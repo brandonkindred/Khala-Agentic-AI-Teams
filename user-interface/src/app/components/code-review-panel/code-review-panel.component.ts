@@ -15,6 +15,7 @@ import { HealthIndicatorComponent } from '../health-indicator/health-indicator.c
 import type {
   CodeReviewRunItem,
   GitHubPullRequestItem,
+  GitHubRepoItem,
   RunPrReviewResponse,
 } from '../../models/integrations.model';
 import type { CodeReviewSummary, CodingTeamJobStatus } from '../../models/coding-team.model';
@@ -29,6 +30,9 @@ import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.
 export interface PrReviewRecord {
   jobId: string;
   prNumber: number;
+  /** Repository the review ran against — PR numbers collide across repositories. */
+  owner: string;
+  repo: string;
   /** Milliseconds since epoch when the review started (for the table timestamp). */
   startedAt: number;
   status: string;
@@ -39,10 +43,11 @@ export interface PrReviewRecord {
 }
 
 /**
- * Code Review panel: lists open pull requests from the configured GitHub repo and
- * lets the user start AI code reviews on them. Each PR row expands inline to show
- * the PR detail, a Start Review action, and a table of every review run on that PR
- * (status + outcome). A live status badge on each row reflects the latest review.
+ * Code Review panel: lists every repository the configured PAT can access and, per
+ * expanded repo, its open pull requests, letting the user start AI code reviews on
+ * them. Each PR row expands inline to show the PR detail, a Start Review action, and
+ * a table of every review run on that PR (status + outcome). A live status badge on
+ * each row reflects the latest review.
  */
 @Component({
   selector: 'app-code-review-panel',
@@ -70,11 +75,18 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
 
   // GitHub integration state
   githubConfigured = false;
-  githubOwner = '';
-  githubRepo = '';
   loadingConfig = true;
 
-  // Pull-request list
+  // Repository list — every repo the configured PAT can access. The PAT's own
+  // authorization configuration is the source of truth; nothing is configured in Khala.
+  repos: GitHubRepoItem[] = [];
+  loadingRepos = false;
+  reposLoaded = false;
+  repoError: string | null = null;
+  /** The expanded repo whose pull requests are shown; null when all repo rows are collapsed. */
+  selectedRepo: GitHubRepoItem | null = null;
+
+  // Pull-request list (scoped to the expanded repo)
   pulls: GitHubPullRequestItem[] = [];
   loadingPulls = false;
   pullsLoaded = false;
@@ -123,12 +135,12 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (cfg) => {
-          this.githubConfigured = cfg.enabled && cfg.token_configured && !!cfg.owner && !!cfg.repo;
-          this.githubOwner = cfg.owner;
-          this.githubRepo = cfg.repo;
+          // Repository access is defined by the PAT itself, so enabled + token is all
+          // the page needs — no owner/repo configuration is required.
+          this.githubConfigured = cfg.enabled && cfg.token_configured;
           this.loadingConfig = false;
           if (this.githubConfigured) {
-            this.loadPulls();
+            this.loadRepos();
           }
         },
         error: () => {
@@ -138,22 +150,82 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
       });
   }
 
+  /**
+   * Load every repository the PAT can access into the repo accordion. Resets any
+   * expanded repo/PR state; on error `repoError` is surfaced.
+   */
+  loadRepos(): void {
+    if (this.loadingRepos) return;
+    this.loadingRepos = true;
+    this.repoError = null;
+    this.selectedRepo = null;
+    this.resetRepoScopedState();
+    this.integrationsApi
+      .getGitHubRepos()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (repos) => {
+          this.repos = repos;
+          this.reposLoaded = true;
+          this.loadingRepos = false;
+        },
+        error: (err: { error?: { detail?: string }; message?: string }) => {
+          this.repoError = err?.error?.detail || err?.message || 'Failed to load repositories.';
+          this.loadingRepos = false;
+        },
+      });
+  }
+
+  /**
+   * Toggle a repository row: expand it (and load its open PRs) when collapsed,
+   * collapse it when it is the open one. Only one repo is expanded at a time.
+   */
+  toggleRepo(repo: GitHubRepoItem): void {
+    if (this.selectedRepo?.full_name === repo.full_name) {
+      this.selectedRepo = null;
+      this.resetRepoScopedState();
+      return;
+    }
+    this.selectedRepo = repo;
+    this.resetRepoScopedState();
+    this.loadPulls();
+  }
+
+  /**
+   * Drop everything keyed by PR number when the expanded repo changes — PR numbers
+   * collide across repositories, so records from one repo must never render under
+   * another's rows. Live pollers keep running; a later hydrate re-attaches their
+   * records when their repo is expanded again.
+   */
+  private resetRepoScopedState(): void {
+    this.pulls = [];
+    this.pullsLoaded = false;
+    this.expandedPrNumber = null;
+    this.pullError = null;
+    this.reviews = new Map();
+    this.reviewErrors.clear();
+  }
+
   loadPulls(): void {
+    const repo = this.selectedRepo;
+    if (!repo) return;
     this.loadingPulls = true;
     this.pullError = null;
     this.expandedPrNumber = null;
     this.integrationsApi
-      .getGitHubPullRequests()
+      .getGitHubPullRequests(repo.owner, repo.name)
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (pulls) => {
+          if (this.selectedRepo?.full_name !== repo.full_name) return; // stale response for a switched-away repo
           this.pulls = pulls;
           this.pageIndex = 0;
           this.pullsLoaded = true;
           this.loadingPulls = false;
-          this.hydrateReviews();
+          this.hydrateReviews(repo);
         },
         error: (err: { error?: { detail?: string }; message?: string }) => {
+          if (this.selectedRepo?.full_name !== repo.full_name) return;
           this.pullError = err?.error?.detail || err?.message || 'Failed to load pull requests.';
           this.loadingPulls = false;
         },
@@ -161,11 +233,13 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Reconcile the in-memory review map with the backend. The backend is the
-   * source of truth, but any review that still has a live poller is preserved as
-   * the *same* object its poller mutates — so a review started while this request
-   * was on the wire is never dropped and its poller is never killed (closing a
-   * hydrate-vs-startReview race).
+   * Reconcile the in-memory review map with the backend for the expanded repo. The
+   * backend is the source of truth, but any review that still has a live poller is
+   * preserved as the *same* object its poller mutates — so a review started while
+   * this request was on the wire is never dropped and its poller is never killed
+   * (closing a hydrate-vs-startReview race). Records from a *different* repository
+   * are never folded in: PR numbers collide across repos, so the rebuilt map holds
+   * this repo's reviews only.
    *
    * Note: this fetches the repository's recent reviews in one call (the backend
    * `limit`, default 500) rather than per-PR, because the row status badges need
@@ -175,12 +249,13 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
    * active PRs) may be absent until a future "latest run per PR" backend query
    * lands. Best-effort: a failure leaves the page usable without history.
    */
-  private hydrateReviews(): void {
+  private hydrateReviews(repo: GitHubRepoItem): void {
     this.integrationsApi
-      .getGitHubReviewHistory()
+      .getGitHubReviewHistory(undefined, repo.owner, repo.name)
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (items) => {
+          if (this.selectedRepo?.full_name !== repo.full_name) return; // stale response
           // Records that still have a live poller must survive the rebuild as the
           // same object their poller writes to, or the UI stops updating.
           const live = new Map<string, PrReviewRecord>();
@@ -193,16 +268,19 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
           const seen = new Set<string>();
           for (const item of items) {
             // Prefer the live record so its poller keeps updating the shown object.
-            const record = live.get(item.job_id) ?? this.toRecord(item);
+            const record = live.get(item.job_id) ?? this.toRecord(item, repo);
             seen.add(record.jobId);
             const list = map.get(record.prNumber) ?? [];
             list.push(record); // backend returns newest-first; preserve that order
             map.set(record.prNumber, list);
           }
           // Carry over any still-polling review the snapshot didn't include yet
-          // (e.g. one started while this request was in flight).
+          // (e.g. one started while this request was in flight) — but only when it
+          // belongs to this repository, so a switched-away repo's run can't surface
+          // under another repo's identical PR number.
           for (const [jobId, record] of live) {
             if (seen.has(jobId)) continue;
+            if (record.owner !== repo.owner || record.repo !== repo.name) continue;
             const list = map.get(record.prNumber) ?? [];
             list.unshift(record); // newest-first
             map.set(record.prNumber, list);
@@ -223,11 +301,13 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
       });
   }
 
-  private toRecord(item: CodeReviewRunItem): PrReviewRecord {
+  private toRecord(item: CodeReviewRunItem, repo: GitHubRepoItem): PrReviewRecord {
     const parsed = Date.parse(item.created_at);
     return {
       jobId: item.job_id,
       prNumber: item.pr_number,
+      owner: repo.owner,
+      repo: repo.name,
       startedAt: Number.isNaN(parsed) ? Date.now() : parsed,
       status: item.status,
       statusText: item.status_text,
@@ -253,13 +333,14 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     this.expandedPrNumber = this.expandedPrNumber === pull.number ? null : pull.number;
   }
 
-  /** Start a code review on a PR, recording it and polling it live. */
+  /** Start a code review on a PR in the expanded repo, recording it and polling it live. */
   startReview(pull: GitHubPullRequestItem): void {
-    if (this.starting.has(pull.number)) return;
+    const repo = this.selectedRepo;
+    if (!repo || this.starting.has(pull.number)) return;
     this.starting.add(pull.number);
     this.reviewErrors.delete(pull.number);
     this.integrationsApi
-      .runGitHubReviewPr({ pr_number: pull.number })
+      .runGitHubReviewPr({ pr_number: pull.number, owner: repo.owner, repo: repo.name })
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (resp: RunPrReviewResponse) => {
@@ -267,13 +348,19 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
           const record: PrReviewRecord = {
             jobId: resp.job_id,
             prNumber: pull.number,
+            owner: repo.owner,
+            repo: repo.name,
             startedAt: Date.now(),
             status: resp.status,
             prUrl: resp.pr_url,
           };
-          const list = this.reviews.get(pull.number) ?? [];
-          list.unshift(record); // newest-first
-          this.reviews.set(pull.number, list);
+          // Show the record only when the user is still on the same repo; the poller
+          // keeps the object live either way, and a later hydrate re-attaches it.
+          if (this.selectedRepo?.full_name === repo.full_name) {
+            const list = this.reviews.get(pull.number) ?? [];
+            list.unshift(record); // newest-first
+            this.reviews.set(pull.number, list);
+          }
           this.startPolling(record);
           this.cdr.markForCheck();
         },

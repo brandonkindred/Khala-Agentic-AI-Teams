@@ -96,6 +96,65 @@
   }
 }
 
+// Repository accordion — one row per repo the PAT can access; expanding shows its issues.
+.github-repos-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.github-repo-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid transparent;
+  border-radius: var(--kh-radius-md);
+  background: transparent;
+  color: var(--kh-text-primary);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: background-color var(--kh-transition), border-color var(--kh-transition);
+
+  &:hover {
+    background: var(--kh-surface-3);
+  }
+
+  &--expanded {
+    border-color: var(--kh-accent);
+    background: var(--kh-surface-3);
+  }
+
+  &__name {
+    flex: 1;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__issues {
+    flex-shrink: 0;
+    font-size: var(--kh-text-sm);
+    color: var(--kh-text-tertiary);
+  }
+
+  &__arrow {
+    flex-shrink: 0;
+    color: var(--kh-text-tertiary);
+  }
+}
+
+// Issue list nested under the expanded repository row.
+.github-repo-issues {
+  margin: 0.25rem 0 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--kh-border);
+  border-radius: var(--kh-radius-md);
+  background: var(--kh-surface-2);
+}
+
 // Issue list
 .github-issues-list {
   display: flex;

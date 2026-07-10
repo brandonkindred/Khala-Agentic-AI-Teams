@@ -9,6 +9,7 @@ import type {
   GitHubConfigUpdate,
   GitHubIssueItem,
   GitHubPullRequestItem,
+  GitHubRepoItem,
   GoogleBrowserLoginCredentialsBody,
   GoogleBrowserLoginStatusResponse,
   IntegrationListItem,
@@ -141,11 +142,23 @@ export class IntegrationsApiService {
     return this.http.delete<GitHubConfigResponse>(`${this.baseUrl}/github`, this.SKIP_NOTIFY);
   }
 
-  /** GET /api/integrations/github/issues */
-  getGitHubIssues(label?: string): Observable<GitHubIssueItem[]> {
+  /**
+   * GET /api/integrations/github/repos — every repository the stored PAT can
+   * access (the token's own authorization configuration is the source of truth).
+   */
+  getGitHubRepos(): Observable<GitHubRepoItem[]> {
+    return this.http.get<GitHubRepoItem[]>(`${this.baseUrl}/github/repos`);
+  }
+
+  /** GET /api/integrations/github/issues — open issues for one accessible repo. */
+  getGitHubIssues(label?: string, owner?: string, repo?: string): Observable<GitHubIssueItem[]> {
     const params: Record<string, string> = {};
     if (label) {
       params['label'] = label;
+    }
+    if (owner && repo) {
+      params['owner'] = owner;
+      params['repo'] = repo;
     }
     return this.http.get<GitHubIssueItem[]>(`${this.baseUrl}/github/issues`, { params });
   }
@@ -155,9 +168,14 @@ export class IntegrationsApiService {
     return this.http.post<RunGitHubIssueResponse>(`${this.baseUrl}/github/run-issue`, body);
   }
 
-  /** GET /api/integrations/github/pulls */
-  getGitHubPullRequests(): Observable<GitHubPullRequestItem[]> {
-    return this.http.get<GitHubPullRequestItem[]>(`${this.baseUrl}/github/pulls`);
+  /** GET /api/integrations/github/pulls — open PRs for one accessible repo. */
+  getGitHubPullRequests(owner?: string, repo?: string): Observable<GitHubPullRequestItem[]> {
+    const params: Record<string, string> = {};
+    if (owner && repo) {
+      params['owner'] = owner;
+      params['repo'] = repo;
+    }
+    return this.http.get<GitHubPullRequestItem[]>(`${this.baseUrl}/github/pulls`, { params });
   }
 
   /** POST /api/integrations/github/review-pr */
@@ -166,13 +184,17 @@ export class IntegrationsApiService {
   }
 
   /**
-   * GET /api/integrations/github/reviews — persisted code-review history for the
-   * configured repository (optionally filtered to one PR), newest-first.
+   * GET /api/integrations/github/reviews — persisted code-review history for one
+   * accessible repository (optionally filtered to one PR), newest-first.
    */
-  getGitHubReviewHistory(prNumber?: number): Observable<CodeReviewRunItem[]> {
+  getGitHubReviewHistory(prNumber?: number, owner?: string, repo?: string): Observable<CodeReviewRunItem[]> {
     const params: Record<string, string> = {};
     if (prNumber !== undefined) {
       params['pr_number'] = String(prNumber);
+    }
+    if (owner && repo) {
+      params['owner'] = owner;
+      params['repo'] = repo;
     }
     return this.http.get<CodeReviewRunItem[]>(`${this.baseUrl}/github/reviews`, { params });
   }

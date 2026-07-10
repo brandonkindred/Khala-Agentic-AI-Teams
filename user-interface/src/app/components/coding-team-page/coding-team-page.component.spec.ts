@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of, throwError } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 import type { CodingTeamJobListItem, CodingTeamJobStatus } from '../../models/coding-team.model';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
@@ -10,7 +10,7 @@ import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { NotificationService } from '../../core/notification.service';
 import { CodingTeamPageComponent } from './coding-team-page.component';
-import type { GitHubConfigResponse, GitHubIssueItem } from '../../models/integrations.model';
+import type { GitHubConfigResponse, GitHubIssueItem, GitHubRepoItem } from '../../models/integrations.model';
 
 function makeIssues(count: number): GitHubIssueItem[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -47,6 +47,20 @@ const CONFIGURED: GitHubConfigResponse = {
   default_label: 'ai',
 };
 
+/** The repo the fake PAT can access; the page lists repos and loads issues per repo. */
+const REPO: GitHubRepoItem = {
+  owner: 'acme',
+  name: 'widgets',
+  full_name: 'acme/widgets',
+  private: false,
+  archived: false,
+  html_url: 'https://github.com/acme/widgets',
+  description: 'Widget factory',
+  default_branch: 'main',
+  open_issues_count: 3,
+  pushed_at: '2026-06-09T10:00:00Z',
+};
+
 /** A non-terminal GitHub-issue run for this repo. */
 function ghRun(overrides: Partial<CodingTeamJobListItem> = {}): CodingTeamJobListItem {
   return {
@@ -79,6 +93,7 @@ describe('CodingTeamPageComponent', () => {
   };
   let integrationsSpy: {
     getGitHubConfig: ReturnType<typeof vi.fn>;
+    getGitHubRepos: ReturnType<typeof vi.fn>;
     getGitHubIssues: ReturnType<typeof vi.fn>;
     runGitHubIssue: ReturnType<typeof vi.fn>;
   };
@@ -112,6 +127,7 @@ describe('CodingTeamPageComponent', () => {
     };
     integrationsSpy = {
       getGitHubConfig: vi.fn().mockReturnValue(of(CONFIGURED)),
+      getGitHubRepos: vi.fn().mockReturnValue(of([REPO])),
       getGitHubIssues: vi.fn().mockReturnValue(of(makeIssues(3))),
       runGitHubIssue: vi.fn(),
     };
@@ -126,6 +142,12 @@ describe('CodingTeamPageComponent', () => {
   /** Switch the visible view (the page opens on 'chat') and re-render. */
   function showView(view: 'chat' | 'github' | 'jobs'): void {
     component.activeView = view;
+    fixture.detectChanges();
+  }
+
+  /** Expand the first accessible repo so its issues load (issues are per-repo now). */
+  function expandFirstRepo(): void {
+    component.toggleRepo(component.repos[0]);
     fixture.detectChanges();
   }
 
@@ -154,13 +176,51 @@ describe('CodingTeamPageComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('auto-loads issues on init when GitHub is configured', async () => {
+  it('auto-loads the accessible repositories on init when GitHub is configured', async () => {
     await setup();
     expect(integrationsSpy.getGitHubConfig).toHaveBeenCalled();
-    expect(integrationsSpy.getGitHubIssues).toHaveBeenCalled();
+    expect(integrationsSpy.getGitHubRepos).toHaveBeenCalled();
     expect(component.githubConfigured).toBe(true);
+    expect(component.reposLoaded).toBe(true);
+    expect(component.repos.length).toBe(1);
+    // Issues are per-repo: nothing loads until a repo is expanded.
+    expect(integrationsSpy.getGitHubIssues).not.toHaveBeenCalled();
+  });
+
+  it('is configured with token alone — no owner/repo required (PAT defines access)', async () => {
+    integrationsSpy.getGitHubConfig.mockReturnValue(
+      of({ ...CONFIGURED, owner: '', repo: '' }),
+    );
+    await setup();
+    expect(component.githubConfigured).toBe(true);
+    expect(integrationsSpy.getGitHubRepos).toHaveBeenCalled();
+  });
+
+  it('loads the expanded repo\'s issues, scoped by owner/repo', async () => {
+    await setup();
+    expandFirstRepo();
+    expect(integrationsSpy.getGitHubIssues).toHaveBeenCalledWith(undefined, 'acme', 'widgets');
     expect(component.issuesLoaded).toBe(true);
     expect(component.issues.length).toBe(3);
+  });
+
+  it('collapsing the expanded repo clears its issue state', async () => {
+    await setup();
+    expandFirstRepo();
+    expect(component.selectedRepo?.full_name).toBe('acme/widgets');
+    component.toggleRepo(component.repos[0]);
+    expect(component.selectedRepo).toBeNull();
+    expect(component.issuesLoaded).toBe(false);
+    expect(component.issues.length).toBe(0);
+  });
+
+  it('surfaces an error when loading repositories fails', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(
+      throwError(() => ({ error: { detail: 'bad credentials' } })),
+    );
+    await setup();
+    expect(component.repoError).toBe('bad credentials');
+    expect(component.loadingRepos).toBe(false);
   });
 
   it('polls the Runs list with terminal jobs included (active=false)', async () => {
@@ -169,28 +229,29 @@ describe('CodingTeamPageComponent', () => {
     expect(apiSpy.listJobs).toHaveBeenCalledWith(false);
   });
 
-  it('does NOT auto-load issues or poll runs when GitHub is not configured', async () => {
+  it('does NOT auto-load repos or poll runs when GitHub is not configured', async () => {
     integrationsSpy.getGitHubConfig.mockReturnValue(
       of({ ...CONFIGURED, token_configured: false }),
     );
     await setup();
     await flushAsync();
     expect(component.githubConfigured).toBe(false);
-    expect(integrationsSpy.getGitHubIssues).not.toHaveBeenCalled();
+    expect(integrationsSpy.getGitHubRepos).not.toHaveBeenCalled();
     expect(apiSpy.listJobs).not.toHaveBeenCalled();
   });
 
-  it('handles a failed config check without loading issues', async () => {
+  it('handles a failed config check without loading repos', async () => {
     integrationsSpy.getGitHubConfig.mockReturnValue(throwError(() => new Error('boom')));
     await setup();
     expect(component.githubConfigured).toBe(false);
     expect(component.isLoadingConfig).toBe(false);
-    expect(integrationsSpy.getGitHubIssues).not.toHaveBeenCalled();
+    expect(integrationsSpy.getGitHubRepos).not.toHaveBeenCalled();
   });
 
   it('paginates client-side and resets to the first page on (re)load', async () => {
     integrationsSpy.getGitHubIssues.mockReturnValue(of(makeIssues(25)));
     await setup();
+    expandFirstRepo();
 
     expect(component.pageIndex).toBe(0);
     expect(component.pageSize).toBe(10);
@@ -212,12 +273,14 @@ describe('CodingTeamPageComponent', () => {
       throwError(() => ({ error: { detail: 'rate limited' } })),
     );
     await setup();
+    expandFirstRepo();
     expect(component.issueError).toBe('rate limited');
     expect(component.loadingIssues).toBe(false);
   });
 
   it('selects an issue, cancels, then runs it — selecting the new run, no dismiss', async () => {
     await setup();
+    expandFirstRepo();
     const issue = component.issues[0];
 
     component.selectIssue(issue);
@@ -231,9 +294,16 @@ describe('CodingTeamPageComponent', () => {
     );
     component.selectIssue(issue);
     component.confirmAndRun();
-    expect(integrationsSpy.runGitHubIssue).toHaveBeenCalledWith({ issue_number: issue.number });
+    // The expanded repo is the run target — repository access comes from the PAT.
+    expect(integrationsSpy.runGitHubIssue).toHaveBeenCalledWith({
+      issue_number: issue.number,
+      owner: 'acme',
+      repo: 'widgets',
+    });
     expect(component.selectedRunId).toBe('j1');
     expect(component.selectedRunNumber).toBe(issue.number);
+    expect(component.selectedRunOwner).toBe('acme');
+    expect(component.selectedRunRepo).toBe('widgets');
     expect(component.selectedIssue).toBeNull();
     expect(component.isIssueInProgress(issue)).toBe(true);
     // The panel is not dismissable.
@@ -242,6 +312,7 @@ describe('CodingTeamPageComponent', () => {
 
   it('surfaces an error when starting a run fails', async () => {
     await setup();
+    expandFirstRepo();
     const issue = component.issues[0];
     integrationsSpy.runGitHubIssue.mockReturnValue(throwError(() => ({ error: { detail: 'duplicate run' } })));
     component.selectIssue(issue);
@@ -271,18 +342,34 @@ describe('CodingTeamPageComponent', () => {
 
   it('confirmAndRun is a no-op while a run is already starting (guards double-submit)', async () => {
     await setup();
+    expandFirstRepo();
     component.selectIssue(component.issues[0]);
     component.runningIssue = true;
     component.confirmAndRun();
     expect(integrationsSpy.runGitHubIssue).not.toHaveBeenCalled();
   });
 
-  it('loadIssues is a no-op while a load is already in flight (guards overlapping fetches)', async () => {
+  it('loadIssues is a no-op when no repo is expanded', async () => {
     await setup();
     integrationsSpy.getGitHubIssues.mockClear();
-    component.loadingIssues = true;
+    component.selectedRepo = null;
     component.loadIssues();
     expect(integrationsSpy.getGitHubIssues).not.toHaveBeenCalled();
+  });
+
+  it('discards an issue response that lands after the user switched repos', async () => {
+    await setup();
+    const slow = new Subject<GitHubIssueItem[]>();
+    integrationsSpy.getGitHubIssues.mockReturnValue(slow.asObservable());
+    component.selectedRepo = REPO;
+    component.loadIssues();
+    // The user switches to another repo while the acme/widgets request is on the wire.
+    component.selectedRepo = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
+    slow.next(makeIssues(2));
+    slow.complete();
+    // The stale response is dropped — it must never render under the other repo's row.
+    expect(component.issues.length).toBe(0);
+    expect(component.issuesLoaded).toBe(false);
   });
 
   it('confirms a launched workflow with a transient snackbar', async () => {
@@ -311,13 +398,23 @@ describe('CodingTeamPageComponent', () => {
       expect(el.querySelector('.jobs-panel')).toBeNull();
     });
 
-    it('shows only the GitHub issues panel when the GitHub view is active', async () => {
+    it('shows only the GitHub repos panel when the GitHub view is active', async () => {
       await setup();
       showView('github');
       const el: HTMLElement = fixture.nativeElement;
-      expect(el.querySelectorAll('.github-issue-row').length).toBe(3);
+      expect(el.querySelectorAll('.github-repo-row').length).toBe(1);
       expect(el.querySelector('app-team-assistant-chat')).toBeNull();
       expect(el.querySelector('.jobs-panel')).toBeNull();
+    });
+
+    it('expanding a repo row reveals its issues inline', async () => {
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelectorAll('.github-issue-row').length).toBe(3);
+      // The repo row shows GitHub's open-items hint.
+      expect(el.querySelector('.github-repo-row__issues')?.textContent).toContain('3 open');
     });
 
     it('shows only the Jobs panel when the Jobs view is active', async () => {
@@ -326,7 +423,7 @@ describe('CodingTeamPageComponent', () => {
       const el: HTMLElement = fixture.nativeElement;
       expect(el.querySelector('.jobs-panel')).not.toBeNull();
       expect(el.querySelector('app-team-assistant-chat')).toBeNull();
-      expect(el.querySelector('.github-issue-row')).toBeNull();
+      expect(el.querySelector('.github-repo-row')).toBeNull();
     });
   });
 
@@ -443,6 +540,7 @@ describe('CodingTeamPageComponent', () => {
         ]),
       );
       await setup();
+      expandFirstRepo();
       expect(component.pagedIssueVms.length).toBe(1);
       const vm = component.pagedIssueVms[0];
       expect(vm.number).toBe(7);
@@ -532,6 +630,7 @@ describe('CodingTeamPageComponent', () => {
       );
       await setup();
       showView('github');
+      expandFirstRepo();
       const el: HTMLElement = fixture.nativeElement;
       const deps = el.querySelector('.github-issue-row__deps');
       expect(deps).not.toBeNull();
@@ -556,6 +655,7 @@ describe('CodingTeamPageComponent', () => {
       );
       await setup();
       showView('github');
+      expandFirstRepo();
       const el: HTMLElement = fixture.nativeElement;
       const deps = el.querySelector('.github-issue-row__deps');
       expect(deps).not.toBeNull();
@@ -568,6 +668,7 @@ describe('CodingTeamPageComponent', () => {
       integrationsSpy.getGitHubIssues.mockReturnValue(of([issueWith({ number: 9 })]));
       await setup();
       showView('github');
+      expandFirstRepo();
       const el: HTMLElement = fixture.nativeElement;
       expect(el.querySelector('.github-issue-row__deps')).toBeNull();
     });
@@ -581,6 +682,7 @@ describe('CodingTeamPageComponent', () => {
       });
       integrationsSpy.getGitHubIssues.mockReturnValue(of([blocked]));
       await setup();
+      expandFirstRepo();
 
       component.selectIssue(blocked);
       showView('github');
@@ -596,6 +698,7 @@ describe('CodingTeamPageComponent', () => {
 
     it('keeps the issue list visible and shows the inline confirm under the selected row', async () => {
       await setup();
+      expandFirstRepo();
       component.selectIssue(component.issues[1]); // issue #2
       showView('github');
       const el: HTMLElement = fixture.nativeElement;
@@ -884,7 +987,7 @@ describe('CodingTeamPageComponent', () => {
       await flushAsync();
       // The running run is auto-selected and its issue shows "In progress".
       expect(component.selectedRunId).toBe('r1');
-      expect(component.activeIssueNumbers.has(2)).toBe(true);
+      expect(component.activeIssueKeys.has('acme/widgets#2')).toBe(true);
 
       // Collapsing the run drops the selection *and* its issue number.
       component.toggleRun(component.runs[0]);
@@ -895,7 +998,7 @@ describe('CodingTeamPageComponent', () => {
       component['applyRuns']([
         ghRun({ job_id: 'r1', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 2 } }),
       ]);
-      expect(component.activeIssueNumbers.has(2)).toBe(false);
+      expect(component.activeIssueKeys.has('acme/widgets#2')).toBe(false);
     });
 
     it('auto-selects a non-terminal run on first load and starts polling it', async () => {
@@ -906,7 +1009,7 @@ describe('CodingTeamPageComponent', () => {
       expect(component.selectedRunId).toBe('j-restore');
       expect(component.selectedRunNumber).toBe(2);
       expect(apiSpy.getJobStatus).toHaveBeenCalledWith('j-restore');
-      expect(component.activeIssueNumbers.has(2)).toBe(true);
+      expect(component.activeIssueKeys.has('acme/widgets#2')).toBe(true);
     });
 
     it('prefers a run paused on questions over a more-recent running run', async () => {
@@ -931,10 +1034,10 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       await flushAsync();
       expect(component.selectedRunId).toBe('newer');
-      expect(component.activeIssueNumbers).toEqual(new Set([2, 3]));
+      expect(component.activeIssueKeys).toEqual(new Set(['acme/widgets#2', 'acme/widgets#3']));
     });
 
-    it('ignores runs belonging to a different repository', async () => {
+    it('lists runs from every repository the PAT can access, keyed per repo', async () => {
       apiSpy.listJobs.mockReturnValue(
         of([
           ghRun({ github_context: { owner: 'acme', repo: 'other-repo', issue_number: 2 } }),
@@ -943,19 +1046,22 @@ describe('CodingTeamPageComponent', () => {
       );
       await setup();
       await flushAsync();
-      expect(component.selectedRunId).toBeNull();
-      expect(component.runs.length).toBe(0);
-      expect(component.activeIssueNumbers.size).toBe(0);
+      // Runs are no longer filtered to a single configured repo.
+      expect(component.runs.length).toBe(2);
+      // The same issue number in two repos yields two distinct chips.
+      expect(component.activeIssueKeys).toEqual(
+        new Set(['acme/other-repo#2', 'someone-else/widgets#2']),
+      );
     });
 
-    it('matches the configured repository case-insensitively', async () => {
+    it('lowercases the repo identity so chips match case-insensitively', async () => {
       apiSpy.listJobs.mockReturnValue(
         of([ghRun({ github_context: { owner: 'Acme', repo: 'Widgets', issue_number: 2 } })]),
       );
       await setup();
       await flushAsync();
       expect(component.selectedRunId).toBe('j-run');
-      expect(component.activeIssueNumbers.has(2)).toBe(true);
+      expect(component.activeIssueKeys.has('acme/widgets#2')).toBe(true);
     });
 
     it('lists a terminal run under Recent without auto-selecting it', async () => {
@@ -969,7 +1075,7 @@ describe('CodingTeamPageComponent', () => {
       await flushAsync();
       expect(component.selectedRunId).toBeNull();
       expect(component.recentRuns.map((r) => r.job_id)).toEqual(['done']);
-      expect(component.activeIssueNumbers.size).toBe(0);
+      expect(component.activeIssueKeys.size).toBe(0);
     });
 
     it('stays usable when the runs list cannot be fetched', async () => {
@@ -995,6 +1101,7 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       await flushAsync();
       showView('github');
+      expandFirstRepo();
       const chips = fixture.nativeElement.querySelectorAll('.github-label-chip--active');
       expect(chips.length).toBe(1);
       expect(chips[0].textContent).toContain('In progress');
@@ -1034,18 +1141,22 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       component.selectedRunId = 'mine';
       component.selectedRunNumber = 9;
+      component.selectedRunOwner = 'acme';
+      component.selectedRunRepo = 'widgets';
       component.jobStatus = { job_id: 'mine', status: 'running' };
       component['applyRuns']([]);
-      expect(component.activeIssueNumbers.has(9)).toBe(true);
+      expect(component.activeIssueKeys.has('acme/widgets#9')).toBe(true);
     });
 
     it('does not re-add the chip for a selected run that has finished', async () => {
       await setup();
       component.selectedRunId = 'mine';
       component.selectedRunNumber = 9;
+      component.selectedRunOwner = 'acme';
+      component.selectedRunRepo = 'widgets';
       component.jobStatus = { job_id: 'mine', status: 'completed' };
       component['applyRuns']([]);
-      expect(component.activeIssueNumbers.has(9)).toBe(false);
+      expect(component.activeIssueKeys.has('acme/widgets#9')).toBe(false);
     });
 
     it('drops the chip once the snapshot reports the selected run terminal, even if the polled status is stale', async () => {
@@ -1053,13 +1164,15 @@ describe('CodingTeamPageComponent', () => {
       component['initialRunsLoad'] = false;
       component.selectedRunId = 'r1';
       component.selectedRunNumber = 5;
+      component.selectedRunOwner = 'acme';
+      component.selectedRunRepo = 'widgets';
       // Polled status lags behind the server: still "running" though the run has finished.
       component.jobStatus = { job_id: 'r1', status: 'running' };
       component['applyRuns']([
         ghRun({ job_id: 'r1', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 5 } }),
       ]);
       // The fresh snapshot is trusted: #5 is no longer in progress and the run sits under Recent.
-      expect(component.activeIssueNumbers.has(5)).toBe(false);
+      expect(component.activeIssueKeys.has('acme/widgets#5')).toBe(false);
       expect(component.recentRuns.map((r) => r.job_id)).toEqual(['r1']);
     });
 
@@ -1067,13 +1180,15 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       component.selectedRunId = 'j1';
       component.selectedRunNumber = 7;
-      component.activeIssueNumbers.add(7);
+      component.selectedRunOwner = 'acme';
+      component.selectedRunRepo = 'widgets';
+      component.activeIssueKeys.add('acme/widgets#7');
       apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'j1', status: 'completed' }));
       apiSpy.listJobs.mockReturnValue(of([]));
       component['startPolling']('j1');
       await flushAsync();
       expect(component.jobStatus?.status).toBe('completed');
-      expect(component.activeIssueNumbers.has(7)).toBe(false);
+      expect(component.activeIssueKeys.has('acme/widgets#7')).toBe(false);
     });
 
     it('discards a stale poll for a run the user switched away from', async () => {
@@ -1100,26 +1215,49 @@ describe('CodingTeamPageComponent', () => {
       expect(integrationsSpy.runGitHubIssue).not.toHaveBeenCalled();
     });
 
-    it('re-runs the selected run\'s issue and selects the new run', async () => {
+    it('re-runs the selected run\'s issue in the same repository and selects the new run', async () => {
       await setup();
+      expandFirstRepo();
       component.selectedRunNumber = 5;
+      component.selectedRunOwner = 'acme';
+      component.selectedRunRepo = 'widgets';
       integrationsSpy.runGitHubIssue.mockReturnValue(
         of({ job_id: 'j-retry', issue_number: 5, issue_url: 'u', status: 'queued', message: '' }),
       );
       component.retrySelectedRun();
-      expect(integrationsSpy.runGitHubIssue).toHaveBeenCalledWith({ issue_number: 5 });
+      expect(integrationsSpy.runGitHubIssue).toHaveBeenCalledWith({
+        issue_number: 5,
+        owner: 'acme',
+        repo: 'widgets',
+      });
       expect(component.selectedRunId).toBe('j-retry');
       expect(component.isIssueInProgress(issueWith({ number: 5 }))).toBe(true);
     });
 
-    it('surfaces an error when the retry fails', async () => {
+    it('derives the retry repository from the polled status when not tracked', async () => {
       await setup();
+      component.selectedRunOwner = '';
+      component.selectedRunRepo = '';
       component.jobStatus = { job_id: 'j1', status: 'failed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 6 } };
       integrationsSpy.runGitHubIssue.mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
       component.retrySelectedRun();
-      expect(integrationsSpy.runGitHubIssue).toHaveBeenCalledWith({ issue_number: 6 });
+      expect(integrationsSpy.runGitHubIssue).toHaveBeenCalledWith({
+        issue_number: 6,
+        owner: 'acme',
+        repo: 'widgets',
+      });
       expect(component.issueError).toBe('nope');
       expect(component.runningIssue).toBe(false);
+    });
+
+    it('is a no-op when the run\'s repository is unknown', async () => {
+      await setup();
+      component.selectedRunNumber = 5;
+      component.selectedRunOwner = '';
+      component.selectedRunRepo = '';
+      component.jobStatus = null;
+      component.retrySelectedRun();
+      expect(integrationsSpy.runGitHubIssue).not.toHaveBeenCalled();
     });
   });
 

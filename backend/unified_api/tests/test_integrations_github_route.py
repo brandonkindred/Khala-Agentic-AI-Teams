@@ -549,7 +549,7 @@ def test_resolve_repo_path_namespaces_per_issue_under_agent_cache(monkeypatch):
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.setenv("AGENT_CACHE", "/cache")
-    path = _resolve_repo_path(dict(_GH_CFG), issue_number=42)
+    path = _resolve_repo_path(dict(_GH_CFG), "acme", "widget", issue_number=42)
     assert path == "/cache/github_workspaces/acme/widget/issue-42"
 
 
@@ -561,7 +561,7 @@ def test_resolve_repo_path_default_agent_cache_fallback(monkeypatch):
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.delenv("AGENT_CACHE", raising=False)
-    path = _resolve_repo_path(dict(_GH_CFG), issue_number=42)
+    path = _resolve_repo_path(dict(_GH_CFG), "acme", "widget", issue_number=42)
     assert Path(path).is_absolute()
     assert path.endswith("/.agent_cache/github_workspaces/acme/widget/issue-42")
 
@@ -572,7 +572,9 @@ def test_resolve_repo_path_distinct_issues_map_to_distinct_paths(monkeypatch):
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.setenv("AGENT_CACHE", "/cache")
     cfg = dict(_GH_CFG)
-    assert _resolve_repo_path(cfg, issue_number=1) != _resolve_repo_path(cfg, issue_number=2)
+    assert _resolve_repo_path(cfg, "acme", "widget", issue_number=1) != _resolve_repo_path(
+        cfg, "acme", "widget", issue_number=2
+    )
 
 
 def test_resolve_repo_path_uses_se_workspace_dir_with_issue(monkeypatch):
@@ -580,7 +582,7 @@ def test_resolve_repo_path_uses_se_workspace_dir_with_issue(monkeypatch):
     monkeypatch.setenv("SE_WORKSPACE_DIR", "/work")
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.delenv("AGENT_CACHE", raising=False)
-    path = _resolve_repo_path(dict(_GH_CFG), issue_number=9)
+    path = _resolve_repo_path(dict(_GH_CFG), "acme", "widget", issue_number=9)
     assert path == "/work/acme_widget/issue-9"
 
 
@@ -589,7 +591,7 @@ def test_resolve_repo_path_uses_workspace_root_with_issue(monkeypatch):
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.setenv("WORKSPACE_ROOT", "/ws")
     monkeypatch.delenv("AGENT_CACHE", raising=False)
-    path = _resolve_repo_path(dict(_GH_CFG), issue_number=5)
+    path = _resolve_repo_path(dict(_GH_CFG), "acme", "widget", issue_number=5)
     assert path == "/ws/acme_widget/issue-5"
 
 
@@ -598,7 +600,7 @@ def test_resolve_repo_path_without_issue_is_repo_level(monkeypatch):
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.setenv("AGENT_CACHE", "/cache")
-    assert _resolve_repo_path(dict(_GH_CFG)) == "/cache/github_workspaces/acme/widget"
+    assert _resolve_repo_path(dict(_GH_CFG), "acme", "widget") == "/cache/github_workspaces/acme/widget"
 
 
 def test_resolve_repo_path_without_issue_uses_se_workspace_dir(monkeypatch):
@@ -606,13 +608,13 @@ def test_resolve_repo_path_without_issue_uses_se_workspace_dir(monkeypatch):
     monkeypatch.setenv("SE_WORKSPACE_DIR", "/work")
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.delenv("AGENT_CACHE", raising=False)
-    assert _resolve_repo_path(dict(_GH_CFG)) == "/work/acme_widget"
+    assert _resolve_repo_path(dict(_GH_CFG), "acme", "widget") == "/work/acme_widget"
 
 
 def test_resolve_repo_path_operator_override_returned_verbatim():
     """An operator-pinned repo_path is returned verbatim, never per-issue-namespaced."""
     cfg = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "/srv/checkout"}
-    assert _resolve_repo_path(cfg, issue_number=42) == "/srv/checkout"
+    assert _resolve_repo_path(cfg, "acme", "widget", issue_number=42) == "/srv/checkout"
 
 
 # ---------------------------------------------------------------------------
@@ -646,6 +648,42 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_c
         "ghp_token",
         platform_owned=True,
     )
+
+
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_run_issue_targets_body_supplied_repo(mock_cfg, mock_cred, mock_clone, monkeypatch):
+    """A body-supplied owner/repo runs the issue in THAT repository — the configured
+    default is only a fallback; the PAT's own authorization is the access list."""
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(result=_ok_resp())
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_RUN_ISSUE, json={"issue_number": 7, "owner": "other", "repo": "thing"})
+    assert resp.status_code == 200
+    payload = fake.last_payload()
+    assert payload["owner"] == "other"
+    assert payload["repo"] == "thing"
+    assert payload["repo_path"] == "/cache/github_workspaces/other/thing/issue-7"
+    mock_clone.assert_called_once_with(
+        "/cache/github_workspaces/other/thing/issue-7",
+        "other",
+        "thing",
+        "ghp_token",
+        platform_owned=True,
+    )
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_run_issue_owner_without_repo_is_400(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    resp = client.post(_RUN_ISSUE, json={"issue_number": 7, "owner": "other"})
+    assert resp.status_code == 400
+    assert "together" in resp.json()["detail"]
 
 
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
@@ -783,7 +821,7 @@ def test_resolve_repo_path_rejects_nonpositive_issue_number(monkeypatch, bad):
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.setenv("AGENT_CACHE", "/cache")
     with pytest.raises(HTTPException) as exc:
-        _resolve_repo_path(dict(_GH_CFG), issue_number=bad)
+        _resolve_repo_path(dict(_GH_CFG), "acme", "widget", issue_number=bad)
     assert exc.value.status_code == 400
 
 
@@ -814,28 +852,39 @@ def test_resolve_repo_path_rejects_unsafe_owner_or_repo(monkeypatch, field, valu
     monkeypatch.setenv("AGENT_CACHE", "/cache")
     # repo_path="" means "no operator override", so the function proceeds to
     # owner/repo path derivation (and thus the sanitization checks under test)
-    # rather than returning an override verbatim. Build the dict without a safe
-    # default for the field under test, then set the unsafe value — no duplicate key.
-    cfg = {"enabled": True, "repo_path": ""}
-    cfg["owner"] = "acme" if field != "owner" else value
-    cfg["repo"] = "widget" if field != "repo" else value
+    # rather than returning an override verbatim.
+    cfg = {"enabled": True, "owner": "", "repo": "", "repo_path": ""}
+    owner = "acme" if field != "owner" else value
+    repo = "widget" if field != "repo" else value
     with pytest.raises(HTTPException) as exc:
-        _resolve_repo_path(cfg, issue_number=1)
+        _resolve_repo_path(cfg, owner, repo, issue_number=1)
     assert exc.value.status_code == 400
 
 
 @pytest.mark.parametrize("missing", ["owner", "repo"])
 def test_resolve_repo_path_rejects_missing_owner_or_repo(monkeypatch, missing):
-    """A config missing owner/repo yields HTTP 400 (enforcing the documented
-    precondition) rather than a raw KeyError → 500."""
+    """A blank owner/repo yields HTTP 400 (enforcing the documented precondition)
+    rather than building a degenerate path."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.setenv("AGENT_CACHE", "/cache")
     cfg = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": ""}
-    del cfg[missing]
+    owner = "" if missing == "owner" else "acme"
+    repo = "" if missing == "repo" else "widget"
     with pytest.raises(HTTPException) as exc:
-        _resolve_repo_path(cfg, issue_number=1)
+        _resolve_repo_path(cfg, owner, repo, issue_number=1)
     assert exc.value.status_code == 400
+
+
+def test_resolve_repo_path_override_not_applied_to_other_repo(monkeypatch):
+    """The operator's pinned repo_path applies only to the configured default repo; a
+    run against a *different* PAT-accessible repo derives its own per-issue path so the
+    pinned checkout (whose remote wouldn't match) is never reused for it."""
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    cfg = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "/srv/checkout"}
+    assert _resolve_repo_path(cfg, "other", "thing", issue_number=3) == "/cache/github_workspaces/other/thing/issue-3"
 
 
 # ---------------------------------------------------------------------------
@@ -1122,9 +1171,32 @@ def test_start_pr_review_with_token_400_when_owner_repo_missing():
     assert "owner/repo" in exc.value.detail
 
 
-def test_start_pr_review_proceeds_when_expected_owner_repo_match(monkeypatch):
-    """When the caller passes the repo it validated and the configured owner/repo still
-    match (case-insensitively), the review starts normally."""
+def test_start_pr_review_targets_caller_supplied_repo(monkeypatch):
+    """A caller-supplied owner/repo (the UI's picked repo or the webhook's commented
+    repo) is the review target — the configured default is ignored, because the PAT's
+    own authorization configuration is the access list, not Khala settings."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(
+        result=_FakeResp(
+            200,
+            {"job_id": "rev-9", "pr_number": 7, "pr_url": "u", "status": "pending", "message": ""},
+        )
+    )
+    with (
+        # Config points at a different default repo; the explicit target must win.
+        patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG)),
+        patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_pre", True)),
+        patch(f"{_M}.httpx.AsyncClient", return_value=fake),
+    ):
+        result = asyncio.run(_start_pr_review(7, None, token="ghp_pre", owner="other", repo="thing"))
+    assert result.job_id == "rev-9"
+    payload = fake.last_payload()
+    assert payload["owner"] == "other"
+    assert payload["repo"] == "thing"
+
+
+def test_start_pr_review_falls_back_to_configured_default_repo(monkeypatch):
+    """With no caller-supplied target, the legacy configured default owner/repo is used."""
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(
         result=_FakeResp(
@@ -1137,27 +1209,8 @@ def test_start_pr_review_proceeds_when_expected_owner_repo_match(monkeypatch):
         patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_pre", True)),
         patch(f"{_M}.httpx.AsyncClient", return_value=fake),
     ):
-        # Different case on purpose — GitHub treats owner/repo case-insensitively.
-        result = asyncio.run(
-            _start_pr_review(7, None, token="ghp_pre", expected_owner="ACME", expected_repo="Widget")
-        )
+        result = asyncio.run(_start_pr_review(7, None, token="ghp_pre"))
     assert result.job_id == "rev-9"
-
-
-def test_start_pr_review_409_when_configured_repo_changed():
-    """If the operator repointed the integration between webhook validation and this
-    worker running, the resolved owner/repo no longer match the repo the caller
-    validated — the review must be refused with 409, never run against the new repo."""
-    from fastapi import HTTPException as _HTTPExc
-
-    with (
-        # Config now points at a DIFFERENT repo than the webhook validated.
-        patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "owner": "acme", "repo": "other-repo"}),
-        patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_pre", True)),
-        pytest.raises(_HTTPExc) as exc,
-    ):
-        asyncio.run(
-            _start_pr_review(7, None, token="ghp_pre", expected_owner="acme", expected_repo="widget")
-        )
-    assert exc.value.status_code == 409
-    assert "changed" in exc.value.detail.lower()
+    payload = fake.last_payload()
+    assert payload["owner"] == "acme"
+    assert payload["repo"] == "widget"

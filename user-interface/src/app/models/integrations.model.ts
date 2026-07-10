@@ -94,6 +94,11 @@ export interface GoogleBrowserLoginCredentialsBody {
 export interface GitHubConfigResponse {
   enabled: boolean;
   token_configured: boolean;
+  /**
+   * Legacy optional default repository. Repository access itself is defined by the
+   * PAT's own authorization configuration — pages list every accessible repo via
+   * GET /api/integrations/github/repos and pass an explicit owner/repo per request.
+   */
   owner: string;
   repo: string;
   default_label: string;
@@ -114,13 +119,33 @@ export interface GitHubConfigResponse {
 /** Request body for PUT /api/integrations/github. */
 export interface GitHubConfigUpdate {
   enabled: boolean;
-  owner: string;
-  repo: string;
+  /** Optional legacy default repository; repository access comes from the PAT itself. */
+  owner?: string;
+  repo?: string;
   token: string;
   default_label: string;
   repo_path: string;
   /** GitHub webhook signing secret; omitted/empty preserves the existing one. */
   webhook_secret?: string;
+}
+
+/**
+ * One repository the configured PAT can access
+ * (GET /api/integrations/github/repos). Mirrors GitHub's `GET /user/repos` for the
+ * stored token, so the token's own authorization configuration is the source of truth.
+ */
+export interface GitHubRepoItem {
+  owner: string;
+  name: string;
+  full_name: string;
+  private: boolean;
+  archived: boolean;
+  html_url: string;
+  description: string;
+  default_branch: string;
+  /** GitHub's count includes open PRs — an at-a-glance hint, not the exact issue total. */
+  open_issues_count: number;
+  pushed_at: string;
 }
 
 /** A single issue this issue is blocked by (a GitHub "blocked by" dependency). */
@@ -149,6 +174,9 @@ export interface GitHubIssueItem {
 export interface RunGitHubIssueRequest {
   issue_number: number;
   base_branch?: string;
+  /** Target repository; omitted falls back to the legacy configured default. */
+  owner?: string;
+  repo?: string;
 }
 
 /** Response from POST /api/integrations/github/run-issue. */
@@ -178,6 +206,9 @@ export interface GitHubPullRequestItem {
 export interface RunPrReviewRequest {
   pr_number: number;
   base_branch?: string;
+  /** Target repository; omitted falls back to the legacy configured default. */
+  owner?: string;
+  repo?: string;
 }
 
 /** Response from POST /api/integrations/github/review-pr. */

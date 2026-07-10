@@ -139,6 +139,41 @@ def test_pulls_400_when_owner_repo_missing(mock_cfg, mock_cred):
 
 
 # ---------------------------------------------------------------------------
+# GET /github/pulls — per-request repository targeting (owner/repo query params)
+# ---------------------------------------------------------------------------
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_pulls_owner_repo_query_overrides_configured_default(mock_cfg, mock_cred):
+    """An explicit owner/repo pair targets that repository — the configured default is
+    only a fallback; the PAT's own authorization decides what is actually reachable."""
+    fake = _FakePullsClient([_FakePullsResp(200, [_pull(1)])])
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_PULLS, params={"owner": "other", "repo": "thing"})
+    assert resp.status_code == 200
+    assert fake.calls[0][0].endswith("/repos/other/thing/pulls")
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "owner": "", "repo": ""})
+def test_pulls_owner_repo_query_works_without_configured_default(mock_cfg, mock_cred):
+    fake = _FakePullsClient([_FakePullsResp(200, [_pull(1)])])
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_PULLS, params={"owner": "other", "repo": "thing"})
+    assert resp.status_code == 200
+    assert fake.calls[0][0].endswith("/repos/other/thing/pulls")
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_pulls_repo_without_owner_is_400(mock_cfg, mock_cred):
+    resp = client.get(_PULLS, params={"repo": "thing"})
+    assert resp.status_code == 400
+    assert "together" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
 # GET /github/pulls — HTTP error mapping
 # ---------------------------------------------------------------------------
 

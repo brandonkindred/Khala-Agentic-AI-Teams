@@ -12,6 +12,7 @@ import type {
   CodeReviewRunItem,
   GitHubConfigResponse,
   GitHubPullRequestItem,
+  GitHubRepoItem,
 } from '../../models/integrations.model';
 
 function makePulls(count: number): GitHubPullRequestItem[] {
@@ -33,11 +34,27 @@ function record(over: Partial<PrReviewRecord> = {}): PrReviewRecord {
   return {
     jobId: 'j1',
     prNumber: 1,
+    owner: 'acme',
+    repo: 'widgets',
     startedAt: Date.parse('2026-01-01T00:00:00Z'),
     status: 'running',
     ...over,
   };
 }
+
+/** The repo the fake PAT can access; the panel lists repos and loads PRs per repo. */
+const REPO: GitHubRepoItem = {
+  owner: 'acme',
+  name: 'widgets',
+  full_name: 'acme/widgets',
+  private: false,
+  archived: false,
+  html_url: 'https://github.com/acme/widgets',
+  description: 'Widget factory',
+  default_branch: 'main',
+  open_issues_count: 3,
+  pushed_at: '2026-06-09T10:00:00Z',
+};
 
 const CONFIGURED: GitHubConfigResponse = {
   enabled: true,
@@ -64,6 +81,7 @@ describe('CodeReviewPanelComponent', () => {
   };
   let integrationsSpy: {
     getGitHubConfig: ReturnType<typeof vi.fn>;
+    getGitHubRepos: ReturnType<typeof vi.fn>;
     getGitHubPullRequests: ReturnType<typeof vi.fn>;
     runGitHubReviewPr: ReturnType<typeof vi.fn>;
     getGitHubReviewHistory: ReturnType<typeof vi.fn>;
@@ -84,6 +102,12 @@ describe('CodeReviewPanelComponent', () => {
     fixture = TestBed.createComponent(CodeReviewPanelComponent);
     component = fixture.componentInstance;
     fixture.detectChanges();
+    // PRs are per-repo now: expand the first accessible repo (when any) so its open
+    // PRs load, matching what most tests exercised before repo-scoped browsing.
+    if (component.repos.length > 0) {
+      component.toggleRepo(component.repos[0]);
+      fixture.detectChanges();
+    }
   }
 
   beforeEach(() => {
@@ -94,6 +118,7 @@ describe('CodeReviewPanelComponent', () => {
     };
     integrationsSpy = {
       getGitHubConfig: vi.fn().mockReturnValue(of(CONFIGURED)),
+      getGitHubRepos: vi.fn().mockReturnValue(of([REPO])),
       getGitHubPullRequests: vi.fn().mockReturnValue(of(makePulls(3))),
       runGitHubReviewPr: vi.fn().mockReturnValue(
         of({ job_id: 'j1', pr_number: 1, pr_url: 'https://example.com/pull/1', status: 'pending', message: '' }),
@@ -111,20 +136,51 @@ describe('CodeReviewPanelComponent', () => {
   // Config + list loading
   // -------------------------------------------------------------------------
 
-  it('should create and load pull requests + review history when configured', async () => {
+  it('should create, list the accessible repos, and load the expanded repo\'s PRs + history', async () => {
     await setup();
     expect(component.githubConfigured).toBe(true);
-    expect(integrationsSpy.getGitHubPullRequests).toHaveBeenCalled();
-    expect(integrationsSpy.getGitHubReviewHistory).toHaveBeenCalled();
+    expect(integrationsSpy.getGitHubRepos).toHaveBeenCalled();
+    expect(component.repos.length).toBe(1);
+    // The expanded repo scopes both the PR list and the review history.
+    expect(integrationsSpy.getGitHubPullRequests).toHaveBeenCalledWith('acme', 'widgets');
+    expect(integrationsSpy.getGitHubReviewHistory).toHaveBeenCalledWith(undefined, 'acme', 'widgets');
     expect(component.pulls.length).toBe(3);
     expect(component.pullsLoaded).toBe(true);
   });
 
-  it('does not load pull requests when GitHub is unconfigured', async () => {
+  it('is configured with token alone — no owner/repo required (PAT defines access)', async () => {
+    integrationsSpy.getGitHubConfig.mockReturnValue(of({ ...CONFIGURED, owner: '', repo: '' }));
+    await setup();
+    expect(component.githubConfigured).toBe(true);
+    expect(integrationsSpy.getGitHubRepos).toHaveBeenCalled();
+  });
+
+  it('does not load repos when GitHub is unconfigured', async () => {
     integrationsSpy.getGitHubConfig.mockReturnValue(of(UNCONFIGURED));
     await setup();
     expect(component.githubConfigured).toBe(false);
+    expect(integrationsSpy.getGitHubRepos).not.toHaveBeenCalled();
     expect(integrationsSpy.getGitHubPullRequests).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a repo-list load error', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(
+      throwError(() => ({ error: { detail: 'bad credentials' } })),
+    );
+    await setup();
+    expect(component.repoError).toBe('bad credentials');
+    expect(component.loadingRepos).toBe(false);
+    expect(integrationsSpy.getGitHubPullRequests).not.toHaveBeenCalled();
+  });
+
+  it('collapsing the expanded repo drops all repo-scoped state', async () => {
+    await setup();
+    component.reviews.set(1, [record()]);
+    component.toggleRepo(component.repos[0]); // collapse
+    expect(component.selectedRepo).toBeNull();
+    expect(component.pulls.length).toBe(0);
+    expect(component.pullsLoaded).toBe(false);
+    expect(component.reviews.size).toBe(0);
   });
 
   it('treats a config check error as unconfigured', async () => {
@@ -275,7 +331,8 @@ describe('CodeReviewPanelComponent', () => {
       }),
     );
     component.startReview(component.pulls[0]);
-    expect(integrationsSpy.runGitHubReviewPr).toHaveBeenCalledWith({ pr_number: 1 });
+    // The expanded repo is the review target — repository access comes from the PAT.
+    expect(integrationsSpy.runGitHubReviewPr).toHaveBeenCalledWith({ pr_number: 1, owner: 'acme', repo: 'widgets' });
     expect(component.reviewsFor(1).length).toBe(1);
     expect(component.reviewsFor(1)[0].jobId).toBe('j1');
 

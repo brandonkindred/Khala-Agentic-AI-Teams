@@ -23,7 +23,7 @@ import {
   PendingQuestionsComponent,
   type AnswersSubmittedStatus,
 } from '../pending-questions/pending-questions.component';
-import type { GitHubIssueItem, RunGitHubIssueResponse } from '../../models/integrations.model';
+import type { GitHubIssueItem, GitHubRepoItem, RunGitHubIssueResponse } from '../../models/integrations.model';
 import type { CodingTeamJobListItem, CodingTeamJobStatus } from '../../models/coding-team.model';
 import type { TeamAssistantFieldSpec } from '../../models/team-assistant.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
@@ -41,12 +41,22 @@ const RUNS_POLL_MS = 15000;
 interface RunRowVm {
   run: CodingTeamJobListItem;
   issueNumber?: number;
+  /** "owner/repo" of the run's repository, so rows from different repos are tellable apart. */
+  repoLabel: string;
   status: string;
   badgeClass: string;
   waiting: boolean;
   /** Live status/phase line for active runs; null when there's nothing to show (no empty tooltip). */
   detail: string | null;
   timeAgo: string;
+}
+
+/**
+ * Stable identity of one issue across repositories ("owner/repo#number", lowercased) so
+ * "In progress" chips from one repo can never light up the same issue number in another.
+ */
+function issueRunKey(owner: string | undefined, repo: string | undefined, issueNumber: number): string {
+  return `${(owner ?? '').toLowerCase()}/${(repo ?? '').toLowerCase()}#${issueNumber}`;
 }
 
 /**
@@ -114,11 +124,18 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
 
   // GitHub integration state
   githubConfigured = false;
-  githubOwner = '';
-  githubRepo = '';
   isLoadingConfig = true;
 
-  // Issue list
+  // Repository list — every repo the configured PAT can access. The PAT's own
+  // authorization configuration is the source of truth; nothing is configured in Khala.
+  repos: GitHubRepoItem[] = [];
+  loadingRepos = false;
+  reposLoaded = false;
+  repoError: string | null = null;
+  /** The expanded repo whose issues are shown; null when every repo row is collapsed. */
+  selectedRepo: GitHubRepoItem | null = null;
+
+  // Issue list (scoped to the expanded repo)
   issues: GitHubIssueItem[] = [];
   loadingIssues = false;
   issuesLoaded = false;
@@ -165,6 +182,9 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   selectedRunId: string | null = null;
   /** Issue number of the selected run — kept so the chip survives a list snapshot that lags a just-started run. */
   selectedRunNumber: number | null = null;
+  /** Repository of the selected run, paired with `selectedRunNumber` for cross-repo-safe chips and retries. */
+  selectedRunOwner = '';
+  selectedRunRepo = '';
   /** Latest polled status of `selectedRunId`; null until the first poll lands. */
   private _jobStatus: CodingTeamJobStatus | null = null;
   /** Badge modifier for the selected run's status, precomputed from `jobStatus` so the detail panel
@@ -202,8 +222,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /** True for a short window after the job id is copied, to flip the copy icon to a check. */
   jobIdCopied = false;
 
-  /** Issue numbers with a non-terminal coding-team run, for "In progress" chips. */
-  activeIssueNumbers = new Set<number>();
+  /** Issue keys ("owner/repo#number") with a non-terminal coding-team run, for "In progress" chips. */
+  activeIssueKeys = new Set<string>();
 
   private pollSub: Subscription | null = null;
   private runsSub: Subscription | null = null;
@@ -224,6 +244,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     // Drop the selected-run bookkeeping so nothing pairs with a dead view.
     this.selectedRunId = null;
     this.selectedRunNumber = null;
+    this.selectedRunOwner = '';
+    this.selectedRunRepo = '';
     if (this.copyResetTimer) {
       clearTimeout(this.copyResetTimer);
       this.copyResetTimer = null;
@@ -232,10 +254,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Load the configured GitHub integration (enabled flag, token, owner/repo) and gate the page on
-   * it. On success, marks the page configured only when all of enabled/token/owner/repo are present
-   * and — once the owner/repo is known — starts the Runs poll and kicks off the first issue load;
-   * on error, leaves the page in the unconfigured state. Sets `isLoadingConfig` for the duration.
+   * Load the GitHub integration status (enabled flag + token) and gate the page on it. Repository
+   * access is defined by the PAT itself, so no owner/repo configuration is required: on success the
+   * page is configured when the integration is enabled and a token is stored, the Runs poll starts,
+   * and the accessible-repository list loads; on error, leaves the page in the unconfigured state.
+   * Sets `isLoadingConfig` for the duration.
    */
   checkGitHubConfig(): void {
     this.isLoadingConfig = true;
@@ -244,16 +267,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
       next: (cfg) => {
-        this.githubConfigured = cfg.enabled && cfg.token_configured && !!cfg.owner && !!cfg.repo;
-        this.githubOwner = cfg.owner;
-        this.githubRepo = cfg.repo;
+        this.githubConfigured = cfg.enabled && cfg.token_configured;
         this.isLoadingConfig = false;
         if (this.githubConfigured) {
-          // The Runs poll only starts once the configured owner/repo is known, so runs from other
-          // repositories are never matched against this page's issues; loadIssues then triggers the
-          // first list fetch alongside the issues.
           this.startRunsPolling();
-          this.loadIssues();
+          this.refreshTrigger$.next();
+          this.loadRepos();
         }
       },
       error: () => {
@@ -264,16 +283,71 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Refresh the open-issue list and the Runs snapshot together so they never drift. Resets the
-   * selection/pagination, triggers a runs refresh (which re-syncs the "In progress" chips), then
-   * fetches issues. Sets `issueError` on failure.
+   * Load every repository the PAT can access into the repo accordion.
    *
    * Preconditions: none.
-   * Postconditions: a no-op while a load is already in flight (`loadingIssues`), so a rapid
-   * re-trigger never issues overlapping requests that could land out of order.
+   * Postconditions: a no-op while a load is already in flight (`loadingRepos`). On success `repos`
+   * holds the accessible repositories (most recently pushed first, as the API returns them) and any
+   * expanded repo/issue state is reset; on error `repoError` is surfaced.
+   */
+  loadRepos(): void {
+    if (this.loadingRepos) return;
+    this.loadingRepos = true;
+    this.repoError = null;
+    this.selectedRepo = null;
+    this.issues = [];
+    this.issuesLoaded = false;
+    this.selectedIssue = null;
+    this.integrationsApi
+      .getGitHubRepos()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+      next: (repos) => {
+        this.repos = repos;
+        this.reposLoaded = true;
+        this.loadingRepos = false;
+      },
+      error: (err: { error?: { detail?: string }; message?: string }) => {
+        this.repoError = err?.error?.detail || err?.message || 'Failed to load repositories.';
+        this.loadingRepos = false;
+      },
+    });
+  }
+
+  /**
+   * Toggle a repository row: expand it (and load its issues) when collapsed, collapse it when it is
+   * the open one. Only one repo is expanded at a time, and the issue list is always scoped to it.
+   */
+  toggleRepo(repo: GitHubRepoItem): void {
+    if (this.selectedRepo?.full_name === repo.full_name) {
+      this.selectedRepo = null;
+      this.issues = [];
+      this.issuesLoaded = false;
+      this.selectedIssue = null;
+      this.issueError = null;
+      return;
+    }
+    this.selectedRepo = repo;
+    this.issues = [];
+    this.issuesLoaded = false;
+    this.selectedIssue = null;
+    this.issueError = null;
+    this.loadIssues();
+  }
+
+  /**
+   * Refresh the expanded repo's open-issue list and the Runs snapshot together so they never drift.
+   * Resets the selection/pagination, triggers a runs refresh (which re-syncs the "In progress"
+   * chips), then fetches issues. Sets `issueError` on failure.
+   *
+   * Preconditions: none.
+   * Postconditions: a no-op when no repo is expanded. A response that lands after the user switched
+   * to a different repo is discarded, so rapid repo switches can never show one repo's issues under
+   * another repo's row.
    */
   loadIssues(): void {
-    if (this.loadingIssues) return;
+    const repo = this.selectedRepo;
+    if (!repo) return;
     this.loadingIssues = true;
     this.issueError = null;
     this.selectedIssue = null;
@@ -281,10 +355,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     // two lists never drift.
     this.refreshTrigger$.next();
     this.integrationsApi
-      .getGitHubIssues()
+      .getGitHubIssues(undefined, repo.owner, repo.name)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
       next: (issues) => {
+        if (this.selectedRepo?.full_name !== repo.full_name) return; // stale response for a switched-away repo
         this.issues = issues;
         this.pageIndex = 0;
         this.issuesLoaded = true;
@@ -292,6 +367,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.recomputeIssueVms();
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
+        if (this.selectedRepo?.full_name !== repo.full_name) return;
         this.issueError = err?.error?.detail || err?.message || 'Failed to load issues.';
         this.loadingIssues = false;
       },
@@ -364,9 +440,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Postconditions: returns a `RunRowVm`; `detail` is null for a terminal run (no live status line).
    */
   private toRunVm(run: CodingTeamJobListItem): RunRowVm {
+    const ctx = run.github_context;
     return {
       run,
-      issueNumber: run.github_context?.issue_number,
+      issueNumber: ctx?.issue_number,
+      repoLabel: ctx ? `${ctx.owner}/${ctx.repo}` : '',
       status: run.status,
       badgeClass: this.badgeClass(run.status),
       waiting: this.isRunWaiting(run),
@@ -391,29 +469,32 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Start a coding-team run for the selected issue.
+   * Start a coding-team run for the selected issue in the expanded repo.
    *
-   * Preconditions: none enforced — a no-op when `selectedIssue` is null or a run is already starting
-   * (`runningIssue`), so a double-click can't submit the same issue twice.
-   * Postconditions: on success the issue is marked in progress (`activeIssueNumbers`), the returned
+   * Preconditions: none enforced — a no-op when `selectedIssue`/`selectedRepo` is null or a run is
+   * already starting (`runningIssue`), so a double-click can't submit the same issue twice.
+   * Postconditions: on success the issue is marked in progress (`activeIssueKeys`), the returned
    * run is selected (so its live detail shows immediately), the Runs list is refreshed, and the
    * selection is cleared; on error `issueError` is surfaced. `runningIssue` is toggled across the call.
    */
   confirmAndRun(): void {
-    if (!this.selectedIssue || this.runningIssue) return;
+    const repo = this.selectedRepo;
+    if (!this.selectedIssue || !repo || this.runningIssue) return;
     this.runningIssue = true;
     this.issueError = null;
     this.integrationsApi
-      .runGitHubIssue({ issue_number: this.selectedIssue.number })
+      .runGitHubIssue({ issue_number: this.selectedIssue.number, owner: repo.owner, repo: repo.name })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
       next: (resp: RunGitHubIssueResponse) => {
         this.runningIssue = false;
         this.selectedIssue = null;
-        this.activeIssueNumbers.add(resp.issue_number);
+        this.activeIssueKeys.add(issueRunKey(repo.owner, repo.name, resp.issue_number));
         // Set the selected run's issue first so selectRun (which can't find the run in `runs`
         // until the next list tick) doesn't clear it.
         this.selectedRunNumber = resp.issue_number;
+        this.selectedRunOwner = repo.owner;
+        this.selectedRunRepo = repo.name;
         this.selectRun(resp.job_id);
         this.recomputeIssueVms();
         this.refreshTrigger$.next();
@@ -428,24 +509,30 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /**
    * Re-run the selected (typically terminal) run's issue, e.g. after a failure.
    *
-   * Preconditions: none enforced — a no-op when the selected run has no resolvable issue number or a
-   * run is already starting (`runningIssue`).
-   * Postconditions: on success a fresh run for the same issue is started and selected, and the issue
-   * is marked in progress; on error `issueError` is surfaced. `runningIssue` is toggled across the call.
+   * Preconditions: none enforced — a no-op when the selected run has no resolvable issue
+   * number/repository or a run is already starting (`runningIssue`).
+   * Postconditions: on success a fresh run for the same issue (in the same repository) is started
+   * and selected, and the issue is marked in progress; on error `issueError` is surfaced.
+   * `runningIssue` is toggled across the call.
    */
   retrySelectedRun(): void {
-    const issueNumber = this.selectedRunNumber ?? this.jobStatus?.github_context?.issue_number;
-    if (issueNumber == null || this.runningIssue) return;
+    const ctx = this.jobStatus?.github_context;
+    const issueNumber = this.selectedRunNumber ?? ctx?.issue_number;
+    const owner = this.selectedRunOwner || ctx?.owner || '';
+    const repo = this.selectedRunRepo || ctx?.repo || '';
+    if (issueNumber == null || !owner || !repo || this.runningIssue) return;
     this.runningIssue = true;
     this.issueError = null;
     this.integrationsApi
-      .runGitHubIssue({ issue_number: issueNumber })
+      .runGitHubIssue({ issue_number: issueNumber, owner, repo })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
       next: (resp: RunGitHubIssueResponse) => {
         this.runningIssue = false;
-        this.activeIssueNumbers.add(resp.issue_number);
+        this.activeIssueKeys.add(issueRunKey(owner, repo, resp.issue_number));
         this.selectedRunNumber = resp.issue_number;
+        this.selectedRunOwner = owner;
+        this.selectedRunRepo = repo;
         this.selectRun(resp.job_id);
         this.recomputeIssueVms();
         this.refreshTrigger$.next();
@@ -460,8 +547,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /**
    * Subscribe to the Runs list poll.
    *
-   * Preconditions: the GitHub integration is configured (`githubOwner`/`githubRepo` set) — the caller
-   * only invokes this once configured, so jobs from other repositories are never matched here.
+   * Preconditions: the GitHub integration is configured (enabled + token) — the caller only invokes
+   * this once configured. Runs from every repository the PAT can access are shown.
    * Postconditions: each `refreshTrigger$` emission re-fetches `/jobs` (terminal jobs included, so
    * "Recent" runs show) on a `timer(0, RUNS_POLL_MS)` cadence and applies them via `applyRuns`; a
    * failed fetch sets `runsError` and leaves the page usable. Idempotent — a second call while a
@@ -494,31 +581,25 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /**
    * Fold a fresh `/jobs` snapshot into the Runs panel.
    *
-   * Preconditions: `githubOwner`/`githubRepo` are set (the poll only starts once configured).
-   * Postconditions: `runs` holds this repo's runs (running + terminal) and `runningRuns`/`recentRuns`
-   * hold its non-terminal/terminal partitions; `activeIssueNumbers` holds the non-terminal subset's
-   * issue numbers, plus the selected run's issue only while that run is absent from this snapshot and
-   * not yet observed terminal (so a snapshot that lags a just-started run can't wipe its chip, while
-   * a run the snapshot already reports terminal is trusted and dropped). On the first load only, a
-   * run is auto-selected when none is selected.
+   * Preconditions: the poll only starts once configured (enabled + token).
+   * Postconditions: `runs` holds every issue-bearing run across all repositories the PAT can access
+   * (running + terminal) and `runningRuns`/`recentRuns` hold its non-terminal/terminal partitions;
+   * `activeIssueKeys` holds the non-terminal subset's "owner/repo#number" keys, plus the selected
+   * run's key only while that run is absent from this snapshot and not yet observed terminal (so a
+   * snapshot that lags a just-started run can't wipe its chip, while a run the snapshot already
+   * reports terminal is trusted and dropped). On the first load only, a run is auto-selected when
+   * none is selected.
    */
   private applyRuns(jobs: CodingTeamJobListItem[]): void {
-    const owner = this.githubOwner.toLowerCase();
-    const repo = this.githubRepo.toLowerCase();
-    const mine = jobs.filter(
-      (j) =>
-        j.github_context?.issue_number != null &&
-        j.github_context.owner.toLowerCase() === owner &&
-        j.github_context.repo.toLowerCase() === repo,
-    );
+    const mine = jobs.filter((j) => j.github_context?.issue_number != null);
     this.runs = mine;
     this.runningRuns = mine.filter((j) => !isCodingTeamTerminalStatus(j.status));
     this.recentRuns = mine.filter((j) => isCodingTeamTerminalStatus(j.status));
 
     const active = new Set(
       this.runningRuns
-        .map((j) => j.github_context?.issue_number)
-        .filter((n): n is number => n != null),
+        .filter((j) => j.github_context?.issue_number != null)
+        .map((j) => issueRunKey(j.github_context?.owner, j.github_context?.repo, j.github_context!.issue_number!)),
     );
     // Preserve the chip for a just-started run the snapshot does not list yet — but only while the
     // run is genuinely absent from the snapshot (`selectedInSnapshot`) AND the polled status has not
@@ -534,9 +615,9 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       !selectedInSnapshot &&
       !isCodingTeamTerminalStatus(this.jobStatus?.status)
     ) {
-      active.add(this.selectedRunNumber);
+      active.add(issueRunKey(this.selectedRunOwner, this.selectedRunRepo, this.selectedRunNumber));
     }
-    this.activeIssueNumbers = active;
+    this.activeIssueKeys = active;
     this.buildRunVms();
     this.recomputeIssueVms();
 
@@ -587,6 +668,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     const run = this.runs.find((r) => r.job_id === jobId);
     if (run) {
       this.selectedRunNumber = run.github_context?.issue_number ?? null;
+      this.selectedRunOwner = run.github_context?.owner ?? '';
+      this.selectedRunRepo = run.github_context?.repo ?? '';
     }
     this.jobStatus = null;
     this.issueError = null;
@@ -608,9 +691,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     if (this.selectedRunId === run.job_id) {
       this.stopPolling();
       this.selectedRunId = null;
-      // Clear the issue number too: applyRuns keeps a chip alive for the selected run's issue, so a
-      // lingering selectedRunNumber would re-flag a deselected (and possibly finished) issue.
+      // Clear the issue identity too: applyRuns keeps a chip alive for the selected run's issue, so
+      // a lingering selectedRunNumber would re-flag a deselected (and possibly finished) issue.
       this.selectedRunNumber = null;
+      this.selectedRunOwner = '';
+      this.selectedRunRepo = '';
       this.jobStatus = null;
       this.jobStatusError = null;
       return;
@@ -761,9 +846,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.startPolling(this.selectedRunId);
   }
 
-  /** True when a non-terminal coding-team run is already working this issue. */
+  /** True when a non-terminal coding-team run is already working this issue in the expanded repo. */
   isIssueInProgress(issue: GitHubIssueItem): boolean {
-    return this.activeIssueNumbers.has(issue.number);
+    const repo = this.selectedRepo;
+    if (!repo) return false;
+    return this.activeIssueKeys.has(issueRunKey(repo.owner, repo.name, issue.number));
   }
 
   /**
@@ -803,6 +890,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.jobStatus = status;
         if (this.selectedRunNumber == null && status.github_context?.issue_number != null) {
           this.selectedRunNumber = status.github_context.issue_number;
+        }
+        if (!this.selectedRunOwner && status.github_context?.owner) {
+          this.selectedRunOwner = status.github_context.owner;
+          this.selectedRunRepo = status.github_context.repo;
         }
         // The selected run finished: refresh the list so it moves Running → Recent and drops its
         // "In progress" chip. The selection stays so its finished detail remains on screen.

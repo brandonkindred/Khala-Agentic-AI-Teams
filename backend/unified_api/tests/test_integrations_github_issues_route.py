@@ -277,6 +277,50 @@ def test_issues_query_label_overrides_default(mock_cfg, mock_cred):
 
 
 # ---------------------------------------------------------------------------
+# Per-request repository targeting (owner/repo query params)
+# ---------------------------------------------------------------------------
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_issues_owner_repo_query_overrides_configured_default(mock_cfg, mock_cred):
+    """An explicit owner/repo pair targets that repository — the configured default is
+    only a fallback; the PAT's own authorization decides what is actually reachable."""
+    fake = _FakeIssuesClient([_FakeIssuesResp(200, [_issue(1)])])
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES, params={"owner": "other", "repo": "thing"})
+    assert resp.status_code == 200
+    assert fake.calls[0][0].endswith("/repos/other/thing/issues")
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "owner": "", "repo": ""})
+def test_issues_owner_repo_query_works_without_configured_default(mock_cfg, mock_cred):
+    fake = _FakeIssuesClient([_FakeIssuesResp(200, [_issue(1)])])
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES, params={"owner": "other", "repo": "thing"})
+    assert resp.status_code == 200
+    assert fake.calls[0][0].endswith("/repos/other/thing/issues")
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_issues_owner_without_repo_is_400(mock_cfg, mock_cred):
+    resp = client.get(_ISSUES, params={"owner": "other"})
+    assert resp.status_code == 400
+    assert "together" in resp.json()["detail"]
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_issues_rejects_unsafe_owner_query(mock_cfg, mock_cred):
+    """A traversal-shaped owner/repo is rejected before any URL or path is built."""
+    resp = client.get(_ISSUES, params={"owner": "../etc", "repo": "thing"})
+    assert resp.status_code == 400
+    assert "invalid GitHub owner" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
 # Pagination: the core fix — every page is fetched, not just the first
 # ---------------------------------------------------------------------------
 

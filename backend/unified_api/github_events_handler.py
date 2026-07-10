@@ -209,20 +209,21 @@ def _add_comment_reaction(owner: str, repo: str, comment_id: int, token: str | N
 def _start_review(owner: str, repo: str, pr_number: int, token: str | None) -> str:
     """Start the existing PR-review flow for ``pr_number`` (runs the async helper).
 
-    Preconditions: ``owner``/``repo`` are the repository the caller already validated
-        against the configured integration; ``pr_number`` is a positive PR number;
-        ``token`` is a pre-resolved GitHub PAT reused so the review path does not
-        re-read the credential store, or ``None`` to let that path resolve it.
+    Preconditions: ``owner``/``repo`` are the commented PR's repository coordinates
+        from the webhook payload; ``pr_number`` is a positive PR number; ``token`` is a
+        pre-resolved GitHub PAT reused so the review path does not re-read the
+        credential store, or ``None`` to let that path resolve it.
     Postconditions: forwards to the same ``_start_pr_review`` path used by
         ``POST /api/integrations/github/review-pr``, passing ``owner``/``repo`` as the
-        expected target so the review is refused (not run against a different repo) if the
-        configured owner/repo changed since dispatch validated them. Returns one of:
+        target repository — whether the PAT can actually reach it is GitHub's decision
+        when the review runs (the token's own authorization configuration is the sole
+        access list). Returns one of:
         - ``"started"`` — a review job was created;
         - ``"already_running"`` — the coding team answered 409 because a review is
           already in flight for this PR (the *intended* duplicate outcome: logged at
           info, never as an error);
-        - ``"failed"`` — any other failure (stale-config 409, service unreachable,
-          unexpected error), logged at warning/error.
+        - ``"failed"`` — any other failure (service unreachable, unexpected error),
+          logged at warning/error.
         Errors are logged, not raised — the webhook has already returned 200 and there
         is no client to surface them to.
         Runs on a bounded executor worker thread (see :func:`_get_dispatch_executor`),
@@ -244,13 +245,11 @@ def _start_review(owner: str, repo: str, pr_number: int, token: str | None) -> s
         from unified_api.routes.integrations import _start_pr_review
 
         try:
-            result = asyncio.run(
-                _start_pr_review(pr_number, None, token=token, expected_owner=owner, expected_repo=repo)
-            )
+            result = asyncio.run(_start_pr_review(pr_number, None, token=token, owner=owner, repo=repo))
         except HTTPException as exc:
             # 409 "already running" is the duplicate guard doing its job — an expected
             # outcome, not an error. Match on the coding team's detail text (forwarded
-            # verbatim by _start_pr_review) to distinguish it from the stale-config 409.
+            # verbatim by _start_pr_review).
             if exc.status_code == 409 and "already running" in str(exc.detail):
                 logger.info("GitHub webhook: review already running for PR #%s: %s", pr_number, exc.detail)
                 return "already_running"
@@ -278,15 +277,20 @@ def process_review_request(
     """Validate config, start the code review, and signal the outcome. Runs in a worker thread.
 
     Preconditions: ``owner``/``repo`` are the repository coordinates from the *webhook
-        payload* (validated against the configured integration here, on the worker, so
-        the config read never blocks the event loop); ``pr_number`` is a positive PR
+        payload* (the integration's enabled flag is checked here, on the worker, so the
+        config read never blocks the event loop); ``pr_number`` is a positive PR
         number; ``comment_id`` is the triggering comment's id (0 when unknown);
         ``delivery_id`` is the ``X-GitHub-Delivery`` header value ("" when absent).
     Postconditions:
-        - Returns without starting a review when the integration is unconfigured/disabled
-          or the payload repo does not match the configured owner/repo; in both cases the
-          delivery is forgotten (see :func:`_forget_delivery`) so a redelivery after the
-          operator fixes the configuration is not swallowed by the dedup table.
+        - Returns without starting a review when the integration is disabled or the
+          payload carries no repository coordinates; in both cases the delivery is
+          forgotten (see :func:`_forget_delivery`) so a redelivery after the operator
+          fixes the configuration is not swallowed by the dedup table. There is
+          deliberately NO Khala-side repository allowlist: the delivery was already
+          HMAC-verified against the shared webhook secret and the commenter's repo
+          association authorized, and whether the PAT can act on this repository is
+          GitHub's decision — the token's own authorization configuration is the sole
+          access list (a repo it can't reach fails the review start, signalled 😕).
         - Resolves the GitHub PAT once and reuses it for the review start and the
           reaction — a single credential-store read per webhook.
         - Signals the outcome on the triggering comment: 👀 when a review started or one
@@ -295,31 +299,24 @@ def process_review_request(
           the delivery is forgotten so GitHub's "Redeliver" can retry it.
         - Best-effort throughout — never raises (the webhook has already returned 200).
     """
-    cfg_owner, cfg_repo = _configured_owner_repo()
-    if not cfg_owner or not cfg_repo:
-        logger.warning("GitHub webhook: no configured owner/repo; ignoring review request")
+    if not _integration_enabled():
+        logger.warning("GitHub webhook: integration disabled or unconfigured; ignoring review request")
         _forget_delivery(delivery_id)
         return
-    if (owner.casefold(), repo.casefold()) != (cfg_owner.casefold(), cfg_repo.casefold()):
-        logger.warning(
-            "GitHub webhook: repo %s/%s does not match configured %s/%s; ignoring",
-            owner,
-            repo,
-            cfg_owner,
-            cfg_repo,
-        )
+    if not owner or not repo:
+        logger.warning("GitHub webhook: payload carries no repository coordinates; ignoring review request")
         _forget_delivery(delivery_id)
         return
 
     token = _resolve_github_token()
-    outcome = _start_review(cfg_owner, cfg_repo, pr_number, token)
+    outcome = _start_review(owner, repo, pr_number, token)
     if outcome in ("started", "already_running"):
         # Either way a review is in flight for this PR — acknowledge the request.
-        _add_comment_reaction(cfg_owner, cfg_repo, comment_id, token, content="eyes")
+        _add_comment_reaction(owner, repo, comment_id, token, content="eyes")
     else:
         # Seen-but-could-not-run: give the commenter a visible signal (😕) instead of
         # silence, and forget the delivery so GitHub's "Redeliver" button can retry it.
-        _add_comment_reaction(cfg_owner, cfg_repo, comment_id, token, content="confused")
+        _add_comment_reaction(owner, repo, comment_id, token, content="confused")
         _forget_delivery(delivery_id)
 
 
@@ -328,29 +325,26 @@ def process_review_request(
 # ---------------------------------------------------------------------------
 
 
-def _configured_owner_repo() -> tuple[str, str]:
-    """Return the configured (owner, repo) when the integration is enabled, else ("", "").
+def _integration_enabled() -> bool:
+    """Return ``True`` when the GitHub integration is enabled.
 
     Preconditions: none.
-    Postconditions: returns the stripped owner/repo from the GitHub config settings
-        (JSON only — no credential read) ONLY when ``enabled`` is true. A disabled
-        integration reports as unconfigured even if owner/repo/PAT are still saved from
-        before it was turned off (the PUT path preserves them on disable), so the
-        webhook path never submits review work — and never adds the 👀 acknowledgement
-        reaction — for an integration the operator turned off. Returns ``("", "")`` when
-        nothing is configured, the integration is disabled, or the settings read fails.
-        Never raises.
+    Postconditions: reads the GitHub config settings (JSON only — no credential read)
+        and returns the ``enabled`` flag. A disabled integration reports ``False`` even
+        if a PAT is still saved from before it was turned off (the PUT path preserves
+        credentials on disable), so the webhook path never submits review work — and
+        never adds the 👀 acknowledgement reaction — for an integration the operator
+        turned off. No owner/repo is consulted: which repositories are reachable is
+        defined by the PAT's own authorization configuration, not by Khala settings.
+        Returns ``False`` when the settings read fails. Never raises.
     """
     try:
         from unified_api.integrations_store import get_github_config_meta
 
-        meta = get_github_config_meta()
-        if not meta.get("enabled"):
-            return "", ""
-        return str(meta.get("owner", "")).strip(), str(meta.get("repo", "")).strip()
+        return bool(get_github_config_meta().get("enabled"))
     except Exception:
-        logger.exception("GitHub webhook: failed to read configured owner/repo")
-        return "", ""
+        logger.exception("GitHub webhook: failed to read integration settings")
+        return False
 
 
 # Best-effort de-dup of GitHub webhook redeliveries by the `X-GitHub-Delivery` header.
@@ -451,15 +445,15 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any], delivery_id:
     - ``delivery_id`` (the ``X-GitHub-Delivery`` header) has not already been processed
       within the dedup TTL — see :func:`_is_duplicate_delivery`
 
-    The configured-repo match (a settings read — file I/O under a lock shared with
+    The integration-enabled check (a settings read — file I/O under a lock shared with
     config writers) deliberately happens on the pool worker inside
     :func:`process_review_request`, NOT here: this function runs synchronously on the
     async route's event-loop thread, and blocking that thread on disk I/O (or behind a
     concurrent config write) would stall every request on the loop. The dedup check runs
     before submission, so a duplicate delivery costs one dict lookup and zero I/O; a
-    consequence is that deliveries for non-matching repos are also recorded (and then
-    forgotten by the worker) — benign, since the worker forgets any delivery that did
-    not start a review.
+    consequence is that deliveries for a disabled integration are also recorded (and
+    then forgotten by the worker) — benign, since the worker forgets any delivery that
+    did not start a review.
 
     Preconditions: ``event_type`` is the value of the ``X-GitHub-Event`` header;
         ``payload`` is the parsed webhook body (already signature-verified by the route);

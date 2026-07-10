@@ -123,8 +123,6 @@ describe('IntegrationsDashboardComponent', () => {
       of({ enabled: true, token_configured: true, owner: 'acme', repo: 'widget', default_label: '', webhook_secret_configured: true }),
     );
     component.githubEnabled = true;
-    component.githubOwner = 'acme';
-    component.githubRepo = 'widget';
     component.githubWebhookSecret = 'whsec_abc';
     component.saveGitHubConfig();
     expect(apiSpy.updateGitHubConfig).toHaveBeenCalledWith(
