@@ -91,6 +91,34 @@ def _diagnostics_dict(**overrides: Any) -> Dict[str, Any]:
     return base
 
 
+def _strategy_lab_record_dict(
+    *, asset_class: str = "stocks", lab_record_id: str = "rec-1", **overrides: Any
+) -> Dict[str, Any]:
+    """A minimal ``StrategyLabRecord`` JSON dump for round-trip / merge tests."""
+    from investment_team.models import StrategyLabRecord
+
+    record = StrategyLabRecord(
+        lab_record_id=lab_record_id,
+        strategy=_spec_dict(asset_class=asset_class),
+        backtest={
+            "backtest_id": f"bt-{lab_record_id}",
+            "strategy_id": "strat-1",
+            "strategy": _spec_dict(asset_class=asset_class),
+            "config": _backtest_config_dict(),
+            "submitted_by": "test",
+            "submitted_at": "2023-01-01T00:00:00Z",
+            "completed_at": "2023-01-01T01:00:00Z",
+            "result": _backtest_result_dict(),
+        },
+        is_winning=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2023-01-01T00:00:00Z",
+        **overrides,
+    )
+    return record.model_dump(mode="json")
+
+
 def _bar_dict(date: str = "2023-01-01", **overrides: Any) -> Dict[str, Any]:
     base = {
         "date": date,
@@ -875,8 +903,171 @@ def test_run_design_attempt_activity_maps_unexpected_error(monkeypatch):
     assert exc_info.value.non_retryable is True
 
 
+# ---------------------------------------------------------------------------
+# Batch-level activities (Stage 4)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_signal_brief_activity_serializes_brief_and_storage(monkeypatch):
+    from investment_team.api import main as api_main
+
+    class _FakeBrief:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"brief_version": "v1"}
+
+    monkeypatch.setattr(
+        api_main,
+        "_compute_signal_brief_snapshot",
+        lambda benchmark_symbol: (_FakeBrief(), {"stored": True, "sym": benchmark_symbol}),
+    )
+    out = act.compute_signal_brief_activity("SPY")
+    assert out["signal_brief"] == {"brief_version": "v1"}
+    assert out["signal_brief_storage"] == {"stored": True, "sym": "SPY"}
+
+
+def test_compute_signal_brief_activity_handles_none_brief(monkeypatch):
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main,
+        "_compute_signal_brief_snapshot",
+        lambda benchmark_symbol: (None, {"skipped": True}),
+    )
+    out = act.compute_signal_brief_activity("SPY")
+    assert out["signal_brief"] is None
+    assert out["signal_brief_storage"] == {"skipped": True}
+
+
+def test_is_run_cancelled_activity_delegates(monkeypatch):
+    from investment_team.api import main as api_main
+
+    seen = {}
+
+    def _fake(run_id):
+        seen["run_id"] = run_id
+        return True
+
+    monkeypatch.setattr(api_main, "_is_strategy_lab_run_cancelled", _fake)
+    assert act.is_run_cancelled_activity("run-42") is True
+    assert seen["run_id"] == "run-42"
+
+
+def test_finalize_cycle_record_activity_delegates_and_serializes(monkeypatch):
+    from investment_team.api import main as api_main
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-final"}
+
+    captured = {}
+
+    def _fake_finalize(record, **kwargs):
+        captured.update(kwargs)
+        captured["record"] = record
+        return _FakeRecord()
+
+    monkeypatch.setattr(api_main, "_finalize_strategy_lab_cycle_record", _fake_finalize)
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: f"parsed:{r['lab_record_id']}"),
+    )
+
+    out = act.finalize_cycle_record_activity(
+        {
+            "record": {"lab_record_id": "raw-1"},
+            "signal_brief_storage": {"s": 1},
+            "paper_trading_enabled": False,
+            "paper_trading_lookback_days": 90,
+        }
+    )
+    assert out["record"] == {"lab_record_id": "rec-final"}
+    assert captured["record"] == "parsed:raw-1"
+    assert captured["signal_brief_storage"] == {"s": 1}
+    assert captured["paper_trading_enabled"] is False
+    assert captured["paper_trading_lookback_days"] == 90
+
+
+def test_merge_wave_results_activity_merges_in_cycle_index_order():
+    """The activity records each cycle's spec + folds its trial-count delta,
+    processing settled cycles in cycle-index order (reproducible directives)."""
+    from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
+
+    # Primary tracker with 2 prior trials.
+    primary = ConvergenceTracker()
+    primary.increment_trials(2)
+    primary_state = primary.to_wire_dict()
+
+    def _cycle_tracker_state(extra_trials: int) -> Dict[str, Any]:
+        # A snapshot of the primary that ran `extra_trials` more trials in-cycle.
+        snap = ConvergenceTracker.from_wire_dict(primary_state).snapshot()
+        snap.increment_trials(extra_trials)
+        return snap.to_wire_dict()
+
+    def _record_dump(asset_class: str) -> Dict[str, Any]:
+        return _strategy_lab_record_dict(asset_class=asset_class)
+
+    params = {
+        "primary_tracker_state": primary_state,
+        # Deliberately out of order to prove the activity sorts.
+        "wave_results": [
+            {
+                "cycle_index": 1,
+                "record": _record_dump("crypto"),
+                "cycle_tracker_state": _cycle_tracker_state(3),
+            },
+            {
+                "cycle_index": 0,
+                "record": _record_dump("stocks"),
+                "cycle_tracker_state": _cycle_tracker_state(1),
+            },
+        ],
+    }
+    out = act.merge_wave_results_activity(params)
+    merged = ConvergenceTracker.from_wire_dict(out["primary_tracker_state"])
+    # 2 (primary) + 1 + 3 (deltas), never double-counting the pre-snapshot total.
+    assert merged.trial_count == 6
+    # Both cycles' asset classes recorded for diversity steering, in index order.
+    assert merged._asset_class_history == ["stocks", "crypto"]
+
+
+def test_compute_signal_brief_activity_maps_unexpected_error(monkeypatch):
+    from investment_team.api import main as api_main
+
+    def _boom(benchmark_symbol):
+        raise RuntimeError("provider exploded")
+
+    monkeypatch.setattr(api_main, "_compute_signal_brief_snapshot", _boom)
+    with pytest.raises(ApplicationError):
+        act.compute_signal_brief_activity("SPY")
+
+
+def test_finalize_cycle_record_activity_maps_unexpected_error(monkeypatch):
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(
+        "investment_team.models.StrategyLabRecord.parse_persisted",
+        staticmethod(lambda r: r),
+    )
+
+    def _boom(record, **kwargs):
+        raise RuntimeError("finalize exploded")
+
+    monkeypatch.setattr(api_main, "_finalize_strategy_lab_cycle_record", _boom)
+    with pytest.raises(ApplicationError):
+        act.finalize_cycle_record_activity({"record": {"lab_record_id": "x"}})
+
+
+def test_merge_wave_results_activity_maps_unexpected_error():
+    # A malformed wave_results entry (missing keys) trips the reconstruction and
+    # maps to ApplicationError rather than crashing the worker opaquely.
+    with pytest.raises(ApplicationError):
+        act.merge_wave_results_activity(
+            {"primary_tracker_state": {}, "wave_results": [{"cycle_index": 0}]}
+        )
+
+
 def test_activities_list_contains_every_activity():
-    assert len(act.ACTIVITIES) == 23
+    assert len(act.ACTIVITIES) == 27
     assert act.design_generate_activity in act.ACTIVITIES
     assert act.persist_record_activity in act.ACTIVITIES
     assert act.resolve_readiness_prices_activity in act.ACTIVITIES
@@ -886,3 +1077,8 @@ def test_activities_list_contains_every_activity():
     assert act.build_short_circuit_record_activity in act.ACTIVITIES
     assert act.run_design_attempt_activity in act.ACTIVITIES
     assert act.resolve_workflow_config_activity in act.ACTIVITIES
+    # Batch-level activities (Stage 4).
+    assert act.compute_signal_brief_activity in act.ACTIVITIES
+    assert act.is_run_cancelled_activity in act.ACTIVITIES
+    assert act.finalize_cycle_record_activity in act.ACTIVITIES
+    assert act.merge_wave_results_activity in act.ACTIVITIES

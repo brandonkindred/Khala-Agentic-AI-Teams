@@ -36,6 +36,7 @@ merge-on-completion is a list ``extend``.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
@@ -71,6 +72,15 @@ _ACTIVITY_TIMEOUT = timedelta(minutes=10)
 # ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS`` model round-trips plus backtests), so it
 # needs a far wider ceiling than a single LLM/gate/persist activity.
 _DESIGN_ATTEMPT_TIMEOUT = timedelta(hours=2)
+
+# A cycle child workflow is expensive and its own activities already retry
+# internally, so a failed cycle is not re-run at the child level — it surfaces
+# as an errored cycle, exactly as a raising ``_run_one_strategy_lab_cycle`` does
+# in thread mode.
+_CHILD_RETRY = RetryPolicy(maximum_attempts=1)
+# A whole cycle (design re-entries × phase pipeline) can run for hours; bound it
+# generously rather than leaving it unbounded.
+_CHILD_EXECUTION_TIMEOUT = timedelta(hours=8)
 
 
 async def _exec(
@@ -284,5 +294,248 @@ class StrategyLabCycleWorkflow:
 # tuned/scaled independently. A plain string constant — sandbox-safe.
 TASK_QUEUE = "strategy-lab-queue"
 
-WORKFLOWS = [StrategyLabCycleWorkflow]
+
+def _snapshot_tracker_wire(primary_state: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a per-cycle snapshot of the batch-level convergence tracker, as wire.
+
+    Mirrors thread-mode's ``primary_tracker.snapshot()`` handed to each concurrent
+    cycle: a shallow clone whose ``_trial_count_at_snapshot`` baseline is captured
+    so ``merge_wave_results_activity`` later folds only the per-cycle trial delta
+    back in. Pure ``ConvergenceTracker`` operations (list/Counter copies + ints) —
+    sandbox-safe, so this runs in workflow code rather than an activity.
+
+    Preconditions:
+        ``primary_state`` is a ``dto`` wire dict (or ``{}`` for a fresh tracker).
+    Postconditions:
+        Returns a wire dict for an isolated snapshot equivalent to
+        ``convergence_tracker_from_wire(primary_state).snapshot()``.
+    """
+    return convergence_tracker_to_wire(convergence_tracker_from_wire(primary_state).snapshot())
+
+
+@workflow.defn(name="StrategyLabBatchWorkflow")
+class StrategyLabBatchWorkflow:
+    """Durable batch driver — ports ``_strategy_lab_worker``'s batch/wave loop.
+
+    Replaces the coarse ``InvestmentStrategyLabWorkflow`` (one activity wrapping
+    the whole multi-hour ``_strategy_lab_worker`` thread) with a fine-grained
+    parent workflow that fans each batch's cycles out as ``StrategyLabCycleWorkflow``
+    **child workflows** — one per cycle, ``_child_wave``'s worth started
+    concurrently — reproducing thread-mode's per-wave
+    ``ThreadPoolExecutor(max_workers=len(wave_indices))`` concurrency on the
+    dedicated ``strategy-lab-queue``.
+
+    Preconditions:
+        ``batch_input`` (the sole ``run()`` argument) is a JSON-shaped dict:
+          - ``run_id``: str run identifier (used for child-workflow ids, run-state
+            persistence, and the cancellation check).
+          - ``config``: ``BacktestConfig`` JSON dump, shared by every cycle.
+          - ``batch_size`` / ``batch_count`` / ``max_parallel``: ints.
+          - ``benchmark_symbol``: str, for the per-batch signal brief.
+          - ``exclude_asset_classes``: list or ``None``.
+          - ``paper_trading_enabled`` (bool, default True) /
+            ``paper_trading_lookback_days`` (int, default 365): forwarded to
+            ``finalize_cycle_record_activity``.
+          - ``start_cycle_offset`` (int, default 0): resume anchor.
+          - ``convergence_tracker_state`` (optional dto wire dict, default fresh):
+            the batch-level tracker to seed from (for resume).
+          - ``workflow_config`` (optional): a ``resolve_workflow_config_activity``
+            result, resolved via that activity when absent and threaded down to
+            every cycle so each child need not re-resolve it.
+    Postconditions:
+        Returns ``{"run_id", "status", "completed_record_ids", "errored_cycles",
+        "convergence_tracker_state"}``. ``status`` is ``cancelled`` when an
+        external cancellation was observed between waves, else ``completed`` /
+        ``completed_with_errors`` (the latter when ≥1 cycle errored). Every
+        completed cycle's record is finalized (paper-traded + persisted) via
+        ``finalize_cycle_record_activity`` before the batch returns.
+    Invariants:
+        Each wave merges its settled cycles into the batch-level tracker in
+        cycle-index order (via ``merge_wave_results_activity``), so directives are
+        reproducible regardless of child completion order; the prior-records
+        snapshot is read once per wave and shared by every cycle in it.
+    """
+
+    @workflow.run
+    async def run(self, batch_input: Dict[str, Any]) -> Dict[str, Any]:
+        run_id = batch_input["run_id"]
+        config_dict = batch_input["config"]
+        batch_size = int(batch_input["batch_size"])
+        batch_count = int(batch_input["batch_count"])
+        max_parallel = max(1, int(batch_input["max_parallel"]))
+        benchmark_symbol = batch_input.get("benchmark_symbol") or "SPY"
+        exclude_asset_classes = batch_input.get("exclude_asset_classes")
+        paper_trading_enabled = batch_input.get("paper_trading_enabled", True)
+        paper_trading_lookback_days = batch_input.get("paper_trading_lookback_days", 365)
+        start_cycle_offset = int(batch_input.get("start_cycle_offset", 0))
+
+        wf_config = batch_input.get("workflow_config")
+        if wf_config is None:
+            wf_config = await _exec(act.resolve_workflow_config_activity)
+
+        # Batch-level convergence tracker (aggregated across every cycle). Seeded
+        # from the input for resume; snapshotted per cycle and merged back
+        # sorted-by-cycle-index after each wave.
+        primary_tracker_state: Dict[str, Any] = batch_input.get("convergence_tracker_state") or {}
+        completed_record_ids: List[str] = []
+        completed_indices: set[int] = set(range(start_cycle_offset))
+        errored = 0
+        cancelled = False
+
+        # Resume: derive the starting batch + within-batch index from the flat offset.
+        start_batch_idx, start_within_batch = divmod(start_cycle_offset, batch_size)
+
+        for batch_idx in range(start_batch_idx, batch_count):
+            within_start = start_within_batch if batch_idx == start_batch_idx else 0
+
+            await self._persist_state(run_id, {"current_batch": batch_idx + 1})
+
+            # ── Per-batch signal-brief refresh (batch N sees batches 1..N-1) ──
+            brief = await _exec(
+                act.compute_signal_brief_activity,
+                params=benchmark_symbol,
+                timeout=_ACTIVITY_TIMEOUT,
+            )
+            signal_brief = brief.get("signal_brief")
+            signal_brief_storage = brief.get("signal_brief_storage")
+
+            batch_start_cycle = batch_idx * batch_size
+            remaining = list(
+                range(batch_start_cycle + within_start, batch_start_cycle + batch_size)
+            )
+
+            while remaining:
+                wave_indices = remaining[:max_parallel]
+                remaining = remaining[max_parallel:]
+
+                # Prior records read once per wave, shared by every cycle in it.
+                prior_records = await _exec(act.snapshot_prior_records_activity)
+
+                # Start every cycle in the wave as a child workflow BEFORE awaiting
+                # any of them — this is what reproduces per-wave concurrency.
+                handles: List[tuple[int, Any]] = []
+                for cycle_index in wave_indices:
+                    cycle_input = {
+                        "prior_records": prior_records,
+                        "config": config_dict,
+                        "signal_brief": signal_brief,
+                        "exclude_asset_classes": exclude_asset_classes,
+                        "convergence_tracker_state": _snapshot_tracker_wire(primary_tracker_state),
+                        "workflow_config": wf_config,
+                    }
+                    handle = await workflow.start_child_workflow(
+                        StrategyLabCycleWorkflow.run,
+                        cycle_input,
+                        id=f"{run_id}-c{cycle_index}",
+                        task_queue=TASK_QUEUE,
+                        retry_policy=_CHILD_RETRY,
+                        execution_timeout=_CHILD_EXECUTION_TIMEOUT,
+                    )
+                    handles.append((cycle_index, handle))
+
+                settled = await asyncio.gather(
+                    *(handle for _, handle in handles), return_exceptions=True
+                )
+
+                # Finalize (paper-trade + persist) each settled cycle, then merge
+                # the whole wave into the batch tracker in cycle-index order.
+                wave_results: List[Dict[str, Any]] = []
+                for (cycle_index, _), result in zip(handles, settled):
+                    if isinstance(result, BaseException):
+                        errored += 1
+                        continue
+                    finalized = await _exec(
+                        act.finalize_cycle_record_activity,
+                        params={
+                            "record": result["record"],
+                            "signal_brief_storage": signal_brief_storage,
+                            "paper_trading_enabled": paper_trading_enabled,
+                            "paper_trading_lookback_days": paper_trading_lookback_days,
+                        },
+                    )
+                    final_record = finalized["record"]
+                    record_id = final_record.get("lab_record_id")
+                    if record_id is not None:
+                        completed_record_ids.append(record_id)
+                    completed_indices.add(cycle_index)
+                    wave_results.append(
+                        {
+                            "cycle_index": cycle_index,
+                            "record": final_record,
+                            "cycle_tracker_state": result["convergence_tracker_state"],
+                        }
+                    )
+
+                if wave_results:
+                    merged = await _exec(
+                        act.merge_wave_results_activity,
+                        params={
+                            "primary_tracker_state": primary_tracker_state,
+                            "wave_results": wave_results,
+                        },
+                    )
+                    primary_tracker_state = merged["primary_tracker_state"]
+
+                await self._persist_state(
+                    run_id,
+                    {
+                        "completed_cycles": len(completed_indices),
+                        "contiguous_cycles": _contiguous_prefix(completed_indices),
+                        "completed_record_ids": list(completed_record_ids),
+                        "errored_cycles": errored,
+                    },
+                )
+
+                # Cancellation is checked only between waves, mirroring thread mode.
+                if await _exec(act.is_run_cancelled_activity, params=run_id):
+                    cancelled = True
+                    break
+
+            if cancelled:
+                break
+            await self._persist_state(run_id, {"completed_batches": batch_idx + 1})
+
+        status = "cancelled" if cancelled else ("completed_with_errors" if errored else "completed")
+        await self._persist_state(run_id, {"status": status})
+        return {
+            "run_id": run_id,
+            "status": status,
+            "completed_record_ids": completed_record_ids,
+            "errored_cycles": errored,
+            "convergence_tracker_state": primary_tracker_state,
+        }
+
+    async def _persist_state(self, run_id: str, state: Dict[str, Any]) -> None:
+        """Persist a run-state delta via ``persist_run_state_activity``.
+
+        ``persist_run_state_activity`` takes ``(run_id, state, create)`` — three
+        positional args — so it can't go through :func:`_exec` (single-``params``);
+        call ``workflow.execute_activity`` directly with the same retry/timeout.
+        Never raises (the underlying helper swallows job-service failures).
+        """
+        await workflow.execute_activity(
+            act.persist_run_state_activity,
+            args=[run_id, state, False],
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            retry_policy=_ACTIVITY_RETRY,
+        )
+
+
+def _contiguous_prefix(completed_indices: "set[int]") -> int:
+    """Return the count of the longest 0-based contiguous prefix of completed cycles.
+
+    Mirrors thread-mode's ``contiguous_cycles`` resume anchor: the highest ``n``
+    such that cycles ``0..n-1`` are all complete.
+
+    Postconditions:
+        Returns ``0`` when cycle ``0`` is incomplete; otherwise the length of the
+        gap-free prefix starting at ``0``.
+    """
+    n = 0
+    while n in completed_indices:
+        n += 1
+    return n
+
+
+WORKFLOWS = [StrategyLabCycleWorkflow, StrategyLabBatchWorkflow]
 ACTIVITIES = act.ACTIVITIES
