@@ -29,7 +29,17 @@ with workflow.unsafe.imports_passed_through():
     from social_media_marketing_team.temporal import activities as _activities
     from social_media_marketing_team.temporal.constants import TASK_QUEUE
 
+# Whole-pipeline ceiling, kept for the legacy drain-out branch so replays of
+# pre-decomposition histories run under the exact same envelope as the original
+# single activity.
 RUN_TIMEOUT = timedelta(hours=4)
+
+# Per-stage ceiling for the decomposed activities. Each phase is a single bounded
+# unit of work (deterministic Python plus, for the content stage, concept generation
+# and a Postgres read), so a whole-pipeline 4h budget per stage would let five stages
+# stack to ~20h before Temporal reacts. One hour comfortably covers a stage's retries
+# while keeping the total pipeline ceiling proportionate.
+STAGE_TIMEOUT = timedelta(hours=1)
 
 DEFAULT_RETRY_POLICY = RetryPolicy(
     maximum_attempts=3,
@@ -38,12 +48,23 @@ DEFAULT_RETRY_POLICY = RetryPolicy(
     backoff_coefficient=2.0,
 )
 
-# One option block shared by every pipeline-stage activity (and the legacy drain-out
-# branch) so tuning a timeout/retry is a single edit. No heartbeat timeout: the stage
-# activities are short, deterministic Python phases with no in-activity human wait (the
-# human gate is a static request flag decided here in the workflow). Immutable
-# (MappingProxyType) so an importer can't accidentally mutate the shared options.
+# One option block shared by every pipeline-stage activity so tuning a timeout/retry
+# is a single edit. No heartbeat timeout: the stage activities are short, deterministic
+# Python phases with no in-activity human wait (the human gate is a static request flag
+# decided here in the workflow). Immutable (MappingProxyType) so an importer can't
+# accidentally mutate the shared options.
 _STAGE_ACTIVITY_OPTS: Mapping[str, Any] = MappingProxyType(
+    dict(
+        task_queue=TASK_QUEUE,
+        schedule_to_close_timeout=STAGE_TIMEOUT,
+        retry_policy=DEFAULT_RETRY_POLICY,
+    )
+)
+
+# Options for the legacy whole-pipeline activity in the drain-out branch: deliberately
+# the pre-decomposition envelope (4h schedule-to-close) so in-flight histories replay
+# unchanged.
+_LEGACY_ACTIVITY_OPTS: Mapping[str, Any] = MappingProxyType(
     dict(
         task_queue=TASK_QUEUE,
         schedule_to_close_timeout=RUN_TIMEOUT,
@@ -81,7 +102,7 @@ class SocialMarketingTeamWorkflow:
             await workflow.execute_activity(
                 _activities.run_team_job_activity,
                 args=[job_id, request_dict],
-                **_STAGE_ACTIVITY_OPTS,
+                **_LEGACY_ACTIVITY_OPTS,
             )
             return
 

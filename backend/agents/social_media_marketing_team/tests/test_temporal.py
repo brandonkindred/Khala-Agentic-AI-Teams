@@ -412,6 +412,69 @@ def test_run_stage_reraises_cancellation(monkeypatch: pytest.MonkeyPatch) -> Non
         amod._run_stage("job-c", "content_plan", lambda: {"status": "FAIL"}, _body)
 
 
+def test_run_stage_cancelled_body_error_maps_to_cancellation(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    """A body error while the activity is cancelled becomes a cancellation, not a FAIL.
+
+    Sync activities don't heartbeat, so cancellation surfaces via
+    ``activity.is_cancelled()`` rather than a raised ``CancelledError``; the funnel
+    must still mark the job cancelled and propagate a ``CancelledError``.
+    """
+    from temporalio.exceptions import CancelledError
+
+    from social_media_marketing_team.temporal import activities as amod
+
+    fake_job_client.create_job("job-cx", status="running")
+    monkeypatch.setattr(amod, "_is_cancelled", lambda: True)
+
+    def _body():
+        raise RuntimeError("boom")
+
+    with pytest.raises(CancelledError):
+        amod._run_stage("job-cx", "content_plan", lambda: {"status": "FAIL"}, _body)
+    assert fake_job_client.get_job("job-cx")["status"] == "cancelled"
+
+
+def test_is_last_attempt_true_outside_activity_context() -> None:
+    from social_media_marketing_team.temporal import activities as amod
+
+    # No activity context -> treat as last attempt so the caller marks terminal.
+    assert amod._is_last_attempt() is True
+
+
+def test_is_cancelled_false_outside_activity_context() -> None:
+    from social_media_marketing_team.temporal import activities as amod
+
+    assert amod._is_cancelled() is False
+
+
+def test_is_last_attempt_reads_scheduled_retry_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from temporalio.common import RetryPolicy
+
+    from social_media_marketing_team.temporal import activities as amod
+
+    def _info(retry_policy, attempt):
+        return type("I", (), {"retry_policy": retry_policy, "attempt": attempt})()
+
+    monkeypatch.setattr(amod.activity, "info", lambda: _info(RetryPolicy(maximum_attempts=3), 3))
+    assert amod._is_last_attempt() is True
+
+    monkeypatch.setattr(amod.activity, "info", lambda: _info(RetryPolicy(maximum_attempts=3), 1))
+    assert amod._is_last_attempt() is False
+
+    # maximum_attempts <= 0 means unlimited retries -> never the last attempt.
+    monkeypatch.setattr(amod.activity, "info", lambda: _info(RetryPolicy(maximum_attempts=0), 9))
+    assert amod._is_last_attempt() is False
+
+
+def test_is_cancelled_reads_activity_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    from social_media_marketing_team.temporal import activities as amod
+
+    monkeypatch.setattr(amod.activity, "is_cancelled", lambda: True)
+    assert amod._is_cancelled() is True
+
+
 def test_content_plan_stage_activity_success(
     monkeypatch: pytest.MonkeyPatch, fake_job_client
 ) -> None:
@@ -524,6 +587,134 @@ def test_finalize_stage_activity_needs_revision(
     assert job["status"] == "completed"
     assert job["result"]["status"] == "needs_revision"
     assert job["result"]["content_plan"] is None
+
+
+def test_finalize_stage_activity_approved_missing_content_non_retryable(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    """Approved finalize with no content DTO raises a non-retryable ApplicationError."""
+    from temporalio.exceptions import ApplicationError
+
+    from social_media_marketing_team.temporal import activities as amod
+
+    _patch_brand(monkeypatch)
+    fake_job_client.create_job("job-6b", status="running")
+    req = _req(human_approved_for_testing=True)
+    consensus = amod.consensus_stage_activity("job-6b", req)
+
+    with pytest.raises(ApplicationError) as exc:
+        amod.finalize_stage_activity("job-6b", req, consensus, content=None)
+    assert exc.value.non_retryable is True
+
+
+def test_finalize_stage_activity_store_failure_last_attempt_marks_failed(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    """On the final attempt, a completion-store failure marks the job failed + re-raises."""
+    from social_media_marketing_team.api import main as api_main
+    from social_media_marketing_team.temporal import activities as amod
+
+    _patch_brand(monkeypatch)
+    fake_job_client.create_job("job-7", status="running")
+    req = _req(human_approved_for_testing=True)
+    consensus = amod.consensus_stage_activity("job-7", req)
+    content = amod.content_plan_stage_activity("job-7", req, consensus)
+    platform = amod.platform_stage_activity("job-7", req, consensus, content)
+    experiment = amod.experiment_stage_activity("job-7", req, consensus, content)
+
+    # Fail the terminal completion write; this is the last retry attempt.
+    def _raise_on_complete(job_id, **fields):
+        if fields.get("status") == "completed":
+            raise RuntimeError("store down")
+
+    marked: dict[str, Any] = {}
+    monkeypatch.setattr(api_main, "_update_job", _raise_on_complete)
+    monkeypatch.setattr(amod, "_is_last_attempt", lambda: True)
+    monkeypatch.setattr(
+        amod, "_fail_activity", lambda job_id, exc, phase: marked.update(job=job_id, phase=phase)
+    )
+
+    with pytest.raises(RuntimeError):
+        amod.finalize_stage_activity("job-7", req, consensus, content, platform, experiment)
+    assert marked == {"job": "job-7", "phase": "finalize"}
+
+
+def test_finalize_stage_activity_store_failure_not_last_attempt_reraises(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    """Before the final attempt, a store failure re-raises for Temporal to retry (no fail-mark)."""
+    from social_media_marketing_team.api import main as api_main
+    from social_media_marketing_team.temporal import activities as amod
+
+    _patch_brand(monkeypatch)
+    fake_job_client.create_job("job-7b", status="running")
+    req = _req(human_approved_for_testing=True)
+    consensus = amod.consensus_stage_activity("job-7b", req)
+    content = amod.content_plan_stage_activity("job-7b", req, consensus)
+    platform = amod.platform_stage_activity("job-7b", req, consensus, content)
+    experiment = amod.experiment_stage_activity("job-7b", req, consensus, content)
+
+    def _raise_on_complete(job_id, **fields):
+        if fields.get("status") == "completed":
+            raise RuntimeError("store blip")
+
+    fail_called: dict[str, Any] = {}
+    monkeypatch.setattr(api_main, "_update_job", _raise_on_complete)
+    monkeypatch.setattr(amod, "_is_last_attempt", lambda: False)
+    monkeypatch.setattr(amod, "_fail_activity", lambda *a, **k: fail_called.setdefault("hit", True))
+
+    with pytest.raises(RuntimeError):
+        amod.finalize_stage_activity("job-7b", req, consensus, content, platform, experiment)
+    assert "hit" not in fail_called  # not marked failed while retries remain
+
+
+def _finalize_with_completion_error(monkeypatch, fake_job_client, job_id, exc):
+    """Build an approved finalize whose completion write raises ``exc``."""
+    from social_media_marketing_team.api import main as api_main
+    from social_media_marketing_team.temporal import activities as amod
+
+    _patch_brand(monkeypatch)
+    fake_job_client.create_job(job_id, status="running")
+    req = _req(human_approved_for_testing=True)
+    consensus = amod.consensus_stage_activity(job_id, req)
+    content = amod.content_plan_stage_activity(job_id, req, consensus)
+    platform = amod.platform_stage_activity(job_id, req, consensus, content)
+    experiment = amod.experiment_stage_activity(job_id, req, consensus, content)
+
+    def _update(job, **fields):
+        if fields.get("status") == "completed":
+            raise exc
+        fake_job_client.update_job(job, **fields)  # let _mark_cancelled through
+
+    monkeypatch.setattr(api_main, "_update_job", _update)
+    return amod, req, consensus, content, platform, experiment
+
+
+def test_finalize_cancellederror_maps_to_cancelled(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    from temporalio.exceptions import CancelledError
+
+    amod, req, consensus, content, platform, experiment = _finalize_with_completion_error(
+        monkeypatch, fake_job_client, "job-8", CancelledError("cancelled")
+    )
+    with pytest.raises(CancelledError):
+        amod.finalize_stage_activity("job-8", req, consensus, content, platform, experiment)
+    assert fake_job_client.get_job("job-8")["status"] == "cancelled"
+
+
+def test_finalize_store_error_while_cancelled_maps_to_cancelled(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    from temporalio.exceptions import CancelledError
+
+    amod, req, consensus, content, platform, experiment = _finalize_with_completion_error(
+        monkeypatch, fake_job_client, "job-8b", RuntimeError("boom")
+    )
+    monkeypatch.setattr(amod, "_is_cancelled", lambda: True)
+    with pytest.raises(CancelledError):
+        amod.finalize_stage_activity("job-8b", req, consensus, content, platform, experiment)
+    assert fake_job_client.get_job("job-8b")["status"] == "cancelled"
 
 
 # ---------------------------------------------------------------------------

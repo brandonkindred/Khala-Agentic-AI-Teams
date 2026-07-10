@@ -63,6 +63,65 @@ def _fail_activity(job_id: str, exc: Exception, failed_phase: str) -> None:
         logger.warning("Failed to mark job %s failed after stage %r", job_id, failed_phase)
 
 
+def _mark_cancelled(job_id: str) -> None:
+    """Mark the job cancelled (best-effort) on external cancellation.
+
+    Preconditions:
+        - ``job_id`` identifies a job record (may already be terminal).
+    Postconditions:
+        - The job store entry is marked ``cancelled``; a best-effort update failure
+          is swallowed so the caller can still propagate the cancellation.
+    """
+    from job_service_client import JOB_STATUS_CANCELLED
+    from social_media_marketing_team.api.main import _update_job
+
+    try:
+        _update_job(job_id, status=JOB_STATUS_CANCELLED, current_stage="cancelled", eta_hint=None)
+    except Exception:  # pragma: no cover - job store best-effort on the cancel path
+        logger.warning("Failed to mark job %s cancelled", job_id)
+
+
+def _is_cancelled() -> bool:
+    """True when the current activity has been cancelled.
+
+    Preconditions:
+        - None (safe to call outside an activity context).
+    Postconditions:
+        - Returns ``activity.is_cancelled()`` inside an activity context, else
+          ``False`` (direct/thread use has no cancellation to observe).
+    """
+    try:
+        return activity.is_cancelled()
+    except RuntimeError:
+        return False
+
+
+def _is_last_attempt() -> bool:
+    """True when this is the final Temporal retry attempt (or no activity context).
+
+    Reads ``maximum_attempts`` from the retry policy the activity was scheduled with
+    (``activity.info().retry_policy``) rather than a compile-time constant, so the
+    check never drifts from the workflow's policy.
+
+    Preconditions:
+        - Called from within an activity body (or directly / thread mode).
+    Postconditions:
+        - Returns True when the current attempt is the last Temporal will make, or
+          when called outside an activity context (the caller then marks the job
+          terminal). Returns False when the policy allows unlimited retries
+          (``maximum_attempts <= 0``) -- there is no last attempt to gate on.
+    """
+    try:
+        info = activity.info()
+    except RuntimeError:
+        return True
+    policy = info.retry_policy
+    max_attempts = policy.maximum_attempts if policy is not None else 0
+    if max_attempts <= 0:
+        return False
+    return info.attempt >= max_attempts
+
+
 def _run_stage(
     job_id: str,
     failed_phase: str,
@@ -72,18 +131,19 @@ def _run_stage(
     """Run one pipeline-stage body under the shared error funnel.
 
     Handled errors terminate the job store and short-circuit the workflow (via the
-    returned FAIL DTO) rather than leaking to Temporal retry, while Temporal-native
-    cancellation propagates. Keeping the funnel in one place makes the contract
-    structural -- a new stage activity cannot forget it.
+    returned FAIL DTO) rather than leaking to Temporal retry, while an external
+    cancellation propagates as a Temporal ``CancelledError`` (job marked cancelled,
+    not failed). Keeping the funnel in one place makes the contract structural -- a
+    new stage activity cannot forget it.
 
     Preconditions:
         - ``body`` is a zero-arg callable returning the stage's serialized DTO dict;
           ``fail_dto`` builds the stage's FAIL DTO dict.
         - ``body`` MUST NOT catch Temporal ``CancelledError``.
     Postconditions:
-        - Returns ``body()``'s DTO on success. On any handled error the job is
-          marked failed and ``fail_dto()`` is returned. A native ``CancelledError``
-          re-raises so cancellation propagates.
+        - Returns ``body()``'s DTO on success. When the activity was cancelled the
+          job is marked cancelled and a ``CancelledError`` propagates. On any other
+          handled error the job is marked failed and ``fail_dto()`` is returned.
     """
     from temporalio.exceptions import CancelledError
 
@@ -91,21 +151,46 @@ def _run_stage(
         return body()
     except CancelledError:
         logger.info("Social marketing %s stage cancelled for job %s", failed_phase, job_id)
+        _mark_cancelled(job_id)
         raise
     except Exception as e:
+        # A worker-delivered cancellation can surface as a non-CancelledError from a
+        # sync body (these activities don't heartbeat, so cancellation is observed
+        # via activity.is_cancelled() rather than a raised CancelledError). Treat an
+        # in-flight cancellation as cancelled, not a pipeline failure, and re-raise a
+        # CancelledError so Temporal records the activity as cancelled.
+        if _is_cancelled():
+            logger.info("Social marketing %s stage cancelled for job %s", failed_phase, job_id)
+            _mark_cancelled(job_id)
+            raise CancelledError(f"{failed_phase} stage cancelled") from e
         _fail_activity(job_id, e, failed_phase)
         return fail_dto()
 
 
 def _build_orchestrator(request: Any) -> Any:
-    """Construct the orchestrator for a request (shared with thread mode)."""
+    """Construct the orchestrator for a request (shared with thread mode).
+
+    Preconditions:
+        - ``request`` is a ``RunMarketingTeamRequest`` exposing ``llm_model_name``.
+    Postconditions:
+        - Returns a fresh ``SocialMediaMarketingOrchestrator`` configured with the
+          request's LLM model name; holds no per-job state.
+    """
     from social_media_marketing_team.orchestrator import SocialMediaMarketingOrchestrator
 
     return SocialMediaMarketingOrchestrator(llm_model_name=request.llm_model_name)
 
 
 def _build_performance(job_id: str, campaign_name: str) -> Any:
-    """Build the performance snapshot from stored observations (as ``_run_team_job``)."""
+    """Build the performance snapshot from stored observations (as ``_run_team_job``).
+
+    Preconditions:
+        - ``job_id`` identifies a created job record; ``campaign_name`` is the
+          campaign the observations belong to.
+    Postconditions:
+        - Returns a ``CampaignPerformanceSnapshot`` over the job's stored
+          ``performance_observations`` (empty when the job or field is absent).
+    """
     from social_media_marketing_team.api.main import _job_manager
     from social_media_marketing_team.models import CampaignPerformanceSnapshot
 
@@ -334,12 +419,19 @@ def finalize_stage_activity(
 
     Preconditions:
         - ``consensus`` is a serialized ``ConsensusStageResult``. When the request's
-          ``human_approved_for_testing`` is True, ``content``/``platform``/
-          ``experiment`` are present serialized stage results.
+          ``human_approved_for_testing`` is True, ``content`` is a present serialized
+          ``ContentPlanStageResult`` (``platform``/``experiment`` may be absent).
     Postconditions:
         - The job store entry is marked completed (progress 100) with the serialized
-          ``TeamOutput`` result. A malformed input DTO raises out of the activity.
+          ``TeamOutput`` result. A malformed or missing required input DTO raises a
+          non-retryable ``ApplicationError`` (a contract/schema defect Temporal
+          should not retry). Nothing is terminal before the completion write, so a
+          transient store error re-raises for Temporal to retry until the final
+          attempt, which marks the job failed and re-raises rather than completing as
+          if finalization had succeeded.
     """
+    from temporalio.exceptions import CancelledError
+
     from job_service_client import JOB_STATUS_COMPLETED
     from social_media_marketing_team.api.main import RunMarketingTeamRequest, _update_job
     from social_media_marketing_team.models import (
@@ -371,7 +463,16 @@ def finalize_stage_activity(
     performance = None
 
     if human_review.approved:
-        content_dto = ContentPlanStageResult.model_validate(content or {})
+        # Defend the precondition explicitly: an approved run must carry a content
+        # stage result. ContentPlan has required no-default fields, so validating an
+        # empty dict would raise an opaque ValidationError after three retries;
+        # surface the contract violation loudly and non-retryably instead.
+        if not content:
+            raise ApplicationError(
+                "finalize_stage invoked with human approval but no content-plan stage result",
+                non_retryable=True,
+            )
+        content_dto = ContentPlanStageResult.model_validate(content)
         content_plan = ContentPlan.model_validate(content_dto.content_plan)
         winners_retrieved = content_dto.winners_retrieved
         platform_dto = PlatformStageResult.model_validate(platform or {})
@@ -394,14 +495,32 @@ def finalize_stage_activity(
         winners_retrieved=winners_retrieved,
     )
 
-    _update_job(
-        job_id,
-        status=JOB_STATUS_COMPLETED,
-        current_stage="completed",
-        progress=100,
-        eta_hint="done",
-        result=output.model_dump(),
-    )
+    # Nothing is terminal before this write: a transient store error must not
+    # permanently fail an otherwise-successful run. Re-raise (letting Temporal
+    # retry) until the final attempt, which marks the job failed and re-raises so the
+    # workflow also reflects that finalization failed.
+    try:
+        _update_job(
+            job_id,
+            status=JOB_STATUS_COMPLETED,
+            current_stage="completed",
+            progress=100,
+            eta_hint="done",
+            result=output.model_dump(),
+        )
+    except CancelledError:
+        logger.info("Social marketing finalize cancelled for job %s", job_id)
+        _mark_cancelled(job_id)
+        raise
+    except Exception as e:
+        if _is_cancelled():
+            logger.info("Social marketing finalize cancelled for job %s", job_id)
+            _mark_cancelled(job_id)
+            raise CancelledError("finalize stage cancelled") from e
+        if not _is_last_attempt():
+            raise
+        _fail_activity(job_id, e, "finalize")
+        raise
 
 
 # ---------------------------------------------------------------------------
