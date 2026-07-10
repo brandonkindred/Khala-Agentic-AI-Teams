@@ -13,7 +13,10 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from blog_writer_agent.models import WriterOutput
 
 from blog_compliance_agent import BlogComplianceAgent
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
@@ -786,9 +789,14 @@ class _PipelineContext:
     def __post_init__(self) -> None:
         # Enforce the resolved-inputs invariant at construction so the Temporal
         # activity path (which builds a context directly) fails loudly here rather
-        # than with an opaque error deep inside a stage.
-        assert self.llm_client is not None, "_PipelineContext.llm_client must be resolved"
-        assert self.length_policy is not None, "_PipelineContext.length_policy must be resolved"
+        # than with an opaque error deep inside a stage. Explicit raise (not assert)
+        # so the check survives ``python -O``.
+        if self.llm_client is None:
+            raise ValueError("_PipelineContext.llm_client must be resolved before running a stage")
+        if self.length_policy is None:
+            raise ValueError(
+                "_PipelineContext.length_policy must be resolved before running a stage"
+            )
 
 
 def run_pipeline(
@@ -888,7 +896,7 @@ def run_pipeline(
 
 def run_planning_stage(
     ctx: "_PipelineContext",
-) -> Optional[Tuple[PlanningPhaseResult, Any, PipelineStatus]]:
+) -> Optional[Tuple[PlanningPhaseResult, Optional["WriterOutput"], PipelineStatus]]:
     """Planning stage: content planning, story elicitation, and outline approval.
 
     Preconditions:
@@ -1121,9 +1129,18 @@ def run_planning_stage(
                     status_text=f"Revising outline based on feedback (revision {outline_revision})...",
                 )
 
-                # Re-run planning with user feedback to refine the plan
+                # Re-run planning with the user's feedback folded into the brief.
+                # plan_content has no dedicated feedback parameter, so the author's
+                # outline feedback is appended to the brief text — otherwise the
+                # re-plan would run with the original input and silently ignore it.
+                refine_brief = brief.brief
+                if user_feedback_text:
+                    refine_brief = (
+                        f"{brief.brief}\n\nAuthor feedback on the previous outline "
+                        f"(revision {outline_revision}): {user_feedback_text}"
+                    )
                 planning_input_for_refine = PlanningInput(
-                    brief=brief.brief,
+                    brief=refine_brief,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
                     length_policy_context=build_planning_length_context(length_policy),
@@ -1139,7 +1156,6 @@ def run_planning_stage(
                         planning_input_for_refine,
                         length_policy=length_policy,
                         on_llm_request=lambda msg: _update(BlogPhase.PLANNING, status_text=msg),
-                        # Override the internal feedback with the user's feedback
                     )
                     plan = refined_result.content_plan
                     planning_phase_result = refined_result
@@ -1183,7 +1199,7 @@ def run_planning_stage(
 
 def run_draft_stage(
     ctx: "_PipelineContext",
-) -> Optional[Tuple[PlanningPhaseResult, Any, PipelineStatus]]:
+) -> Optional[Tuple[PlanningPhaseResult, Optional["WriterOutput"], PipelineStatus]]:
     """Draft stage: initial draft, interactive review, and the copy-edit loop.
 
     Preconditions:
@@ -1762,7 +1778,7 @@ def run_draft_stage(
 
 def run_gates_stage(
     ctx: "_PipelineContext",
-) -> Optional[Tuple[PlanningPhaseResult, Any, PipelineStatus]]:
+) -> Optional[Tuple[PlanningPhaseResult, Optional["WriterOutput"], PipelineStatus]]:
     """Gates stage: validators, fact-check, compliance, rewrite loop, and finalize.
 
     Preconditions:

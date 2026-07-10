@@ -74,6 +74,11 @@ class BlogFullPipelineWorkflow:
         if not workflow.patched("blog-per-phase-activities"):
             # Drain-out branch: replays of pre-decomposition histories must
             # re-schedule the original monolithic activity deterministically.
+            # Removal criterion: once no open workflow histories predate the
+            # per-phase decomposition deploy (i.e. every in-flight run has
+            # drained), replace this whole block with ``workflow.deprecate_patch(
+            # "blog-per-phase-activities")`` for one release, then delete the
+            # marker entirely along with ``run_full_pipeline_activity``.
             await workflow.execute_activity(
                 _activities.run_full_pipeline_activity,
                 args=[job_id, request_dict],
