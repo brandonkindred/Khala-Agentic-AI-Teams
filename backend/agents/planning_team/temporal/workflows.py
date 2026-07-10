@@ -114,6 +114,11 @@ class PlanningWorkflow:
               legacy single-activity path via the ``workflow.patched`` gate, so it
               stays deterministic and completes after a worker rolls forward.
         """
+        # TODO: Remove this legacy branch, the `_PER_PHASE_PATCH` gate, and
+        # `run_planning_activity` once no pre-migration PlanningWorkflow histories
+        # remain open (confirm via the Temporal UI that no open executions predate
+        # the deploy that introduced this patch); then deprecate the patch marker
+        # with `workflow.deprecate_patch(_PER_PHASE_PATCH)` before deleting it.
         if not workflow.patched(_PER_PHASE_PATCH):
             # Legacy path: reached only when replaying a history recorded before the
             # per-phase migration. Reproduce the old single coarse activity exactly.

@@ -386,3 +386,57 @@ def test_activity_sequence_matches_orchestrator_handoff(tmp_path, monkeypatch, j
     # open_questions, so this empty handoff is deliberately preserved).
     assert act_handoff["open_questions"] == orch_result["handoff_package"]["open_questions"]
     assert act_handoff["resolved_questions"] == orch_result["handoff_package"]["resolved_questions"]
+
+
+def test_activity_sequence_matches_orchestrator_handoff_with_pra_and_mr(
+    tmp_path, monkeypatch, job_store
+):
+    """Second parity guard exercising the PRA + market-research branches through the
+    FULL sequence (the other parity test covers the no-PRA/no-MR path), so a drift in
+    how the orchestrator vs the activities compose those branches can't slip through.
+    Both paths use the same mocked cross-team adapters."""
+    from planning_team.orchestrator import run_workflow
+
+    monkeypatch.setattr("planning_team.adapters.request_market_research", lambda **kw: {"raw": "x"})
+    monkeypatch.setattr(
+        "planning_team.adapters.market_research_to_evidence",
+        lambda data: {"summary": "MR", "insights": ["i1"]},
+    )
+    monkeypatch.setattr("planning_team.adapters.run_product_analysis", lambda **kw: "pra-job")
+    monkeypatch.setattr(
+        "planning_team.adapters.wait_for_product_analysis_completion",
+        lambda **kw: {"status": "completed"},
+    )
+
+    # Thread-mode orchestrator with both branches on.
+    orch_result = run_workflow(
+        repo_path=str(tmp_path / "orch"),
+        client_name="Acme",
+        initial_brief="a brief",
+        use_product_analysis=True,
+        use_market_research=True,
+        llm=make_llm(_LLM_JSON),
+        job_updater=None,
+    )
+
+    # Temporal-mode: drive the full activity sequence WITH the market-research and
+    # PRA branches (market_research_activity → synthesis; document_production True).
+    monkeypatch.setattr("llm_service.get_client", lambda agent_key=None: make_llm(_LLM_JSON))
+    ctx = A.intake_activity("job-2", str(tmp_path / "act"), "Acme", "a brief", None)
+    ctx = A.discovery_activity("job-2", ctx)
+    ctx = A.requirements_activity("job-2", ctx)
+    evidence = A.market_research_activity("job-2", ctx)
+    ctx = A.synthesis_activity("job-2", ctx, evidence)
+    ctx = A.document_production_activity("job-2", ctx, True)
+    ctx = A.sub_agent_provisioning_activity("job-2", ctx, None)
+    A.finalize_planning_activity("job-2", ctx)
+    act_handoff = job_store["jobs"]["job-2"]["handoff_package"]
+
+    assert orch_result["success"] is True
+    # client_context (path-independent) must match, including the market-research
+    # evidence synthesis folds into its constraints on BOTH paths.
+    assert act_handoff["client_context"] == orch_result["handoff_package"]["client_context"]
+    assert act_handoff["client_context"]["constraints"]["market_research_summary"] == "MR"
+    # PRA ran on both paths → the validated spec resolves under product_analysis/.
+    assert act_handoff["validated_spec_path"].endswith("validated_spec.md")
+    assert orch_result["handoff_package"]["validated_spec_path"].endswith("validated_spec.md")

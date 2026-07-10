@@ -137,11 +137,18 @@ def _guarded(
           ``constants.RETRYABLE_MAX_ATTEMPTS`` / ``SINGLE_ATTEMPT``).
     Postconditions:
         - The job row's ``current_phase``/``progress``/``status_text`` are updated;
-          ``status`` is written only when supplied (the intake phase flips it to
-          RUNNING). Non-terminal phases deliberately do NOT touch ``status``, so a
-          concurrent ``cancelled`` is never clobbered.
-        - This progress write is INSIDE the guard, so a failing progress write can
-          no longer leave the job stuck non-terminal.
+          ``status`` is written only when supplied. Only the intake phase supplies
+          it (PENDING → RUNNING); every later phase leaves ``status`` untouched so a
+          concurrent ``cancelled`` is never clobbered. (Accepted narrow race: a
+          cancel landing between the API's ``create_job`` and intake's RUNNING write
+          would be overwritten — no planning caller cancels jobs today, and a real
+          canceller should also send a Temporal cancel to the workflow.)
+        - The progress write happens BEFORE ``work()`` (inside the guard, so a
+          failing progress write still marks the job FAILED and cannot leave it
+          stuck non-terminal). A consequence is that on terminal failure the job's
+          ``current_phase``/``progress`` reflect the phase that was *attempted* when
+          it failed, not a completed phase — a deliberate trade-off (progress is a
+          best-effort hint, and pointing at the failing phase is the useful signal).
         - On error, the job is marked FAILED only on the *final* Temporal attempt
           (``_is_final_attempt``); a retry that later succeeds therefore never
           leaves behind a transient FAILED status or a stale ``error``. The
@@ -447,6 +454,11 @@ def sub_agent_provisioning_activity(
         if blueprint:
             # The handoff lives in the job store (persisted by document production),
             # not in the context. Read it back, attach the blueprint, and re-persist.
+            # This read-modify-write is NOT atomic with the activity completion: a
+            # crash between get_job and update_job would drop the blueprint (a retry
+            # re-does it — the attachment is idempotent), and a concurrent writer to
+            # handoff_package could be lost. Acceptable today — this phase is
+            # SINGLE_ATTEMPT and there is no other concurrent writer of the handoff.
             from planning_team.shared.job_store import get_job, update_job
 
             job = get_job(job_id) or {}
