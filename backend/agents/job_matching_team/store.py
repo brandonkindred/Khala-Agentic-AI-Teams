@@ -131,16 +131,21 @@ class JobMatchingStore:
 
     @timed_query(store=_STORE, op="create_run")
     def create_run(self, run_id: str, profile: JobSeekerProfile, request: JobMatchRequest) -> None:
-        """Insert a new run row in ``running`` state.
+        """Insert a new run row in ``running`` state (idempotent on ``run_id``).
 
         Preconditions:
-            * ``run_id`` is unique (caller generates a UUID).
+            * ``run_id`` is caller-generated (e.g. a UUID or a workflow-owned id).
+        Postconditions:
+            * Exactly one run row exists for ``run_id`` in ``running`` state.
+            * Idempotent: a repeat call with the same ``run_id`` is a no-op
+              (``ON CONFLICT DO NOTHING``), so a Temporal activity that mints the
+              id once and re-runs on retry does not create a duplicate run row.
         """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO job_matching_runs "
                 "(run_id, status, profile_snapshot, request_json, top_n, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
+                "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (run_id) DO NOTHING",
                 (
                     run_id,
                     RUN_STATUS_RUNNING,
@@ -172,8 +177,11 @@ class JobMatchingStore:
         Postconditions:
             * The run's ``status`` is ``completed`` with ``total_found`` /
               ``total_ranked`` populated and ``completed_at`` set.
-            * One ``job_matching_ranked_jobs`` row exists per entry in
+            * Exactly one ``job_matching_ranked_jobs`` row exists per entry in
               ``ranked`` (rank starts at 1, in list order).
+            * Idempotent on ``run_id``: any ranked rows from a prior call for the
+              same run are deleted first, so a Temporal ``finalize`` activity that
+              re-runs on retry replaces its rows instead of duplicating them.
             * The run's ``seen_fingerprints`` holds the de-duplicated set of
               ``scanned_fingerprints`` (falling back to the ranked postings'
               fingerprints when not supplied).
@@ -183,6 +191,9 @@ class JobMatchingStore:
         seen = sorted({fp for fp in scanned_fingerprints if fp})
         now = _now()
         with get_conn() as conn, conn.cursor() as cur:
+            # Idempotent re-save: drop any rows a prior (crashed-then-retried)
+            # attempt wrote for this run before re-inserting the current set.
+            cur.execute("DELETE FROM job_matching_ranked_jobs WHERE run_id = %s", (run_id,))
             for idx, rj in enumerate(ranked, start=1):
                 cur.execute(
                     "INSERT INTO job_matching_ranked_jobs "

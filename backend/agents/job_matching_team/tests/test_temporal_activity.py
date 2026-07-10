@@ -18,6 +18,7 @@ start, ``start_job_matching_workflow``) are covered in
 from __future__ import annotations
 
 import inspect
+import uuid
 
 from temporalio.exceptions import ActivityError, RetryState
 from temporalio.testing import ActivityEnvironment
@@ -39,6 +40,11 @@ from job_matching_team.temporal.workflows import (
     scan_activity,
 )
 
+# Fixed workflow-owned run id (see _patch_workflow); the real workflow derives
+# it deterministically from workflow.uuid4().
+_FIXED_RUN_ID = "12345678-1234-5678-1234-567812345678"
+
+
 # ---------------------------------------------------------------------------
 # Shared test doubles
 # ---------------------------------------------------------------------------
@@ -53,10 +59,17 @@ class _FakeJobStore:
     returns for the post-run / failure-branch checks.
     """
 
-    def __init__(self, *, existing: dict | None = None, cancelled: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        existing: dict | None = None,
+        cancelled: bool = False,
+        cancel_raises: bool = False,
+    ) -> None:
         self.updates: list[dict] = []
         self._existing = existing
         self._cancelled = cancelled
+        self._cancel_raises = cancel_raises
 
     def get_job(self, job_id):
         return self._existing
@@ -65,6 +78,8 @@ class _FakeJobStore:
         self.updates.append(fields)
 
     def is_job_cancelled(self, job_id):
+        if self._cancel_raises:
+            raise RuntimeError("cancel check unreachable")
         return self._cancelled
 
     @property
@@ -170,18 +185,18 @@ def test_prepare_ready_creates_run_and_sets_running(monkeypatch):
     )
 
     result = ActivityEnvironment().run(
-        prepare_scan_activity, "job-1", {"max_queries": 3, "max_roles": 20, "top_n": 5}
+        prepare_scan_activity, "job-1", {"max_queries": 3, "max_roles": 20, "top_n": 5}, "run-xyz"
     )
 
     assert result["status"] == "ready"
-    assert isinstance(result["run_id"], str) and result["run_id"]
+    assert "run_id" not in result  # the workflow owns run_id; prepare no longer returns it
     assert result["profile"]["target_titles"] == ["Engineer"]
     assert result["skip"] == []
     assert result["store_ok"] is True
     assert (result["max_queries"], result["max_roles"], result["top_n"]) == (3, 20, 5)
     assert job.statuses == ["running"]
     assert len(store.create_calls) == 1
-    assert store.create_calls[0][0] == result["run_id"]
+    assert store.create_calls[0][0] == "run-xyz"  # the passed-in run_id is used
 
 
 def test_prepare_already_completed_replays(monkeypatch):
@@ -191,7 +206,7 @@ def test_prepare_already_completed_replays(monkeypatch):
     _patch_job_store(monkeypatch, job)
     monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
 
-    result = ActivityEnvironment().run(prepare_scan_activity, "job-1", {})
+    result = ActivityEnvironment().run(prepare_scan_activity, "job-1", {}, "run-xyz")
 
     assert result == {"status": "already_completed", "result": stored}
     assert job.statuses == []  # no RUNNING flap
@@ -204,7 +219,7 @@ def test_prepare_cancelled_at_entry(monkeypatch):
     _patch_job_store(monkeypatch, job)
     monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
 
-    result = ActivityEnvironment().run(prepare_scan_activity, "job-1", {})
+    result = ActivityEnvironment().run(prepare_scan_activity, "job-1", {}, "run-xyz")
 
     assert result == {"status": "cancelled"}
     assert job.statuses == []
@@ -220,11 +235,12 @@ def test_prepare_store_failure_downgrades(monkeypatch):
         "job_matching_team.profile.loader.load_job_seeker_profile", JobSeekerProfile
     )
 
-    result = ActivityEnvironment().run(prepare_scan_activity, "job-1", {"exclude_seen": True})
+    result = ActivityEnvironment().run(
+        prepare_scan_activity, "job-1", {"exclude_seen": True}, "run-xyz"
+    )
 
     assert result["status"] == "ready"
     assert result["store_ok"] is False
-    assert result["run_id"]
     assert result["skip"] == []  # exclude_seen skipped when the store is down
     assert store.seen_calls == 0  # never queried after a failed create_run
     assert job.statuses == ["running"]
@@ -239,7 +255,9 @@ def test_prepare_exclude_seen_loads_sorted_skip(monkeypatch):
         "job_matching_team.profile.loader.load_job_seeker_profile", JobSeekerProfile
     )
 
-    result = ActivityEnvironment().run(prepare_scan_activity, "job-1", {"exclude_seen": True})
+    result = ActivityEnvironment().run(
+        prepare_scan_activity, "job-1", {"exclude_seen": True}, "run-xyz"
+    )
 
     assert result["skip"] == ["fp1", "fp2"]  # sorted
     assert store.seen_calls == 1
@@ -254,7 +272,9 @@ def test_prepare_seen_lookup_failure_swallowed(monkeypatch):
         "job_matching_team.profile.loader.load_job_seeker_profile", JobSeekerProfile
     )
 
-    result = ActivityEnvironment().run(prepare_scan_activity, "job-1", {"exclude_seen": True})
+    result = ActivityEnvironment().run(
+        prepare_scan_activity, "job-1", {"exclude_seen": True}, "run-xyz"
+    )
 
     assert result["status"] == "ready"
     assert result["skip"] == []  # lookup failure is non-fatal
@@ -389,6 +409,30 @@ def test_finalize_cancelled_skips_completion(monkeypatch):
     assert result == {}
     assert len(store.save_calls) == 1  # run row still saved
     assert job.statuses == []  # job COMPLETED skipped
+
+
+def test_finalize_completes_when_cancel_check_errors(monkeypatch):
+    # A transient job-store error on the cancellation check must not discard a
+    # successfully saved result: the scan still COMPLETEs with its payload.
+    job = _FakeJobStore(cancel_raises=True)
+    store = _FakeStore()
+    _patch_job_store(monkeypatch, job)
+    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+
+    result = ActivityEnvironment().run(
+        finalize_scan_activity,
+        "job-1",
+        "run-1",
+        _one_ranked_dict(),
+        1,
+        ["fp1"],
+        _profile_dict(),
+        True,
+    )
+
+    assert result["run_id"] == "run-1"
+    assert len(store.save_calls) == 1
+    assert job.statuses == ["completed"]  # completed despite the cancel-check error
 
 
 def test_finalize_store_ok_false_skips_save(monkeypatch):
@@ -531,8 +575,12 @@ def test_fail_swallows_job_store_outage(monkeypatch):
 # ===========================================================================
 
 
-def test_prepare_activity_takes_job_id_first():
-    assert list(inspect.signature(prepare_scan_activity).parameters) == ["job_id", "request"]
+def test_prepare_activity_signature():
+    assert list(inspect.signature(prepare_scan_activity).parameters) == [
+        "job_id",
+        "request",
+        "run_id",
+    ]
 
 
 # ===========================================================================
@@ -559,13 +607,13 @@ class _WorkflowStub:
     raises an ``ActivityError`` for one named phase to exercise the failure path.
     """
 
-    def __init__(self, *, fail_on=None) -> None:
+    def __init__(self, *, fail_on=None, fail_scan_raises=False) -> None:
         self.calls: list[dict] = []
         self._fail_on = fail_on
+        self._fail_scan_raises = fail_scan_raises
         self._canned = {
             wf.prepare_scan_activity: {
                 "status": "ready",
-                "run_id": "run-1",
                 "profile": {"p": 1},
                 "skip": ["s"],
                 "store_ok": True,
@@ -580,7 +628,7 @@ class _WorkflowStub:
                 "total_found": 1,
                 "scanned_fingerprints": ["fp"],
             },
-            wf.finalize_scan_activity: {"run_id": "run-1", "final": True},
+            wf.finalize_scan_activity: {"run_id": _FIXED_RUN_ID, "final": True},
             wf.fail_scan_activity: None,
         }
 
@@ -593,6 +641,8 @@ class _WorkflowStub:
                 "retry": retry_policy,
             }
         )
+        if self._fail_scan_raises and activity_fn is wf.fail_scan_activity:
+            raise _activity_error("job_matching_fail_scan")
         if self._fail_on is not None and activity_fn is self._fail_on:
             raise _activity_error("job_matching_scan")
         return self._canned[activity_fn]
@@ -600,6 +650,20 @@ class _WorkflowStub:
     def with_prepare(self, prep: dict) -> "_WorkflowStub":
         self._canned[wf.prepare_scan_activity] = prep
         return self
+
+
+def _patch_workflow(monkeypatch, stub) -> None:
+    """Patch the workflow's Temporal touchpoints for bare-``asyncio.run`` tests.
+
+    ``workflow.uuid4`` and ``workflow.logger`` both need a live workflow context,
+    which ``asyncio.run`` of the run coroutine does not provide, so we pin the id
+    to a fixed value and route the logger to a plain stdlib logger.
+    """
+    import logging
+
+    monkeypatch.setattr(wf.workflow, "execute_activity", stub)
+    monkeypatch.setattr(wf.workflow, "uuid4", lambda: uuid.UUID(_FIXED_RUN_ID))
+    monkeypatch.setattr(wf.workflow, "logger", logging.getLogger("job_matching.wf.test"))
 
 
 def _run_workflow(job_id="job-1", request=None):
@@ -610,11 +674,11 @@ def _run_workflow(job_id="job-1", request=None):
 
 def test_workflow_run_delegates_through_phases(monkeypatch):
     stub = _WorkflowStub()
-    monkeypatch.setattr(wf.workflow, "execute_activity", stub)
+    _patch_workflow(monkeypatch, stub)
 
     result = _run_workflow()
 
-    assert result == {"run_id": "run-1", "final": True}
+    assert result == {"run_id": _FIXED_RUN_ID, "final": True}
     # Phases run in order.
     assert [c["fn"] for c in stub.calls] == [
         wf.prepare_scan_activity,
@@ -623,14 +687,15 @@ def test_workflow_run_delegates_through_phases(monkeypatch):
         wf.rank_activity,
         wf.finalize_scan_activity,
     ]
-    # Data threading between phases.
-    assert stub.calls[0]["args"] == ["job-1", {"top_n": 2}]
+    # Data threading between phases; the workflow-owned run_id reaches prepare
+    # and finalize.
+    assert stub.calls[0]["args"] == ["job-1", {"top_n": 2}, _FIXED_RUN_ID]
     assert stub.calls[1]["args"] == [{"p": 1}, 3, "job-1"]
     assert stub.calls[2]["args"] == [["q1", "q2"], 9, ["s"], "job-1"]
     assert stub.calls[3]["args"] == [[{"company": "Acme"}], {"p": 1}, 2, "job-1"]
     assert stub.calls[4]["args"] == [
         "job-1",
-        "run-1",
+        _FIXED_RUN_ID,
         [{"x": 1}],
         1,
         ["fp"],
@@ -643,7 +708,7 @@ def test_workflow_run_delegates_through_phases(monkeypatch):
 
 def test_workflow_already_completed_short_circuits(monkeypatch):
     stub = _WorkflowStub().with_prepare({"status": "already_completed", "result": {"cached": 1}})
-    monkeypatch.setattr(wf.workflow, "execute_activity", stub)
+    _patch_workflow(monkeypatch, stub)
 
     result = _run_workflow()
 
@@ -653,14 +718,14 @@ def test_workflow_already_completed_short_circuits(monkeypatch):
 
 def test_workflow_already_completed_missing_result_returns_empty(monkeypatch):
     stub = _WorkflowStub().with_prepare({"status": "already_completed"})
-    monkeypatch.setattr(wf.workflow, "execute_activity", stub)
+    _patch_workflow(monkeypatch, stub)
 
     assert _run_workflow() == {}
 
 
 def test_workflow_cancelled_short_circuits(monkeypatch):
     stub = _WorkflowStub().with_prepare({"status": "cancelled"})
-    monkeypatch.setattr(wf.workflow, "execute_activity", stub)
+    _patch_workflow(monkeypatch, stub)
 
     result = _run_workflow()
 
@@ -670,7 +735,7 @@ def test_workflow_cancelled_short_circuits(monkeypatch):
 
 def test_workflow_phase_failure_records_fail_and_returns_empty(monkeypatch):
     stub = _WorkflowStub(fail_on=wf.scan_activity)
-    monkeypatch.setattr(wf.workflow, "execute_activity", stub)
+    _patch_workflow(monkeypatch, stub)
 
     result = _run_workflow()
 
@@ -680,10 +745,23 @@ def test_workflow_phase_failure_records_fail_and_returns_empty(monkeypatch):
     assert fns[-1] is wf.fail_scan_activity
     assert wf.rank_activity not in fns  # short-circuited on scan failure
     fail_call = stub.calls[-1]
-    assert fail_call["args"][:2] == ["job-1", "run-1"]
+    assert fail_call["args"][:2] == ["job-1", _FIXED_RUN_ID]
     assert fail_call["args"][3] is True  # store_ok threaded through
     assert "job_matching_scan failed" in fail_call["args"][2]
-    assert fail_call["retry"].maximum_attempts == 1  # failure bookkeeping never retries
+    # fail_scan only flips statuses (idempotent), so it retries like the phases.
+    assert fail_call["retry"].maximum_attempts == 3
+
+
+def test_workflow_fail_scan_error_does_not_fail_workflow(monkeypatch):
+    # If even the terminal fail_scan bookkeeping can't be recorded, the workflow
+    # must still return {} rather than propagate and end in a Failed state.
+    stub = _WorkflowStub(fail_on=wf.scan_activity, fail_scan_raises=True)
+    _patch_workflow(monkeypatch, stub)
+
+    result = _run_workflow()
+
+    assert result == {}
+    assert stub.calls[-1]["fn"] is wf.fail_scan_activity  # attempted, then swallowed
 
 
 # ===========================================================================
