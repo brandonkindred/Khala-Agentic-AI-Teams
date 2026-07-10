@@ -12,6 +12,7 @@ cancel/failure semantics in exactly one place for every async job kind
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Dict, Optional
 
 from nutrition_meal_planning_team.models import MealPlanRequest, NutritionPlanRequest
@@ -27,6 +28,7 @@ from nutrition_meal_planning_team.shared.job_store import (
 logger = logging.getLogger(__name__)
 
 _orchestrator: Optional[NutritionMealPlanningOrchestrator] = None
+_orchestrator_lock = threading.Lock()
 
 
 def get_orchestrator() -> NutritionMealPlanningOrchestrator:
@@ -40,21 +42,28 @@ def get_orchestrator() -> NutritionMealPlanningOrchestrator:
     empty, and that error should fail the individual request/job that actually
     needs an LLM, not orchestrator construction or process startup.
 
+    Construction is guarded by a lock (double-checked) because the singleton is
+    now shared across concurrent callers — API request threads and Temporal
+    activity-executor threads — so a first-use race must not build two
+    orchestrators.
+
     Preconditions:
         - None.
 
     Postconditions:
         - Returns a ``NutritionMealPlanningOrchestrator`` singleton, constructed
-          on first call and reused thereafter (shared by the API routes, the
-          thread-dispatch path, and the Temporal activities).
+          exactly once on first call and reused thereafter (shared by the API
+          routes, the thread-dispatch path, and the Temporal activities).
     """
     global _orchestrator
     if _orchestrator is None:
-        from llm_service import get_strands_model
+        with _orchestrator_lock:
+            if _orchestrator is None:
+                from llm_service import get_strands_model
 
-        _orchestrator = NutritionMealPlanningOrchestrator(
-            llm_model=get_strands_model("nutrition_meal_planning", lazy=True)
-        )
+                _orchestrator = NutritionMealPlanningOrchestrator(
+                    llm_model=get_strands_model("nutrition_meal_planning", lazy=True)
+                )
     return _orchestrator
 
 

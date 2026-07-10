@@ -24,6 +24,7 @@ def _drive(monkeypatch, workflow_obj, *args):
         captured["args"] = kwargs.get("args")
         captured["task_queue"] = kwargs.get("task_queue")
         captured["timeout"] = kwargs.get("start_to_close_timeout")
+        captured["heartbeat_timeout"] = kwargs.get("heartbeat_timeout")
         captured["retry_policy"] = kwargs.get("retry_policy")
         return {"job_id": args[0]}
 
@@ -65,5 +66,8 @@ def test_workflow_run_delegates_to_activity(
     assert captured["args"] == ["job-1", second_arg]
     assert captured["task_queue"] == wf.TASK_QUEUE
     assert captured["timeout"] == timeout
+    # A heartbeat_timeout lets Temporal detect a dead/hung worker within the
+    # heartbeat window rather than only at the (up-to-2h) start_to_close_timeout.
+    assert captured["heartbeat_timeout"] == wf.HEARTBEAT_TIMEOUT
     # Non-idempotent LLM pipeline: retries are capped at a single attempt.
     assert captured["retry_policy"].maximum_attempts == 1

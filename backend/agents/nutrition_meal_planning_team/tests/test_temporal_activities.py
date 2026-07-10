@@ -167,3 +167,38 @@ def test_activity_swallows_when_cancelled_mid_exception(monkeypatch, fn, arg, co
     assert result == {"job_id": "job-cx"}
     # Left cancelled — no FAILED overwrite.
     assert get_job("job-cx")["status"] == JOB_STATUS_CANCELLED
+
+
+def test_activity_heartbeats_during_core_run(monkeypatch):
+    """The activity wraps the core in a BackgroundHeartbeat driving
+    ``activity.heartbeat`` on the team interval, so a dead/hung worker is caught
+    by the workflow's heartbeat_timeout."""
+    from temporalio import activity
+
+    import shared_concurrency
+
+    entered: dict = {"count": 0}
+
+    class _FakeHeartbeat:
+        def __init__(self, beat, interval_s, **_kwargs):
+            entered["beat"] = beat
+            entered["interval"] = interval_s
+
+        def __enter__(self):
+            entered["count"] += 1
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", _FakeHeartbeat)
+    _patch_orch(monkeypatch)
+    create_job("job-hb")
+
+    result = wf.run_meal_plan_activity("job-hb", {"client_id": "client-1"})
+
+    assert result == {"job_id": "job-hb"}
+    assert entered["count"] == 1
+    assert entered["beat"] is activity.heartbeat
+    assert entered["interval"] == wf.HEARTBEAT_INTERVAL_S
+    assert get_job("job-hb")["status"] == JOB_STATUS_COMPLETED

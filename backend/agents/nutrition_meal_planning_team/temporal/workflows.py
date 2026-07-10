@@ -33,6 +33,13 @@ with workflow.unsafe.imports_passed_through():
 MEAL_PLAN_TIMEOUT = timedelta(hours=2)
 NUTRITION_PLAN_TIMEOUT = timedelta(minutes=30)
 
+# A background thread heartbeats every ``HEARTBEAT_INTERVAL_S`` while an activity
+# runs, so a dead/hung worker is detected within ``HEARTBEAT_TIMEOUT`` instead of
+# only at ``start_to_close_timeout`` (up to 2h). Matches how the blogging/coding
+# teams keep their long activities live.
+HEARTBEAT_INTERVAL_S = 30.0
+HEARTBEAT_TIMEOUT = timedelta(minutes=5)
+
 # The pipelines are long, non-idempotent LLM flows, and the llm_service layer
 # already fails over on transient provider errors. A workflow-level retry would
 # therefore mostly re-run expensive deterministic failures (and could
@@ -44,35 +51,58 @@ NUTRITION_PLAN_TIMEOUT = timedelta(minutes=30)
 NO_RETRY = RetryPolicy(maximum_attempts=1)
 
 
+def _run_activity(job_id: str, core, *core_args: Any) -> Dict[str, Any]:
+    """Shared activity body: heartbeat while the core runs; own the job-store
+    failure contract.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+        - ``core`` is one of the ``pipeline.run_*_core`` functions and
+          ``core_args`` are its trailing positional arguments.
+
+    Postconditions:
+        - On success returns ``{"job_id": job_id}`` (the core wrote COMPLETED).
+        - If the job was cancelled, swallows the error and returns
+          ``{"job_id": job_id}`` (cancelled is terminal — not retried).
+        - On a genuine failure, marks the row FAILED (``ValueError`` →
+          ``not_found``) and re-raises so the failure surfaces as a failed
+          Temporal workflow (auto-retry bounded by ``NO_RETRY``).
+    """
+    from nutrition_meal_planning_team.pipeline import mark_job_failed
+    from nutrition_meal_planning_team.shared.job_store import is_job_cancelled
+    from shared_concurrency import BackgroundHeartbeat
+
+    try:
+        # ``copy_context=True`` snapshots the activity context so the daemon
+        # thread's ``activity.heartbeat`` reaches this activity execution; a beat
+        # error (e.g. outside a live activity in unit tests) is swallowed by the
+        # heartbeat driver and never touches the pipeline result.
+        with BackgroundHeartbeat(activity.heartbeat, HEARTBEAT_INTERVAL_S, copy_context=True):
+            core(job_id, *core_args)
+    except Exception as exc:
+        activity.logger.exception("Nutrition job %s failed", job_id)
+        if is_job_cancelled(job_id):
+            return {"job_id": job_id}
+        mark_job_failed(job_id, exc)
+        raise
+    return {"job_id": job_id}
+
+
 @activity.defn(name="nutrition_run_plan")
 def run_nutrition_plan_activity(job_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
-    """Run the nutrition-plan job and record job status.
+    """Run the nutrition-plan job and record job status (see ``_run_activity``).
 
     Preconditions:
         - ``job_id`` refers to a job already created in the job store.
         - ``request`` is the serialized ``NutritionPlanRequest`` (``body.model_dump()``).
 
     Postconditions:
-        - On success the job row ends COMPLETED with the plan result and the
-          activity returns ``{"job_id": job_id}``.
-        - If the job was cancelled, leaves the row untouched and returns
-          ``{"job_id": job_id}`` (cancelled is terminal — not retried).
-        - On a genuine failure, marks the row FAILED (``ValueError`` →
-          ``not_found``) and re-raises so the failure surfaces as a failed
-          Temporal workflow. Auto-retry is bounded by ``NO_RETRY``.
+        - Per ``_run_activity``: COMPLETED on success, FAILED + re-raise on error
+          (``ValueError`` → ``not_found``), swallow on cancel.
     """
-    from nutrition_meal_planning_team.pipeline import mark_job_failed, run_nutrition_plan_core
-    from nutrition_meal_planning_team.shared.job_store import is_job_cancelled
+    from nutrition_meal_planning_team.pipeline import run_nutrition_plan_core
 
-    try:
-        run_nutrition_plan_core(job_id, request)
-    except Exception as exc:
-        activity.logger.exception("Nutrition plan job %s failed", job_id)
-        if is_job_cancelled(job_id):
-            return {"job_id": job_id}
-        mark_job_failed(job_id, exc)
-        raise
-    return {"job_id": job_id}
+    return _run_activity(job_id, run_nutrition_plan_core, request)
 
 
 @activity.defn(name="nutrition_run_regenerate")
@@ -84,20 +114,11 @@ def run_nutrition_regenerate_activity(job_id: str, client_id: str) -> Dict[str, 
         - ``client_id`` identifies a client whose profile exists.
 
     Postconditions:
-        - Same job-store contract as ``run_nutrition_plan_activity``.
+        - Per ``_run_activity`` (same job-store contract).
     """
-    from nutrition_meal_planning_team.pipeline import mark_job_failed, run_regenerate_core
-    from nutrition_meal_planning_team.shared.job_store import is_job_cancelled
+    from nutrition_meal_planning_team.pipeline import run_regenerate_core
 
-    try:
-        run_regenerate_core(job_id, client_id)
-    except Exception as exc:
-        activity.logger.exception("Nutrition regenerate job %s failed", job_id)
-        if is_job_cancelled(job_id):
-            return {"job_id": job_id}
-        mark_job_failed(job_id, exc)
-        raise
-    return {"job_id": job_id}
+    return _run_activity(job_id, run_regenerate_core, client_id)
 
 
 @activity.defn(name="run_meal_plan_job")
@@ -113,20 +134,11 @@ def run_meal_plan_activity(job_id: str, request: Dict[str, Any]) -> Dict[str, An
         - ``request`` is the serialized ``MealPlanRequest`` (``body.model_dump()``).
 
     Postconditions:
-        - Same job-store contract as ``run_nutrition_plan_activity``.
+        - Per ``_run_activity`` (same job-store contract).
     """
-    from nutrition_meal_planning_team.pipeline import mark_job_failed, run_meal_plan_core
-    from nutrition_meal_planning_team.shared.job_store import is_job_cancelled
+    from nutrition_meal_planning_team.pipeline import run_meal_plan_core
 
-    try:
-        run_meal_plan_core(job_id, request)
-    except Exception as exc:
-        activity.logger.exception("Nutrition meal plan job %s failed", job_id)
-        if is_job_cancelled(job_id):
-            return {"job_id": job_id}
-        mark_job_failed(job_id, exc)
-        raise
-    return {"job_id": job_id}
+    return _run_activity(job_id, run_meal_plan_core, request)
 
 
 @workflow.defn(name="NutritionPlanWorkflow")
@@ -157,6 +169,7 @@ class NutritionPlanWorkflow:
             args=[job_id, request],
             task_queue=TASK_QUEUE,
             start_to_close_timeout=NUTRITION_PLAN_TIMEOUT,
+            heartbeat_timeout=HEARTBEAT_TIMEOUT,
             retry_policy=NO_RETRY,
         )
 
@@ -183,6 +196,7 @@ class NutritionRegenerateWorkflow:
             args=[job_id, client_id],
             task_queue=TASK_QUEUE,
             start_to_close_timeout=NUTRITION_PLAN_TIMEOUT,
+            heartbeat_timeout=HEARTBEAT_TIMEOUT,
             retry_policy=NO_RETRY,
         )
 
@@ -208,5 +222,6 @@ class NutritionMealPlanWorkflow:
             args=[job_id, request],
             task_queue=TASK_QUEUE,
             start_to_close_timeout=MEAL_PLAN_TIMEOUT,
+            heartbeat_timeout=HEARTBEAT_TIMEOUT,
             retry_policy=NO_RETRY,
         )

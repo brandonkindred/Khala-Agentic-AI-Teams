@@ -333,11 +333,18 @@ def _temporal_enabled() -> bool:
     return is_temporal_enabled()
 
 
-def _dispatch_nutrition_plan_run(job_id: str, body: NutritionPlanRequest) -> str:
-    """Dispatch a nutrition-plan run via Temporal when enabled, else a daemon thread.
+def _dispatch_job_run(job_id: str, arg, *, starter: str, thread_target) -> str:
+    """Dispatch a job run via Temporal when enabled, else a daemon thread.
+
+    Single implementation shared by the three per-endpoint wrappers below.
 
     Preconditions:
         - ``job_id`` refers to a job already created in the job store.
+        - ``starter`` names a ``start_*`` function in
+          ``nutrition_meal_planning_team.temporal.start_workflow`` and
+          ``thread_target`` is the matching ``pipeline.run_*_background`` thread
+          body; ``arg`` is the serialized request dict or the ``client_id`` that
+          both of them accept as the second positional argument.
 
     Postconditions:
         - Starts exactly one execution path and returns its label ("Temporal" or
@@ -346,51 +353,43 @@ def _dispatch_nutrition_plan_run(job_id: str, body: NutritionPlanRequest) -> str
           silently downgraded to a thread.
     """
     if _temporal_enabled():
-        from nutrition_meal_planning_team.temporal.start_workflow import (
-            start_nutrition_plan_workflow,
-        )
+        from nutrition_meal_planning_team.temporal import start_workflow
 
-        start_nutrition_plan_workflow(job_id, body.model_dump())
+        getattr(start_workflow, starter)(job_id, arg)
         return "Temporal"
 
-    threading.Thread(
-        target=run_nutrition_plan_background, args=(job_id, body.model_dump()), daemon=True
-    ).start()
+    threading.Thread(target=thread_target, args=(job_id, arg), daemon=True).start()
     return "thread"
+
+
+def _dispatch_nutrition_plan_run(job_id: str, body: NutritionPlanRequest) -> str:
+    """Dispatch a nutrition-plan run (Temporal or thread). See ``_dispatch_job_run``."""
+    return _dispatch_job_run(
+        job_id,
+        body.model_dump(),
+        starter="start_nutrition_plan_workflow",
+        thread_target=run_nutrition_plan_background,
+    )
 
 
 def _dispatch_regenerate_run(job_id: str, client_id: str) -> str:
-    """Dispatch a regenerate run via Temporal when enabled, else a daemon thread.
-
-    See ``_dispatch_nutrition_plan_run`` for the contract.
-    """
-    if _temporal_enabled():
-        from nutrition_meal_planning_team.temporal.start_workflow import start_regenerate_workflow
-
-        start_regenerate_workflow(job_id, client_id)
-        return "Temporal"
-
-    threading.Thread(
-        target=run_regenerate_background, args=(job_id, client_id), daemon=True
-    ).start()
-    return "thread"
+    """Dispatch a regenerate run (Temporal or thread). See ``_dispatch_job_run``."""
+    return _dispatch_job_run(
+        job_id,
+        client_id,
+        starter="start_regenerate_workflow",
+        thread_target=run_regenerate_background,
+    )
 
 
 def _dispatch_meal_plan_run(job_id: str, body: MealPlanRequest) -> str:
-    """Dispatch a meal-plan run via Temporal when enabled, else a daemon thread.
-
-    See ``_dispatch_nutrition_plan_run`` for the contract.
-    """
-    if _temporal_enabled():
-        from nutrition_meal_planning_team.temporal.start_workflow import start_meal_plan_workflow
-
-        start_meal_plan_workflow(job_id, body.model_dump())
-        return "Temporal"
-
-    threading.Thread(
-        target=run_meal_plan_background, args=(job_id, body.model_dump()), daemon=True
-    ).start()
-    return "thread"
+    """Dispatch a meal-plan run (Temporal or thread). See ``_dispatch_job_run``."""
+    return _dispatch_job_run(
+        job_id,
+        body.model_dump(),
+        starter="start_meal_plan_workflow",
+        thread_target=run_meal_plan_background,
+    )
 
 
 @app.post("/plan/nutrition")
