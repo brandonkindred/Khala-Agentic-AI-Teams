@@ -23,8 +23,10 @@ in-request) and a **durable job** counterpart:
 - In Temporal mode `DeepResearchWorkflow` fans out one activity per company
   (decision-maker mapping) and one per prospect (dossier building); in thread
   mode `run_deep_research_job` runs the same `deep_research_only` body in a
-  daemon thread. Both share the per-item cores (`map_company_one` /
-  `build_dossier_one`) and the assembly/persist step
+  daemon thread, with a background beater refreshing the job heartbeat so the
+  stale-job monitor cannot fail a long run mid-flight (Temporal heartbeats from
+  inside each activity instead). Both share the per-item cores
+  (`map_company_one` / `build_dossier_one`) and the assembly/persist step
   (`assemble_and_persist_deep_research`) with the synchronous path.
 
 Use the job endpoint for large `target_prospects`, where the pipeline runs

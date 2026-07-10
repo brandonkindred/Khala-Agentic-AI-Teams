@@ -409,6 +409,90 @@ def test_run_deep_research_job_skips_terminal(monkeypatch, fake_job_client):
     assert fake_job_client.get_job("dr-t")["status"] == "cancelled"
 
 
+def test_run_deep_research_job_heartbeats_during_long_run(monkeypatch, fake_job_client):
+    """A run that outlasts the beat interval gets its heartbeat refreshed so the
+    stale-job monitor cannot fail an in-flight deep-research job."""
+    import threading
+
+    fake_job_client.create_job("dr-hb", status="pending")
+    monkeypatch.setattr(job_runner, "DEEP_RESEARCH_HEARTBEAT_INTERVAL_S", 0.01)
+
+    beat_seen = threading.Event()
+    real_heartbeat = fake_job_client.heartbeat
+
+    def _spy_heartbeat(job_id):
+        real_heartbeat(job_id)
+        beat_seen.set()
+
+    monkeypatch.setattr(fake_job_client, "heartbeat", _spy_heartbeat)
+
+    result = DeepResearchResult(product_name="ProductX", total_prospects=0, companies_represented=0)
+
+    def _wait_for_beat(*_a, **_k):
+        # Block until the background beater has refreshed the heartbeat at least
+        # once — deterministic, no fixed sleeps.
+        assert beat_seen.wait(timeout=5.0), "heartbeat never fired during the run"
+        return result
+
+    stub = MagicMock()
+    stub.deep_research_only.side_effect = _wait_for_beat
+    monkeypatch.setattr("sales_team.job_runner.SalesPodOrchestrator", lambda config=None: stub)
+
+    req = DeepResearchRequest(
+        product_name="ProductX",
+        value_proposition="Save 20% on outbound time",
+        icp=IdealCustomerProfile(industry=["SaaS"]),
+    )
+    job_runner.run_deep_research_job("dr-hb", req)
+
+    assert beat_seen.is_set()
+    assert fake_job_client.get_job("dr-hb")["status"] == "completed"
+
+
+def test_run_deep_research_job_heartbeat_error_is_swallowed(monkeypatch, fake_job_client):
+    """A heartbeat that raises mid-run is routed to ``on_error`` (logged, not
+    fatal); the beater keeps looping and the run still completes."""
+    import threading
+
+    fake_job_client.create_job("dr-hb-err", status="pending")
+    monkeypatch.setattr(job_runner, "DEEP_RESEARCH_HEARTBEAT_INTERVAL_S", 0.01)
+
+    def _boom_heartbeat(_job_id):
+        raise RuntimeError("heartbeat endpoint down")
+
+    monkeypatch.setattr(fake_job_client, "heartbeat", _boom_heartbeat)
+
+    on_error_seen = threading.Event()
+    real_warning = job_runner.logger.warning
+
+    def _spy_warning(msg, *args, **kwargs):
+        if "heartbeat failed" in str(msg):
+            on_error_seen.set()
+        return real_warning(msg, *args, **kwargs)
+
+    monkeypatch.setattr(job_runner.logger, "warning", _spy_warning)
+
+    result = DeepResearchResult(product_name="ProductX", total_prospects=0, companies_represented=0)
+
+    def _wait_for_error(*_a, **_k):
+        assert on_error_seen.wait(timeout=5.0), "on_error never fired for the failing beat"
+        return result
+
+    stub = MagicMock()
+    stub.deep_research_only.side_effect = _wait_for_error
+    monkeypatch.setattr("sales_team.job_runner.SalesPodOrchestrator", lambda config=None: stub)
+
+    req = DeepResearchRequest(
+        product_name="ProductX",
+        value_proposition="Save 20% on outbound time",
+        icp=IdealCustomerProfile(industry=["SaaS"]),
+    )
+    job_runner.run_deep_research_job("dr-hb-err", req)
+
+    assert on_error_seen.is_set()
+    assert fake_job_client.get_job("dr-hb-err")["status"] == "completed"
+
+
 def test_run_context_round_trips():
     original = _dctx(job_id="dr-rt")
     assert DeepResearchContext.model_validate(original).model_dump(mode="json") == original
