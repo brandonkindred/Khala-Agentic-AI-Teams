@@ -40,6 +40,7 @@ jobs:
       shared_postgres: ${{ steps.filter.outputs.shared_postgres }}
       shared_neo4j: ${{ steps.filter.outputs.shared_neo4j }}
       shared_backend: ${{ steps.filter.outputs.shared_backend }}
+      branding: ${{ steps.filter.outputs.branding }}
       software_engineering: ${{ steps.filter.outputs.software_engineering }}
       coding_team: ${{ steps.filter.outputs.coding_team }}
       agent_cognition: ${{ steps.filter.outputs.agent_cognition }}
@@ -97,6 +98,23 @@ jobs:
               - 'backend/conftest.py'
               - 'backend/pyproject.toml'
               - 'backend/pytest.ini'
+              - '.github/workflows/ci.yml'
+            # Branding runs its full suite (integration + unit) against Postgres +
+            # a job-service sidecar in the dedicated test-branding job, so trigger
+            # on the team plus the shared infra and test harness it depends on.
+            branding:
+              - 'backend/agents/branding_team/**'
+              - 'backend/agents/shared_postgres/**'
+              - 'backend/agents/shared_temporal/**'
+              - 'backend/agents/shared_observability/**'
+              - 'backend/agents/llm_service/**'
+              - 'backend/agents/job_service_client.py'
+              - 'backend/agents/job_service_client_fake.py'
+              - 'backend/agents/requirements.txt'
+              - 'backend/agents/conftest.py'
+              - 'backend/conftest.py'
+              - 'backend/pytest.ini'
+              - 'backend/job_service/**'
               - '.github/workflows/ci.yml'
             backend_any:
               - 'backend/**'
@@ -934,6 +952,101 @@ jobs:
           fi
           pytest -v --tb=short -m integration \
             ../unified_api/tests/test_integration_smoke.py
+
+  # Branding runs its FULL suite (integration + unit) against real Postgres + a
+  # job-service sidecar, gated at 90% coverage. Branding's comprehensive tests
+  # (endpoints, assistant, store) are integration-marked, so this job — not the
+  # -m "not integration" misc-teams job — is where they run. The marker
+  # expression "integration or not integration" un-skips the integration tests
+  # (conftest only skips them when "integration" is absent from -m) while still
+  # running the unit tests, so coverage reflects the whole package.
+  test-branding:
+    name: Test – Branding (full suite, Postgres + job service)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      needs.changes.outputs.is_pull_request == 'true' &&
+      needs.changes.outputs.branding == 'true'
+    defaults:
+      run:
+        working-directory: backend/agents
+    services:
+      # trust auth so the ephemeral CI database needs no password (avoids a
+      # hardcoded dummy credential); connections come only from this runner.
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=2s
+          --health-timeout=3s
+          --health-retries=25
+    env:
+      LLM_PROVIDER: dummy
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/agents/requirements.txt
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          # The job service is started as a sidecar process below; it needs
+          # psycopg2-binary from its own reqs file.
+          pip install -r ../job_service/requirements.txt
+      # Boot the job-service sidecar AND run pytest in a single step so the
+      # background process is guaranteed to be alive when pytest collects.
+      # PYTHONPATH=../agents is required because job_service/postgres.py
+      # imports `shared_postgres`, which lives under backend/agents/.
+      - name: Start job-service + run branding suite with coverage
+        env:
+          PYTHONPATH: ../agents
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+          JOB_SERVICE_URL: http://127.0.0.1:8085
+        run: |
+          set -euo pipefail
+          (cd ../job_service && \
+            uvicorn main:app --host 127.0.0.1 --port 8085 > /tmp/job-service.log 2>&1) &
+          JOB_SERVICE_PID=$!
+          trap '
+            echo "--- job-service log ---";
+            tail -100 /tmp/job-service.log || true;
+            kill "$JOB_SERVICE_PID" 2>/dev/null || true;
+          ' EXIT
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8085/health >/dev/null; then
+              echo "job-service is up after ~$((i * 5 / 10))s"
+              break
+            fi
+            if ! kill -0 "$JOB_SERVICE_PID" 2>/dev/null; then
+              echo "job-service exited prematurely; tail of log:"
+              tail -100 /tmp/job-service.log
+              exit 1
+            fi
+            sleep 0.5
+          done
+          if ! curl -sf http://127.0.0.1:8085/health >/dev/null; then
+            echo "job-service did not become healthy in 30s; tail of log:"
+            tail -100 /tmp/job-service.log
+            exit 1
+          fi
+          pytest -v --tb=short -m "integration or not integration" \
+            branding_team/tests/ \
+            --cov=branding_team --cov-report=term-missing --cov-fail-under=90
 
   lint-and-test-ui:
     name: Lint & Test – Angular UI
