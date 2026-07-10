@@ -1,0 +1,93 @@
+"""Tests for the unified-API lifespan hook that boots the Agent Studio worker.
+
+Agent Studio is an in-process team, so its Temporal worker is started from the
+unified-API lifespan (not a separate ``team_service`` container). The helper is gated
+on the team being enabled, must never let a worker-start failure break app startup,
+and must log honestly — INFO only when a worker actually started, WARNING when
+``start_team_worker`` returns ``False`` (``TEMPORAL_ADDRESS`` unset → no worker).
+
+Log assertions patch ``main.logger`` methods directly rather than using ``caplog``,
+which is unreliable here because importing the unified API configures logging.
+"""
+
+from __future__ import annotations
+
+import types
+
+import pytest
+
+import unified_api.main as main
+
+
+def _fake_team_configs(enabled: bool) -> dict:
+    return {"agent_studio": types.SimpleNamespace(enabled=enabled)}
+
+
+def _capture_logs(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str]]:
+    """Capture ``main.logger`` info/warning messages into two lists."""
+    infos: list[str] = []
+    warns: list[str] = []
+    monkeypatch.setattr(main.logger, "info", lambda msg, *a, **k: infos.append(msg))
+    monkeypatch.setattr(main.logger, "warning", lambda msg, *a, **k: warns.append(msg))
+    return infos, warns
+
+
+def test_worker_start_invoked_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[bool] = []
+
+    def _start() -> bool:
+        called.append(True)
+        return True
+
+    monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
+    monkeypatch.setattr("agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread", _start)
+    infos, warns = _capture_logs(monkeypatch)
+
+    main._start_agent_studio_temporal_worker()
+
+    assert called == [True]
+    assert any("Started Agent Studio Temporal worker" in m for m in infos)
+    assert warns == []
+
+
+def test_worker_start_warns_when_temporal_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``False`` return (worker not started, e.g. TEMPORAL_ADDRESS unset) logs a
+    WARNING rather than a misleading success line — and never raises."""
+    monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
+    monkeypatch.setattr(
+        "agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread",
+        lambda: False,
+    )
+    infos, warns = _capture_logs(monkeypatch)
+
+    main._start_agent_studio_temporal_worker()
+
+    assert any("NOT started" in m for m in warns)
+    assert infos == []
+
+
+def test_worker_start_skipped_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[bool] = []
+    monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(False))
+    monkeypatch.setattr(
+        "agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread",
+        lambda: called.append(True),
+    )
+    main._start_agent_studio_temporal_worker()
+    assert called == []
+
+
+def test_worker_start_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom() -> bool:
+        raise RuntimeError("worker exploded")
+
+    monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
+    monkeypatch.setattr("agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread", _boom)
+    infos, warns = _capture_logs(monkeypatch)
+
+    # Must not raise — startup is log-and-continue.
+    main._start_agent_studio_temporal_worker()
+
+    # The swallowed exception is surfaced as a WARNING (not a silent success line).
+    assert any("failed to start" in m for m in warns)
+    assert infos == []

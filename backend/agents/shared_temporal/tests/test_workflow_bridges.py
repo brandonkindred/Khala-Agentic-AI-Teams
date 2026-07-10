@@ -38,6 +38,18 @@ class _FakeClient:
         return _FakeHandle(self._captured)
 
 
+class _FakeExecClient:
+    """A client whose ``execute_workflow`` records its call and resolves to a result."""
+
+    def __init__(self, captured: dict, result: object) -> None:
+        self._captured = captured
+        self._result = result
+
+    async def execute_workflow(self, workflow_run, *, args, id, task_queue):
+        self._captured.update(workflow_run=workflow_run, args=args, id=id, task_queue=task_queue)
+        return self._result
+
+
 @pytest.fixture
 def running_loop():
     """A real event loop running in a background thread + restored globals."""
@@ -101,8 +113,50 @@ def test_signal_raises_when_no_worker():
         client_mod.set_temporal_loop(prev_l)
 
 
+def test_execute_workflow_sync_returns_result(running_loop):
+    """The execute-and-wait bridge starts the workflow and returns its result."""
+    captured: dict = {}
+    sentinel = {"job_id": "j1"}
+    client_mod.set_temporal_client(_FakeExecClient(captured, sentinel))
+    client_mod.set_temporal_loop(running_loop)
+
+    out = runner.execute_workflow_sync(
+        object(), "a1", {"k": "v"}, workflow_id="wid", task_queue="q"
+    )
+
+    assert out is sentinel
+    assert captured["id"] == "wid"
+    assert captured["task_queue"] == "q"
+    assert captured["args"] == ["a1", {"k": "v"}]
+
+
+def test_execute_workflow_sync_raises_when_no_worker():
+    """With no connected client/loop the execute bridge surfaces a clear worker error."""
+    prev_c, prev_l = client_mod.get_temporal_client(), client_mod.get_temporal_loop()
+    client_mod.set_temporal_client(None)
+    client_mod.set_temporal_loop(None)
+    try:
+        with pytest.raises(RuntimeError, match="worker"):
+            runner.execute_workflow_sync(
+                object(), workflow_id="wid", task_queue="q", client_ready_timeout_s=0.05
+            )
+    finally:
+        client_mod.set_temporal_client(prev_c)
+        client_mod.set_temporal_loop(prev_l)
+
+
+def test_execute_requires_non_empty_ids():
+    """execute_workflow_sync asserts non-empty workflow_id/task_queue like the
+    signal/cancel bridges. The asserts precede the client wait, so no worker is needed."""
+    with pytest.raises(AssertionError):
+        runner.execute_workflow_sync(object(), workflow_id="", task_queue="q")
+    with pytest.raises(AssertionError):
+        runner.execute_workflow_sync(object(), workflow_id="wid", task_queue="")
+
+
 def test_bridges_are_exported():
     import shared_temporal
 
     assert shared_temporal.signal_workflow_sync is runner.signal_workflow_sync
     assert shared_temporal.cancel_workflow_sync is runner.cancel_workflow_sync
+    assert shared_temporal.execute_workflow_sync is runner.execute_workflow_sync
