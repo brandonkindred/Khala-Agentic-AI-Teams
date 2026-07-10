@@ -8,10 +8,9 @@ object, and turn selected fields into ``recommendations``. Their ``run``,
 were byte-aligned, and their three ``plan`` bodies were copy-pasted with an
 inert ``(lambda _r: str(_r))`` wrapper and three subtly different inline JSON
 fallbacks. :class:`PlanGeneratorToolAgent` captures the shared lifecycle once and
-parses leniently via the shared
-:func:`~software_engineering_team.shared.tool_agent_base.lenient_json_object`
-helper; subclasses declare only the differing prompt, field→label map, and
-fallback strings.
+parses via the lightweight, stdlib-only
+:func:`shared_llm_recovery.extract_json_object` salvage engine; subclasses
+declare only the differing prompt, field→label map, and fallback strings.
 
 Like the other code-v2 tool-agent bases, the concrete ``agent.py`` keeps a
 top-level ``from strands import Agent`` so tests can
@@ -27,7 +26,7 @@ from typing import List, Optional, Sequence, Tuple
 
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
-from software_engineering_team.shared.tool_agent_base import lenient_json_object
+from shared_llm_recovery import extract_json_object
 
 from ..models import (
     ToolAgentInput,
@@ -125,12 +124,13 @@ class PlanGeneratorToolAgent:
                 recommendations=list(self.llm_error_recommendations),
                 summary=self.llm_error_summary,
             )
-        data = lenient_json_object(
-            raw,
-            logger=self._logger,
-            context=f"{self.log_label} plan",
-            on_fail_msg="using empty plan output",
-        )
+        data = extract_json_object(raw)
+        if data is None:
+            self._logger.warning(
+                "%s plan: model output did not parse as JSON; using empty plan output",
+                self.log_label,
+            )
+            data = {}
         recommendations = [
             f"{label}: {data[key]}" for key, label in self.field_labels if data.get(key)
         ]

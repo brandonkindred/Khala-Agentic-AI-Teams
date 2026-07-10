@@ -8,9 +8,11 @@ The six domain tool agents (``agent_runtime``, ``safety_governance``,
 Every ``run`` parsed the model output with a bare
 ``json.loads(str(agent(prompt)).strip())`` — so fenced or prose-wrapped output
 raised :class:`json.JSONDecodeError` and crashed the microtask. This base
-captures the shared shape once and parses leniently via the shared
-:func:`~software_engineering_team.shared.tool_agent_base.lenient_json_object`
-helper, so malformed output degrades to an empty result instead of raising.
+captures the shared shape once and parses via the lightweight, stdlib-only
+:func:`shared_llm_recovery.extract_json_object` salvage engine, so malformed
+output degrades to an empty result instead of raising. (It deliberately does not
+reuse ``shared.tool_agent_base.lenient_json_object``, whose module pulls in
+``code_review_agent`` — a dependency not on the AI-agent-development team's path.)
 
 Like the code-v2 tool-agent bases, the concrete ``agent.py`` keeps a top-level
 ``from strands import Agent`` so tests can
@@ -25,7 +27,7 @@ import logging
 
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
-from software_engineering_team.shared.tool_agent_base import lenient_json_object
+from shared_llm_recovery import extract_json_object
 
 from ..models import ToolAgentInput, ToolAgentOutput
 
@@ -75,12 +77,14 @@ class JsonGeneratorToolAgent:
             spec=inp.spec_context[:MAX_SPEC_CHARS],
         )
         raw = str(agent(prompt)).strip()
-        data = lenient_json_object(
-            raw,
-            logger=self._logger,
-            context=type(self).__name__,
-            on_fail_msg="returning empty tool-agent output",
-        )
+        data = extract_json_object(raw)
+        if data is None:
+            self._logger.warning(
+                "%s: model output did not parse as JSON: %r; returning empty tool-agent output",
+                type(self).__name__,
+                raw,
+            )
+            data = {}
         return ToolAgentOutput(
             files=data.get("files") or {},
             recommendations=data.get("recommendations") or [],
