@@ -951,13 +951,27 @@ def run_planning_stage(
 ) -> Optional[Tuple[PlanningPhaseResult, Optional["WriterOutput"], PipelineStatus]]:
     """Planning stage: content planning, story elicitation, and outline approval.
 
+    Args:
+        ctx: The shared ``PipelineContext``. Reads ``brief``, ``work_dir``,
+            ``llm_client``, ``length_policy``, ``series_context``, ``job_id``, and
+            ``job_updater``; writes ``planning_phase_result``/``plan``/
+            ``elicited_stories_text`` (and ``status`` on abort).
     Preconditions:
         - ``ctx.llm_client`` and ``ctx.length_policy`` are resolved.
     Postconditions:
         - On success sets ``ctx.planning_phase_result``/``ctx.plan``/
           ``ctx.elicited_stories_text`` and returns None.
         - Returns a terminal ``(planning_phase_result, None, "FAIL")`` tuple if the
-          job was cancelled/failed while awaiting outline approval.
+          job was cancelled/failed while awaiting outline approval. This tuple
+          sentinel mirrors ``run_pipeline``'s return shape so the sequencer forwards
+          it unchanged (see ``run_draft_stage`` for the rationale).
+    Raises:
+        PlanningError: when content planning fails (e.g. max parse retries).
+        BloggingError: any other blogging-domain failure from the planning agent
+            propagates unchanged.
+        CancelledError: a Temporal-native cancellation propagates (never swallowed);
+            a cancellation surfaced *while awaiting outline approval* instead
+            short-circuits to the FAIL tuple above.
     """
     brief = ctx.brief
     work_dir = ctx.work_dir
@@ -1860,6 +1874,12 @@ def run_draft_stage(
 def run_gates_stage(ctx: "PipelineContext") -> None:
     """Gates stage: validators, fact-check, compliance, rewrite loop, and finalize.
 
+    Args:
+        ctx: The shared ``PipelineContext``. Reads ``brief``, ``work_dir``,
+            ``llm_client``, ``length_policy``, ``job_id``, ``job_updater``,
+            ``max_rewrite_iterations``, ``run_gates``, ``plan``,
+            ``elicited_stories_text``, and ``draft_result``; writes the final
+            ``draft_result`` and ``status``.
     Preconditions:
         - The draft stage populated ``ctx.draft_result``/``ctx.plan``/
           ``ctx.elicited_stories_text``.
