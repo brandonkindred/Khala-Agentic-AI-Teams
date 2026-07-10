@@ -396,7 +396,11 @@ def finalize_stage_activity(
           if finalization had succeeded.
     """
     from job_service_client import JOB_STATUS_COMPLETED
-    from social_media_marketing_team.api.main import RunMarketingTeamRequest, _update_job
+    from social_media_marketing_team.api.main import (
+        RunMarketingTeamRequest,
+        _job_manager,
+        _update_job,
+    )
     from social_media_marketing_team.models import (
         CampaignProposal,
         ContentPlan,
@@ -475,6 +479,13 @@ def finalize_stage_activity(
         raise_if_cancelled(e, "finalize stage cancelled", lambda: _mark_cancelled(job_id))
         if not _is_last_attempt():
             raise
+        # Under at-least-once delivery a prior attempt's completion write may have
+        # succeeded server-side while its ack was lost, triggering this retry. Don't
+        # clobber an already-completed job with a failure -- treat finalization as done.
+        existing = _job_manager.get_job(job_id) or {}
+        if existing.get("status") == JOB_STATUS_COMPLETED:
+            logger.info("Finalize retry for job %s: already completed; treating as success", job_id)
+            return
         _fail_activity(job_id, e, "finalize")
         raise
 

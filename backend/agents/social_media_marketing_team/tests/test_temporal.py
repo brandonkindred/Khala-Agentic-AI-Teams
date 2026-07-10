@@ -642,6 +642,44 @@ def test_finalize_stage_activity_store_failure_last_attempt_marks_failed(
     assert marked == {"job": "job-7", "phase": "finalize"}
 
 
+def test_finalize_already_completed_on_last_attempt_returns_success(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    """A completion retry for an already-completed job succeeds; it never fails it.
+
+    Under at-least-once delivery a prior attempt's write can succeed server-side while
+    its ack is lost, triggering this retry. The last-attempt path must not clobber the
+    persisted ``completed`` status with ``failed``.
+    """
+    from social_media_marketing_team.api import main as api_main
+    from social_media_marketing_team.temporal import activities as amod
+
+    _patch_brand(monkeypatch)
+    fake_job_client.create_job("job-9", status="running")
+    req = _req(human_approved_for_testing=True)
+    consensus = amod.consensus_stage_activity("job-9", req)
+    content = amod.content_plan_stage_activity("job-9", req, consensus)
+    platform = amod.platform_stage_activity("job-9", req, consensus, content)
+    experiment = amod.experiment_stage_activity("job-9", req, consensus, content)
+
+    # Simulate: a prior attempt already persisted completion server-side.
+    fake_job_client.update_job("job-9", status="completed")
+
+    def _raise_on_complete(job_id, **fields):
+        if fields.get("status") == "completed":
+            raise RuntimeError("ack lost")
+
+    fail_called: dict[str, Any] = {}
+    monkeypatch.setattr(api_main, "_update_job", _raise_on_complete)
+    monkeypatch.setattr(amod, "_is_last_attempt", lambda: True)
+    monkeypatch.setattr(amod, "_fail_activity", lambda *a, **k: fail_called.setdefault("hit", True))
+
+    # Should NOT raise and should NOT mark failed -- the job is already completed.
+    amod.finalize_stage_activity("job-9", req, consensus, True, content, platform, experiment)
+    assert "hit" not in fail_called
+    assert fake_job_client.get_job("job-9")["status"] == "completed"
+
+
 def test_finalize_stage_activity_store_failure_not_last_attempt_reraises(
     monkeypatch: pytest.MonkeyPatch, fake_job_client
 ) -> None:
@@ -843,6 +881,23 @@ def _fake_workflow(monkeypatch, *, patched: bool, results: dict[str, dict] | Non
     monkeypatch.setattr(wmod.workflow, "patched", lambda name: patched)
     monkeypatch.setattr(wmod.workflow, "execute_activity", _fake_execute)
     return wmod, order
+
+
+def test_stage_activity_opts_bound_each_attempt() -> None:
+    """Stage opts cap each attempt (start-to-close) below the overall ceiling so a
+    hung attempt is retried; the legacy drain-out opts keep the 4h envelope."""
+    from social_media_marketing_team.temporal import workflows as wmod
+
+    stage = dict(wmod._STAGE_ACTIVITY_OPTS)
+    assert stage["start_to_close_timeout"] == wmod.STAGE_START_TO_CLOSE_TIMEOUT
+    assert stage["start_to_close_timeout"] < stage["schedule_to_close_timeout"]
+
+    legacy = dict(wmod._LEGACY_ACTIVITY_OPTS)
+    assert legacy["schedule_to_close_timeout"] == wmod.RUN_TIMEOUT
+    assert legacy["start_to_close_timeout"] == wmod.RUN_TIMEOUT
+    # Task queue + retry policy stay in lockstep with the stage opts.
+    assert legacy["task_queue"] == stage["task_queue"]
+    assert legacy["retry_policy"] is stage["retry_policy"]
 
 
 def test_workflow_approved_runs_all_stages(monkeypatch: pytest.MonkeyPatch) -> None:

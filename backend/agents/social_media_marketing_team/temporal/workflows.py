@@ -34,12 +34,21 @@ with workflow.unsafe.imports_passed_through():
 # single activity.
 RUN_TIMEOUT = timedelta(hours=4)
 
-# Per-stage ceiling for the decomposed activities. Each phase is a single bounded
-# unit of work (deterministic Python plus, for the content stage, concept generation
-# and a Postgres read), so a whole-pipeline 4h budget per stage would let five stages
-# stack to ~20h before Temporal reacts. One hour comfortably covers a stage's retries
-# while keeping the total pipeline ceiling proportionate.
+# Per-stage overall ceiling (schedule-to-close, including retries) for the decomposed
+# activities. Each phase is a single bounded unit of work (deterministic Python plus,
+# for the content stage, concept generation and a Postgres read), so a whole-pipeline
+# 4h budget per stage would let five stages stack to ~20h before Temporal reacts. One
+# hour comfortably covers a stage's retries while keeping the total pipeline ceiling
+# proportionate.
 STAGE_TIMEOUT = timedelta(hours=1)
+
+# Per-attempt ceiling (start-to-close) for the decomposed activities. Without it a
+# single hung attempt (e.g. a wedged LLM exemplar rerank in the content stage) would
+# never time out, so the retry policy could never re-dispatch it and the attempt would
+# hold a worker activity slot for the full STAGE_TIMEOUT. Twenty minutes is generous
+# for the only stage that does real work (the rest are sub-second) while ensuring a
+# hang is detected and retried onto a healthy worker well before the overall ceiling.
+STAGE_START_TO_CLOSE_TIMEOUT = timedelta(minutes=20)
 
 DEFAULT_RETRY_POLICY = RetryPolicy(
     maximum_attempts=3,
@@ -51,22 +60,28 @@ DEFAULT_RETRY_POLICY = RetryPolicy(
 # One option block shared by every pipeline-stage activity so tuning a timeout/retry
 # is a single edit. No heartbeat timeout: the stage activities are short, deterministic
 # Python phases with no in-activity human wait (the human gate is a static request flag
-# decided here in the workflow). Immutable (MappingProxyType) so an importer can't
-# accidentally mutate the shared options.
+# decided here in the workflow); the per-attempt start-to-close timeout bounds a hang
+# instead. Immutable (MappingProxyType) so an importer can't accidentally mutate the
+# shared options.
 _STAGE_ACTIVITY_OPTS: Mapping[str, Any] = MappingProxyType(
     dict(
         task_queue=TASK_QUEUE,
         schedule_to_close_timeout=STAGE_TIMEOUT,
+        start_to_close_timeout=STAGE_START_TO_CLOSE_TIMEOUT,
         retry_policy=DEFAULT_RETRY_POLICY,
     )
 )
 
 # Options for the legacy whole-pipeline activity in the drain-out branch: the shared
-# stage options with only the timeout widened back to the pre-decomposition envelope
-# (4h schedule-to-close) so in-flight histories replay unchanged. Derived from
-# _STAGE_ACTIVITY_OPTS so the task queue and retry policy stay in lockstep.
+# stage options with both ceilings widened back to the pre-decomposition envelope (4h)
+# so in-flight histories replay unchanged. Derived from _STAGE_ACTIVITY_OPTS so the
+# task queue and retry policy stay in lockstep.
 _LEGACY_ACTIVITY_OPTS: Mapping[str, Any] = MappingProxyType(
-    {**_STAGE_ACTIVITY_OPTS, "schedule_to_close_timeout": RUN_TIMEOUT}
+    {
+        **_STAGE_ACTIVITY_OPTS,
+        "schedule_to_close_timeout": RUN_TIMEOUT,
+        "start_to_close_timeout": RUN_TIMEOUT,
+    }
 )
 
 
