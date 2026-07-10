@@ -414,7 +414,7 @@ def test_consensus_stage_activity_cancelled_brand_fetch_maps_to_cancelled(
         "social_media_marketing_team.adapters.branding.fetch_brand",
         lambda client_id, brand_id: (_ for _ in ()).throw(RuntimeError("interrupted")),
     )
-    monkeypatch.setattr(amod, "_is_cancelled", lambda: True)
+    monkeypatch.setattr("temporalio.activity.is_cancelled", lambda: True)
     fake_job_client.create_job("job-brand-cx", status="pending")
 
     with pytest.raises(CancelledError):
@@ -468,7 +468,7 @@ def test_run_stage_cancelled_body_error_maps_to_cancellation(
     from social_media_marketing_team.temporal import activities as amod
 
     fake_job_client.create_job("job-cx", status="running")
-    monkeypatch.setattr(amod, "_is_cancelled", lambda: True)
+    monkeypatch.setattr("temporalio.activity.is_cancelled", lambda: True)
 
     def _body():
         raise RuntimeError("boom")
@@ -476,45 +476,6 @@ def test_run_stage_cancelled_body_error_maps_to_cancellation(
     with pytest.raises(CancelledError):
         amod._run_stage("job-cx", "content_plan", lambda: {"status": "FAIL"}, _body)
     assert fake_job_client.get_job("job-cx")["status"] == "cancelled"
-
-
-def test_is_last_attempt_true_outside_activity_context() -> None:
-    from social_media_marketing_team.temporal import activities as amod
-
-    # No activity context -> treat as last attempt so the caller marks terminal.
-    assert amod._is_last_attempt() is True
-
-
-def test_is_cancelled_false_outside_activity_context() -> None:
-    from social_media_marketing_team.temporal import activities as amod
-
-    assert amod._is_cancelled() is False
-
-
-def test_is_last_attempt_reads_scheduled_retry_policy(monkeypatch: pytest.MonkeyPatch) -> None:
-    from temporalio.common import RetryPolicy
-
-    from social_media_marketing_team.temporal import activities as amod
-
-    def _info(retry_policy, attempt):
-        return type("I", (), {"retry_policy": retry_policy, "attempt": attempt})()
-
-    monkeypatch.setattr(amod.activity, "info", lambda: _info(RetryPolicy(maximum_attempts=3), 3))
-    assert amod._is_last_attempt() is True
-
-    monkeypatch.setattr(amod.activity, "info", lambda: _info(RetryPolicy(maximum_attempts=3), 1))
-    assert amod._is_last_attempt() is False
-
-    # maximum_attempts <= 0 means unlimited retries -> never the last attempt.
-    monkeypatch.setattr(amod.activity, "info", lambda: _info(RetryPolicy(maximum_attempts=0), 9))
-    assert amod._is_last_attempt() is False
-
-
-def test_is_cancelled_reads_activity_context(monkeypatch: pytest.MonkeyPatch) -> None:
-    from social_media_marketing_team.temporal import activities as amod
-
-    monkeypatch.setattr(amod.activity, "is_cancelled", lambda: True)
-    assert amod._is_cancelled() is True
 
 
 def test_content_plan_stage_activity_success(
@@ -753,7 +714,7 @@ def test_finalize_store_error_while_cancelled_maps_to_cancelled(
     amod, req, consensus, content, platform, experiment = _finalize_with_completion_error(
         monkeypatch, fake_job_client, "job-8b", RuntimeError("boom")
     )
-    monkeypatch.setattr(amod, "_is_cancelled", lambda: True)
+    monkeypatch.setattr("temporalio.activity.is_cancelled", lambda: True)
     with pytest.raises(CancelledError):
         amod.finalize_stage_activity("job-8b", req, consensus, True, content, platform, experiment)
     assert fake_job_client.get_job("job-8b")["status"] == "cancelled"

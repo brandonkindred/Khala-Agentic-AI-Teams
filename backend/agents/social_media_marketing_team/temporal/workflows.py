@@ -61,15 +61,12 @@ _STAGE_ACTIVITY_OPTS: Mapping[str, Any] = MappingProxyType(
     )
 )
 
-# Options for the legacy whole-pipeline activity in the drain-out branch: deliberately
-# the pre-decomposition envelope (4h schedule-to-close) so in-flight histories replay
-# unchanged.
+# Options for the legacy whole-pipeline activity in the drain-out branch: the shared
+# stage options with only the timeout widened back to the pre-decomposition envelope
+# (4h schedule-to-close) so in-flight histories replay unchanged. Derived from
+# _STAGE_ACTIVITY_OPTS so the task queue and retry policy stay in lockstep.
 _LEGACY_ACTIVITY_OPTS: Mapping[str, Any] = MappingProxyType(
-    dict(
-        task_queue=TASK_QUEUE,
-        schedule_to_close_timeout=RUN_TIMEOUT,
-        retry_policy=DEFAULT_RETRY_POLICY,
-    )
+    {**_STAGE_ACTIVITY_OPTS, "schedule_to_close_timeout": RUN_TIMEOUT}
 )
 
 

@@ -30,6 +30,9 @@ from typing import Any, Callable, Dict, Optional
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from shared_temporal import is_last_attempt as _is_last_attempt
+from shared_temporal import raise_if_cancelled
+
 logger = logging.getLogger(__name__)
 
 
@@ -81,47 +84,6 @@ def _mark_cancelled(job_id: str) -> None:
         logger.warning("Failed to mark job %s cancelled", job_id)
 
 
-def _is_cancelled() -> bool:
-    """True when the current activity has been cancelled.
-
-    Preconditions:
-        - None (safe to call outside an activity context).
-    Postconditions:
-        - Returns ``activity.is_cancelled()`` inside an activity context, else
-          ``False`` (direct/thread use has no cancellation to observe).
-    """
-    try:
-        return activity.is_cancelled()
-    except RuntimeError:
-        return False
-
-
-def _is_last_attempt() -> bool:
-    """True when this is the final Temporal retry attempt (or no activity context).
-
-    Reads ``maximum_attempts`` from the retry policy the activity was scheduled with
-    (``activity.info().retry_policy``) rather than a compile-time constant, so the
-    check never drifts from the workflow's policy.
-
-    Preconditions:
-        - Called from within an activity body (or directly / thread mode).
-    Postconditions:
-        - Returns True when the current attempt is the last Temporal will make, or
-          when called outside an activity context (the caller then marks the job
-          terminal). Returns False when the policy allows unlimited retries
-          (``maximum_attempts <= 0``) -- there is no last attempt to gate on.
-    """
-    try:
-        info = activity.info()
-    except RuntimeError:
-        return True
-    policy = info.retry_policy
-    max_attempts = policy.maximum_attempts if policy is not None else 0
-    if max_attempts <= 0:
-        return False
-    return info.attempt >= max_attempts
-
-
 def _run_stage(
     job_id: str,
     failed_phase: str,
@@ -133,8 +95,8 @@ def _run_stage(
     Handled errors terminate the job store and short-circuit the workflow (via the
     returned FAIL DTO) rather than leaking to Temporal retry, while an external
     cancellation propagates as a Temporal ``CancelledError`` (job marked cancelled,
-    not failed). Keeping the funnel in one place makes the contract structural -- a
-    new stage activity cannot forget it.
+    not failed -- via the shared ``raise_if_cancelled``). Keeping the funnel in one
+    place makes the contract structural -- a new stage activity cannot forget it.
 
     Preconditions:
         - ``body`` is a zero-arg callable returning the stage's serialized DTO dict;
@@ -145,24 +107,10 @@ def _run_stage(
           job is marked cancelled and a ``CancelledError`` propagates. On any other
           handled error the job is marked failed and ``fail_dto()`` is returned.
     """
-    from temporalio.exceptions import CancelledError
-
     try:
         return body()
-    except CancelledError:
-        logger.info("Social marketing %s stage cancelled for job %s", failed_phase, job_id)
-        _mark_cancelled(job_id)
-        raise
     except Exception as e:
-        # A worker-delivered cancellation can surface as a non-CancelledError from a
-        # sync body (these activities don't heartbeat, so cancellation is observed
-        # via activity.is_cancelled() rather than a raised CancelledError). Treat an
-        # in-flight cancellation as cancelled, not a pipeline failure, and re-raise a
-        # CancelledError so Temporal records the activity as cancelled.
-        if _is_cancelled():
-            logger.info("Social marketing %s stage cancelled for job %s", failed_phase, job_id)
-            _mark_cancelled(job_id)
-            raise CancelledError(f"{failed_phase} stage cancelled") from e
+        raise_if_cancelled(e, f"{failed_phase} stage cancelled", lambda: _mark_cancelled(job_id))
         _fail_activity(job_id, e, failed_phase)
         return fail_dto()
 
@@ -223,8 +171,6 @@ def consensus_stage_activity(job_id: str, request_dict: Dict[str, Any]) -> Dict[
           reflects the failure. Any other handled stage error marks the job failed
           and returns a ``FAIL`` DTO.
     """
-    from temporalio.exceptions import CancelledError
-
     from social_media_marketing_team.adapters.branding import (
         BrandIncompleteError,
         BrandNotFoundError,
@@ -250,12 +196,10 @@ def consensus_stage_activity(job_id: str, request_dict: Dict[str, Any]) -> Dict[
         # Unexpected brand-fetch errors (network/timeout/RuntimeError from the
         # branding API) are retryable, but the job store must still reflect the
         # failure rather than sit in "running" until the stale monitor fires --
-        # mirroring the thread-mode ``_run_team_job`` funnel. Re-raise so Temporal
-        # can still retry a transient fault; surface an in-flight cancellation as a
-        # cancellation rather than a failure.
-        if _is_cancelled():
-            _mark_cancelled(job_id)
-            raise CancelledError("consensus brand fetch cancelled") from exc
+        # mirroring the thread-mode ``_run_team_job`` funnel. Surface an in-flight
+        # cancellation as a cancellation, then mark failed and re-raise so Temporal
+        # can still retry a transient fault.
+        raise_if_cancelled(exc, "consensus brand fetch cancelled", lambda: _mark_cancelled(job_id))
         _fail_activity(job_id, exc, "brand_validation")
         raise
 
@@ -451,8 +395,6 @@ def finalize_stage_activity(
           attempt, which marks the job failed and re-raises rather than completing as
           if finalization had succeeded.
     """
-    from temporalio.exceptions import CancelledError
-
     from job_service_client import JOB_STATUS_COMPLETED
     from social_media_marketing_team.api.main import RunMarketingTeamRequest, _update_job
     from social_media_marketing_team.models import (
@@ -529,15 +471,8 @@ def finalize_stage_activity(
             eta_hint="done",
             result=output.model_dump(),
         )
-    except CancelledError:
-        logger.info("Social marketing finalize cancelled for job %s", job_id)
-        _mark_cancelled(job_id)
-        raise
     except Exception as e:
-        if _is_cancelled():
-            logger.info("Social marketing finalize cancelled for job %s", job_id)
-            _mark_cancelled(job_id)
-            raise CancelledError("finalize stage cancelled") from e
+        raise_if_cancelled(e, "finalize stage cancelled", lambda: _mark_cancelled(job_id))
         if not _is_last_attempt():
             raise
         _fail_activity(job_id, e, "finalize")
