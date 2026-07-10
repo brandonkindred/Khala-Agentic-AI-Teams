@@ -152,7 +152,7 @@ describe('IntegrationsApiService', () => {
     req.flush({ enabled: false, token_configured: false, default_label: '' });
   });
 
-  it('getGitHubRepos GET emits the typed repo list', () => {
+  it('getGitHubRepos GET emits the typed repo list and sends no query params', () => {
     const repos = [
       {
         owner: 'acme',
@@ -173,6 +173,8 @@ describe('IntegrationsApiService', () => {
     });
     const req = httpMock.expectOne(`${baseUrl}/github/repos`);
     expect(req.request.method).toBe('GET');
+    // The repos endpoint is account-scoped — it must never receive owner/repo params.
+    expect(req.request.params.keys().length).toBe(0);
     req.flush(repos);
     expect(emitted).toEqual(repos);
   });
@@ -200,6 +202,31 @@ describe('IntegrationsApiService', () => {
     expect(req.request.method).toBe('GET');
     expect(req.request.params.get('owner')).toBe('acme');
     expect(req.request.params.get('repo')).toBe('widget');
+    req.flush([]);
+  });
+
+  it('getGitHubIssues GET passes a partial owner-only pair through (backend returns 400)', () => {
+    service.getGitHubIssues({ owner: 'acme' }).subscribe();
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/github/issues`);
+    // The lone param is sent so the backend rejects it, rather than being silently dropped.
+    expect(req.request.params.get('owner')).toBe('acme');
+    expect(req.request.params.has('repo')).toBe(false);
+    req.flush([]);
+  });
+
+  it('getGitHubPullRequests GET passes a partial repo-only pair through', () => {
+    service.getGitHubPullRequests({ repo: 'widget' }).subscribe();
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/github/pulls`);
+    expect(req.request.params.get('repo')).toBe('widget');
+    expect(req.request.params.has('owner')).toBe(false);
+    req.flush([]);
+  });
+
+  it('getGitHubReviewHistory GET passes a partial owner-only pair through', () => {
+    service.getGitHubReviewHistory({ owner: 'acme' }).subscribe();
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/github/reviews`);
+    expect(req.request.params.get('owner')).toBe('acme');
+    expect(req.request.params.has('repo')).toBe(false);
     req.flush([]);
   });
 

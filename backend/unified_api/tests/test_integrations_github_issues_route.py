@@ -171,6 +171,16 @@ def test_issues_returns_400_when_owner_repo_missing(mock_cfg, mock_cred):
     assert "owner/repo" in resp.json()["detail"]
 
 
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "owner": "../etc", "repo": "widget"})
+def test_issues_rejects_unsafe_configured_default_owner(mock_cfg, mock_cred):
+    """A corrupted/misconfigured default owner is validated like a request-supplied one,
+    so a traversal-shaped value yields a 400 rather than a malformed GitHub URL."""
+    resp = client.get(_ISSUES)
+    assert resp.status_code == 400
+    assert "invalid GitHub owner" in resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # GitHub HTTP error mapping
 # ---------------------------------------------------------------------------

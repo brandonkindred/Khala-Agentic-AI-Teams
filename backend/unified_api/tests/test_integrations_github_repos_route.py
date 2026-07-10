@@ -36,12 +36,17 @@ _GH_CFG = {"enabled": True, "owner": "", "repo": "", "default_label": "", "repo_
 class _FakeResp:
     """Minimal stand-in for an httpx.Response from GET /user/repos."""
 
-    def __init__(self, status_code=200, json_data=None, next_url=None):
+    def __init__(self, status_code=200, json_data=None, next_url=None, json_raises=False):
         self.status_code = status_code
         self._json = json_data if json_data is not None else []
+        self._json_raises = json_raises
         self.links = {"next": {"url": next_url, "rel": "next"}} if next_url else {}
 
     def json(self):
+        if self._json_raises:
+            # Mirrors httpx.Response.json() on a non-JSON 200 body (json.JSONDecodeError
+            # is a ValueError subclass).
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
         return self._json
 
 
@@ -143,6 +148,30 @@ def test_repos_returns_502_on_other_github_error(mock_cfg, mock_cred):
         resp = client.get(_REPOS)
     assert resp.status_code == 502
     assert "GitHub API returned 500" in resp.json()["detail"]
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_repos_returns_502_on_non_json_200(mock_cfg, mock_cred):
+    """A 200 whose body isn't JSON (e.g. an HTML error page from a proxy) maps to a 502,
+    not an unhandled 500 from resp.json() raising."""
+    fake = _FakeClient([_FakeResp(200, json_raises=True)])
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REPOS)
+    assert resp.status_code == 502
+    assert "non-JSON" in resp.json()["detail"]
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_repos_returns_502_on_non_list_200(mock_cfg, mock_cred):
+    """A 200 whose JSON body is an object rather than an array is malformed for a list
+    endpoint and maps to a 502 instead of iterating the dict's keys."""
+    fake = _FakeClient([_FakeResp(200, {"message": "unexpected"})])
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REPOS)
+    assert resp.status_code == 502
+    assert "unexpected response shape" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

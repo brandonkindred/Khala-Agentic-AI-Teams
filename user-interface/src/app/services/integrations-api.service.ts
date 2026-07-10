@@ -159,8 +159,13 @@ export class IntegrationsApiService {
     if (options.label) {
       params['label'] = options.label;
     }
-    if (options.owner && options.repo) {
+    // Send whichever of owner/repo is provided rather than dropping both when only one is
+    // set — a partial pair is a caller error the backend rejects with a 400, and silently
+    // falling back to the configured default would mask it.
+    if (options.owner) {
       params['owner'] = options.owner;
+    }
+    if (options.repo) {
       params['repo'] = options.repo;
     }
     return this.http.get<GitHubIssueItem[]>(`${this.baseUrl}/github/issues`, { params });
@@ -177,8 +182,11 @@ export class IntegrationsApiService {
    */
   getGitHubPullRequests(options: { owner?: string; repo?: string } = {}): Observable<GitHubPullRequestItem[]> {
     const params: Record<string, string> = {};
-    if (options.owner && options.repo) {
+    // Pass through a partial pair so the backend's 400 surfaces (see getGitHubIssues).
+    if (options.owner) {
       params['owner'] = options.owner;
+    }
+    if (options.repo) {
       params['repo'] = options.repo;
     }
     return this.http.get<GitHubPullRequestItem[]>(`${this.baseUrl}/github/pulls`, { params });
@@ -201,8 +209,11 @@ export class IntegrationsApiService {
     if (options.prNumber !== undefined) {
       params['pr_number'] = String(options.prNumber);
     }
-    if (options.owner && options.repo) {
+    // Pass through a partial pair so the backend's 400 surfaces (see getGitHubIssues).
+    if (options.owner) {
       params['owner'] = options.owner;
+    }
+    if (options.repo) {
       params['repo'] = options.repo;
     }
     return this.http.get<CodeReviewRunItem[]>(`${this.baseUrl}/github/reviews`, { params });

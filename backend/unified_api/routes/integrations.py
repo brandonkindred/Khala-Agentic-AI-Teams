@@ -1701,10 +1701,13 @@ def _resolve_github_target(
         return cfg, token, req_owner, req_repo
     if req_owner or req_repo:
         raise HTTPException(status_code=400, detail="GitHub owner and repo must be provided together.")
-    # .get() defensively: a malformed/legacy config record missing a key must surface
-    # as this clean 400, never as a KeyError → opaque 500 (matching _repo_path_override).
-    cfg_owner = cfg.get("owner", "")
-    cfg_repo = cfg.get("repo", "")
+    # The configured default is operator-set, but a corrupted/misconfigured value would
+    # otherwise flow unchecked into URL segments and filesystem paths — run it through the
+    # SAME validation as a request-supplied target so the fallback can't traverse or build
+    # a malformed GitHub URL. .get() defensively: a malformed/legacy record missing a key
+    # surfaces as this clean 400, never a KeyError → opaque 500 (matching _repo_path_override).
+    cfg_owner = _validate_repo_component("owner", cfg.get("owner", ""))
+    cfg_repo = _validate_repo_component("repo", cfg.get("repo", ""))
     if not cfg_owner or not cfg_repo:
         raise HTTPException(
             status_code=400,
@@ -1752,7 +1755,19 @@ async def _collect_github_pages(
                 raise HTTPException(status_code=404, detail=not_found_message)
             if resp.status_code != 200:
                 raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code}.")
-            raw.extend(resp.json())
+            # A 200 whose body isn't JSON (an HTML error page from a proxy/outage) would
+            # otherwise raise inside resp.json() and escape as an unhandled 500. Map it to a
+            # 502 like any other upstream failure. json.JSONDecodeError is a ValueError
+            # subclass, so catching ValueError covers httpx's decode error too.
+            try:
+                page = resp.json()
+            except ValueError as e:
+                raise HTTPException(status_code=502, detail="GitHub API returned a non-JSON response.") from e
+            # A list endpoint always returns a JSON array on 200; a non-list body is
+            # malformed, so treat it as an upstream error rather than iterating a dict's keys.
+            if not isinstance(page, list):
+                raise HTTPException(status_code=502, detail="GitHub API returned an unexpected response shape.")
+            raw.extend(page)
             has_more = bool(resp.links.get("next", {}).get("url"))
     return raw, has_more
 
