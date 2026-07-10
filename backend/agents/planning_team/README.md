@@ -80,7 +80,8 @@ store, so a completed run survives a worker restart and the API keeps polling
 | Phase activity | Timeout | Retry |
 |----------------|---------|-------|
 | `intake` / `synthesis` / `finalize` | 5 min | up to 3 (deterministic, safe) |
-| `discovery` / `requirements` / `market_research` | 1 h | 1 (non-idempotent LLM/HTTP) |
+| `discovery` / `requirements` | 1 h | up to 3 (pure LLM extraction — writes/submits nothing, safe to retry) |
+| `market_research` | 1 h | 1 (submits an external research request) |
 | `document_production` / `sub_agent_provisioning` | 2 h (+ 5 min heartbeat) | 1 (writes files / submits external jobs) |
 
 The worker is registered via `shared_temporal.start_team_worker` (Pattern A:
