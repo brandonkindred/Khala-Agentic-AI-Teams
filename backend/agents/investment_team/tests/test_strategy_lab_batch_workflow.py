@@ -274,9 +274,29 @@ def test_cancellation_between_waves_stops_and_marks_cancelled():
     # 4 cycles, max_parallel=2 → wave [0,1] runs, cancel check trips, wave [2,3] never starts.
     result = _run(_batch_input(batch_size=4, max_parallel=2), harness)
     assert result["status"] == "cancelled"
+    # Wave 2's children never started after the cancel check returned True.
     assert harness.child_starts == ["run-1-c0", "run-1-c1"]
+    # The cancel check runs *between* waves: after wave 1's merge + run-state
+    # persist, not before them.
+    calls = harness.activity_calls
+    first_cancel = calls.index("is_run_cancelled_activity")
+    assert "merge_wave_results_activity" in calls[:first_cancel]
+    assert "persist_run_state_activity" in calls[:first_cancel]
+    # No further wave was launched, so only one cancel check happened.
+    assert calls.count("is_run_cancelled_activity") == 1
     # Terminal status persisted.
     assert any(s.get("status") == "cancelled" for s in persisted)
+
+
+def test_contiguous_prefix():
+    from investment_team.strategy_lab.temporal.workflows import _contiguous_prefix
+
+    assert _contiguous_prefix(set()) == 0
+    assert _contiguous_prefix({0}) == 1
+    assert _contiguous_prefix({1, 2}) == 0  # index 0 missing → no contiguous prefix
+    assert _contiguous_prefix({0, 1, 2}) == 3  # fully contiguous
+    assert _contiguous_prefix({0, 1, 3}) == 2  # gap at 2 stops the prefix
+    assert _contiguous_prefix({0, 2, 3, 5}) == 1
 
 
 def test_errored_cycle_is_counted_and_yields_completed_with_errors():

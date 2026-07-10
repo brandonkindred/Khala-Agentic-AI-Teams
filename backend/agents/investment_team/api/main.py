@@ -1544,14 +1544,21 @@ def _finalize_strategy_lab_cycle_record(
     Preconditions:
         ``record`` is a fully assembled ``StrategyLabRecord`` returned by
         ``StrategyLabOrchestrator.run_cycle`` (``record.strategy`` /
-        ``record.backtest`` populated).
+        ``record.backtest`` populated). ``on_phase`` is either ``None`` or a
+        callable ``(phase: str, data: dict) -> None`` that receives
+        phase-change notifications (``paper_trading``, ``paper_trading_complete``,
+        ``paper_trading_skipped``, ``paper_trading_failed``); when ``None``, those
+        events are silently dropped (the Temporal ``finalize_cycle_record_activity``
+        passes ``None`` — SSE progress is a separate concern there).
     Postconditions:
         Returns the same ``record`` with its ``signal_intelligence_brief`` set
         (when ``signal_brief_storage`` is given and it was empty) and its
         ``paper_trading_*`` fields resolved — ``skipped`` for non-winning /
         disabled / no-code / no-data cases, ``completed`` on success,
         ``failed`` (non-fatal) on a paper-trading error. The record is durably
-        persisted via :func:`_persist_strategy_lab_record` before returning.
+        persisted via :func:`_persist_strategy_lab_record` before returning. Any
+        ``on_phase`` callback fires as a side effect only; it never affects the
+        returned record.
     """
 
     def _emit(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
@@ -1645,7 +1652,7 @@ def _get_lab_run_job_client():
 
 def _compute_signal_brief_snapshot(
     benchmark_symbol: str,
-) -> "tuple[Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]]":
+) -> tuple[Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]]:
     """Build a per-batch signal brief over all currently-persisted prior records.
 
     Extracted from ``_strategy_lab_worker``'s ``_compute_signal_brief`` closure so
@@ -2003,21 +2010,6 @@ def _strategy_lab_worker(
             # "no constraint" handling (which keys off ``None``) is uniform.
             exclude_asset_classes = excluded_for_allowed(request.allowed_asset_classes) or None
 
-        def _compute_signal_brief() -> tuple[
-            Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]
-        ]:
-            """Build the per-batch signal brief over all currently-persisted prior records.
-
-            Called at the start of every batch so that batch N+1 sees results from
-            batches 1..N (and prior runs). Delegates to the module-level
-            :func:`_compute_signal_brief_snapshot` shared with the Temporal path.
-            """
-            return _compute_signal_brief_snapshot(request.benchmark_symbol)
-
-        def _is_run_cancelled() -> bool:
-            """Check the job service for external cancellation."""
-            return _is_strategy_lab_run_cancelled(run_id)
-
         # Resume support: derive starting batch + within-batch index from the flat offset.
         start_batch_idx, start_within_batch = divmod(start_cycle_offset, batch_size)
         if start_cycle_offset > 0:
@@ -2073,10 +2065,12 @@ def _strategy_lab_worker(
 
             # Refresh the signal-intelligence brief at the start of every batch so the
             # next batch's strategies are informed by every prior batch's results.
-            # Belt-and-suspenders: _compute_signal_brief already catches expected
-            # failures, but an unexpected raise here must not kill the whole run.
+            # Belt-and-suspenders: _compute_signal_brief_snapshot already catches
+            # expected failures, but an unexpected raise here must not kill the run.
             try:
-                precomputed_brief, signal_brief_storage = _compute_signal_brief()
+                precomputed_brief, signal_brief_storage = _compute_signal_brief_snapshot(
+                    request.benchmark_symbol
+                )
             except Exception as exc:  # pragma: no cover — signal brief failure path defensive; happy path covered by integration tests
                 logger.exception(
                     "Signal brief computation raised unexpectedly at batch %d", batch_num
@@ -2296,7 +2290,7 @@ def _strategy_lab_worker(
                             )
 
                 # Check for external cancellation between waves
-                if not run_failed and _is_run_cancelled():
+                if not run_failed and _is_strategy_lab_run_cancelled(run_id):
                     logger.info(
                         "Strategy lab run %s cancelled externally — stopping after wave",
                         run_id,

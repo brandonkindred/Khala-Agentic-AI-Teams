@@ -1030,6 +1030,54 @@ def test_merge_wave_results_activity_merges_in_cycle_index_order():
     assert merged._asset_class_history == ["stocks", "crypto"]
 
 
+# -- Direct tests for the extracted api.main helpers the batch activities wrap --
+
+
+def test_compute_signal_brief_snapshot_disabled_returns_skip(monkeypatch):
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_strategy_lab_signal_expert_enabled", lambda: False)
+    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+    assert brief is None
+    assert storage == {"skipped": True, "skipped_reason": "signal_expert_disabled"}
+
+
+def test_is_strategy_lab_run_cancelled_reads_job_status(monkeypatch):
+    from investment_team.api import main as api_main
+
+    class _FakeClient:
+        def __init__(self, status):
+            self._status = status
+
+        def get_job(self, run_id):
+            return {"status": self._status} if self._status is not None else None
+
+    def _use(status):
+        monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _FakeClient(status))
+
+    _use("cancelled")
+    assert api_main._is_strategy_lab_run_cancelled("r") is True
+    _use("failed")
+    assert api_main._is_strategy_lab_run_cancelled("r") is True
+    _use("running")
+    assert api_main._is_strategy_lab_run_cancelled("r") is False
+    _use(None)  # no persisted job
+    assert api_main._is_strategy_lab_run_cancelled("r") is False
+    # completed is a terminal *success*, not a cancellation.
+    _use("completed")
+    assert api_main._is_strategy_lab_run_cancelled("r") is False
+
+
+def test_is_strategy_lab_run_cancelled_swallows_errors(monkeypatch):
+    from investment_team.api import main as api_main
+
+    def _boom():
+        raise RuntimeError("job service down")
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", _boom)
+    assert api_main._is_strategy_lab_run_cancelled("r") is False
+
+
 def test_compute_signal_brief_activity_maps_unexpected_error(monkeypatch):
     from investment_team.api import main as api_main
 

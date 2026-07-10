@@ -32,6 +32,15 @@ record. Drift copy-on-entry / merge-on-completion across attempts is plain dict
 work here: ``_DriftCollector.snapshot()`` hands each attempt a fresh *empty*
 child collector by design, so copy-on-entry is simply an empty drift dict, and
 merge-on-completion is a list ``extend``.
+
+This module also defines ``StrategyLabBatchWorkflow`` — the durable parent that
+ports ``_strategy_lab_worker``'s batch/wave loop and fans each batch's cycles out
+as ``StrategyLabCycleWorkflow`` **child workflows** (a wave's worth started
+concurrently), merging their results into the batch-level convergence tracker in
+cycle-index order. Both run on the dedicated ``TASK_QUEUE`` (``strategy-lab-queue``)
+and are exported via ``WORKFLOWS``; ``ACTIVITIES`` re-exports the full
+``activities.ACTIVITIES`` list the worker registers alongside them. See the
+``StrategyLabBatchWorkflow`` class docstring for the batch-input/output contract.
 """
 
 from __future__ import annotations
