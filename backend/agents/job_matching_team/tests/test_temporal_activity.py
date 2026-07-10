@@ -764,6 +764,29 @@ def test_workflow_fail_scan_error_does_not_fail_workflow(monkeypatch):
     assert stub.calls[-1]["fn"] is wf.fail_scan_activity  # attempted, then swallowed
 
 
+def test_workflow_never_schedules_legacy_run_scan_activity(monkeypatch):
+    # The decomposed workflow must NEVER schedule the legacy monolith — it stays
+    # registered only for in-flight-history drain-out. Guard against a future
+    # edit reintroducing it alongside the phase activities (duplicate scans).
+    stub = _WorkflowStub()
+    _patch_workflow(monkeypatch, stub)
+
+    _run_workflow()
+
+    scheduled = [c["fn"] for c in stub.calls]
+    assert wf.run_scan_activity not in scheduled
+
+
+def test_workflow_failure_path_never_schedules_legacy_activity(monkeypatch):
+    # The invariant also holds on the failure path (which adds fail_scan).
+    stub = _WorkflowStub(fail_on=wf.scan_activity)
+    _patch_workflow(monkeypatch, stub)
+
+    _run_workflow()
+
+    assert wf.run_scan_activity not in [c["fn"] for c in stub.calls]
+
+
 # ===========================================================================
 # Legacy monolith: run_scan_activity (retained for in-flight history drain-out)
 # ===========================================================================

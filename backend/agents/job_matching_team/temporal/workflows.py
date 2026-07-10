@@ -36,7 +36,13 @@ from temporalio.exceptions import ActivityError
 # raises a deterministic (business) failure exhausts these attempts and then
 # bubbles to the workflow, which records the run + job FAILED via
 # ``fail_scan_activity`` — the same terminal state the monolith recorded inline.
-DEFAULT_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
+# Interval/backoff are set explicitly rather than inherited from the SDK default
+# so the retry cadence is version-independent.
+DEFAULT_RETRY_POLICY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=1),
+    backoff_coefficient=2.0,
+)
 
 # Per-phase start_to_close budgets. ``scan`` does the bulk of the network/LLM
 # work (search + fetch + per-posting extraction), so it keeps the original
@@ -261,6 +267,13 @@ def finalize_scan_activity(
         except Exception:  # noqa: BLE001 - persistence failure must not lose the response
             activity.logger.warning("Failed to save results for run %s", run_id, exc_info=True)
             # Don't leave the run stuck RUNNING; record the persistence failure.
+            # INTENTIONAL run-FAILED + job-COMPLETED split (do not "fix"): the run
+            # row is FAILED because its results couldn't be persisted, yet the job
+            # still COMPLETEs below with the in-memory payload. This mirrors the
+            # thread-mode orchestrator — "persistence failure must not lose the
+            # response" — so a transient DB write error still returns the ranked
+            # jobs the caller computed. The two rows track different things (run
+            # persistence vs. API job outcome), so the mismatch is expected.
             try:
                 store.mark_failed(run_id, "persisting results failed")
             except Exception:  # noqa: BLE001
@@ -503,9 +516,12 @@ class JobMatchingWorkflow:
                     retry_policy=DEFAULT_RETRY_POLICY,
                 )
             except ActivityError:
-                # Even the failure bookkeeping couldn't be recorded (worker died /
-                # job store down through every retry). Don't let that fail the
-                # workflow and lose the terminal state — return {} like a normal
-                # failure; the run/job are left as-is for a monitor to reconcile.
+                # Even the terminal bookkeeping couldn't be recorded (worker died
+                # or the job store was down through every retry). Swallow it:
+                # failing the workflow here would not record FAILED either and
+                # would surface a Failed workflow instead of the {} a caller
+                # expects. This is the bounded worst case (a crash through every
+                # fail_scan retry); the run/job stay RUNNING until the job's own
+                # lifecycle (cancellation/expiry) or a re-submission supersedes it.
                 workflow.logger.warning("fail_scan could not record FAILED for %s", job_id)
             return {}

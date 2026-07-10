@@ -94,6 +94,18 @@ def test_save_results_inserts_rows_and_completes(monkeypatch):
     assert sorted(seen_json.obj) == ["a", "b", "c"]
 
 
+def test_save_results_defaults_scanned_fingerprints_to_ranked(monkeypatch):
+    # Omitting scanned_fingerprints falls back to the ranked postings' own
+    # fingerprints (store.py default path).
+    cur = FakeCursor()
+    _patch_conn(monkeypatch, cur)
+    ranked = [_ranked("A"), _ranked("B")]
+    JobMatchingStore().save_results("r1", ranked, total_found=2)
+    update_params = next(p for s, p in cur.executed if "UPDATE job_matching_runs" in s)
+    seen_json = update_params[3]
+    assert sorted(seen_json.obj) == sorted({r.posting.fingerprint for r in ranked})
+
+
 def test_mark_failed_truncates(monkeypatch):
     cur = FakeCursor()
     _patch_conn(monkeypatch, cur)
@@ -213,6 +225,20 @@ def test_list_listings_all_disables_filtering(monkeypatch):
     JobMatchingStore().list_listings(status="all")
     listing_sql, _ = cur.executed[0]
     assert "WHERE COALESCE" not in listing_sql
+
+
+def test_list_listings_active_empty_result(monkeypatch):
+    # Empty result set under the default 'active' filter yields an empty,
+    # count-less response (not just the 'all' case).
+    cur = FakeCursor(fetchall=[[], []])
+    _patch_conn(monkeypatch, cur)
+    out = JobMatchingStore().list_listings(status="active", limit=25)
+    assert out.total == 0
+    assert out.listings == []
+    assert out.counts == {}
+    listing_sql, listing_params = cur.executed[0]
+    assert "NOT IN ('archived', 'not_interested')" in listing_sql
+    assert listing_params == (25,)
 
 
 def test_list_listings_rejects_invalid_filter(monkeypatch):
