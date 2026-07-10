@@ -153,6 +153,7 @@ def test_build_batch_input_maps_request(monkeypatch):
 
 
 def test_build_batch_input_translates_allowed_asset_classes(monkeypatch):
+    from investment_team import strategy_lab_context
     from investment_team.api import main as api_main
     from investment_team.strategy_lab.temporal.start_workflow import (
         build_strategy_lab_batch_input,
@@ -160,7 +161,11 @@ def test_build_batch_input_translates_allowed_asset_classes(monkeypatch):
 
     monkeypatch.setattr(api_main, "_clamp_max_parallel", lambda n: n)
     monkeypatch.setattr(api_main, "_rehydrate_active_run_offset", lambda run_id: 0)
-    monkeypatch.setattr(api_main, "excluded_for_allowed", lambda allowed: ["crypto", "forex"])
+    # ``excluded_for_allowed`` is imported from its home module, not laundered
+    # through api.main, so patch it at the source.
+    monkeypatch.setattr(
+        strategy_lab_context, "excluded_for_allowed", lambda allowed: ["crypto", "forex"]
+    )
 
     req = _FakeRequest()
     req.allowed_asset_classes = ["stocks"]
