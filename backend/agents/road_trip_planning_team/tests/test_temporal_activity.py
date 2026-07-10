@@ -251,8 +251,8 @@ def test_workflow_dispatches_begin_five_steps_persist(monkeypatch, sample_trip_b
 
     # Retry policy split: specialists get the bounded LLM retry, bookkeeping the
     # deeper idempotent-write retry.
-    assert by_name["begin_road_trip_job_activity"]["retry"] is wf._DEFAULT_RETRY
-    assert by_name["persist_itinerary_activity"]["retry"] is wf._DEFAULT_RETRY
+    assert by_name["begin_road_trip_job_activity"]["retry"] is wf._BOOKKEEPING_RETRY
+    assert by_name["persist_itinerary_activity"]["retry"] is wf._BOOKKEEPING_RETRY
     for step in ("profile_travelers_activity", "plan_route_activity", "compose_itinerary_activity"):
         assert by_name[step]["retry"] is wf._LLM_RETRY
 

@@ -47,7 +47,7 @@ _LLM_RETRY = RetryPolicy(
 
 # Cheap/deterministic job-store bookkeeping (begin / persist / mark-failed): a
 # slightly deeper bounded retry is safe because each write is idempotent.
-_DEFAULT_RETRY = RetryPolicy(
+_BOOKKEEPING_RETRY = RetryPolicy(
     maximum_attempts=3,
     initial_interval=timedelta(seconds=10),
     maximum_interval=timedelta(minutes=1),
@@ -98,6 +98,7 @@ class RoadTripWorkflow:
         Postconditions:
             - ``progress()`` subsequently reports ``step``/``fraction``.
         """
+        assert 0.0 <= fraction <= 1.0, f"progress fraction {fraction} out of [0.0, 1.0]"
         self._step = step
         self._fraction = fraction
 
@@ -123,7 +124,7 @@ class RoadTripWorkflow:
                 args=[job_id],
                 task_queue=TASK_QUEUE,
                 start_to_close_timeout=_SHORT_TIMEOUT,
-                retry_policy=_DEFAULT_RETRY,
+                retry_policy=_BOOKKEEPING_RETRY,
             )
 
             self._advance("profile_travelers", 0.05)
@@ -177,7 +178,7 @@ class RoadTripWorkflow:
                 args=[job_id, itinerary],
                 task_queue=TASK_QUEUE,
                 start_to_close_timeout=_SHORT_TIMEOUT,
-                retry_policy=_DEFAULT_RETRY,
+                retry_policy=_BOOKKEEPING_RETRY,
             )
             self._advance("done", 1.0)
             return {"job_id": job_id}
@@ -190,7 +191,7 @@ class RoadTripWorkflow:
                     args=[job_id, str(exc)],
                     task_queue=TASK_QUEUE,
                     start_to_close_timeout=_SHORT_TIMEOUT,
-                    retry_policy=_DEFAULT_RETRY,
+                    retry_policy=_BOOKKEEPING_RETRY,
                 )
             except Exception:  # noqa: BLE001 — never mask the original pipeline error
                 pass
