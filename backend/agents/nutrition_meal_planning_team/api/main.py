@@ -315,9 +315,16 @@ def reresolve_restrictions_route(client_id: str):
 def _temporal_enabled() -> bool:
     """Return True when Temporal mode is active (``TEMPORAL_ADDRESS`` set).
 
-    A missing ``shared_temporal`` (Temporal not installed) reads as disabled so
-    the thread fallback runs. Imports the flag lazily so it reflects the live
-    env at request time (and so tests can patch ``shared_temporal.is_temporal_enabled``).
+    Imports the flag lazily so it reflects the live env at request time (and so
+    tests can patch ``shared_temporal.is_temporal_enabled``).
+
+    Preconditions:
+        - None.
+
+    Postconditions:
+        - Returns ``True`` iff ``shared_temporal`` is importable and
+          ``is_temporal_enabled()`` is True; a missing ``shared_temporal``
+          (Temporal not installed) reads as disabled so the thread fallback runs.
     """
     try:
         from shared_temporal import is_temporal_enabled

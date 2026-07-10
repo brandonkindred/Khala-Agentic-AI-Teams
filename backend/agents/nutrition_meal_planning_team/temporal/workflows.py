@@ -141,6 +141,17 @@ class NutritionPlanWorkflow:
 
     @workflow.run
     async def run(self, job_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Durable entrypoint: run the nutrition-plan job for ``job_id``.
+
+        Preconditions:
+            - ``job_id`` refers to a job already created in the job store.
+            - ``request`` is the serialized ``NutritionPlanRequest``
+              (``body.model_dump()``).
+
+        Postconditions:
+            - Delegates to ``run_nutrition_plan_activity`` (which owns job-store
+              status bookkeeping) and returns its ``{"job_id": job_id}`` result.
+        """
         return await workflow.execute_activity(
             run_nutrition_plan_activity,
             args=[job_id, request],
@@ -156,6 +167,17 @@ class NutritionRegenerateWorkflow:
 
     @workflow.run
     async def run(self, job_id: str, client_id: str) -> Dict[str, Any]:
+        """Durable entrypoint: rebuild the nutrition plan for ``client_id``.
+
+        Preconditions:
+            - ``job_id`` refers to a job already created in the job store.
+            - ``client_id`` identifies a client whose profile exists.
+
+        Postconditions:
+            - Delegates to ``run_nutrition_regenerate_activity`` (which owns
+              job-store status bookkeeping) and returns its ``{"job_id": job_id}``
+              result.
+        """
         return await workflow.execute_activity(
             run_nutrition_regenerate_activity,
             args=[job_id, client_id],
@@ -171,6 +193,16 @@ class NutritionMealPlanWorkflow:
 
     @workflow.run
     async def run(self, job_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Durable entrypoint: run the meal-plan job for ``job_id``.
+
+        Preconditions:
+            - ``job_id`` refers to a job already created in the job store.
+            - ``request`` is the serialized ``MealPlanRequest`` (``body.model_dump()``).
+
+        Postconditions:
+            - Delegates to ``run_meal_plan_activity`` (which owns job-store
+              status bookkeeping) and returns its ``{"job_id": job_id}`` result.
+        """
         return await workflow.execute_activity(
             run_meal_plan_activity,
             args=[job_id, request],
