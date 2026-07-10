@@ -113,13 +113,24 @@ def _mock_strands(monkeypatch):
     )
 
     def _fake_call_agent(agent, prompt):
-        """Return mock JSON based on prompt keywords."""
+        """Return mock JSON based on prompt keywords.
+
+        Order and phrasing both matter because stage outputs get embedded into
+        downstream prompts. The viability prompt reasons *over* market signals
+        (so it contains "market signals") and, in split mode, embeds the
+        consistency signal name "Cross-interview theme consistency" — so it must
+        be routed on "viability"/"verdict" BEFORE the psychology "market signals"
+        key, and the consistency branch must key on the instruction phrase
+        "cross-interview consistency" (which the embedded "cross-interview THEME
+        consistency" signal name does not contain) rather than a bare
+        "cross-interview"/"consistency" substring that the viability prompt would
+        trip.
+        """
         prompt_lower = prompt.lower()
-        # Consistency must be matched before the generic transcript/psychology
-        # checks — its prompt mentions "insights"/"analyze" but is the
-        # cross-interview stage.
-        if "consistency" in prompt_lower or "cross-interview" in prompt_lower:
+        if "cross-interview consistency" in prompt_lower:
             return SAMPLE_CONSISTENCY_JSON
+        if "viability" in prompt_lower or "verdict" in prompt_lower:
+            return SAMPLE_VIABILITY_JSON
         if "transcript" in prompt_lower and "analyze" in prompt_lower:
             return SAMPLE_INSIGHT_JSON
         if (
@@ -128,8 +139,6 @@ def _mock_strands(monkeypatch):
             or "market signals" in prompt_lower
         ):
             return SAMPLE_SIGNALS_JSON
-        if "viability" in prompt_lower or "verdict" in prompt_lower:
-            return SAMPLE_VIABILITY_JSON
         if "research artifacts" in prompt_lower or "interview script" in prompt_lower:
             return SAMPLE_SCRIPTS_JSON
         # Fallback

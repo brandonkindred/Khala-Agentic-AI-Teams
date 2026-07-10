@@ -173,7 +173,15 @@ class MarketResearchWorkflow:
         )
         insights = [i for i in ux_results if not isinstance(i, BaseException)]
 
-        await self._progress(job_id, "analysis", 45)
+        active = await self._progress(job_id, "analysis", 45)
+        # Transcripts were loaded but EVERY UX analysis was dropped: if the job is
+        # still active (not a cancel — a cancel makes ux_one raise, which gather
+        # captures too), this is a total analysis failure. Surface it as a failed
+        # run rather than silently emitting an "insufficient evidence / collect
+        # more interviews" result from zero insights (which would misrepresent a
+        # run that had data but couldn't analyze it).
+        if active and loaded and not insights:
+            raise RuntimeError(f"All {len(loaded)} transcript analyses failed")
 
         # Psychology and (split mode) consistency run concurrently after UX.
         psych_coro = workflow.execute_activity(
@@ -217,7 +225,16 @@ class MarketResearchWorkflow:
         return {"job_id": job_id}
 
     async def _progress(self, job_id: str, stage: str, pct: int) -> bool:
-        """Write stage progress; return False if the job has gone terminal."""
+        """Write stage progress via the report-progress activity.
+
+        Preconditions:
+            - ``job_id`` refers to a job already created in the job store;
+              ``stage`` labels the current stage and ``pct`` is a 0-100 hint.
+        Postconditions:
+            - Returns ``True`` when the job is still active (progress written),
+              ``False`` when it has gone terminal (nothing written) so the caller
+              can stop scheduling further work.
+        """
         return await workflow.execute_activity(
             _act.report_progress_activity,
             args=[job_id, stage, pct],

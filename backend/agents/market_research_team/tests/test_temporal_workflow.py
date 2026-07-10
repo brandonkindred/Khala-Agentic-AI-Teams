@@ -173,20 +173,40 @@ def test_workflow_progress_gate_stops_when_terminal(monkeypatch) -> None:
     assert rec.names() == ["market_research_prepare", "market_research_report_progress"]
 
 
-def test_workflow_drops_failed_ux_transcripts(monkeypatch) -> None:
-    """Every UX activity failing → insights collapse to empty (gather drops
-    them), yet the run still completes (viability sees count 0)."""
+def test_workflow_fails_when_all_ux_transcripts_dropped(monkeypatch) -> None:
+    """Transcripts were loaded but EVERY UX activity failed (all dropped by
+    gather) and the job is still active → the run fails (rather than silently
+    reporting insufficient evidence), recording FAILED via mark_failed."""
     rec = _Recorder(
         _default_results(),
         raise_for={"market_research_ux_one": RuntimeError("ux boom")},
     )
     _install(monkeypatch, rec)
 
+    with pytest.raises(RuntimeError, match="All 2 transcript analyses failed"):
+        _run(_REQUEST_UNIFIED)
+
+    assert "market_research_mark_failed" in rec.names()
+    # It fails before scheduling the downstream fan-in / finalize.
+    assert "market_research_viability" not in rec.names()
+    assert "market_research_finalize" not in rec.names()
+
+
+def test_workflow_no_transcripts_completes_without_failing(monkeypatch) -> None:
+    """No transcripts loaded → no UX fan-out, run completes normally (an empty
+    corpus is a valid 'insufficient evidence' result, NOT an analysis failure)."""
+    results = _default_results()
+    results["market_research_ingest"] = []
+    rec = _Recorder(results)
+    _install(monkeypatch, rec)
+
     out = _run(_REQUEST_UNIFIED)
 
     assert out == {"job_id": "job-x"}
+    assert rec.count("market_research_ux_one") == 0
     assert rec.kwargs_for("market_research_viability")["args"][2] == 0
     assert "market_research_finalize" in rec.names()
+    assert "market_research_mark_failed" not in rec.names()
 
 
 def test_workflow_marks_failed_and_reraises_on_stage_error(monkeypatch) -> None:

@@ -43,11 +43,10 @@ def test_orchestrator_ready_for_execution_with_approval() -> None:
 
     assert output.status == WorkflowStatus.READY_FOR_EXECUTION
     assert output.topology == TeamTopology.SPLIT
-    assert output.recommendation.verdict in {
-        "promising_with_risks",
-        "needs_more_validation",
-        "insufficient_evidence",
-    }
+    # The viability stage is fed the mock's viability JSON (routed correctly even
+    # though its prompt also mentions "market signals"), so the verdict is the
+    # canned one — not a silently-defaulted "needs_more_validation".
+    assert output.recommendation.verdict == "promising_with_risks"
     assert any(
         signal.signal == "Cross-interview theme consistency" for signal in output.market_signals
     )
@@ -90,14 +89,17 @@ def test_orchestrator_consistency_signal_survives_null_signal_name(monkeypatch) 
 
     def _custom_call_agent(agent, prompt):
         p = prompt.lower()
-        if "consistency" in p or "cross-interview" in p:
+        # Same routing discipline as the conftest mock: consistency on the
+        # instruction phrase, and viability before the psychology "market
+        # signals" key (see conftest for why).
+        if "cross-interview consistency" in p:
             return null_consistency_json
+        if "viability" in p or "verdict" in p:
+            return SAMPLE_VIABILITY_JSON
         if "transcript" in p and "analyze" in p:
             return SAMPLE_INSIGHT_JSON
         if "psychology" in p or "adoption" in p or "market signals" in p:
             return SAMPLE_SIGNALS_JSON
-        if "viability" in p or "verdict" in p:
-            return SAMPLE_VIABILITY_JSON
         if "research artifacts" in p or "interview script" in p:
             return SAMPLE_SCRIPTS_JSON
         return SAMPLE_INSIGHT_JSON

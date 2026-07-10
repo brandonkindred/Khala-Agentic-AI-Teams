@@ -37,7 +37,7 @@ Job-store status ownership (the retry-safe contract, mirrored from sales_team):
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -61,6 +61,8 @@ HEARTBEAT_TIMEOUT_S = 180.0
 def _heartbeat_interval_s() -> float:
     """Heartbeat cadence (seconds) for the long LLM activities.
 
+    Preconditions:
+        - None (environment may be unset or hold garbage).
     Postconditions:
         - Returns ``MARKET_RESEARCH_TEMPORAL_HEARTBEAT_INTERVAL_S`` clamped to
           ``[1, HEARTBEAT_TIMEOUT_S / 3]`` (garbage/unset → the 30s default);
@@ -97,30 +99,48 @@ def _beating() -> BackgroundHeartbeat:
     )
 
 
+_STATUS_SETS: Optional[tuple[frozenset[str], frozenset[str]]] = None
+
+
 def _status_sets() -> tuple[frozenset[str], frozenset[str]]:
     """Return ``(terminal, clean_terminal)`` job-status sets.
 
+    Preconditions:
+        - None.
     Postconditions:
         - ``terminal`` = completed/failed/cancelled/interrupted; ``clean`` is
           ``terminal`` minus FAILED (a cancel/interrupt/completed replay ends a
           run cleanly, whereas FAILED must surface as a failed workflow).
+        - Computed once and memoized: ``_job_stopped`` calls this on every
+          activity/guard, so the constants import + frozenset build must not
+          repeat per call.
     """
-    from job_service_client import (
-        JOB_STATUS_CANCELLED,
-        JOB_STATUS_COMPLETED,
-        JOB_STATUS_FAILED,
-        JOB_STATUS_INTERRUPTED,
-    )
+    global _STATUS_SETS
+    if _STATUS_SETS is None:
+        from job_service_client import (
+            JOB_STATUS_CANCELLED,
+            JOB_STATUS_COMPLETED,
+            JOB_STATUS_FAILED,
+            JOB_STATUS_INTERRUPTED,
+        )
 
-    terminal = frozenset(
-        {JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_CANCELLED, JOB_STATUS_INTERRUPTED}
-    )
-    clean = frozenset({JOB_STATUS_COMPLETED, JOB_STATUS_CANCELLED, JOB_STATUS_INTERRUPTED})
-    return terminal, clean
+        terminal = frozenset(
+            {JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_CANCELLED, JOB_STATUS_INTERRUPTED}
+        )
+        clean = frozenset({JOB_STATUS_COMPLETED, JOB_STATUS_CANCELLED, JOB_STATUS_INTERRUPTED})
+        _STATUS_SETS = (terminal, clean)
+    return _STATUS_SETS
 
 
 def _job_status(job_id: str) -> Optional[str]:
-    """Read the job's current status from the job store (``None`` if missing)."""
+    """Read the job's current status from the job store.
+
+    Preconditions:
+        - ``job_id`` is a job-store id (the row may or may not exist).
+    Postconditions:
+        - Returns the status string, or ``None`` when the row is missing —
+          callers decide whether missing is a clean skip or an error.
+    """
     from market_research_team.shared.job_store import get_job
 
     job = get_job(job_id)
@@ -143,10 +163,13 @@ def _job_stopped(job_id: str) -> bool:
 def _orch():
     """Construct a fresh ``MarketResearchOrchestrator`` (lazy import).
 
+    Preconditions:
+        - None.
     Postconditions:
-        - Each specialist agent resolves its LLM client lazily on first call, so
-          constructing the orchestrator per activity is cheap and only the
-          stage this activity invokes touches the provider.
+        - Returns a new orchestrator whose specialist agents are lazily built on
+          first use (and resolve their LLM client lazily), so constructing it per
+          activity is cheap and only the stage this activity invokes builds an
+          agent or touches the provider.
     """
     from market_research_team.orchestrator import MarketResearchOrchestrator
 
@@ -160,10 +183,38 @@ def _mission_and_review(sctx: MarketResearchRunContext):
         - ``sctx.request`` is the transcripts-stripped run request from
           ``market_research_prepare``; the non-ingest stages need only its
           mission + human-review fields.
+    Postconditions:
+        - Returns ``(ResearchMission, HumanReview)`` derived from the carrier.
     """
     from market_research_team.pipeline import prepare
 
     return prepare(sctx.request)
+
+
+def _signals_stage(
+    ctx: dict[str, Any],
+    insights: list[dict[str, Any]],
+    invoke: Callable[[Any, list[Any]], list[Any]],
+) -> list[dict[str, Any]]:
+    """Shared body for the single-shot signal stages (psychology, consistency).
+
+    Preconditions:
+        - ``ctx`` is the ``market_research_prepare`` carrier; ``insights`` are the
+          collected per-transcript UX insight dicts; ``invoke(orch, insight_objs)``
+          runs exactly one signal stage and returns ``list[MarketSignal]``.
+    Postconditions:
+        - Job terminal/missing → returns ``[]`` (finalize surfaces the state).
+        - Otherwise returns the stage's signals dumped to JSON dicts.
+    """
+    from market_research_team.models import InterviewInsight
+
+    sctx = MarketResearchRunContext.model_validate(ctx)
+    if _job_stopped(sctx.job_id):
+        return []
+    insight_objs = [InterviewInsight.model_validate(i) for i in insights]
+    with _beating():
+        signals = invoke(_orch(), insight_objs)
+    return [s.model_dump(mode="json") for s in signals]
 
 
 # ---------------------------------------------------------------------------
@@ -418,15 +469,7 @@ def psychology_activity(
         - Job terminal/missing → returns ``[]`` (finalize surfaces the state).
         - Otherwise returns the signal dicts (agent guarantees at least two).
     """
-    from market_research_team.models import InterviewInsight
-
-    sctx = MarketResearchRunContext.model_validate(ctx)
-    if _job_stopped(sctx.job_id):
-        return []
-    insight_objs = [InterviewInsight.model_validate(i) for i in insights]
-    with _beating():
-        signals = _orch().psychology(insight_objs)
-    return [s.model_dump(mode="json") for s in signals]
+    return _signals_stage(ctx, insights, lambda orch, objs: orch.psychology(objs))
 
 
 @activity.defn(name="market_research_consistency")
@@ -440,15 +483,7 @@ def consistency_activity(
         - Empty ``insights`` → the deterministic fallback signal (no LLM call);
           otherwise the consistency agent's single-signal assessment.
     """
-    from market_research_team.models import InterviewInsight
-
-    sctx = MarketResearchRunContext.model_validate(ctx)
-    if _job_stopped(sctx.job_id):
-        return []
-    insight_objs = [InterviewInsight.model_validate(i) for i in insights]
-    with _beating():
-        signals = _orch().consistency(insight_objs)
-    return [s.model_dump(mode="json") for s in signals]
+    return _signals_stage(ctx, insights, lambda orch, objs: orch.consistency(objs))
 
 
 @activity.defn(name="market_research_viability")

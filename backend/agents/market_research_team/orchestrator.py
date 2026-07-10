@@ -21,6 +21,7 @@ mission.
 from __future__ import annotations
 
 import logging
+from functools import cached_property
 from typing import List, Tuple
 
 from shared_concurrency import parallel_map
@@ -78,12 +79,31 @@ class MarketResearchOrchestrator:
     """
 
     def __init__(self) -> None:
+        # ``TranscriptIngestionAgent``/``UXResearchAgent`` have cheap
+        # constructors (no strands agent is built until ``UXResearchAgent`` runs,
+        # which builds a fresh one per call). The four specialist agents below
+        # each build a strands agent in their constructor, so they are lazily
+        # cached: a fresh orchestrator is built per Temporal activity, and an
+        # activity only touches the one stage it runs — so the others are never
+        # constructed.
         self.ingestion = TranscriptIngestionAgent()
         self.ux = UXResearchAgent()
-        self.psychology_agent = UserPsychologyAgent()
-        self.consistency_agent = ConsistencyAgent()
-        self.viability_agent = MarketViabilityAgent()
-        self.scripts_agent = ResearchScriptAgent()
+
+    @cached_property
+    def psychology_agent(self) -> UserPsychologyAgent:
+        return UserPsychologyAgent()
+
+    @cached_property
+    def consistency_agent(self) -> ConsistencyAgent:
+        return ConsistencyAgent()
+
+    @cached_property
+    def viability_agent(self) -> MarketViabilityAgent:
+        return MarketViabilityAgent()
+
+    @cached_property
+    def scripts_agent(self) -> ResearchScriptAgent:
+        return ResearchScriptAgent()
 
     # ------------------------------------------------------------------
     # Per-stage seam (shared by the thread path and the Temporal activities)
@@ -185,7 +205,9 @@ class MarketResearchOrchestrator:
         """
         market_signals = list(signals)
         while len(market_signals) < 2:
-            market_signals.append(_DEFAULT_SIGNALS_FALLBACK[len(market_signals)])
+            # Copy the shared default so distinct outputs never alias (and mutate)
+            # the same module-level MarketSignal instance.
+            market_signals.append(_DEFAULT_SIGNALS_FALLBACK[len(market_signals)].model_copy())
 
         if not human_review.approved:
             return TeamOutput(
