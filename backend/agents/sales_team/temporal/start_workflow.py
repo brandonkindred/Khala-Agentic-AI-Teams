@@ -13,7 +13,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sales_team.temporal import TASK_QUEUE, WORKFLOW_ID_PREFIX, SalesWorkflow
+from sales_team.temporal import (
+    DEEP_RESEARCH_WORKFLOW_ID_PREFIX,
+    TASK_QUEUE,
+    WORKFLOW_ID_PREFIX,
+    DeepResearchWorkflow,
+    SalesWorkflow,
+)
 from shared_temporal import start_workflow_sync
 
 logger = logging.getLogger(__name__)
@@ -41,3 +47,27 @@ def start_sales_workflow(job_id: str, request: dict[str, Any]) -> None:
         task_queue=TASK_QUEUE,
     )
     logger.info("Started SalesWorkflow id=%s", workflow_id)
+
+
+def start_deep_research_workflow(job_id: str, request: dict[str, Any]) -> None:
+    """Start ``DeepResearchWorkflow`` for the given job.
+
+    Preconditions:
+        - ``job_id`` is a job already created in the job store.
+        - ``request`` is the serialized ``DeepResearchRequest``
+          (``payload.model_dump(mode="json")``).
+
+    Postconditions:
+        - A workflow with id ``sales-deep-research-<job_id>`` is started on the
+          sales task queue (raises ``RuntimeError`` if the worker client never
+          becomes available within the wait window).
+    """
+    workflow_id = f"{DEEP_RESEARCH_WORKFLOW_ID_PREFIX}{job_id}"
+    start_workflow_sync(
+        DeepResearchWorkflow.run,
+        job_id,
+        request,
+        workflow_id=workflow_id,
+        task_queue=TASK_QUEUE,
+    )
+    logger.info("Started DeepResearchWorkflow id=%s", workflow_id)
