@@ -18,21 +18,40 @@ logger = logging.getLogger(__name__)
 
 
 def start_investment_temporal_worker_thread() -> bool:
-    """Start the investment Temporal worker (no-op when disabled).
+    """Start the investment Temporal workers (no-op when disabled).
+
+    Boots two workers on distinct queues from this single entrypoint (the one the
+    team_service entrypoint / lifespan backstop invokes), so every deployment path
+    gets both:
+
+      - the coarse ``investment-queue`` worker (this module's ``WORKFLOWS`` /
+        ``ACTIVITIES`` — the ad hoc single-backtest ``InvestmentBacktestWorkflow``);
+      - the fine-grained ``strategy-lab-queue`` worker
+        (``StrategyLabBatchWorkflow`` + its ``StrategyLabCycleWorkflow`` children
+        and every per-step activity), started via the strategy-lab package's own
+        ``start_strategy_lab_temporal_worker_thread``.
 
     Preconditions:
         - None; safe to call unconditionally and repeatedly.
 
     Postconditions:
-        - Returns ``True`` if a worker thread is running (or was already running
-          — ``start_team_worker`` is idempotent per team), and ``False`` when
-          Temporal is disabled (``TEMPORAL_ADDRESS`` unset).
+        - Returns ``True`` if at least one worker thread is running (or was already
+          running — ``start_team_worker`` is idempotent per team), and ``False``
+          when Temporal is disabled (``TEMPORAL_ADDRESS`` unset).
     """
     if not is_temporal_enabled():
         return False
-    return start_team_worker(
+    investment_started = start_team_worker(
         "investment",
         WORKFLOWS,
         ACTIVITIES,
         task_queue=TASK_QUEUE,
     )
+    # Boot the Strategy Lab worker on its own queue from the same hook; imported
+    # lazily to avoid dragging the strategy-lab graph into this module at import.
+    from investment_team.strategy_lab.temporal.worker import (
+        start_strategy_lab_temporal_worker_thread,
+    )
+
+    strategy_lab_started = start_strategy_lab_temporal_worker_thread()
+    return investment_started or strategy_lab_started

@@ -17,23 +17,22 @@ from __future__ import annotations
 
 from investment_team.temporal.workflows import (
     InvestmentBacktestWorkflow,
-    InvestmentStrategyLabWorkflow,
     run_backtest_activity,
-    run_strategy_lab_activity,
 )
 
-WORKFLOWS = [InvestmentStrategyLabWorkflow, InvestmentBacktestWorkflow]
-ACTIVITIES = [run_strategy_lab_activity, run_backtest_activity]
+# The Strategy Lab batch run moved to the fine-grained
+# ``investment_team.strategy_lab.temporal`` package (``strategy-lab-queue``); this
+# coarse queue now serves only the ad hoc single-backtest workflow.
+WORKFLOWS = [InvestmentBacktestWorkflow]
+ACTIVITIES = [run_backtest_activity]
 TASK_QUEUE = "investment-queue"
 WORKFLOW_ID_PREFIX = "investment-"
 
 __all__ = [
     "ACTIVITIES",
     "InvestmentBacktestWorkflow",
-    "InvestmentStrategyLabWorkflow",
     "TASK_QUEUE",
     "WORKFLOWS",
     "WORKFLOW_ID_PREFIX",
     "run_backtest_activity",
-    "run_strategy_lab_activity",
 ]

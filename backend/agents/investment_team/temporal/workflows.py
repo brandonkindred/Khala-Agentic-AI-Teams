@@ -6,20 +6,23 @@ the workflow classes, so nothing here may invoke restricted builtins
 the team's existing background workers — happens inside the activity bodies,
 which execute *outside* the sandbox and may freely use threads/IO.
 
-Each workflow wraps one of the investment team's long-running jobs, which are
-otherwise dispatched via daemon threads in :mod:`investment_team.api.main`:
+This module now holds only the ad hoc single-backtest path:
 
-* :class:`InvestmentStrategyLabWorkflow` → ``_strategy_lab_worker`` (Strategy Lab batch)
-* :class:`InvestmentBacktestWorkflow`     → ``_run_backtest_background`` (single backtest)
+* :class:`InvestmentBacktestWorkflow` → ``_run_backtest_background`` (single backtest)
 
-Durability contract. The activities are written to be safe under Temporal's
+The Strategy Lab batch run is no longer wrapped as one coarse activity here — it
+is driven by the fine-grained ``StrategyLabBatchWorkflow`` /
+``StrategyLabCycleWorkflow`` (``investment_team.strategy_lab.temporal``) on the
+dedicated ``strategy-lab-queue``, so every cycle/LLM-call/backtest is an
+individually-retryable Temporal unit rather than one multi-hour activity.
+
+Durability contract. The backtest activity is written to be safe under Temporal's
 retry (which fires on worker crash / start_to_close timeout):
 
-* they rehydrate the in-memory run entry from the durable job store, so progress
-  is tracked even when the retry lands in a fresh process after a restart;
-* the Strategy Lab activity resumes from the persisted contiguous-cycle offset
-  instead of replaying completed cycles, and the backtest activity short-circuits
-  a job that already completed — so a retry does not duplicate work;
+* it rehydrates the in-memory job entry from the durable job store, so progress is
+  tracked even when the retry lands in a fresh process after a restart;
+* it short-circuits a job that already completed — so a retry does not duplicate
+  work;
 * a worker-level failure is re-raised as an ``ApplicationError`` so Temporal sees
   the failure (and retries within the bounded policy) instead of the swallowed
   exception being reported as success.
@@ -46,45 +49,9 @@ _ACTIVITY_RETRY = RetryPolicy(
     maximum_attempts=3,
 )
 
-# Strategy Lab batches run many cycles and backtests run a full walk-forward
-# sweep; give the activity a wide ceiling so Temporal does not time it out.
+# A backtest runs a full walk-forward sweep; give the activity a wide ceiling so
+# Temporal does not time it out.
 _ACTIVITY_TIMEOUT = timedelta(hours=6)
-
-
-@activity.defn(name="investment_run_strategy_lab")
-def run_strategy_lab_activity(run_id: str, request: dict[str, Any]) -> dict[str, Any]:
-    """Run one Strategy Lab batch to completion inside a Temporal activity.
-
-    Preconditions:
-        - ``run_id`` is a non-empty run identifier whose state was persisted to
-          the job store before dispatch.
-        - ``request`` is a JSON-round-tripped ``RunStrategyLabRequest`` payload.
-
-    Postconditions:
-        - ``_strategy_lab_worker`` has run to completion, resuming from the
-          persisted contiguous-cycle offset (so a retry does not replay finished
-          cycles) with the in-memory run entry rehydrated so progress is tracked.
-        - Raises ``ApplicationError`` if the run ended in a hard ``failed`` state
-          (so Temporal retries within the bounded policy); otherwise returns a
-          small status dict.
-    """
-    from investment_team.api.main import (
-        RunStrategyLabRequest,
-        _rehydrate_active_run_offset,
-        _strategy_lab_run_failure,
-        _strategy_lab_worker,
-    )
-
-    offset = _rehydrate_active_run_offset(run_id)
-    _strategy_lab_worker(run_id, RunStrategyLabRequest(**request), start_cycle_offset=offset)
-
-    failure = _strategy_lab_run_failure(run_id)
-    if failure is not None:
-        raise ApplicationError(
-            f"Strategy Lab run {run_id} failed: {failure}",
-            type="StrategyLabRunFailed",
-        )
-    return {"run_id": run_id, "status": "completed"}
 
 
 @activity.defn(name="investment_run_backtest")
@@ -131,30 +98,6 @@ def run_backtest_activity(
     if _backtest_job_status(job_id) == _BT_JOB_STATUS_FAILED:
         raise ApplicationError(f"Backtest {job_id} failed", type="BacktestFailed")
     return {"job_id": job_id, "status": "completed"}
-
-
-@workflow.defn(name="InvestmentStrategyLabWorkflow")
-class InvestmentStrategyLabWorkflow:
-    """Durable wrapper around a Strategy Lab batch run."""
-
-    @workflow.run
-    async def run(self, run_id: str, request: dict[str, Any]) -> dict[str, Any]:
-        """Execute the Strategy Lab activity durably.
-
-        Preconditions:
-            - ``run_id`` / ``request`` satisfy ``run_strategy_lab_activity``'s
-              preconditions.
-
-        Postconditions:
-            - Returns the activity result, retrying per ``_ACTIVITY_RETRY`` on
-              failure.
-        """
-        return await workflow.execute_activity(
-            run_strategy_lab_activity,
-            args=[run_id, request],
-            start_to_close_timeout=_ACTIVITY_TIMEOUT,
-            retry_policy=_ACTIVITY_RETRY,
-        )
 
 
 @workflow.defn(name="InvestmentBacktestWorkflow")

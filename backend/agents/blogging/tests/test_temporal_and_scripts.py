@@ -15,6 +15,7 @@ import pytest
 
 
 def test_create_blogging_worker_with_client(monkeypatch) -> None:
+    """create_blogging_worker builds a Worker on the blogging task queue."""
     from blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
@@ -38,6 +39,7 @@ def test_create_blogging_worker_with_client(monkeypatch) -> None:
 
 
 def test_start_blogging_temporal_worker_thread_when_enabled(monkeypatch) -> None:
+    """The worker thread starts once and is idempotent while already alive."""
     from blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
@@ -90,6 +92,7 @@ def test_worker_thread_target_handles_runtime_error_loop_stopped(monkeypatch) ->
 
 
 def test_worker_thread_target_handles_unknown_runtime_error(monkeypatch) -> None:
+    """An unrelated RuntimeError in the worker loop is logged, not raised."""
     from blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
@@ -110,6 +113,7 @@ def test_worker_thread_target_handles_unknown_runtime_error(monkeypatch) -> None
 
 
 def test_worker_thread_target_handles_generic_exception(monkeypatch) -> None:
+    """A generic exception in the worker loop is logged, not raised."""
     from blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
@@ -313,45 +317,477 @@ def test_run_async_executes(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# temporal.activities.run_full_pipeline_activity
+# temporal.activities — fine-grained pipeline-phase activities
 # ---------------------------------------------------------------------------
 
 
-def test_temporal_activity_run_full_pipeline_delegates(monkeypatch) -> None:
-    """run_full_pipeline_activity calls run_blog_full_pipeline_job."""
+class _Dumpable:
+    """Stand-in for a pydantic model at an activity boundary.
+
+    ``model_dump`` returns the wrapped dict and ``content_plan`` exposes it so it can
+    double as a ``PlanningPhaseResult`` stub in the draft/gates activities.
+    """
+
+    def __init__(self, data):
+        self._data = data
+        self.content_plan = data
+
+    def model_dump(self, mode=None):
+        return self._data
+
+
+def _fake_ctx(tmp_path):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        job_updater=lambda **kw: None,
+        work_dir=tmp_path,
+        planning_phase_result=None,
+        plan=None,
+        elicited_stories_text=None,
+        draft_result=None,
+        status="PASS",
+    )
+
+
+def _patch_context(monkeypatch, tmp_path):
+    """Patch the shared context builder + job-store/heartbeat side effects to no-ops."""
+    import importlib
+
     from blogging.temporal import activities as acts
 
+    bjs = importlib.import_module("blogging.shared.blog_job_store")
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    ctx = _fake_ctx(tmp_path)
+    monkeypatch.setattr(acts, "_build_pipeline_context", lambda job_id, req: ctx)
+    monkeypatch.setattr(bjs, "start_blog_job", lambda job_id: None)
+    monkeypatch.setattr(rpj, "start_pipeline_heartbeat", lambda job_id: None)
+    return acts, ctx
+
+
+def _v2():
+    import importlib
+
+    return importlib.import_module("blogging.agent_implementations.blog_writing_process_v2")
+
+
+def test_plan_stage_activity_returns_planning_dto(monkeypatch, tmp_path) -> None:
+    """plan_stage_activity runs the planning stage and serializes the result."""
+    acts, ctx = _patch_context(monkeypatch, tmp_path)
+
+    def fake_planning(c):
+        c.planning_phase_result = _Dumpable({"content_plan": {"x": 1}})
+        c.elicited_stories_text = "story"
+        return None
+
+    monkeypatch.setattr(_v2(), "run_planning_stage", fake_planning)
+
+    out = acts.plan_stage_activity("j1", {"brief": "x"})
+    assert out["status"] == "PASS"
+    assert out["planning_phase_result"] == {"content_plan": {"x": 1}}
+    assert out["elicited_stories_text"] == "story"
+
+
+def test_plan_stage_activity_abort_returns_fail(monkeypatch, tmp_path) -> None:
+    """A planning abort (cancel/failed job) yields a FAIL DTO, not a raise."""
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+    monkeypatch.setattr(_v2(), "run_planning_stage", lambda c: (None, None, "FAIL"))
+
+    out = acts.plan_stage_activity("j1", {"brief": "x"})
+    assert out["status"] == "FAIL"
+
+
+def test_plan_stage_activity_error_fails_job_and_returns_fail(monkeypatch, tmp_path) -> None:
+    """A hard stage error fails the job and returns a FAIL DTO (terminal, no Temporal retry)."""
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+
+    def boom(c):
+        raise ValueError("kaboom")
+
+    monkeypatch.setattr(_v2(), "run_planning_stage", boom)
+    failed: dict = {}
+    monkeypatch.setattr(
+        acts,
+        "_fail_activity",
+        lambda job_id, exc, failed_phase: failed.update(job_id=job_id, phase=failed_phase),
+    )
+
+    out = acts.plan_stage_activity("j1", {"brief": "x"})
+    assert out["status"] == "FAIL"
+    assert failed == {"job_id": "j1", "phase": "planning"}
+
+
+def test_run_stage_propagates_heartbeat_start_failure(monkeypatch) -> None:
+    """A start_pipeline_heartbeat failure is infrastructure, not a pipeline failure:
+    _run_stage lets it propagate (so Temporal retries) instead of running the body or
+    funneling it into a FAIL DTO."""
+    import importlib
+
+    from blogging.temporal import activities as acts
+
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+
+    def boom(job_id):
+        raise RuntimeError("heartbeat thread failed to start")
+
+    monkeypatch.setattr(rpj, "start_pipeline_heartbeat", boom)
+
+    body_ran = {"n": 0}
+    failed = {"n": 0}
+    monkeypatch.setattr(acts, "_fail_activity", lambda *a, **kw: failed.update(n=failed["n"] + 1))
+
+    def _body():
+        body_ran["n"] += 1
+        return {"status": "PASS"}
+
+    with pytest.raises(RuntimeError, match="heartbeat thread failed to start"):
+        acts._run_stage("j1", "planning", lambda: {"status": "FAIL"}, _body)
+
+    assert body_ran["n"] == 0  # body never ran (heartbeat starts first, outside the funnel)
+    assert failed["n"] == 0  # not funneled into _fail_activity — it propagates to Temporal
+
+
+def test_draft_stage_activity_returns_draft_dto(monkeypatch, tmp_path) -> None:
+    """draft_stage_activity rebuilds the plan, runs the draft stage, serializes it."""
+    import importlib
+
+    acts, ctx = _patch_context(monkeypatch, tmp_path)
+    cp = importlib.import_module("blogging.shared.content_plan")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+
+    def fake_draft(c):
+        c.draft_result = _Dumpable({"draft": "hello"})
+        c.elicited_stories_text = "s2"
+        return None
+
+    monkeypatch.setattr(_v2(), "run_draft_stage", fake_draft)
+
+    planning = {"planning_phase_result": {"content_plan": {}}, "status": "PASS"}
+    out = acts.draft_stage_activity("j1", {"brief": "x"}, planning)
+    assert out["status"] == "PASS"
+    assert out["draft"] == {"draft": "hello"}
+    assert out["elicited_stories_text"] == "s2"
+
+
+def test_gates_stage_activity_returns_gates_dto(monkeypatch, tmp_path) -> None:
+    """gates_stage_activity rebuilds plan+draft, runs the gates stage, serializes it."""
+    import importlib
+
+    acts, ctx = _patch_context(monkeypatch, tmp_path)
+    cp = importlib.import_module("blogging.shared.content_plan")
+    wm = importlib.import_module("blog_writer_agent.models")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+    monkeypatch.setattr(wm.WriterOutput, "model_validate", classmethod(lambda cls, d: _Dumpable(d)))
+
+    def fake_gates(c):
+        c.draft_result = _Dumpable({"draft": "final"})
+        c.status = "NEEDS_HUMAN_REVIEW"
+        return None
+
+    monkeypatch.setattr(_v2(), "run_gates_stage", fake_gates)
+
+    planning = {"planning_phase_result": {"content_plan": {}}}
+    draft = {"draft": {"draft": "d"}, "status": "PASS"}
+    out = acts.gates_stage_activity("j1", {"brief": "x"}, planning, draft)
+    assert out["status"] == "NEEDS_HUMAN_REVIEW"
+    assert out["draft"] == {"draft": "final"}
+
+
+def test_finalize_job_activity_delegates(monkeypatch, tmp_path) -> None:
+    """finalize_job_activity reconstructs models and calls finalize_blog_job."""
+    import importlib
+
+    from blogging.temporal import activities as acts
+
+    cp = importlib.import_module("blogging.shared.content_plan")
+    wm = importlib.import_module("blog_writer_agent.models")
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+    monkeypatch.setattr(wm.WriterOutput, "model_validate", classmethod(lambda cls, d: _Dumpable(d)))
     seen: dict = {}
+    monkeypatch.setattr(
+        rpj,
+        "finalize_blog_job",
+        lambda job_id, ppr, draft, status: seen.update(job_id=job_id, status=status),
+    )
 
-    def fake(job_id, req):
-        seen["job_id"] = job_id
-        seen["req"] = req
+    planning = {"planning_phase_result": {"content_plan": {}}}
+    gates = {"draft": {"draft": "final"}, "status": "PASS"}
+    acts.finalize_job_activity("j1", planning, gates)
+    assert seen == {"job_id": "j1", "status": "PASS"}
 
-    monkeypatch.setattr(acts, "run_blog_full_pipeline_job", fake)
+
+class _FakeHeartbeat:
+    def __init__(self):
+        self.stopped = False
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_plan_stage_activity_swallows_external_cancellation(monkeypatch, tmp_path) -> None:
+    """A stage error the funnel recognizes as external cancellation marks the job
+    cancelled (via the real _fail_activity) and returns a FAIL DTO; heartbeat stopped."""
+    import importlib
+
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    hb = _FakeHeartbeat()
+    monkeypatch.setattr(rpj, "start_pipeline_heartbeat", lambda job_id: hb)
+    # Drive the real _fail_activity down its external-cancellation branch.
+    marked: dict = {}
+    monkeypatch.setattr(rpj, "_is_external_cancellation", lambda exc: True)
+    monkeypatch.setattr(rpj, "mark_job_cancelled", lambda job_id: marked.setdefault("job", job_id))
+
+    def boom(c):
+        raise RuntimeError("wrapped cancel")
+
+    monkeypatch.setattr(_v2(), "run_planning_stage", boom)
+    out = acts.plan_stage_activity("j1", {"brief": "x"})
+    assert out["status"] == "FAIL"
+    assert marked == {"job": "j1"}
+    assert hb.stopped is True
+
+
+def test_draft_stage_activity_abort_returns_fail_with_partial_draft(monkeypatch, tmp_path) -> None:
+    """A draft abort tuple carries the partial draft into a FAIL DTO."""
+    import importlib
+
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+    cp = importlib.import_module("blogging.shared.content_plan")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+    monkeypatch.setattr(
+        _v2(), "run_draft_stage", lambda c: (None, _Dumpable({"draft": "partial"}), "FAIL")
+    )
+
+    planning = {"planning_phase_result": {"content_plan": {}}}
+    out = acts.draft_stage_activity("j1", {"brief": "x"}, planning)
+    assert out["status"] == "FAIL"
+    assert out["draft"] == {"draft": "partial"}
+
+
+def test_draft_stage_activity_reraises_cancelled(monkeypatch, tmp_path) -> None:
+    """A Temporal CancelledError from the draft stage propagates out of the activity."""
+    import importlib
+
+    from temporalio.exceptions import CancelledError
+
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+    cp = importlib.import_module("blogging.shared.content_plan")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+
+    def boom(c):
+        raise CancelledError("cancel")
+
+    monkeypatch.setattr(_v2(), "run_draft_stage", boom)
+    with pytest.raises(CancelledError):
+        acts.draft_stage_activity("j1", {"brief": "x"}, {"planning_phase_result": {}})
+
+
+def test_gates_stage_activity_hard_error_returns_fail(monkeypatch, tmp_path) -> None:
+    """A hard gates error fails the job and returns a FAIL DTO so finalize is skipped."""
+    import importlib
+
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+    cp = importlib.import_module("blogging.shared.content_plan")
+    wm = importlib.import_module("blog_writer_agent.models")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+    monkeypatch.setattr(wm.WriterOutput, "model_validate", classmethod(lambda cls, d: _Dumpable(d)))
+    failed: dict = {}
+    monkeypatch.setattr(
+        acts, "_fail_activity", lambda job_id, exc, failed_phase: failed.update(phase=failed_phase)
+    )
+
+    def boom(c):
+        raise ValueError("gate blew up")
+
+    monkeypatch.setattr(_v2(), "run_gates_stage", boom)
+    planning = {"planning_phase_result": {"content_plan": {}}}
+    draft = {"draft": {"draft": "d"}}
+    out = acts.gates_stage_activity("j1", {"brief": "x"}, planning, draft)
+    assert out["status"] == "FAIL"
+    assert failed == {"phase": "gates"}
+
+
+def _patch_finalize(monkeypatch):
+    """Patch finalize's model rebuilds to stubs and return the (acts, rpj) modules.
+
+    Leaves ``finalize_blog_job`` (the transient store call) for the test to drive.
+    """
+    import importlib
+
+    from blogging.temporal import activities as acts
+
+    cp = importlib.import_module("blogging.shared.content_plan")
+    wm = importlib.import_module("blog_writer_agent.models")
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+    monkeypatch.setattr(wm.WriterOutput, "model_validate", classmethod(lambda cls, d: _Dumpable(d)))
+    return acts, rpj
+
+
+def test_finalize_job_activity_marks_failed_on_last_attempt(monkeypatch, tmp_path) -> None:
+    """On the final Temporal attempt a transient store error marks the job failed AND
+    re-raises, so the workflow also reflects the finalize failure (not a silent swallow)."""
+    acts, rpj = _patch_finalize(monkeypatch)
+
+    def _raise(*a, **kw):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(rpj, "finalize_blog_job", _raise)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+    failed: dict = {}
+    monkeypatch.setattr(
+        acts, "_fail_activity", lambda job_id, exc, failed_phase: failed.update(phase=failed_phase)
+    )
+
+    with pytest.raises(RuntimeError, match="store down"):
+        acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": {"d": 1}})
+    assert failed == {"phase": "finalize"}  # job still marked failed before propagating
+
+
+def test_finalize_job_activity_reraises_before_last_attempt(monkeypatch, tmp_path) -> None:
+    """Before the final attempt a transient store error re-raises so Temporal retries —
+    nothing is terminal yet, and a store blip must not permanently fail a successful pipeline."""
+    acts, rpj = _patch_finalize(monkeypatch)
+
+    def _raise(*a, **kw):
+        raise RuntimeError("transient store blip")
+
+    monkeypatch.setattr(rpj, "finalize_blog_job", _raise)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: False)
+    monkeypatch.setattr(
+        acts,
+        "_fail_activity",
+        lambda *a, **kw: pytest.fail("job must not be marked failed before the last attempt"),
+    )
+
+    with pytest.raises(RuntimeError):
+        acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": {"d": 1}})
+
+
+def test_finalize_job_activity_malformed_dto_raises_loudly(monkeypatch, tmp_path) -> None:
+    """A malformed finalize input DTO raises out of the activity (code/schema defect),
+    bypassing the retry-then-mark funnel — matching the draft/gates contract."""
+    import importlib
+
+    from blogging.temporal import activities as acts
+
+    cp = importlib.import_module("blogging.shared.content_plan")
+
+    def boom(cls, d):
+        raise ValueError("bad model")
+
+    monkeypatch.setattr(cp.PlanningPhaseResult, "model_validate", classmethod(boom))
+    monkeypatch.setattr(
+        acts, "_fail_activity", lambda *a, **kw: pytest.fail("malformed DTO must not mark the job")
+    )
+    monkeypatch.setattr(
+        acts, "_is_last_attempt", lambda: pytest.fail("must not reach the retry funnel")
+    )
+
+    with pytest.raises(ValueError):
+        acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": None})
+
+
+def test_draft_stage_activity_malformed_dto_raises_loudly(monkeypatch, tmp_path) -> None:
+    """A malformed input DTO (missing key) is a code/schema defect: it must raise
+    out of the activity instead of being recorded as a pipeline failure."""
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        acts,
+        "_fail_activity",
+        lambda *a, **kw: pytest.fail("a malformed DTO must not mark the job failed"),
+    )
+
+    with pytest.raises(KeyError):
+        acts.draft_stage_activity("j1", {"brief": "x"}, {"status": "PASS"})  # no planning key
+
+
+def test_gates_stage_activity_malformed_dto_raises_loudly(monkeypatch, tmp_path) -> None:
+    """Same loud-failure contract for the gates activity's input DTOs."""
+    import importlib
+
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+    cp = importlib.import_module("blogging.shared.content_plan")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+    monkeypatch.setattr(
+        acts,
+        "_fail_activity",
+        lambda *a, **kw: pytest.fail("a malformed DTO must not mark the job failed"),
+    )
+
+    planning = {"planning_phase_result": {"content_plan": {}}}
+    with pytest.raises(KeyError):
+        acts.gates_stage_activity("j1", {"brief": "x"}, planning, {"status": "PASS"})  # no draft
+
+
+# ---------------------------------------------------------------------------
+# temporal.activities.run_full_pipeline_activity (legacy drain-out monolith)
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_full_pipeline_activity_delegates(monkeypatch) -> None:
+    """run_full_pipeline_activity delegates to run_blog_full_pipeline_job."""
+    import importlib
+
+    from blogging.temporal import activities as acts
+
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    seen: dict = {}
+    monkeypatch.setattr(
+        rpj, "run_blog_full_pipeline_job", lambda job_id, req: seen.update(job_id=job_id, req=req)
+    )
     acts.run_full_pipeline_activity("j1", {"brief": "x"})
     assert seen == {"job_id": "j1", "req": {"brief": "x"}}
 
 
-def test_temporal_activity_run_full_pipeline_reraises_cancelled(monkeypatch) -> None:
+def test_legacy_full_pipeline_activity_reraises_cancelled(monkeypatch) -> None:
+    """The legacy drain-out activity re-raises a Temporal CancelledError."""
+    import importlib
+
     from temporalio.exceptions import CancelledError
 
     from blogging.temporal import activities as acts
 
-    def fake(job_id, req):
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+
+    def boom(job_id, req):
         raise CancelledError("nope")
 
-    monkeypatch.setattr(acts, "run_blog_full_pipeline_job", fake)
+    monkeypatch.setattr(rpj, "run_blog_full_pipeline_job", boom)
     with pytest.raises(CancelledError):
         acts.run_full_pipeline_activity("j", {})
 
 
-def test_temporal_activity_run_full_pipeline_reraises_other(monkeypatch) -> None:
+def test_legacy_full_pipeline_activity_reraises_other(monkeypatch) -> None:
+    """The legacy drain-out activity re-raises non-cancellation errors."""
+    import importlib
+
     from blogging.temporal import activities as acts
 
-    def fake(job_id, req):
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+
+    def boom(job_id, req):
         raise ValueError("oops")
 
-    monkeypatch.setattr(acts, "run_blog_full_pipeline_job", fake)
+    monkeypatch.setattr(rpj, "run_blog_full_pipeline_job", boom)
     with pytest.raises(ValueError):
         acts.run_full_pipeline_activity("j", {})
 
@@ -420,19 +856,23 @@ def test_run_writer_agent_main_smoke(monkeypatch, capsys) -> None:
 
     from blog_writer_agent.models import WriterOutput
 
-    # The script constructs WriterInput with content_plan=None which raises.
-    # We mock the BlogWriterAgent so the bug is bypassed.
+    # Stub only the agent's LLM-backed run (no network); the script now builds a
+    # real, valid WriterInput/ContentPlan, so WriterInput validation is exercised
+    # for real rather than mocked away.
+    captured_input: dict = {}
+
     class _Stub:
         def __init__(self, *a, **kw):
             pass
 
         def run(self, inp):
+            captured_input["inp"] = inp
             return WriterOutput(draft="# Draft\n\nBody.")
 
     monkeypatch.setattr(mod, "BlogWriterAgent", _Stub)
-    # Also patch WriterInput so the missing content_plan validation is skipped
-    monkeypatch.setattr(mod, "WriterInput", lambda **kw: type("X", (), {"draft": "..."})())
 
     mod.main()
     captured = capsys.readouterr()
     assert "Draft" in captured.out
+    # The real WriterInput was constructed with a valid content_plan (no mask).
+    assert captured_input["inp"].content_plan is not None
