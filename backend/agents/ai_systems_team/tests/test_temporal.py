@@ -306,50 +306,6 @@ def test_finalize_activity_completes_without_prior_blueprint() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_is_last_attempt_outside_activity_context() -> None:
-    """No activity context (direct/thread use) -> treated as the last attempt."""
-    from ai_systems_team.temporal import activities as acts
-
-    assert acts._is_last_attempt() is True
-
-
-def test_is_last_attempt_reads_scheduled_retry_policy(monkeypatch) -> None:
-    """The check reads maximum_attempts off the scheduled policy (activity.info())."""
-    from types import SimpleNamespace
-
-    import temporalio.activity as ta
-
-    from ai_systems_team.temporal import activities as acts
-
-    def _info(attempt, max_attempts):
-        return SimpleNamespace(
-            attempt=attempt, retry_policy=SimpleNamespace(maximum_attempts=max_attempts)
-        )
-
-    monkeypatch.setattr(ta, "info", lambda: _info(1, 3))
-    assert acts._is_last_attempt() is False
-    monkeypatch.setattr(ta, "info", lambda: _info(3, 3))
-    assert acts._is_last_attempt() is True
-
-
-def test_is_last_attempt_unlimited_or_missing_policy(monkeypatch) -> None:
-    """maximum_attempts <= 0 (unlimited) or a missing policy -> never the last attempt."""
-    from types import SimpleNamespace
-
-    import temporalio.activity as ta
-
-    from ai_systems_team.temporal import activities as acts
-
-    monkeypatch.setattr(
-        ta,
-        "info",
-        lambda: SimpleNamespace(attempt=9, retry_policy=SimpleNamespace(maximum_attempts=0)),
-    )
-    assert acts._is_last_attempt() is False
-    monkeypatch.setattr(ta, "info", lambda: SimpleNamespace(attempt=9, retry_policy=None))
-    assert acts._is_last_attempt() is False
-
-
 def test_finalize_last_attempt_store_failure_marks_failed(monkeypatch) -> None:
     """A persistent completion-store failure on the final attempt marks the job FAILED."""
     import ai_systems_team.shared.job_store as js
@@ -362,7 +318,7 @@ def test_finalize_last_attempt_store_failure_marks_failed(monkeypatch) -> None:
         raise RuntimeError("store down")
 
     monkeypatch.setattr(js, "mark_job_completed", _boom)
-    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+    monkeypatch.setattr(acts, "is_last_attempt", lambda: True)
 
     with pytest.raises(RuntimeError, match="store down"):
         acts.finalize_build_activity("j-finfail", None)
@@ -370,6 +326,34 @@ def test_finalize_last_attempt_store_failure_marks_failed(monkeypatch) -> None:
     data = get_job("j-finfail")
     assert data["status"] == JOB_STATUS_FAILED
     assert "Finalize failed" in data["error"]
+
+
+def test_finalize_last_attempt_lost_ack_keeps_job_completed(monkeypatch) -> None:
+    """If the completion write landed (lost ack), finalize must not flip it to FAILED."""
+    import ai_systems_team.shared.job_store as js
+    from ai_systems_team.shared.job_store import JOB_STATUS_COMPLETED
+    from ai_systems_team.temporal import activities as acts
+
+    create_job("j-lostack", "proj", "/spec.md")
+
+    def _complete_then_lose_ack(job_id, **kw):
+        # The write reaches the store, then the client raises (lost response).
+        js.update_job(job_id, status=JOB_STATUS_COMPLETED)
+        raise RuntimeError("lost ack")
+
+    marked_failed: dict = {}
+
+    def _track_failed(job_id, **kw):
+        marked_failed["called"] = True
+
+    monkeypatch.setattr(js, "mark_job_completed", _complete_then_lose_ack)
+    monkeypatch.setattr(js, "mark_job_failed", _track_failed)
+    monkeypatch.setattr(acts, "is_last_attempt", lambda: True)
+
+    # The job is already COMPLETED, so finalize returns success and does NOT flip it.
+    acts.finalize_build_activity("j-lostack", None)
+    assert get_job("j-lostack")["status"] == JOB_STATUS_COMPLETED
+    assert "called" not in marked_failed
 
 
 def test_finalize_non_last_attempt_reraises_without_terminal(monkeypatch) -> None:
@@ -384,13 +368,44 @@ def test_finalize_non_last_attempt_reraises_without_terminal(monkeypatch) -> Non
         raise RuntimeError("blip")
 
     monkeypatch.setattr(js, "mark_job_completed", _boom)
-    monkeypatch.setattr(acts, "_is_last_attempt", lambda: False)
+    monkeypatch.setattr(acts, "is_last_attempt", lambda: False)
 
     with pytest.raises(RuntimeError, match="blip"):
         acts.finalize_build_activity("j-finretry", None)
 
     # Nothing terminal was written — Temporal will retry the completion.
     assert get_job("j-finretry")["status"] != JOB_STATUS_FAILED
+
+
+def test_finalize_last_attempt_reread_failure_marks_failed(monkeypatch) -> None:
+    """If the completion-check re-read itself fails, finalize still marks the job FAILED."""
+    import ai_systems_team.shared.job_store as js
+    from ai_systems_team.shared.job_store import JOB_STATUS_FAILED
+    from ai_systems_team.temporal import activities as acts
+
+    create_job("j-reread", "proj", "/spec.md")
+
+    real_get = js.get_job
+    calls = {"n": 0}
+
+    def _get(job_id, **kw):
+        calls["n"] += 1
+        if calls["n"] >= 2:  # the re-read inside the except block
+            raise RuntimeError("read down")
+        return real_get(job_id, **kw)
+
+    def _complete_boom(*a, **kw):
+        raise RuntimeError("complete down")
+
+    monkeypatch.setattr(js, "get_job", _get)
+    monkeypatch.setattr(js, "mark_job_completed", _complete_boom)
+    monkeypatch.setattr(acts, "is_last_attempt", lambda: True)
+
+    with pytest.raises(RuntimeError, match="complete down"):
+        acts.finalize_build_activity("j-reread", None)
+
+    # The re-read raised -> current is None -> falls through to mark_job_failed.
+    assert get_job("j-reread")["status"] == JOB_STATUS_FAILED
 
 
 def test_finalize_last_attempt_fallback_swallows_secondary_store_error(monkeypatch) -> None:
@@ -408,7 +423,7 @@ def test_finalize_last_attempt_fallback_swallows_secondary_store_error(monkeypat
 
     monkeypatch.setattr(js, "mark_job_completed", _complete_boom)
     monkeypatch.setattr(js, "mark_job_failed", _failed_boom)
-    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+    monkeypatch.setattr(acts, "is_last_attempt", lambda: True)
 
     # The original completion error propagates even though the fallback also failed.
     with pytest.raises(RuntimeError, match="complete down"):

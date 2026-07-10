@@ -71,19 +71,18 @@ def test_build_status_reports_completed_phases_from_blueprint():
     assert body["current_phase"] == "architecture"
 
 
-def test_build_status_falls_back_to_top_level_completed_phases():
-    """With no blueprint snapshot, the top-level completed_phases field is used."""
+def test_build_status_no_blueprint_reports_empty_completed_phases():
+    """Before the first phase checkpoints a blueprint, completed_phases is empty."""
     data = {
         "status": "running",
         "project_name": "proj",
         "progress": 5,
-        "completed_phases": ["spec_intake"],
         "blueprint": None,
     }
     with patch("ai_systems_team.api.main.get_job", return_value=data):
         resp = client.get("/build/status/j2")
     assert resp.status_code == 200
-    assert resp.json()["completed_phases"] == ["spec_intake"]
+    assert resp.json()["completed_phases"] == []
 
 
 def test_cancel_missing_job_returns_404():

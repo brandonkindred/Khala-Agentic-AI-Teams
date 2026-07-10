@@ -53,8 +53,9 @@ def create_job(
         "output_dir": output_dir,
         "progress": 0,
         "current_phase": None,
-        "completed_phases": [],
-        "phase_results": {},
+        # Phase completion lives on the checkpointed ``blueprint`` snapshot
+        # (``blueprint.completed_phases``), the single source of truth read by
+        # ``get_build_status`` — there is no separate top-level completed-phases field.
         "blueprint": None,
         "error": None,
         "created_at": now,
@@ -237,42 +238,6 @@ def mark_job_failed(
     update_job(job_id, cache_dir=cache_dir, status=JOB_STATUS_FAILED, error=error)
 
 
-def update_phase_progress(
-    job_id: str,
-    current_phase: str,
-    progress: int,
-    cache_dir: Path = DEFAULT_CACHE_DIR,
-) -> None:
-    """Update job with current phase progress."""
-    update_job(
-        job_id,
-        cache_dir=cache_dir,
-        current_phase=current_phase,
-        progress=progress,
-    )
-
-
-def add_completed_phase(
-    job_id: str,
-    phase: str,
-    phase_result: Optional[Dict[str, Any]] = None,
-    cache_dir: Path = DEFAULT_CACHE_DIR,
-) -> None:
-    """Add a phase to the completed phases list."""
-    data = get_job(job_id, cache_dir=cache_dir)
-    if not data:
-        return
-    completed = list(data.get("completed_phases", []))
-    if phase not in completed:
-        completed.append(phase)
-    updates: Dict[str, Any] = {"completed_phases": completed}
-    if phase_result is not None:
-        phase_results = dict(data.get("phase_results", {}))
-        phase_results[phase] = phase_result
-        updates["phase_results"] = phase_results
-    update_job(job_id, cache_dir=cache_dir, **updates)
-
-
 def reset_job(
     job_id: str,
     cache_dir: Path = DEFAULT_CACHE_DIR,
@@ -287,8 +252,6 @@ def reset_job(
         status=JOB_STATUS_PENDING,
         progress=0,
         current_phase=None,
-        completed_phases=[],
-        phase_results={},
         blueprint=None,
         error=None,
         status_text=None,

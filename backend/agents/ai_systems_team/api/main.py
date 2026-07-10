@@ -176,19 +176,17 @@ def get_build_status(job_id: str) -> AISystemStatusResponse:
     if not data:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
-    blueprint = None
-    if data.get("status") == JOB_STATUS_COMPLETED and data.get("blueprint"):
-        blueprint = AgentBlueprint(**data["blueprint"])
-
     # The checkpointed blueprint snapshot is the single source of truth for phase
     # completion — both the thread-mode orchestrator and the Temporal per-phase
-    # activities maintain ``blueprint.completed_phases`` (the top-level job field is
-    # never populated), so prefer it here to report live progress mid-run.
+    # activities maintain ``blueprint.completed_phases`` (checkpointed after each
+    # phase), so read live progress straight from it.
     stored_bp = data.get("blueprint")
-    if isinstance(stored_bp, dict) and stored_bp.get("completed_phases"):
-        completed_phases = stored_bp["completed_phases"]
-    else:
-        completed_phases = data.get("completed_phases", [])
+
+    blueprint = None
+    if data.get("status") == JOB_STATUS_COMPLETED and stored_bp:
+        blueprint = AgentBlueprint(**stored_bp)
+
+    completed_phases = stored_bp.get("completed_phases", []) if isinstance(stored_bp, dict) else []
 
     return AISystemStatusResponse(
         job_id=job_id,

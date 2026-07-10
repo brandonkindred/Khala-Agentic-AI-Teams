@@ -23,34 +23,9 @@ from typing import Any, Dict, Optional
 
 from temporalio import activity
 
+from shared_temporal.activity_utils import is_last_attempt
+
 logger = logging.getLogger(__name__)
-
-
-def _is_last_attempt() -> bool:
-    """True when this is the final Temporal retry attempt (or no activity context).
-
-    Reads ``maximum_attempts`` from the retry policy the activity was actually
-    scheduled with (``activity.info().retry_policy``) rather than a compile-time
-    constant, so the check never drifts from the workflow's policy.
-
-    Preconditions:
-        - Called from within an activity body (or directly / in a unit test).
-    Postconditions:
-        - Returns True when the current attempt is the last one Temporal will make,
-          or when called outside an activity context (direct/thread use).
-        - Returns False when the scheduled policy allows unlimited retries
-          (``maximum_attempts <= 0``) or a retry policy is absent — there is no
-          "last attempt" to gate on, so the caller keeps deferring to Temporal.
-    """
-    try:
-        info = activity.info()
-    except RuntimeError:
-        return True
-    policy = info.retry_policy
-    max_attempts = policy.maximum_attempts if policy is not None else 0
-    if max_attempts <= 0:
-        return False
-    return info.attempt >= max_attempts
 
 
 # ---------------------------------------------------------------------------
@@ -93,10 +68,17 @@ def finalize_build_activity(job_id: str, error: Optional[str]) -> None:
           transition.
         - The completion write is retried by Temporal on a transient store error;
           on the final attempt the job is instead marked FAILED so it never strands
-          in RUNNING, and the error is re-raised so the workflow reflects it too.
+          in RUNNING, and the error is re-raised so the workflow reflects it too —
+          unless a re-read shows the write actually landed (lost ack), in which case
+          the job is left COMPLETED and finalize returns as success.
     """
     from ..models import AgentBlueprint
-    from ..shared.job_store import get_job, mark_job_completed, mark_job_failed
+    from ..shared.job_store import (
+        JOB_STATUS_COMPLETED,
+        get_job,
+        mark_job_completed,
+        mark_job_failed,
+    )
 
     if error:
         mark_job_failed(job_id, error=error)
@@ -116,11 +98,21 @@ def finalize_build_activity(job_id: str, error: Optional[str]) -> None:
     except Exception as exc:
         # Nothing is terminal yet; let Temporal retry the completion write while
         # attempts remain.
-        if not _is_last_attempt():
+        if not is_last_attempt():
             raise
-        # Final attempt: downgrade to a terminal FAILED state so the job does not
-        # hang in RUNNING forever, then re-raise so the workflow also fails.
         logger.exception("AI Systems finalize failed for job %s", job_id)
+        # The completion write may have landed server-side even though the client
+        # raised (a lost ack). Re-read: if the job is already COMPLETED the finalize
+        # actually succeeded, so leave it COMPLETED and return rather than flipping a
+        # successful build to FAILED.
+        try:
+            current = get_job(job_id)
+        except Exception:
+            current = None
+        if current and current.get("status") == JOB_STATUS_COMPLETED:
+            return
+        # Final attempt with no completed write: downgrade to a terminal FAILED state
+        # so the job does not hang in RUNNING, then re-raise so the workflow fails too.
         try:
             mark_job_failed(job_id, error=f"Finalize failed: {exc}")
         except Exception:
