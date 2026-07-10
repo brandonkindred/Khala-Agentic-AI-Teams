@@ -84,7 +84,7 @@ def test_activities_list_exposes_every_step_activity():
     assert names == {
         "begin_run_activity",
         "generate_spec_activity",
-        "start_phase_activity",
+        "enter_phase_activity",
         "poll_phase_activity",
         "answer_questions_activity",
         "finalize_run_activity",

@@ -168,35 +168,71 @@ def test_agent_uses_persona_prompts_when_present(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# start_phase
+# enter_phase (fresh start + resume)
 # ---------------------------------------------------------------------------
 
 
-def test_start_phase_analysis_records_job_id(monkeypatch):
+def test_enter_phase_analysis_records_job_id(monkeypatch):
     adapter = MagicMock(name="adapter")
     adapter.display_name = "Software Engineering"
     adapter.start_from_spec.return_value = "aj-1"
     m = _install(monkeypatch, run=_run(spec_content="SPEC"), adapter=adapter)
 
-    out = acts.start_phase_activity("r1", "analysis")
+    out = acts.enter_phase_activity("r1", "analysis", None)
 
     assert out == {"job_id": "aj-1"}
     m.store.update_run.assert_any_call("r1", analysis_job_id="aj-1")
+    m.store.update_run.assert_any_call("r1", status="polling_analysis", error=None)
 
 
-def test_start_phase_build_records_se_job_id(monkeypatch):
+def test_enter_phase_build_records_se_job_id(monkeypatch):
     adapter = MagicMock(name="adapter")
     adapter.display_name = "Software Engineering"
     adapter.start_build.return_value = "bj-1"
     m = _install(monkeypatch, run=_run(spec_content="SPEC", repo_path="/repo"), adapter=adapter)
 
-    out = acts.start_phase_activity("r1", "build")
+    out = acts.enter_phase_activity("r1", "build", None)
 
     assert out == {"job_id": "bj-1"}
     m.store.update_run.assert_any_call("r1", se_job_id="bj-1")
 
 
-def test_start_phase_start_failed_is_non_retryable(monkeypatch):
+def test_enter_phase_resume_transitions_polling_and_clears_error(monkeypatch):
+    """A resumed phase (existing job id) must not re-submit, but must transition
+    the run to polling_<phase> with the error cleared and a resume breadcrumb."""
+    adapter = MagicMock(name="adapter")
+    adapter.display_name = "Software Engineering"
+    m = _install(
+        monkeypatch, run=_run(spec_content="SPEC", analysis_job_id="aj-1"), adapter=adapter
+    )
+
+    out = acts.enter_phase_activity("r1", "analysis", "aj-1")
+
+    assert out == {"job_id": "aj-1"}
+    # No submit to the target on resume.
+    adapter.start_from_spec.assert_not_called()
+    m.store.update_run.assert_any_call("r1", status="polling_analysis", error=None)
+    # Resume breadcrumb recorded.
+    assert any(
+        "Resuming" in (c.args[2] if len(c.args) > 2 else "")
+        for c in m.store.add_chat_message.call_args_list
+    )
+
+
+def test_enter_phase_persisted_job_id_resumes_without_resubmit(monkeypatch):
+    """Idempotency: a retry of a fresh submit (existing_job_id=None) whose prior
+    attempt already persisted the job id must resume it, not submit a 2nd target job."""
+    adapter = MagicMock(name="adapter")
+    adapter.display_name = "Software Engineering"
+    _install(monkeypatch, run=_run(spec_content="SPEC", analysis_job_id="aj-1"), adapter=adapter)
+
+    out = acts.enter_phase_activity("r1", "analysis", None)
+
+    assert out == {"job_id": "aj-1"}
+    adapter.start_from_spec.assert_not_called()
+
+
+def test_enter_phase_start_failed_is_non_retryable(monkeypatch):
     from user_agent_founder.targets import StartFailed
 
     adapter = MagicMock(name="adapter")
@@ -205,15 +241,15 @@ def test_start_phase_start_failed_is_non_retryable(monkeypatch):
     _install(monkeypatch, run=_run(spec_content="SPEC"), adapter=adapter)
 
     with pytest.raises(ApplicationError) as ei:
-        acts.start_phase_activity("r1", "analysis")
+        acts.enter_phase_activity("r1", "analysis", None)
     assert ei.value.non_retryable is True
     assert "Failed to start analysis" in str(ei.value)
 
 
-def test_start_phase_unknown_phase_is_non_retryable(monkeypatch):
+def test_enter_phase_unknown_phase_is_non_retryable(monkeypatch):
     _install(monkeypatch, run=_run(spec_content="SPEC"))
     with pytest.raises(ApplicationError) as ei:
-        acts.start_phase_activity("r1", "bogus")
+        acts.enter_phase_activity("r1", "bogus", None)
     assert ei.value.non_retryable is True
 
 
@@ -346,3 +382,14 @@ def test_mark_failed_no_ops_when_cancelled(monkeypatch):
     # The user cancel already wrote the terminal state — never clobbered.
     for c in m.store.update_run.call_args_list:
         assert c.kwargs.get("status") != "failed"
+
+
+def test_mark_failed_no_ops_when_already_failed(monkeypatch):
+    """Idempotency: a Temporal retry after the first attempt wrote FAILED must not
+    re-write the status or add a duplicate failure breadcrumb."""
+    m = _install(monkeypatch, run=_run(), job={"status": job_store.JOB_STATUS_FAILED})
+    out = acts.mark_failed_activity("r1", "kaboom")
+
+    assert out == {"marked": False}
+    m.store.update_run.assert_not_called()
+    m.store.add_chat_message.assert_not_called()

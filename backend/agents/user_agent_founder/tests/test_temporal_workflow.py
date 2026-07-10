@@ -88,8 +88,9 @@ class _Rec:
             return dict(self.snap)
         if fn is acts.generate_spec_activity:
             return {"chars": 12, "skipped": False}
-        if fn is acts.start_phase_activity:
-            return {"job_id": f"{a[1]}-job"}
+        if fn is acts.enter_phase_activity:
+            # args = [run_id, phase, existing_job_id]; resume returns the existing id.
+            return {"job_id": a[2] or f"{a[1]}-job"}
         if fn is acts.poll_phase_activity:
             phase = a[1]
             queue = self.polls[phase]
@@ -160,7 +161,7 @@ def test_full_pipeline_order(monkeypatch):
     assert names[0] == "begin_run_activity"
     assert names[-1] == "finalize_run_activity"
     assert rec.count(acts.generate_spec_activity) == 1
-    assert rec.count(acts.start_phase_activity) == 2  # analysis + build
+    assert rec.count(acts.enter_phase_activity) == 2  # analysis + build
     assert rec.count(acts.poll_phase_activity) == 4
     assert rec.count(acts.mark_failed_activity) == 0
 
@@ -171,12 +172,12 @@ def test_resume_skips_spec_and_analysis(monkeypatch):
 
     assert out == {"run_id": "r1"}
     assert rec.count(acts.generate_spec_activity) == 0
-    # Only the build phase starts; analysis is short-circuited entirely.
-    assert rec.count(acts.start_phase_activity) == 1
-    assert rec.args_for(acts.start_phase_activity)[0] == ["r1", "build"]
+    # Only the build phase is entered; analysis is short-circuited entirely.
+    assert rec.count(acts.enter_phase_activity) == 1
+    assert rec.args_for(acts.enter_phase_activity)[0] == ["r1", "build", None]
 
 
-def test_resume_existing_job_ids_skip_start(monkeypatch):
+def test_resume_existing_job_ids_enter_without_restart(monkeypatch):
     rec = _Rec(
         snap=_snap(analysis_job_id="aj", build_job_id="bj"),
         analysis_polls=[_completed("/repo")],
@@ -185,8 +186,11 @@ def test_resume_existing_job_ids_skip_start(monkeypatch):
     _inst, out = _run(monkeypatch, rec)
 
     assert out == {"run_id": "r1"}
-    # Both phases resume straight into polling — no start activity.
-    assert rec.count(acts.start_phase_activity) == 0
+    # Both phases are entered with their persisted job ids (enter_phase does the
+    # resume status transition without re-submitting to the target).
+    assert rec.count(acts.enter_phase_activity) == 2
+    assert rec.args_for(acts.enter_phase_activity)[0] == ["r1", "analysis", "aj"]
+    assert rec.args_for(acts.enter_phase_activity)[1] == ["r1", "build", "bj"]
     # Poll targets the persisted job ids.
     assert rec.args_for(acts.poll_phase_activity)[0] == ["r1", "analysis", "aj"]
 
@@ -354,7 +358,9 @@ def test_activities_use_expected_retry_policies(monkeypatch):
 
     assert rec.retry_for(acts.begin_run_activity) == [wf.IO_RETRY]
     assert rec.retry_for(acts.generate_spec_activity) == [wf.LLM_RETRY]
+    assert rec.retry_for(acts.enter_phase_activity) == [wf.IO_RETRY, wf.IO_RETRY]
     poll_retries = rec.retry_for(acts.poll_phase_activity)
     assert poll_retries and all(r is wf.IO_RETRY for r in poll_retries)
-    assert rec.retry_for(acts.answer_questions_activity) == [wf.LLM_RETRY]
+    # Answering is not idempotent → a single attempt (no auto-retry).
+    assert rec.retry_for(acts.answer_questions_activity) == [wf.ANSWER_RETRY]
     assert rec.retry_for(acts.finalize_run_activity) == [wf.IO_RETRY]

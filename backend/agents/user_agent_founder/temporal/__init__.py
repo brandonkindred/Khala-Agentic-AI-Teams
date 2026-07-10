@@ -17,11 +17,11 @@ from __future__ import annotations
 from user_agent_founder.temporal.activities import (
     answer_questions_activity,
     begin_run_activity,
+    enter_phase_activity,
     finalize_run_activity,
     generate_spec_activity,
     mark_failed_activity,
     poll_phase_activity,
-    start_phase_activity,
 )
 from user_agent_founder.temporal.workflows import UserAgentFounderWorkflow
 
@@ -29,7 +29,7 @@ WORKFLOWS = [UserAgentFounderWorkflow]
 ACTIVITIES = [
     begin_run_activity,
     generate_spec_activity,
-    start_phase_activity,
+    enter_phase_activity,
     poll_phase_activity,
     answer_questions_activity,
     finalize_run_activity,
@@ -46,9 +46,9 @@ __all__ = [
     "WORKFLOW_ID_PREFIX",
     "answer_questions_activity",
     "begin_run_activity",
+    "enter_phase_activity",
     "finalize_run_activity",
     "generate_spec_activity",
     "mark_failed_activity",
     "poll_phase_activity",
-    "start_phase_activity",
 ]

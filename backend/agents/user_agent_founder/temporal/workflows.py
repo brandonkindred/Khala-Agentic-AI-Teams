@@ -55,6 +55,11 @@ IO_RETRY = RetryPolicy(
     maximum_interval=timedelta(seconds=30),
     backoff_coefficient=2.0,
 )
+# Answering is NOT idempotent — it records decisions/chat and submits answers to
+# the target, and owns its own submit retry/backoff internally. A single attempt
+# (no Temporal retry) ensures a mid-batch crash fails the run instead of
+# re-answering + re-submitting duplicate answers, matching the thread path.
+ANSWER_RETRY = RetryPolicy(maximum_attempts=1)
 
 # Per-attempt execution timeouts (queue wait excluded — start_to_close, never
 # schedule_to_close, so a saturated worker never starves a queued bookkeeping write).
@@ -221,13 +226,18 @@ class UserAgentFounderWorkflow:
               mirroring ``orchestrator._run_phase``.
         """
         self._phase = f"polling_{phase}"
-        if existing_job_id:
-            job_id = existing_job_id
-        else:
-            started = await self._exec(
-                _act.start_phase_activity, run_id, phase, retry=IO_RETRY, timeout=_IO_TIMEOUT
-            )
-            job_id = started["job_id"]
+        # enter_phase starts a fresh phase or, on resume, transitions the run to
+        # polling_<phase> (clearing stale error + syncing the job phase) — either
+        # way returning the job id to poll.
+        started = await self._exec(
+            _act.enter_phase_activity,
+            run_id,
+            phase,
+            existing_job_id,
+            retry=IO_RETRY,
+            timeout=_IO_TIMEOUT,
+        )
+        job_id = started["job_id"]
 
         failed_question_sets: dict[frozenset[str], int] = {}
         for attempt in range(self._max_attempts):
@@ -257,7 +267,7 @@ class UserAgentFounderWorkflow:
                     phase,
                     job_id,
                     pending,
-                    retry=LLM_RETRY,
+                    retry=ANSWER_RETRY,
                     timeout=_ANSWER_TIMEOUT,
                 )
                 if not ans.get("ok"):
@@ -276,18 +286,45 @@ class UserAgentFounderWorkflow:
     # ── Helpers ──────────────────────────────────────────────────────────
 
     def _raise_if_cancelled(self) -> None:
-        """Raise ``_CancelledSignal`` when a cancel has been signalled."""
+        """Raise ``_CancelledSignal`` when a cancel has been signalled.
+
+        Preconditions:
+            - None (reads ``self._cancel_requested``, set only by the ``cancel``
+              signal handler).
+        Postconditions:
+            - Raises ``_CancelledSignal`` iff a cancel was signalled; otherwise
+              returns ``None`` with no state change.
+        """
         if self._cancel_requested:
             raise _CancelledSignal()
 
     async def _exec(self, fn: Any, *args: Any, retry: RetryPolicy, timeout: timedelta) -> Any:
-        """Schedule ``fn`` as an activity with ``args``, timeout, and retry policy."""
+        """Schedule ``fn`` as an activity with ``args``, timeout, and retry policy.
+
+        Preconditions:
+            - ``fn`` is one of this team's registered ``@activity.defn`` callables;
+              ``timeout`` is a per-attempt ``start_to_close`` bound; ``retry`` is a
+              ``RetryPolicy``.
+        Postconditions:
+            - Returns the activity's JSON result once it completes, or raises the
+              activity's terminal error after its retry policy is exhausted (no
+              side effects in the workflow body itself).
+        """
         return await workflow.execute_activity(
             fn, args=list(args), start_to_close_timeout=timeout, retry_policy=retry
         )
 
     async def _safe_mark_failed(self, run_id: str, error: str) -> None:
-        """Best-effort FAILED write; its own failure must not mask the cause."""
+        """Best-effort FAILED write; its own failure must not mask the cause.
+
+        Preconditions:
+            - ``run_id`` refers to the run being failed; ``error`` is the
+              stringified fatal cause.
+        Postconditions:
+            - Schedules ``mark_failed_activity`` (which is a no-op if the run was
+              already cancelled); a failure of that activity is swallowed and
+              logged so the original pipeline error is the one that propagates.
+        """
         try:
             await self._exec(
                 _act.mark_failed_activity, run_id, error, retry=IO_RETRY, timeout=_IO_TIMEOUT

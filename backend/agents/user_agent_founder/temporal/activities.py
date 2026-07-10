@@ -38,10 +38,41 @@ Job-store status ownership (retry-safe contract, mirroring ``sales_team``):
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
+
+# Process-wide HTTP client shared across activity invocations. The founder poll
+# loop can fire hundreds of target-team calls per run (every poll/answer tick);
+# httpx.Client is documented thread-safe for concurrent requests and reuses its
+# connection pool, so one shared client avoids the construct/teardown churn of a
+# fresh client per activity. Lazily created (double-checked locking) and never
+# closed — it lives for the worker process, like any pooled resource.
+_HTTP_LOCK = threading.Lock()
+_HTTP_CLIENT: Any = None
+
+
+def _http_client() -> Any:
+    """Return the process-wide shared ``httpx.Client``.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns a live ``httpx.Client`` (created on first use under a lock so
+          concurrent activity threads share one instance); never ``None`` and
+          never closed by callers.
+    """
+    global _HTTP_CLIENT
+    if _HTTP_CLIENT is None:
+        import httpx
+
+        with _HTTP_LOCK:
+            if _HTTP_CLIENT is None:
+                _HTTP_CLIENT = httpx.Client()
+    return _HTTP_CLIENT
+
 
 # ---------------------------------------------------------------------------
 # Dependency reconstruction (lazy — nothing heavy at module import)
@@ -210,53 +241,84 @@ def generate_spec_activity(run_id: str) -> dict[str, Any]:
     return {"chars": len(spec_content), "skipped": False}
 
 
-@activity.defn(name="user_agent_founder_start_phase")
-def start_phase_activity(run_id: str, phase: str) -> dict[str, Any]:
-    """Start one target-team phase (``analysis`` or ``build``) and record its job id.
+@activity.defn(name="user_agent_founder_enter_phase")
+def enter_phase_activity(run_id: str, phase: str, existing_job_id: str | None) -> dict[str, Any]:
+    """Start one target-team phase — or resume its poll — and return its job id.
+
+    Mirrors the start-or-resume block of ``orchestrator._run_phase``: a fresh
+    phase submits to the target and records the job id; a resumed phase (a job id
+    passed in, or already persisted on the checkpoint column) skips the submit but
+    still transitions the run to ``polling_<phase>``, clears any stale error, and
+    syncs the central job phase — so a resumed run reports the live phase instead
+    of the stale ``pending``/``starting`` it was left in.
+
+    Idempotency: the "resume" branch also covers a Temporal retry of a *fresh*
+    submit. Because the checkpoint column (``analysis_job_id``/``se_job_id``) is
+    re-read at entry, a retry after a prior attempt already submitted + persisted
+    the job id resumes that job instead of submitting a second target job.
 
     Preconditions:
         - ``run_id`` refers to an existing run; ``phase`` is ``"analysis"`` or
-          ``"build"``. For ``analysis`` the run's ``spec_content`` is set; for
-          ``build`` the run's ``repo_path`` is the analysis→build handoff (a real
-          path for the SE target, ``None`` for the agentic target whose
-          ``start_build`` ignores it).
+          ``"build"``. For a fresh ``analysis`` the run's ``spec_content`` is set;
+          for a fresh ``build`` the run's ``repo_path`` is the analysis→build
+          handoff (a real path for the SE target, ``None`` for the agentic target
+          whose ``start_build`` ignores it).
     Postconditions:
-        - ``StartFailed`` (or an unknown ``phase``) → non-retryable
-          ``ApplicationError`` so the workflow's catch-all marks the run FAILED
-          without burning retries on a deterministic failure.
-        - Otherwise the target job is started, its id is persisted to the
-          matching checkpoint column (``analysis_job_id``/``se_job_id``), the run
-          transitions to ``polling_<phase>``, and ``{"job_id": ...}`` is returned.
+        - Unknown ``phase`` → non-retryable ``ApplicationError``.
+        - Resume path (``existing_job_id`` set OR the checkpoint column already
+          holds a job id): transitions the run to ``polling_<phase>`` with error
+          cleared + the job phase synced, records a resume breadcrumb, and returns
+          ``{"job_id": <that id>}`` without contacting the target.
+        - Fresh path: ``StartFailed`` → non-retryable ``ApplicationError`` so the
+          workflow's catch-all marks the run FAILED without burning retries on a
+          deterministic failure; otherwise the target job is started, its id is
+          persisted to the matching checkpoint column
+          (``analysis_job_id``/``se_job_id``), the run transitions to
+          ``polling_<phase>``, and ``{"job_id": ...}`` is returned.
     """
-    import httpx
-
     from user_agent_founder import orchestrator
     from user_agent_founder.targets import StartFailed
 
-    store, run = _require_run(run_id, "start_phase")
+    if phase not in ("analysis", "build"):
+        raise ApplicationError(f"Unknown phase {phase!r}", non_retryable=True)
+
+    store, run = _require_run(run_id, "enter_phase")
     adapter = _adapter_for(run)
+    label = "Product analysis" if phase == "analysis" else f"{adapter.display_name} build"
+
+    # Unify the workflow-passed id with the persisted checkpoint column so a
+    # retry of a fresh submit (which already persisted the id) resumes rather
+    # than double-submits to the target.
+    persisted = run.analysis_job_id if phase == "analysis" else run.se_job_id
+    resume_job_id = existing_job_id or persisted
+
+    if resume_job_id:
+        # Resume: no submit, but transition to polling + clear error so the run
+        # row and central job reflect the live phase during the resumed poll.
+        store.update_run(run_id, status=f"polling_{phase}", error=None)
+        orchestrator._sync_job_status(run_id, "running", phase=f"polling_{phase}")
+        store.add_chat_message(
+            run_id, "system", f"Resuming {label} poll (job: {resume_job_id})", "status_update"
+        )
+        return {"job_id": resume_job_id}
 
     store.update_run(run_id, status=f"submitting_{phase}")
     orchestrator._sync_job_status(run_id, "running", phase=f"submitting_{phase}")
     project_name = run.project_name or f"user-agent-founder-{run_id}"
 
+    client = _http_client()
     try:
-        with httpx.Client() as client:
-            if phase == "analysis":
-                job_id = adapter.start_from_spec(client, project_name, run.spec_content or "")
-            elif phase == "build":
-                job_id = adapter.start_build(client, run.repo_path)
-            else:
-                raise ApplicationError(f"Unknown phase {phase!r}", non_retryable=True)
+        if phase == "analysis":
+            job_id = adapter.start_from_spec(client, project_name, run.spec_content or "")
+        else:
+            job_id = adapter.start_build(client, run.repo_path)
     except StartFailed as exc:
         raise ApplicationError(f"Failed to start {phase}: {exc}", non_retryable=True) from exc
 
     if phase == "analysis":
         store.update_run(run_id, analysis_job_id=job_id)
-        label = "Product analysis"
     else:
         store.update_run(run_id, se_job_id=job_id)
-        label = f"{adapter.display_name} build"
     store.update_run(run_id, status=f"polling_{phase}", error=None)
     orchestrator._sync_job_status(run_id, "running", phase=f"polling_{phase}")
     store.add_chat_message(run_id, "system", f"{label} started (job: {job_id})", "status_update")
@@ -279,21 +341,19 @@ def poll_phase_activity(run_id: str, phase: str, job_id: str) -> dict[str, Any]:
           handoff ``repo_path`` is persisted (idempotent) so the build phase can
           read it from the run row.
     """
-    import httpx
-
     from user_agent_founder import orchestrator
 
     store, run = _require_run(run_id, "poll_phase")
     adapter = _adapter_for(run)
 
     orchestrator._heartbeat(run_id)
-    with httpx.Client() as client:
-        if phase == "analysis":
-            status_data = adapter.poll_analysis(client, job_id)
-        elif phase == "build":
-            status_data = adapter.poll_build(client, job_id)
-        else:
-            raise ApplicationError(f"Unknown phase {phase!r}", non_retryable=True)
+    client = _http_client()
+    if phase == "analysis":
+        status_data = adapter.poll_analysis(client, job_id)
+    elif phase == "build":
+        status_data = adapter.poll_build(client, job_id)
+    else:
+        raise ApplicationError(f"Unknown phase {phase!r}", non_retryable=True)
 
     poll_error = status_data.get("_poll_error")
     status = status_data.get("status", "")
@@ -334,9 +394,11 @@ def answer_questions_activity(
           normal return, not an exception, so Temporal does not retry the batch —
           the workflow tracks the failed-set counter and re-surfaces on the next
           poll, exactly like the thread path.
+        - Not idempotent (it records decisions/chat and submits answers), so the
+          workflow schedules it with a single attempt (no Temporal retry): a
+          mid-batch crash fails the run rather than re-answering + re-submitting,
+          matching the thread path where such a crash fails ``run_workflow``.
     """
-    import httpx
-
     from user_agent_founder import orchestrator
 
     store, run = _require_run(run_id, "answer_questions")
@@ -354,19 +416,17 @@ def answer_questions_activity(
         metadata={"question_ids": [q.get("id", "") for q in questions]},
     )
 
-    with httpx.Client() as client:
-        if phase == "analysis":
+    client = _http_client()
+    if phase == "analysis":
 
-            def _submit(answers: list[dict[str, Any]]) -> None:
-                adapter.submit_analysis_answers(client, job_id, answers)
-        else:
+        def _submit(answers: list[dict[str, Any]]) -> None:
+            adapter.submit_analysis_answers(client, job_id, answers)
+    else:
 
-            def _submit(answers: list[dict[str, Any]]) -> None:
-                adapter.submit_build_answers(client, job_id, answers)
+        def _submit(answers: list[dict[str, Any]]) -> None:
+            adapter.submit_build_answers(client, job_id, answers)
 
-        ok = orchestrator._answer_pending_questions(
-            agent, store, run_id, job_id, questions, _submit
-        )
+    ok = orchestrator._answer_pending_questions(agent, store, run_id, job_id, questions, _submit)
     return {"ok": bool(ok)}
 
 
@@ -400,8 +460,11 @@ def mark_failed_activity(run_id: str, error: str) -> dict[str, Any]:
     Preconditions:
         - ``error`` is the stringified fatal error.
     Postconditions:
-        - Central job already CANCELLED (a user cancel wrote the terminal state)
-          → no-op, returns ``{"marked": False}`` — the cancel is never clobbered.
+        - Central job already in ANY terminal state → no-op, returns
+          ``{"marked": False}``. This both preserves a user CANCELLED (never
+          clobbered) and makes the activity idempotent: on a Temporal retry after
+          the first attempt already wrote FAILED, the job is terminal so it does
+          not re-write the status or add a duplicate failure breadcrumb.
         - Otherwise the run row + central job end FAILED with ``error`` recorded
           and a breadcrumb added; returns ``{"marked": True}``.
     """
@@ -410,9 +473,16 @@ def mark_failed_activity(run_id: str, error: str) -> dict[str, Any]:
     from user_agent_founder.store import get_founder_store
 
     job = job_store.get_job(run_id)
-    if job is not None and job.get("status") == job_store.JOB_STATUS_CANCELLED:
+    status = job.get("status") if job is not None else None
+    if status in (
+        job_store.JOB_STATUS_CANCELLED,
+        job_store.JOB_STATUS_COMPLETED,
+        job_store.JOB_STATUS_FAILED,
+    ):
         activity.logger.info(
-            "Founder run %s already CANCELLED at mark-failed; leaving status untouched", run_id
+            "Founder run %s already terminal (%s) at mark-failed; leaving status untouched",
+            run_id,
+            status,
         )
         return {"marked": False}
 
