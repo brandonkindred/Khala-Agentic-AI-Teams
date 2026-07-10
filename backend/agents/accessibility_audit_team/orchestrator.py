@@ -131,7 +131,9 @@ class AccessibilityAuditOrchestrator:
             else:
                 result = await self._run_audit_phases(audit_request, tech_stack, result)
         except asyncio.TimeoutError:
-            logger.warning("Audit %s timed out after %s hours", result.audit_id, audit_request.timebox_hours)
+            logger.warning(
+                "Audit %s timed out after %s hours", result.audit_id, audit_request.timebox_hours
+            )
             result.success = False
             result.failure_reason = (
                 f"Audit timed out after {audit_request.timebox_hours} hour(s). "
@@ -228,32 +230,11 @@ class AccessibilityAuditOrchestrator:
             result.failure_reason = report_result.error or "Report packaging failed"
             return result
 
-        result.report_packaging_result = report_result
-        result.completed_phases.append(Phase.REPORT_PACKAGING)
+        # Finalize result (severity counts + summary). Shared with the Temporal
+        # finalize step so both execution modes assemble the result identically.
+        from .audit_execution import finalize_audit_result
 
-        # Finalize result
-        result.success = True
-        result.final_findings = report_result.final_backlog
-        result.final_patterns = report_result.patterns
-        result.coverage_matrix = report_result.coverage_matrix
-
-        # Count by severity
-        result.total_findings = len(result.final_findings)
-        result.critical_count = sum(
-            1 for f in result.final_findings if f.severity == Severity.CRITICAL
-        )
-        result.high_count = sum(1 for f in result.final_findings if f.severity == Severity.HIGH)
-        result.medium_count = sum(
-            1 for f in result.final_findings if f.severity == Severity.MEDIUM
-        )
-        result.low_count = sum(1 for f in result.final_findings if f.severity == Severity.LOW)
-
-        result.summary = (
-            f"Audit complete. {result.total_findings} findings "
-            f"({result.critical_count} critical, {result.high_count} high, "
-            f"{result.medium_count} medium, {result.low_count} low). "
-            f"{len(result.final_patterns)} patterns identified."
-        )
+        finalize_audit_result(result, report_result)
 
         logger.info("Audit %s complete: %s", result.audit_id, result.summary)
 
@@ -300,42 +281,20 @@ class AccessibilityAuditOrchestrator:
     # ------------------------------------------------------------------
 
     async def _persist_audit(self, result: AccessibilityAuditResult) -> None:
-        """Persist audit state to the artifact store for crash recovery."""
-        try:
-            from .artifact_store import (
-                ArtifactMetadata,
-                ArtifactType,
-                RetentionPolicy,
-                get_artifact_store,
-            )
+        """Persist audit state to the artifact store for crash recovery.
 
-            store = get_artifact_store()
-            ref = f"audit_state_{result.audit_id}"
-            content = result.model_dump_json().encode()
-            metadata = ArtifactMetadata(
-                artifact_ref=ref,
-                artifact_type=ArtifactType.AUDIT_STATE,
-                audit_id=result.audit_id,
-                mime_type="application/json",
-                retention_policy=RetentionPolicy.STANDARD,
-            )
-            await store.backend.store(ref, content, metadata)
-        except Exception as e:
-            logger.warning("Failed to persist audit state: %s", e)
+        Delegates to the shared ``audit_execution.persist_audit_state`` so thread
+        mode and the Temporal per-phase steps write state identically.
+        """
+        from .audit_execution import persist_audit_state
+
+        await persist_audit_state(result)
 
     async def _load_audit(self, audit_id: str) -> Optional[AccessibilityAuditResult]:
-        """Load audit state from the artifact store."""
-        try:
-            from .artifact_store import get_artifact_store
+        """Load audit state from the artifact store (shared helper)."""
+        from .audit_execution import load_audit_state
 
-            store = get_artifact_store()
-            ref = f"audit_state_{audit_id}"
-            content = await store.retrieve(ref)
-            if content:
-                return AccessibilityAuditResult.model_validate_json(content)
-        except Exception as e:
-            logger.warning("Failed to load audit state: %s", e)
-        return None
+        return await load_audit_state(audit_id)
 
     async def _ensure_loaded(self, audit_id: str) -> Optional[AccessibilityAuditResult]:
         """Return the audit from cache or load from persistent store."""

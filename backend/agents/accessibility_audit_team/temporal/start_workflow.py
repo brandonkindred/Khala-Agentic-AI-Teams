@@ -55,3 +55,45 @@ def start_accessibility_audit_workflow(job_id: str, audit_id: str, request_paylo
     )
     logger.info("Started AccessibilityAuditWorkflow id=%s", workflow_id)
     return workflow_id
+
+
+def start_accessibility_audit_retest_workflow(job_id: str, audit_id: str, finding_ids: list) -> str:
+    """Dispatch ``AccessibilityRetestWorkflow`` for one retest job.
+
+    Preconditions:
+        - ``job_id`` and ``audit_id`` are non-empty identifiers, and a job row
+          already exists for ``job_id``. ``finding_ids`` may be empty (retest all).
+    Postconditions:
+        - The accessibility_audit worker is ensured running in this process
+          (idempotent), then an ``AccessibilityRetestWorkflow`` is started on
+          ``TASK_QUEUE`` with id ``accessibility_audit-retest-{job_id}``. Returns
+          that ``workflow_id`` once Temporal accepts the workflow.
+    Raises:
+        - ``ValueError`` if ``job_id``/``audit_id`` is blank (caller precondition).
+        - ``RuntimeError`` if the worker's Temporal client never becomes available.
+    """
+    if not job_id:
+        raise ValueError("job_id must be a non-empty job id")
+    if not audit_id:
+        raise ValueError("audit_id must be a non-empty audit id")
+
+    from accessibility_audit_team.temporal import TASK_QUEUE, AccessibilityRetestWorkflow
+    from accessibility_audit_team.temporal.worker import (
+        start_accessibility_audit_temporal_worker_thread,
+    )
+    from shared_temporal import start_workflow_sync
+
+    # Ensure a worker (and thus the shared client/loop) exists in THIS process.
+    # Idempotent: a no-op when one already runs, and a no-op returning False when
+    # Temporal is disabled.
+    start_accessibility_audit_temporal_worker_thread()
+
+    workflow_id = f"accessibility_audit-retest-{job_id}"
+    start_workflow_sync(
+        AccessibilityRetestWorkflow.run,
+        {"job_id": job_id, "audit_id": audit_id, "finding_ids": finding_ids},
+        workflow_id=workflow_id,
+        task_queue=TASK_QUEUE,
+    )
+    logger.info("Started AccessibilityRetestWorkflow id=%s", workflow_id)
+    return workflow_id

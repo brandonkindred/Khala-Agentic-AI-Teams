@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 from job_service_client import (
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
-    JOB_STATUS_RUNNING,
     start_stale_job_monitor,
 )
 from shared_observability import init_otel
@@ -21,6 +20,7 @@ from shared_observability import init_otel
 from ..audit_execution import (
     CreateAuditRequest,
     execute_audit_job,
+    execute_retest_job,
     get_job_manager,
     get_orchestrator,
 )
@@ -147,6 +147,36 @@ def _get_temporal_dispatcher() -> Optional[Callable[[str, str, dict], str]]:
         )
         return None
     return start_accessibility_audit_workflow
+
+
+def _get_retest_temporal_dispatcher() -> Optional[Callable[[str, str, list], str]]:
+    """Return the Temporal retest dispatcher when Temporal is enabled, else ``None``.
+
+    Preconditions:
+        - None from the caller. Temporal enablement (``TEMPORAL_ADDRESS`` set) is
+          checked internally via ``shared_temporal.is_temporal_enabled()``.
+    Postconditions:
+        - Returns ``start_accessibility_audit_retest_workflow`` when Temporal is
+          enabled and the stack imports cleanly, else ``None`` so the caller falls
+          back to the in-process background-task path. A failed import while Temporal
+          is enabled is logged before returning ``None``.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+    except ImportError:
+        return None
+    if not is_temporal_enabled():
+        return None
+    try:
+        from ..temporal.start_workflow import start_accessibility_audit_retest_workflow
+    except ImportError:
+        logger.warning(
+            "Temporal is enabled but the accessibility-audit Temporal stack failed to "
+            "import; falling back to in-process retest execution.",
+            exc_info=True,
+        )
+        return None
+    return start_accessibility_audit_retest_workflow
 
 
 # ---------------------------------------------------------------------------
@@ -371,13 +401,24 @@ async def retest_findings(
     request: RetestRequest,
     background_tasks: BackgroundTasks,
 ) -> AuditJobResponse:
-    """
-    Run retest on specific findings or all findings.
+    """Run retest on specific findings or all findings.
+
+    Dispatch mirrors ``create_audit``: when Temporal is enabled the retest runs as a
+    durable ``AccessibilityRetestWorkflow`` (``workflow_id`` populated for Temporal-UI
+    correlation); otherwise it runs in-process via a FastAPI background task. Either
+    way the job row is created ``pending`` up front and its status transitions are
+    owned by whichever path executes it, so clients poll ``GET /audit/status/{job_id}``.
+
+    Postconditions:
+        - 404 when the audit is unknown; otherwise a ``pending`` retest job row exists
+          and the response returns its ``job_id`` / ``audit_id`` (and ``workflow_id``
+          on the Temporal path) for polling.
     """
     orchestrator = get_orchestrator()
-    status = orchestrator.get_audit_status(audit_id)
-
-    if status.get("status") == "not_found":
+    # Existence check against the persisted audit state (via the artifact store), so a
+    # Temporal-executed audit that ran in a worker process is still found from the API
+    # process — the in-memory orchestrator cache alone would 404 every cross-process audit.
+    if await orchestrator._ensure_loaded(audit_id) is None:
         raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
 
     job_id = f"retest_{uuid.uuid4().hex[:8]}"
@@ -396,27 +437,48 @@ async def retest_findings(
         request_payload=request.model_dump(),
     )
 
-    async def run_retest_task():
+    # None => the in-process (non-Temporal) path ran; set to the workflow id on a
+    # successful Temporal dispatch. It is never an empty string.
+    workflow_id: Optional[str] = None
+    dispatch = _get_retest_temporal_dispatcher()
+    if dispatch is not None:
         try:
-            _job_manager.update_job(job_id, status=JOB_STATUS_RUNNING, progress=30)
-            result = await orchestrator.run_retest(audit_id, request.finding_ids)
-            _job_manager.update_job(
-                job_id,
-                status="completed" if result.success else JOB_STATUS_FAILED,
-                progress=100,
-                result=result.model_dump(),
-                error=result.failure_reason if not result.success else None,
-            )
+            # The dispatcher is synchronous and blocking (polls for the worker client,
+            # then a blocking start round-trip), so offload it off the event loop.
+            workflow_id = await asyncio.to_thread(dispatch, job_id, audit_id, request.finding_ids)
         except Exception as e:
-            _job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
-
-    background_tasks.add_task(run_retest_task)
+            # Fail fast rather than re-running in-process: the workflow may have been
+            # accepted server-side, so an in-process fallback could double-run.
+            logger.warning(
+                "Temporal retest dispatch failed for job %s: %s: %s",
+                job_id,
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
+            _job_manager.update_job(
+                job_id, status=JOB_STATUS_FAILED, error=f"Temporal dispatch failed: {e}"
+            )
+            raise HTTPException(
+                status_code=500, detail="Failed to dispatch retest to Temporal"
+            ) from e
+        # Record the workflow id for correlation only; the worker activity owns all
+        # status transitions. A persist failure here is logged, not raised.
+        try:
+            _job_manager.update_job(job_id, workflow_id=workflow_id)
+        except Exception:
+            logger.warning("Failed to record workflow_id for retest job %s", job_id, exc_info=True)
+        message = "Retest queued (Temporal). Poll /audit/status/{job_id} for progress."
+    else:
+        background_tasks.add_task(execute_retest_job, job_id, audit_id, request.finding_ids)
+        message = "Retest started."
 
     return AuditJobResponse(
         job_id=job_id,
         audit_id=audit_id,
-        status="running",
-        message="Retest started.",
+        status=JOB_STATUS_PENDING,
+        message=message,
+        workflow_id=workflow_id,
     )
 
 

@@ -1,0 +1,285 @@
+"""Temporal activities for the accessibility audit team — one per pipeline phase.
+
+Each phase of the in-process orchestrator is wrapped here as its own
+``@activity.defn`` so :class:`~accessibility_audit_team.temporal.workflows.AccessibilityAuditWorkflow`
+can drive the audit phase by phase — with independent timeouts, retries, and
+heartbeats — instead of one opaque 2-hour black-box activity:
+
+* :func:`intake_activity`            -> build the audit plan (wraps ``run_intake_step``)
+* :func:`discovery_activity`         -> WAS/MAS scans + early QA (wraps ``run_discovery_step``)
+* :func:`verification_activity`      -> AT/standards/remediation (wraps ``run_verification_step``)
+* :func:`report_packaging_activity`  -> final QA + backlog (wraps ``run_report_packaging_step``)
+* :func:`finalize_activity`          -> assemble result + mark the job completed
+* :func:`retest_activity`            -> re-verify fixed findings (wraps ``run_retest_job``)
+
+State crosses each boundary via the artifact store (``audit_state_{audit_id}``),
+not by threading large findings lists through Temporal payloads: every step loads
+the accumulated ``AccessibilityAuditResult``, runs its phase, and persists it.
+Only a slim ``{"status", "audit_id"}`` dict is returned to the workflow. Heavy
+imports live inside the function bodies so importing this module — which the
+workflow sandbox reuses via ``imports_passed_through`` — stays cheap and
+side-effect free.
+
+Error model (mirrors the pre-decomposition ``run_pipeline_activity`` contract):
+a *logical* phase failure (the phase ran but its target was unauditable) sets
+``failure_reason`` on the result, so the activity marks the job FAILED and returns
+``{"status": "FAIL"}`` to short-circuit the workflow. An *infrastructure* failure
+(LLM/store crash) propagates out of the step and the activity so Temporal's retry
+policy recovers, rather than being swallowed into a green workflow.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Awaitable, Callable, Dict, List
+
+from temporalio import activity
+
+from accessibility_audit_team.temporal.constants import (
+    ACTIVITY_DISCOVERY,
+    ACTIVITY_FINALIZE,
+    ACTIVITY_INTAKE,
+    ACTIVITY_REPORT_PACKAGING,
+    ACTIVITY_RETEST,
+    ACTIVITY_RUN_PIPELINE,
+    ACTIVITY_VERIFICATION,
+)
+
+logger = logging.getLogger(__name__)
+
+#: Background-heartbeat cadence (seconds) for the long LLM/scan phases. Kept well
+#: under those activities' ``heartbeat_timeout`` so a live phase is never mistaken
+#: for a stalled worker.
+_HEARTBEAT_INTERVAL_S = 30.0
+
+# Per-phase job-store progress markers (0..100).
+_INTAKE_PROGRESS = 20
+_DISCOVERY_PROGRESS = 40
+_VERIFICATION_PROGRESS = 60
+_REPORT_PROGRESS = 80
+
+
+async def _run_phase(
+    job_id: str,
+    audit_id: str,
+    phase_name: str,
+    progress: int,
+    step: Callable[[], Awaitable[Any]],
+    *,
+    heartbeat: bool = False,
+) -> Dict[str, Any]:
+    """Report per-phase progress, run ``step``, and translate its result to a status dict.
+
+    Preconditions:
+        - ``job_id`` refers to an existing job row; ``step`` is a zero-arg callable
+          returning the awaitable phase step (which returns an
+          ``AccessibilityAuditResult``).
+    Postconditions:
+        - Writes ``RUNNING``/``current_phase``/``progress`` before running the step.
+        - On a *logical* phase failure (``result.failure_reason`` set) marks the job
+          FAILED and returns ``{"status": "FAIL", ...}`` so the workflow short-circuits.
+        - On success returns ``{"status": "PASS", "audit_id": audit_id}``.
+        - An infrastructure exception from ``step`` (or the progress write) propagates
+          so Temporal retries — it is NOT swallowed into a FAIL/terminal state.
+        - When ``heartbeat`` is set the step runs under a background heartbeat so a
+          long phase keeps the activity alive.
+    """
+    from accessibility_audit_team.audit_execution import (
+        JOB_STATUS_FAILED,
+        JOB_STATUS_RUNNING,
+        get_job_manager,
+    )
+
+    manager = get_job_manager()
+    manager.update_job(
+        job_id, status=JOB_STATUS_RUNNING, current_phase=phase_name, progress=progress
+    )
+
+    if heartbeat:
+        from shared_concurrency import BackgroundHeartbeat
+
+        with BackgroundHeartbeat(activity.heartbeat, _HEARTBEAT_INTERVAL_S, copy_context=True):
+            result = await step()
+    else:
+        result = await step()
+
+    if result.failure_reason:
+        manager.update_job(
+            job_id,
+            status=JOB_STATUS_FAILED,
+            current_phase=phase_name,
+            error=result.failure_reason,
+        )
+        return {"status": "FAIL", "audit_id": audit_id, "error": result.failure_reason}
+    return {"status": "PASS", "audit_id": audit_id}
+
+
+@activity.defn(name=ACTIVITY_INTAKE)
+async def intake_activity(
+    job_id: str, audit_id: str, request_dict: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Intake phase: build the audit plan + coverage matrix and seed audit state.
+
+    Preconditions:
+        - ``job_id`` refers to a pending job; ``request_dict`` validates as a
+          ``CreateAuditRequest``.
+    Postconditions:
+        - Flips the job to RUNNING at 20% and returns a PASS/FAIL status dict.
+    """
+    from accessibility_audit_team.audit_execution import CreateAuditRequest, run_intake_step
+
+    # Rebuild the request OUTSIDE the funnel: a malformed request is a schema/plumbing
+    # defect that must fail loudly, not read as a pipeline FAIL.
+    request = CreateAuditRequest(**request_dict)
+    return await _run_phase(
+        job_id,
+        audit_id,
+        "intake",
+        _INTAKE_PROGRESS,
+        lambda: run_intake_step(job_id, audit_id, request),
+    )
+
+
+@activity.defn(name=ACTIVITY_DISCOVERY)
+async def discovery_activity(job_id: str, audit_id: str) -> Dict[str, Any]:
+    """Discovery phase: WAS/MAS scans + evidence + early QA over the audit plan.
+
+    Preconditions:
+        - Intake has persisted state under ``audit_id``.
+    Postconditions:
+        - Returns a PASS/FAIL status dict; runs under a background heartbeat.
+    """
+    from accessibility_audit_team.audit_execution import run_discovery_step
+
+    return await _run_phase(
+        job_id,
+        audit_id,
+        "discovery",
+        _DISCOVERY_PROGRESS,
+        lambda: run_discovery_step(job_id, audit_id),
+        heartbeat=True,
+    )
+
+
+@activity.defn(name=ACTIVITY_VERIFICATION)
+async def verification_activity(
+    job_id: str, audit_id: str, tech_stack: Dict[str, str]
+) -> Dict[str, Any]:
+    """Verification phase: AT verification, standards mapping, remediation guidance.
+
+    Preconditions:
+        - Discovery has persisted state under ``audit_id``; ``tech_stack`` is the
+          audit's tech-stack map (``{web, mobile}``).
+    Postconditions:
+        - Returns a PASS/FAIL status dict; runs under a background heartbeat.
+    """
+    from accessibility_audit_team.audit_execution import run_verification_step
+
+    return await _run_phase(
+        job_id,
+        audit_id,
+        "verification",
+        _VERIFICATION_PROGRESS,
+        lambda: run_verification_step(job_id, audit_id, tech_stack),
+        heartbeat=True,
+    )
+
+
+@activity.defn(name=ACTIVITY_REPORT_PACKAGING)
+async def report_packaging_activity(job_id: str, audit_id: str) -> Dict[str, Any]:
+    """Report-packaging phase: final QA, pattern clustering, backlog + roadmap.
+
+    Preconditions:
+        - Verification has persisted state under ``audit_id``.
+    Postconditions:
+        - Returns a PASS/FAIL status dict; runs under a background heartbeat. Final
+          assembly (severity counts / completed status) is done by
+          :func:`finalize_activity`.
+    """
+    from accessibility_audit_team.audit_execution import run_report_packaging_step
+
+    return await _run_phase(
+        job_id,
+        audit_id,
+        "report_packaging",
+        _REPORT_PROGRESS,
+        lambda: run_report_packaging_step(job_id, audit_id),
+        heartbeat=True,
+    )
+
+
+@activity.defn(name=ACTIVITY_FINALIZE)
+async def finalize_activity(job_id: str, audit_id: str) -> Dict[str, Any]:
+    """Finalize: assemble the audit result and write the terminal job-store row.
+
+    Preconditions:
+        - Report packaging has persisted state under ``audit_id``.
+    Postconditions:
+        - Marks the job ``completed`` (severity counts + full result dump) at 100%,
+          or ``failed`` if the finalized result is unsuccessful. Idempotent: a
+          Temporal retry re-writes the same terminal state. Returns a status dict.
+          A store failure propagates so Temporal retries.
+    """
+    from accessibility_audit_team.audit_execution import (
+        JOB_STATUS_COMPLETED,
+        JOB_STATUS_FAILED,
+        finalize_audit_step,
+        get_job_manager,
+    )
+
+    result = await finalize_audit_step(job_id, audit_id)
+    get_job_manager().update_job(
+        job_id,
+        status=JOB_STATUS_COMPLETED if result.success else JOB_STATUS_FAILED,
+        progress=100,
+        current_phase=result.current_phase.value,
+        completed_phases=[p.value for p in result.completed_phases],
+        findings_count=result.total_findings,
+        result=result.model_dump(),
+        error=None if result.success else result.failure_reason,
+    )
+    return {"status": "PASS" if result.success else "FAIL", "audit_id": audit_id}
+
+
+@activity.defn(name=ACTIVITY_RETEST)
+async def retest_activity(job_id: str, audit_id: str, finding_ids: List[str]) -> Dict[str, Any]:
+    """Retest: re-verify fixed findings for an existing audit.
+
+    Preconditions:
+        - ``job_id`` refers to a created retest job; ``audit_id`` refers to a
+          completed audit whose state is in the artifact store.
+    Postconditions:
+        - ``run_retest_job`` owns the job-store lifecycle (running -> terminal) and
+          propagates infrastructure failures so Temporal retries. Returns a status
+          dict once the retest reaches a terminal state.
+    """
+    from accessibility_audit_team.audit_execution import run_retest_job
+
+    await run_retest_job(job_id, audit_id, finding_ids)
+    return {"status": "done", "audit_id": audit_id}
+
+
+@activity.defn(name=ACTIVITY_RUN_PIPELINE)
+async def run_pipeline_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """LEGACY whole-pipeline activity, retained ONLY for history drain-out.
+
+    Runs the entire audit in one activity via ``run_audit_job`` (the
+    pre-decomposition behavior). New executions run the per-phase activities; this
+    exists so an ``AccessibilityAuditWorkflow`` history recorded *before* the
+    per-phase migration still replays deterministically (see the ``workflow.patched``
+    gate in :class:`AccessibilityAuditWorkflow`) and can complete after a worker
+    rolls forward. Remove once no pre-migration executions remain open.
+
+    Preconditions:
+        - ``payload`` has ``job_id``, ``audit_id``, and a ``request`` dict.
+    Postconditions:
+        - The job's terminal state is persisted; an infrastructure exception
+          propagates (failing the activity) rather than being swallowed.
+    """
+    from accessibility_audit_team.audit_execution import CreateAuditRequest, run_audit_job
+
+    job_id = payload["job_id"]
+    audit_id = payload["audit_id"]
+    request = CreateAuditRequest(**payload["request"])
+    await run_audit_job(job_id, audit_id, request)
+    return {"job_id": job_id, "audit_id": audit_id, "status": "done"}
