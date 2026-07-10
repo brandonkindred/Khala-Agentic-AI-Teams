@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 CLIENT_READY_TIMEOUT_S = 10.0
 CLIENT_READY_POLL_S = 0.05
 START_WORKFLOW_TIMEOUT_S = 30
+# Ceiling on how long an execute-and-wait caller (a sync handler that must return
+# the workflow's result) blocks for the whole workflow to finish. Generous because
+# the workflow may include LLM calls; per-activity timeouts bound each phase.
+EXECUTE_WORKFLOW_TIMEOUT_S = 300
 
 
 def _await_client(timeout_s: float | None = None) -> tuple[Any, Any]:
@@ -99,6 +103,56 @@ def start_workflow_sync(
         workflow_run, args=list(args), id=workflow_id, task_queue=task_queue
     )
     asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=start_timeout_s)
+
+
+def execute_workflow_sync(
+    workflow_run: Any,
+    *args: Any,
+    workflow_id: str,
+    task_queue: str,
+    client_ready_timeout_s: float | None = None,
+    execute_timeout_s: float = EXECUTE_WORKFLOW_TIMEOUT_S,
+) -> Any:
+    """Start a Temporal workflow and block for its RESULT, from synchronous code.
+
+    The execute-and-wait sibling of :func:`start_workflow_sync`. Where that helper
+    only blocks until the server *accepts* the start (and returns ``None``), this one
+    schedules ``client.execute_workflow`` on the worker loop and blocks until the
+    workflow *completes*, returning its result. It is the forward Temporal dispatch
+    path for short, interactive operations whose synchronous HTTP handler must return
+    the real payload — there is no job-store/polling model to hand a job id back to.
+
+    Preconditions:
+        - ``workflow_id`` and ``task_queue`` are non-empty.
+        - ``workflow_id`` is unique per invocation (callers mint a fresh id, e.g. a
+          uuid). Execute-and-wait does not reuse ids for idempotency the way
+          :func:`run_team_job` does, so a duplicate *live* id would raise
+          ``WorkflowAlreadyStartedError``.
+        - ``args`` are Temporal-serializable (the same codec the workflow uses).
+
+    Postconditions:
+        - Returns the workflow's return value once it completes successfully.
+
+    Invariants:
+        - Runs the coroutine on the worker's shared event loop via
+          ``run_coroutine_threadsafe`` — it never creates a second loop.
+
+    Raises:
+        - ``RuntimeError`` if the worker's client never becomes available within
+          ``client_ready_timeout_s`` (defaulting to ``CLIENT_READY_TIMEOUT_S``).
+        - ``concurrent.futures.TimeoutError`` if the workflow does not finish within
+          ``execute_timeout_s``.
+        - ``temporalio.client.WorkflowFailureError`` if the workflow itself fails;
+          callers that need to translate the failure inspect its ``ApplicationError``
+          cause.
+    """
+    assert workflow_id, "workflow_id must be non-empty"
+    assert task_queue, "task_queue must be non-empty"
+    client, loop = _await_client(client_ready_timeout_s)
+    coro = client.execute_workflow(
+        workflow_run, args=list(args), id=workflow_id, task_queue=task_queue
+    )
+    return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=execute_timeout_s)
 
 
 def signal_workflow_sync(
