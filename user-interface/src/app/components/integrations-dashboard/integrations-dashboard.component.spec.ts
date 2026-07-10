@@ -158,6 +158,40 @@ describe('IntegrationsDashboardComponent', () => {
     expect(component.githubDisconnecting).toBe(false);
   });
 
+  it('GitHub card shows Connected on token alone (PAT-scoped, no owner/repo fields)', () => {
+    apiSpy.getGitHubConfig.mockReturnValue(
+      of({ enabled: true, token_configured: true, default_label: 'ai-ready' }),
+    );
+    component.loadGitHubConfig();
+    fixture.detectChanges();
+    // A stored token alone means connected — no owner/repo configuration is required.
+    expect(component.githubTokenConfigured).toBe(true);
+    expect(component.connectedCount).toBeGreaterThanOrEqual(1);
+    const card: HTMLElement = fixture.nativeElement.querySelector('#integration-github');
+    expect(card).toBeTruthy();
+    expect(card.textContent).toContain('Connected');
+    // Repository access is defined by the PAT itself: the card explains this and never
+    // renders Owner/Repository input fields.
+    expect(card.textContent).toContain('token');
+    expect(card.querySelector('input[name="githubOwner"]')).toBeNull();
+    expect(card.querySelector('input[name="githubRepo"]')).toBeNull();
+  });
+
+  it('GitHub card shows Not configured when no token is stored', () => {
+    // Default beforeEach stub: enabled false, token_configured false.
+    const card: HTMLElement = fixture.nativeElement.querySelector('#integration-github');
+    expect(card.textContent).toContain('Not configured');
+    expect(component.githubTokenConfigured).toBe(false);
+  });
+
+  it('should set githubError and reset githubSaving when saveGitHubConfig fails', () => {
+    apiSpy.updateGitHubConfig.mockReturnValue(throwError(() => ({ error: { detail: 'token invalid' } })));
+    component.githubPat = 'ghp_bad';
+    component.saveGitHubConfig();
+    expect(component.githubError).toBe('token invalid');
+    expect(component.githubSaving).toBe(false);
+  });
+
   it('defaults the GitHub store-unreachable flag to false when absent', () => {
     apiSpy.getGitHubConfig.mockReturnValue(
       of({ enabled: false, token_configured: false, default_label: '' }),

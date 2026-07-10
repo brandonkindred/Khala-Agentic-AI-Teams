@@ -290,13 +290,19 @@ def process_review_request(
           HMAC-verified against the shared webhook secret and the commenter's repo
           association authorized, and whether the PAT can act on this repository is
           GitHub's decision — the token's own authorization configuration is the sole
-          access list (a repo it can't reach fails the review start, signalled 😕).
+          access list (a repo it can't reach fails the review start).
         - Resolves the GitHub PAT once and reuses it for the review start and the
           reaction — a single credential-store read per webhook.
         - Signals the outcome on the triggering comment: 👀 when a review started or one
           is already running (either way, a review is in flight for this PR), 😕
           (``confused``) when the request was seen but could not run. On a failed start
-          the delivery is forgotten so GitHub's "Redeliver" can retry it.
+          the delivery is forgotten so GitHub's "Redeliver" can retry it. Both reactions
+          are BEST-EFFORT and go through the same PAT: when the start failed *because the
+          PAT can't reach the repository*, the 😕 reaction fails identically and the
+          commenter necessarily sees no signal — there is no credential that could react
+          where the review itself could not act. The visible-😕 guarantee therefore holds
+          only for failures unrelated to repo reachability (e.g. the coding-team service
+          being down for a repo the PAT can reach).
         - Best-effort throughout — never raises (the webhook has already returned 200).
     """
     if not _integration_enabled():

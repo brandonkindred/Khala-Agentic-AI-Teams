@@ -1117,6 +1117,46 @@ def test_review_pr_forwards_base_branch(mock_cfg, mock_cred, monkeypatch):
     assert fake.calls[0][1]["base_branch"] == "develop"
 
 
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_review_pr_forwards_owner_repo_from_body(mock_cfg, mock_cred, monkeypatch):
+    """POST /github/review-pr accepts owner/repo in the body and forwards them to the coding
+    team service, overriding the configured default (acme/widget)."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(
+        result=_FakeResp(
+            200,
+            {"job_id": "rev-3", "pr_number": 7, "pr_url": "u", "status": "pending", "message": ""},
+        )
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_REVIEW_PR, json={"pr_number": 7, "owner": "other", "repo": "thing"})
+    assert resp.status_code == 200
+    forwarded = fake.calls[0][1]
+    assert forwarded["owner"] == "other"
+    assert forwarded["repo"] == "thing"
+
+
+# ---------------------------------------------------------------------------
+# _redact_url_userinfo: never leak embedded credentials in checkout-mismatch errors
+# ---------------------------------------------------------------------------
+
+from unified_api.routes.integrations import _redact_url_userinfo  # noqa: E402
+
+
+def test_redact_url_userinfo_strips_embedded_credentials():
+    # https URLs with user:pass@ userinfo — the credential must be gone.
+    assert _redact_url_userinfo("https://user:ghp_secret@github.com/acme/widget.git") == (
+        "https://github.com/acme/widget.git"
+    )
+    assert _redact_url_userinfo("https://tokenonly@github.com/acme/widget") == "https://github.com/acme/widget"
+    # A port is preserved; a credential-free URL is unchanged.
+    assert _redact_url_userinfo("https://x:y@git.example.com:8443/a/b") == "https://git.example.com:8443/a/b"
+    assert _redact_url_userinfo("https://github.com/acme/widget.git") == "https://github.com/acme/widget.git"
+    # An scp-like ssh remote (no URL authority) drops anything before the last '@'.
+    assert _redact_url_userinfo("git@github.com:acme/widget.git") == "github.com:acme/widget.git"
+
+
 # ---------------------------------------------------------------------------
 # _start_pr_review(token=...): webhook path reuses a pre-resolved PAT (no 2nd read)
 # ---------------------------------------------------------------------------

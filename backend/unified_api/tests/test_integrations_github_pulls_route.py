@@ -173,6 +173,16 @@ def test_pulls_repo_without_owner_is_400(mock_cfg, mock_cred):
     assert "together" in resp.json()["detail"]
 
 
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_pulls_owner_without_repo_is_400(mock_cfg, mock_cred):
+    """The symmetric case of test_pulls_repo_without_owner_is_400: a partial pair (owner
+    only) must be rejected, not silently fall back to the configured default."""
+    resp = client.get(_PULLS, params={"owner": "other"})
+    assert resp.status_code == 400
+    assert "together" in resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # GET /github/pulls — HTTP error mapping
 # ---------------------------------------------------------------------------
@@ -413,6 +423,31 @@ def test_reviews_success_injects_owner_repo(mock_cfg, mock_cred, monkeypatch):
     assert params["repo"] == "widget"
     assert params["pr_number"] == 7
     assert params["limit"] == 500
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_reviews_owner_repo_query_overrides_configured_default(mock_cfg, mock_cred, monkeypatch):
+    """GET /github/reviews accepts owner/repo query params and forwards them to the coding
+    team service, overriding the configured default (acme/widget)."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(result=_FakeResp(200, json_data=[]))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REVIEWS, params={"owner": "other", "repo": "thing", "pr_number": 3})
+    assert resp.status_code == 200
+    _url, params = fake.calls[0]
+    assert params["owner"] == "other"
+    assert params["repo"] == "thing"
+    assert params["pr_number"] == 3
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_reviews_owner_without_repo_is_400(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    resp = client.get(_REVIEWS, params={"owner": "other"})
+    assert resp.status_code == 400
+    assert "together" in resp.json()["detail"]
 
 
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))

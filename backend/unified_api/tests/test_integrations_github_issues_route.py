@@ -286,6 +286,30 @@ def test_issues_query_label_overrides_default(mock_cfg, mock_cred):
     assert fake.calls[0][1]["labels"] == "blocked"
 
 
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "default_label": "ready"})
+def test_issues_default_label_not_applied_to_explicit_repo(mock_cfg, mock_cred):
+    """The configured ``default_label`` is scoped to the legacy default repo; targeting a
+    DIFFERENT repo explicitly must not silently filter out issues that repo never tagged."""
+    fake = _FakeIssuesClient([_FakeIssuesResp(200, [_issue(1)])])
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES, params={"owner": "other", "repo": "thing"})
+    assert resp.status_code == 200
+    # No label was forwarded to GitHub for the explicitly-targeted repo.
+    assert "labels" not in fake.calls[0][1]
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_issues_rejects_owner_with_url_metacharacters(mock_cfg, mock_cred):
+    """An owner carrying a URL metacharacter (``?``/``#``/``@`` …) is rejected with a 400
+    rather than rewriting the GitHub API request path."""
+    for bad in ("someorg?per_page=1", "a#b", "a@b", "a%2eb", "a:b"):
+        resp = client.get(_ISSUES, params={"owner": bad, "repo": "thing"})
+        assert resp.status_code == 400, bad
+        assert "invalid GitHub owner" in resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # Per-request repository targeting (owner/repo query params)
 # ---------------------------------------------------------------------------

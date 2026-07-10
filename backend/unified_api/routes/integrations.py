@@ -22,6 +22,7 @@ import functools
 import json
 import logging
 import os
+import re
 import subprocess
 import urllib.error
 import urllib.parse
@@ -1188,6 +1189,11 @@ _GITHUB_MAX_DEPENDENCY_PAGES = 10
 # coding-team-service calls use their own longer timeouts (those are a different
 # upstream with different latency characteristics).
 _GITHUB_HTTP_TIMEOUT = 15.0
+# Allowlist for a single owner/repo path component: GitHub logins and repository
+# names are ASCII alphanumerics plus ``.``, ``_``, ``-``. Validating against this
+# (rather than blocklisting a few bad characters) is what keeps a caller-supplied
+# value from rewriting the GitHub API request path or escaping the workspace root.
+_REPO_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _parse_dependency_concurrency(raw: str | None) -> int:
@@ -1661,14 +1667,19 @@ def _validate_repo_component(label: str, value: str | None) -> str:
     Preconditions: ``label`` is ``"owner"`` or ``"repo"`` (used in the error detail);
         ``value`` is the raw caller-supplied string or ``None``.
     Postconditions: returns the stripped value (``""`` when absent/blank). Raises
-        ``HTTPException(400)`` for a non-blank value carrying a path separator, ``..``/
-        ``.`` segment, null byte, or whitespace — these later become URL path segments
-        and filesystem path components, and no real GitHub owner/repo contains them.
+        ``HTTPException(400)`` for any non-blank value outside GitHub's owner/repo
+        character set (ASCII alphanumerics plus ``.``, ``_``, ``-``), or equal to
+        ``".."``/``"."``. This is an allowlist, not a blocklist: it rejects not only
+        path separators, null bytes, and whitespace but also URL metacharacters
+        (``?`` ``#`` ``%`` ``@`` ``:`` …) that would otherwise rewrite the GitHub API
+        request target once concatenated into the request path, and traversal
+        segments that would escape the workspace root — no real GitHub owner/repo
+        contains any of these.
     """
     value = (value or "").strip()
     if not value:
         return ""
-    if "/" in value or "\\" in value or "\x00" in value or value in ("..", ".") or any(ch.isspace() for ch in value):
+    if value in ("..", ".") or not _REPO_COMPONENT_RE.match(value):
         raise HTTPException(status_code=400, detail=f"invalid GitHub {label}: {value!r}")
     return value
 
@@ -1886,11 +1897,18 @@ async def list_github_issues(
           issue and never fails the list. This adds roughly one extra request wave per
           ``GITHUB_DEPENDENCY_CONCURRENCY`` issues to the response latency.
     """
+    # Whether the caller named a specific repository (vs. falling back to the configured
+    # default) — captured before _resolve_github_target overwrites owner/repo below.
+    explicit_target = bool((owner or "").strip() and (repo or "").strip())
     cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, owner, repo)
 
     params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_ISSUES_PER_PAGE}
-    # .get() defensively: a config saved before this field existed must not KeyError → 500.
-    use_label = label or cfg.get("default_label")
+    # The configured ``default_label`` is scoped to the legacy default repo. Applying it to
+    # an explicitly-targeted repo would silently hide every issue that repo never tagged, so
+    # the config fallback label applies ONLY when no specific repo was requested. An explicit
+    # ``?label=`` always wins. .get() defensively: a config saved before this field existed
+    # must not KeyError → 500.
+    use_label = label or (None if explicit_target else cfg.get("default_label"))
     if use_label:
         params["labels"] = use_label
     headers = _github_api_headers(token)
@@ -1905,8 +1923,10 @@ async def list_github_issues(
             _GITHUB_MAX_ISSUE_PAGES,
             not_found_message=f"Repository {owner}/{repo} not found.",
         )
-        # Exclude pull requests (the issues endpoint returns both).
-        raw_issues = [raw for raw in raw_pages if "pull_request" not in raw]
+        # Exclude pull requests (the issues endpoint returns both), and drop any entry
+        # without an integer ``number`` — a malformed payload must not KeyError → 500 when
+        # ``number`` is read below (for the dependency fetch and the issue view-model).
+        raw_issues = [raw for raw in raw_pages if "pull_request" not in raw and isinstance(raw.get("number"), int)]
 
         # Enrich each issue with its blocked_by dependencies. Fan out under a bounded
         # semaphore so a large page is not an N+1 storm of serial round-trips.
@@ -2014,8 +2034,11 @@ def _repo_path_override(cfg: dict[str, Any], owner: str, repo: str) -> str:
     override = cfg.get("repo_path", "").strip()
     if not override:
         return ""
-    cfg_owner = str(cfg.get("owner", ""))
-    cfg_repo = str(cfg.get("repo", ""))
+    # Strip the stored values before comparing: the resolved target was stripped by
+    # _validate_repo_component, so an un-stripped stored default (e.g. " acme ") would
+    # otherwise never match and the pinned checkout would be silently ignored.
+    cfg_owner = str(cfg.get("owner", "")).strip()
+    cfg_repo = str(cfg.get("repo", "")).strip()
     if cfg_owner.casefold() == owner.casefold() and cfg_repo.casefold() == repo.casefold():
         return override
     return ""
@@ -2080,19 +2103,17 @@ def _resolve_repo_path(cfg: dict[str, Any], owner: str, repo: str, issue_number:
         if not value:
             raise HTTPException(status_code=400, detail=f"missing GitHub {label}")
 
-    # Defense-in-depth: owner/repo become path components below, so reject any
-    # value that could traverse out of the workspace (a real GitHub owner/repo
-    # never contains these). Same character rules as _validate_repo_component so
-    # the two validation layers can never disagree on what is acceptable.
+    # Defense-in-depth: owner/repo become path components below, so reject any value
+    # that could traverse out of the workspace or was otherwise never a legal component.
+    # Delegate the character-class rules to the ONE validation predicate (same 400 detail)
+    # so this filesystem-path layer can never disagree with the request boundary on what is
+    # acceptable. The routes resolve owner/repo through _validate_repo_component (which
+    # strips) before reaching here, so a value that isn't already its own stripped form
+    # means a caller bypassed that boundary — reject it rather than silently normalize.
     for label, value in (("owner", owner), ("repo", repo)):
-        if (
-            "/" in value
-            or "\\" in value
-            or "\x00" in value
-            or value in ("..", ".")
-            or any(ch.isspace() for ch in value)
-        ):
+        if value != value.strip():
             raise HTTPException(status_code=400, detail=f"invalid GitHub {label}: {value!r}")
+        _validate_repo_component(label, value)
 
     # Enforce the documented precondition: a non-positive issue_number would yield
     # a degenerate ``issue-0`` / ``issue--1`` segment (and never names a real
@@ -2152,6 +2173,28 @@ def _scrub_git_secret(text: str, token: str) -> str:
     """
     encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     return text.replace(token, "***").replace(encoded, "***")
+
+
+def _redact_url_userinfo(url: str) -> str:
+    """Strip any ``user:pass@`` userinfo from a URL so it is safe to surface in errors.
+
+    Preconditions: ``url`` is a string (need not be a valid URL).
+    Postconditions: returns the URL with its userinfo (``user[:pass]@``) removed. An
+        operator-pinned checkout's remote may embed credentials this service does not
+        control (and ``_scrub_git_secret`` only knows the *PAT*, not those), so echoing
+        the raw remote in a mismatch error could leak them. On a parse failure returns
+        ``"<redacted>"`` rather than risk leaking an unparseable-but-credentialed URL.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return "<redacted>"
+    if not parsed.hostname:
+        # No recognizable authority (e.g. an ssh ``git@host:owner/repo`` scp-like remote):
+        # drop anything before an ``@`` defensively rather than echo possible credentials.
+        return url.split("@", 1)[-1] if "@" in url else url
+    netloc = parsed.hostname + (f":{parsed.port}" if parsed.port else "")
+    return urllib.parse.urlunparse(parsed._replace(netloc=netloc))
 
 
 def _remote_matches(remote_url: str, owner: str, repo: str) -> bool:
@@ -2228,9 +2271,10 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
                 )
                 url_out = url_check.stdout.strip()
                 if url_check.returncode != 0 or not _remote_matches(url_out, owner, repo):
+                    # Redact any embedded credentials before surfacing the remote in the error.
                     return (
                         f"existing checkout at {repo_path} does not match {owner}/{repo} "
-                        f"(remote origin: {url_out[:120]})"
+                        f"(remote origin: {_redact_url_userinfo(url_out)[:120]})"
                     )
 
                 result = subprocess.run(
@@ -2310,7 +2354,9 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
     """Start the coding team on a specific GitHub issue.
 
     Preconditions:
-        - GitHub integration is enabled with a stored PAT and a configured owner/repo.
+        - GitHub integration is enabled with a stored PAT. The target repository comes
+          from the request body (``owner``/``repo``); if omitted it falls back to the
+          optional configured default, and a target reachable by the PAT is required.
         - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
     Postconditions:
         - On success returns a ``RunGitHubIssueResponse`` describing the started job.
@@ -2585,7 +2631,11 @@ async def list_github_reviews(
         except Exception:
             upstream_detail = resp.text
         logger.warning("github reviews: coding team service returned %s: %s", resp.status_code, upstream_detail)
-        raise HTTPException(status_code=resp.status_code, detail="Failed to retrieve review history.")
+        # Mirror the run-issue/review-pr routes: surface a bounded copy of the upstream
+        # detail for 4xx (client-actionable), but a generic message for 5xx (which can
+        # carry a stack trace), always preserving the upstream status code.
+        client_detail = str(upstream_detail)[:500] if resp.status_code < 500 else "Failed to retrieve review history."
+        raise HTTPException(status_code=resp.status_code, detail=client_detail)
 
     try:
         data = resp.json()

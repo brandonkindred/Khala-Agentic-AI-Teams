@@ -160,10 +160,13 @@ def list_reviews(
         return []
     limit = max(1, min(limit, 2000))
     # ``query`` (not ``sql``) so we don't shadow the imported ``psycopg.sql`` module.
+    # Compare owner/repo case-insensitively: GitHub treats them as case-insensitive, and
+    # rows may have been persisted with the operator-typed casing while lookups now use the
+    # canonical casing from GET /user/repos — an exact match would silently hide history.
     query = (
         "SELECT job_id, owner, repo, pr_number, pr_url, status, status_text, "
         "       review_summary, error, author, created_at, completed_at "
-        "FROM code_review_runs WHERE owner = %s AND repo = %s"
+        "FROM code_review_runs WHERE lower(owner) = lower(%s) AND lower(repo) = lower(%s)"
     )
     params: list[Any] = [owner, repo]
     if pr_number is not None:

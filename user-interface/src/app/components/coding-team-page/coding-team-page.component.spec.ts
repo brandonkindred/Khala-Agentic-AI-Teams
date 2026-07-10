@@ -321,6 +321,22 @@ describe('CodingTeamPageComponent', () => {
     expect(component.runningIssue).toBe(false);
   });
 
+  it('does not attribute a run-start failure to the repo the user switched to', async () => {
+    await setup();
+    expandFirstRepo(); // acme/widgets expanded
+    const issue = component.issues[0];
+    const slow = new Subject<never>();
+    integrationsSpy.runGitHubIssue.mockReturnValue(slow.asObservable());
+    component.selectIssue(issue);
+    component.confirmAndRun(); // targets acme/widgets (request pending)
+    // The user switches to another repo while the run-start is on the wire.
+    component.selectedRepo = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
+    slow.error({ error: { detail: 'duplicate run' } });
+    // issueError is the expanded repo's banner — acme/widgets' failure must not show under other/thing.
+    expect(component.issueError).toBeNull();
+    expect(component.runningIssue).toBe(false);
+  });
+
   it('treats completed_with_failures as terminal (so polling stops)', async () => {
     await setup();
     component.jobStatus = null;

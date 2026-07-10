@@ -199,6 +199,37 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.loadingPulls).toBe(false);
   });
 
+  it('ignores a concurrent loadRepos while one is already in flight', async () => {
+    await setup();
+    const slow = new Subject<GitHubRepoItem[]>();
+    integrationsSpy.getGitHubRepos.mockClear();
+    integrationsSpy.getGitHubRepos.mockReturnValue(slow.asObservable());
+    component.loadRepos();
+    component.loadRepos(); // guarded no-op — a second fetch must not be issued
+    expect(integrationsSpy.getGitHubRepos).toHaveBeenCalledTimes(1);
+    slow.next([REPO]);
+    slow.complete();
+    expect(component.loadingRepos).toBe(false);
+  });
+
+  it('discards a PR-list response that lands after the user switched repos', async () => {
+    await setup();
+    component.toggleRepo(component.repos[0]); // collapse so pulls start from an empty baseline
+    const slow = new Subject<GitHubPullRequestItem[]>();
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(slow.asObservable());
+    component.selectedRepo = REPO;
+    component.loadPulls();
+    // Switch to another repo while acme/widgets' PRs are on the wire.
+    component.selectedRepo = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
+    slow.next(makePulls(2));
+    slow.complete();
+    // The stale response must not render under the other repo's row, and the loading flag
+    // must still be cleared (never stuck true after a switch-away).
+    expect(component.pulls.length).toBe(0);
+    expect(component.pullsLoaded).toBe(false);
+    expect(component.loadingPulls).toBe(false);
+  });
+
   it('paginates the PR list client-side', async () => {
     integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(25)));
     await setup();
@@ -414,6 +445,22 @@ describe('CodeReviewPanelComponent', () => {
     await setup();
     component.startReview(component.pulls[0]);
     expect(component.reviewErrorFor(1)).toBe('Network down');
+  });
+
+  it('does not surface a start-review failure from a switched-away repo under the new repo', async () => {
+    await setup(); // acme/widgets expanded, PRs loaded (PR #1 present)
+    const slow = new Subject<never>();
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
+    component.startReview(component.pulls[0]); // start on acme/widgets PR #1 (request pending)
+    // Switch to a different repo that also has a PR #1 before the start resolves.
+    const other: GitHubRepoItem = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
+    component.repos = [REPO, other];
+    component.toggleRepo(other);
+    fixture.detectChanges();
+    // acme/widgets' start now fails — reviewErrors is keyed by bare PR number, so an
+    // unguarded set would render this failure under other/thing's PR #1.
+    slow.error({ error: { detail: 'clone failed' } });
+    expect(component.reviewErrorFor(1)).toBeNull();
   });
 
   it('falls back to a default message when a start-review error has no detail or message', async () => {

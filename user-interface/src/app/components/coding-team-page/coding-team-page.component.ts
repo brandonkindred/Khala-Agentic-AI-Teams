@@ -28,6 +28,8 @@ import type { CodingTeamJobListItem, CodingTeamJobStatus } from '../../models/co
 import type { TeamAssistantFieldSpec } from '../../models/team-assistant.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
+import { LatestOnly } from '../../shared/latest-only';
 import { NotificationService } from '../../core/notification.service';
 
 /** How often the Runs list is re-fetched while the page is open. */
@@ -76,6 +78,17 @@ interface IssueRowVm {
   depsTooltip: string;
 }
 
+/**
+ * Main page for the Coding Team feature, hosting three single-select views: the assistant
+ * chat (default), a GitHub issue browser, and the job Runs panel.
+ *
+ * The GitHub view lists every repository the configured PAT can access — repository access
+ * is defined by the PAT's own authorization, not by per-repo Khala configuration. Expanding
+ * a repo loads its open issues; starting a run targets that repo via per-request owner/repo
+ * parameters. The Runs panel shows runs from every repository, and both the "In progress"
+ * chips and the run rows are keyed by `owner/repo#number` (see {@link issueRunKey}) so
+ * identical issue numbers across repositories can never collide.
+ */
 @Component({
   selector: 'app-coding-team-page',
   standalone: true,
@@ -140,6 +153,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   loadingIssues = false;
   issuesLoaded = false;
   issueError: string | null = null;
+  // "Latest wins" guard so a slow issue load superseded by a newer one (rapid
+  // collapse/re-expand of the same repo, or a repo switch) is discarded, and the
+  // loading flag is always cleared by the current handler rather than getting stuck.
+  private readonly issuesLoad = new LatestOnly();
   /** View-models for the visible issue page; rebuilt in `recomputeIssueVms`. */
   pagedIssueVms: IssueRowVm[] = [];
 
@@ -307,8 +324,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.reposLoaded = true;
         this.loadingRepos = false;
       },
-      error: (err: { error?: { detail?: string }; message?: string }) => {
-        this.repoError = err?.error?.detail || err?.message || 'Failed to load repositories.';
+      error: (err: unknown) => {
+        this.repoError = extractErrorDetail(err, 'Failed to load repositories.');
         this.loadingRepos = false;
       },
     });
@@ -319,20 +336,20 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * the open one. Only one repo is expanded at a time, and the issue list is always scoped to it.
    */
   toggleRepo(repo: GitHubRepoItem): void {
-    if (this.selectedRepo?.full_name === repo.full_name) {
-      this.selectedRepo = null;
-      this.issues = [];
-      this.issuesLoaded = false;
-      this.selectedIssue = null;
-      this.issueError = null;
-      return;
+    const collapse = this.selectedRepo?.full_name === repo.full_name;
+    this.selectedRepo = collapse ? null : repo;
+    this.resetIssueState();
+    if (!collapse) {
+      this.loadIssues();
     }
-    this.selectedRepo = repo;
+  }
+
+  /** Clear all issue-scoped state (list, selection, error) when the expanded repo changes. */
+  private resetIssueState(): void {
     this.issues = [];
     this.issuesLoaded = false;
     this.selectedIssue = null;
     this.issueError = null;
-    this.loadIssues();
   }
 
   /**
@@ -348,6 +365,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   loadIssues(): void {
     const repo = this.selectedRepo;
     if (!repo) return;
+    // Claim a token so a slow response superseded by a newer load (collapse/re-expand of the
+    // same repo, or a repo switch) is discarded — and the loading flag is always cleared by
+    // the current handler, so it can't get stuck true after a switch-away.
+    const token = this.issuesLoad.next();
     this.loadingIssues = true;
     this.issueError = null;
     this.selectedIssue = null;
@@ -359,17 +380,23 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
       next: (issues) => {
-        if (this.selectedRepo?.full_name !== repo.full_name) return; // stale response for a switched-away repo
+        // Superseded by a newer load: that newer load now owns the loading flag, so leave
+        // it and drop this response (prevents an out-of-order same-repo overwrite).
+        if (!this.issuesLoad.isCurrent(token)) return;
+        // This is the current load, so it must clear the flag even if the user switched away
+        // (or the flag would stick true forever). Only render the data when still on this repo.
+        this.loadingIssues = false;
+        if (this.selectedRepo?.full_name !== repo.full_name) return;
         this.issues = issues;
         this.pageIndex = 0;
         this.issuesLoaded = true;
-        this.loadingIssues = false;
         this.recomputeIssueVms();
       },
-      error: (err: { error?: { detail?: string }; message?: string }) => {
-        if (this.selectedRepo?.full_name !== repo.full_name) return;
-        this.issueError = err?.error?.detail || err?.message || 'Failed to load issues.';
+      error: (err: unknown) => {
+        if (!this.issuesLoad.isCurrent(token)) return;
         this.loadingIssues = false;
+        if (this.selectedRepo?.full_name !== repo.full_name) return;
+        this.issueError = extractErrorDetail(err, 'Failed to load issues.');
       },
     });
   }
@@ -510,9 +537,14 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.recomputeIssueVms();
         this.refreshTrigger$.next();
       },
-      error: (err: { error?: { detail?: string }; message?: string }) => {
-        this.issueError = err?.error?.detail || err?.message || 'Failed to start job.';
+      error: (err: unknown) => {
         this.runningIssue = false;
+        // Only surface the failure while still on the repo the run targeted; `issueError`
+        // is the expanded repo's banner, so an unguarded set would attribute this repo's
+        // failure to whichever repo the user switched to while the request was in flight.
+        if (this.selectedRepo?.full_name === repo.full_name) {
+          this.issueError = extractErrorDetail(err, 'Failed to start job.');
+        }
       },
     });
   }
@@ -548,8 +580,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.recomputeIssueVms();
         this.refreshTrigger$.next();
       },
-      error: (err: { error?: { detail?: string }; message?: string }) => {
-        this.issueError = err?.error?.detail || err?.message || 'Failed to start job.';
+      error: (err: unknown) => {
+        this.issueError = extractErrorDetail(err, 'Failed to start job.');
         this.runningIssue = false;
       },
     });
@@ -578,8 +610,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
             tap(() => {
               this.runsError = null;
             }),
-            catchError((err: { error?: { detail?: string }; message?: string }) => {
-              this.runsError = err?.error?.detail ?? err?.message ?? 'Failed to load runs.';
+            catchError((err: unknown) => {
+              this.runsError = extractErrorDetail(err, 'Failed to load runs.');
               return of([] as CodingTeamJobListItem[]);
             }),
           ),
@@ -883,9 +915,9 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.resumingJob = false;
         this.startPolling(jobId);
       },
-      error: (err: { error?: { detail?: string }; message?: string }) => {
+      error: (err: unknown) => {
         this.resumingJob = false;
-        this.issueError = err?.error?.detail ?? err?.message ?? 'Failed to resume job.';
+        this.issueError = extractErrorDetail(err, 'Failed to resume job.');
       },
     });
   }

@@ -21,6 +21,8 @@ import type {
 import type { CodeReviewSummary, CodingTeamJobStatus } from '../../models/coding-team.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
+import { LatestOnly } from '../../shared/latest-only';
 
 /**
  * One code-review run on a pull request. Held in memory and kept live by a
@@ -111,6 +113,11 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   // PR numbers whose Start Review request is in flight (disables the button).
   starting = new Set<number>();
 
+  // "Latest wins" guards so a slow response from a superseded repo load can't overwrite
+  // a newer one (rapid collapse/re-expand of the same repo, or a fast repo switch).
+  private readonly pullsLoad = new LatestOnly();
+  private readonly reviewsLoad = new LatestOnly();
+
   // Live status pollers keyed by job id, so ngOnDestroy can tear them all down.
   private pollers = new Map<string, Subscription>();
 
@@ -169,8 +176,8 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
           this.reposLoaded = true;
           this.loadingRepos = false;
         },
-        error: (err: { error?: { detail?: string }; message?: string }) => {
-          this.repoError = err?.error?.detail || err?.message || 'Failed to load repositories.';
+        error: (err: unknown) => {
+          this.repoError = extractErrorDetail(err, 'Failed to load repositories.');
           this.loadingRepos = false;
         },
       });
@@ -193,22 +200,35 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
 
   /**
    * Drop everything keyed by PR number when the expanded repo changes — PR numbers
-   * collide across repositories, so records from one repo must never render under
-   * another's rows. Live pollers keep running; a later hydrate re-attaches their
-   * records when their repo is expanded again.
+   * collide across repositories, so records, errors, and in-flight "starting" markers
+   * from one repo must never render under another's rows.
+   *
+   * Pollers are disposed too, not left running: a poller mutates its record object,
+   * but this clears the `reviews` map those records live in, so a surviving poller
+   * would update an orphan nothing renders while a later hydrate rebuilds a *fresh*
+   * record whose `startPolling` would no-op (the jobId still looked "polled"), freezing
+   * the row. Disposing here means re-expanding the repo re-fetches history and attaches
+   * a fresh poller to the shown record.
    */
   private resetRepoScopedState(): void {
+    this.stopAllPollers();
     this.pulls = [];
     this.pullsLoaded = false;
     this.expandedPrNumber = null;
     this.pullError = null;
     this.reviews = new Map();
     this.reviewErrors.clear();
+    this.starting.clear();
   }
 
+  /** Load the expanded repo's open pull requests, then hydrate their review history. */
   loadPulls(): void {
     const repo = this.selectedRepo;
     if (!repo) return;
+    // Claim a token so a slow response superseded by a newer load (collapse/re-expand of
+    // the same repo, or a repo switch) is discarded — and the loading flag is always
+    // cleared by the current handler, so it can't get stuck true after a switch-away.
+    const token = this.pullsLoad.next();
     this.loadingPulls = true;
     this.pullError = null;
     this.expandedPrNumber = null;
@@ -217,17 +237,22 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (pulls) => {
-          if (this.selectedRepo?.full_name !== repo.full_name) return; // stale response for a switched-away repo
+          // Superseded by a newer load: that newer load owns the flag; drop this response.
+          if (!this.pullsLoad.isCurrent(token)) return;
+          // Current load — clear the flag even after a switch-away (else it sticks true);
+          // only render + hydrate when still on this repo.
+          this.loadingPulls = false;
+          if (this.selectedRepo?.full_name !== repo.full_name) return;
           this.pulls = pulls;
           this.pageIndex = 0;
           this.pullsLoaded = true;
-          this.loadingPulls = false;
           this.hydrateReviews(repo);
         },
-        error: (err: { error?: { detail?: string }; message?: string }) => {
-          if (this.selectedRepo?.full_name !== repo.full_name) return;
-          this.pullError = err?.error?.detail || err?.message || 'Failed to load pull requests.';
+        error: (err: unknown) => {
+          if (!this.pullsLoad.isCurrent(token)) return;
           this.loadingPulls = false;
+          if (this.selectedRepo?.full_name !== repo.full_name) return;
+          this.pullError = extractErrorDetail(err, 'Failed to load pull requests.');
         },
       });
   }
@@ -250,12 +275,15 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
    * lands. Best-effort: a failure leaves the page usable without history.
    */
   private hydrateReviews(repo: GitHubRepoItem): void {
+    const token = this.reviewsLoad.next();
     this.integrationsApi
       .getGitHubReviewHistory({ owner: repo.owner, repo: repo.name })
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (items) => {
-          if (this.selectedRepo?.full_name !== repo.full_name) return; // stale response
+          // Drop if superseded by a newer repo load, or if the user is no longer on this
+          // repo (a switch that didn't issue a new hydrate) — PR numbers collide across repos.
+          if (!this.reviewsLoad.isCurrent(token) || this.selectedRepo?.full_name !== repo.full_name) return;
           // Records that still have a live poller must survive the rebuild as the
           // same object their poller writes to, or the UI stops updating.
           const live = new Map<string, PrReviewRecord>();
@@ -323,6 +351,7 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     return this.pulls.slice(start, start + this.pageSize);
   }
 
+  /** Adopt a new page index/size from the paginator (the `pagedPulls` getter re-slices). */
   onPageChange(event: PageEvent): void {
     this.pageIndex = event.pageIndex;
     this.pageSize = event.pageSize;
@@ -364,12 +393,14 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
           this.startPolling(record);
           this.cdr.markForCheck();
         },
-        error: (err: { error?: { detail?: string }; message?: string }) => {
+        error: (err: unknown) => {
           this.starting.delete(pull.number);
-          this.reviewErrors.set(
-            pull.number,
-            err?.error?.detail || err?.message || 'Failed to start review.',
-          );
+          // Only surface the error while the user is still on the repo the review targeted;
+          // reviewErrors is keyed by bare PR number, so an unguarded set would render this
+          // failure under another repo's identically-numbered PR after a switch.
+          if (this.selectedRepo?.full_name === repo.full_name) {
+            this.reviewErrors.set(pull.number, extractErrorDetail(err, 'Failed to start review.'));
+          }
           this.cdr.markForCheck();
         },
       });
@@ -438,6 +469,7 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     return this.reviewsFor(prNumber)[0] ?? null;
   }
 
+  /** True when a PR has at least one recorded review run. */
   hasReviews(prNumber: number): boolean {
     return this.reviewsFor(prNumber).length > 0;
   }
