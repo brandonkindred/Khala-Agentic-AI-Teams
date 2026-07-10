@@ -172,6 +172,14 @@ def test_translate_finds_real_activity_error_chain() -> None:
         dispatch._translate_workflow_failure(wf_fail)
 
 
+def test_translate_finds_top_level_marker() -> None:
+    """The common single-activity path: the marker ``ApplicationError`` is the
+    ``WorkflowFailureError``'s immediate cause (one step from the top)."""
+    wf_fail = WorkflowFailureError(cause=ApplicationError("bad", type="ValueError"))
+    with pytest.raises(ValueError, match="bad"):
+        dispatch._translate_workflow_failure(wf_fail)
+
+
 def test_translate_returns_none_without_marker() -> None:
     """No contract marker → returns without raising (caller re-raises the original)."""
     wf_fail = WorkflowFailureError(cause=ApplicationError("infra", type="Boom"))

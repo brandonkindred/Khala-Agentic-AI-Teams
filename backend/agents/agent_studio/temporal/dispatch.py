@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from temporalio.client import WorkflowFailureError
@@ -41,8 +42,8 @@ from shared_temporal import execute_workflow_sync
 
 logger = logging.getLogger(__name__)
 
-# Bounded walk so a cyclic/adversarial cause chain can never loop forever. Mirrors
-# code_review_agent._reports_review_unavailable.
+# Bounded walk so a cyclic/adversarial cause chain can never loop forever — the same
+# bounded-walk pattern the codebase's other Temporal error translators use.
 _MAX_CAUSE_DEPTH = 12
 
 # The ApplicationError.type markers the activities stamp, mapped to the native
@@ -56,12 +57,14 @@ _MARKER_EXCEPTIONS: dict[str, type[Exception]] = {
 def _translate_workflow_failure(exc: WorkflowFailureError) -> None:
     """Re-raise the native domain exception a workflow failure carries, if any.
 
-    Walks the ``WorkflowFailureError`` cause chain (``cause`` / ``__cause__`` /
-    ``__context__``) for an ``ApplicationError`` whose ``type`` marker names a
-    contract exception (``ValueError``/``LookupError``) and re-raises that native
-    exception, so the route's HTTP mapping is preserved through Temporal. Temporal
-    surfaces the marker either at the top of the chain (the activity raised it
-    directly) or nested under an ``ActivityError``; the bounded walk handles both.
+    Walks the standard exception chain (``__cause__`` / ``__context__``) for an
+    ``ApplicationError`` whose ``type`` marker names a contract exception
+    (``ValueError``/``LookupError``) and re-raises that native exception, so the
+    route's HTTP mapping is preserved through Temporal. Temporal surfaces the marker
+    either at the top of the chain (the activity raised it directly) or nested under
+    an ``ActivityError``; the bounded walk handles both. (Temporal's
+    ``FailureError.cause`` is defined as an alias of ``__cause__``, so the standard
+    attributes cover both temporalio and plain exceptions.)
 
     Preconditions:
         - ``exc`` is a ``WorkflowFailureError``.
@@ -81,14 +84,17 @@ def _translate_workflow_failure(exc: WorkflowFailureError) -> None:
         native = _MARKER_EXCEPTIONS.get(marker) if isinstance(marker, str) else None
         if native is not None:
             raise native(str(node)) from exc
-        node = getattr(node, "cause", None) or node.__cause__ or node.__context__
+        node = node.__cause__ or node.__context__
 
 
-def _execute(workflow_run: Any, *args: Any, workflow_id: str) -> Any:
+def _execute(workflow_run: Callable[..., Any], *args: Any, workflow_id: str) -> Any:
     """Run a workflow to completion, translating a failed run's domain error.
 
     Preconditions:
-        - ``workflow_id`` is unique per call (callers mint a fresh uuid).
+        - ``workflow_id`` is unique per call. The public helpers below enforce this by
+          minting a fresh ``uuid.uuid4().hex`` per call — there is no runtime assertion,
+          so a future caller that reuses a still-live id gets the
+          ``WorkflowAlreadyStartedError`` → ``RuntimeError`` path below.
     Postconditions:
         - Returns the workflow result on success. On ``WorkflowFailureError`` first
           re-raises a native ``ValueError``/``LookupError`` when the failure carries

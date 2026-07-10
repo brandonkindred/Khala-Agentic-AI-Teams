@@ -276,16 +276,30 @@ def _start_agent_studio_temporal_worker() -> None:
     being enabled — Agent Studio assumes Temporal is always configured. The worker is a
     daemon thread (no shutdown handle needed); log-and-continue on failure, matching
     the other lifespan startup steps.
+
+    Postconditions:
+        - Logs at INFO only when a worker actually started; when ``start_team_worker``
+          returns ``False`` (``TEMPORAL_ADDRESS`` unset → no worker), logs a WARNING
+          instead of a misleading success line, since Agent Studio is Temporal-only and
+          its requests will fail until Temporal is configured. Startup is not aborted
+          (that would take down every other team for one in-process team's config).
     """
     if not TEAM_CONFIGS["agent_studio"].enabled:
         return
     try:
         from agent_studio.temporal.worker import start_agent_studio_temporal_worker_thread
 
-        start_agent_studio_temporal_worker_thread()
-        logger.info("Started Agent Studio Temporal worker")
+        started = start_agent_studio_temporal_worker_thread()
     except Exception:
         logger.warning("Agent Studio Temporal worker failed to start", exc_info=True)
+        return
+    if started:
+        logger.info("Started Agent Studio Temporal worker")
+    else:
+        logger.warning(
+            "Agent Studio Temporal worker NOT started (TEMPORAL_ADDRESS unset); "
+            "Agent Studio requests will fail until Temporal is configured."
+        )
 
 
 @asynccontextmanager
