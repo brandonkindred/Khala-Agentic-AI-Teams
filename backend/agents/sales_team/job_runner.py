@@ -21,7 +21,7 @@ from job_service_client import (
     JOB_STATUS_RUNNING,
     JobServiceClient,
 )
-from sales_team.models import SalesPipelineRequest
+from sales_team.models import DeepResearchRequest, SalesPipelineRequest
 from sales_team.orchestrator import SalesPodOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -180,4 +180,59 @@ def run_pipeline_job(job_id: str, request: SalesPipelineRequest) -> None:
         write_job_completed(job_id, result.model_dump())
     except Exception as exc:
         logger.error("Sales pipeline job %s failed: %s", job_id, exc, exc_info=True)
+        write_job_failed(job_id, str(exc))
+
+
+def run_deep_research_job(job_id: str, request: DeepResearchRequest) -> None:
+    """Run the deep-research pipeline end-to-end and record job status.
+
+    The thread-dispatch body for the durable deep-research job, shared with the
+    Temporal path's outcome contract. Uses the default dossier-URL shape (no
+    FastAPI request scope in a background thread), matching the async path.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Missing/terminal job at start → orchestrator not run, row untouched.
+        - On success the row ends COMPLETED with the ``DeepResearchResult``
+          (unless a cancel landed during the run, which is preserved).
+        - On failure the row ends FAILED. Never raises — both dispatch paths
+          observe the outcome via the job store.
+    """
+    existing = job_manager.get_job(job_id)
+    if existing is None:
+        logger.warning("Deep-research job %s not found at start; skipping run", job_id)
+        return
+    if existing.get("status") in TERMINAL_STATUSES:
+        logger.info(
+            "Deep-research job %s already terminal (%s) before start; skipping run",
+            job_id,
+            existing.get("status"),
+        )
+        return
+
+    try:
+        job_manager.update_job(
+            job_id,
+            status=JOB_STATUS_RUNNING,
+            current_stage="initializing",
+            progress=2,
+            eta_hint="Starting deep research...",
+        )
+
+        result = SalesPodOrchestrator().deep_research_only(request, persist=True)
+
+        current = job_manager.get_job(job_id)
+        if current is not None and current.get("status") in TERMINAL_STATUSES:
+            logger.info(
+                "Deep-research job %s went terminal (%s) during run; not writing COMPLETED",
+                job_id,
+                current.get("status"),
+            )
+            return
+
+        write_job_completed(job_id, result.model_dump())
+    except Exception as exc:
+        logger.error("Deep-research job %s failed: %s", job_id, exc, exc_info=True)
         write_job_failed(job_id, str(exc))
