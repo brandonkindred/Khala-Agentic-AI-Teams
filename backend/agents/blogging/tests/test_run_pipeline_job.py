@@ -116,13 +116,13 @@ def test_run_blog_full_pipeline_job_completes_needs_review(
 
 
 def _import_errors_used_by_run_pipeline_job():
-    """Mirror the import order in shared.run_pipeline_job: try blogging.shared.errors
-    first, then fall back to shared.errors. Returns (BloggingError, PlanningError, DraftError).
+    """Import the error classes the way blog_writing_process_v2 raises them: from the
+    top-level ``shared.errors`` module. run_pipeline_job must catch these exact class
+    objects — in dual-layout runtimes ``blogging.shared.errors`` is a distinct module
+    whose classes never match. Returns (BloggingError, PlanningError, DraftError).
     """
-    try:
-        from blogging.shared.errors import BloggingError, DraftError, PlanningError
-    except ImportError:
-        from shared.errors import BloggingError, DraftError, PlanningError
+    from shared.errors import BloggingError, DraftError, PlanningError
+
     return BloggingError, PlanningError, DraftError
 
 
@@ -145,7 +145,10 @@ def test_run_blog_full_pipeline_job_planning_error(
     rpj.run_blog_full_pipeline_job(job_id, {"brief": "hi"})
     job = bjs.get_blog_job(job_id)
     assert job["status"] == "failed"
+    # The typed except clause must match the sibling-module PlanningError v2 raises;
+    # falling into the generic handler would lose both attribution fields below.
     assert job["failed_phase"] == "planning"
+    assert job["planning_failure_reason"] == "MAX_ITER"
 
 
 def test_run_blog_full_pipeline_job_blogging_error(
@@ -193,11 +196,88 @@ def test_run_blog_full_pipeline_job_unknown_error(
 def test_run_blog_full_pipeline_job_job_updater_failure_swallowed(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
-    """A failing update_blog_job inside job_updater is logged but doesn't crash."""
+    """A failing update_blog_job inside the job_updater is swallowed; the run still completes.
+
+    The mocked pipeline invokes the real job_updater with a sentinel status_text so the
+    store write raises, exercising make_job_updater's swallow path (rather than just
+    asserting completion of a clean run).
+    """
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
 
     _setup_artifacts_root(monkeypatch, tmp_path)
+
+    hit = {"n": 0}
+    real_update = bjs.update_blog_job
+
+    def raising_update(job_id, **kwargs):
+        if kwargs.get("status_text") == "boom":
+            hit["n"] += 1
+            raise RuntimeError("store down")
+        return real_update(job_id, **kwargs)
+
+    monkeypatch.setattr(rpj, "_resolve_update_blog_job", lambda: raising_update)
+
+    ppr, draft, _ = _make_pipeline_doubles()
+
+    def fake_run(*a, **kw):
+        # Drive the job_updater so its raising store write is actually reached.
+        kw["job_updater"](status_text="boom")
+        return (ppr, draft, "PASS")
+
+    monkeypatch.setattr("agent_implementations.blog_writing_process_v2.run_pipeline", fake_run)
+
+    job_id = str(uuid.uuid4())[:8]
+    bjs.create_blog_job(job_id, "brief")
+    rpj.run_blog_full_pipeline_job(job_id, {"brief": "hi", "audience": {"profession": "dev"}})
+    job = bjs.get_blog_job(job_id)
+    assert job["status"] == "completed"
+    assert hit["n"] >= 1  # the failing update was actually reached and swallowed
+
+
+# ---------------------------------------------------------------------------
+# Degraded-layout paths: _import_shared unavailable
+# ---------------------------------------------------------------------------
+
+
+def _deny_import(name):
+    raise ImportError("nope")
+
+
+def test_mark_job_cancelled_tolerates_missing_modules(monkeypatch) -> None:
+    """mark_job_cancelled still returns True when the shared modules are absent."""
+    from shared import run_pipeline_job as rpj
+
+    monkeypatch.setattr(rpj, "_import_shared", _deny_import)
+    assert rpj.mark_job_cancelled("jid") is True
+
+
+def test_mark_job_cancelled_swallows_update_errors(monkeypatch) -> None:
+    """A failing update_blog_job inside mark_job_cancelled is swallowed."""
+    from shared import run_pipeline_job as rpj
+
+    def raising_update(job_id, **kwargs):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(rpj, "_resolve_update_blog_job", lambda: raising_update)
+    assert rpj.mark_job_cancelled("jid") is True
+
+
+def test_make_job_updater_tolerates_missing_event_bus(monkeypatch) -> None:
+    """The updater never raises when the SSE bus module is absent."""
+    from shared import run_pipeline_job as rpj
+
+    monkeypatch.setattr(rpj, "_import_shared", _deny_import)
+    updater = rpj.make_job_updater("jid")
+    updater(status_text="ok")  # must not raise
+
+
+def test_run_blog_full_pipeline_job_degrades_without_job_store(monkeypatch, tmp_path: Path) -> None:
+    """With the shared modules unavailable, the run degrades to no-store mode without raising."""
+    from shared import run_pipeline_job as rpj
+
+    _setup_artifacts_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(rpj, "_import_shared", _deny_import)
 
     ppr, draft, _ = _make_pipeline_doubles()
     monkeypatch.setattr(
@@ -205,8 +285,4 @@ def test_run_blog_full_pipeline_job_job_updater_failure_swallowed(
         lambda *a, **kw: (ppr, draft, "PASS"),
     )
 
-    job_id = str(uuid.uuid4())[:8]
-    bjs.create_blog_job(job_id, "brief")
-    rpj.run_blog_full_pipeline_job(job_id, {"brief": "hi", "audience": {"profession": "dev"}})
-    job = bjs.get_blog_job(job_id)
-    assert job["status"] == "completed"
+    rpj.run_blog_full_pipeline_job("job-degraded", {"brief": "hi"})  # must not raise

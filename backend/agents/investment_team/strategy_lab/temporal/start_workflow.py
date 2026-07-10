@@ -6,17 +6,23 @@ JSON-shaped ``batch_input`` that ``StrategyLabBatchWorkflow.run`` consumes —
 mirroring the config/clamp/exclusion construction ``_strategy_lab_worker`` does
 today, so the two entrypoints stay behaviorally aligned.
 
-Not yet called by ``_dispatch_strategy_lab_run`` — repointing dispatch at this
-helper (and deleting the coarse ``start_strategy_lab_workflow``) is the Stage 5
-cutover. Import-time side-effect-free.
+Called by ``_dispatch_strategy_lab_run`` (``api/main.py``) on the Temporal
+branch — the coarse ``start_strategy_lab_workflow`` it replaced has been
+deleted. Import-time side-effect-free.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict
+
+if TYPE_CHECKING:
+    # ``RunStrategyLabRequest`` is defined in ``investment_team.api.main``; the
+    # import is guarded so the type hint carries no runtime coupling (with
+    # ``from __future__ import annotations`` the annotation stays a string).
+    from investment_team.api.main import RunStrategyLabRequest
 
 
-def build_strategy_lab_batch_input(run_id: str, request: Any) -> Dict[str, Any]:
+def build_strategy_lab_batch_input(run_id: str, request: RunStrategyLabRequest) -> Dict[str, Any]:
     """Translate a ``RunStrategyLabRequest`` into ``StrategyLabBatchWorkflow`` input.
 
     Reproduces ``_strategy_lab_worker``'s ``BacktestConfig`` construction
@@ -33,12 +39,25 @@ def build_strategy_lab_batch_input(run_id: str, request: Any) -> Dict[str, Any]:
         ``batch_size``/``batch_count``/``max_parallel``, ``benchmark_symbol``,
         ``exclude_asset_classes``, paper-trading flags, ``start_cycle_offset``).
     """
+    # Intentional coupling to two api.main helpers, both bound to state/config the
+    # API module legitimately owns:
+    #   - ``_rehydrate_active_run_offset`` reads and repopulates the in-memory run
+    #     registry (``_active_runs``/``_lock``/``_get_run_state``);
+    #   - ``_clamp_max_parallel`` applies ``_MAX_CONCURRENT_CYCLES``, whose sibling
+    #     constants (``_MAX_PARALLEL``/``_MAX_BATCH_COUNT``) are the ``RunStrategyLabRequest``
+    #     Pydantic ``le=`` bounds, so they cannot move without moving the schema.
+    # We import them here (rather than reimplementing) so the Temporal batch runs
+    # with byte-for-byte the same offset/clamp the thread-mode worker uses — the
+    # deliberate risk being that a signature change to either goes uncaught until a
+    # dispatch. Extracting the run registry into a public store shared by both
+    # modules is tracked as a follow-up; it is out of scope for this cutover, which
+    # by design leaves the thread-mode/API path untouched.
     from investment_team.api.main import (
         _clamp_max_parallel,
         _rehydrate_active_run_offset,
-        excluded_for_allowed,
     )
     from investment_team.models import BacktestConfig
+    from investment_team.strategy_lab_context import excluded_for_allowed
 
     config = BacktestConfig(
         start_date=request.start_date,
@@ -68,7 +87,7 @@ def build_strategy_lab_batch_input(run_id: str, request: Any) -> Dict[str, Any]:
     }
 
 
-def start_strategy_lab_batch_workflow(run_id: str, request: Any) -> None:
+def start_strategy_lab_batch_workflow(run_id: str, request: RunStrategyLabRequest) -> None:
     """Start ``StrategyLabBatchWorkflow`` on ``strategy-lab-queue`` for a run.
 
     Preconditions:

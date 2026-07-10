@@ -1824,9 +1824,11 @@ def _dispatch_strategy_lab_run(run_id: str, request: RunStrategyLabRequest) -> b
     """
 
     def _start() -> None:
-        from investment_team.temporal.start_workflow import start_strategy_lab_workflow
+        from investment_team.strategy_lab.temporal.start_workflow import (
+            start_strategy_lab_batch_workflow,
+        )
 
-        start_strategy_lab_workflow(run_id, request)
+        start_strategy_lab_batch_workflow(run_id, request)
 
     return _dispatch_via_temporal(_start)
 

@@ -10,7 +10,7 @@ from typing import Optional
 
 from temporalio.worker import Worker
 
-from blogging.temporal.activities import run_full_pipeline_activity
+from blogging.temporal import ACTIVITIES, WORKFLOWS
 from blogging.temporal.client import (
     connect_temporal_client,
     is_temporal_enabled,
@@ -18,7 +18,6 @@ from blogging.temporal.client import (
     set_temporal_loop,
 )
 from blogging.temporal.constants import TASK_QUEUE
-from blogging.temporal.workflows import BlogFullPipelineWorkflow
 
 logger = logging.getLogger(__name__)
 
@@ -39,16 +38,17 @@ def create_blogging_worker(
         return None
     global _activity_executor
     if _activity_executor is None:
+        # Four pipeline-phase activities may be in flight across concurrent jobs.
         _activity_executor = ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="blogging-temporal-activity"
+            max_workers=4, thread_name_prefix="blogging-temporal-activity"
         )
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[BlogFullPipelineWorkflow],
-        activities=[run_full_pipeline_activity],
+        workflows=WORKFLOWS,
+        activities=ACTIVITIES,
         activity_executor=_activity_executor,
-        max_concurrent_activities=2,
+        max_concurrent_activities=4,
     )
     logger.info("Blogging Temporal worker created for task queue %s", TASK_QUEUE)
     return worker

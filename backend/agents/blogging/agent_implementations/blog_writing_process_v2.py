@@ -9,10 +9,15 @@ Supports job_updater callback for UI phase tracking.
 """
 
 import logging
+import os
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from blog_writer_agent.models import WriterOutput
 
 from blog_compliance_agent import BlogComplianceAgent
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
@@ -31,6 +36,7 @@ from shared.blog_job_store import (
 )
 from shared.brand_spec import load_brand_spec_prompt
 from shared.content_plan import (
+    ContentPlan,
     PlanningInput,
     PlanningPhaseResult,
     content_plan_to_content_brief_markdown,
@@ -79,10 +85,22 @@ logger = logging.getLogger(__name__)
 _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
 STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
 BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
+# Hard upper bound on the draft/copy-edit loop iterations (the `for iteration in
+# range(1, draft_editor_iterations + 1)` cap in run_draft_stage). It is deliberately
+# high because the loop normally exits *early* when the copy editor approves the
+# draft, or escalates to the author at COPY_EDIT_ESCALATION_THRESHOLD — 500 is a
+# runaway-safety ceiling, not an expected iteration count.
 DRAFT_EDITOR_ITERATIONS = 500
 MAX_REWRITE_ITERATIONS = 100
 # After this many copy-edit revisions without editor approval, escalate to the user
 COPY_EDIT_ESCALATION_THRESHOLD = 10
+
+# Poll cadence (seconds) for every human-in-the-loop wait loop (draft feedback,
+# uncertainty answers, title selection). One value keeps the loops consistent and
+# configurable in one place. This is independent of the Temporal activity heartbeat:
+# ``start_pipeline_heartbeat`` runs a background thread that heartbeats on its own
+# schedule, so these blocking sleeps never risk a heartbeat timeout.
+HITL_POLL_INTERVAL_S = int(os.getenv("BLOGGING_HITL_POLL_INTERVAL_S", "10"))
 
 # Default model - use environment variable or this default
 DEFAULT_MODEL = "deepseek-v4-pro:cloud"
@@ -94,16 +112,20 @@ JobUpdater = Callable[..., None]
 
 
 def _is_external_cancellation(exc: BaseException) -> bool:
-    """True when exception chain indicates runtime cancellation (e.g., Temporal)."""
+    """True when the exception chain indicates a Temporal runtime cancellation.
+
+    Walks the ``__cause__``/``__context__`` chain (bounded by a ``seen`` id-set so a
+    self-referential chain can't loop forever) and tests each link with ``isinstance``
+    against ``temporalio.exceptions.CancelledError`` — robust to subclasses and free
+    of the class-name/module string matching that a Temporal exception-hierarchy
+    change could silently break.
+    """
     cur: Optional[BaseException] = exc
-    for _ in range(8):
-        if cur is None:
-            break
-        cls = cur.__class__
-        if cls.__name__ == "CancelledError":
-            module = getattr(cls, "__module__", "")
-            if module.startswith("temporalio"):
-                return True
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, CancelledError):
+            return True
         cur = cur.__cause__ or cur.__context__
     return False
 
@@ -188,30 +210,30 @@ def run_planning(
     job_updater: Optional[JobUpdater],
 ) -> PlanningPhaseResult:
     """
-    Planning step for the full pipeline.
+    Planning step for the full pipeline: build the content plan for ``brief``.
 
-    Returns planning phase result (content plan with title candidates, sections, etc.).
+    Args:
+        brief: The research brief describing the blog topic.
+        work_dir: Optional directory for artifact persistence (planning artifacts
+            are written when set).
+        llm_client: Resolved LLM client used for planning.
+        length_policy: Resolved length/format policy for the plan.
+        series_context: Optional series-instalment scope.
+        job_updater: Optional UI progress callback.
+
+    Preconditions:
+        - ``brief`` is a valid ``ResearchBriefInput``.
+        - ``llm_client`` and ``length_policy`` are resolved (non-None).
+    Postconditions:
+        - Returns a ``PlanningPhaseResult`` (content plan with title candidates,
+          sections, requirements analysis, and planning telemetry).
+    Raises:
+        PlanningError: If content planning fails.
     """
 
-    def _update(
-        phase: BlogPhase,
-        sub_progress: float = 0.0,
-        status_text: str = "",
-        **kwargs: Any,
-    ) -> None:
-        if job_updater:
-            try:
-                progress = get_phase_progress(phase, sub_progress)
-                job_updater(
-                    phase=phase.value,
-                    progress=progress,
-                    status_text=status_text,
-                    **kwargs,
-                )
-            except CancelledError:
-                raise
-            except Exception as e:
-                logger.warning("Failed to update job status: %s", e)
+    # Same progress-callback as the stage functions use; _make_update is the single
+    # source of the swallow-but-reraise-CancelledError update logic.
+    _update = _make_update(job_updater)
 
     _update(
         BlogPhase.PLANNING,
@@ -535,7 +557,19 @@ def _run_title_selection(
 ) -> Optional[str]:
     """Run the title selection phase: present candidates, process feedback, return loved title.
 
-    Returns the selected title string, or None if title selection was skipped.
+    Args:
+        plan: The content plan; its ``title_candidates`` drive the selection UI.
+        llm_client: Resolved LLM client (used to regenerate candidates on feedback).
+        job_id: Job identifier, or None to skip title selection.
+        job_updater: UI progress callback, or None to skip title selection.
+        _update: The phase-progress callback bound to ``job_updater``.
+
+    Preconditions:
+        - When title selection runs, both ``job_id`` and ``job_updater`` are non-None
+          (either being None short-circuits to a no-op returning None).
+    Postconditions:
+        - Returns the author-selected title string, or None when title selection is
+          skipped (missing job context) or no title is chosen.
     """
     if job_id is None or job_updater is None:
         return None
@@ -663,7 +697,7 @@ def _run_title_selection(
                     )
                     continue
 
-                time.sleep(5)
+                time.sleep(HITL_POLL_INTERVAL_S)
 
             job_data = get_blog_job(job_id) or {}
             selected_title = job_data.get("selected_title")
@@ -682,6 +716,121 @@ def _run_title_selection(
     except Exception as e:
         logger.warning("Title selection phase error (skipping): %s", e)
     return None
+
+
+def _load_required_guidelines(action: str, *, phase: str = "draft") -> Tuple[str, str]:
+    """Load the writing-style and brand-spec guideline files, failing loudly if absent.
+
+    Preconditions:
+        - ``action`` is a short phrase for the error message (e.g. "start drafting").
+        - ``phase`` names the pipeline stage the failure should be attributed to.
+    Postconditions:
+        - Returns ``(writing_style_content, brand_spec_content)``, both non-empty.
+        - Raises ``DraftError(phase=phase)`` naming each missing file when either
+          cannot be loaded — agents must never run with silently-empty guidelines —
+          so the job store's ``failed_phase`` points at the stage that actually failed.
+    """
+    writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
+    brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
+    if not writing_style_content or not brand_spec_content:
+        missing_parts: list[str] = []
+        if not writing_style_content:
+            missing_parts.append(f"writing guidelines ({STYLE_GUIDE_PATH})")
+        if not brand_spec_content:
+            missing_parts.append(f"brand guidelines ({BRAND_SPEC_PROMPT_PATH})")
+        missing_msg = ", ".join(missing_parts)
+        raise DraftError(
+            f"Cannot {action} without required guideline inputs. Missing: {missing_msg}.",
+            cause=ValueError(missing_msg),
+            phase=phase,
+        )
+    return writing_style_content, brand_spec_content
+
+
+def _make_update(job_updater: Optional[JobUpdater]) -> Callable[..., None]:
+    """Build the phase-progress ``_update`` callback bound to a job_updater.
+
+    Preconditions:
+        - ``job_updater`` is either a callable ``(**kwargs) -> None`` or None.
+    Postconditions:
+        - Returns a callable ``(phase, sub_progress=0.0, status_text="", **kwargs)``
+          that forwards a computed overall progress to ``job_updater`` (no-op when
+          ``job_updater`` is None). Re-raises CancelledError; swallows other
+          job-update failures (identical to the pipeline's former inline closure).
+    """
+
+    def _update(
+        phase: BlogPhase,
+        sub_progress: float = 0.0,
+        status_text: str = "",
+        **kwargs: Any,
+    ) -> None:
+        if job_updater:
+            try:
+                progress = get_phase_progress(phase, sub_progress)
+                job_updater(
+                    phase=phase.value,
+                    progress=progress,
+                    status_text=status_text,
+                    **kwargs,
+                )
+            except CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("Failed to update job status: %s", e)
+
+    return _update
+
+
+@dataclass
+class PipelineContext:
+    """Mutable state threaded across the blogging pipeline stages.
+
+    Split out so each stage (planning -> draft -> gates) can run as its own Temporal
+    activity: the activity seeds a context from the previous stage's serialized DTO,
+    runs the stage, and serializes the produced fields. In thread mode a single
+    context is threaded through all three stages in-process.
+
+    Invariants:
+        - ``llm_client`` and ``length_policy`` are resolved (non-None) before any
+          stage runs.
+        - ``planning_phase_result``/``plan``/``elicited_stories_text`` are populated
+          by the planning stage before the draft stage reads them.
+        - ``draft_result`` is populated by the draft stage before the gates stage
+          reads it.
+    """
+
+    brief: ResearchBriefInput
+    work_dir: Optional[Union[str, Path]]
+    # ``Any`` is deliberate: the LLM client is one of several unrelated concrete
+    # types (a Strands model wrapper, a FailoverLLMClient, a DummyLLMClient) with no
+    # shared base. ``Optional`` because it may be None at construction — __post_init__
+    # rejects that, so every stage that runs sees a resolved client.
+    llm_client: Any
+    length_policy: Optional[LengthPolicy]
+    series_context: Optional[SeriesContext]
+    job_id: Optional[str]
+    job_updater: Optional[JobUpdater]
+    draft_editor_iterations: int
+    max_rewrite_iterations: int
+    run_gates: bool
+    planning_phase_result: Optional[PlanningPhaseResult] = None
+    plan: Optional[ContentPlan] = None
+    elicited_stories_text: Optional[str] = None
+    draft_result: Optional["WriterOutput"] = None
+    status: PipelineStatus = "PASS"
+
+    def __post_init__(self) -> None:
+        # Enforce the resolved-inputs invariant at construction so the Temporal
+        # activity path (which builds a context directly) fails loudly here rather
+        # than with an opaque error deep inside a stage. Explicit raise (not assert)
+        # so the check survives ``python -O``.
+        if self.llm_client is None:
+            raise ValueError("PipelineContext.llm_client must be resolved before running a stage")
+        if self.length_policy is None:
+            raise ValueError(
+                "PipelineContext.length_policy must be resolved before running a stage"
+            )
 
 
 def run_pipeline(
@@ -707,6 +856,28 @@ def run_pipeline(
     work_dir is set), runs validators, fact-check, and compliance. On FAIL, enters
     closed-loop rewrite until PASS or max_rewrite_iterations.
 
+    Internally the pipeline is decomposed into three stages — ``run_planning_stage``,
+    ``run_draft_stage``, ``run_gates_stage`` — that operate on a shared
+    ``PipelineContext``. This function is a thin thread-mode sequencer over them;
+    the same stage functions run as independent Temporal activities when orchestrated
+    by ``BlogFullPipelineWorkflow``. The signature and return contract are unchanged.
+
+    Preconditions:
+        - ``brief`` is a valid ``ResearchBriefInput``.
+        - ``llm_client``/``length_policy`` may be None; each is resolved here before
+          the shared ``PipelineContext`` is built (default Strands model; policy
+          derived from content_profile/series_context/length_notes/target_word_count).
+    Postconditions:
+        - Runs the three stages in order over one ``PipelineContext`` and returns
+          ``(planning_phase_result, draft_result, status)`` (see Returns).
+        - Short-circuits and forwards a stage's abort result unchanged when a stage
+          aborts (planning/draft) — the later stages do not run.
+    Invariants:
+        - Each stage's preconditions are met by the previous stage's postconditions:
+          planning populates ``plan``/``planning_phase_result`` before draft reads
+          them; draft populates ``draft_result`` before gates reads it. The
+          ``PipelineContext`` is the single shared carrier of that state.
+
     Args:
         brief: The research brief input describing the blog topic.
         work_dir: Optional directory for artifact persistence.
@@ -725,7 +896,9 @@ def run_pipeline(
 
     Returns:
         Tuple of (planning_phase_result, draft_result, status).
-        status is PASS, FAIL, or NEEDS_HUMAN_REVIEW.
+        status is PASS, FAIL, or NEEDS_HUMAN_REVIEW. On an abort during planning,
+        draft_result is None and status is FAIL (the planning stage returns its
+        abort tuple, which this sequencer forwards unchanged).
 
     Raises:
         PlanningError: If content planning fails.
@@ -733,27 +906,6 @@ def run_pipeline(
         ComplianceError: If compliance check fails unrecoverably.
         FactCheckError: If fact check fails unrecoverably.
     """
-
-    def _update(
-        phase: BlogPhase,
-        sub_progress: float = 0.0,
-        status_text: str = "",
-        **kwargs: Any,
-    ) -> None:
-        """Update job status if job_updater is provided."""
-        if job_updater:
-            try:
-                progress = get_phase_progress(phase, sub_progress)
-                job_updater(
-                    phase=phase.value,
-                    progress=progress,
-                    status_text=status_text,
-                    **kwargs,
-                )
-            except CancelledError:
-                raise
-            except Exception as e:
-                logger.warning("Failed to update job status: %s", e)
 
     if llm_client is None:
         llm_client = get_strands_model("blog")
@@ -770,6 +922,65 @@ def run_pipeline(
         work_path = Path(work_dir).resolve()
         work_path.mkdir(parents=True, exist_ok=True)
         logger.info("Artifact work_dir: %s", work_path)
+
+    ctx = PipelineContext(
+        brief=brief,
+        work_dir=work_dir,
+        llm_client=llm_client,
+        length_policy=length_policy,
+        series_context=series_context,
+        job_id=job_id,
+        job_updater=job_updater,
+        draft_editor_iterations=draft_editor_iterations,
+        max_rewrite_iterations=max_rewrite_iterations,
+        run_gates=run_gates,
+    )
+
+    planning_abort = run_planning_stage(ctx)
+    if planning_abort is not None:
+        return planning_abort
+    draft_abort = run_draft_stage(ctx)
+    if draft_abort is not None:
+        return draft_abort
+    run_gates_stage(ctx)
+    return ctx.planning_phase_result, ctx.draft_result, ctx.status
+
+
+def run_planning_stage(
+    ctx: "PipelineContext",
+) -> Optional[Tuple[PlanningPhaseResult, Optional["WriterOutput"], PipelineStatus]]:
+    """Planning stage: content planning, story elicitation, and outline approval.
+
+    Args:
+        ctx: The shared ``PipelineContext``. Reads ``brief``, ``work_dir``,
+            ``llm_client``, ``length_policy``, ``series_context``, ``job_id``, and
+            ``job_updater``; writes ``planning_phase_result``/``plan``/
+            ``elicited_stories_text`` (and ``status`` on abort).
+    Preconditions:
+        - ``ctx.llm_client`` and ``ctx.length_policy`` are resolved.
+    Postconditions:
+        - On success sets ``ctx.planning_phase_result``/``ctx.plan``/
+          ``ctx.elicited_stories_text`` and returns None.
+        - Returns a terminal ``(planning_phase_result, None, "FAIL")`` tuple if the
+          job was cancelled/failed while awaiting outline approval. This tuple
+          sentinel mirrors ``run_pipeline``'s return shape so the sequencer forwards
+          it unchanged (see ``run_draft_stage`` for the rationale).
+    Raises:
+        PlanningError: when content planning fails (e.g. max parse retries).
+        BloggingError: any other blogging-domain failure from the planning agent
+            propagates unchanged.
+        CancelledError: a Temporal-native cancellation propagates (never swallowed);
+            a cancellation surfaced *while awaiting outline approval* instead
+            short-circuits to the FAIL tuple above.
+    """
+    brief = ctx.brief
+    work_dir = ctx.work_dir
+    llm_client = ctx.llm_client
+    length_policy = ctx.length_policy
+    series_context = ctx.series_context
+    job_id = ctx.job_id
+    job_updater = ctx.job_updater
+    _update = _make_update(job_updater)
 
     planning_phase_result = run_planning(
         brief,
@@ -850,15 +1061,15 @@ def run_pipeline(
                         from shared.story_bank import save_story
 
                         topic_keywords = _extract_plan_keywords(plan)
-                        for idx2, gap2 in enumerate(story_gaps):
+                        for story_idx, story_gap in enumerate(story_gaps):
                             # Find the matching narrative (format: "[Story for section: ...]\n<narrative>")
                             for narr in collected_narratives:
-                                if gap2.section_title in narr:
+                                if story_gap.section_title in narr:
                                     raw_narrative = narr.split("\n", 1)[1] if "\n" in narr else narr
                                     save_story(
                                         narrative=raw_narrative,
-                                        section_title=gap2.section_title,
-                                        section_context=gap2.section_context,
+                                        section_title=story_gap.section_title,
+                                        section_context=story_gap.section_context,
                                         keywords=topic_keywords,
                                         source_job_id=job_id,
                                         llm_client=llm_client,
@@ -953,7 +1164,7 @@ def run_pipeline(
                     job_data = get_blog_job(job_id)
                     if job_data and job_data.get("status") in ("failed", "cancelled"):
                         return planning_phase_result, None, "FAIL"
-                    time.sleep(10)
+                    time.sleep(HITL_POLL_INTERVAL_S)
 
                 feedback_data = get_user_draft_feedback(job_id)
                 if not feedback_data:
@@ -984,9 +1195,18 @@ def run_pipeline(
                     status_text=f"Revising outline based on feedback (revision {outline_revision})...",
                 )
 
-                # Re-run planning with user feedback to refine the plan
+                # Re-run planning with the user's feedback folded into the brief.
+                # plan_content has no dedicated feedback parameter, so the author's
+                # outline feedback is appended to the brief text — otherwise the
+                # re-plan would run with the original input and silently ignore it.
+                refine_brief = brief.brief
+                if user_feedback_text:
+                    refine_brief = (
+                        f"{brief.brief}\n\nAuthor feedback on the previous outline "
+                        f"(revision {outline_revision}): {user_feedback_text}"
+                    )
                 planning_input_for_refine = PlanningInput(
-                    brief=brief.brief,
+                    brief=refine_brief,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
                     length_policy_context=build_planning_length_context(length_policy),
@@ -1002,7 +1222,6 @@ def run_pipeline(
                         planning_input_for_refine,
                         length_policy=length_policy,
                         on_llm_request=lambda msg: _update(BlogPhase.PLANNING, status_text=msg),
-                        # Override the internal feedback with the user's feedback
                     )
                     plan = refined_result.content_plan
                     planning_phase_result = refined_result
@@ -1038,20 +1257,62 @@ def run_pipeline(
         except Exception as e:
             logger.warning("Outline approval phase error (skipping): %s", e)
 
+    ctx.planning_phase_result = planning_phase_result
+    ctx.plan = plan
+    ctx.elicited_stories_text = elicited_stories_text
+    return None
+
+
+def run_draft_stage(
+    ctx: "PipelineContext",
+) -> Optional[Tuple[PlanningPhaseResult, Optional["WriterOutput"], PipelineStatus]]:
+    """Draft stage: initial draft, interactive review, and the copy-edit loop.
+
+    Preconditions:
+        - The planning stage populated ``ctx.plan``/``ctx.planning_phase_result``/
+          ``ctx.elicited_stories_text``.
+        - The human-in-the-loop steps (story-placeholder filling and the interactive
+          draft-review loop with uncertainty questions / author feedback / guideline
+          updates) require a job store: they run only when BOTH ``ctx.job_id`` and
+          ``ctx.job_updater`` are non-None. In thread-mode / CLI / test runs without a
+          job store they are skipped and the draft proceeds straight to the automated
+          copy-edit loop (the story-placeholder skip is logged, since unfilled
+          placeholders visibly degrade the output).
+    Postconditions:
+        - On success sets ``ctx.draft_result`` (and the possibly-updated
+          ``ctx.elicited_stories_text``) and returns None.
+        - Returns a terminal ``(planning_phase_result, draft_result, "FAIL")`` tuple
+          if the job was cancelled/failed while awaiting user review. This tuple
+          *sentinel* (rather than a dedicated ``PipelineAbortedError``) is a
+          deliberate design choice: it keeps the abort shape identical to
+          ``run_pipeline``'s ``(planning, draft, status)`` return so the thin
+          sequencer can forward it unchanged, and avoids exception-based control flow
+          across the Temporal activity boundary where state crosses as serialized
+          DTOs, not live exceptions. ``run_gates_stage`` (terminal, no abort) returns
+          ``None``; only the two stages that can abort use this sentinel.
+    Raises:
+        DraftError: when the required guideline files cannot be loaded
+            (via ``_load_required_guidelines``, phase="draft") or when draft /
+            copy-edit generation fails.
+        BloggingError: any other blogging-domain failure raised by the draft or
+            copy-edit agents propagates unchanged.
+        CancelledError: a Temporal-native cancellation propagates (never swallowed).
+    """
+    assert ctx.plan is not None, "run_draft_stage requires ctx.plan (set by the planning stage)"
+    brief = ctx.brief
+    work_dir = ctx.work_dir
+    llm_client = ctx.llm_client
+    length_policy = ctx.length_policy
+    job_id = ctx.job_id
+    job_updater = ctx.job_updater
+    draft_editor_iterations = ctx.draft_editor_iterations
+    planning_phase_result = ctx.planning_phase_result
+    plan = ctx.plan
+    elicited_stories_text = ctx.elicited_stories_text
+    _update = _make_update(job_updater)
+
     # Draft + Copy Editor loop (load style and brand spec as raw text for draft/editor agents)
-    writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
-    brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
-    if not writing_style_content or not brand_spec_content:
-        missing_parts: list[str] = []
-        if not writing_style_content:
-            missing_parts.append(f"writing guidelines ({STYLE_GUIDE_PATH})")
-        if not brand_spec_content:
-            missing_parts.append(f"brand guidelines ({BRAND_SPEC_PROMPT_PATH})")
-        missing_msg = ", ".join(missing_parts)
-        raise DraftError(
-            f"Cannot start drafting without required guideline inputs. Missing: {missing_msg}.",
-            cause=ValueError(missing_msg),
-        )
+    writing_style_content, brand_spec_content = _load_required_guidelines("start drafting")
     draft_agent = BlogWriterAgent(
         llm_client=llm_client,
         writing_style_guide_content=writing_style_content,
@@ -1063,6 +1324,9 @@ def run_pipeline(
         brand_spec_content=brand_spec_content,
     )
 
+    # Deferred imports (here and elsewhere in the stage bodies) keep this module's
+    # import-time cheap and avoid pulling the full blog_writer_agent / job-store graph
+    # when the Temporal worker imports this file to register activities.
     from blog_writer_agent.feedback_tracker import FeedbackTracker
 
     draft_result = None
@@ -1140,6 +1404,11 @@ def run_pipeline(
                     work_dir=work_dir,
                     iteration=iteration,
                 )
+            else:
+                logger.info(
+                    "No job store (job_id/job_updater is None) — skipping story-placeholder "
+                    "elicitation; any [Author: ...] placeholders remain unfilled in the draft."
+                )
 
             # ── Interactive draft review (user-as-editor) ──────────────────
             # After the initial draft:
@@ -1190,7 +1459,7 @@ def run_pipeline(
                         job_data = get_blog_job(job_id)
                         if job_data and job_data.get("status") in ("failed", "cancelled"):
                             return planning_phase_result, draft_result, "FAIL"
-                        time.sleep(10)
+                        time.sleep(HITL_POLL_INTERVAL_S)
 
                     # ── Step 2: Revise draft with the user's answers ──────
                     job_data = get_blog_job(job_id)
@@ -1252,7 +1521,7 @@ def run_pipeline(
                     job_data = get_blog_job(job_id)
                     if job_data and job_data.get("status") in ("failed", "cancelled"):
                         return planning_phase_result, draft_result, "FAIL"
-                    time.sleep(20)
+                    time.sleep(HITL_POLL_INTERVAL_S)
 
                 # Process user feedback in a loop until approved
                 while True:
@@ -1354,7 +1623,7 @@ def run_pipeline(
                         job_data = get_blog_job(job_id)
                         if job_data and job_data.get("status") in ("failed", "cancelled"):
                             return planning_phase_result, draft_result, "FAIL"
-                        time.sleep(2)
+                        time.sleep(HITL_POLL_INTERVAL_S)
 
         else:
             # Copy edit loop
@@ -1475,7 +1744,7 @@ def run_pipeline(
                         job_data = get_blog_job(job_id)
                         if job_data and job_data.get("status") in ("failed", "cancelled"):
                             return planning_phase_result, draft_result, "FAIL"
-                        time.sleep(2)
+                        time.sleep(HITL_POLL_INTERVAL_S)
 
                     esc_feedback = get_user_draft_feedback(job_id)
                     if esc_feedback and esc_feedback.get("approved"):
@@ -1597,16 +1866,91 @@ def run_pipeline(
             draft_iterations=draft_editor_iterations,
         )
 
+    ctx.draft_result = draft_result
+    ctx.elicited_stories_text = elicited_stories_text
+    return None
+
+
+def run_gates_stage(ctx: "PipelineContext") -> None:
+    """Gates stage: validators, fact-check, compliance, rewrite loop, and finalize.
+
+    Args:
+        ctx: The shared ``PipelineContext``. Reads ``brief``, ``work_dir``,
+            ``llm_client``, ``length_policy``, ``job_id``, ``job_updater``,
+            ``max_rewrite_iterations``, ``run_gates``, ``plan``,
+            ``elicited_stories_text``, and ``draft_result``; writes the final
+            ``draft_result`` and ``status``.
+    Preconditions:
+        - The draft stage populated ``ctx.draft_result``/``ctx.plan``/
+          ``ctx.elicited_stories_text``.
+    Postconditions:
+        - Sets ``ctx.draft_result`` (final) and ``ctx.status`` (PASS or
+          NEEDS_HUMAN_REVIEW). Always returns None (no early aborts).
+        - When ``run_gates`` is True but ``work_dir`` is None the gates cannot run
+          (they persist artifacts under ``work_dir``): they are skipped with a
+          ``logger.info`` and ``ctx.status`` stays PASS — a "gates requested but not
+          executable" result rather than "gates passed". Callers that require gates
+          to actually run must supply a ``work_dir``.
+    Raises:
+        DraftError: when gates are enabled but the guideline files required for
+            gate-driven rewrites cannot be loaded, or when a rewrite iteration
+            fails (phase="gates"/"draft").
+        FactCheckError: when the fact-check gate fails unrecoverably.
+        ComplianceError: when the compliance gate fails unrecoverably.
+        BloggingError: any other blogging-domain gate failure (base class of the
+            above) propagates unchanged.
+        CancelledError: a Temporal-native cancellation propagates for the worker
+            to observe (never swallowed here).
+    """
+    assert ctx.draft_result is not None, (
+        "run_gates_stage requires ctx.draft_result (set by the draft stage)"
+    )
+    brief = ctx.brief
+    work_dir = ctx.work_dir
+    llm_client = ctx.llm_client
+    length_policy = ctx.length_policy
+    job_id = ctx.job_id
+    job_updater = ctx.job_updater
+    max_rewrite_iterations = ctx.max_rewrite_iterations
+    run_gates = ctx.run_gates
+    plan = ctx.plan
+    elicited_stories_text = ctx.elicited_stories_text
+    draft_result = ctx.draft_result
+    _update = _make_update(job_updater)
+
     status: PipelineStatus = "PASS"
     if work_dir is not None:
         write_artifact(work_dir, "final.md", draft_result.draft)
         logger.info("Persisted final.md")
+
+    # Gates require a work_dir: they persist validator/fact-check/compliance
+    # artifacts and drive the closed-loop rewrite off them. When gates are
+    # requested without a work_dir (e.g. an in-memory run), skip them but say so
+    # rather than finalizing silently as PASS.
+    if run_gates and work_dir is None:
+        logger.info(
+            "Blog gates requested (run_gates=True) but skipped: no work_dir to "
+            "persist gate artifacts. Provide work_dir to enable quality gates."
+        )
 
     if work_dir is not None and run_gates:
         brand_spec_prompt_text = load_brand_spec_prompt(BRAND_SPEC_PROMPT_PATH)
         compliance_agent = BlogComplianceAgent(llm_client=llm_client)
         fact_check_agent = BlogFactCheckAgent(llm_client=llm_client)
         require_disclaimer_for = ["medical", "legal", "financial"]
+
+        # Reconstruct the draft agent for gate-driven rewrites. Guideline edits made
+        # during the draft stage are persisted to STYLE_GUIDE_PATH, so re-loading here
+        # picks them up — this also makes the gates stage self-contained when it runs
+        # as its own Temporal activity (a fresh process with no in-memory draft agent).
+        writing_style_content, brand_spec_content = _load_required_guidelines(
+            "run gate-driven rewrites", phase="gates"
+        )
+        draft_agent = BlogWriterAgent(
+            llm_client=llm_client,
+            writing_style_guide_content=writing_style_content,
+            brand_spec_content=brand_spec_content,
+        )
 
         for rewrite_iter in range(max_rewrite_iterations):
             # Fact check phase
@@ -1646,6 +1990,9 @@ def run_pipeline(
                 compliance_report = compliance_agent.run(
                     draft_result.draft,
                     brand_spec_prompt=brand_spec_prompt_text,
+                    # validator_report is normally a Pydantic model, but the
+                    # hasattr guard tolerates plain-object stand-ins from test
+                    # doubles / legacy validator paths (passes None if absent).
                     validator_report=validator_report.model_dump()
                     if hasattr(validator_report, "model_dump")
                     else None,
@@ -1862,7 +2209,9 @@ def run_pipeline(
             status_text="Pipeline complete (gates skipped)",
         )
 
-    return planning_phase_result, draft_result, status
+    ctx.draft_result = draft_result
+    ctx.status = status
+    return None
 
 
 def main() -> None:
