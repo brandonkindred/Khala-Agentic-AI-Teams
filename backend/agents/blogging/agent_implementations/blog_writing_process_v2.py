@@ -205,9 +205,25 @@ def run_planning(
     job_updater: Optional[JobUpdater],
 ) -> PlanningPhaseResult:
     """
-    Planning step for the full pipeline.
+    Planning step for the full pipeline: build the content plan for ``brief``.
 
-    Returns planning phase result (content plan with title candidates, sections, etc.).
+    Args:
+        brief: The research brief describing the blog topic.
+        work_dir: Optional directory for artifact persistence (planning artifacts
+            are written when set).
+        llm_client: Resolved LLM client used for planning.
+        length_policy: Resolved length/format policy for the plan.
+        series_context: Optional series-instalment scope.
+        job_updater: Optional UI progress callback.
+
+    Preconditions:
+        - ``brief`` is a valid ``ResearchBriefInput``.
+        - ``llm_client`` and ``length_policy`` are resolved (non-None).
+    Postconditions:
+        - Returns a ``PlanningPhaseResult`` (content plan with title candidates,
+          sections, requirements analysis, and planning telemetry).
+    Raises:
+        PlanningError: If content planning fails.
     """
 
     def _update(
@@ -552,7 +568,19 @@ def _run_title_selection(
 ) -> Optional[str]:
     """Run the title selection phase: present candidates, process feedback, return loved title.
 
-    Returns the selected title string, or None if title selection was skipped.
+    Args:
+        plan: The content plan; its ``title_candidates`` drive the selection UI.
+        llm_client: Resolved LLM client (used to regenerate candidates on feedback).
+        job_id: Job identifier, or None to skip title selection.
+        job_updater: UI progress callback, or None to skip title selection.
+        _update: The phase-progress callback bound to ``job_updater``.
+
+    Preconditions:
+        - When title selection runs, both ``job_id`` and ``job_updater`` are non-None
+          (either being None short-circuits to a no-op returning None).
+    Postconditions:
+        - Returns the author-selected title string, or None when title selection is
+          skipped (missing job context) or no title is chosen.
     """
     if job_id is None or job_updater is None:
         return None
@@ -1010,15 +1038,15 @@ def run_planning_stage(
                         from shared.story_bank import save_story
 
                         topic_keywords = _extract_plan_keywords(plan)
-                        for idx2, gap2 in enumerate(story_gaps):
+                        for story_idx, story_gap in enumerate(story_gaps):
                             # Find the matching narrative (format: "[Story for section: ...]\n<narrative>")
                             for narr in collected_narratives:
-                                if gap2.section_title in narr:
+                                if story_gap.section_title in narr:
                                     raw_narrative = narr.split("\n", 1)[1] if "\n" in narr else narr
                                     save_story(
                                         narrative=raw_narrative,
-                                        section_title=gap2.section_title,
-                                        section_context=gap2.section_context,
+                                        section_title=story_gap.section_title,
+                                        section_context=story_gap.section_context,
                                         keywords=topic_keywords,
                                         source_job_id=job_id,
                                         llm_client=llm_client,
@@ -1826,6 +1854,16 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
     if work_dir is not None:
         write_artifact(work_dir, "final.md", draft_result.draft)
         logger.info("Persisted final.md")
+
+    # Gates require a work_dir: they persist validator/fact-check/compliance
+    # artifacts and drive the closed-loop rewrite off them. When gates are
+    # requested without a work_dir (e.g. an in-memory run), skip them but say so
+    # rather than finalizing silently as PASS.
+    if run_gates and work_dir is None:
+        logger.info(
+            "Blog gates requested (run_gates=True) but skipped: no work_dir to "
+            "persist gate artifacts. Provide work_dir to enable quality gates."
+        )
 
     if work_dir is not None and run_gates:
         brand_spec_prompt_text = load_brand_spec_prompt(BRAND_SPEC_PROMPT_PATH)
