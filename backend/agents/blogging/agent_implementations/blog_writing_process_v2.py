@@ -1831,8 +1831,16 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
     Postconditions:
         - Sets ``ctx.draft_result`` (final) and ``ctx.status`` (PASS or
           NEEDS_HUMAN_REVIEW). Always returns None (no early aborts).
-        - Raises ``DraftError`` (phase="gates") when gates are enabled but the
-          guideline files required for gate-driven rewrites cannot be loaded.
+    Raises:
+        DraftError: when gates are enabled but the guideline files required for
+            gate-driven rewrites cannot be loaded, or when a rewrite iteration
+            fails (phase="gates"/"draft").
+        FactCheckError: when the fact-check gate fails unrecoverably.
+        ComplianceError: when the compliance gate fails unrecoverably.
+        BloggingError: any other blogging-domain gate failure (base class of the
+            above) propagates unchanged.
+        CancelledError: a Temporal-native cancellation propagates for the worker
+            to observe (never swallowed here).
     """
     assert ctx.draft_result is not None, (
         "run_gates_stage requires ctx.draft_result (set by the draft stage)"

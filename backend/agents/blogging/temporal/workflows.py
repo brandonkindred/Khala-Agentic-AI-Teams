@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import timedelta
-from typing import Any, Dict
+from types import MappingProxyType
+from typing import Any, Dict, Mapping
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -49,11 +50,15 @@ FINALIZE_RETRY_POLICY = dataclasses.replace(DEFAULT_RETRY_POLICY, maximum_attemp
 # schedule-to-close and a 5min heartbeat (its 30s background beat keeps that
 # heartbeat fresh), so replays of pre-decomposition histories keep the exact same
 # timeout envelope. No separate options block is needed for the legacy activity.
-_STAGE_ACTIVITY_OPTS: Dict[str, Any] = dict(
-    task_queue=TASK_QUEUE,
-    schedule_to_close_timeout=HITL_STAGE_TIMEOUT,
-    heartbeat_timeout=timedelta(minutes=5),
-    retry_policy=DEFAULT_RETRY_POLICY,
+# Immutable (MappingProxyType) so an importer can't accidentally mutate the shared
+# options; ``**_STAGE_ACTIVITY_OPTS`` unpacking works on any mapping.
+_STAGE_ACTIVITY_OPTS: Mapping[str, Any] = MappingProxyType(
+    dict(
+        task_queue=TASK_QUEUE,
+        schedule_to_close_timeout=HITL_STAGE_TIMEOUT,
+        heartbeat_timeout=timedelta(minutes=5),
+        retry_policy=DEFAULT_RETRY_POLICY,
+    )
 )
 
 

@@ -8,6 +8,8 @@ four ``@activity.defn`` names in sync — the seam that silently breaks a workfl
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 
 def test_pattern_a_exports_workflows_and_activities() -> None:
     """Every ``@activity.defn`` in the package is exported via ACTIVITIES."""
@@ -60,8 +62,6 @@ def test_worker_registers_exported_lists(monkeypatch) -> None:
             captured.update(kwargs)
 
     monkeypatch.setattr(worker, "Worker", _FakeWorker)
-
-    from unittest.mock import MagicMock
 
     worker.create_blogging_worker(client=MagicMock())
     assert list(captured["workflows"]) == list(t.WORKFLOWS)

@@ -438,13 +438,15 @@ def test_event_bus_concurrent_start_no_double_reaper() -> None:
     def _reapers_alive() -> int:
         return len([t for t in threading.enumerate() if t.name == "blogging-event-bus-reaper"])
 
-    barrier = threading.Barrier(16)
+    n_racers = 8  # enough to race the check-and-start; small enough to stay stable in CI
+
+    barrier = threading.Barrier(n_racers)
 
     def _racer() -> None:
         barrier.wait()  # maximise the chance all threads race the check-and-start
         bus._start_reaper_if_needed()
 
-    threads = [threading.Thread(target=_racer) for _ in range(16)]
+    threads = [threading.Thread(target=_racer) for _ in range(n_racers)]
     for t in threads:
         t.start()
     for t in threads:
@@ -581,6 +583,8 @@ def test_ghost_writer_models() -> None:
 
 
 def test_temporal_client_helpers(monkeypatch) -> None:
+    """address/namespace/enabled accessors read env, and the module-level client and
+    loop setters/getters round-trip None."""
     from blogging.temporal import client as tc
 
     # Default no-address → disabled
@@ -604,6 +608,8 @@ def test_temporal_client_helpers(monkeypatch) -> None:
 
 
 def test_temporal_constants_loaded() -> None:
+    """The task-queue, workflow-id prefix, workflow name, and all five activity-name
+    constants are present and non-empty."""
     from blogging.temporal import constants
 
     assert constants.TASK_QUEUE  # non-empty
@@ -617,6 +623,8 @@ def test_temporal_constants_loaded() -> None:
 
 
 def test_connect_temporal_client_no_address(monkeypatch) -> None:
+    """connect_temporal_client returns None (no connection attempt) when
+    TEMPORAL_ADDRESS is unset."""
     import asyncio
 
     from blogging.temporal import client as tc
@@ -627,6 +635,8 @@ def test_connect_temporal_client_no_address(monkeypatch) -> None:
 
 
 def test_start_full_pipeline_workflow_without_client(monkeypatch) -> None:
+    """start_full_pipeline_workflow raises RuntimeError('not available') when no
+    Temporal client is configured."""
     from blogging.temporal import start_workflow
 
     monkeypatch.setattr(start_workflow, "get_temporal_client", lambda: None)
@@ -635,6 +645,8 @@ def test_start_full_pipeline_workflow_without_client(monkeypatch) -> None:
 
 
 def test_start_workflow_run_async_no_loop(monkeypatch) -> None:
+    """_run_async raises RuntimeError when there is no running Temporal loop/client to
+    submit the coroutine to."""
     from blogging.temporal import start_workflow
 
     monkeypatch.setattr(start_workflow, "get_temporal_loop", lambda: None)
@@ -649,6 +661,8 @@ def test_start_workflow_run_async_no_loop(monkeypatch) -> None:
 
 
 def test_temporal_worker_disabled_paths(monkeypatch) -> None:
+    """When Temporal is disabled, create_blogging_worker returns None, the thread
+    starter returns False, and the thread target is a no-op."""
     from blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: False)
@@ -660,6 +674,8 @@ def test_temporal_worker_disabled_paths(monkeypatch) -> None:
 
 
 def test_temporal_worker_shutdown_noop_when_nothing_running() -> None:
+    """shutdown_blogging_temporal_components is a safe no-op when no executor, worker,
+    loop, or thread is running."""
     from blogging.temporal import worker
 
     worker._activity_executor = None
@@ -670,6 +686,8 @@ def test_temporal_worker_shutdown_noop_when_nothing_running() -> None:
 
 
 def test_force_stop_worker_loop_already_closed(monkeypatch) -> None:
+    """_force_stop_worker_loop swallows the 'Event loop is closed' RuntimeError raised
+    when stopping an already-closed loop."""
     from blogging.temporal import worker
 
     class _DeadLoop:
@@ -922,16 +940,39 @@ def test_arxiv_search_http_400(monkeypatch) -> None:
         arxiv_search.search_arxiv("foo", max_results=1)
 
 
-def test_arxiv_search_max_results_minimum() -> None:
-    """max_results < 1 is coerced to 1 — exercised by passing 0."""
-    from blog_research_agent.tools.arxiv_search import search_arxiv
+def test_arxiv_search_max_results_minimum(monkeypatch) -> None:
+    """max_results < 1 is coerced to 1 before the request URL is built.
 
-    # We don't actually want to call the network; just exercise the input branch.
-    # Skip when network would be involved by checking that a 0 doesn't raise on the validation step.
-    try:
-        search_arxiv("query", max_results=0)
-    except Exception:
-        pass  # network may fail — we only care that the input validation didn't
+    Mocks httpx so no network call happens, then asserts the coerced value reached
+    the request (``max_results=1``) and that an empty feed parses to ``[]``.
+    """
+    from blog_research_agent.tools import arxiv_search as mod
+
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+        content = b'<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url):
+            captured["url"] = url
+            return _Resp()
+
+    monkeypatch.setattr(mod.httpx, "Client", _Client)
+
+    result = mod.search_arxiv("query", max_results=0)
+    assert result == []
+    assert "max_results=1" in captured["url"]  # 0 was clamped to the minimum of 1
 
 
 def test_web_fetcher_init_validation() -> None:

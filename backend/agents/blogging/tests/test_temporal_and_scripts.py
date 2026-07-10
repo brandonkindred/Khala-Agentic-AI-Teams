@@ -417,6 +417,36 @@ def test_plan_stage_activity_error_fails_job_and_returns_fail(monkeypatch, tmp_p
     assert failed == {"job_id": "j1", "phase": "planning"}
 
 
+def test_run_stage_propagates_heartbeat_start_failure(monkeypatch) -> None:
+    """A start_pipeline_heartbeat failure is infrastructure, not a pipeline failure:
+    _run_stage lets it propagate (so Temporal retries) instead of running the body or
+    funneling it into a FAIL DTO."""
+    import importlib
+
+    from blogging.temporal import activities as acts
+
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+
+    def boom(job_id):
+        raise RuntimeError("heartbeat thread failed to start")
+
+    monkeypatch.setattr(rpj, "start_pipeline_heartbeat", boom)
+
+    body_ran = {"n": 0}
+    failed = {"n": 0}
+    monkeypatch.setattr(acts, "_fail_activity", lambda *a, **kw: failed.update(n=failed["n"] + 1))
+
+    def _body():
+        body_ran["n"] += 1
+        return {"status": "PASS"}
+
+    with pytest.raises(RuntimeError, match="heartbeat thread failed to start"):
+        acts._run_stage("j1", "planning", lambda: {"status": "FAIL"}, _body)
+
+    assert body_ran["n"] == 0  # body never ran (heartbeat starts first, outside the funnel)
+    assert failed["n"] == 0  # not funneled into _fail_activity — it propagates to Temporal
+
+
 def test_draft_stage_activity_returns_draft_dto(monkeypatch, tmp_path) -> None:
     """draft_stage_activity rebuilds the plan, runs the draft stage, serializes it."""
     import importlib
