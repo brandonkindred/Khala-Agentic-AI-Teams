@@ -1,25 +1,38 @@
 """Orchestrator for market research and concept viability analysis.
 
-Uses a Strands Graph for parallel agent execution:
-- Split mode: UX research → [psychology, consistency] → viability synthesis
-- Unified mode: UX research → psychology → viability synthesis
-- Scripts agent runs independently in parallel
+Coordinates role-separated specialist agents (defined in ``agents.py``) through
+a **per-stage seam** that is shared by BOTH runtime paths:
+
+- the thread path — :meth:`MarketResearchOrchestrator.run`, which fans the UX
+  stage out one call per transcript with ``shared_concurrency.parallel_map``,
+  then runs psychology/consistency/viability/scripts;
+- the Temporal path — ``temporal/activities.py``, one durable
+  ``@activity.defn`` per stage, calling the exact same methods.
+
+Topology (``TeamTopology``):
+- Split mode:  UX → [psychology, consistency] → viability;  scripts in parallel.
+- Unified mode: UX → psychology → viability;                scripts in parallel.
+
+Every stage method is a pure function of its inputs (no job-store or Temporal
+coupling) so the two paths can never derive different results from the same
+mission.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import List, Tuple
 
-from shared_graph import extract_node_text, invoke_graph_sync
+from shared_concurrency import parallel_map
 
 from .agents import (
+    ConsistencyAgent,
+    MarketViabilityAgent,
+    ResearchScriptAgent,
     TranscriptIngestionAgent,
-    _ensure_list,
-    _parse_json,
-    _safe_float,
+    UserPsychologyAgent,
+    UXResearchAgent,
 )
-from .graphs.research_graph import build_research_graph
 from .models import (
     HumanReview,
     InterviewInsight,
@@ -30,10 +43,16 @@ from .models import (
     ViabilityRecommendation,
     WorkflowStatus,
 )
-from .prompts import CONSISTENCY_SYSTEM_PROMPT  # noqa: F401 — re-exported for backward compat
 
 logger = logging.getLogger(__name__)
 
+# Thread-path UX fan-out width. The Temporal path bounds fan-out by the worker's
+# ``max_concurrent_activities`` instead, so this only governs local/thread runs.
+_UX_FANOUT_WORKERS = 4
+
+# Padding used by ``assemble`` to guarantee ``TeamOutput`` always carries at
+# least two market signals (a display-only floor — these are never fed to the
+# viability stage, which sees only the real derived signals).
 _DEFAULT_SIGNALS_FALLBACK = [
     MarketSignal(
         signal="User pain urgency",
@@ -47,201 +66,126 @@ _DEFAULT_SIGNALS_FALLBACK = [
     ),
 ]
 
-_DEFAULT_SCRIPTS_FALLBACK = [
-    (
-        "Interview script:\n"
-        "1) Tell me about your current workflow.\n"
-        "2) What is hardest or most frustrating today?\n"
-        "3) What have you already tried and why did it fail?\n"
-        "4) If this problem disappeared tomorrow, what outcome would change?"
-    ),
-    (
-        "Transcript tagging guide:\n"
-        "- Label each statement as job_to_be_done, pain_point, desired_outcome, workaround, or trigger_event.\n"
-        "- Track frequency count for repeated themes across interviews."
-    ),
-    (
-        "Decision checkpoint template:\n"
-        "- What evidence improved confidence?\n"
-        "- What assumptions remain unproven?\n"
-        "- What experiment is approved for next sprint?"
-    ),
-]
-
-
-def _parse_insights_from_text(text: str) -> List[InterviewInsight]:
-    """Parse UX research agent output into InterviewInsight list."""
-    data = _parse_json(text, {})
-    if isinstance(data, dict):
-        # Single insight or nested structure
-        return [
-            InterviewInsight(
-                source="graph_analysis",
-                user_jobs=_ensure_list(data.get("user_jobs"), []),
-                pain_points=_ensure_list(data.get("pain_points"), []),
-                desired_outcomes=_ensure_list(data.get("desired_outcomes"), []),
-                direct_quotes=_ensure_list(data.get("direct_quotes"), []),
-            )
-        ]
-    if isinstance(data, list):
-        insights = []
-        for item in data:
-            if isinstance(item, dict):
-                insights.append(
-                    InterviewInsight(
-                        source=item.get("source", "graph_analysis"),
-                        user_jobs=_ensure_list(item.get("user_jobs"), []),
-                        pain_points=_ensure_list(item.get("pain_points"), []),
-                        desired_outcomes=_ensure_list(item.get("desired_outcomes"), []),
-                        direct_quotes=_ensure_list(item.get("direct_quotes"), []),
-                    )
-                )
-        return insights
-    return []
-
-
-def _signal_name(raw: object) -> str:
-    """Coerce a signal name, defaulting to a sensible label when None or non-string."""
-    return str(raw) if isinstance(raw, str) else "Cross-interview theme consistency"
-
-
-def _parse_signals_from_text(text: str) -> List[MarketSignal]:
-    """Parse psychology/consistency agent output into MarketSignal list."""
-    data = _parse_json(text, [])
-    if isinstance(data, dict):
-        return [
-            MarketSignal(
-                signal=_signal_name(data.get("signal")),
-                confidence=min(1.0, max(0.0, _safe_float(data.get("confidence"), 0.5))),
-                evidence=_ensure_list(data.get("evidence"), []),
-            )
-        ]
-    if isinstance(data, list):
-        signals = []
-        for item in data:
-            if isinstance(item, dict):
-                signals.append(
-                    MarketSignal(
-                        signal=_signal_name(item.get("signal")),
-                        confidence=min(1.0, max(0.0, _safe_float(item.get("confidence"), 0.5))),
-                        evidence=_ensure_list(item.get("evidence"), []),
-                    )
-                )
-        return signals
-    return []
-
-
-def _parse_viability_from_text(text: str, mission: ResearchMission) -> ViabilityRecommendation:
-    """Parse viability synthesis output into ViabilityRecommendation."""
-    data = _parse_json(text, {})
-    if not isinstance(data, dict):
-        data = {}
-
-    valid_verdicts = {"insufficient_evidence", "needs_more_validation", "promising_with_risks"}
-    verdict = str(data.get("verdict", "needs_more_validation"))
-    if verdict not in valid_verdicts:
-        verdict = "needs_more_validation"
-
-    return ViabilityRecommendation(
-        verdict=verdict,
-        confidence=min(1.0, max(0.0, _safe_float(data.get("confidence"), 0.5))),
-        rationale=_ensure_list(
-            data.get("rationale"), [f"Mission concept: {mission.product_concept}."]
-        ),
-        suggested_next_experiments=_ensure_list(
-            data.get("suggested_next_experiments"),
-            ["Run a concierge MVP with 3-5 target users for one core workflow."],
-        ),
-    )
-
-
-def _parse_scripts_from_text(text: str) -> List[str]:
-    """Parse scripts agent output into a list of strings."""
-    data = _parse_json(text, _DEFAULT_SCRIPTS_FALLBACK)
-    if isinstance(data, list) and all(isinstance(s, str) for s in data) and len(data) >= 1:
-        return data
-    return list(_DEFAULT_SCRIPTS_FALLBACK)
-
 
 class MarketResearchOrchestrator:
-    """Coordinates market research workflow via a Strands Graph."""
+    """Coordinates the market-research workflow via a shared per-stage seam.
+
+    Invariants:
+        - Each ``*_one``/stage method is a pure function of its arguments and the
+          held specialist agents; none touch the job store or Temporal. This is
+          what lets the thread path and the Temporal activities share them
+          verbatim.
+    """
 
     def __init__(self) -> None:
         self.ingestion = TranscriptIngestionAgent()
+        self.ux = UXResearchAgent()
+        self.psychology_agent = UserPsychologyAgent()
+        self.consistency_agent = ConsistencyAgent()
+        self.viability_agent = MarketViabilityAgent()
+        self.scripts_agent = ResearchScriptAgent()
 
-    def run(self, mission: ResearchMission, human_review: HumanReview) -> TeamOutput:
-        """Run the market research workflow."""
-        # Load transcripts outside the graph (pure data I/O)
-        loaded = self.ingestion.load_transcripts(mission)
+    # ------------------------------------------------------------------
+    # Per-stage seam (shared by the thread path and the Temporal activities)
+    # ------------------------------------------------------------------
 
-        is_split = mission.topology == TeamTopology.SPLIT
+    def ingest(self, mission: ResearchMission) -> List[Tuple[str, str]]:
+        """Load transcript text for ``mission`` (pure I/O, no LLM).
 
-        # Build task with mission context and transcript data
-        transcript_text = ""
-        for source, text in loaded:
-            transcript_text += f"\n--- {source} ---\n{text}\n"
+        Postconditions:
+            - Returns ``[(source, text), ...]`` — inline transcripts first, then
+              ``*.txt`` files under ``transcript_folder_path`` (may be empty).
+        """
+        return self.ingestion.load_transcripts(mission)
 
-        task = (
-            f"Analyze the following market research data.\n\n"
-            f"Product concept: {mission.product_concept}\n"
-            f"Target users: {mission.target_users}\n"
-            f"Business goal: {mission.business_goal}\n"
-            f"Number of interviews: {len(loaded)}\n\n"
-            f"Transcripts:{transcript_text if transcript_text else ' (none provided)'}"
+    def ux_one(self, source: str, transcript: str) -> InterviewInsight:
+        """Extract one interview's ``InterviewInsight`` (one LLM call).
+
+        Preconditions:
+            - ``transcript`` is a single interview's text; ``source`` labels it.
+        Postconditions:
+            - Returns an ``InterviewInsight`` tagged with ``source``; parsing
+              failures fall back to the agent's default fields, never raise.
+        """
+        return self.ux.analyze(source, transcript)
+
+    def psychology(self, insights: List[InterviewInsight]) -> List[MarketSignal]:
+        """Derive adoption/behavior ``MarketSignal``s from ``insights``.
+
+        Postconditions:
+            - Returns at least two signals (the agent pads with defaults).
+        """
+        return self.psychology_agent.derive_signals(insights)
+
+    def consistency(self, insights: List[InterviewInsight]) -> List[MarketSignal]:
+        """Score cross-interview theme consistency (split mode only).
+
+        Postconditions:
+            - Empty ``insights`` (no transcripts) → a single deterministic
+              "Cross-interview theme consistency" fallback signal (no LLM call),
+              preserving the previous graph-path behavior.
+            - Otherwise → the consistency agent's single-signal assessment.
+        """
+        if not insights:
+            return [self._consistency_empty_signal()]
+        return self.consistency_agent.analyze(insights)
+
+    def viability(
+        self, mission: ResearchMission, signals: List[MarketSignal], insight_count: int
+    ) -> ViabilityRecommendation:
+        """Produce the viability verdict from the real derived ``signals``.
+
+        Postconditions:
+            - ``insight_count == 0`` → a deterministic ``insufficient_evidence``
+              recommendation (no LLM call); otherwise an LLM-backed verdict.
+        """
+        return self.viability_agent.recommend(mission, signals, insight_count)
+
+    def scripts(self, mission: ResearchMission) -> List[str]:
+        """Generate the research scripts/templates for ``mission`` (one LLM call).
+
+        Postconditions:
+            - Returns a non-empty ``list[str]`` (agent defaults on parse failure).
+        """
+        return self.scripts_agent.build_scripts(mission)
+
+    @staticmethod
+    def _consistency_empty_signal() -> MarketSignal:
+        """The deterministic split-mode fallback when no transcripts exist."""
+        return MarketSignal(
+            signal="Cross-interview theme consistency",
+            confidence=0.55,
+            evidence=[
+                "Insufficient transcript volume for consistency scoring; collect 5+ interviews."
+            ],
         )
 
-        # Build and invoke the graph
-        graph = build_research_graph(include_consistency=is_split)
-        result = invoke_graph_sync(graph, task)
+    def assemble(
+        self,
+        mission: ResearchMission,
+        human_review: HumanReview,
+        insights: List[InterviewInsight],
+        signals: List[MarketSignal],
+        recommendation: ViabilityRecommendation,
+        scripts: List[str],
+    ) -> TeamOutput:
+        """Assemble the final ``TeamOutput`` (pure — no LLM, no I/O).
 
-        # Extract results from graph nodes
-        ux_text = extract_node_text(result, "ux_research")
-        insights = _parse_insights_from_text(ux_text) if ux_text else []
+        Holds the two policy branches the workflow must not: the min-2
+        market-signals display floor, and the ``human_review.approved`` gate
+        (NEEDS_HUMAN_DECISION vs READY_FOR_EXECUTION).
 
-        psych_text = extract_node_text(result, "psychology")
-        market_signals = _parse_signals_from_text(psych_text) if psych_text else []
-
-        if is_split:
-            if not loaded:
-                # No transcripts → deterministic fallback (no LLM call needed)
-                market_signals.append(
-                    MarketSignal(
-                        signal="Cross-interview theme consistency",
-                        confidence=0.55,
-                        evidence=[
-                            "Insufficient transcript volume for consistency scoring; collect 5+ interviews."
-                        ],
-                    )
-                )
-            else:
-                consistency_text = extract_node_text(result, "consistency")
-                consistency_signals = (
-                    _parse_signals_from_text(consistency_text) if consistency_text else []
-                )
-                market_signals.extend(consistency_signals)
-
-        # Ensure minimum signals
+        Preconditions:
+            - ``signals`` are the real derived signals (already includes the
+              consistency signal in split mode); ``recommendation`` was computed
+              from them.
+        Postconditions:
+            - Returns a ``TeamOutput`` carrying ``insights``/``scripts`` verbatim
+              and at least two ``market_signals``.
+        """
+        market_signals = list(signals)
         while len(market_signals) < 2:
             market_signals.append(_DEFAULT_SIGNALS_FALLBACK[len(market_signals)])
-
-        viability_text = extract_node_text(result, "viability_synthesis")
-        recommendation = (
-            _parse_viability_from_text(viability_text, mission)
-            if viability_text
-            else ViabilityRecommendation(
-                verdict="insufficient_evidence",
-                confidence=0.3,
-                rationale=["Graph execution produced no viability output."],
-                suggested_next_experiments=["Re-run analysis with transcript data."],
-            )
-        )
-
-        scripts_text = extract_node_text(result, "scripts")
-        scripts = (
-            _parse_scripts_from_text(scripts_text)
-            if scripts_text
-            else list(_DEFAULT_SCRIPTS_FALLBACK)
-        )
 
         if not human_review.approved:
             return TeamOutput(
@@ -272,3 +216,43 @@ class MarketResearchOrchestrator:
             proposed_research_scripts=scripts,
             human_feedback=human_review.feedback or "Approved.",
         )
+
+    # ------------------------------------------------------------------
+    # Thread-path driver (Temporal mode reproduces this DAG across activities)
+    # ------------------------------------------------------------------
+
+    def run(self, mission: ResearchMission, human_review: HumanReview) -> TeamOutput:
+        """Run the full market-research workflow in-process (thread mode).
+
+        Reproduces the same DAG the Temporal workflow orchestrates: ingest →
+        UX fan-out (one call per transcript) + scripts → psychology (+consistency
+        in split mode) → viability → assemble.
+
+        Preconditions:
+            - ``mission`` is a validated ``ResearchMission``.
+        Postconditions:
+            - Returns the assembled ``TeamOutput``. A single transcript's UX
+              failure raises (whole-run failure), matching the previous
+              behavior; the Temporal path instead retries/drops per transcript.
+        """
+        loaded = self.ingest(mission)
+
+        insights: List[InterviewInsight] = (
+            parallel_map(
+                loaded,
+                lambda item: self.ux_one(item[0], item[1]),
+                max_workers=_UX_FANOUT_WORKERS,
+            )
+            if loaded
+            else []
+        )
+
+        scripts = self.scripts(mission)
+
+        signals = self.psychology(insights)
+        if mission.topology == TeamTopology.SPLIT:
+            signals = signals + self.consistency(insights)
+
+        recommendation = self.viability(mission, signals, len(insights))
+
+        return self.assemble(mission, human_review, insights, signals, recommendation, scripts)

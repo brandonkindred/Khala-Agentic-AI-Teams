@@ -74,11 +74,13 @@ def test_orchestrator_split_mode_adds_consistency_signal_for_empty_inputs() -> N
 
 
 def test_orchestrator_consistency_signal_survives_null_signal_name(monkeypatch) -> None:
-    """LLM returns {"signal": null, ...} — should fall back to the default signal name."""
+    """LLM returns {"signal": null, ...} for the consistency stage — the
+    ConsistencyAgent must fall back to the default signal name."""
 
     null_consistency_json = json.dumps({"signal": None, "confidence": 0.6, "evidence": ["theme A"]})
 
-    # Override extract_node_text to return null-signal consistency for the consistency node
+    # Route the consistency stage's LLM call to null-signal JSON; every other
+    # stage keeps its schema-valid canned output.
     from market_research_team.tests.conftest import (
         SAMPLE_INSIGHT_JSON,
         SAMPLE_SCRIPTS_JSON,
@@ -86,20 +88,21 @@ def test_orchestrator_consistency_signal_survives_null_signal_name(monkeypatch) 
         SAMPLE_VIABILITY_JSON,
     )
 
-    def _custom_extract(result, node_id):
-        if node_id == "consistency":
+    def _custom_call_agent(agent, prompt):
+        p = prompt.lower()
+        if "consistency" in p or "cross-interview" in p:
             return null_consistency_json
-        if node_id == "ux_research":
+        if "transcript" in p and "analyze" in p:
             return SAMPLE_INSIGHT_JSON
-        if node_id == "psychology":
+        if "psychology" in p or "adoption" in p or "market signals" in p:
             return SAMPLE_SIGNALS_JSON
-        if node_id == "viability_synthesis":
+        if "viability" in p or "verdict" in p:
             return SAMPLE_VIABILITY_JSON
-        if node_id == "scripts":
+        if "research artifacts" in p or "interview script" in p:
             return SAMPLE_SCRIPTS_JSON
-        return ""
+        return SAMPLE_INSIGHT_JSON
 
-    monkeypatch.setattr("market_research_team.orchestrator.extract_node_text", _custom_extract)
+    monkeypatch.setattr("market_research_team.agents._call_agent", _custom_call_agent)
 
     orchestrator = MarketResearchOrchestrator()
     mission = ResearchMission(

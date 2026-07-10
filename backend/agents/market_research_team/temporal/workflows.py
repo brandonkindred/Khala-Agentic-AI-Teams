@@ -1,67 +1,79 @@
-"""Temporal workflow + activity for the market_research team.
+"""Temporal workflow for the market_research team — fine-grained per-stage orchestration.
 
-Kept in its own module (separate from the package ``__init__``) so the
-temporalio workflow sandbox can re-import the workflow class without
-executing any non-deterministic top-level code (e.g. ``os.getenv``,
-worker bootstrap). Co-locating ``start_team_worker``/``is_temporal_enabled``
-with the workflow class trips the sandbox with
-``__call__ on os.getenv restricted`` during workflow registration.
+``MarketResearchWorkflow`` runs the pipeline as a graph of Temporal activities
+(defined in :mod:`activities`): a single-shot ``market_research_prepare`` opens
+the run, ``market_research_ingest`` loads transcripts, the UX stage **fans out
+one activity per transcript** via ``asyncio.gather``, ``scripts`` runs as an
+independent parallel branch, ``psychology`` and (split mode) ``consistency`` run
+concurrently, ``viability`` fans in, and ``market_research_finalize`` assembles
+the ``TeamOutput`` and writes COMPLETED. Every specialist agent invocation is a
+durable, individually-retryable Temporal activity, visible in the Temporal UI —
+the whole point of the fine-grained decomposition.
 
-The activity reuses the shared pipeline core (``run_pipeline_core`` in
-``market_research_team.pipeline`` — a neutral module, so the worker does not
-import the FastAPI app) so the job-store bookkeeping (RUNNING → COMPLETED,
-cancel guards) lives in exactly one place. Status is written to the durable
-``JobServiceClient`` store, so a completed run survives a worker/process
-restart.
+Failure contract (mirrored from sales_team): activities never write FAILED
+(doing so mid-retry would trip their own terminal guards and defeat the retry
+policy). Instead the workflow body is wrapped in a catch-all that, after a fatal
+error has exhausted its retries, records FAILED via the dedicated
+``market_research_mark_failed`` activity and re-raises — so the Temporal
+workflow outcome always mirrors the job store: FAILED job ⇔ failed workflow,
+COMPLETED job ⇔ succeeded workflow, and a cancelled/interrupted job ends the
+workflow cleanly without a COMPLETED write.
+
+The workflow body is **deterministic**: no clock, no randomness, no I/O — only
+pure dict/string computation (the split-topology flag, per-stage progress
+gating, exception filtering of the UX fan-out) plus scheduling of activities.
+Long LLM activities use per-attempt ``start_to_close`` timeouts with heartbeats;
+the cheap job-store activities also use ``start_to_close`` (not
+``schedule_to_close``, which counts queue time — a queued progress write on a
+worker whose slots are saturated by long LLM activities must wait for a slot,
+not die of starvation).
+
+This package ``__init__`` and this module stay free of import-time side effects
+(no worker boot, no ``os.getenv``) — the temporalio sandbox replays them during
+workflow registration (guarded by ``test_temporal_bootstrap``).
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any
 
-from temporalio import activity, workflow
+from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+with workflow.unsafe.imports_passed_through():
+    from market_research_team.temporal import activities as _act
 
-@activity.defn(name="market_research_run_pipeline")
-def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
-    """Run the market-research orchestrator and record job status.
+# Per-stage LLM calls are non-idempotent, but a single call is cheap to re-run
+# and the ``llm_service`` layer also retries transient provider errors; a small
+# bounded retry gives crash/transient durability — the point of the fine-grained
+# decomposition (vs. the old whole-pipeline single attempt).
+LLM_RETRY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=30),
+    maximum_interval=timedelta(minutes=2),
+    backoff_coefficient=2.0,
+)
+# Cheap, idempotent job-store activities: safe to retry aggressively so a
+# transient job-service blip never fails the whole workflow.
+IO_RETRY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=5),
+    maximum_interval=timedelta(seconds=30),
+    backoff_coefficient=2.0,
+)
 
-    Preconditions:
-        - ``job_id`` refers to a job already created in the job store
-          (the API endpoint calls ``create_job`` before dispatch).
-        - ``request`` is the serialized ``RunMarketResearchRequest``
-          (i.e. ``payload.model_dump()``).
+# Per-attempt execution timeouts (queue wait excluded — see module docstring).
+_IO_TIMEOUT = timedelta(minutes=2)
+_INGEST_TIMEOUT = timedelta(minutes=5)
+_FINALIZE_TIMEOUT = timedelta(minutes=5)
+_STAGE_TIMEOUT = timedelta(minutes=30)
+_HEARTBEAT_TIMEOUT = timedelta(seconds=_act.HEARTBEAT_TIMEOUT_S)
 
-    Postconditions:
-        - On success the job store row ends in ``COMPLETED`` with the
-          orchestrator result and the activity returns ``{"job_id": job_id}``.
-        - If the job was cancelled, leaves the row untouched and returns
-          ``{"job_id": job_id}`` (a cancelled run is terminal — not retried).
-        - On a genuine failure, marks the row ``FAILED`` and re-raises so the
-          failure surfaces as a failed Temporal workflow rather than a
-          silently-"completed" one. Auto-retry is bounded by the workflow's
-          ``RetryPolicy`` (see ``MarketResearchWorkflow.run``).
-    """
-    from market_research_team.models import RunMarketResearchRequest
-    from market_research_team.pipeline import prepare, run_pipeline_core
-    from market_research_team.shared.job_store import (
-        JOB_STATUS_FAILED,
-        is_job_cancelled,
-        update_job,
-    )
-
-    mission, human_review = prepare(RunMarketResearchRequest(**request))
-    try:
-        run_pipeline_core(job_id, mission, human_review)
-    except Exception as e:
-        activity.logger.exception("Market research job %s failed", job_id)
-        if is_job_cancelled(job_id):
-            return {"job_id": job_id}
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
-        raise
-    return {"job_id": job_id}
+# ``TeamTopology.SPLIT`` value. Compared against the JSON-round-tripped request
+# dict, so a plain string literal keeps the workflow body free of model imports.
+_SPLIT_TOPOLOGY = "split"
 
 
 @workflow.defn(name="MarketResearchWorkflow")
@@ -76,26 +88,139 @@ class MarketResearchWorkflow:
               (``payload.model_dump()``).
 
         Postconditions:
-            - Delegates to ``run_pipeline_activity`` (which owns job-store
-              status bookkeeping) and returns its ``{"job_id": job_id}`` result.
+            - On success returns ``{"job_id": job_id}`` with the job-store row
+              COMPLETED (or left at its clean terminal state after a cancel).
+            - On a fatal pipeline error the job is marked FAILED (best-effort,
+              via ``market_research_mark_failed``) and the error re-raises so the
+              Temporal workflow fails — a real failure is never reported as a
+              succeeded workflow.
         """
-        return await workflow.execute_activity(
-            run_pipeline_activity,
+        try:
+            return await self._pipeline(job_id, request)
+        except Exception as exc:
+            try:
+                await workflow.execute_activity(
+                    _act.mark_failed_activity,
+                    args=[job_id, str(exc)],
+                    start_to_close_timeout=_IO_TIMEOUT,
+                    retry_policy=IO_RETRY,
+                )
+            except Exception:
+                workflow.logger.warning(
+                    "market_research job %s: failed to record FAILED after pipeline error", job_id
+                )
+            raise
+
+    async def _pipeline(self, job_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Schedule the pipeline stages; deterministic control flow only.
+
+        Preconditions: same as :meth:`run` (its sole caller).
+        Postconditions: returns ``{"job_id": job_id}``; raises on the first fatal
+            activity error (handled by :meth:`run`'s catch-all).
+        """
+        ctx = await workflow.execute_activity(
+            _act.prepare_activity,
             args=[job_id, request],
-            start_to_close_timeout=timedelta(hours=2),
-            # The orchestrator is a long, non-idempotent LLM pipeline, and the
-            # llm_service layer already fails over on transient provider errors
-            # (429s, etc.). A workflow-level retry would therefore mostly re-run
-            # expensive, deterministic failures. Cap at a single attempt: a
-            # failure surfaces as a failed workflow + a FAILED job-store row for
-            # explicit resubmission rather than being auto-retried.
-            #
-            # Trade-off: because the single attempt is consumed, a worker crash
-            # mid-activity is NOT auto-re-dispatched either. Such an orphaned
-            # RUNNING job is instead reconciled to ``interrupted`` by the
-            # team_service startup/shutdown recovery
-            # (``team_service.entrypoint._startup_recovery`` /
-            # ``mark_all_active_jobs_interrupted``), not resumed — the expensive
-            # non-idempotent pipeline is deliberately not silently re-run.
-            retry_policy=RetryPolicy(maximum_attempts=1),
+            start_to_close_timeout=_IO_TIMEOUT,
+            retry_policy=IO_RETRY,
+        )
+        if ctx["stopped"]:
+            return {"job_id": job_id}
+
+        split = request.get("topology") == _SPLIT_TOPOLOGY
+
+        # Gate before the expensive fan-out: if the job already went terminal
+        # (cancel / stale-job monitor), stop cleanly without spending on LLM
+        # activities. Downstream activities also self-guard, so a cancel landing
+        # mid-run still short-circuits (each becomes a cheap no-op) and finalize
+        # never writes COMPLETED.
+        if not await self._progress(job_id, "ingest", 10):
+            return {"job_id": job_id}
+
+        # ``scripts`` needs only the mission, so it runs as an independent branch
+        # concurrently with ingest + UX (mirrors the graph's parallel entry).
+        scripts_handle = workflow.start_activity(
+            _act.scripts_activity,
+            args=[ctx],
+            start_to_close_timeout=_STAGE_TIMEOUT,
+            heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+            retry_policy=LLM_RETRY,
+        )
+
+        loaded = await workflow.execute_activity(
+            _act.ingest_activity,
+            args=[job_id, request],
+            start_to_close_timeout=_INGEST_TIMEOUT,
+            retry_policy=IO_RETRY,
+        )
+
+        # UX: one activity per transcript, fanned out concurrently. A transcript
+        # whose activity fails after its retries is dropped (return_exceptions),
+        # not fatal to the run — the Temporal upgrade over the thread path's
+        # whole-run failure. An outer cancellation still propagates out of gather.
+        ux_results = await asyncio.gather(
+            *[
+                workflow.execute_activity(
+                    _act.ux_one_activity,
+                    args=[ctx, source, text],
+                    start_to_close_timeout=_STAGE_TIMEOUT,
+                    heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+                    retry_policy=LLM_RETRY,
+                )
+                for source, text in loaded
+            ],
+            return_exceptions=True,
+        )
+        insights = [i for i in ux_results if not isinstance(i, BaseException)]
+
+        await self._progress(job_id, "analysis", 45)
+
+        # Psychology and (split mode) consistency run concurrently after UX.
+        psych_coro = workflow.execute_activity(
+            _act.psychology_activity,
+            args=[ctx, insights],
+            start_to_close_timeout=_STAGE_TIMEOUT,
+            heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+            retry_policy=LLM_RETRY,
+        )
+        if split:
+            cons_coro = workflow.execute_activity(
+                _act.consistency_activity,
+                args=[ctx, insights],
+                start_to_close_timeout=_STAGE_TIMEOUT,
+                heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+                retry_policy=LLM_RETRY,
+            )
+            psych_signals, cons_signals = await asyncio.gather(psych_coro, cons_coro)
+            signals = psych_signals + cons_signals
+        else:
+            signals = await psych_coro
+
+        await self._progress(job_id, "viability", 75)
+
+        recommendation = await workflow.execute_activity(
+            _act.viability_activity,
+            args=[ctx, signals, len(insights)],
+            start_to_close_timeout=_STAGE_TIMEOUT,
+            heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+            retry_policy=LLM_RETRY,
+        )
+
+        scripts = await scripts_handle
+
+        await workflow.execute_activity(
+            _act.finalize_activity,
+            args=[ctx, insights, signals, recommendation, scripts],
+            start_to_close_timeout=_FINALIZE_TIMEOUT,
+            retry_policy=IO_RETRY,
+        )
+        return {"job_id": job_id}
+
+    async def _progress(self, job_id: str, stage: str, pct: int) -> bool:
+        """Write stage progress; return False if the job has gone terminal."""
+        return await workflow.execute_activity(
+            _act.report_progress_activity,
+            args=[job_id, stage, pct],
+            start_to_close_timeout=_IO_TIMEOUT,
+            retry_policy=IO_RETRY,
         )

@@ -24,6 +24,7 @@ from strands import Agent as StrandsAgent
 from strands_tools import current_time, http_request, python_repl
 
 from .models import InterviewInsight, MarketSignal, ResearchMission, ViabilityRecommendation
+from .prompts import CONSISTENCY_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +37,20 @@ _DEFAULT_TOOLS = [http_request, python_repl, current_time]
 
 
 def _build_strands_agent(system_prompt: str, tools: list | None = None) -> StrandsAgent:
-    """Construct a strands.Agent."""
+    """Construct a strands.Agent backed by the centralized LLM service.
+
+    The model is resolved through ``llm_service.get_strands_model`` — the same
+    per-agent routing (Postgres provider list, failover, retry) the retired
+    Strands graph obtained via ``shared_graph.build_agent`` — with ``lazy=True``
+    so constructing an agent never eagerly resolves a provider: resolution (and
+    any ``LLMNotConfiguredError``) is deferred to the first agent call. This
+    keeps per-activity orchestrator construction cheap and side-effect-free.
+    """
+    from llm_service import get_strands_model
+
     return StrandsAgent(
         system_prompt=system_prompt,
+        model=get_strands_model(lazy=True),
         tools=tools if tools is not None else _DEFAULT_TOOLS,
     )
 
@@ -384,6 +396,54 @@ class UserPsychologyAgent:
             signals.append(MarketSignal(**fallback))
 
         return signals
+
+
+@dataclass
+class ConsistencyAgent:
+    """Scores cross-interview theme consistency from insights using LLM analysis."""
+
+    role: str = "Cross-Interview Consistency Analyst"
+    _agent: Any = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._agent = _build_strands_agent(CONSISTENCY_SYSTEM_PROMPT, _DEFAULT_TOOLS)
+
+    def analyze(self, insights: List[InterviewInsight]) -> List[MarketSignal]:
+        """Assess how consistent recurring themes are across interviews.
+
+        Preconditions:
+            - ``insights`` is the per-interview UX output (non-empty; the
+              empty-transcript fallback is the orchestrator's responsibility).
+
+        Postconditions:
+            - Returns a single-element ``list[MarketSignal]`` (the consistency
+              node emits exactly one signal). A ``null``/non-string ``signal``
+              name from the LLM falls back to ``"Cross-interview theme
+              consistency"``; confidence is clamped to ``[0.0, 1.0]``.
+        """
+        insights_json = json.dumps([i.model_dump() for i in insights], indent=2)
+        prompt = (
+            f"Analyze the following interview insights for cross-interview consistency. "
+            f"Identify recurring themes that appear across multiple interviews and assess "
+            f"how consistent the evidence is.\n\n"
+            f"Interview insights ({len(insights)} interviews):\n{insights_json}\n\n"
+            f"Return ONLY a valid JSON object with signal, confidence, and evidence."
+        )
+        raw = _call_agent(self._agent, prompt)
+        data = _parse_json(raw, {})
+
+        if not isinstance(data, dict):
+            data = {}
+
+        raw_signal = data.get("signal")
+        signal = raw_signal if isinstance(raw_signal, str) else "Cross-interview theme consistency"
+        return [
+            MarketSignal(
+                signal=signal,
+                confidence=min(1.0, max(0.0, _safe_float(data.get("confidence"), 0.5))),
+                evidence=_ensure_list(data.get("evidence"), []),
+            )
+        ]
 
 
 @dataclass
