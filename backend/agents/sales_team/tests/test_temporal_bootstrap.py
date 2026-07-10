@@ -80,14 +80,15 @@ def test_workflow_registers_in_temporalio_sandbox():
     from shared_temporal.worker import _build_workflow_runner
 
     _purge("sales_team.temporal")
-    from sales_team.temporal import SalesWorkflow
+    from sales_team.temporal import WORKFLOWS
 
     async def _prepare() -> None:
         runner = _build_workflow_runner()
-        runner.prepare_workflow(_wf._Definition.must_from_class(SalesWorkflow))
+        for wfc in WORKFLOWS:  # SalesWorkflow + DeepResearchWorkflow
+            runner.prepare_workflow(_wf._Definition.must_from_class(wfc))
 
-    # No RestrictedWorkflowAccessError => the module (and its passthrough imports)
-    # loaded cleanly in the sandbox.
+    # No RestrictedWorkflowAccessError => the modules (and their passthrough
+    # imports) loaded cleanly in the sandbox.
     asyncio.run(_prepare())
 
 
@@ -99,6 +100,7 @@ def test_activities_list_exposes_every_stage_activity():
 
     names = {getattr(a, "__name__", None) for a in ACTIVITIES}
     assert names == {
+        # main pipeline
         "prepare_sales_pipeline_activity",
         "prospect_activity",
         "load_dossiers_activity",
@@ -112,6 +114,13 @@ def test_activities_list_exposes_every_stage_activity():
         "report_progress_activity",
         "mark_failed_activity",
         "finalize_sales_pipeline_activity",
+        # deep research
+        "prepare_deep_research_activity",
+        "companies_activity",
+        "map_company_one_activity",
+        "rank_activity",
+        "build_dossier_one_activity",
+        "finalize_deep_research_activity",
     }
 
 
@@ -208,4 +217,27 @@ def test_start_sales_workflow_delegates_to_shared_bridge(monkeypatch):
     assert captured["workflow_run"] is SalesWorkflow.run
     assert captured["args"] == ("job-abc", {"product_name": "x"})
     assert captured["workflow_id"] == "sales-job-abc"
+    assert captured["task_queue"] == "sales-queue"
+
+
+def test_start_deep_research_workflow_delegates_to_shared_bridge(monkeypatch):
+    """The deep-research wrapper forwards to ``start_workflow_sync`` with the
+    deep-research workflow id prefix + the shared sales task queue."""
+    from sales_team.temporal import DeepResearchWorkflow
+    from sales_team.temporal import start_workflow as sw
+
+    captured: dict = {}
+
+    def _fake_start_workflow_sync(workflow_run, *args, workflow_id, task_queue, **_kw):
+        captured.update(
+            workflow_run=workflow_run, args=args, workflow_id=workflow_id, task_queue=task_queue
+        )
+
+    monkeypatch.setattr(sw, "start_workflow_sync", _fake_start_workflow_sync)
+
+    sw.start_deep_research_workflow("job-xyz", {"product_name": "x"})
+
+    assert captured["workflow_run"] is DeepResearchWorkflow.run
+    assert captured["args"] == ("job-xyz", {"product_name": "x"})
+    assert captured["workflow_id"] == "sales-deep-research-job-xyz"
     assert captured["task_queue"] == "sales-queue"
