@@ -9,7 +9,7 @@ retryable activities orchestrated by ``BlogFullPipelineWorkflow``:
 * ``finalize_job_activity``   -> completes the job-store entry from the final result
 
 State crosses each boundary as a JSON-native dict (the ``temporal.phase_models``
-DTOs). Every stage activity re-seeds a ``_PipelineContext`` from the previous
+DTOs). Every stage activity re-seeds a ``PipelineContext`` from the previous
 stage's DTO and runs the corresponding stage function (shared with thread mode via
 ``run_pipeline``) under the shared ``_run_stage`` funnel; input-DTO deserialization
 happens OUTSIDE the funnel so schema/plumbing defects fail the activity loudly
@@ -28,18 +28,18 @@ logger = logging.getLogger(__name__)
 
 
 def _build_pipeline_context(job_id: str, request_dict: Dict[str, Any]) -> Any:
-    """Construct a ``_PipelineContext`` seeded with the run's inputs.
+    """Construct a ``PipelineContext`` seeded with the run's inputs.
 
     Preconditions:
         - ``request_dict`` is a serialized full-pipeline request.
     Postconditions:
-        - Returns a ``_PipelineContext`` with a resolved LLM client, length policy,
+        - Returns a ``PipelineContext`` with a resolved LLM client, length policy,
           job updater, and work_dir. Stage-produced fields (plan/draft/etc.) are left
           at their defaults for the caller to seed from the prior stage's DTO.
     """
     from blogging.agent_implementations.blog_writing_process_v2 import (
         DRAFT_EDITOR_ITERATIONS,
-        _PipelineContext,
+        PipelineContext,
     )
     from blogging.shared.content_profile import resolve_length_policy_from_request_dict
     from blogging.shared.run_pipeline_job import (
@@ -52,7 +52,7 @@ def _build_pipeline_context(job_id: str, request_dict: Dict[str, Any]) -> Any:
     work_dir = _get_run_artifacts_base() / job_id
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    return _PipelineContext(
+    return PipelineContext(
         brief=build_brief_input(request_dict),
         work_dir=work_dir,
         llm_client=get_strands_model("blog"),

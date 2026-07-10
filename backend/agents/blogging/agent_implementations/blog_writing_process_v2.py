@@ -106,11 +106,16 @@ JobUpdater = Callable[..., None]
 
 
 def _is_external_cancellation(exc: BaseException) -> bool:
-    """True when exception chain indicates runtime cancellation (e.g., Temporal)."""
+    """True when exception chain indicates runtime cancellation (e.g., Temporal).
+
+    Walks the ``__cause__``/``__context__`` chain to the end. A ``seen`` set bounds
+    the walk so a self-referential chain (which Python permits) can't loop forever,
+    replacing the previous arbitrary fixed depth cap.
+    """
     cur: Optional[BaseException] = exc
-    for _ in range(8):
-        if cur is None:
-            break
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
         cls = cur.__class__
         if cls.__name__ == "CancelledError":
             module = getattr(cls, "__module__", "")
@@ -761,7 +766,7 @@ def _make_update(job_updater: Optional[JobUpdater]) -> Callable[..., None]:
 
 
 @dataclass
-class _PipelineContext:
+class PipelineContext:
     """Mutable state threaded across the blogging pipeline stages.
 
     Split out so each stage (planning -> draft -> gates) can run as its own Temporal
@@ -800,10 +805,10 @@ class _PipelineContext:
         # than with an opaque error deep inside a stage. Explicit raise (not assert)
         # so the check survives ``python -O``.
         if self.llm_client is None:
-            raise ValueError("_PipelineContext.llm_client must be resolved before running a stage")
+            raise ValueError("PipelineContext.llm_client must be resolved before running a stage")
         if self.length_policy is None:
             raise ValueError(
-                "_PipelineContext.length_policy must be resolved before running a stage"
+                "PipelineContext.length_policy must be resolved before running a stage"
             )
 
 
@@ -832,7 +837,7 @@ def run_pipeline(
 
     Internally the pipeline is decomposed into three stages — ``run_planning_stage``,
     ``run_draft_stage``, ``run_gates_stage`` — that operate on a shared
-    ``_PipelineContext``. This function is a thin thread-mode sequencer over them;
+    ``PipelineContext``. This function is a thin thread-mode sequencer over them;
     the same stage functions run as independent Temporal activities when orchestrated
     by ``BlogFullPipelineWorkflow``. The signature and return contract are unchanged.
 
@@ -854,7 +859,9 @@ def run_pipeline(
 
     Returns:
         Tuple of (planning_phase_result, draft_result, status).
-        status is PASS, FAIL, or NEEDS_HUMAN_REVIEW.
+        status is PASS, FAIL, or NEEDS_HUMAN_REVIEW. On an abort during planning,
+        draft_result is None and status is FAIL (the planning stage returns its
+        abort tuple, which this sequencer forwards unchanged).
 
     Raises:
         PlanningError: If content planning fails.
@@ -879,7 +886,7 @@ def run_pipeline(
         work_path.mkdir(parents=True, exist_ok=True)
         logger.info("Artifact work_dir: %s", work_path)
 
-    ctx = _PipelineContext(
+    ctx = PipelineContext(
         brief=brief,
         work_dir=work_dir,
         llm_client=llm_client,
@@ -903,7 +910,7 @@ def run_pipeline(
 
 
 def run_planning_stage(
-    ctx: "_PipelineContext",
+    ctx: "PipelineContext",
 ) -> Optional[Tuple[PlanningPhaseResult, Optional["WriterOutput"], PipelineStatus]]:
     """Planning stage: content planning, story elicitation, and outline approval.
 
@@ -1206,7 +1213,7 @@ def run_planning_stage(
 
 
 def run_draft_stage(
-    ctx: "_PipelineContext",
+    ctx: "PipelineContext",
 ) -> Optional[Tuple[PlanningPhaseResult, Optional["WriterOutput"], PipelineStatus]]:
     """Draft stage: initial draft, interactive review, and the copy-edit loop.
 
@@ -1245,6 +1252,9 @@ def run_draft_stage(
         brand_spec_content=brand_spec_content,
     )
 
+    # Deferred imports (here and elsewhere in the stage bodies) keep this module's
+    # import-time cheap and avoid pulling the full blog_writer_agent / job-store graph
+    # when the Temporal worker imports this file to register activities.
     from blog_writer_agent.feedback_tracker import FeedbackTracker
 
     draft_result = None
@@ -1784,7 +1794,7 @@ def run_draft_stage(
     return None
 
 
-def run_gates_stage(ctx: "_PipelineContext") -> None:
+def run_gates_stage(ctx: "PipelineContext") -> None:
     """Gates stage: validators, fact-check, compliance, rewrite loop, and finalize.
 
     Preconditions:

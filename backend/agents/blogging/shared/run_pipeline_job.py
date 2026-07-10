@@ -77,17 +77,41 @@ def _normalize_audience(audience: Any) -> Optional[str]:
 
 
 def _is_external_cancellation(exc: BaseException) -> bool:
-    """True when exception chain indicates runtime cancellation (e.g., Temporal)."""
+    """True when exception chain indicates runtime cancellation (e.g., Temporal).
+
+    Walks the ``__cause__``/``__context__`` chain to the end. A ``seen`` set bounds
+    the walk so a self-referential chain (which Python permits) can't loop forever,
+    replacing the previous arbitrary fixed depth cap.
+    """
     cur: Optional[BaseException] = exc
-    for _ in range(8):
-        if cur is None:
-            break
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
         cls = cur.__class__
         if cls.__name__ == "CancelledError":
             module = getattr(cls, "__module__", "")
             if module.startswith("temporalio"):
                 return True
         cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def _mark_cancelled_if_external(job_id: str, exc: BaseException) -> bool:
+    """Short-circuit a terminal ``except`` arm when ``exc`` is an external cancellation.
+
+    Centralizes the cancellation check shared verbatim by every terminal handler in
+    ``run_blog_full_pipeline_job`` so the three arms don't each re-implement it.
+
+    Preconditions:
+        - ``job_id`` identifies the running job.
+    Postconditions:
+        - When ``_is_external_cancellation(exc)``: marks the job cancelled and
+          returns True (the caller should ``return`` without failing the job).
+        - Otherwise: no side effects, returns False.
+    """
+    if _is_external_cancellation(exc):
+        mark_job_cancelled(job_id)
+        return True
     return False
 
 
@@ -395,8 +419,7 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
     except CancelledError:
         raise
     except PlanningError as e:
-        if _is_external_cancellation(e):
-            mark_job_cancelled(job_id)
+        if _mark_cancelled_if_external(job_id, e):
             return
         logger.exception("Planning failed for job %s", job_id)
         _fail_job(
@@ -407,17 +430,19 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
         )
         _publish_terminal(job_id, "error", error=str(e), failed_phase="planning")
     except BloggingError as e:
-        if _is_external_cancellation(
-            e
+        if _mark_cancelled_if_external(
+            job_id, e
         ):  # pragma: no cover - extremely narrow race-only branch; the cancellation path is already exercised via the PlanningError variant above.
-            mark_job_cancelled(job_id)
             return
         logger.exception("Pipeline failed for job %s", job_id)
         _fail_job(job_id, str(e), failed_phase=getattr(e, "phase", None))
         _publish_terminal(job_id, "error", error=str(e), failed_phase=getattr(e, "phase", None))
     except Exception as e:
-        if _is_external_cancellation(e):
-            mark_job_cancelled(job_id)
+        # Broad by design: this is the terminal funnel for the thread-mode run. The
+        # job is marked failed and a traceback is logged at ERROR (logger.exception)
+        # so unexpected AttributeError/TypeError etc. are still surfaced in logs — the
+        # swallow only prevents the worker thread from dying silently.
+        if _mark_cancelled_if_external(job_id, e):
             return
         logger.exception("Unexpected error in pipeline for job %s", job_id)
         _fail_job(job_id, str(e))
