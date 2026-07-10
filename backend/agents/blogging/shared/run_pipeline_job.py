@@ -77,21 +77,20 @@ def _normalize_audience(audience: Any) -> Optional[str]:
 
 
 def _is_external_cancellation(exc: BaseException) -> bool:
-    """True when exception chain indicates runtime cancellation (e.g., Temporal).
+    """True when the exception chain indicates a Temporal runtime cancellation.
 
-    Walks the ``__cause__``/``__context__`` chain to the end. A ``seen`` set bounds
-    the walk so a self-referential chain (which Python permits) can't loop forever,
-    replacing the previous arbitrary fixed depth cap.
+    Walks the ``__cause__``/``__context__`` chain (bounded by a ``seen`` id-set so a
+    self-referential chain can't loop forever) and tests each link with
+    ``isinstance`` against ``temporalio.exceptions.CancelledError`` — robust to
+    subclasses and free of the class-name/module string matching that a Temporal
+    exception-hierarchy change could silently break.
     """
     cur: Optional[BaseException] = exc
     seen: set[int] = set()
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
-        cls = cur.__class__
-        if cls.__name__ == "CancelledError":
-            module = getattr(cls, "__module__", "")
-            if module.startswith("temporalio"):
-                return True
+        if isinstance(cur, CancelledError):
+            return True
         cur = cur.__cause__ or cur.__context__
     return False
 

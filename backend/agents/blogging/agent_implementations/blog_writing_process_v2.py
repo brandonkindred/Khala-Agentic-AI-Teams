@@ -85,6 +85,11 @@ logger = logging.getLogger(__name__)
 _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
 STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
 BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
+# Hard upper bound on the draft/copy-edit loop iterations (the `for iteration in
+# range(1, draft_editor_iterations + 1)` cap in run_draft_stage). It is deliberately
+# high because the loop normally exits *early* when the copy editor approves the
+# draft, or escalates to the author at COPY_EDIT_ESCALATION_THRESHOLD — 500 is a
+# runaway-safety ceiling, not an expected iteration count.
 DRAFT_EDITOR_ITERATIONS = 500
 MAX_REWRITE_ITERATIONS = 100
 # After this many copy-edit revisions without editor approval, escalate to the user
@@ -107,21 +112,20 @@ JobUpdater = Callable[..., None]
 
 
 def _is_external_cancellation(exc: BaseException) -> bool:
-    """True when exception chain indicates runtime cancellation (e.g., Temporal).
+    """True when the exception chain indicates a Temporal runtime cancellation.
 
-    Walks the ``__cause__``/``__context__`` chain to the end. A ``seen`` set bounds
-    the walk so a self-referential chain (which Python permits) can't loop forever,
-    replacing the previous arbitrary fixed depth cap.
+    Walks the ``__cause__``/``__context__`` chain (bounded by a ``seen`` id-set so a
+    self-referential chain can't loop forever) and tests each link with ``isinstance``
+    against ``temporalio.exceptions.CancelledError`` — robust to subclasses and free
+    of the class-name/module string matching that a Temporal exception-hierarchy
+    change could silently break.
     """
     cur: Optional[BaseException] = exc
     seen: set[int] = set()
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
-        cls = cur.__class__
-        if cls.__name__ == "CancelledError":
-            module = getattr(cls, "__module__", "")
-            if module.startswith("temporalio"):
-                return True
+        if isinstance(cur, CancelledError):
+            return True
         cur = cur.__cause__ or cur.__context__
     return False
 
@@ -1253,11 +1257,25 @@ def run_draft_stage(
     Preconditions:
         - The planning stage populated ``ctx.plan``/``ctx.planning_phase_result``/
           ``ctx.elicited_stories_text``.
+        - The human-in-the-loop steps (story-placeholder filling and the interactive
+          draft-review loop with uncertainty questions / author feedback / guideline
+          updates) require a job store: they run only when BOTH ``ctx.job_id`` and
+          ``ctx.job_updater`` are non-None. In thread-mode / CLI / test runs without a
+          job store they are skipped and the draft proceeds straight to the automated
+          copy-edit loop (the story-placeholder skip is logged, since unfilled
+          placeholders visibly degrade the output).
     Postconditions:
         - On success sets ``ctx.draft_result`` (and the possibly-updated
           ``ctx.elicited_stories_text``) and returns None.
         - Returns a terminal ``(planning_phase_result, draft_result, "FAIL")`` tuple
-          if the job was cancelled/failed while awaiting user review.
+          if the job was cancelled/failed while awaiting user review. This tuple
+          *sentinel* (rather than a dedicated ``PipelineAbortedError``) is a
+          deliberate design choice: it keeps the abort shape identical to
+          ``run_pipeline``'s ``(planning, draft, status)`` return so the thin
+          sequencer can forward it unchanged, and avoids exception-based control flow
+          across the Temporal activity boundary where state crosses as serialized
+          DTOs, not live exceptions. ``run_gates_stage`` (terminal, no abort) returns
+          ``None``; only the two stages that can abort use this sentinel.
     Raises:
         DraftError: when the required guideline files cannot be loaded
             (via ``_load_required_guidelines``, phase="draft") or when draft /
@@ -1371,6 +1389,11 @@ def run_draft_stage(
                     ),
                     work_dir=work_dir,
                     iteration=iteration,
+                )
+            else:
+                logger.info(
+                    "No job store (job_id/job_updater is None) — skipping story-placeholder "
+                    "elicitation; any [Author: ...] placeholders remain unfilled in the draft."
                 )
 
             # ── Interactive draft review (user-as-editor) ──────────────────
