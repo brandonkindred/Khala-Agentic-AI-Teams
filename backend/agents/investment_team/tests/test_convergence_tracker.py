@@ -457,3 +457,54 @@ def test_record_inserts_failed_gates_in_deterministic_order():
         "mu_gate",
         "zeta_gate",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Wire serialization — to_wire_dict / from_wire_dict (Temporal boundary)
+# ---------------------------------------------------------------------------
+
+
+def test_wire_round_trip_preserves_all_state():
+    t = ConvergenceTracker(window_size=4, max_history=17)
+    t.record(_mk_spec("stocks"), [_failing_gate("alpha_gate")])
+    t.record(_mk_spec("crypto"), [_failing_gate("beta_gate")])
+    t.increment_trials(5)
+
+    restored = ConvergenceTracker.from_wire_dict(t.to_wire_dict())
+
+    assert restored._window_size == 4
+    assert restored._max_history == 17
+    assert restored.trial_count == 5
+    assert [sorted(s) for s in restored._signatures] == [sorted(s) for s in t._signatures]
+    assert restored._failure_modes == t._failure_modes
+    assert restored._asset_class_history == ["stocks", "crypto"]
+
+
+def test_wire_round_trip_preserves_snapshot_baseline_so_merge_folds_only_delta():
+    """A snapshot taken, serialized, incremented, restored, then merged back must
+    fold only the per-cycle delta — not the whole trial count (issue #269)."""
+    primary = ConvergenceTracker()
+    primary.increment_trials(4)  # prior-wave trials
+    snap = primary.snapshot()  # baseline captured at 4
+
+    # Round-trip the snapshot across a (simulated) activity boundary.
+    snap = ConvergenceTracker.from_wire_dict(snap.to_wire_dict())
+    snap.increment_trials(3)  # this cycle added 3
+
+    primary.merge_from(snap)
+    # 4 (primary) + 3 (delta), NOT 4 + 7.
+    assert primary.trial_count == 7
+
+
+def test_from_wire_dict_defaults_snapshot_baseline_for_legacy_payload():
+    legacy = {"trial_count": 9}  # predates the trial_count_at_snapshot field
+    restored = ConvergenceTracker.from_wire_dict(legacy)
+    assert restored.trial_count == 9
+    assert restored._trial_count_at_snapshot == 9
+
+
+def test_from_wire_dict_empty_yields_fresh_tracker():
+    t = ConvergenceTracker.from_wire_dict({})
+    assert t.trial_count == 0
+    assert t._signatures == []
+    assert t._window_size == 5
