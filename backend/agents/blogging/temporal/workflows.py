@@ -44,6 +44,11 @@ FINALIZE_RETRY_POLICY = dataclasses.replace(DEFAULT_RETRY_POLICY, maximum_attemp
 
 # One option block shared by every pipeline-stage activity (and the legacy
 # drain-out branch) so tuning a timeout/heartbeat/retry is a single edit.
+# For the drain-out branch this is deliberately identical to the pre-decomposition
+# monolith's options — the former whole-pipeline activity ran with a 12h
+# schedule-to-close and a 5min heartbeat (its 30s background beat keeps that
+# heartbeat fresh), so replays of pre-decomposition histories keep the exact same
+# timeout envelope. No separate options block is needed for the legacy activity.
 _STAGE_ACTIVITY_OPTS: Dict[str, Any] = dict(
     task_queue=TASK_QUEUE,
     schedule_to_close_timeout=HITL_STAGE_TIMEOUT,

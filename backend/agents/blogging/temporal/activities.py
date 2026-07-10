@@ -154,6 +154,13 @@ def _run_stage(
     Preconditions:
         - ``body`` is a zero-arg callable that runs the stage and returns its
           serialized DTO dict; ``fail_dto`` builds the stage's FAIL DTO dict.
+        - ``body`` MUST NOT catch Temporal ``CancelledError`` — this funnel handles
+          it (re-raising so cancellation propagates). Swallowing it in ``body`` would
+          convert an external cancellation into a spurious FAIL.
+        - Anything ``body`` does that is infrastructure setup rather than pipeline
+          work (e.g. starting the job, rebuilding an input DTO) belongs OUTSIDE this
+          funnel, so its failures propagate to Temporal for retry instead of being
+          masked as a pipeline FAIL.
     Postconditions:
         - Returns ``body()``'s DTO on success. On any handled error the job is
           marked cancelled/failed (via ``_fail_activity`` with ``failed_phase``)
@@ -186,19 +193,26 @@ def plan_stage_activity(job_id: str, request_dict: Dict[str, Any]) -> Dict[str, 
         - ``job_id`` identifies a created job record; ``request_dict`` is a serialized
           full-pipeline request.
     Postconditions:
-        - Starts the job, runs ``run_planning_stage``, and returns a serialized
-          ``PlanningStageResult``. On any handled error the job is marked
-          cancelled/failed and a ``FAIL`` DTO is returned so the workflow
-          short-circuits; only Temporal-native ``CancelledError`` propagates.
+        - Starts the job (outside the funnel, so a store/infra failure propagates to
+          Temporal for retry rather than reading as a pipeline FAIL), runs
+          ``run_planning_stage``, and returns a serialized ``PlanningStageResult``.
+          On any handled stage error the job is marked cancelled/failed and a
+          ``FAIL`` DTO is returned so the workflow short-circuits; only
+          Temporal-native ``CancelledError`` propagates.
     """
+    from blogging.shared.blog_job_store import start_blog_job
     from blogging.temporal.phase_models import PlanningStageResult
+
+    # Start the job OUTSIDE the funnel: a start_blog_job failure (store unavailable,
+    # job already exists) is an infrastructure error, not a pipeline failure, so it
+    # must propagate to Temporal for retry rather than be masked as a FAIL DTO —
+    # matching the pre-decomposition behavior and the draft/gates DTO-rebuild pattern.
+    start_blog_job(job_id)
 
     def _body() -> Dict[str, Any]:
         from blogging.agent_implementations.blog_writing_process_v2 import run_planning_stage
-        from blogging.shared.blog_job_store import start_blog_job
 
         ctx = _build_pipeline_context(job_id, request_dict)
-        start_blog_job(job_id)
         ctx.job_updater(work_dir=str(ctx.work_dir))
 
         abort = run_planning_stage(ctx)
