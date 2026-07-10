@@ -196,23 +196,43 @@ def test_run_blog_full_pipeline_job_unknown_error(
 def test_run_blog_full_pipeline_job_job_updater_failure_swallowed(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
-    """A failing update_blog_job inside job_updater is logged but doesn't crash."""
+    """A failing update_blog_job inside the job_updater is swallowed; the run still completes.
+
+    The mocked pipeline invokes the real job_updater with a sentinel status_text so the
+    store write raises, exercising make_job_updater's swallow path (rather than just
+    asserting completion of a clean run).
+    """
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
 
     _setup_artifacts_root(monkeypatch, tmp_path)
 
+    hit = {"n": 0}
+    real_update = bjs.update_blog_job
+
+    def raising_update(job_id, **kwargs):
+        if kwargs.get("status_text") == "boom":
+            hit["n"] += 1
+            raise RuntimeError("store down")
+        return real_update(job_id, **kwargs)
+
+    monkeypatch.setattr(rpj, "_resolve_update_blog_job", lambda: raising_update)
+
     ppr, draft, _ = _make_pipeline_doubles()
-    monkeypatch.setattr(
-        "agent_implementations.blog_writing_process_v2.run_pipeline",
-        lambda *a, **kw: (ppr, draft, "PASS"),
-    )
+
+    def fake_run(*a, **kw):
+        # Drive the job_updater so its raising store write is actually reached.
+        kw["job_updater"](status_text="boom")
+        return (ppr, draft, "PASS")
+
+    monkeypatch.setattr("agent_implementations.blog_writing_process_v2.run_pipeline", fake_run)
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
     rpj.run_blog_full_pipeline_job(job_id, {"brief": "hi", "audience": {"profession": "dev"}})
     job = bjs.get_blog_job(job_id)
     assert job["status"] == "completed"
+    assert hit["n"] >= 1  # the failing update was actually reached and swallowed
 
 
 # ---------------------------------------------------------------------------

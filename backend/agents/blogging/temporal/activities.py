@@ -122,10 +122,8 @@ def _is_last_attempt() -> bool:
           (``maximum_attempts <= 0``): there is no last attempt to gate on, so the
           caller keeps re-raising and defers to Temporal.
     """
-    from temporalio import activity as _act
-
     try:
-        info = _act.info()
+        info = activity.info()
     except RuntimeError:
         return True
     policy = info.retry_policy
@@ -170,9 +168,12 @@ def _run_stage(
 
     from blogging.shared.run_pipeline_job import start_pipeline_heartbeat
 
-    hb = None
+    # Start the heartbeat OUTSIDE the funnel: a heartbeat-start failure is an
+    # infrastructure error (store/thread), so it must propagate to Temporal for
+    # retry rather than be caught below and masked as a terminal pipeline FAIL —
+    # matching the start_blog_job / DTO-rebuild pattern.
+    hb = start_pipeline_heartbeat(job_id)
     try:
-        hb = start_pipeline_heartbeat(job_id)
         return body()
     except CancelledError:
         logger.info("Blog %s stage cancelled for job %s", failed_phase, job_id)

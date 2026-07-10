@@ -91,12 +91,17 @@ class BlogFullPipelineWorkflow:
             )
             return
 
+        # Short-circuit contract (all three stages): only an explicit "FAIL" is
+        # terminal (job already cancelled/failed, nothing to finalize). Any other
+        # status proceeds — so a future non-PASS/non-FAIL status (e.g. a
+        # NEEDS_HUMAN_REVIEW hold surfaced by an earlier stage) doesn't silently
+        # skip the rest of the pipeline. Kept identical across stages on purpose.
         planning = await workflow.execute_activity(
             _activities.plan_stage_activity,
             args=[job_id, request_dict],
             **_STAGE_ACTIVITY_OPTS,
         )
-        if planning.get("status") != "PASS":
+        if planning.get("status") == "FAIL":
             return
 
         draft = await workflow.execute_activity(
@@ -104,7 +109,7 @@ class BlogFullPipelineWorkflow:
             args=[job_id, request_dict, planning],
             **_STAGE_ACTIVITY_OPTS,
         )
-        if draft.get("status") != "PASS":
+        if draft.get("status") == "FAIL":
             return
 
         gates = await workflow.execute_activity(
