@@ -63,6 +63,32 @@ def test_build_brief_input_appends_title_concept_and_normalizes_audience() -> No
 
 
 # ---------------------------------------------------------------------------
+# start_blog_job idempotency (retry-safety)
+# ---------------------------------------------------------------------------
+
+
+def test_start_blog_job_is_idempotent_across_retries(patched_client) -> None:
+    """Calling start_blog_job twice (as a Temporal retry would) never raises and
+    preserves the original started_at — it merges status=running onto the existing
+    row rather than re-creating it or resetting the start time."""
+    from shared import blog_job_store as bjs
+
+    job_id = str(uuid.uuid4())[:8]
+    bjs.create_blog_job(job_id, "brief")
+
+    bjs.start_blog_job(job_id)
+    first = bjs.get_blog_job(job_id)
+    assert first["status"] == "running"
+    started_at = first["started_at"]
+
+    # A retry after a "successful start" must not raise and must keep started_at.
+    bjs.start_blog_job(job_id)
+    second = bjs.get_blog_job(job_id)
+    assert second["status"] == "running"
+    assert second["started_at"] == started_at
+
+
+# ---------------------------------------------------------------------------
 # make_job_updater
 # ---------------------------------------------------------------------------
 
