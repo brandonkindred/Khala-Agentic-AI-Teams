@@ -145,6 +145,15 @@ def test_execute_workflow_sync_raises_when_no_worker():
         client_mod.set_temporal_loop(prev_l)
 
 
+def test_execute_requires_non_empty_ids():
+    """execute_workflow_sync asserts non-empty workflow_id/task_queue like the
+    signal/cancel bridges. The asserts precede the client wait, so no worker is needed."""
+    with pytest.raises(AssertionError):
+        runner.execute_workflow_sync(object(), workflow_id="", task_queue="q")
+    with pytest.raises(AssertionError):
+        runner.execute_workflow_sync(object(), workflow_id="wid", task_queue="")
+
+
 def test_bridges_are_exported():
     import shared_temporal
 

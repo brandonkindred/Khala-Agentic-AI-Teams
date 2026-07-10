@@ -146,6 +146,8 @@ def execute_workflow_sync(
           callers that need to translate the failure inspect its ``ApplicationError``
           cause.
     """
+    assert workflow_id, "workflow_id must be non-empty"
+    assert task_queue, "task_queue must be non-empty"
     client, loop = _await_client(client_ready_timeout_s)
     coro = client.execute_workflow(
         workflow_run, args=list(args), id=workflow_id, task_queue=task_queue
