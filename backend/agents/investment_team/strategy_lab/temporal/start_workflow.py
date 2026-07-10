@@ -13,10 +13,16 @@ deleted. Import-time side-effect-free.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict
+
+if TYPE_CHECKING:
+    # ``RunStrategyLabRequest`` is defined in ``investment_team.api.main``; the
+    # import is guarded so the type hint carries no runtime coupling (with
+    # ``from __future__ import annotations`` the annotation stays a string).
+    from investment_team.api.main import RunStrategyLabRequest
 
 
-def build_strategy_lab_batch_input(run_id: str, request: Any) -> Dict[str, Any]:
+def build_strategy_lab_batch_input(run_id: str, request: RunStrategyLabRequest) -> Dict[str, Any]:
     """Translate a ``RunStrategyLabRequest`` into ``StrategyLabBatchWorkflow`` input.
 
     Reproduces ``_strategy_lab_worker``'s ``BacktestConfig`` construction
@@ -36,9 +42,9 @@ def build_strategy_lab_batch_input(run_id: str, request: Any) -> Dict[str, Any]:
     from investment_team.api.main import (
         _clamp_max_parallel,
         _rehydrate_active_run_offset,
-        excluded_for_allowed,
     )
     from investment_team.models import BacktestConfig
+    from investment_team.strategy_lab_context import excluded_for_allowed
 
     config = BacktestConfig(
         start_date=request.start_date,
@@ -68,7 +74,7 @@ def build_strategy_lab_batch_input(run_id: str, request: Any) -> Dict[str, Any]:
     }
 
 
-def start_strategy_lab_batch_workflow(run_id: str, request: Any) -> None:
+def start_strategy_lab_batch_workflow(run_id: str, request: RunStrategyLabRequest) -> None:
     """Start ``StrategyLabBatchWorkflow`` on ``strategy-lab-queue`` for a run.
 
     Preconditions:
