@@ -26,6 +26,33 @@ from temporalio import activity
 logger = logging.getLogger(__name__)
 
 
+def _is_last_attempt() -> bool:
+    """True when this is the final Temporal retry attempt (or no activity context).
+
+    Reads ``maximum_attempts`` from the retry policy the activity was actually
+    scheduled with (``activity.info().retry_policy``) rather than a compile-time
+    constant, so the check never drifts from the workflow's policy.
+
+    Preconditions:
+        - Called from within an activity body (or directly / in a unit test).
+    Postconditions:
+        - Returns True when the current attempt is the last one Temporal will make,
+          or when called outside an activity context (direct/thread use).
+        - Returns False when the scheduled policy allows unlimited retries
+          (``maximum_attempts <= 0``) or a retry policy is absent — there is no
+          "last attempt" to gate on, so the caller keeps deferring to Temporal.
+    """
+    try:
+        info = activity.info()
+    except RuntimeError:
+        return True
+    policy = info.retry_policy
+    max_attempts = policy.maximum_attempts if policy is not None else 0
+    if max_attempts <= 0:
+        return False
+    return info.attempt >= max_attempts
+
+
 # ---------------------------------------------------------------------------
 # book-end activities
 # ---------------------------------------------------------------------------
@@ -56,6 +83,7 @@ def finalize_build_activity(job_id: str, error: Optional[str]) -> None:
     """Close out the build: mark the job completed or failed.
 
     Preconditions:
+        - ``job_id`` identifies a created job record.
         - ``error`` is the failure message when any phase aborted, else ``None``.
     Postconditions:
         - When ``error`` is set the job is marked FAILED with that message (the
@@ -63,6 +91,9 @@ def finalize_build_activity(job_id: str, error: Optional[str]) -> None:
         - Otherwise the job's stored blueprint is loaded, flagged ``success=True``
           and marked COMPLETED — mirroring the thread-mode orchestrator's terminal
           transition.
+        - The completion write is retried by Temporal on a transient store error;
+          on the final attempt the job is instead marked FAILED so it never strands
+          in RUNNING, and the error is re-raised so the workflow reflects it too.
     """
     from ..models import AgentBlueprint
     from ..shared.job_store import get_job, mark_job_completed, mark_job_failed
@@ -79,7 +110,24 @@ def finalize_build_activity(job_id: str, error: Optional[str]) -> None:
         blueprint = AgentBlueprint(project_name=(data.get("project_name") if data else "") or "")
     blueprint.success = True
     blueprint.error = None
-    mark_job_completed(job_id, blueprint=blueprint.model_dump(mode="json"))
+
+    try:
+        mark_job_completed(job_id, blueprint=blueprint.model_dump(mode="json"))
+    except Exception as exc:
+        # Nothing is terminal yet; let Temporal retry the completion write while
+        # attempts remain.
+        if not _is_last_attempt():
+            raise
+        # Final attempt: downgrade to a terminal FAILED state so the job does not
+        # hang in RUNNING forever, then re-raise so the workflow also fails.
+        logger.exception("AI Systems finalize failed for job %s", job_id)
+        try:
+            mark_job_failed(job_id, error=f"Finalize failed: {exc}")
+        except Exception:
+            logger.exception(
+                "AI Systems finalize fallback mark-failed also failed for job %s", job_id
+            )
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +143,10 @@ def spec_intake_activity(
 ) -> Dict[str, Any]:
     """Spec-intake phase: parse the spec into goals, constraints, and policy.
 
+    Preconditions:
+        - ``job_id`` identifies a created job record; ``spec_path`` and
+          ``constraints`` are the build request's spec location and extra
+          constraints.
     Postconditions:
         - Runs ``run_spec_intake`` and returns a serialized ``SpecIntakeResult``.
           On success the result is checkpointed into the job's blueprint snapshot.
@@ -117,6 +169,9 @@ def spec_intake_activity(
 def architecture_activity(job_id: str, spec_intake: Dict[str, Any]) -> Dict[str, Any]:
     """Architecture phase: choose topology and design the orchestration graph.
 
+    Preconditions:
+        - ``job_id`` identifies a created job record; ``spec_intake`` is a serialized
+          ``SpecIntakeResult`` from the upstream phase.
     Postconditions:
         - Runs ``run_architecture`` and returns a serialized ``ArchitectureResult``;
           checkpoints it on success. A malformed ``spec_intake`` DTO raises.
@@ -141,6 +196,10 @@ def capabilities_activity(
 ) -> Dict[str, Any]:
     """Capabilities phase: map requirements to tools, memory, and models.
 
+    Preconditions:
+        - ``job_id`` identifies a created job record; ``spec_intake`` /
+          ``architecture`` are serialized ``SpecIntakeResult`` / ``ArchitectureResult``
+          from the upstream phases.
     Postconditions:
         - Runs ``run_capabilities`` and returns a serialized ``CapabilitiesResult``;
           checkpoints it on success. A malformed input DTO raises.
@@ -166,6 +225,9 @@ def capabilities_activity(
 def evaluation_activity(job_id: str, spec_intake: Dict[str, Any]) -> Dict[str, Any]:
     """Evaluation phase: build the acceptance/adversarial test harness and KPIs.
 
+    Preconditions:
+        - ``job_id`` identifies a created job record; ``spec_intake`` is a serialized
+          ``SpecIntakeResult`` from the upstream phase.
     Postconditions:
         - Runs ``run_evaluation`` and returns a serialized ``EvaluationResult``;
           checkpoints it on success. A malformed ``spec_intake`` DTO raises.
@@ -190,6 +252,10 @@ def safety_activity(
 ) -> Dict[str, Any]:
     """Safety phase: define checkpoints, guardrails, and policy requirements.
 
+    Preconditions:
+        - ``job_id`` identifies a created job record; ``spec_intake`` /
+          ``architecture`` are serialized ``SpecIntakeResult`` / ``ArchitectureResult``
+          from the upstream phases.
     Postconditions:
         - Runs ``run_safety`` and returns a serialized ``SafetyResult``;
           checkpoints it on success. A malformed input DTO raises.
@@ -224,6 +290,11 @@ def build_phase_activity(
 ) -> Dict[str, Any]:
     """Build phase: package every phase output into the final artifact bundle.
 
+    Preconditions:
+        - ``job_id`` identifies a created job record; ``project_name`` /
+          ``output_dir`` are the build request fields, and ``spec_intake``,
+          ``architecture``, ``capabilities``, ``evaluation``, and ``safety`` are the
+          serialized results of the five upstream phases.
     Postconditions:
         - Runs ``run_build`` and returns a serialized ``BuildResult``;
           checkpoints it on success. A malformed input DTO raises.

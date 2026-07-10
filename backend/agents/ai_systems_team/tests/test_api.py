@@ -50,6 +50,42 @@ def test_get_job_status_not_found():
     assert resp.status_code == 404
 
 
+def test_build_status_reports_completed_phases_from_blueprint():
+    """Mid-run progress: completed_phases comes from the checkpointed blueprint."""
+    data = {
+        "status": "running",
+        "project_name": "proj",
+        "current_phase": "architecture",
+        "progress": 35,
+        "completed_phases": [],  # top-level field stays empty; must not win
+        "blueprint": {
+            "project_name": "proj",
+            "completed_phases": ["spec_intake", "architecture"],
+        },
+    }
+    with patch("ai_systems_team.api.main.get_job", return_value=data):
+        resp = client.get("/build/status/j1")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["completed_phases"] == ["spec_intake", "architecture"]
+    assert body["current_phase"] == "architecture"
+
+
+def test_build_status_falls_back_to_top_level_completed_phases():
+    """With no blueprint snapshot, the top-level completed_phases field is used."""
+    data = {
+        "status": "running",
+        "project_name": "proj",
+        "progress": 5,
+        "completed_phases": ["spec_intake"],
+        "blueprint": None,
+    }
+    with patch("ai_systems_team.api.main.get_job", return_value=data):
+        resp = client.get("/build/status/j2")
+    assert resp.status_code == 200
+    assert resp.json()["completed_phases"] == ["spec_intake"]
+
+
 def test_cancel_missing_job_returns_404():
     with patch("ai_systems_team.api.main.get_job", return_value={}):
         resp = client.post("/build/job/nonexistent/cancel")

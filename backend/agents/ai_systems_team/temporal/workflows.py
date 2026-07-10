@@ -31,10 +31,13 @@ with workflow.unsafe.imports_passed_through():
 # ``run_build_activity`` with byte-identical options to the pre-decomposition
 # workflow, so replays of in-flight histories stay deterministic.
 BUILD_TIMEOUT = timedelta(hours=12)
-# Per-phase ceiling — the phases are fast, deterministic transforms (spec parsing,
-# graph design, artifact writes), so an hour is a generous safety net, not a budget.
+# Per-attempt ceiling for each phase — the phases are fast, deterministic transforms
+# (spec parsing, graph design, artifact writes), so an hour is a generous safety net,
+# not a budget. Used as ``start_to_close_timeout`` so a hung attempt is timed out and
+# retried under DEFAULT_RETRY_POLICY rather than pinning a worker until an overall cap.
 PHASE_TIMEOUT = timedelta(hours=1)
-# Book-end activities (begin/finalize) are tiny job-store writes.
+# Per-attempt ceiling for the book-end activities (begin/finalize) — tiny job-store
+# writes.
 BOOKEND_TIMEOUT = timedelta(minutes=10)
 
 DEFAULT_RETRY_POLICY = RetryPolicy(
@@ -47,17 +50,21 @@ DEFAULT_RETRY_POLICY = RetryPolicy(
 # One option block per activity class so tuning a timeout/retry is a single edit.
 # Immutable (MappingProxyType) so an importer can't mutate the shared options;
 # ``**_PHASE_ACTIVITY_OPTS`` unpacking works on any mapping.
+# Phase/book-end activities use ``start_to_close_timeout`` (per attempt) rather than
+# ``schedule_to_close_timeout`` (whole-window) so a stuck attempt is timed out and
+# retried under DEFAULT_RETRY_POLICY, instead of consuming the entire window before
+# the retry policy can act.
 _PHASE_ACTIVITY_OPTS: Mapping[str, Any] = MappingProxyType(
     dict(
         task_queue=TASK_QUEUE,
-        schedule_to_close_timeout=PHASE_TIMEOUT,
+        start_to_close_timeout=PHASE_TIMEOUT,
         retry_policy=DEFAULT_RETRY_POLICY,
     )
 )
 _BOOKEND_ACTIVITY_OPTS: Mapping[str, Any] = MappingProxyType(
     dict(
         task_queue=TASK_QUEUE,
-        schedule_to_close_timeout=BOOKEND_TIMEOUT,
+        start_to_close_timeout=BOOKEND_TIMEOUT,
         retry_policy=DEFAULT_RETRY_POLICY,
     )
 )

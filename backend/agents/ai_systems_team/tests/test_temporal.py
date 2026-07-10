@@ -302,6 +302,120 @@ def test_finalize_activity_completes_without_prior_blueprint() -> None:
 
 
 # ---------------------------------------------------------------------------
+# finalize retry / last-attempt fallback
+# ---------------------------------------------------------------------------
+
+
+def test_is_last_attempt_outside_activity_context() -> None:
+    """No activity context (direct/thread use) -> treated as the last attempt."""
+    from ai_systems_team.temporal import activities as acts
+
+    assert acts._is_last_attempt() is True
+
+
+def test_is_last_attempt_reads_scheduled_retry_policy(monkeypatch) -> None:
+    """The check reads maximum_attempts off the scheduled policy (activity.info())."""
+    from types import SimpleNamespace
+
+    import temporalio.activity as ta
+
+    from ai_systems_team.temporal import activities as acts
+
+    def _info(attempt, max_attempts):
+        return SimpleNamespace(
+            attempt=attempt, retry_policy=SimpleNamespace(maximum_attempts=max_attempts)
+        )
+
+    monkeypatch.setattr(ta, "info", lambda: _info(1, 3))
+    assert acts._is_last_attempt() is False
+    monkeypatch.setattr(ta, "info", lambda: _info(3, 3))
+    assert acts._is_last_attempt() is True
+
+
+def test_is_last_attempt_unlimited_or_missing_policy(monkeypatch) -> None:
+    """maximum_attempts <= 0 (unlimited) or a missing policy -> never the last attempt."""
+    from types import SimpleNamespace
+
+    import temporalio.activity as ta
+
+    from ai_systems_team.temporal import activities as acts
+
+    monkeypatch.setattr(
+        ta,
+        "info",
+        lambda: SimpleNamespace(attempt=9, retry_policy=SimpleNamespace(maximum_attempts=0)),
+    )
+    assert acts._is_last_attempt() is False
+    monkeypatch.setattr(ta, "info", lambda: SimpleNamespace(attempt=9, retry_policy=None))
+    assert acts._is_last_attempt() is False
+
+
+def test_finalize_last_attempt_store_failure_marks_failed(monkeypatch) -> None:
+    """A persistent completion-store failure on the final attempt marks the job FAILED."""
+    import ai_systems_team.shared.job_store as js
+    from ai_systems_team.shared.job_store import JOB_STATUS_FAILED
+    from ai_systems_team.temporal import activities as acts
+
+    create_job("j-finfail", "proj", "/spec.md")
+
+    def _boom(*a, **kw):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(js, "mark_job_completed", _boom)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+
+    with pytest.raises(RuntimeError, match="store down"):
+        acts.finalize_build_activity("j-finfail", None)
+
+    data = get_job("j-finfail")
+    assert data["status"] == JOB_STATUS_FAILED
+    assert "Finalize failed" in data["error"]
+
+
+def test_finalize_non_last_attempt_reraises_without_terminal(monkeypatch) -> None:
+    """Before the final attempt, a transient store failure re-raises for Temporal to retry."""
+    import ai_systems_team.shared.job_store as js
+    from ai_systems_team.shared.job_store import JOB_STATUS_FAILED
+    from ai_systems_team.temporal import activities as acts
+
+    create_job("j-finretry", "proj", "/spec.md")
+
+    def _boom(*a, **kw):
+        raise RuntimeError("blip")
+
+    monkeypatch.setattr(js, "mark_job_completed", _boom)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: False)
+
+    with pytest.raises(RuntimeError, match="blip"):
+        acts.finalize_build_activity("j-finretry", None)
+
+    # Nothing terminal was written — Temporal will retry the completion.
+    assert get_job("j-finretry")["status"] != JOB_STATUS_FAILED
+
+
+def test_finalize_last_attempt_fallback_swallows_secondary_store_error(monkeypatch) -> None:
+    """If the fallback mark-failed also fails, the original completion error still re-raises."""
+    import ai_systems_team.shared.job_store as js
+    from ai_systems_team.temporal import activities as acts
+
+    create_job("j-fin2fail", "proj", "/spec.md")
+
+    def _complete_boom(*a, **kw):
+        raise RuntimeError("complete down")
+
+    def _failed_boom(*a, **kw):
+        raise RuntimeError("failed down")
+
+    monkeypatch.setattr(js, "mark_job_completed", _complete_boom)
+    monkeypatch.setattr(js, "mark_job_failed", _failed_boom)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+
+    # The original completion error propagates even though the fallback also failed.
+    with pytest.raises(RuntimeError, match="complete down"):
+        acts.finalize_build_activity("j-fin2fail", None)
+
+
+# ---------------------------------------------------------------------------
 # legacy monolith activity (drain-out)
 # ---------------------------------------------------------------------------
 
@@ -585,12 +699,20 @@ def test_workflow_unpatched_replay_runs_legacy_monolith(monkeypatch) -> None:
 
 
 def test_finalize_retry_and_timeouts_configured() -> None:
-    """Option blocks are wired: per-phase, book-end, and legacy each carry a policy."""
+    """Option blocks are wired: every block carries the retry policy + task queue."""
     from ai_systems_team.temporal import workflows as wf
 
     for opts in (wf._PHASE_ACTIVITY_OPTS, wf._BOOKEND_ACTIVITY_OPTS, wf._LEGACY_ACTIVITY_OPTS):
         assert opts["retry_policy"] is wf.DEFAULT_RETRY_POLICY
         assert opts["task_queue"] == wf.TASK_QUEUE
-        assert "schedule_to_close_timeout" in opts
-    # The legacy drain-out branch must keep the pre-decomposition 12h ceiling.
+
+    # Phase/book-end activities bound each ATTEMPT (start_to_close) so a hung attempt
+    # is retried under the policy rather than pinning a worker for the whole window.
+    assert wf._PHASE_ACTIVITY_OPTS["start_to_close_timeout"] == wf.PHASE_TIMEOUT
+    assert wf._BOOKEND_ACTIVITY_OPTS["start_to_close_timeout"] == wf.BOOKEND_TIMEOUT
+    assert "schedule_to_close_timeout" not in wf._PHASE_ACTIVITY_OPTS
+
+    # The legacy drain-out branch must keep the pre-decomposition whole-window 12h
+    # ceiling byte-identical so replays stay deterministic.
     assert wf._LEGACY_ACTIVITY_OPTS["schedule_to_close_timeout"] == wf.BUILD_TIMEOUT
+    assert "start_to_close_timeout" not in wf._LEGACY_ACTIVITY_OPTS

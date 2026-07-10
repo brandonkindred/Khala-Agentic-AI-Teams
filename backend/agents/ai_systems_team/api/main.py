@@ -180,13 +180,23 @@ def get_build_status(job_id: str) -> AISystemStatusResponse:
     if data.get("status") == JOB_STATUS_COMPLETED and data.get("blueprint"):
         blueprint = AgentBlueprint(**data["blueprint"])
 
+    # The checkpointed blueprint snapshot is the single source of truth for phase
+    # completion — both the thread-mode orchestrator and the Temporal per-phase
+    # activities maintain ``blueprint.completed_phases`` (the top-level job field is
+    # never populated), so prefer it here to report live progress mid-run.
+    stored_bp = data.get("blueprint")
+    if isinstance(stored_bp, dict) and stored_bp.get("completed_phases"):
+        completed_phases = stored_bp["completed_phases"]
+    else:
+        completed_phases = data.get("completed_phases", [])
+
     return AISystemStatusResponse(
         job_id=job_id,
         status=data.get("status", JOB_STATUS_PENDING),
         project_name=data.get("project_name"),
         current_phase=data.get("current_phase"),
         progress=data.get("progress", 0),
-        completed_phases=data.get("completed_phases", []),
+        completed_phases=completed_phases,
         error=data.get("error"),
         blueprint=blueprint,
     )
