@@ -14,8 +14,24 @@ The durable job pipeline (`POST /sales/pipeline/run`) runs in one of two modes:
   and the per-prospect stage logic are single-sourced (`routing.py`,
   `orchestrator.build_run_context`/`<stage>_one`) so the two modes cannot drift.
 
-The synchronous single-stage endpoints and `/sales/prospect/deep-research` run
-in-request and are unaffected by the mode.
+The **deep-research** prospecting pipeline (company → decision-maker → dossier)
+has both a synchronous endpoint (`POST /sales/prospect/deep-research`, runs
+in-request) and a **durable job** counterpart:
+
+- `POST /sales/prospect/deep-research/run` → returns a `job_id`; poll
+  `GET /sales/prospect/deep-research/status/{job_id}` for the ranked result.
+- In Temporal mode `DeepResearchWorkflow` fans out one activity per company
+  (decision-maker mapping) and one per prospect (dossier building); in thread
+  mode `run_deep_research_job` runs the same `deep_research_only` body in a
+  daemon thread, with a background beater refreshing the job heartbeat so the
+  stale-job monitor cannot fail a long run mid-flight (Temporal heartbeats from
+  inside each activity instead). Both share the per-item cores
+  (`map_company_one` / `build_dossier_one`) and the assembly/persist step
+  (`assemble_and_persist_deep_research`) with the synchronous path.
+
+Use the job endpoint for large `target_prospects`, where the pipeline runs
+longer than a request should block and a worker restart must not lose the run.
+The other synchronous single-stage endpoints are unaffected by the mode.
 
 ### Temporal tuning knobs
 

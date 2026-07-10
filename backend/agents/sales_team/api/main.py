@@ -18,6 +18,7 @@ from job_service_client import (
     JobServiceClient,
     start_stale_job_monitor,
 )
+from sales_team.job_runner import run_deep_research_job as _run_deep_research_job
 from sales_team.job_runner import run_pipeline_job as _run_pipeline_job
 from sales_team.learning_engine import LearningEngine
 from sales_team.models import (
@@ -124,6 +125,24 @@ class SalesPipelineStatusResponse(BaseModel):
     eta_hint: Optional[str] = None
     error: Optional[str] = None
     result: Optional[SalesPipelineResult] = None
+
+
+class DeepResearchRunResponse(BaseModel):
+    job_id: str
+    status: str
+    message: str
+
+
+class DeepResearchStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    current_stage: str
+    progress: int
+    product_name: str
+    last_updated_at: str
+    eta_hint: Optional[str] = None
+    error: Optional[str] = None
+    result: Optional[DeepResearchResult] = None
 
 
 class SalesPipelineJobListItem(BaseModel):
@@ -516,6 +535,114 @@ def deep_research(body: DeepResearchRequest, request: Request) -> DeepResearchRe
             return f"/api/sales/dossiers/{dossier_id}"
 
     return orchestrator.deep_research_only(body, dossier_url_builder=_build_dossier_url)
+
+
+def _dispatch_deep_research_job(job_id: str, request: DeepResearchRequest) -> str:
+    """Dispatch a deep-research run via Temporal when enabled, else a daemon thread.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Starts exactly one execution path and returns its label
+          ("Temporal" or "thread"), mirroring ``_dispatch_pipeline_job``. A
+          missing ``shared_temporal`` falls through to the thread path; any
+          other failure while starting the workflow propagates to the caller,
+          which marks the job FAILED — a Temporal-enabled run is never silently
+          downgraded.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+    except ImportError:
+        is_temporal_enabled = None
+
+    if is_temporal_enabled is not None and is_temporal_enabled():
+        from sales_team.temporal.start_workflow import start_deep_research_workflow
+
+        start_deep_research_workflow(job_id, request.model_dump(mode="json"))
+        return "Temporal"
+
+    thread = threading.Thread(target=_run_deep_research_job, args=(job_id, request), daemon=True)
+    thread.start()
+    return "thread"
+
+
+@app.post(
+    "/sales/prospect/deep-research/run",
+    response_model=DeepResearchRunResponse,
+    tags=["prospecting"],
+)
+def run_deep_research(body: DeepResearchRequest) -> DeepResearchRunResponse:
+    """Start a durable deep-research prospecting run.
+
+    Returns a job_id to poll for status and the ranked result. This is the
+    async, durable counterpart to the synchronous ``POST
+    /sales/prospect/deep-research`` — use it for large ``target_prospects``
+    where the company → decision-maker → dossier pipeline runs longer than a
+    request should block, and so a worker restart cannot lose the run.
+    """
+    job_id = str(uuid.uuid4())
+    now = _now()
+    _job_manager.create_job(
+        job_id,
+        job_type="sales_deep_research",
+        status=JOB_STATUS_PENDING,
+        current_stage="queued",
+        progress=0,
+        product_name=body.product_name,
+        result=None,
+        error=None,
+        eta_hint="queued",
+        created_at=now,
+        last_updated_at=now,
+    )
+    try:
+        dispatch_method = _dispatch_deep_research_job(job_id, body)
+    except Exception as exc:
+        logger.exception("Failed to dispatch deep-research job %s", job_id)
+        _update_job(job_id, status=JOB_STATUS_FAILED, error=f"Dispatch failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to start deep-research run.") from exc
+    logger.info("Deep-research job %s dispatched via %s", job_id, dispatch_method)
+    return DeepResearchRunResponse(
+        job_id=job_id,
+        status=JOB_STATUS_PENDING,
+        message=(
+            f"Deep research started. "
+            f"Poll GET /sales/prospect/deep-research/status/{job_id} for updates."
+        ),
+    )
+
+
+@app.get(
+    "/sales/prospect/deep-research/status/{job_id}",
+    response_model=DeepResearchStatusResponse,
+    tags=["prospecting"],
+)
+def get_deep_research_status(job_id: str) -> DeepResearchStatusResponse:
+    """Poll the status of a durable deep-research job."""
+    job = _job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    result_data = job.get("result")
+    result_obj = None
+    if result_data and isinstance(result_data, dict):
+        try:
+            result_obj = DeepResearchResult(**result_data)
+        except Exception:
+            result_obj = None
+
+    return DeepResearchStatusResponse(
+        job_id=job_id,
+        status=job.get("status", JOB_STATUS_PENDING),
+        current_stage=job.get("current_stage", ""),
+        progress=job.get("progress", 0),
+        product_name=job.get("product_name", ""),
+        last_updated_at=job.get("last_updated_at", _now()),
+        eta_hint=job.get("eta_hint"),
+        error=job.get("error"),
+        result=result_obj,
+    )
 
 
 @app.get(

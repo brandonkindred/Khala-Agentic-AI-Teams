@@ -18,7 +18,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from sales_team.models import SalesPipelineRequest
+from sales_team.models import DeepResearchRequest, SalesPipelineRequest
 
 
 class SalesRunContext(BaseModel):
@@ -52,4 +52,37 @@ class SalesRunContext(BaseModel):
     insights_ctx: str = ""
     insights_version: Optional[int] = None
     insights_total_outcomes: int = 0
+    stopped: bool = False
+
+
+class DeepResearchContext(BaseModel):
+    """Immutable, constant-size per-run context for the deep-research workflow.
+
+    Built once by ``deep_research_prepare`` and handed to every deep-research
+    activity, which reconstructs the request + insights from it. Mirrors
+    :class:`SalesRunContext` for the company → decision-maker → dossier pipeline.
+
+    Invariants:
+        - Every field is a pure function of the request plus the once-loaded
+          learning insights; nothing here grows as the run progresses.
+
+    Attributes:
+        request: The validated deep-research request (icp, target_prospects,
+            max_per_company, …).
+        job_id: The job-store id this run writes status to.
+        insights_ctx: The learning-insights prompt block, loaded once in
+            ``deep_research_prepare`` and injected into every agent prompt.
+        icp_json: The ICP serialized to JSON once (used by the company and
+            decision-maker agents on every call).
+        companies_requested: How many companies to ask the prospector for
+            (over-requested vs the target so dedupe/cap still hit the target).
+        stopped: ``True`` when the job was already terminal at prepare time;
+            the workflow short-circuits the entire run when set.
+    """
+
+    request: DeepResearchRequest
+    job_id: str
+    insights_ctx: str = ""
+    icp_json: str = ""
+    companies_requested: int = 0
     stopped: bool = False
