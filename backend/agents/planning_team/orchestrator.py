@@ -24,7 +24,7 @@ PHASE_ORDER = [
 ]
 
 
-def _resolve_pra_answers(
+def resolve_pra_answers(
     questions: list,
     answer_callback: Optional[Callable[[list], list]],
     auto_answer_questions: bool,
@@ -167,7 +167,7 @@ def run_workflow(
         _update(Phase.DOCUMENT_PRODUCTION.value, 45, "Document production")
 
         def _pra_answer_cb(questions: list) -> list:
-            return _resolve_pra_answers(questions, answer_callback, auto_answer_questions)
+            return resolve_pra_answers(questions, answer_callback, auto_answer_questions)
 
         ctx_update, artifacts = run_document_production(
             context,

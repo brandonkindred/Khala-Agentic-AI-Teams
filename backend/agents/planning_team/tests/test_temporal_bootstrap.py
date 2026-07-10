@@ -21,15 +21,42 @@ import sys
 import unittest.mock as mock
 from pathlib import Path
 
+import pytest
+
 _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
+
+
+_TEMPORAL_PREFIX = "planning_team.temporal"
 
 
 def _purge(prefix: str) -> None:
     for name in list(sys.modules):
         if name == prefix or name.startswith(prefix + "."):
             del sys.modules[name]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_temporal_modules():
+    """Snapshot and restore the ``planning_team.temporal*`` modules around each test.
+
+    These tests deliberately ``_purge`` + re-import the package to observe
+    import-time behavior. Snapshotting/restoring here means that manipulation can
+    neither inherit a partially-imported state from an earlier test nor leak one
+    into a later test, even in a shared or parallel session — so each test starts
+    from and ends with the session's original module state.
+    """
+    saved = {
+        name: mod
+        for name, mod in sys.modules.items()
+        if name == _TEMPORAL_PREFIX or name.startswith(_TEMPORAL_PREFIX + ".")
+    }
+    try:
+        yield
+    finally:
+        _purge(_TEMPORAL_PREFIX)
+        sys.modules.update(saved)
 
 
 def test_importing_temporal_package_does_not_call_start_team_worker():
@@ -55,10 +82,20 @@ def test_temporal_package_exports_pattern_a_contract():
     from planning_team.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOW_ID_PREFIX, WORKFLOWS
 
     assert [w.__name__ for w in WORKFLOWS] == ["PlanningWorkflow"]
-    # 8 per-phase activities (intake, discovery, requirements, market research,
-    # synthesis, document production, sub-agent provisioning, finalize) + the legacy
+    # Assert the exact activity set by name (self-documenting, and catches an
+    # accidental add/remove/rename): the 8 per-phase activities + the legacy
     # run_planning_activity kept for rollout replay compatibility.
-    assert len(ACTIVITIES) == 9
+    assert {a.__name__ for a in ACTIVITIES} == {
+        "intake_activity",
+        "discovery_activity",
+        "requirements_activity",
+        "market_research_activity",
+        "synthesis_activity",
+        "document_production_activity",
+        "sub_agent_provisioning_activity",
+        "finalize_planning_activity",
+        "run_planning_activity",
+    }
     assert all(callable(a) for a in ACTIVITIES)
     assert TASK_QUEUE == "planning"
     assert WORKFLOW_ID_PREFIX == "planning-"

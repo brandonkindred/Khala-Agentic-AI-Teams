@@ -355,7 +355,7 @@ def document_production_activity(
         wait_for_product_analysis_completion,
     )
     from planning_team.models import Phase
-    from planning_team.orchestrator import _resolve_pra_answers
+    from planning_team.orchestrator import resolve_pra_answers
     from planning_team.phases import run_document_production
     from shared_concurrency import BackgroundHeartbeat
 
@@ -363,7 +363,7 @@ def document_production_activity(
         def _pra_answer_cb(questions: list) -> list:
             # No user callback across the Temporal boundary; auto-answer with
             # defaults, exactly as run_workflow_background does for the HTTP path.
-            return _resolve_pra_answers(questions, None, True)
+            return resolve_pra_answers(questions, None, True)
 
         with BackgroundHeartbeat(activity.heartbeat, _POLL_HEARTBEAT_INTERVAL_S, copy_context=True):
             context_update, _ = run_document_production(
