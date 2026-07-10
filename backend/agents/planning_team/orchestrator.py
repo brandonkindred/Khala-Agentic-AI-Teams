@@ -24,7 +24,7 @@ PHASE_ORDER = [
 ]
 
 
-def _resolve_pra_answers(
+def resolve_pra_answers(
     questions: list,
     answer_callback: Optional[Callable[[list], list]],
     auto_answer_questions: bool,
@@ -167,7 +167,7 @@ def run_workflow(
         _update(Phase.DOCUMENT_PRODUCTION.value, 45, "Document production")
 
         def _pra_answer_cb(questions: list) -> list:
-            return _resolve_pra_answers(questions, answer_callback, auto_answer_questions)
+            return resolve_pra_answers(questions, answer_callback, auto_answer_questions)
 
         ctx_update, artifacts = run_document_production(
             context,
@@ -182,8 +182,11 @@ def run_workflow(
         if result["handoff_package"] and hasattr(result["handoff_package"], "model_dump"):
             result["handoff_package"] = result["handoff_package"].model_dump()
         # Carry any planning-surfaced questions across the handoff so the downstream team can
-        # escalate unanswered ones to the user instead of auto-deciding them. Typically empty today
-        # (PRA resolves answers inline), but the field makes the decisions survive the boundary.
+        # escalate unanswered ones to the user instead of auto-deciding them. This is a
+        # ``setdefault`` no-op today (HandoffPackage seeds both keys with []), and that empty
+        # handoff is load-bearing: the SE orchestrator pauses the whole run for user input when
+        # ``handoff.open_questions`` is non-empty, and the requirements phase always emits (default)
+        # questions, so populating them here would pause every SE-driven run. Left as-is on purpose.
         if isinstance(result["handoff_package"], dict):
             result["handoff_package"].setdefault(
                 "open_questions", list(context.get("open_questions") or [])
