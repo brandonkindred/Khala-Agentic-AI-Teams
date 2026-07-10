@@ -78,6 +78,14 @@ def get_studio_service() -> AgentStudioService:
     is durable and the singleton is merely a convenience; with the in-memory store it
     is a correctness requirement.
 
+    Coherence is **per process**: because Agent Studio is Temporal-only, every uvicorn
+    worker starts its own Temporal worker on the shared ``agent-studio-queue``, and
+    Temporal does **not** bind an activity to the process that dispatched its workflow.
+    So the in-memory store is coherent only in single-process mode (``make run``,
+    tests). A multi-worker deployment (``make deploy`` runs ``--workers 4``) **requires**
+    ``POSTGRES_HOST``: without it, a follow-up request's activity may execute in a
+    different process whose in-memory store lacks the conversation, returning 404.
+
     Postconditions:
         - Returns the same instance on every call within a process.
     """

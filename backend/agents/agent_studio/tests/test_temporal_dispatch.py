@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 from temporalio.client import WorkflowFailureError
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError, WorkflowAlreadyStartedError
 
 import agent_studio.temporal.dispatch as dispatch
 from agent_studio.models import AgentDefinition, ConversationStateResponse
@@ -131,6 +131,14 @@ def test_dispatch_reraises_unmarked_failure(monkeypatch: pytest.MonkeyPatch) -> 
         dispatch.send_message("c", "hi")
 
 
+def test_dispatch_surfaces_duplicate_workflow_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A duplicate live workflow id (``WorkflowAlreadyStartedError``) surfaces as a clear
+    ``RuntimeError`` naming the id, not the raw Temporal error the route would not map."""
+    _raise(monkeypatch, WorkflowAlreadyStartedError("wid", "AgentStudioStartConversationWorkflow"))
+    with pytest.raises(RuntimeError, match="duplicate live workflow id"):
+        dispatch.start_conversation("new", None, None)
+
+
 # ── _translate_workflow_failure directly ─────────────────────────────────────────
 
 
@@ -141,6 +149,26 @@ def test_translate_finds_nested_marker() -> None:
     outer.__cause__ = inner
     wf_fail = WorkflowFailureError(cause=outer)
     with pytest.raises(ValueError, match="nested bad"):
+        dispatch._translate_workflow_failure(wf_fail)
+
+
+def test_translate_finds_real_activity_error_chain() -> None:
+    """The real production chain — ``WorkflowFailureError`` → ``ActivityError`` →
+    ``ApplicationError`` (two levels, which Temporal actually builds) — translates back
+    to the native exception, not just the hand-crafted one-level chain above."""
+    app = ApplicationError("boom", type="ValueError")
+    act = ActivityError(
+        message="activity failed",
+        scheduled_event_id=1,
+        started_event_id=2,
+        identity="x",
+        activity_type="agent_studio_start_conversation",
+        activity_id="1",
+        retry_state=None,
+    )
+    act.__cause__ = app  # Temporal exposes the wrapped failure as .cause / .__cause__
+    wf_fail = WorkflowFailureError(cause=act)
+    with pytest.raises(ValueError, match="boom"):
         dispatch._translate_workflow_failure(wf_fail)
 
 

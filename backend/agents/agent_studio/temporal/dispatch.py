@@ -22,6 +22,7 @@ import uuid
 from typing import Any
 
 from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from agent_registry.models import AgentManifest
 from agent_studio.models import AgentDefinition, ConversationStateResponse
@@ -92,11 +93,22 @@ def _execute(workflow_run: Any, *args: Any, workflow_id: str) -> Any:
         - Returns the workflow result on success. On ``WorkflowFailureError`` first
           re-raises a native ``ValueError``/``LookupError`` when the failure carries
           that marker, else re-raises the original ``WorkflowFailureError``.
+        - If the precondition is violated and ``workflow_id`` collides with a still-live
+          workflow, Temporal raises ``WorkflowAlreadyStartedError``; that is re-raised as
+          a ``RuntimeError`` naming the offending id rather than surfacing the raw
+          Temporal error (which the route would not map, yielding an opaque 500).
     """
     try:
         return execute_workflow_sync(
             workflow_run, *args, workflow_id=workflow_id, task_queue=TASK_QUEUE
         )
+    except WorkflowAlreadyStartedError as exc:
+        # Unreachable in normal operation — every dispatch mints a fresh uuid — but
+        # execute_workflow_sync documents id-uniqueness as a caller precondition, so a
+        # violation surfaces as a clear error instead of an opaque 500.
+        raise RuntimeError(
+            f"Agent Studio dispatch minted a duplicate live workflow id: {workflow_id}"
+        ) from exc
     except WorkflowFailureError as exc:
         _translate_workflow_failure(exc)
         raise
