@@ -30,8 +30,10 @@ max-statements = 130
 "llm_service/clients/ollama.py" = ["C901", "PLR0915"]
 "team_assistant/api.py" = ["C901", "PLR0915"]
 "investment_team/api/main.py" = ["PLR0915"]
-"software_engineering_team/backend_code_v2_team/phases/execution.py" = ["PLR0915"]
-"software_engineering_team/frontend_code_v2_team/phases/execution.py" = ["PLR0915"]
+# The gated microtask loop was unified into one shared skeleton
+# (run_gated_execution_impl); the two per-team execution.py wrappers are now thin
+# and no longer need the exemption, so the debt is consolidated to the one copy.
+"software_engineering_team/shared/phases/execution.py" = ["PLR0915"]
 "software_engineering_team/product_requirements_analysis_agent/agent.py" = ["PLR0915"]
 
 [format]
