@@ -32,7 +32,7 @@ from branding_team.models import (
     HumanReview,
     TeamOutput,
 )
-from branding_team.orchestrator import BrandingTeamOrchestrator
+from branding_team.orchestrator import orchestrator
 from branding_team.postgres import SCHEMA as BRANDING_POSTGRES_SCHEMA
 from branding_team.shared.job_store import (
     JOB_STATUS_CANCELLED,
@@ -130,7 +130,6 @@ app = FastAPI(title="Branding Team API", version="2.0.0", lifespan=_lifespan)
 instrument_fastapi_app(app, team_key="branding")
 
 branding_store = get_default_store()
-orchestrator = BrandingTeamOrchestrator()
 conversation_store = get_conversation_store()
 
 # Public name so tests can patch 'branding_team.api.main.assistant_agent'.

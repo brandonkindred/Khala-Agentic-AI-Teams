@@ -763,3 +763,10 @@ def _build_brand_book(
 
     content = "\n\n".join(sections_md)
     return BrandBook(content=content, sections=sections_data)
+
+
+# Process-wide orchestrator singleton. It is stateless (only holds the regex
+# ``BrandComplianceAgent``), so one shared instance is safe. Defined here — the
+# canonical domain module — so both the API layer and the Temporal activities
+# import it from here rather than coupling the worker to ``api.main``.
+orchestrator = BrandingTeamOrchestrator()

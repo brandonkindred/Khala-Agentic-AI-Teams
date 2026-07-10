@@ -223,8 +223,8 @@ def test_begin_activity_runs_then_returns_true() -> None:
     from branding_team.temporal import activities
 
     with (
-        patch.object(main_mod, "is_job_cancelled", return_value=False),
-        patch.object(main_mod, "update_job") as mock_update,
+        patch("branding_team.shared.job_store.is_job_cancelled", return_value=False),
+        patch("branding_team.shared.job_store.update_job") as mock_update,
     ):
         assert activities.begin_branding_job_activity("job-1") is True
 
@@ -233,12 +233,11 @@ def test_begin_activity_runs_then_returns_true() -> None:
 
 
 def test_begin_activity_returns_false_when_cancelled() -> None:
-    from branding_team.api import main as main_mod
     from branding_team.temporal import activities
 
     with (
-        patch.object(main_mod, "is_job_cancelled", return_value=True),
-        patch.object(main_mod, "update_job") as mock_update,
+        patch("branding_team.shared.job_store.is_job_cancelled", return_value=True),
+        patch("branding_team.shared.job_store.update_job") as mock_update,
     ):
         assert activities.begin_branding_job_activity("job-1") is False
         mock_update.assert_not_called()
@@ -291,6 +290,27 @@ def test_phase_activity_checkpoint_short_circuits(monkeypatch) -> None:
 
     assert out == cached
     mock_rsp.assert_not_called()
+
+
+def test_phase_activity_none_payload_checkpoint_does_not_short_circuit(monkeypatch) -> None:
+    """A checkpoint whose payload is None must NOT short-circuit — the phase re-runs
+    (guards against `existing.get("payload") is not None` treating None as cached)."""
+    import shared_temporal
+    from branding_team.api import main as main_mod
+    from branding_team.models import StrategicCoreOutput
+    from branding_team.temporal import activities
+
+    monkeypatch.setattr(
+        shared_temporal, "load_checkpoint", lambda team, jid, phase: {"payload": None}
+    )
+    monkeypatch.setattr(shared_temporal, "save_checkpoint", MagicMock())
+
+    model = StrategicCoreOutput(positioning_statement="FRESH")
+    with patch.object(main_mod.orchestrator, "run_single_phase", return_value=model) as mock_rsp:
+        out = activities.run_branding_phase_activity(_phase_payload(), "strategic_core", {})
+
+    assert out["positioning_statement"] == "FRESH"
+    mock_rsp.assert_called_once()
 
 
 def test_market_research_activity_returns_none_on_failure() -> None:
@@ -377,8 +397,8 @@ def test_finalize_activity_completes_and_appends(monkeypatch) -> None:
     }
 
     with (
-        patch.object(main_mod, "is_job_cancelled", return_value=False),
-        patch.object(main_mod, "update_job") as mock_update,
+        patch("branding_team.shared.job_store.is_job_cancelled", return_value=False),
+        patch("branding_team.shared.job_store.update_job") as mock_update,
         patch.object(main_mod.branding_store, "append_brand_version") as mock_append,
     ):
         activities.finalize_branding_activity(
@@ -406,8 +426,8 @@ def test_finalize_activity_finalized_checkpoint_blocks_double_append(monkeypatch
     monkeypatch.setattr(shared_temporal, "save_checkpoint", MagicMock())
 
     with (
-        patch.object(main_mod, "is_job_cancelled", return_value=False),
-        patch.object(main_mod, "update_job") as mock_update,
+        patch("branding_team.shared.job_store.is_job_cancelled", return_value=False),
+        patch("branding_team.shared.job_store.update_job") as mock_update,
         patch.object(main_mod.branding_store, "append_brand_version") as mock_append,
     ):
         activities.finalize_branding_activity(_phase_payload(), {}, None, None)
@@ -428,8 +448,8 @@ def test_finalize_activity_skips_completion_when_cancelled(monkeypatch) -> None:
     monkeypatch.setattr(shared_temporal, "save_checkpoint", MagicMock())
 
     with (
-        patch.object(main_mod, "is_job_cancelled", return_value=True),
-        patch.object(main_mod, "update_job") as mock_update,
+        patch("branding_team.shared.job_store.is_job_cancelled", return_value=True),
+        patch("branding_team.shared.job_store.update_job") as mock_update,
         patch.object(main_mod.branding_store, "append_brand_version"),
     ):
         activities.finalize_branding_activity(_phase_payload(), {}, None, None)
@@ -444,8 +464,8 @@ def test_mark_failed_activity_writes_failed_row() -> None:
     from branding_team.temporal import activities
 
     with (
-        patch.object(main_mod, "is_job_cancelled", return_value=False),
-        patch.object(main_mod, "update_job") as mock_update,
+        patch("branding_team.shared.job_store.is_job_cancelled", return_value=False),
+        patch("branding_team.shared.job_store.update_job") as mock_update,
     ):
         activities.mark_branding_failed_activity("job-1", "boom")
 
@@ -455,24 +475,22 @@ def test_mark_failed_activity_writes_failed_row() -> None:
 
 
 def test_mark_failed_activity_skips_when_cancelled() -> None:
-    from branding_team.api import main as main_mod
     from branding_team.temporal import activities
 
     with (
-        patch.object(main_mod, "is_job_cancelled", return_value=True),
-        patch.object(main_mod, "update_job") as mock_update,
+        patch("branding_team.shared.job_store.is_job_cancelled", return_value=True),
+        patch("branding_team.shared.job_store.update_job") as mock_update,
     ):
         activities.mark_branding_failed_activity("job-1", "boom")
         mock_update.assert_not_called()
 
 
 def test_check_cancelled_activity_reflects_job_state() -> None:
-    from branding_team.api import main as main_mod
     from branding_team.temporal import activities
 
-    with patch.object(main_mod, "is_job_cancelled", return_value=True):
+    with patch("branding_team.shared.job_store.is_job_cancelled", return_value=True):
         assert activities.check_branding_cancelled_activity("job-1") is True
-    with patch.object(main_mod, "is_job_cancelled", return_value=False):
+    with patch("branding_team.shared.job_store.is_job_cancelled", return_value=False):
         assert activities.check_branding_cancelled_activity("job-1") is False
 
 
@@ -576,6 +594,7 @@ def _drive_workflow(
     mr_error: bool = False,
     da_error: bool = False,
     mark_failed_error: bool = False,
+    check_cancel_error: bool = False,
 ):
     """Run BrandingWorkflow.run with workflow.execute_activity monkeypatched.
 
@@ -617,6 +636,8 @@ def _drive_workflow(
                 raise RuntimeError("begin-boom")
             return begin
         if activity_fn is A.check_branding_cancelled_activity:
+            if check_cancel_error:
+                raise RuntimeError("check-boom")
             state["checks"] += 1
             return cancel_after is not None and state["checks"] > cancel_after
         if activity_fn is A.run_branding_phase_activity:
@@ -854,6 +875,45 @@ def test_workflow_begin_failure_marks_failed() -> None:
 
     assert "mark_branding_failed_activity" in _names(result)
     assert "run_branding_phase_activity" not in _names(result)
+    assert isinstance(result.error, RuntimeError)
+
+
+def test_workflow_cancel_during_activity_failure_stays_terminal() -> None:
+    """If the job is cancelled while a phase is failing, the run stays terminal
+    (cancelled), NOT failed — the except branch re-checks cancel before re-raising,
+    mirroring _run_branding_core. Otherwise Temporal would record a failed workflow
+    while the job row stays cancelled."""
+    # phase 1 fails; the between-phase check passed (cancel_after=1) but the
+    # except-branch check then reports cancelled.
+    result = _drive_workflow(_phase_payload(), phase_error="strategic_core", cancel_after=1)
+
+    names = _names(result)
+    assert "mark_branding_failed_activity" not in names  # not marked FAILED
+    assert result.error is None  # workflow completes (terminal cancelled)
+    assert result.instance.progress()["phase"] == "cancelled"
+
+
+def test_workflow_design_assets_failure_propagates_even_with_mr_enabled() -> None:
+    """Design-asset failures fail the run promptly even when market research is also
+    enabled — MR is wrapped best-effort, so gather surfaces the DA error at once
+    instead of waiting out MR's multi-minute timeout."""
+    result = _drive_workflow(
+        _phase_payload(include_market_research=True, include_design_assets=True),
+        da_error=True,
+        mr_result={"summary": "mr"},
+    )
+
+    assert isinstance(result.error, RuntimeError)
+    assert "mark_branding_failed_activity" in _names(result)
+    assert "finalize_branding_activity" not in _names(result)
+
+
+def test_workflow_cancel_probe_failure_falls_through_to_failed() -> None:
+    """If the cancel-probe in the failure handler itself errors, the run falls
+    through to FAILED rather than hanging or masking the error."""
+    result = _drive_workflow(_phase_payload(), check_cancel_error=True)
+
+    assert "mark_branding_failed_activity" in _names(result)
     assert isinstance(result.error, RuntimeError)
 
 

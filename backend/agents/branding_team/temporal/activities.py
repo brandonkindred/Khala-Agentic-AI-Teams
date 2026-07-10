@@ -63,7 +63,7 @@ def begin_branding_job_activity(job_id: str) -> bool:
           (terminal — the workflow returns without failing).
         - Otherwise sets the row to RUNNING and returns True.
     """
-    from branding_team.api.main import JOB_STATUS_RUNNING, is_job_cancelled, update_job
+    from branding_team.shared.job_store import JOB_STATUS_RUNNING, is_job_cancelled, update_job
 
     if is_job_cancelled(job_id):
         return False
@@ -90,8 +90,12 @@ def run_branding_phase_activity(
           output is returned without re-running the phase. Otherwise the freshly
           computed output is checkpointed before return.
     """
-    from branding_team.api.main import orchestrator
     from branding_team.models import BrandingMission, BrandPhase
+    from branding_team.orchestrator import orchestrator
+
+    # shared_concurrency is stdlib-only (threading/contextvars/logging) with no
+    # import side effects, and this runs in the worker thread pool (outside the
+    # workflow sandbox), so the call-time import is safe.
     from shared_concurrency import BackgroundHeartbeat
     from shared_temporal import load_checkpoint, save_checkpoint
 
@@ -122,6 +126,9 @@ def run_market_research_activity(payload: dict[str, Any]) -> Optional[dict[str, 
           context — a failure must not fail the branding run), matching the
           thread-mode ``_gather_integrations`` behavior.
     """
+    # request_market_research is the sync wrapper over request_market_research_async
+    # (it runs the same coroutine via _run_blocking), so it shares the async path's
+    # timeout/error handling exactly — used here because activities are sync.
     from branding_team.adapters.market_research import request_market_research
     from branding_team.models import BrandingMission
 
@@ -188,13 +195,6 @@ def finalize_branding_activity(
         - The COMPLETED write is idempotent and always applied unless the job was
           cancelled (cancel is terminal, not completed).
     """
-    from branding_team.api.main import (
-        JOB_STATUS_COMPLETED,
-        branding_store,
-        is_job_cancelled,
-        orchestrator,
-        update_job,
-    )
     from branding_team.models import (
         BrandCheckRequest,
         BrandingMission,
@@ -207,9 +207,13 @@ def finalize_branding_activity(
         StrategicCoreOutput,
         VisualIdentityOutput,
     )
+    from branding_team.orchestrator import orchestrator
+    from branding_team.shared.job_store import JOB_STATUS_COMPLETED, is_job_cancelled, update_job
+    from branding_team.store import get_default_store
     from branding_team.temporal.constants import stop_index
     from shared_temporal import load_checkpoint, save_checkpoint
 
+    branding_store = get_default_store()
     job_id = payload["job_id"]
     mission = BrandingMission(**payload["mission"])
     human_review = HumanReview(**payload["human_review"])
@@ -219,6 +223,10 @@ def finalize_branding_activity(
 
     stop_idx = stop_index(payload.get("target_phase"))
 
+    # The keys below are BrandPhase value strings — the same keys the workflow
+    # accumulates in prior_outputs (from PHASE_SEQUENCE) and passes here as
+    # phase_outputs. A phase not reached (partial target_phase run) is absent, so
+    # _model returns None and _assemble_team_output tolerates it.
     def _model(cls: type, key: str) -> Any:
         data = phase_outputs.get(key)
         return cls(**data) if data else None
@@ -274,7 +282,7 @@ def mark_branding_failed_activity(job_id: str, error: str) -> None:
           cancelled run is terminal, not a failure), matching the except-branch of
           the old ``_run_branding_core``.
     """
-    from branding_team.api.main import JOB_STATUS_FAILED, is_job_cancelled, update_job
+    from branding_team.shared.job_store import JOB_STATUS_FAILED, is_job_cancelled, update_job
 
     if is_job_cancelled(job_id):
         return
@@ -290,6 +298,6 @@ def check_branding_cancelled_activity(job_id: str) -> bool:
     Postconditions:
         - Returns True iff the job row is in the cancelled state; no side effects.
     """
-    from branding_team.api.main import is_job_cancelled
+    from branding_team.shared.job_store import is_job_cancelled
 
     return bool(is_job_cancelled(job_id))

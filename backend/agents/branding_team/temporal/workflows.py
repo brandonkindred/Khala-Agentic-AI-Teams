@@ -191,10 +191,21 @@ class BrandingWorkflow:
             )
             self._advance("done", 1.0)
         except Exception as exc:  # noqa: BLE001 — record the failure, then re-raise
-            # Mirror the except-branch of the old _run_branding_core: mark the job
-            # FAILED (cancel-guarded inside the activity), then re-raise so the
-            # workflow reflects the real cause. The mark-failed dispatch is
-            # best-effort — its own failure must not mask the original exception.
+            # If the job was cancelled mid-run, keep it terminal (cancelled), not
+            # failed — mirroring _run_branding_core, whose except-branch returned
+            # when is_job_cancelled was true. mark_failed no-ops for a cancelled job,
+            # so re-raising would otherwise fail the Temporal workflow while the job
+            # row stays cancelled (an inconsistent state).
+            cancelled = False
+            try:
+                cancelled = await self._cancelled(job_id)
+            except Exception:  # noqa: BLE001 — a cancel-probe failure falls through to FAILED
+                cancelled = False
+            if cancelled:
+                self._advance("cancelled", self._fraction)
+                return
+            # Not cancelled: record FAILED (best-effort — its own failure must not
+            # mask the original cause), then re-raise so the workflow reflects it.
             try:
                 await workflow.execute_activity(
                     _activities.mark_branding_failed_activity,
@@ -236,28 +247,20 @@ class BrandingWorkflow:
               pass ``strategic_core`` to design assets).
         Postconditions:
             - Returns ``(competitive_snapshot, design_asset_result)``; each is the
-              activity's dict result, or ``None`` when its flag is off. Gathering
-              enabled integrations concurrently mirrors thread mode's
-              ``_gather_integrations``, including its asymmetry: market research is
-              best-effort (a Temporal-level activity failure — timeout/crash/retry
-              exhaustion — degrades to ``None`` rather than failing the run), while
-              a design-asset failure propagates.
+              activity's dict result, or ``None`` when its flag is off. Concurrent,
+              mirroring thread mode's ``_gather_integrations`` asymmetry: market
+              research is best-effort (any failure degrades to ``None``) while a
+              design-asset failure propagates. Because MR is wrapped so it never
+              raises, a design-asset failure surfaces immediately from ``gather``
+              rather than waiting out MR's (multi-minute) timeout.
         """
-        coros = []
+        awaitables = []
         kinds: List[str] = []
         if payload.get("include_market_research"):
-            coros.append(
-                workflow.execute_activity(
-                    _activities.run_market_research_activity,
-                    args=[payload],
-                    task_queue=TASK_QUEUE,
-                    start_to_close_timeout=_MARKET_RESEARCH_TIMEOUT,
-                    retry_policy=_LLM_RETRY,
-                )
-            )
+            awaitables.append(self._market_research_best_effort(payload))
             kinds.append("mr")
         if payload.get("include_design_assets"):
-            coros.append(
+            awaitables.append(
                 workflow.execute_activity(
                     _activities.run_design_assets_activity,
                     args=[payload, prior_outputs.get("strategic_core")],
@@ -270,17 +273,35 @@ class BrandingWorkflow:
 
         competitive_snapshot: Any = None
         design_asset_result: Any = None
-        if coros:
-            # return_exceptions so a market-research failure can be absorbed
-            # (best-effort) without cancelling the concurrent design-assets call.
-            results = await asyncio.gather(*coros, return_exceptions=True)
+        if awaitables:
+            # No return_exceptions: a design-asset failure propagates from gather
+            # at once. MR is pre-wrapped to never raise, so it can't fail the run.
+            results = await asyncio.gather(*awaitables)
             for kind, result in zip(kinds, results):
                 if kind == "mr":
-                    # Best-effort: a failed MR activity degrades to None (thread mode).
-                    competitive_snapshot = None if isinstance(result, BaseException) else result
+                    competitive_snapshot = result
                 else:
-                    # Design-asset errors propagate, matching thread mode.
-                    if isinstance(result, BaseException):
-                        raise result
                     design_asset_result = result
         return competitive_snapshot, design_asset_result
+
+    async def _market_research_best_effort(self, payload: dict[str, Any]) -> Any:
+        """Run the market-research activity, degrading any failure to ``None``.
+
+        Preconditions:
+            - ``payload`` carries the mission the activity needs.
+        Postconditions:
+            - Returns the ``CompetitiveSnapshot`` dict, or ``None`` if the activity
+              fails at the Temporal level (timeout/crash/retry exhaustion) — market
+              research is best-effort context and must never fail the branding run,
+              matching thread mode's ``except Exception`` in ``_gather_integrations``.
+        """
+        try:
+            return await workflow.execute_activity(
+                _activities.run_market_research_activity,
+                args=[payload],
+                task_queue=TASK_QUEUE,
+                start_to_close_timeout=_MARKET_RESEARCH_TIMEOUT,
+                retry_policy=_LLM_RETRY,
+            )
+        except Exception:  # noqa: BLE001 — best-effort: a failed MR degrades to None
+            return None
