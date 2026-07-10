@@ -8,7 +8,7 @@ import threading
 import uuid
 from typing import Any
 
-from deepthought.agent import DEFAULT_AGENT_BUDGET, DeepthoughtAgent
+from deepthought.agent import DeepthoughtAgent
 from deepthought.knowledge_base import SharedKnowledgeBase
 from deepthought.models import (
     AgentEvent,
@@ -20,6 +20,7 @@ from deepthought.models import (
     DeepthoughtResponse,
 )
 from deepthought.prompts import CLASSIFY_QUESTION_SYSTEM_PROMPT
+from deepthought.reasoning import DEFAULT_AGENT_BUDGET, format_answer
 from deepthought.result_cache import ResultCache
 
 logger = logging.getLogger(__name__)
@@ -198,23 +199,5 @@ class DeepthoughtOrchestrator:
 
     @staticmethod
     def _format_answer(result: AgentResult) -> str:
-        """Append a 'Specialists consulted' footer to the answer when decomposition occurred."""
-        if not result.was_decomposed:
-            return result.answer
-
-        specialists = _collect_specialists(result)
-        if not specialists:
-            return result.answer
-
-        footer_lines = [f"- **{name}**: {focus}" for name, focus in specialists]
-        footer = "\n\n---\n**Specialists consulted:**\n" + "\n".join(footer_lines)
-        return result.answer + footer
-
-
-def _collect_specialists(result: AgentResult) -> list[tuple[str, str]]:
-    """Recursively collect (name, focus_question) for all child agents."""
-    specialists: list[tuple[str, str]] = []
-    for child in result.child_results:
-        specialists.append((child.agent_name, child.focus_question))
-        specialists.extend(_collect_specialists(child))
-    return specialists
+        """Append a 'Specialists consulted' footer (delegates to ``reasoning``)."""
+        return format_answer(result)

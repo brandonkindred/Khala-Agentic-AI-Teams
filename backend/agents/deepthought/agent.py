@@ -20,7 +20,6 @@ from deepthought.models import (
     AgentResult,
     AgentSpec,
     DecompositionStrategy,
-    KnowledgeEntry,
     QueryAnalysis,
     SkillRequirement,
 )
@@ -36,18 +35,24 @@ from deepthought.prompts import (
     format_conversation_history,
     format_specialist_results,
 )
+
+# The pure, deterministic tree-shaping logic lives in ``deepthought.reasoning``
+# so the Temporal workflow can reuse it verbatim. The instance methods below
+# delegate to it, keeping a single source of truth across thread and Temporal
+# runtimes. ``DEFAULT_AGENT_BUDGET`` is imported by the orchestrator from
+# ``reasoning`` directly.
+from deepthought.reasoning import (
+    MAX_CHARS_PER_CHILD_ANSWER,
+    MAX_CHILDREN_PER_AGENT,
+    build_child_specs,
+    build_finding_entry,
+    compute_structural_confidence,
+    parse_analysis,
+    results_to_dicts,
+)
 from deepthought.result_cache import ResultCache
 
 logger = logging.getLogger(__name__)
-
-# Maximum child agents any single node may spawn.
-MAX_CHILDREN_PER_AGENT = 5
-
-# Global budget — shared across the whole tree via the orchestrator callback.
-DEFAULT_AGENT_BUDGET = 50
-
-# Max chars to include per child answer in synthesis to control token usage.
-MAX_CHARS_PER_CHILD_ANSWER = 3000
 
 
 class DeepthoughtAgent:
@@ -238,26 +243,7 @@ class DeepthoughtAgent:
 
     def _parse_analysis(self, data: dict[str, Any]) -> QueryAnalysis:
         """Parse raw LLM JSON into a QueryAnalysis, with defensive defaults."""
-        skills_raw = data.get("skill_requirements") or []
-        skills = []
-        for s in skills_raw[:MAX_CHILDREN_PER_AGENT]:
-            try:
-                skills.append(SkillRequirement(**s))
-            except Exception:
-                logger.warning("Skipping malformed skill requirement: %s", s)
-
-        can_answer = bool(data.get("can_answer_directly", False))
-        # If the LLM says it can't answer but provides no skills, force direct.
-        if not can_answer and not skills:
-            can_answer = True
-
-        return QueryAnalysis(
-            summary=data.get("summary", self.spec.focus_question),
-            can_answer_directly=can_answer,
-            direct_answer=data.get("direct_answer") if can_answer else None,
-            confidence=float(data.get("confidence", 0.5)) if can_answer else 0.0,
-            skill_requirements=[] if can_answer else skills,
-        )
+        return parse_analysis(data, self.spec.focus_question)
 
     def _force_direct_answer(self) -> str:
         """Produce a direct answer when depth limit hit or analysis failed."""
@@ -286,18 +272,7 @@ class DeepthoughtAgent:
 
     def _build_child_specs(self, skills: list[SkillRequirement]) -> list[AgentSpec]:
         """Create AgentSpec objects for each required specialist."""
-        specs = []
-        for skill in skills[:MAX_CHILDREN_PER_AGENT]:
-            spec = AgentSpec(
-                agent_id=str(uuid.uuid4()),
-                name=skill.name,
-                role_description=skill.description,
-                focus_question=skill.focus_question,
-                depth=self.spec.depth + 1,
-                parent_id=self.spec.agent_id,
-            )
-            specs.append(spec)
-        return specs
+        return build_child_specs(skills, self.spec, uuid.uuid4)
 
     def _run_children_parallel(self, specs: list[AgentSpec], max_depth: int) -> list[AgentResult]:
         """Execute child agents in parallel threads."""
@@ -435,37 +410,13 @@ class DeepthoughtAgent:
         child_results: list[AgentResult],
         deliberation_notes: str = "",
     ) -> float:
-        """Derive confidence from structural signals rather than LLM self-assessment.
-
-        Signals used:
-        - Direct answers get a modest base (the LLM self-assessment is just one signal).
-        - Decomposed answers: weighted by child agreement and coverage.
-        - Penalty for contradictions found in deliberation.
-        - Bonus for multiple children agreeing (convergence).
-        """
-        if not was_decomposed:
-            # Blend: 40% structural base + 60% self-assessed (dampened)
-            return round(0.4 + 0.6 * min(self_assessed, 0.95), 3)
-
-        if not child_results:
-            return 0.3
-
-        child_confs = [r.confidence for r in child_results]
-        avg_child = sum(child_confs) / len(child_confs)
-        # More children = more perspectives = higher base confidence
-        coverage_bonus = min(len(child_results) * 0.05, 0.2)
-        # Penalty for contradictions mentioned in deliberation
-        contradiction_penalty = 0.0
-        if deliberation_notes:
-            # Count occurrences of "contradict" as a rough proxy
-            contradiction_count = deliberation_notes.lower().count("contradict")
-            contradiction_penalty = min(contradiction_count * 0.05, 0.15)
-        # Penalty for any cached/reused results (lower novelty)
-        reused = sum(1 for r in child_results if r.reused_from_cache)
-        reuse_penalty = min(reused * 0.02, 0.1)
-
-        raw = avg_child + coverage_bonus - contradiction_penalty - reuse_penalty
-        return round(max(0.1, min(raw, 0.95)), 3)
+        """Derive confidence from structural signals (delegates to ``reasoning``)."""
+        return compute_structural_confidence(
+            was_decomposed=was_decomposed,
+            self_assessed=self_assessed,
+            child_results=child_results,
+            deliberation_notes=deliberation_notes,
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -473,19 +424,7 @@ class DeepthoughtAgent:
 
     def _store_finding(self, answer: str, confidence: float) -> None:
         """Write this agent's finding to the shared knowledge base."""
-        # Extract first ~500 chars as the finding summary
-        finding = answer[:500] if len(answer) > 500 else answer
-        tags = [w.lower().strip("?.,!;:") for w in self.spec.name.split("_") if len(w) > 2]
-        self.knowledge_base.add(
-            KnowledgeEntry(
-                agent_id=self.spec.agent_id,
-                agent_name=self.spec.name,
-                focus_question=self.spec.focus_question,
-                finding=finding,
-                confidence=confidence,
-                tags=tags,
-            )
-        )
+        self.knowledge_base.add(build_finding_entry(self.spec, answer, confidence))
 
     def _cache_result(self, result: AgentResult) -> None:
         """Store result in the cross-conversation cache."""
@@ -509,12 +448,4 @@ class DeepthoughtAgent:
 
     @staticmethod
     def _results_to_dicts(child_results: list[AgentResult]) -> list[dict]:
-        return [
-            {
-                "agent_name": r.agent_name,
-                "focus_question": r.focus_question,
-                "confidence": r.confidence,
-                "answer": r.answer,
-            }
-            for r in child_results
-        ]
+        return results_to_dicts(child_results)
