@@ -404,11 +404,13 @@ class CodeReviewOutput(BaseModel):
     )
     summary: str = Field(
         default="",
-        description="Overall summary of the code review",
+        description="Brief, high-level review overview: which areas of the code have issues and any "
+        "common theme. Does not restate what the PR does, and never praises the code or claims spec "
+        "alignment when issues were found.",
     )
     spec_compliance_notes: str = Field(
         default="",
-        description="Notes on how well the code meets the specification and acceptance criteria",
+        description="Concrete spec/acceptance-criteria gaps only, or '' when there are none",
     )
 
 
