@@ -36,18 +36,37 @@ _LLM_JSON = (
 
 @pytest.fixture
 def job_store(monkeypatch):
-    """Fake the durable job store; record every write the activities make."""
+    """Stateful in-memory fake of the durable job store.
+
+    Records every write (``update``/``completed``/``failed`` call lists) and keeps
+    the merged job state in ``jobs`` so ``get_job`` round-trips what was persisted
+    (document production writes the handoff; sub-agent provisioning reads it back).
+    """
     from planning_team.shared import job_store as js
 
-    calls = {"update": [], "completed": [], "failed": []}
-    monkeypatch.setattr(js, "update_job", lambda job_id, **f: calls["update"].append((job_id, f)))
-    monkeypatch.setattr(
-        js, "mark_job_completed", lambda job_id, **f: calls["completed"].append((job_id, f))
-    )
-    monkeypatch.setattr(
-        js, "mark_job_failed", lambda job_id, error: calls["failed"].append((job_id, error))
-    )
-    return calls
+    state: dict = {"jobs": {}, "update": [], "completed": [], "failed": []}
+
+    def _update(job_id, **fields):
+        state["update"].append((job_id, fields))
+        state["jobs"].setdefault(job_id, {}).update(fields)
+
+    def _get(job_id):
+        job = state["jobs"].get(job_id)
+        return dict(job) if job is not None else None
+
+    def _completed(job_id, **fields):
+        state["completed"].append((job_id, fields))
+        state["jobs"].setdefault(job_id, {}).update(fields, status="completed")
+
+    def _failed(job_id, error):
+        state["failed"].append((job_id, error))
+        state["jobs"].setdefault(job_id, {}).update(error=error, status="failed")
+
+    monkeypatch.setattr(js, "update_job", _update)
+    monkeypatch.setattr(js, "get_job", _get)
+    monkeypatch.setattr(js, "mark_job_completed", _completed)
+    monkeypatch.setattr(js, "mark_job_failed", _failed)
+    return state
 
 
 @pytest.fixture
@@ -154,7 +173,9 @@ def test_document_production_activity_no_pra(tmp_path, job_store):
     ctx = A.intake_activity("job-1", str(tmp_path), "Acme", "brief", None)
     ctx = A.document_production_activity("job-1", ctx, False)
 
-    handoff = ctx["handoff_package"]
+    # The activity result is slim; the handoff is persisted to the job store.
+    assert ctx == {"repo_path": str(tmp_path)}
+    handoff = job_store["jobs"]["job-1"]["handoff_package"]
     assert isinstance(handoff, dict)
     # No PRA → the initial spec is the validated spec.
     assert handoff["validated_spec_path"].endswith("initial_spec.md")
@@ -178,7 +199,7 @@ def test_document_production_activity_with_pra(tmp_path, monkeypatch, job_store)
     ctx = A.intake_activity("job-1", str(tmp_path), "Acme", "brief", None)
     ctx = A.document_production_activity("job-1", ctx, True)
 
-    handoff = ctx["handoff_package"]
+    handoff = job_store["jobs"]["job-1"]["handoff_package"]
     assert handoff["validated_spec_path"].endswith("validated_spec.md")
     assert handoff["prd_path"].endswith("product_requirements_document.md")
     # The auto-answer callback picked the default option (parity with the HTTP path).
@@ -188,15 +209,16 @@ def test_document_production_activity_with_pra(tmp_path, monkeypatch, job_store)
 def test_sub_agent_provisioning_activity_noop_without_gap(tmp_path, job_store):
     ctx = A.intake_activity("job-1", str(tmp_path), "Acme", "brief", None)
     ctx = A.document_production_activity("job-1", ctx, False)
-    before = dict(ctx["handoff_package"])
+    before = dict(job_store["jobs"]["job-1"]["handoff_package"])
 
     ctx = A.sub_agent_provisioning_activity("job-1", ctx, None)
 
-    # No capability gap → context/handoff unchanged, no blueprint attached (the
-    # handoff's sub_agent_blueprint field stays at its None default).
+    # No capability gap → no blueprint attached; the persisted handoff is unchanged
+    # (its sub_agent_blueprint field stays at its None default).
     assert "sub_agent_blueprint" not in ctx
-    assert ctx["handoff_package"]["sub_agent_blueprint"] is None
-    assert ctx["handoff_package"] == before
+    handoff = job_store["jobs"]["job-1"]["handoff_package"]
+    assert handoff["sub_agent_blueprint"] is None
+    assert handoff == before
 
 
 def test_sub_agent_provisioning_activity_attaches_blueprint(tmp_path, monkeypatch, job_store):
@@ -211,18 +233,55 @@ def test_sub_agent_provisioning_activity_attaches_blueprint(tmp_path, monkeypatc
     ctx = A.sub_agent_provisioning_activity("job-1", ctx, "needs a scraper")
 
     assert ctx["sub_agent_blueprint"] == {"name": "agent-x"}
-    assert ctx["handoff_package"]["sub_agent_blueprint"] == {"name": "agent-x"}
+    # The blueprint is attached to the persisted handoff, not the activity result.
+    assert job_store["jobs"]["job-1"]["handoff_package"]["sub_agent_blueprint"] == {
+        "name": "agent-x"
+    }
 
 
-def test_finalize_activity_marks_completed(tmp_path, job_store):
-    ctx = {"handoff_package": {"summary": "hp"}}
-    result = A.finalize_planning_activity("job-1", ctx)
+def test_finalize_activity_marks_completed(job_store):
+    # Handoff was already persisted by document production; finalize must not
+    # re-pass (and thus clobber) it — it only flips status/summary.
+    job_store["jobs"]["job-1"] = {"handoff_package": {"summary": "hp"}}
+
+    result = A.finalize_planning_activity("job-1", {"repo_path": "/x"})
 
     assert result == {"success": True, "summary": "Planning completed; handoff package ready."}
     job_id, fields = job_store["completed"][0]
     assert job_id == "job-1"
-    assert fields["handoff_package"] == {"summary": "hp"}
+    assert "handoff_package" not in fields
     assert fields["summary"] == "Planning completed; handoff package ready."
+    # The previously-persisted handoff survives the completion write.
+    assert job_store["jobs"]["job-1"]["handoff_package"] == {"summary": "hp"}
+    assert job_store["jobs"]["job-1"]["status"] == "completed"
+
+
+def test_legacy_run_planning_activity_delegates(monkeypatch):
+    """The legacy single-activity path (kept for rollout replay) delegates to the
+    same run_workflow_background the thread-mode /run endpoint uses."""
+    import planning_team.api.main as api_main
+
+    captured = {}
+    monkeypatch.setattr(
+        api_main, "run_workflow_background", lambda *args: captured.setdefault("args", args)
+    )
+
+    A.run_planning_activity("job-1", "/tmp/ws", "Acme", "brief", None, True, False)
+
+    assert captured["args"] == ("job-1", "/tmp/ws", "Acme", "brief", None, True, False)
+
+
+def test_legacy_run_planning_activity_reraises(monkeypatch):
+    """A legacy-path failure re-raises so the legacy RetryPolicy governs retries."""
+    import planning_team.api.main as api_main
+
+    def _boom(*args):
+        raise RuntimeError("legacy boom")
+
+    monkeypatch.setattr(api_main, "run_workflow_background", _boom)
+
+    with pytest.raises(RuntimeError, match="legacy boom"):
+        A.run_planning_activity("job-1", "/tmp/ws", None, "brief", None, True, False)
 
 
 def test_activity_marks_job_failed_and_reraises(tmp_path, monkeypatch, job_store):
@@ -314,21 +373,16 @@ def test_activity_sequence_matches_orchestrator_handoff(tmp_path, monkeypatch, j
 
     # Activity sequence (Temporal-mode path) with the same fake LLM.
     monkeypatch.setattr("llm_service.get_client", lambda agent_key=None: make_llm(_LLM_JSON))
-    ctx = _run_activity_sequence("job-1", str(tmp_path / "act"))
+    _run_activity_sequence("job-1", str(tmp_path / "act"))
+    # The Temporal path persists the handoff to the job store (not the context).
+    act_handoff = job_store["jobs"]["job-1"]["handoff_package"]
 
     assert orch_result["success"] is True
     # client_context is path-independent, so it must match exactly across paths.
-    assert (
-        ctx["handoff_package"]["client_context"] == orch_result["handoff_package"]["client_context"]
-    )
-    assert ctx["handoff_package"]["client_context"]["problem_summary"] == "Need X"
+    assert act_handoff["client_context"] == orch_result["handoff_package"]["client_context"]
+    assert act_handoff["client_context"]["problem_summary"] == "Need X"
     # The handoff's open/resolved questions must stay identical across the thread
     # and Temporal paths (both empty today — the SE gate pauses on non-empty
     # open_questions, so this empty handoff is deliberately preserved).
-    assert (
-        ctx["handoff_package"]["open_questions"] == orch_result["handoff_package"]["open_questions"]
-    )
-    assert (
-        ctx["handoff_package"]["resolved_questions"]
-        == orch_result["handoff_package"]["resolved_questions"]
-    )
+    assert act_handoff["open_questions"] == orch_result["handoff_package"]["open_questions"]
+    assert act_handoff["resolved_questions"] == orch_result["handoff_package"]["resolved_questions"]

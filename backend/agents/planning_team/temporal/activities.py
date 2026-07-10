@@ -342,11 +342,10 @@ def document_production_activity(
         - Writes the client-context doc and initial spec under the workspace, and
           (when ``use_product_analysis``) submits the Product Requirements Analysis
           job and blocks on its completion — with a background heartbeat so the long
-          poll is not mistaken for a stalled worker. Folds any surfaced
-          ``open_questions``/``resolved_questions`` onto the handoff, then returns a
-          *slimmed* context (``{repo_path, handoff_package}``) — the only keys the
-          remaining phases read — so the raw brief/spec are not re-serialized across
-          later activity boundaries.
+          poll is not mistaken for a stalled worker. Persists the handoff (which
+          carries the full spec/PRD content) to the durable job store and returns a
+          *slim* ``{repo_path}`` result, so the large handoff never crosses a
+          Temporal activity boundary / blob limit.
         - PRA clarification questions are auto-answered with defaults (parity with
           the current HTTP Temporal path: no user ``answer_callback``); the
           architecture step is not run here (it is a gated non-HTTP feature).
@@ -387,12 +386,18 @@ def document_production_activity(
         if isinstance(handoff, dict):
             handoff.setdefault("open_questions", list(merged.get("open_questions") or []))
             handoff.setdefault("resolved_questions", list(merged.get("resolved_questions") or []))
-        # Slim the context for the remaining hops: only repo_path + handoff_package
-        # are read downstream (sub-agent provisioning reads repo_path; finalize
-        # reads handoff_package). Dropping the now-unused raw brief/spec and the
-        # duplicated top-level client_context keeps the per-activity Temporal
-        # payload well under the blob limit for large plans.
-        return {"repo_path": merged.get("repo_path"), "handoff_package": handoff}
+            # Persist the handoff to the durable job store NOW (Postgres JSONB — no
+            # Temporal blob limit). The handoff carries the full validated-spec/PRD
+            # content, which for a large plan can exceed Temporal's activity-result
+            # payload limit; returning it as an activity result would strand the job
+            # (files already written, but the workflow can't advance to finalize).
+            # So the handoff never crosses a Temporal boundary — only the job store.
+            from planning_team.shared.job_store import update_job
+
+            update_job(job_id, handoff_package=handoff)
+        # Slim result: downstream phases read only repo_path; the handoff lives in
+        # the job store from here on.
+        return {"repo_path": merged.get("repo_path")}
 
     return _guarded(
         job_id,
@@ -418,7 +423,8 @@ def sub_agent_provisioning_activity(
         - When ``capability_gap`` is falsy (the HTTP path never sets it) this is a
           fast no-op returning ``context`` unchanged. Otherwise it writes a spec,
           starts the AI-Systems build and blocks on completion (heartbeated), then
-          attaches the resulting blueprint to both ``context`` and the handoff.
+          attaches the resulting blueprint to the job-store handoff (which document
+          production persisted; it is not threaded through the activity result).
     """
     from planning_team.adapters import (
         start_ai_systems_build,
@@ -438,9 +444,16 @@ def sub_agent_provisioning_activity(
             )
         merged = _merge_context(context, context_update)
         blueprint = merged.get("sub_agent_blueprint")
-        handoff = merged.get("handoff_package")
-        if blueprint and isinstance(handoff, dict):
-            handoff["sub_agent_blueprint"] = blueprint
+        if blueprint:
+            # The handoff lives in the job store (persisted by document production),
+            # not in the context. Read it back, attach the blueprint, and re-persist.
+            from planning_team.shared.job_store import get_job, update_job
+
+            job = get_job(job_id) or {}
+            handoff = job.get("handoff_package")
+            if isinstance(handoff, dict):
+                handoff["sub_agent_blueprint"] = blueprint
+                update_job(job_id, handoff_package=handoff)
         return merged
 
     return _guarded(
@@ -455,15 +468,16 @@ def sub_agent_provisioning_activity(
 
 @activity.defn(name="planning_finalize")
 def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str, Any]:
-    """Finalize: persist the handoff package and mark the job completed at 100%.
+    """Finalize: mark the job completed at 100%.
 
     Preconditions:
-        - ``context`` carries the ``handoff_package`` produced by document
-          production (a JSON-native dict, or ``None`` if it was never built).
+        - The ``handoff_package`` has already been persisted to the job store by
+          ``document_production_activity`` (``context`` is the slim ``{repo_path}``).
     Postconditions:
-        - Marks the job COMPLETED at 100% with its ``handoff_package`` and summary,
-          and returns ``{"success": True, "summary": ...}``. This is the sole
-          terminal-success writer for the Temporal path.
+        - Marks the job COMPLETED at 100% with a summary, WITHOUT passing
+          ``handoff_package`` (a partial-update merge, so the already-persisted
+          handoff is preserved, not clobbered). Returns ``{"success": True, ...}``.
+          This is the sole terminal-success writer for the Temporal path.
     """
     from planning_team.models import Phase
     from planning_team.shared.job_store import mark_job_completed
@@ -471,11 +485,7 @@ def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str
     summary = "Planning completed; handoff package ready."
 
     def _work() -> Dict[str, Any]:
-        mark_job_completed(
-            job_id,
-            handoff_package=context.get("handoff_package"),
-            summary=summary,
-        )
+        mark_job_completed(job_id, summary=summary)
         return {"success": True, "summary": summary}
 
     # current_phase stays at the last real phase (sub_agent_provisioning); the
@@ -489,3 +499,48 @@ def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str
         _work,
         max_attempts=RETRYABLE_MAX_ATTEMPTS,
     )
+
+
+@activity.defn(name="run_planning_activity")
+def run_planning_activity(
+    job_id: str,
+    repo_path: str,
+    client_name: Optional[str],
+    initial_brief: Optional[str],
+    spec_content: Optional[str],
+    use_product_analysis: bool,
+    use_market_research: bool,
+) -> None:
+    """LEGACY single-activity path, retained ONLY for rollout compatibility.
+
+    Runs the whole planning pipeline in one activity via ``run_workflow_background``
+    (the pre-decomposition behavior). New executions run the per-phase activities;
+    this exists so a ``PlanningWorkflow`` history recorded *before* the per-phase
+    migration still replays deterministically (see ``PlanningWorkflow.run``'s
+    ``workflow.patched`` gate) and can complete after a worker rolls forward.
+
+    Preconditions:
+        - Only scheduled by the legacy branch of ``PlanningWorkflow.run`` while
+          replaying a pre-migration history; the activity name / args / timeouts
+          must stay byte-for-byte what those histories recorded.
+    Postconditions:
+        - Runs intake→…→finalize in-process and updates the job store (the same
+          function the thread-mode ``/run`` endpoint uses). Re-raises on error so
+          the legacy RetryPolicy governs re-attempts. Remove once no pre-migration
+          executions remain open.
+    """
+    try:
+        from planning_team.api.main import run_workflow_background
+
+        run_workflow_background(
+            job_id,
+            repo_path,
+            client_name,
+            initial_brief,
+            spec_content,
+            use_product_analysis,
+            use_market_research,
+        )
+    except Exception:
+        logger.exception("Planning legacy activity failed for job %s", job_id)
+        raise

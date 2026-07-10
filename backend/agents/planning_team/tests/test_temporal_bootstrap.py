@@ -55,8 +55,10 @@ def test_temporal_package_exports_pattern_a_contract():
     from planning_team.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOW_ID_PREFIX, WORKFLOWS
 
     assert [w.__name__ for w in WORKFLOWS] == ["PlanningWorkflow"]
-    assert len(ACTIVITIES) == 8  # intake, discovery, requirements, market research,
-    # synthesis, document production, sub-agent provisioning, finalize
+    # 8 per-phase activities (intake, discovery, requirements, market research,
+    # synthesis, document production, sub-agent provisioning, finalize) + the legacy
+    # run_planning_activity kept for rollout replay compatibility.
+    assert len(ACTIVITIES) == 9
     assert all(callable(a) for a in ACTIVITIES)
     assert TASK_QUEUE == "planning"
     assert WORKFLOW_ID_PREFIX == "planning-"

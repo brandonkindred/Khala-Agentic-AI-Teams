@@ -62,6 +62,21 @@ SAFE_RETRY = RetryPolicy(
 #: for explicit resubmission rather than being auto-retried.
 NO_RETRY = RetryPolicy(maximum_attempts=SINGLE_ATTEMPT)
 
+# --- Legacy single-activity path (rollout compatibility only) --------------
+#: Marker gating the per-phase sequence. New executions record it and take the
+#: per-phase path; a PlanningWorkflow history recorded before this patch has no
+#: marker, so it replays the legacy single-activity path below and completes.
+_PER_PHASE_PATCH = "planning-per-phase-activities"
+#: These MUST match byte-for-byte what pre-migration histories recorded for the
+#: ``run_planning_activity`` schedule, or replay is non-deterministic.
+LEGACY_WORKFLOW_TIMEOUT = timedelta(hours=12)
+LEGACY_RETRY_POLICY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=30),
+    maximum_interval=timedelta(minutes=2),
+    backoff_coefficient=2.0,
+)
+
 
 @workflow.defn(name="PlanningWorkflow")
 class PlanningWorkflow:
@@ -94,7 +109,31 @@ class PlanningWorkflow:
               FAILED (then re-raises) on its own error, so a phase failure fails
               this workflow at that specific activity rather than re-running the
               whole plan.
+            - A PlanningWorkflow execution started before the per-phase migration
+              (its history schedules ``run_planning_activity`` first) replays the
+              legacy single-activity path via the ``workflow.patched`` gate, so it
+              stays deterministic and completes after a worker rolls forward.
         """
+        if not workflow.patched(_PER_PHASE_PATCH):
+            # Legacy path: reached only when replaying a history recorded before the
+            # per-phase migration. Reproduce the old single coarse activity exactly.
+            await workflow.execute_activity(
+                _activities.run_planning_activity,
+                args=[
+                    job_id,
+                    repo_path,
+                    client_name,
+                    initial_brief,
+                    spec_content,
+                    use_product_analysis,
+                    use_market_research,
+                ],
+                task_queue=TASK_QUEUE,
+                schedule_to_close_timeout=LEGACY_WORKFLOW_TIMEOUT,
+                retry_policy=LEGACY_RETRY_POLICY,
+            )
+            return {"success": True, "summary": "Planning completed (legacy path)."}
+
         context = await workflow.execute_activity(
             _activities.intake_activity,
             args=[job_id, repo_path, client_name, initial_brief, spec_content],
@@ -137,10 +176,11 @@ class PlanningWorkflow:
             retry_policy=SAFE_RETRY,
         )
 
-        # From here ``context`` is SLIM: document_production returns only
-        # ``{repo_path, handoff_package}`` (the raw brief/spec are dropped to keep
-        # the payload small). The two phases below read only those keys — do not add
-        # a phase after this that expects the full pre-document-production context.
+        # From here ``context`` is SLIM ``{repo_path}``: document_production persists
+        # the (potentially large) handoff to the job store and returns only the
+        # repo path, so the handoff never crosses a Temporal boundary. The phases
+        # below read the handoff from the job store when they need it — do not add a
+        # phase after this that expects the full pre-document-production context.
         context = await workflow.execute_activity(
             _activities.document_production_activity,
             args=[job_id, context, use_product_analysis],

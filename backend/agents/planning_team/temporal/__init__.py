@@ -20,6 +20,7 @@ from planning_team.temporal.activities import (
     intake_activity,
     market_research_activity,
     requirements_activity,
+    run_planning_activity,
     sub_agent_provisioning_activity,
     synthesis_activity,
 )
@@ -37,6 +38,9 @@ ACTIVITIES = [
     document_production_activity,
     sub_agent_provisioning_activity,
     finalize_planning_activity,
+    # Legacy single-activity path, registered so pre-migration PlanningWorkflow
+    # histories can still execute during a rollout (see PlanningWorkflow.run).
+    run_planning_activity,
 ]
 
 __all__ = [
@@ -52,6 +56,7 @@ __all__ = [
     "is_temporal_enabled",
     "market_research_activity",
     "requirements_activity",
+    "run_planning_activity",
     "sub_agent_provisioning_activity",
     "synthesis_activity",
 ]
