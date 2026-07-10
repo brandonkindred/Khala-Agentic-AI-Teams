@@ -27,6 +27,7 @@ from personal_assistant_team.temporal.activities import (
     handle_profile_activity,
     handle_reservations_activity,
     handle_tasks_activity,
+    run_assistant_activity,
 )
 from personal_assistant_team.temporal.constants import (
     TASK_QUEUE,
@@ -50,6 +51,9 @@ ACTIVITIES = [
     generate_response_activity,
     finalize_success_activity,
     fail_job_activity,
+    # Legacy single activity, kept registered so pre-decomposition workflow
+    # executions can replay/drain (gated by workflow.patched in the workflow).
+    run_assistant_activity,
 ]
 
 WORKFLOW_ID_PREFIX = WORKFLOW_ID_PREFIX_ASSISTANT

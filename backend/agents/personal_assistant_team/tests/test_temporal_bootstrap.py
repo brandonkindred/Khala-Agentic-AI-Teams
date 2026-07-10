@@ -82,6 +82,7 @@ def test_export_contract():
         handle_profile_activity,
         handle_reservations_activity,
         handle_tasks_activity,
+        run_assistant_activity,
     )
 
     assert WORKFLOWS == [PaAssistantWorkflow]
@@ -102,9 +103,12 @@ def test_export_contract():
         generate_response_activity,
         finalize_success_activity,
         fail_job_activity,
+        # Legacy single activity retained for deterministic replay/drain of
+        # pre-decomposition workflow executions.
+        run_assistant_activity,
     }
     assert set(ACTIVITIES) == expected_activities
-    assert len(ACTIVITIES) == len(expected_activities) == 13
+    assert len(ACTIVITIES) == len(expected_activities) == 14
 
 
 def test_worker_module_exposes_team_service_entrypoint():

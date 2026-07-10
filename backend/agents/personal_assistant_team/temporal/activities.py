@@ -108,14 +108,17 @@ def classify_intent_activity(
     from ..core import get_orchestrator
     from ..shared.pa_job_store import PA_JOB_STATUS_RUNNING, is_job_cancelled, update_job
 
+    # Check the cancel guard BEFORE stamping RUNNING so a cancellation that
+    # landed between create_job and this first activity is honored rather than
+    # clobbered back to RUNNING.
+    if is_job_cancelled(job_id):
+        return dict(_CANCELLED)
     update_job(
         job_id,
         status=PA_JOB_STATUS_RUNNING,
         status_text="Classifying intent...",
         progress=5,
     )
-    if is_job_cancelled(job_id):
-        return dict(_CANCELLED)
 
     intent = get_orchestrator().classify_intent(message)
     logger.info("Classified intent: %s (confidence: %.2f)", intent.primary, intent.confidence)
@@ -322,12 +325,27 @@ def finalize_success_activity(
         - ``response`` is a serialized ``OrchestratorResponse``.
 
     Postconditions:
-        - The job store row ends COMPLETED at progress 100 with the response
-          stored in the same ``AssistantResponse`` shape as the thread path.
-        - A Slack notification is attempted (best-effort; never fails the job).
+        - Marks the job COMPLETED at progress 100 with the response stored in the
+          same ``AssistantResponse`` shape as the thread path — UNLESS the job was
+          cancelled first, in which case it is left untouched (mirrors the final
+          cancel guard in ``api.main._run_assistant_job``).
+        - Sends the Slack notification at most once: it is skipped when the job is
+          already COMPLETED, so an activity retry (e.g. a worker crash before
+          Temporal recorded completion) cannot double-notify.
     """
     from ..models import AssistantResponse
-    from ..shared.pa_job_store import PA_JOB_STATUS_COMPLETED, update_job
+    from ..shared.pa_job_store import (
+        PA_JOB_STATUS_COMPLETED,
+        get_job,
+        is_job_cancelled,
+        update_job,
+    )
+
+    # Do not complete a job the user cancelled after the last cancel-checked step.
+    if is_job_cancelled(job_id):
+        return
+    existing = get_job(job_id)
+    already_completed = existing is not None and existing.get("status") == PA_JOB_STATUS_COMPLETED
 
     assistant_response = AssistantResponse(
         request_id=job_id,
@@ -343,7 +361,9 @@ def finalize_success_activity(
         status_text="Request completed successfully",
         response=assistant_response.model_dump(),
     )
-    _notify_slack(user_id, message, assistant_response)
+    # Slack delivery is not idempotent; only notify on the first completion.
+    if not already_completed:
+        _notify_slack(user_id, message, assistant_response)
 
 
 @activity.defn(name="pa_fail_job")
@@ -354,16 +374,50 @@ def fail_job_activity(job_id: str, error: str) -> None:
         - ``job_id`` refers to a job already created in the PA job store.
 
     Postconditions:
-        - The job store row ends FAILED with ``error`` recorded.
+        - The job store row ends FAILED with ``error`` recorded, UNLESS the job
+          was already cancelled (a user cancellation is not overwritten).
     """
-    from ..shared.pa_job_store import PA_JOB_STATUS_FAILED, update_job
+    from ..shared.pa_job_store import PA_JOB_STATUS_FAILED, is_job_cancelled, update_job
 
+    # A user cancellation takes precedence over a downstream error.
+    if is_job_cancelled(job_id):
+        return
     update_job(
         job_id,
         status=PA_JOB_STATUS_FAILED,
         status_text=f"Error: {error}",
         error=error,
     )
+
+
+@activity.defn(name="run_pa_assistant")
+def run_assistant_activity(
+    job_id: str,
+    user_id: str,
+    message: str,
+    context: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Legacy single-activity job runner (pre-decomposition).
+
+    Retained ONLY so ``PaAssistantWorkflow`` executions that were started before
+    the activity decomposition can replay/drain deterministically — the workflow
+    gates the decomposed path behind ``workflow.patched`` and schedules this
+    activity for un-patched (old) histories. New executions never schedule it.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the PA job store.
+
+    Postconditions:
+        - Runs the whole orchestrator job via the thread-path runner and re-raises
+          on failure (job-store bookkeeping is owned by ``_run_assistant_job``).
+    """
+    try:
+        from personal_assistant_team.api.main import _run_assistant_job
+
+        _run_assistant_job(job_id, user_id, message, context or {})
+    except Exception:
+        logger.exception("PA assistant activity failed for job %s", job_id)
+        raise
 
 
 def _notify_slack(user_id: str, message: str, response: Any) -> None:

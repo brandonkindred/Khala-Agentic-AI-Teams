@@ -15,14 +15,15 @@ from personal_assistant_team.temporal import activities as acts
 from personal_assistant_team.temporal import workflows as wf
 
 
-def _script(monkeypatch, table, *, calls=None, arg_log=None):
+def _script(monkeypatch, table, *, calls=None, arg_log=None, patched=True):
     """Install a scripted ``execute_activity`` returning ``table[activity_fn]``.
 
     ``table`` values may be a plain result or a callable ``(args) -> result``;
-    a callable that raises is used to simulate an activity failure.
+    a callable that raises is used to simulate an activity failure. ``patched``
+    stubs ``workflow.patched`` (True → decomposed flow, False → legacy branch).
     """
 
-    async def _fake_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+    async def _fake_execute_activity(activity_fn, *, args, **_kwargs):
         if calls is not None:
             calls.append(activity_fn)
         if arg_log is not None:
@@ -33,6 +34,7 @@ def _script(monkeypatch, table, *, calls=None, arg_log=None):
         return value(args) if callable(value) else value
 
     monkeypatch.setattr(wf.workflow, "execute_activity", _fake_execute_activity)
+    monkeypatch.setattr(wf.workflow, "patched", lambda _patch_id: patched)
 
 
 def _run(job_id="job-1", user_id="u1", message="do it", context=None):
@@ -172,6 +174,24 @@ def test_failure_marks_job_and_reraises(monkeypatch):
         _run()
 
     assert calls == [acts.classify_intent_activity, acts.fail_job_activity]
+
+
+def test_legacy_unpatched_execution_runs_single_activity(monkeypatch):
+    """An execution started before the decomposition (workflow.patched False)
+    replays the original single ``run_assistant_activity`` and nothing else, so
+    old histories stay deterministic."""
+    calls: list = []
+    _script(
+        monkeypatch,
+        {acts.run_assistant_activity: None},
+        calls=calls,
+        patched=False,
+    )
+
+    result = _run(message="legacy job")
+
+    assert calls == [acts.run_assistant_activity]
+    assert result is None
 
 
 def test_error_message_prefers_cause():

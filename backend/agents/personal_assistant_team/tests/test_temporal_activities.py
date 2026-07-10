@@ -99,14 +99,14 @@ def test_classify_intent_activity(orchestrator, job_client):
     assert ("classify", "check my inbox") in orchestrator.calls
 
 
-def test_classify_intent_activity_cancelled(orchestrator, job_client, monkeypatch):
-    _new_job(job_client)
-    # A cancel landing after the RUNNING stamp: force the guard to trip.
-    monkeypatch.setattr(
-        "personal_assistant_team.shared.pa_job_store.is_job_cancelled", lambda job_id: True
-    )
+def test_classify_intent_activity_cancelled_before_running_stamp(orchestrator, job_client):
+    # A job cancelled before the first activity must NOT be clobbered back to
+    # RUNNING: the guard runs before the status stamp.
+    _new_job(job_client, status="cancelled")
     assert acts.classify_intent_activity("job-1", "check my inbox") == {"cancelled": True}
     assert ("classify", "check my inbox") not in orchestrator.calls
+    # Status is left untouched (not stamped to RUNNING).
+    assert job_client.get_job("job-1")["status"] == "cancelled"
 
 
 # --------------------------------------------------------------------------- #
@@ -210,6 +210,37 @@ def test_finalize_success_activity_defaults_missing_fields(job_client, monkeypat
     assert stored["actions_taken"] == []
 
 
+def test_finalize_success_activity_skips_cancelled_job(job_client, monkeypatch):
+    # A job cancelled after the last cancel-checked step must not be completed.
+    _new_job(job_client, status="cancelled")
+    notified = {"called": False}
+    monkeypatch.setattr(acts, "_notify_slack", lambda *a, **k: notified.update(called=True))
+
+    acts.finalize_success_activity("job-1", {"message": "done"}, "u1", "hi")
+
+    job = job_client.get_job("job-1")
+    assert job["status"] == "cancelled"
+    assert job.get("response") is None
+    assert notified["called"] is False
+
+
+def test_finalize_success_activity_notifies_only_once_on_retry(job_client, monkeypatch):
+    # A retry (e.g. worker crash before Temporal recorded completion) must not
+    # re-send the non-idempotent Slack notification.
+    _new_job(job_client)
+    notify_count = {"n": 0}
+    monkeypatch.setattr(
+        acts, "_notify_slack", lambda *a, **k: notify_count.update(n=notify_count["n"] + 1)
+    )
+    response = {"message": "done", "actions_taken": [], "data": {}, "follow_up_suggestions": []}
+
+    acts.finalize_success_activity("job-1", response, "u1", "hi")
+    acts.finalize_success_activity("job-1", response, "u1", "hi")  # retry
+
+    assert job_client.get_job("job-1")["status"] == "completed"
+    assert notify_count["n"] == 1
+
+
 def test_fail_job_activity(job_client):
     _new_job(job_client)
     acts.fail_job_activity("job-1", "boom")
@@ -218,6 +249,51 @@ def test_fail_job_activity(job_client):
     assert job["status"] == "failed"
     assert job["error"] == "boom"
     assert job["status_text"] == "Error: boom"
+
+
+def test_fail_job_activity_does_not_overwrite_cancelled(job_client):
+    # A user cancellation takes precedence over a downstream error.
+    _new_job(job_client, status="cancelled")
+    acts.fail_job_activity("job-1", "boom")
+
+    job = job_client.get_job("job-1")
+    assert job["status"] == "cancelled"
+    assert job.get("error") is None
+
+
+def test_run_assistant_activity_legacy_delegates_to_thread_runner(monkeypatch):
+    # The retained legacy activity runs the monolithic thread-path job runner.
+    import personal_assistant_team.api.main as api_main
+
+    captured = {}
+    monkeypatch.setattr(
+        api_main,
+        "_run_assistant_job",
+        lambda job_id, user_id, message, context: captured.update(
+            job_id=job_id, user_id=user_id, message=message, context=context
+        ),
+    )
+
+    acts.run_assistant_activity("job-9", "u9", "legacy", {"k": "v"})
+
+    assert captured == {
+        "job_id": "job-9",
+        "user_id": "u9",
+        "message": "legacy",
+        "context": {"k": "v"},
+    }
+
+
+def test_run_assistant_activity_legacy_reraises_on_failure(monkeypatch):
+    import personal_assistant_team.api.main as api_main
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("legacy blew up")
+
+    monkeypatch.setattr(api_main, "_run_assistant_job", _boom)
+
+    with pytest.raises(RuntimeError, match="legacy blew up"):
+        acts.run_assistant_activity("job-9", "u9", "legacy", None)
 
 
 # --------------------------------------------------------------------------- #

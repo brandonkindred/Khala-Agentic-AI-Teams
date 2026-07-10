@@ -25,8 +25,29 @@ from temporalio.exceptions import ActivityError
 with workflow.unsafe.imports_passed_through():
     from personal_assistant_team.temporal import activities as _activities
 
+    # ``constants`` is a literal (no os.getenv), so importing it here is
+    # sandbox-safe; only the legacy-drain branch below references TASK_QUEUE.
+    from personal_assistant_team.temporal.constants import TASK_QUEUE
+
+# ``workflow.patched`` id gating the decomposed activity flow. Executions
+# started before the decomposition (single ``run_pa_assistant`` activity) have
+# no marker in their history, so ``patched`` returns False for them and they
+# replay the legacy branch deterministically; new executions run the decomposed
+# flow. Never rename this id.
+_DECOMPOSED_PATCH = "pa-decomposed-activities"
+
 # Per-step timeout. Each step is at most one LLM round-trip; 30 min is generous.
 STEP_TIMEOUT = timedelta(minutes=30)
+
+# Legacy single-activity scheduling options, matching the pre-decomposition
+# workflow so old histories replay/drain against unchanged behavior.
+LEGACY_TIMEOUT = timedelta(hours=2)
+LEGACY_RETRY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=30),
+    maximum_interval=timedelta(minutes=2),
+    backoff_coefficient=2.0,
+)
 
 # LLM-driven steps are non-idempotent and the llm_service layer already fails
 # over on transient provider errors (429s), so a workflow-level retry would
@@ -59,7 +80,15 @@ _SPECIALIST_ACTIVITIES = {
 
 
 def _error_message(exc: ActivityError) -> str:
-    """Best-effort human-readable message from a failed activity."""
+    """Best-effort human-readable message from a failed activity.
+
+    Preconditions:
+        - ``exc`` is a Temporal ``ActivityError`` raised by ``execute_activity``.
+
+    Postconditions:
+        - Returns ``str(exc.cause)`` when a cause is present (the underlying
+          failure), otherwise ``str(exc)``. Never raises.
+    """
     return str(exc.cause) if exc.cause is not None else str(exc)
 
 
@@ -92,6 +121,18 @@ class PaAssistantWorkflow:
             - On a genuine activity failure, marks the job FAILED and re-raises.
         """
         context = context or {}
+
+        if not workflow.patched(_DECOMPOSED_PATCH):
+            # Executions started before the decomposition replay the original
+            # single-activity path so their history stays deterministic.
+            return await workflow.execute_activity(
+                _activities.run_assistant_activity,
+                args=[job_id, user_id, message, context],
+                task_queue=TASK_QUEUE,
+                schedule_to_close_timeout=LEGACY_TIMEOUT,
+                retry_policy=LEGACY_RETRY,
+            )
+
         try:
             intent = await workflow.execute_activity(
                 _activities.classify_intent_activity,
@@ -119,11 +160,15 @@ class PaAssistantWorkflow:
 
             # Apply high-confidence profile preferences before generating the
             # response, so the response reflects them (matches the thread path).
+            # This step makes an LLM call AND mutates the profile store, so it is
+            # non-idempotent — cap it at one attempt like the other LLM steps
+            # rather than retrying (which would re-bill the LLM and re-apply
+            # preferences).
             await workflow.execute_activity(
                 _activities.check_profile_updates_activity,
                 args=[job_id, user_id, message],
                 start_to_close_timeout=STEP_TIMEOUT,
-                retry_policy=BOOKKEEPING_RETRY,
+                retry_policy=LLM_RETRY,
             )
 
             response = await workflow.execute_activity(
