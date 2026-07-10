@@ -101,6 +101,28 @@ def test_recommend_activities_parses_and_skips_passthrough(sample_plan_request):
     assert result[1].tips == ["bring water"]
 
 
+def test_recommend_activities_invokes_on_stop_per_stop(sample_plan_request):
+    route = RoutePlan(
+        ordered_stops=[
+            RouteStop(location="SF", stop_type="start", recommended_nights=0),
+            RouteStop(location="Yosemite", stop_type="destination", recommended_nights=1),
+            RouteStop(location="LA", stop_type="end", recommended_nights=0),
+        ]
+    )
+    llm = _FakeLLM('{"activities": [], "dining": [], "tips": []}')
+    beats: list[int] = []
+    rtp_pipeline.recommend_activities(
+        route,
+        TravelerGroupProfile(),
+        sample_plan_request.trip,
+        llm=llm,
+        on_stop=lambda: beats.append(1),
+    )
+    # on_stop fires once per stop, including the pass-through start/end — this is
+    # what the Temporal activity uses to heartbeat during the per-stop loop.
+    assert len(beats) == 3
+
+
 def test_plan_logistics_parses_llm_json(sample_plan_request):
     route = RoutePlan(ordered_stops=[RouteStop(location="Yosemite", recommended_nights=1)])
     llm = _FakeLLM(
@@ -222,6 +244,24 @@ def test_run_pipeline_chains_all_steps_in_order(monkeypatch, sample_plan_request
     assert captured["route"] is route
     assert captured["activities"] is activities
     assert captured["logistics"] is logistics
+
+
+def test_run_pipeline_degrades_to_fallback_on_step_failure(monkeypatch, sample_plan_request):
+    """A step raising an unexpected error (e.g. a schema-invalid LLM response)
+    must not crash thread mode — run_pipeline returns a minimal fallback so the
+    job still reaches a terminal COMPLETED state."""
+
+    def _boom(_trip):
+        raise ValueError("schema-invalid LLM response")
+
+    monkeypatch.setattr(rtp_pipeline, "profile_travelers", _boom)
+
+    itinerary = rtp_pipeline.run_pipeline(sample_plan_request)
+
+    assert isinstance(itinerary, TripItinerary)
+    assert itinerary.title == "Road Trip: San Francisco, CA to Los Angeles, CA"
+    assert "failed" in itinerary.overview
+    assert itinerary.total_days == 2  # from trip_duration_days
 
 
 def test_run_plan_core_writes_running_then_completed(monkeypatch, sample_plan_request):

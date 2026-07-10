@@ -127,8 +127,9 @@ def test_recommend_activities_activity_returns_list_of_dicts(monkeypatch, sample
     canned = [StopActivities(location="Yosemite"), StopActivities(location="Los Angeles, CA")]
     captured: dict = {}
 
-    def _fake(route, group_profile, trip, llm=None):
+    def _fake(route, group_profile, trip, llm=None, on_stop=None):
         captured["route"] = route
+        captured["on_stop"] = on_stop
         return canned
 
     monkeypatch.setattr(rtp_pipeline, "recommend_activities", _fake)
@@ -140,6 +141,8 @@ def test_recommend_activities_activity_returns_list_of_dicts(monkeypatch, sample
     assert out == [s.model_dump() for s in canned]
     assert isinstance(captured["route"], RoutePlan)
     assert captured["route"].route_summary == "loop"
+    # The activity wires the per-stop heartbeat callback through.
+    assert callable(captured["on_stop"])
 
 
 def test_plan_logistics_activity_returns_dict(monkeypatch, sample_trip_body):
@@ -206,6 +209,7 @@ def test_workflow_dispatches_begin_five_steps_persist(monkeypatch, sample_trip_b
                 "args": kwargs.get("args"),
                 "retry": kwargs.get("retry_policy"),
                 "timeout": kwargs.get("start_to_close_timeout"),
+                "heartbeat": kwargs.get("heartbeat_timeout"),
             }
         )
         # Thread an identifiable stub forward so arg-threading is checkable.
@@ -219,15 +223,15 @@ def test_workflow_dispatches_begin_five_steps_persist(monkeypatch, sample_trip_b
     assert out == {"job_id": "job-wf"}
 
     names = [c["name"] for c in calls]
-    assert names == [
+    # begin → profile → route, then recommend + logistics run concurrently (order
+    # between them is not guaranteed), then compose → persist.
+    assert names[:3] == [
         "begin_road_trip_job_activity",
         "profile_travelers_activity",
         "plan_route_activity",
-        "recommend_activities_activity",
-        "plan_logistics_activity",
-        "compose_itinerary_activity",
-        "persist_itinerary_activity",
     ]
+    assert set(names[3:5]) == {"recommend_activities_activity", "plan_logistics_activity"}
+    assert names[5:] == ["compose_itinerary_activity", "persist_itinerary_activity"]
 
     # Arg threading: each step receives the request + upstream stub results.
     by_name = {c["name"]: c for c in calls}
@@ -255,6 +259,10 @@ def test_workflow_dispatches_begin_five_steps_persist(monkeypatch, sample_trip_b
     assert by_name["persist_itinerary_activity"]["retry"] is wf._BOOKKEEPING_RETRY
     for step in ("profile_travelers_activity", "plan_route_activity", "compose_itinerary_activity"):
         assert by_name[step]["retry"] is wf._LLM_RETRY
+
+    # Only the per-stop recommend loop carries a heartbeat timeout.
+    assert by_name["recommend_activities_activity"]["heartbeat"] is wf._STEP_HEARTBEAT_TIMEOUT
+    assert by_name["plan_logistics_activity"]["heartbeat"] is None
 
     # Progress reaches the terminal snapshot.
     assert instance.progress() == {"step": "done", "fraction": 1.0}

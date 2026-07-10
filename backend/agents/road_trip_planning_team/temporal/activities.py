@@ -16,10 +16,11 @@ unfinished specialist step instead of the whole multi-agent pipeline:
   ``run_plan_background`` except-branch).
 
 Each activity is a plain **sync** function (run in the worker's thread-pool
-executor) whose heavy imports live inside the body, keeping module import —
-which the workflow sandbox replays during registration — cheap and side-effect
-free. All payloads cross the workflow/activity boundary as JSON-native dicts and
-are reconstructed with pydantic inside the body.
+executor) whose heavy imports live inside the body (or the ``_decode_*``
+helpers), keeping module import — which the workflow sandbox replays during
+registration — cheap and side-effect free. All payloads cross the
+workflow/activity boundary as JSON-native dicts (``model_dump(mode="json")``)
+and are reconstructed with pydantic inside the body.
 
 Invariant: job-store status is written to the durable ``JobServiceClient`` store
 under the ``road_trip_planning_team`` slug (the same slug the API's ``create_job``
@@ -31,6 +32,36 @@ from __future__ import annotations
 from typing import Any
 
 from temporalio import activity
+
+# ---------------------------------------------------------------------------
+# Payload decoders — shared by the specialist activities so a change to how a
+# JSON-native payload is reconstructed lives in one place. Imports stay inside
+# each helper to keep module import (replayed by the workflow sandbox) clean.
+# ---------------------------------------------------------------------------
+
+
+def _decode_trip(request: dict[str, Any]):
+    from road_trip_planning_team.models import PlanTripRequest
+
+    return PlanTripRequest(**request).trip
+
+
+def _decode_profile(profile: dict[str, Any]):
+    from road_trip_planning_team.models import TravelerGroupProfile
+
+    return TravelerGroupProfile.model_validate(profile)
+
+
+def _decode_route(route: dict[str, Any]):
+    from road_trip_planning_team.models import RoutePlan
+
+    return RoutePlan.model_validate(route)
+
+
+def _decode_logistics(logistics: dict[str, Any]):
+    from road_trip_planning_team.models import LogisticsPlan
+
+    return LogisticsPlan.model_validate(logistics)
 
 
 @activity.defn(name="road_trip_begin_job")
@@ -60,11 +91,10 @@ def profile_travelers_activity(request: dict[str, Any]) -> dict[str, Any]:
     Postconditions:
         - Returns a JSON-safe ``TravelerGroupProfile`` dict.
     """
-    from road_trip_planning_team.models import PlanTripRequest
     from road_trip_planning_team.pipeline import profile_travelers
 
-    trip = PlanTripRequest(**request).trip
-    return profile_travelers(trip).model_dump()
+    trip = _decode_trip(request)
+    return profile_travelers(trip).model_dump(mode="json")
 
 
 @activity.defn(name="road_trip_plan_route")
@@ -79,12 +109,9 @@ def plan_route_activity(request: dict[str, Any], profile: dict[str, Any]) -> dic
     Postconditions:
         - Returns a JSON-safe ``RoutePlan`` dict.
     """
-    from road_trip_planning_team.models import PlanTripRequest, TravelerGroupProfile
     from road_trip_planning_team.pipeline import plan_route
 
-    trip = PlanTripRequest(**request).trip
-    group_profile = TravelerGroupProfile.model_validate(profile)
-    return plan_route(trip, group_profile).model_dump()
+    return plan_route(_decode_trip(request), _decode_profile(profile)).model_dump(mode="json")
 
 
 @activity.defn(name="road_trip_recommend_activities")
@@ -100,14 +127,19 @@ def recommend_activities_activity(
 
     Postconditions:
         - Returns a list of JSON-safe ``StopActivities`` dicts, one per route stop.
+          Emits a Temporal heartbeat after each stop so this per-stop LLM loop is
+          detected as stalled within the heartbeat timeout, not only at
+          start-to-close.
     """
-    from road_trip_planning_team.models import PlanTripRequest, RoutePlan, TravelerGroupProfile
     from road_trip_planning_team.pipeline import recommend_activities
 
-    trip = PlanTripRequest(**request).trip
-    group_profile = TravelerGroupProfile.model_validate(profile)
-    route_plan = RoutePlan.model_validate(route)
-    return [s.model_dump() for s in recommend_activities(route_plan, group_profile, trip)]
+    stops = recommend_activities(
+        _decode_route(route),
+        _decode_profile(profile),
+        _decode_trip(request),
+        on_stop=activity.heartbeat,
+    )
+    return [s.model_dump(mode="json") for s in stops]
 
 
 @activity.defn(name="road_trip_plan_logistics")
@@ -124,13 +156,11 @@ def plan_logistics_activity(
     Postconditions:
         - Returns a JSON-safe ``LogisticsPlan`` dict.
     """
-    from road_trip_planning_team.models import PlanTripRequest, RoutePlan, TravelerGroupProfile
     from road_trip_planning_team.pipeline import plan_logistics
 
-    trip = PlanTripRequest(**request).trip
-    group_profile = TravelerGroupProfile.model_validate(profile)
-    route_plan = RoutePlan.model_validate(route)
-    return plan_logistics(route_plan, group_profile, trip).model_dump()
+    return plan_logistics(
+        _decode_route(route), _decode_profile(profile), _decode_trip(request)
+    ).model_dump(mode="json")
 
 
 @activity.defn(name="road_trip_compose_itinerary")
@@ -150,24 +180,18 @@ def compose_itinerary_activity(
     Postconditions:
         - Returns a JSON-safe ``TripItinerary`` dict.
     """
-    from road_trip_planning_team.models import (
-        LogisticsPlan,
-        PlanTripRequest,
-        RoutePlan,
-        StopActivities,
-        TravelerGroupProfile,
-    )
+    from road_trip_planning_team.models import StopActivities
     from road_trip_planning_team.pipeline import compose_itinerary
 
-    trip = PlanTripRequest(**request).trip
-    group_profile = TravelerGroupProfile.model_validate(profile)
-    route_plan = RoutePlan.model_validate(route)
     activities_per_stop = [StopActivities.model_validate(a) for a in activities]
-    logistics_plan = LogisticsPlan.model_validate(logistics)
     itinerary = compose_itinerary(
-        trip, group_profile, route_plan, activities_per_stop, logistics_plan
+        _decode_trip(request),
+        _decode_profile(profile),
+        _decode_route(route),
+        activities_per_stop,
+        _decode_logistics(logistics),
     )
-    return itinerary.model_dump()
+    return itinerary.model_dump(mode="json")
 
 
 @activity.defn(name="road_trip_persist_itinerary")

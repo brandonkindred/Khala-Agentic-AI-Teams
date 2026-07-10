@@ -23,6 +23,7 @@ over the returned dicts.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any, Dict
 
@@ -56,6 +57,9 @@ _BOOKKEEPING_RETRY = RetryPolicy(
 
 _SHORT_TIMEOUT = timedelta(minutes=5)
 _STEP_TIMEOUT = timedelta(minutes=30)
+# recommend_activities loops one LLM call per stop and heartbeats after each, so a
+# stalled worker is caught within this window rather than only at start-to-close.
+_STEP_HEARTBEAT_TIMEOUT = timedelta(minutes=5)
 
 
 @workflow.defn(name="RoadTripWorkflow")
@@ -71,8 +75,16 @@ class RoadTripWorkflow:
     """
 
     def __init__(self) -> None:
-        # Progress is exposed via the ``progress`` query; it is not required for a
-        # run to complete.
+        """Initialize the queryable progress snapshot.
+
+        Preconditions:
+            - None (Temporal constructs the workflow instance with no arguments).
+
+        Postconditions:
+            - ``progress()`` reports ``{"step": "starting", "fraction": 0.0}`` until
+              the first ``_advance`` call. Progress is advisory — a run completes
+              regardless of whether the ``progress`` query is ever issued.
+        """
         self._step: str = "starting"
         self._fraction: float = 0.0
 
@@ -145,22 +157,26 @@ class RoadTripWorkflow:
                 retry_policy=_LLM_RETRY,
             )
 
-            self._advance("recommend_activities", 0.45)
-            activities = await workflow.execute_activity(
-                _activities.recommend_activities_activity,
-                args=[request, profile, route],
-                task_queue=TASK_QUEUE,
-                start_to_close_timeout=_STEP_TIMEOUT,
-                retry_policy=_LLM_RETRY,
-            )
-
-            self._advance("plan_logistics", 0.65)
-            logistics = await workflow.execute_activity(
-                _activities.plan_logistics_activity,
-                args=[request, profile, route],
-                task_queue=TASK_QUEUE,
-                start_to_close_timeout=_STEP_TIMEOUT,
-                retry_policy=_LLM_RETRY,
+            # recommend_activities and plan_logistics both derive only from
+            # route + profile + trip and don't consume each other's output, so run
+            # them concurrently and join before composing.
+            self._advance("recommend_activities_and_logistics", 0.45)
+            activities, logistics = await asyncio.gather(
+                workflow.execute_activity(
+                    _activities.recommend_activities_activity,
+                    args=[request, profile, route],
+                    task_queue=TASK_QUEUE,
+                    start_to_close_timeout=_STEP_TIMEOUT,
+                    heartbeat_timeout=_STEP_HEARTBEAT_TIMEOUT,
+                    retry_policy=_LLM_RETRY,
+                ),
+                workflow.execute_activity(
+                    _activities.plan_logistics_activity,
+                    args=[request, profile, route],
+                    task_queue=TASK_QUEUE,
+                    start_to_close_timeout=_STEP_TIMEOUT,
+                    retry_policy=_LLM_RETRY,
+                ),
             )
 
             self._advance("compose_itinerary", 0.85)

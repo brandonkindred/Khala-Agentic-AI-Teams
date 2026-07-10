@@ -83,18 +83,22 @@ def recommend_activities(
     group_profile: TravelerGroupProfile,
     trip: TripRequest,
     llm=None,
+    on_stop=None,
 ) -> List[StopActivities]:
     """Recommend activities and dining for each stop on the route.
 
     Preconditions:
         - ``route`` is the ``RoutePlan`` from ``plan_route``; ``group_profile``
           the profile from ``profile_travelers``; ``trip`` the original request.
+        - ``on_stop`` is ``None`` or a no-arg callable invoked once per route
+          stop (used by the Temporal activity to emit heartbeats during the
+          per-stop LLM loop).
 
     Postconditions:
         - Returns one ``StopActivities`` per stop in ``route.ordered_stops``
           (pass-through start/end stops get an empty entry).
     """
-    return ActivitiesExpertAgent(llm=llm).run(route, group_profile, trip)
+    return ActivitiesExpertAgent(llm=llm).run(route, group_profile, trip, on_stop=on_stop)
 
 
 def plan_logistics(
@@ -151,19 +155,31 @@ def run_pipeline(trip_request: PlanTripRequest) -> TripItinerary:
           layer enforces this before dispatch).
 
     Postconditions:
-        - Returns a ``TripItinerary``. Each step degrades to a typed fallback on
-          LLM/parse failure rather than raising, so the job still reaches a
-          terminal COMPLETED state with a usable (if degraded) result.
+        - Returns a ``TripItinerary``. Each step already degrades to a typed
+          fallback on LLM/parse failure; the outer guard additionally catches an
+          unexpected step failure (e.g. a schema-invalid LLM response) and
+          returns a minimal fallback, so thread mode always reaches a terminal
+          COMPLETED state with a usable (if degraded) result rather than raising.
+          (The Temporal path drives the steps as individual activities and lets a
+          genuine step failure surface for durable retry/resubmission instead.)
     """
     trip = trip_request.trip
 
     logger.info("Road trip planning started: %s → %s", trip.start_location, trip.required_stops)
 
-    group_profile = profile_travelers(trip)
-    route = plan_route(trip, group_profile)
-    activities_per_stop = recommend_activities(route, group_profile, trip)
-    logistics = plan_logistics(route, group_profile, trip)
-    return compose_itinerary(trip, group_profile, route, activities_per_stop, logistics)
+    try:
+        group_profile = profile_travelers(trip)
+        route = plan_route(trip, group_profile)
+        activities_per_stop = recommend_activities(route, group_profile, trip)
+        logistics = plan_logistics(route, group_profile, trip)
+        return compose_itinerary(trip, group_profile, route, activities_per_stop, logistics)
+    except Exception as e:
+        logger.warning("Road trip pipeline degraded to fallback itinerary: %s", e)
+        return TripItinerary(
+            title=f"Road Trip: {trip.start_location} to {trip.end_location or trip.start_location}",
+            overview="Itinerary generation completed but a planning step failed.",
+            total_days=trip.trip_duration_days or len(trip.required_stops) * 2,
+        )
 
 
 def run_plan_core(job_id: str, body: PlanTripRequest) -> None:
