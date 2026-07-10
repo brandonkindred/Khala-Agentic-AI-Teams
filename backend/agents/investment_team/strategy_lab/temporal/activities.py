@@ -1247,6 +1247,135 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Batch-level activities — used by StrategyLabBatchWorkflow (the per-batch /
+# per-wave orchestration around the per-cycle child workflows). Each wraps an
+# existing thread-mode helper verbatim so the two paths share one implementation.
+# ---------------------------------------------------------------------------
+
+
+@activity.defn(name="strategy_lab_compute_signal_brief")
+def compute_signal_brief_activity(benchmark_symbol: str) -> Dict[str, Any]:
+    """Build the per-batch signal brief over all currently-persisted prior records.
+
+    Preconditions:
+        ``benchmark_symbol`` is the run's benchmark ticker.
+    Postconditions:
+        Returns ``{"signal_brief": <SignalIntelligenceBriefV1 JSON dump or None>,
+        "signal_brief_storage": <dict or None>}`` — the JSON-shaped pair the batch
+        workflow threads into each cycle's ``signal_brief`` input and into
+        ``finalize_cycle_record_activity``. Delegates to
+        ``investment_team.api.main._compute_signal_brief_snapshot``, which is
+        fail-open (never raises; returns a skipped/degraded marker instead), so
+        this activity likewise only raises ``ApplicationError`` on a genuinely
+        unexpected exception.
+    """
+    from investment_team.api.main import _compute_signal_brief_snapshot
+
+    try:
+        brief, storage = _compute_signal_brief_snapshot(benchmark_symbol)
+    except Exception as exc:  # noqa: BLE001
+        raise _map_exception_to_application_error(exc) from exc
+    return {
+        "signal_brief": brief.model_dump(mode="json") if brief is not None else None,
+        "signal_brief_storage": storage,
+    }
+
+
+@activity.defn(name="strategy_lab_is_run_cancelled")
+def is_run_cancelled_activity(run_id: str) -> bool:
+    """Return True if the run has been externally cancelled (terminal job status).
+
+    Preconditions:
+        ``run_id`` is the strategy-lab run identifier.
+    Postconditions:
+        Returns ``investment_team.api.main._is_strategy_lab_run_cancelled``'s
+        result verbatim — True for a ``cancelled``/``failed``/``interrupted``
+        job status, False otherwise. That helper never raises, so this activity
+        never raises either.
+    """
+    from investment_team.api.main import _is_strategy_lab_run_cancelled
+
+    return _is_strategy_lab_run_cancelled(run_id)
+
+
+@activity.defn(name="strategy_lab_finalize_cycle_record")
+def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the post-``run_cycle`` finalization (signal brief + paper-trade + persist).
+
+    The per-cycle child workflow (``StrategyLabCycleWorkflow``) returns only the
+    raw ``run_cycle`` record; this activity reproduces the tail that thread-mode's
+    ``_run_one_strategy_lab_cycle`` runs after it, by delegating to the shared
+    ``investment_team.api.main._finalize_strategy_lab_cycle_record`` helper.
+
+    Preconditions:
+        ``params`` carries ``record`` (a ``StrategyLabRecord`` JSON dump from the
+        cycle workflow), and optionally ``signal_brief_storage`` (dict or None),
+        ``paper_trading_enabled`` (bool, default True), and
+        ``paper_trading_lookback_days`` (int, default 365).
+    Postconditions:
+        Returns ``{"record": <finalized StrategyLabRecord JSON dump>}`` — the same
+        record with ``paper_trading_*`` resolved and durably persisted. Raises
+        ``ApplicationError`` on an unexpected exception (paper-trading failures are
+        already non-fatal inside the helper).
+    """
+    from investment_team.api.main import _finalize_strategy_lab_cycle_record
+    from investment_team.models import StrategyLabRecord
+
+    record = StrategyLabRecord.parse_persisted(params["record"])
+    try:
+        finalized = _finalize_strategy_lab_cycle_record(
+            record,
+            signal_brief_storage=params.get("signal_brief_storage"),
+            paper_trading_enabled=params.get("paper_trading_enabled", True),
+            paper_trading_lookback_days=params.get("paper_trading_lookback_days", 365),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _map_exception_to_application_error(exc) from exc
+    return {"record": finalized.model_dump(mode="json")}
+
+
+@activity.defn(name="strategy_lab_merge_wave_results")
+def merge_wave_results_activity(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fold a completed wave's cycle results into the batch-level convergence tracker.
+
+    Reproduces the deterministic merge thread-mode does after each wave
+    (``api/main.py``: sort settled cycles by cycle index, then per record
+    ``primary_tracker.record(strategy, gate_results)`` for diversity/failure-mode
+    state and ``primary_tracker.merge_from(cycle_tracker)`` for the trial-count
+    delta). Runs in an activity — not workflow code — so the Pydantic
+    reconstruction of ``StrategyLabRecord``/``QualityGateResult`` and the tracker
+    math stay outside the temporalio sandbox.
+
+    Preconditions:
+        ``params`` = ``{"primary_tracker_state": <dto wire dict>, "wave_results":
+        [{"cycle_index": int, "record": <StrategyLabRecord JSON dump>,
+        "cycle_tracker_state": <dto wire dict>}, ...]}``.
+    Postconditions:
+        Returns ``{"primary_tracker_state": <updated dto wire dict>}`` — the
+        primary tracker with every settled cycle in the wave merged in
+        cycle-index order (reproducible across runs). Raises ``ApplicationError``
+        on an unexpected exception.
+    """
+    from investment_team.models import StrategyLabRecord
+    from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
+    from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+
+    try:
+        primary = ConvergenceTracker.from_wire_dict(params["primary_tracker_state"])
+        for wr in sorted(params["wave_results"], key=lambda w: w["cycle_index"]):
+            record = StrategyLabRecord.parse_persisted(wr["record"])
+            gate_results = [
+                QualityGateResult(**g) if isinstance(g, dict) else g
+                for g in record.quality_gate_results
+            ]
+            primary.record(record.strategy, gate_results)
+            primary.merge_from(ConvergenceTracker.from_wire_dict(wr["cycle_tracker_state"]))
+    except Exception as exc:  # noqa: BLE001
+        raise _map_exception_to_application_error(exc) from exc
+    return {"primary_tracker_state": primary.to_wire_dict()}
+
+
 ACTIVITIES = [
     design_generate_activity,
     design_revise_activity,
@@ -1271,10 +1400,18 @@ ACTIVITIES = [
     build_short_circuit_record_activity,
     run_design_attempt_activity,
     resolve_workflow_config_activity,
+    compute_signal_brief_activity,
+    is_run_cancelled_activity,
+    finalize_cycle_record_activity,
+    merge_wave_results_activity,
 ]
 
 __all__ = [
     "ACTIVITIES",
+    "compute_signal_brief_activity",
+    "finalize_cycle_record_activity",
+    "is_run_cancelled_activity",
+    "merge_wave_results_activity",
     "alignment_near_miss_activity",
     "alignment_propose_fix_activity",
     "analysis_activity",

@@ -221,6 +221,57 @@ def test_run_reentry_and_short_circuit_path_touches_no_restricted_callable():
     assert result["record"]["lab_record_id"] == "sc-1"
 
 
+def test_batch_run_touches_no_restricted_callable():
+    """The batch workflow's own code path — per-batch/per-wave loop, the pure
+    ConvergenceTracker snapshot it takes per cycle, and the contiguous-prefix
+    accounting — runs clean under the sandbox's restricted-callable set. Child
+    workflows and activities (which run outside the sandbox) are mocked."""
+    child_result = {
+        "record": {"lab_record_id": "0"},
+        "convergence_tracker_state": {"trial_count": 1},
+    }
+
+    async def _fake_start_child(_wf_run, _arg, *, id, **_kw):  # noqa: A002
+        async def _handle():
+            return child_result
+
+        return _handle()
+
+    handlers = {
+        "compute_signal_brief_activity": lambda a: {
+            "signal_brief": None,
+            "signal_brief_storage": None,
+        },
+        "snapshot_prior_records_activity": lambda a: [],
+        "persist_run_state_activity": lambda a: None,
+        "finalize_cycle_record_activity": lambda a: {"record": {"lab_record_id": "fin-0"}},
+        "merge_wave_results_activity": lambda a: {"primary_tracker_state": {"ok": True}},
+        "is_run_cancelled_activity": lambda a: False,
+    }
+    batch_input = {
+        "run_id": "run-1",
+        "config": _config_dict(),
+        "batch_size": 1,
+        "batch_count": 1,
+        "max_parallel": 1,
+        "benchmark_symbol": "SPY",
+        "workflow_config": _WF_CONFIG,
+        "convergence_tracker_state": {},
+    }
+    loop = asyncio.new_event_loop()
+    try:
+        with (
+            _patch_execute(handlers),
+            mock.patch("temporalio.workflow.start_child_workflow", _fake_start_child),
+            _sandbox_restrictions(),
+        ):
+            result = loop.run_until_complete(wf.StrategyLabBatchWorkflow().run(batch_input))
+    finally:
+        loop.close()
+    assert result["status"] == "completed"
+    assert result["completed_record_ids"] == ["fin-0"]
+
+
 def test_restriction_harness_actually_trips():
     """Guard-the-guard: a coroutine that *does* call a restricted callable must
     be caught, proving the harness would catch a real determinism regression."""
@@ -255,6 +306,10 @@ def test_run_source_has_no_restricted_names():
 
     sources = [
         inspect.getsource(wf.StrategyLabCycleWorkflow.run),
+        inspect.getsource(wf.StrategyLabBatchWorkflow.run),
+        inspect.getsource(wf.StrategyLabBatchWorkflow._persist_state),
+        inspect.getsource(wf._snapshot_tracker_wire),
+        inspect.getsource(wf._contiguous_prefix),
         inspect.getsource(wf._exec),
         inspect.getsource(wf._empty_drift),
     ]
