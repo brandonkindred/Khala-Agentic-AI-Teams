@@ -633,13 +633,18 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
     Postconditions:
         Returns ``{"design_review_rounds": int, "design_review_stall_rounds":
         int, "mechanical_repair_enabled": bool, "code_conformance_retries":
-        int, "design_max_llm_calls": int, "regime_summary_enabled": bool}``.
+        int, "design_max_llm_calls": int, "regime_summary_enabled": bool,
+        "max_design_reentries": int}``.
         A workflow may never read these env vars itself (``os.*`` is
         restricted at workflow runtime by the temporalio sandbox) — it calls
         this activity once and threads the resolved values through
         ``cycle_input`` instead of re-reading env vars in any loop body.
+        ``max_design_reentries`` is a plain module constant (not env-derived);
+        it is surfaced here so the workflow need never import
+        ``orchestrator`` (and its heavy transitive graph) into the sandbox.
     """
     from investment_team.strategy_lab.orchestrator import (
+        MAX_DESIGN_REENTRIES,
         _design_max_llm_calls,
         _design_review_rounds,
         _design_review_stall_rounds,
@@ -657,6 +662,7 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
         "code_conformance_retries": _code_conformance_retries(),
         "design_max_llm_calls": _design_max_llm_calls(),
         "regime_summary_enabled": _env_flag("STRATEGY_LAB_REGIME_SUMMARY_ENABLED"),
+        "max_design_reentries": MAX_DESIGN_REENTRIES,
     }
 
 
@@ -1072,6 +1078,175 @@ def build_short_circuit_record_activity(params: Dict[str, Any]) -> Dict[str, Any
     }
 
 
+@activity.defn(name="strategy_lab_run_design_attempt")
+def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Run one full ``StrategyLabOrchestrator._run_design_attempt`` verbatim.
+
+    This is the single per-attempt boundary the cycle workflow drives. It
+    wraps the whole design → synthesis → refinement/alignment →
+    verification/analysis → record-assembly sequence
+    (``orchestrator._run_design_attempt``) unmodified, inside one activity.
+    Running it here — outside the temporalio workflow sandbox — is what makes
+    the quality gates, ``datetime.now``/``uuid.uuid4``, and the scattered
+    ``os.environ`` reads in those phases legal: none of that is re-expressed as
+    sandboxed workflow code. The ``SpecImplementabilityError`` design-re-entry
+    control-flow signal is caught at this outermost frame and returned as a
+    structured ``{"kind": "reentry", ...}`` outcome rather than crossing the
+    activity boundary as an exception; the workflow branches on
+    ``outcome["kind"]`` exactly where ``run_cycle`` branches on the ``except``.
+
+    Preconditions:
+        ``params`` carries the JSON-shaped attempt inputs:
+          - ``prior_records``: list of ``StrategyLabRecord`` JSON dumps.
+          - ``config``: ``BacktestConfig`` JSON dump.
+          - ``signal_brief``: ``SignalIntelligenceBriefV1`` JSON dump or ``None``.
+          - ``exclude_asset_classes``: list of str or ``None``.
+          - ``directives``: list of convergence-directive strings.
+          - ``design_attempt``: int re-entry index (0-based).
+          - ``phase_back_count``: int prior phase-backs.
+          - ``drift``: ``{"spec_history", "code_history", "gate_timeline"}``
+            (each a list of ``SpecRevision``/``CodeRevision``/``GateEvent`` JSON
+            dumps) — normally the empty per-attempt child collector, since
+            ``_DriftCollector.snapshot()`` hands each attempt a fresh empty one.
+          - ``gate_results``: list of ``QualityGateResult`` JSON dumps
+            accumulated across prior attempts (extended in place by the run).
+          - ``budget_calls``: int LLM calls charged in prior attempts; the
+            per-cycle budget is pre-charged to this so its ceiling spans every
+            re-entry, exactly as ``run_cycle``'s single ``with use_budget(...)``
+            around the whole loop does.
+          - ``regime_summary``: ``RegimeSummary`` JSON dump or ``None``.
+          - ``convergence_tracker_state``: ``dto.convergence_tracker_to_wire``'s
+            output for the batch-level tracker.
+    Postconditions:
+        Returns either
+        ``{"kind": "record", "record": <StrategyLabRecord JSON dump>,
+        "convergence_tracker_state": ..., "gate_results": [...],
+        "budget_calls": int, "drift": {...}}`` on a terminal record, or
+        ``{"kind": "reentry", "evidence": str, "last_spec": <StrategySpec JSON
+        dump or None>, "last_code": str, "failure_phase": str|None,
+        "design_context": {...}|None, "convergence_tracker_state": ...,
+        "gate_results": [...], "budget_calls": int, "drift": {...}}`` when
+        ``_run_design_attempt`` raised ``SpecImplementabilityError``. Any other
+        exception maps to ``ApplicationError`` via
+        :func:`_map_exception_to_application_error`.
+    Invariants:
+        The returned ``convergence_tracker_state``/``gate_results``/
+        ``budget_calls`` reflect exactly this attempt's mutations layered on
+        the incoming state; ``drift`` reflects only this attempt's own child
+        collector — the workflow owns the parent copy-on-entry/merge across
+        attempts.
+    """
+    from investment_team.models import (
+        BacktestConfig,
+        CodeRevision,
+        GateEvent,
+        SpecRevision,
+        StrategyLabRecord,
+    )
+    from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
+    from investment_team.strategy_lab._orchestrator_helpers import _DriftCollector
+    from investment_team.strategy_lab.agents._llm_budget import LLMCallBudget, use_budget
+    from investment_team.strategy_lab.exceptions import SpecImplementabilityError
+    from investment_team.strategy_lab.market_regime import RegimeSummary
+    from investment_team.strategy_lab.orchestrator import (
+        StrategyLabOrchestrator,
+        _design_max_llm_calls,
+    )
+    from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+    from investment_team.strategy_lab.temporal.dto import (
+        convergence_tracker_from_wire,
+        convergence_tracker_to_wire,
+    )
+
+    prior_records = [StrategyLabRecord.parse_persisted(r) for r in params["prior_records"]]
+    config = BacktestConfig(**params["config"])
+    signal_brief = (
+        SignalIntelligenceBriefV1(**params["signal_brief"]) if params.get("signal_brief") else None
+    )
+    regime_summary = (
+        RegimeSummary(**params["regime_summary"]) if params.get("regime_summary") else None
+    )
+    drift_data = params.get("drift") or {}
+    drift_collector = _DriftCollector(
+        spec_history=[SpecRevision(**d) for d in drift_data.get("spec_history", [])],
+        code_history=[CodeRevision(**d) for d in drift_data.get("code_history", [])],
+        gate_timeline=[GateEvent(**d) for d in drift_data.get("gate_timeline", [])],
+    )
+    # ``_run_design_attempt`` appends to this list in place (its
+    # ``all_gate_results``); returning the mutated list threads accumulation
+    # across re-entries, matching ``run_cycle``'s single ``cumulative_gate_results``.
+    cumulative_gate_results = [
+        QualityGateResult.model_validate(g) for g in params.get("gate_results", [])
+    ]
+
+    orch = StrategyLabOrchestrator()
+    orch.convergence_tracker = convergence_tracker_from_wire(params["convergence_tracker_state"])
+
+    # Pre-charge the per-cycle budget to what prior attempts already spent so
+    # the ceiling is a true whole-cycle cap, not a per-attempt allowance.
+    budget = LLMCallBudget(_design_max_llm_calls())
+    budget.calls_made = min(int(params.get("budget_calls", 0)), budget.limit)
+
+    def _drift_to_wire(collector: _DriftCollector) -> Dict[str, Any]:
+        return {
+            "spec_history": [r.model_dump(mode="json") for r in collector.spec_history],
+            "code_history": [r.model_dump(mode="json") for r in collector.code_history],
+            "gate_timeline": [r.model_dump(mode="json") for r in collector.gate_timeline],
+        }
+
+    try:
+        with use_budget(budget):
+            record = orch._run_design_attempt(
+                prior_records=prior_records,
+                config=config,
+                signal_brief=signal_brief,
+                emit=lambda *_a, **_kw: None,
+                exclude_asset_classes=params.get("exclude_asset_classes"),
+                directives=list(params.get("directives") or []),
+                design_attempt=params.get("design_attempt", 0),
+                phase_back_count=params.get("phase_back_count", 0),
+                drift_collector=drift_collector,
+                cumulative_gate_results=cumulative_gate_results,
+                regime_summary=regime_summary,
+            )
+    except SpecImplementabilityError as exc:
+        design_context = exc.design_context
+        design_context_wire = (
+            None
+            if design_context is None
+            else {
+                "rounds": design_context.rounds,
+                "critiques": [c.model_dump(mode="json") for c in design_context.critiques],
+                "stop_reason": design_context.stop_reason,
+                "loop_telemetry": design_context.loop_telemetry,
+            }
+        )
+        return {
+            "kind": "reentry",
+            "evidence": exc.evidence,
+            "last_spec": (
+                exc.last_spec.model_dump(mode="json") if exc.last_spec is not None else None
+            ),
+            "last_code": exc.last_code or "",
+            "failure_phase": exc.failure_phase,
+            "design_context": design_context_wire,
+            "convergence_tracker_state": convergence_tracker_to_wire(orch.convergence_tracker),
+            "gate_results": [g.model_dump(mode="json") for g in cumulative_gate_results],
+            "budget_calls": budget.calls_made,
+            "drift": _drift_to_wire(drift_collector),
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise _map_exception_to_application_error(exc) from exc
+    return {
+        "kind": "record",
+        "record": record.model_dump(mode="json"),
+        "convergence_tracker_state": convergence_tracker_to_wire(orch.convergence_tracker),
+        "gate_results": [g.model_dump(mode="json") for g in cumulative_gate_results],
+        "budget_calls": budget.calls_made,
+        "drift": _drift_to_wire(drift_collector),
+    }
+
+
 ACTIVITIES = [
     design_generate_activity,
     design_revise_activity,
@@ -1094,6 +1269,7 @@ ACTIVITIES = [
     run_verification_and_analysis_activity,
     assemble_record_activity,
     build_short_circuit_record_activity,
+    run_design_attempt_activity,
     resolve_workflow_config_activity,
 ]
 
@@ -1117,6 +1293,7 @@ __all__ = [
     "resolve_symbols_activity",
     "resolve_workflow_config_activity",
     "run_alignment_audit_activity",
+    "run_design_attempt_activity",
     "run_strategy_code_activity",
     "run_verification_and_analysis_activity",
     "snapshot_prior_records_activity",

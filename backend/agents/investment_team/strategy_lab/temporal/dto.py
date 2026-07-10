@@ -22,7 +22,10 @@ def convergence_tracker_to_wire(tracker: Any) -> Dict[str, Any]:
     Postconditions:
         Returns a dict round-trippable by :func:`convergence_tracker_from_wire`
         into an equivalent tracker (same window/history size, signatures,
-        failure-mode counts, asset-class history, and trial count).
+        failure-mode counts, asset-class history, trial count, **and
+        snapshot-baseline trial count** — the last is required for
+        ``merge_from`` to fold only the per-cycle delta rather than the whole
+        trial total after a round trip through this wire format).
     """
     return {
         "window_size": tracker._window_size,
@@ -31,6 +34,7 @@ def convergence_tracker_to_wire(tracker: Any) -> Dict[str, Any]:
         "failure_modes": dict(tracker._failure_modes),
         "asset_class_history": list(tracker._asset_class_history),
         "trial_count": tracker._trial_count,
+        "trial_count_at_snapshot": tracker._trial_count_at_snapshot,
     }
 
 
@@ -54,6 +58,9 @@ def convergence_tracker_from_wire(data: Dict[str, Any]) -> Any:
     tracker._failure_modes = Counter(data.get("failure_modes", {}))
     tracker._asset_class_history = list(data.get("asset_class_history", []))
     tracker._trial_count = data.get("trial_count", 0)
+    # Default to trial_count for dicts predating this field so a round trip is
+    # never worse than treating the whole count as the snapshot baseline.
+    tracker._trial_count_at_snapshot = data.get("trial_count_at_snapshot", tracker._trial_count)
     return tracker
 
 

@@ -502,6 +502,7 @@ def test_resolve_workflow_config_activity_resolves_every_expected_key(monkeypatc
         "code_conformance_retries": 2,
         "design_max_llm_calls": 120,
         "regime_summary_enabled": True,
+        "max_design_reentries": 2,
     }
 
 
@@ -761,8 +762,121 @@ def test_build_short_circuit_record_activity_reuses_orchestrator_method(monkeypa
     assert result["convergence_tracker_state"]["trial_count"] == 1
 
 
+# ---------------------------------------------------------------------------
+# run_design_attempt_activity — wraps the whole per-attempt pipeline verbatim
+# ---------------------------------------------------------------------------
+
+
+def _run_design_attempt_params(**overrides: Any) -> Dict[str, Any]:
+    base = {
+        "prior_records": [],
+        "config": _backtest_config_dict(),
+        "signal_brief": None,
+        "exclude_asset_classes": None,
+        "directives": ["seed directive"],
+        "design_attempt": 0,
+        "phase_back_count": 0,
+        "drift": {"spec_history": [], "code_history": [], "gate_timeline": []},
+        "gate_results": [],
+        "budget_calls": 7,
+        "regime_summary": None,
+        "convergence_tracker_state": {},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_run_design_attempt_activity_returns_record_outcome(monkeypatch):
+    """On a terminal record, the activity returns ``kind='record'`` plus the
+    threaded whole-cycle accumulators (tracker state, gate results, budget)."""
+    from investment_team.strategy_lab.agents._llm_budget import active_budget
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        # The activity only serializes the record via ``model_dump(mode="json")``;
+        # a full ``StrategyLabRecord`` (with its many required fields) isn't needed.
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    record = _FakeRecord()
+    captured: Dict[str, Any] = {}
+
+    class _FakeGate:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"gate_name": "g", "passed": True}
+
+    def _fake_attempt(self, **kwargs):
+        # The activity must run us inside the pre-charged budget context.
+        budget = active_budget()
+        captured["budget_calls_seen"] = budget.calls_made if budget else None
+        captured["directives"] = kwargs["directives"]
+        # Mutate the passed-in gate-results list in place, as the real method does.
+        kwargs["cumulative_gate_results"].append(_FakeGate())
+        return record
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params())
+    assert out["kind"] == "record"
+    assert out["record"]["lab_record_id"] == "rec-1"
+    assert out["budget_calls"] == 7  # pre-charged, no further LLM calls made
+    assert captured["budget_calls_seen"] == 7
+    assert captured["directives"] == ["seed directive"]
+    assert "convergence_tracker_state" in out
+    assert "drift" in out
+
+
+def test_run_design_attempt_activity_returns_reentry_outcome(monkeypatch):
+    """A ``SpecImplementabilityError`` is caught and surfaced as a structured
+    ``kind='reentry'`` outcome carrying last spec/code/evidence + design context
+    — never re-raised across the activity boundary."""
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
+    from investment_team.strategy_lab.exceptions import SpecImplementabilityError
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    last_spec = StrategySpec.parse_persisted(_spec_dict(strategy_id="strat-x"))
+
+    def _fake_attempt(self, **kwargs):
+        raise SpecImplementabilityError(
+            "risk limits loosened",
+            failure_phase="evaluation",
+            last_spec=last_spec,
+            last_code="def x(): pass",
+            design_context=_DesignPersistContext(
+                rounds=3, critiques=[], stop_reason="ready", loop_telemetry={"k": 1}
+            ),
+        )
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params())
+    assert out["kind"] == "reentry"
+    assert out["evidence"] == "risk limits loosened"
+    assert out["failure_phase"] == "evaluation"
+    assert out["last_spec"]["strategy_id"] == "strat-x"
+    assert out["last_code"] == "def x(): pass"
+    assert out["design_context"]["rounds"] == 3
+    assert out["design_context"]["loop_telemetry"] == {"k": 1}
+    assert out["budget_calls"] == 7
+
+
+def test_run_design_attempt_activity_maps_unexpected_error(monkeypatch):
+    """Any non-control-flow exception maps to a non-retryable ApplicationError."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    def _fake_attempt(self, **kwargs):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    with pytest.raises(ApplicationError) as exc_info:
+        act.run_design_attempt_activity(_run_design_attempt_params())
+    assert exc_info.value.non_retryable is True
+
+
 def test_activities_list_contains_every_activity():
-    assert len(act.ACTIVITIES) == 22
+    assert len(act.ACTIVITIES) == 23
     assert act.design_generate_activity in act.ACTIVITIES
     assert act.persist_record_activity in act.ACTIVITIES
     assert act.resolve_readiness_prices_activity in act.ACTIVITIES
@@ -770,4 +884,5 @@ def test_activities_list_contains_every_activity():
     assert act.run_verification_and_analysis_activity in act.ACTIVITIES
     assert act.assemble_record_activity in act.ACTIVITIES
     assert act.build_short_circuit_record_activity in act.ACTIVITIES
+    assert act.run_design_attempt_activity in act.ACTIVITIES
     assert act.resolve_workflow_config_activity in act.ACTIVITIES
