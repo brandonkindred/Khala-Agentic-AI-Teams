@@ -31,6 +31,7 @@ from ..shared.job_store import (
     create_job,
     get_job,
     list_jobs,
+    make_job_updater,
     mark_job_completed,
     mark_job_failed,
     mark_job_running,
@@ -73,30 +74,17 @@ def _run_build_background(
     output_dir: Optional[str],
     resume_blueprint: Optional[Any] = None,
 ) -> None:
-    """Background thread function for running AI system generation workflow."""
+    """Background thread function for running AI system generation workflow.
+
+    Thread-mode counterpart to ``AISystemsBuildWorkflow``: it shares the same
+    ``make_job_updater`` progress callback so both runtimes write identical
+    job-store fields. The Temporal path runs each phase as its own activity
+    instead (see ``temporal/workflows.py``).
+    """
     try:
         mark_job_running(job_id)
 
-        def job_updater(
-            current_phase: Optional[str] = None,
-            progress: Optional[int] = None,
-            status_text: Optional[str] = None,
-            blueprint_snapshot: Optional[Dict[str, Any]] = None,
-        ) -> None:
-            """Callback to update job status during workflow execution."""
-            updates: Dict[str, Any] = {}
-
-            if current_phase is not None:
-                updates["current_phase"] = current_phase
-            if progress is not None:
-                updates["progress"] = progress
-            if status_text is not None:
-                updates["status_text"] = status_text
-            if blueprint_snapshot is not None:
-                updates["blueprint"] = blueprint_snapshot
-
-            if updates:
-                update_job(job_id, **updates)
+        job_updater = make_job_updater(job_id)
 
         blueprint = orchestrator.run_workflow(
             project_name=project_name,
@@ -314,8 +302,9 @@ def resume_build_job(job_id: str) -> AISystemJobResponse:
         from ai_systems_team.temporal.start_workflow import start_build_workflow
 
         if is_temporal_enabled():
-            # Temporal re-runs the activity; resume_blueprint is passed via job store
-            update_job(job_id, resume_blueprint=stored_bp)
+            # The workflow's ``begin`` activity reads the checkpointed blueprint
+            # (completed_phases + per-phase results) straight from the job store and
+            # skips the phases already done, so no separate resume payload is needed.
             start_build_workflow(
                 job_id, project_name, spec_path, data.get("constraints", {}), data.get("output_dir")
             )
