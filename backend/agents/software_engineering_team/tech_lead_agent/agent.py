@@ -11,6 +11,7 @@ from strands import Agent
 
 from llm_service import compact_text, get_client, get_strands_model
 from llm_service.strands_model import resolve_strands_model
+from shared_llm_recovery import agent_call_json
 from software_engineering_team.shared.env_config import env_int
 from software_engineering_team.shared.models import (
     Task,
@@ -51,10 +52,14 @@ def _learnings_top_n() -> int:
 
 
 def _agent_json(agent: Agent, prompt: str) -> dict:
-    """Call a Strands Agent and parse the result as JSON."""
-    result = agent(prompt)
-    raw = str(result).strip()
-    return json.loads(raw)
+    """Call a Strands Agent and parse the result as JSON (fence/prose tolerant).
+
+    Delegates to the shared :func:`shared_llm_recovery.agent_call_json`, which
+    tries strict ``json.loads`` first and salvages a JSON object from fenced or
+    prose-wrapped output before re-raising — replacing the previous bare
+    ``json.loads`` that crashed on any non-clean reply.
+    """
+    return agent_call_json(agent, prompt)
 
 
 class TechLeadAgent:

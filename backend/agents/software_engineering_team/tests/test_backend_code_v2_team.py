@@ -856,6 +856,7 @@ class TestBackendCodeV2TeamLead:
         from backend_code_v2_team.models import (
             BackendCodeV2WorkflowResult,
             DeliverResult,
+            DocumentationPhaseResult,
             Phase,
             SetupResult,
         )
@@ -868,11 +869,13 @@ class TestBackendCodeV2TeamLead:
             delivered_files=["app.py"],
             summary="handoff ready",
         )
+        documentation = DocumentationPhaseResult(summary="docs updated")
         inner = BackendCodeV2WorkflowResult(
             task_id="api",
             success=True,
             current_phase=Phase.DELIVER,
             iterations_used=2,
+            documentation_result=documentation,
             deliver_result=deliver,
             final_files={"app.py": "print('ok')\n"},
             summary="implemented and ready",
@@ -913,6 +916,9 @@ class TestBackendCodeV2TeamLead:
         assert result.current_phase == Phase.DELIVER
         assert result.iterations_used == 2
         assert result.deliver_result is deliver
+        # The documentation phase output must survive the team-lead overlay (it was
+        # previously dropped, leaving callers with None).
+        assert result.documentation_result is documentation
         assert result.final_files == {"app.py": "print('ok')\n"}
         assert result.summary == "implemented and ready"
         assert result.needs_followup is True
