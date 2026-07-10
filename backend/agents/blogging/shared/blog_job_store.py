@@ -477,12 +477,7 @@ def add_story_agent_message(
         merge_fields={"waiting_for_story_input": True},
         append_to={
             "story_chat_history": [
-                {
-                    "role": "agent",
-                    "content": content,
-                    "gap_index": gap_index,
-                    "gap_round": gap_round,
-                }
+                {"role": "agent", "content": content, "gap_index": gap_index, "gap_round": gap_round}
             ]
         },
     )
