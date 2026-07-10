@@ -16,15 +16,22 @@ from __future__ import annotations
 import asyncio
 import atexit
 import concurrent.futures
+import json
 import logging
 import os
 import threading
 from typing import TYPE_CHECKING, Any, Callable, Iterable, List, Optional
 
 from pydantic import BaseModel, ValidationError
+from strands.multiagent.graph import GraphBuilder
 
 from .agents import BrandComplianceAgent
 from .config import env_int
+from .graphs.phase1_strategic_core import build_phase1_graph
+from .graphs.phase2_narrative import build_phase2_swarm
+from .graphs.phase3_visual import build_phase3_graph
+from .graphs.phase4_channel import build_phase4_graph
+from .graphs.phase5_governance import build_phase5_graph
 from .graphs.shared import PHASE_ORDER, phase_index, serialize_mission
 from .graphs.top_level import build_branding_graph
 from .models import (
@@ -60,6 +67,24 @@ _PHASE_EXTRACTION = (
     ("phase4_channel", ChannelActivationOutput, 3),
     ("phase5_governance", GovernanceOutput, 4),
 )
+
+
+# Per-phase isolated-execution spec: BrandPhase -> (sub-graph builder, top-level
+# node id, output model). The node id deliberately matches the id the monolithic
+# ``build_branding_graph`` assigns each phase, so ``run_single_phase`` can wrap a
+# phase's sub-graph/swarm as a single node under that id and reuse
+# ``_extract_phase_output`` (and its test doubles) verbatim.
+_PHASE_SPEC: dict[BrandPhase, tuple[Callable[[], Any], str, type[BaseModel]]] = {
+    BrandPhase.STRATEGIC_CORE: (build_phase1_graph, "phase1_strategic_core", StrategicCoreOutput),
+    BrandPhase.NARRATIVE_MESSAGING: (
+        build_phase2_swarm,
+        "phase2_narrative",
+        NarrativeMessagingOutput,
+    ),
+    BrandPhase.VISUAL_IDENTITY: (build_phase3_graph, "phase3_visual", VisualIdentityOutput),
+    BrandPhase.CHANNEL_ACTIVATION: (build_phase4_graph, "phase4_channel", ChannelActivationOutput),
+    BrandPhase.GOVERNANCE: (build_phase5_graph, "phase5_governance", GovernanceOutput),
+}
 
 
 def _offload_pool_workers() -> int:
@@ -270,11 +295,6 @@ class BrandingTeamOrchestrator:
             for node_id, model_cls, min_idx in _PHASE_EXTRACTION
         ]
 
-        # ---- Determine current phase ----
-        current_phase = self._determine_current_phase(
-            narrative, visual_identity, channel_activation, governance, human_review.approved
-        )
-
         # ---- Run compliance checks (outside the graph) ----
         checks = self.compliance.evaluate(brand_checks or [], mission)
 
@@ -285,18 +305,143 @@ class BrandingTeamOrchestrator:
             )
         )
 
-        # ---- Build brand book ----
+        # ---- Assemble the final output (shared with the Temporal finalize activity) ----
+        output = self._assemble_team_output(
+            mission=mission,
+            human_review=human_review,
+            strategic_core=strategic_core,
+            narrative=narrative,
+            visual_identity=visual_identity,
+            channel_activation=channel_activation,
+            governance=governance,
+            checks=checks,
+            competitive_snapshot=competitive_snapshot,
+            design_asset_result=design_asset_result,
+            stop_idx=stop_idx,
+        )
+
+        if store and brand_id and resolved_client_id:
+            store.append_brand_version(resolved_client_id, brand_id, output)
+
+        return output
+
+    def run_single_phase(
+        self,
+        mission: BrandingMission,
+        phase: BrandPhase,
+        prior_outputs: Optional[dict[str, dict]] = None,
+    ) -> BaseModel:
+        """Run a single pipeline phase in isolation and return its output model.
+
+        The monolithic ``build_branding_graph`` wires phases as sequential nodes,
+        so a downstream phase normally receives its predecessor's output through a
+        Strands edge. To run one phase alone (as a Temporal activity does), we wrap
+        that phase's sub-graph/swarm as a *single node* — reusing the same
+        top-level node id the monolithic graph assigns it — so the invoke result
+        has the identical ``result.result[node_id]`` shape ``_extract_phase_output``
+        already parses. The lost cross-phase edge is compensated by injecting the
+        serialized ``prior_outputs`` into the task string (see ``_phase_task``).
+
+        Preconditions:
+            - ``phase`` is one of the five pipeline phases (a key of
+              ``_PHASE_SPEC``); ``BrandPhase.COMPLETE`` is not a runnable phase.
+            - ``prior_outputs`` maps upstream ``BrandPhase`` value strings to their
+              JSON-safe phase-output dicts (``model_dump(mode="json")``), or is
+              ``None``/empty for the first phase.
+        Postconditions:
+            - Returns an instance of the phase's output model (never ``None``);
+              a parse failure yields a default-constructed model, matching
+              ``_extract_phase_output``'s contract.
+        """
+        if phase not in _PHASE_SPEC:
+            raise ValueError(f"{phase!r} is not a runnable branding phase")
+        builder_fn, node_id, model_cls = _PHASE_SPEC[phase]
+
+        builder = GraphBuilder()
+        builder.set_graph_id(f"branding_phase_{phase.value}")
+        builder.set_execution_timeout(600.0)
+        builder.set_node_timeout(180.0)
+        builder.add_node(builder_fn(), node_id=node_id)
+        builder.set_entry_point(node_id)
+        graph = builder.build()
+
+        task = self._phase_task(mission, phase, prior_outputs or {})
+        result = _run_coro(graph.invoke_async(task))
+        return self._extract_phase_output(result, node_id, model_cls)
+
+    @staticmethod
+    def _phase_task(
+        mission: BrandingMission,
+        phase: BrandPhase,
+        prior_outputs: dict[str, dict],
+    ) -> str:
+        """Build the task string for an isolated phase run.
+
+        Preconditions:
+            - ``prior_outputs`` maps upstream phase value strings to JSON-safe
+              phase-output dicts (possibly empty).
+        Postconditions:
+            - Returns the same mission-seeded task the monolithic graph uses,
+              extended with the serialized upstream outputs when present so an
+              isolated downstream phase sees the context the sequential edge would
+              otherwise carry (a superset — never less context).
+        """
+        base = (
+            "Create a comprehensive brand strategy for the following company.\n\n"
+            f"Branding Mission:\n{serialize_mission(mission)}"
+        )
+        if prior_outputs:
+            blocks = "\n\n".join(
+                f"### {name} (approved prior-phase output) ###\n"
+                f"{json.dumps(payload, indent=2, default=str)}"
+                for name, payload in prior_outputs.items()
+            )
+            base += (
+                "\n\nContext from completed upstream phases — build on these and do "
+                f"not contradict them:\n{blocks}"
+            )
+        return base
+
+    def _assemble_team_output(
+        self,
+        *,
+        mission: BrandingMission,
+        human_review: HumanReview,
+        strategic_core: Optional[StrategicCoreOutput],
+        narrative: Optional[NarrativeMessagingOutput],
+        visual_identity: Optional[VisualIdentityOutput],
+        channel_activation: Optional[ChannelActivationOutput],
+        governance: Optional[GovernanceOutput],
+        checks: List[Any],
+        competitive_snapshot: Any,
+        design_asset_result: Any,
+        stop_idx: int,
+    ) -> TeamOutput:
+        """Assemble the final ``TeamOutput`` from computed phase artifacts.
+
+        Shared by the thread path (``run``) and the Temporal ``finalize`` activity
+        so the brand-book, phase-gate, status, and summary derivation live in one
+        place — the primary guard against Temporal-vs-thread output divergence.
+
+        Preconditions:
+            - The five phase outputs are their respective models or ``None`` (a
+              phase not reached for this ``stop_idx``); ``checks`` is the compliance
+              result list; ``competitive_snapshot``/``design_asset_result`` are the
+              integration results (or ``None`` when disabled).
+        Postconditions:
+            - Returns a fully-populated ``TeamOutput``; performs no I/O and no
+              persistence (the caller owns ``store.append_brand_version``).
+        """
+        current_phase = self._determine_current_phase(
+            narrative, visual_identity, channel_activation, governance, human_review.approved
+        )
         brand_book = _build_brand_book(
             strategic_core, narrative, visual_identity, channel_activation, governance
         )
-
-        # ---- Phase gates ----
         phase_gates = _build_phase_gates(current_phase, human_review.approved)
-
-        # ---- Status determination ----
         status, mission_summary = self._build_status_summary(human_review, current_phase, stop_idx)
 
-        output = TeamOutput(
+        return TeamOutput(
             status=status,
             mission_summary=mission_summary,
             current_phase=current_phase,
@@ -317,11 +462,6 @@ class BrandingTeamOrchestrator:
             design_asset_result=design_asset_result,
             brand_book=brand_book,
         )
-
-        if store and brand_id and resolved_client_id:
-            store.append_brand_version(resolved_client_id, brand_id, output)
-
-        return output
 
     def run_phase(
         self,
@@ -517,9 +657,7 @@ def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[
     return None
 
 
-def _bullets(
-    title: str, items: Iterable[Any], fmt: Callable[[Any], str] = lambda x: x
-) -> str:
+def _bullets(title: str, items: Iterable[Any], fmt: Callable[[Any], str] = lambda x: x) -> str:
     """Render a markdown section: a ``# title`` heading over a bullet list.
 
     Preconditions:
@@ -625,3 +763,10 @@ def _build_brand_book(
 
     content = "\n\n".join(sections_md)
     return BrandBook(content=content, sections=sections_data)
+
+
+# Process-wide orchestrator singleton. It is stateless (only holds the regex
+# ``BrandComplianceAgent``), so one shared instance is safe. Defined here — the
+# canonical domain module — so both the API layer and the Temporal activities
+# import it from here rather than coupling the worker to ``api.main``.
+orchestrator = BrandingTeamOrchestrator()
