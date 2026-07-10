@@ -3,13 +3,13 @@
 * ``_now`` timestamp helper
 * ``mark_all_running_jobs_failed`` (both success and failure paths)
 * ``_run_audit_job`` failure branch (audit run raises)
-* ``run_audit`` Temporal branch (when Temporal is enabled)
+
+(The ``run_audit`` Temporal vs thread dispatch branch is covered by
+``test_temporal_dispatch.py``.)
 """
 
 from __future__ import annotations
 
-import time
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -118,92 +118,27 @@ def test_run_audit_job_failure_branch(
 
 
 # ---------------------------------------------------------------------------
-# run_audit — Temporal-enabled branch
+# _start_temporal_worker_backstop
 # ---------------------------------------------------------------------------
 
 
-def test_run_audit_uses_temporal_when_enabled(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """When ``is_temporal_enabled`` returns True and ``start_audit_workflow``
-    succeeds, the route should return immediately with the Temporal-specific
-    message without spawning a thread."""
-    (tmp_path / "x.py").write_text("a=1")
-
-    import soc2_compliance_team.temporal.client as cmod
-    import soc2_compliance_team.temporal.start_workflow as swmod
-
-    captured: dict[str, Any] = {}
-
-    def _fake_enabled():
-        return True
-
-    def _fake_start(job_id, repo_path):
-        captured["job_id"] = job_id
-        captured["repo_path"] = repo_path
-
-    monkeypatch.setattr(cmod, "is_temporal_enabled", _fake_enabled)
-    monkeypatch.setattr(swmod, "start_audit_workflow", _fake_start)
-    # Also stub the threading branch so a test failure on the wrong branch
-    # is loud rather than the thread silently doing real work.
-
-    def _no_thread(*a, **k):
-        raise AssertionError("Should not spawn a thread when Temporal is enabled")
-
-    monkeypatch.setattr(api_main.threading, "Thread", _no_thread)
-
-    r = client.post("/soc2-audit/run", json={"repo_path": str(tmp_path)})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == "running"
-    assert "(Temporal)" in body["message"]
-    assert captured["job_id"] == body["job_id"]
-    assert captured["repo_path"] == str(tmp_path.resolve())
+def test_temporal_worker_backstop_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With Temporal disabled the backstop delegates and does not raise."""
+    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
+    # start_soc2_temporal_worker_thread() returns False when disabled; the
+    # backstop must complete cleanly.
+    api_main._start_temporal_worker_backstop()
 
 
-def test_run_audit_falls_back_to_thread_on_temporal_import_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _patched
-) -> None:
-    """If the temporal modules can't be imported, the route should fall
-    back to the threaded branch."""
-    (tmp_path / "x.py").write_text("a=1")
+def test_temporal_worker_backstop_swallows_errors(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    """A worker-boot failure is logged, never propagated (must not abort boot)."""
 
-    real_import = (
-        __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+    def _boom() -> bool:
+        raise RuntimeError("worker boom")
+
+    monkeypatch.setattr(
+        "soc2_compliance_team.temporal.worker.start_soc2_temporal_worker_thread", _boom
     )
-
-    def _fake_import(name, *args, **kwargs):
-        if name.startswith("soc2_compliance_team.temporal"):
-            raise ImportError("temporal not installed")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr("builtins.__import__", _fake_import)
-
-    # Stub the orchestrator so the background thread does no real work.
-    from soc2_compliance_team.models import SOC2AuditResult
-
-    class _Orch:
-        def run(self, repo_path):
-            return SOC2AuditResult(status="completed", repo_path=str(repo_path))
-
-    monkeypatch.setattr(api_main, "SOC2AuditOrchestrator", _Orch)
-
-    r = client.post("/soc2-audit/run", json={"repo_path": str(tmp_path)})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == "running"
-    # Threaded message (no "Temporal" suffix)
-    assert "(Temporal)" not in body["message"]
-
-    # Wait for the background thread to finish *while the stubs are still
-    # active*, so the real orchestrator / job-manager paths are never
-    # reached after fixture teardown.
-    job_id = body["job_id"]
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline:
-        job = _patched.get_job(job_id)
-        if job and job.get("status") in ("completed", "failed"):
-            break
-        time.sleep(0.02)
-    else:
-        pytest.fail(f"Audit job {job_id} did not reach a terminal state in 2s")
+    with caplog.at_level("WARNING"):
+        api_main._start_temporal_worker_backstop()
+    assert any("backstop failed to start" in r.message for r in caplog.records)

@@ -1,8 +1,10 @@
 """SOC2 Trust Service Criteria audit agents and report writer.
 
-Provides both the legacy class-based agents (used internally by
-``_run_tsc_agent``) and Strands Agent factory functions (``make_*``)
-for use as Graph nodes.
+The class-based agents (``SecurityTSCAgent`` … ``PrivacyTSCAgent`` and
+``ReportWriterAgent``) each make one ``llm.complete_json`` call and return a
+typed result. They are the audit pipeline's units of work: the thread-mode
+orchestrator and the Temporal activities both drive them via
+:mod:`soc2_compliance_team.pipeline`.
 """
 
 from __future__ import annotations
@@ -10,10 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from strands import Agent
-
 from llm_service import compact_text
-from shared_graph import build_agent
 
 from .models import (
     FindingSeverity,
@@ -308,113 +307,3 @@ Respond with valid JSON only. No text outside JSON."""
             recommended_timeline=data.get("recommended_timeline") or "",
             raw_markdown=data.get("raw_markdown") or "",
         )
-
-
-# ---------------------------------------------------------------------------
-# Strands Agent factories for Graph nodes
-# ---------------------------------------------------------------------------
-
-_TSC_SYSTEM_PROMPT_TEMPLATE = """You are a SOC2 auditor specializing in the **{criterion}** Trust Service Criterion.
-Your task is to review repository content and identify compliance gaps or risks.
-
-**Criterion focus:** {focus}
-
-Analyze the repository context provided in the user message and produce your audit.
-
-{output_format}"""
-
-
-def _make_tsc_agent(criterion: str, focus: str) -> Agent:
-    """Create a Strands Agent for a specific TSC criterion."""
-    return build_agent(
-        name=f"{criterion.lower().replace(' ', '_')}_tsc_agent",
-        system_prompt=_TSC_SYSTEM_PROMPT_TEMPLATE.format(
-            criterion=criterion,
-            focus=focus,
-            output_format=_TSC_OUTPUT_FORMAT,
-        ),
-        agent_key="soc2",
-        description=f"SOC2 {criterion} auditor",
-    )
-
-
-def make_security_tsc_agent() -> Agent:
-    """Create a Strands Agent for Security TSC auditing."""
-    return _make_tsc_agent(
-        "Security (Common Criteria)",
-        "Logical and physical access controls; authentication and authorization; "
-        "encryption of data at rest and in transit; change management; risk assessment; "
-        "monitoring and incident response; secure disposal of data.",
-    )
-
-
-def make_availability_tsc_agent() -> Agent:
-    """Create a Strands Agent for Availability TSC auditing."""
-    return _make_tsc_agent(
-        "Availability",
-        "System availability; capacity and performance management; "
-        "backup and recovery; monitoring and incident management; environmental controls.",
-    )
-
-
-def make_processing_integrity_tsc_agent() -> Agent:
-    """Create a Strands Agent for Processing Integrity TSC auditing."""
-    return _make_tsc_agent(
-        "Processing Integrity",
-        "Processing completeness, validity, accuracy, timeliness, and authorization; "
-        "data validation; error handling; reconciliation and quality assurance of processing.",
-    )
-
-
-def make_confidentiality_tsc_agent() -> Agent:
-    """Create a Strands Agent for Confidentiality TSC auditing."""
-    return _make_tsc_agent(
-        "Confidentiality",
-        "Identification and classification of confidential information; "
-        "disclosure only as agreed; secure handling and disposal of confidential data.",
-    )
-
-
-def make_privacy_tsc_agent() -> Agent:
-    """Create a Strands Agent for Privacy TSC auditing."""
-    return _make_tsc_agent(
-        "Privacy",
-        "Collection, use, retention, disclosure, and disposal of personal information; "
-        "consent; data subject rights; privacy notice and policies; PII handling in code/config.",
-    )
-
-
-_REPORT_WRITER_SYSTEM_PROMPT = """You are a SOC2 lead auditor. You receive audit findings from five TSC specialist \
-agents (Security, Availability, Processing Integrity, Confidentiality, Privacy).
-
-Analyze all the findings from the upstream auditors and produce one of two outputs:
-
-**If there are critical or high severity findings:**
-Produce a SOC2 Compliance Audit Report as a single JSON object with:
-- "report_type": "compliance_audit"
-- "executive_summary": string (2-5 paragraphs: scope, overall posture, key risks, high-level recommendation)
-- "scope": string (one paragraph: what was in scope)
-- "findings_by_tsc": object mapping TSC category to array of finding objects
-- "recommendations_summary": array of strings (prioritized remediation steps)
-- "raw_markdown": string (full report in markdown)
-
-**If there are NO critical or high severity findings:**
-Produce a Next Steps for SOC2 Certification document as a single JSON object with:
-- "report_type": "next_steps"
-- "title": string
-- "introduction": string (2-4 sentences)
-- "steps": array of objects with "title" and "description"
-- "recommended_timeline": string
-- "raw_markdown": string (full document in markdown)
-
-Respond with valid JSON only. No text outside JSON."""
-
-
-def make_report_writer_agent() -> Agent:
-    """Create a Strands Agent for SOC2 report writing (fan-in compositor)."""
-    return build_agent(
-        name="soc2_report_writer",
-        system_prompt=_REPORT_WRITER_SYSTEM_PROMPT,
-        agent_key="soc2",
-        description="SOC2 report writer that synthesizes all TSC audit findings",
-    )

@@ -1,43 +1,43 @@
-"""Start SOC2 Temporal workflows from sync API."""
+"""Start the SOC2 Temporal workflow from synchronous API code.
+
+Thin wrapper over ``shared_temporal.start_workflow_sync`` (the shared sync→async
+bridge). We deliberately do NOT use ``shared_temporal.run_team_job``: it creates
+its own job row and sets ``status=running`` itself, which would collide with the
+API's ``create_job`` and the activity-owned RUNNING/COMPLETED bookkeeping.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
-from soc2_compliance_team.temporal.client import (
-    get_temporal_client,
-    get_temporal_loop,
+from shared_temporal import start_workflow_sync
+from soc2_compliance_team.temporal import (
+    TASK_QUEUE,
+    WORKFLOW_ID_PREFIX,
+    Soc2AuditWorkflow,
 )
-from soc2_compliance_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX_AUDIT
-from soc2_compliance_team.temporal.workflows import Soc2AuditWorkflow
 
 logger = logging.getLogger(__name__)
 
-START_WORKFLOW_TIMEOUT = 30
-
-
-def _run_async(coro: object) -> object:
-    loop = get_temporal_loop()
-    client = get_temporal_client()
-    if loop is None or client is None:
-        raise RuntimeError("Temporal client not available; is the SOC2 worker running?")
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=START_WORKFLOW_TIMEOUT)
-
 
 def start_audit_workflow(job_id: str, repo_path: str) -> None:
-    """Start Soc2AuditWorkflow for the given job."""
-    client = get_temporal_client()
-    if client is None:
-        raise RuntimeError("Temporal client not available")
-    workflow_id = f"{WORKFLOW_ID_PREFIX_AUDIT}{job_id}"
-    _run_async(
-        client.start_workflow(
-            Soc2AuditWorkflow.run,
-            args=[job_id, repo_path],
-            id=workflow_id,
-            task_queue=TASK_QUEUE,
-        )
+    """Start ``Soc2AuditWorkflow`` for the given job.
+
+    Preconditions:
+        - ``job_id`` is a job already created in the job store.
+        - ``repo_path`` is a directory path on the worker host.
+
+    Postconditions:
+        - A workflow with id ``soc2-audit-<job_id>`` is started on the SOC2 task
+          queue (raises ``RuntimeError`` if the worker client never becomes
+          available within the wait window).
+    """
+    workflow_id = f"{WORKFLOW_ID_PREFIX}{job_id}"
+    start_workflow_sync(
+        Soc2AuditWorkflow.run,
+        job_id,
+        repo_path,
+        workflow_id=workflow_id,
+        task_queue=TASK_QUEUE,
     )
     logger.info("Started Soc2AuditWorkflow id=%s", workflow_id)

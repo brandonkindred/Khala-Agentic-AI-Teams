@@ -20,12 +20,39 @@ from soc2_compliance_team.orchestrator import SOC2AuditOrchestrator
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _start_temporal_worker_backstop() -> None:
+    """Start the SOC2 Temporal worker when serving the app standalone.
+
+    The team_service entrypoint normally starts the worker via
+    ``TEAM_TEMPORAL_WORKER_MODULE``/``_FUNC`` before uvicorn accepts requests.
+    This backstop covers running the app standalone (``uvicorn ...:app``, local
+    dev / unified API): without it, a ``TEMPORAL_ADDRESS``-set process has no
+    worker, so ``start_audit_workflow`` would stall waiting for a client.
+
+    Postconditions:
+        - Starts the worker thread when Temporal is enabled; a no-op when
+          ``TEMPORAL_ADDRESS`` is unset. Never raises — a failure is logged so
+          it cannot abort app boot (``start_team_worker`` is idempotent per
+          team, so double-starting with the entrypoint is harmless).
+    """
+    try:
+        from soc2_compliance_team.temporal.worker import (
+            start_soc2_temporal_worker_thread,
+        )
+
+        start_soc2_temporal_worker_thread()
+    except Exception:  # noqa: BLE001 - backstop must not abort app boot
+        logger.warning("SOC2 Temporal worker backstop failed to start", exc_info=True)
+
+
 app = create_team_app(
     service_name="soc2-compliance-team",
     team_key="soc2_compliance",
     title="SOC2 Compliance Audit Team API",
     description="Run a SOC2 compliance audit on a code repository. POST to start, GET status to poll.",
     version="1.0.0",
+    on_startup=_start_temporal_worker_backstop,
 )
 
 _job_manager = JobServiceClient(team="soc2_compliance_team")
@@ -39,6 +66,22 @@ _stale_monitor_stop = start_stale_job_monitor(
 
 def _now() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
+
+
+def _is_temporal_enabled() -> bool:
+    """Whether Temporal mode is active (``TEMPORAL_ADDRESS`` set).
+
+    Postconditions:
+        - Returns ``True`` only if ``shared_temporal`` is importable and
+          ``TEMPORAL_ADDRESS`` is set; ``False`` otherwise (defaults to the
+          thread-mode path).
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+
+        return is_temporal_enabled()
+    except ImportError:
+        return False
 
 
 class RunAuditRequest(BaseModel):
@@ -137,19 +180,21 @@ def run_audit(request: RunAuditRequest) -> RunAuditResponse:
         events=[],
     )
 
-    try:
-        from soc2_compliance_team.temporal.client import is_temporal_enabled
-        from soc2_compliance_team.temporal.start_workflow import start_audit_workflow
+    if _is_temporal_enabled():
+        try:
+            from soc2_compliance_team.temporal.start_workflow import start_audit_workflow
 
-        if is_temporal_enabled():
             start_audit_workflow(job_id, str(repo_path))
-            return RunAuditResponse(
-                job_id=job_id,
-                status="running",
-                message=f"Audit started (Temporal). Poll GET /soc2-audit/status/{job_id} for results.",
-            )
-    except ImportError:
-        pass
+        except Exception as e:
+            # Don't leave the job orphaned in `pending` if dispatch fails.
+            logger.exception("Failed to dispatch SOC2 audit workflow for job %s", job_id)
+            _update_job(job_id, status="failed", current_stage="Failed", error=str(e))
+            raise HTTPException(status_code=503, detail=f"Failed to start audit workflow: {e}")
+        return RunAuditResponse(
+            job_id=job_id,
+            status="running",
+            message=f"Audit started (Temporal). Poll GET /soc2-audit/status/{job_id} for results.",
+        )
 
     thread = threading.Thread(target=_run_audit_job, args=(job_id, str(repo_path)))
     thread.daemon = True

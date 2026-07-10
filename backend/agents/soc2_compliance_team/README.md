@@ -16,7 +16,16 @@ A multi-agent team that performs a **SOC2 compliance audit** on a code repositor
 | **Privacy TSC Agent** | Audits PII handling: collection, retention, consent, data subject rights. |
 | **Report Writer Agent** | Compiles all findings into a compliance report or a next-steps-for-certification document. |
 
-The **orchestrator** loads the repository (code, config, docs), runs each TSC agent in sequence, then invokes the Report Writer to produce the final deliverable.
+The audit is a fan-out/fan-in pipeline: load the repository (code, config, docs) → run the five TSC agents **in parallel** → invoke the Report Writer to produce the final deliverable. The pipeline stages live in `pipeline.py` as pure functions (`load_context`, `audit_criterion`, `run_all_criteria`, `write_report`, `assemble_result`) — a single source of truth shared by both execution modes.
+
+## Execution modes
+
+The same decomposed pipeline runs two ways:
+
+- **Thread mode** (default): `SOC2AuditOrchestrator` runs the five TSC audits concurrently in a thread pool.
+- **Temporal mode** (when `TEMPORAL_ADDRESS` is set): `Soc2AuditWorkflow` orchestrates the pipeline as durable, annotated activities — `soc2_load_repo` → five `soc2_audit_criterion` activities fanned out with `asyncio.gather` → `soc2_write_report` (with `soc2_mark_failed` as the terminal failure marker). Each activity wraps one `pipeline.py` step, so both modes produce the same `SOC2AuditResult`. The worker follows the shared `shared_temporal` pattern (registered in `shared_temporal.teams_registry`; task queue `soc2_compliance-queue`) and boots via the team_service entrypoint or the API `on_startup` backstop.
+
+The API's `POST /soc2-audit/run` dispatches to Temporal when it is enabled and falls back to thread mode otherwise; either way you poll `GET /soc2-audit/status/{job_id}` for the result.
 
 ## Quick start
 
@@ -113,7 +122,13 @@ soc2_compliance_team/
 ├── repo_loader.py     # Load repository into RepoContext for agents
 ├── (uses llm_service for LLM client)
 ├── agents.py          # Security, Availability, PI, Confidentiality, Privacy TSC agents + ReportWriter
-├── orchestrator.py    # SOC2AuditOrchestrator, run_soc2_audit()
+├── pipeline.py        # Decomposed pipeline steps shared by both execution modes
+├── orchestrator.py    # SOC2AuditOrchestrator, run_soc2_audit() (thread-mode driver)
+├── temporal/          # Temporal workflow + activities (shared_temporal pattern)
+│   ├── activities.py  # soc2_load_repo, soc2_audit_criterion, soc2_write_report, soc2_mark_failed
+│   ├── workflows.py   # Soc2AuditWorkflow (load → fan-out audits → report)
+│   ├── worker.py      # start_soc2_temporal_worker_thread()
+│   └── start_workflow.py
 ├── api/
 │   └── main.py        # FastAPI: POST /soc2-audit/run, GET /soc2-audit/status/{job_id}
 └── README.md
