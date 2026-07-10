@@ -1,10 +1,10 @@
 """Unit tests for the neutral pipeline core.
 
-Covers the graph-output translation (`_translate_itinerary_keys`) and the
-`run_pipeline` parse + fallback paths directly — the rest of the suite stubs
-`run_pipeline`, so this is where the key-translation logic (the most bug-prone
-part of the module) is exercised. Pure functions + a mocked graph, so no job
-service or Postgres is needed.
+Exercises the five per-step specialist functions (each wrapping a typed agent
+class, driven through its ``llm=None`` injection seam), the ``run_pipeline``
+chaining, and the RUNNING/COMPLETED/FAILED job-store bookkeeping. A fake callable
+model stands in for the Strands agent, so no LLM, job service, or Postgres is
+needed for the step tests.
 """
 
 from __future__ import annotations
@@ -12,113 +12,241 @@ from __future__ import annotations
 import json
 
 from road_trip_planning_team import pipeline as rtp_pipeline
-from road_trip_planning_team.models import TripItinerary
+from road_trip_planning_team.models import (
+    LogisticsPlan,
+    RoutePlan,
+    RouteStop,
+    StopActivities,
+    TravelerGroupProfile,
+    TripItinerary,
+)
+from road_trip_planning_team.shared.job_store import (
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    create_job,
+    get_job,
+)
 
 
-def test_translate_top_level_and_route_summary_renames():
-    data = {"summary": "A great trip", "packing_list": ["boots"], "route_summary": "SF → LA"}
-    out = rtp_pipeline._translate_itinerary_keys(data)
-    assert out["overview"] == "A great trip"
-    assert "summary" not in out
-    assert out["packing_suggestions"] == ["boots"]
-    assert out["route_summary"] == ["SF → LA"]  # str coerced to list
+class _FakeLLM:
+    """Callable stand-in for a Strands agent: returns a fixed response string.
 
-
-def test_translate_does_not_overwrite_model_native_keys():
-    data = {"summary": "graph", "overview": "native"}
-    out = rtp_pipeline._translate_itinerary_keys(data)
-    # Model-native key wins and the graph-native alias is left untouched (the
-    # rename is guarded on the target key being absent).
-    assert out["overview"] == "native"
-    assert out["summary"] == "graph"
-
-
-def test_translate_per_day_driving_activities_meals_accommodation():
-    data = {
-        "days": [
-            {
-                "date_label": "Day 1",
-                "day_notes": "scenic",
-                "driving": {"from_location": "SF", "miles": 180, "hours": 3.5},
-                "activities": [
-                    {"time": "morning", "name": "Coffee"},
-                    {"time": "afternoon", "name": "Hike"},
-                    {"time": "dinner", "name": "Tacos"},
-                    {"name": "Unspecified"},
-                ],
-                "meals": [{"venue": "Diner", "notes": "cheap", "meal_type": "breakfast"}],
-                "accommodation": {"type": "hotel", "notes": "book early"},
-            },
-            "not-a-dict",  # skipped without error
-        ]
-    }
-    out = rtp_pipeline._translate_itinerary_keys(data)
-    day = out["days"][0]
-    assert day["date"] == "Day 1"
-    assert day["day_summary"] == "scenic"
-    assert day["driving_from"] == "SF"
-    assert day["driving_distance_miles"] == 180
-    assert day["driving_time_hours"] == 3.5
-    assert [a["name"] for a in day["morning_activities"]] == ["Coffee"]
-    assert [a["name"] for a in day["afternoon_activities"]] == ["Hike", "Unspecified"]
-    assert [a["name"] for a in day["evening_activities"]] == ["Tacos"]
-    assert day["meals"][0] == {
-        "name": "Diner",
-        "description": "cheap",
-        "activity_type": "breakfast",
-    }
-    assert day["accommodation"]["accommodation_type"] == "hotel"
-    assert day["accommodation"]["booking_tips"] == "book early"
-
-
-def test_run_pipeline_parses_translated_graph_output(monkeypatch, sample_plan_request):
-    """run_pipeline extracts + translates a successful graph run into a TripItinerary.
-
-    Mock contract: build_trip_graph/invoke_graph_sync are stubbed to opaque
-    objects (their identity is irrelevant), and extract_node_text returns the
-    composer node's text — prose wrapping a valid itinerary JSON object — which
-    run_pipeline must slice, json.loads, key-translate, and validate.
+    Matches the ``self._agent(prompt)`` call the specialist agents make, so a
+    test can drive the real parsing/fallback logic without an LLM.
     """
-    composer_json = json.dumps(
-        {
-            "title": "SF to LA",
-            "summary": "Coastal cruise",
-            "total_days": 2,
-            "days": [
-                {"date_label": "Day 1", "activities": [{"time": "morning", "name": "Coffee"}]}
-            ],
-        }
-    )
-    monkeypatch.setattr(rtp_pipeline, "build_trip_graph", lambda: object())
-    monkeypatch.setattr(rtp_pipeline, "invoke_graph_sync", lambda graph, task: object())
-    monkeypatch.setattr(
-        rtp_pipeline, "extract_node_text", lambda result, node_id: f"prose... {composer_json}"
-    )
 
-    itinerary = rtp_pipeline.run_pipeline(sample_plan_request)
+    def __init__(self, response: str) -> None:
+        self._response = response
 
+    def __call__(self, prompt: str) -> str:
+        return self._response
+
+
+# ---------------------------------------------------------------------------
+# Per-step functions — happy path (LLM JSON parsed) + fallback (bad JSON)
+# ---------------------------------------------------------------------------
+
+
+def test_profile_travelers_parses_llm_json(sample_plan_request):
+    llm = _FakeLLM('{"group_description": "family of hikers", "activity_pace": "active"}')
+    profile = rtp_pipeline.profile_travelers(sample_plan_request.trip, llm=llm)
+    assert isinstance(profile, TravelerGroupProfile)
+    assert profile.group_description == "family of hikers"
+    assert profile.activity_pace == "active"
+
+
+def test_profile_travelers_falls_back_on_bad_json(sample_plan_request):
+    profile = rtp_pipeline.profile_travelers(sample_plan_request.trip, llm=_FakeLLM("not json"))
+    assert isinstance(profile, TravelerGroupProfile)
+    # Fallback derives interests from the travelers (Alice → hiking).
+    assert "hiking" in profile.combined_interests
+
+
+def test_plan_route_parses_llm_json(sample_plan_request):
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "SF", "stop_type": "start"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert isinstance(route, RoutePlan)
+    assert route.route_summary == "coastal"
+    assert route.ordered_stops[0].location == "SF"
+
+
+def test_plan_route_falls_back_on_bad_json(sample_plan_request):
+    route = rtp_pipeline.plan_route(
+        sample_plan_request.trip, TravelerGroupProfile(), llm=_FakeLLM("x")
+    )
+    assert isinstance(route, RoutePlan)
+    locations = [s.location for s in route.ordered_stops]
+    assert "San Francisco, CA" in locations
+    assert "Yosemite" in locations
+
+
+def test_recommend_activities_parses_and_skips_passthrough(sample_plan_request):
+    route = RoutePlan(
+        ordered_stops=[
+            RouteStop(location="SF", stop_type="start", recommended_nights=0),
+            RouteStop(location="Yosemite", stop_type="destination", recommended_nights=1),
+        ]
+    )
+    llm = _FakeLLM('{"activities": [{"name": "Hike"}], "dining": [], "tips": ["bring water"]}')
+    result = rtp_pipeline.recommend_activities(
+        route, TravelerGroupProfile(), sample_plan_request.trip, llm=llm
+    )
+    assert [r.location for r in result] == ["SF", "Yosemite"]
+    # SF is a pass-through start (0 nights) → empty entry, no LLM call recorded.
+    assert result[0].activities == []
+    assert result[1].activities == [{"name": "Hike"}]
+    assert result[1].tips == ["bring water"]
+
+
+def test_plan_logistics_parses_llm_json(sample_plan_request):
+    route = RoutePlan(ordered_stops=[RouteStop(location="Yosemite", recommended_nights=1)])
+    llm = _FakeLLM(
+        '{"stop_logistics": [], "packing_suggestions": ["boots"],'
+        ' "travel_tips": ["start early"], "budget_estimate": "$800"}'
+    )
+    logistics = rtp_pipeline.plan_logistics(
+        route, TravelerGroupProfile(), sample_plan_request.trip, llm=llm
+    )
+    assert isinstance(logistics, LogisticsPlan)
+    assert logistics.packing_suggestions == ["boots"]
+    assert logistics.budget_estimate == "$800"
+
+
+def test_plan_logistics_falls_back_on_bad_json(sample_plan_request):
+    logistics = rtp_pipeline.plan_logistics(
+        RoutePlan(), TravelerGroupProfile(), sample_plan_request.trip, llm=_FakeLLM("boom")
+    )
+    assert isinstance(logistics, LogisticsPlan)
+    assert logistics.packing_suggestions  # non-empty fallback list
+
+
+def test_compose_itinerary_parses_llm_json(sample_plan_request):
+    route = RoutePlan(
+        ordered_stops=[RouteStop(location="Yosemite", recommended_nights=1)], suggested_total_days=2
+    )
+    llm = _FakeLLM(
+        json.dumps(
+            {
+                "title": "SF to LA",
+                "overview": "coastal cruise",
+                "total_days": 2,
+                "days": [
+                    {
+                        "day_number": 1,
+                        "location": "Yosemite",
+                        "morning_activities": [{"name": "Hike"}],
+                    }
+                ],
+            }
+        )
+    )
+    itinerary = rtp_pipeline.compose_itinerary(
+        sample_plan_request.trip,
+        TravelerGroupProfile(),
+        route,
+        [StopActivities(location="Yosemite")],
+        LogisticsPlan(),
+        llm=llm,
+    )
     assert isinstance(itinerary, TripItinerary)
     assert itinerary.title == "SF to LA"
-    assert itinerary.overview == "Coastal cruise"
-    assert itinerary.days[0].date == "Day 1"
-    assert itinerary.days[0].morning_activities[0].name == "Coffee"
+    assert itinerary.days[0].morning_activities[0].name == "Hike"
 
 
-def test_run_pipeline_falls_back_when_output_unparseable(monkeypatch, sample_plan_request):
-    """run_pipeline returns a minimal fallback itinerary when the graph output
-    has no parseable JSON.
-
-    Mock contract: extract_node_text returns text with no ``{`` so the parse
-    branch is skipped and the fallback (title/overview/total_days derived from
-    the request) is returned instead of raising.
-    """
-    monkeypatch.setattr(rtp_pipeline, "build_trip_graph", lambda: object())
-    monkeypatch.setattr(rtp_pipeline, "invoke_graph_sync", lambda graph, task: object())
-    monkeypatch.setattr(rtp_pipeline, "extract_node_text", lambda result, node_id: "no json here")
-
-    itinerary = rtp_pipeline.run_pipeline(sample_plan_request)
-
+def test_compose_itinerary_falls_back_on_bad_json(sample_plan_request):
+    route = RoutePlan(
+        ordered_stops=[RouteStop(location="Yosemite", recommended_nights=1)], suggested_total_days=2
+    )
+    itinerary = rtp_pipeline.compose_itinerary(
+        sample_plan_request.trip,
+        TravelerGroupProfile(),
+        route,
+        [StopActivities(location="Yosemite")],
+        LogisticsPlan(travel_tips=["t"]),
+        llm=_FakeLLM("nope"),
+    )
     assert isinstance(itinerary, TripItinerary)
-    assert itinerary.title == "Road Trip: San Francisco, CA to Los Angeles, CA"
-    assert "parsing failed" in itinerary.overview
-    assert itinerary.total_days == 2
+    assert itinerary.total_days == 2  # derived from route.suggested_total_days
+
+
+# ---------------------------------------------------------------------------
+# run_pipeline chaining + job-store bookkeeping
+# ---------------------------------------------------------------------------
+
+
+def test_run_pipeline_chains_all_steps_in_order(monkeypatch, sample_plan_request):
+    calls: list[str] = []
+    profile = TravelerGroupProfile(group_description="fam")
+    route = RoutePlan(route_summary="loop")
+    activities = [StopActivities(location="Yosemite")]
+    logistics = LogisticsPlan(budget_estimate="$900")
+    final = TripItinerary(title="Final", total_days=2)
+    captured: dict = {}
+
+    def _profile(trip):
+        calls.append("profile")
+        return profile
+
+    def _route(trip, p):
+        calls.append("route")
+        return route
+
+    def _activities(r, p, trip):
+        calls.append("activities")
+        return activities
+
+    def _logistics(r, p, trip):
+        calls.append("logistics")
+        return logistics
+
+    def _compose(trip, p, r, a, lg):
+        calls.append("compose")
+        captured.update(profile=p, route=r, activities=a, logistics=lg)
+        return final
+
+    monkeypatch.setattr(rtp_pipeline, "profile_travelers", _profile)
+    monkeypatch.setattr(rtp_pipeline, "plan_route", _route)
+    monkeypatch.setattr(rtp_pipeline, "recommend_activities", _activities)
+    monkeypatch.setattr(rtp_pipeline, "plan_logistics", _logistics)
+    monkeypatch.setattr(rtp_pipeline, "compose_itinerary", _compose)
+
+    out = rtp_pipeline.run_pipeline(sample_plan_request)
+
+    assert out is final
+    assert calls == ["profile", "route", "activities", "logistics", "compose"]
+    # The composer receives every upstream step's typed output.
+    assert captured["profile"] is profile
+    assert captured["route"] is route
+    assert captured["activities"] is activities
+    assert captured["logistics"] is logistics
+
+
+def test_run_plan_core_writes_running_then_completed(monkeypatch, sample_plan_request):
+    create_job("job-core", request={"trip": {}})
+    canned = TripItinerary(title="Core", total_days=1)
+    monkeypatch.setattr(rtp_pipeline, "run_pipeline", lambda body: canned)
+
+    rtp_pipeline.run_plan_core("job-core", sample_plan_request)
+
+    job = get_job("job-core")
+    assert job["status"] == JOB_STATUS_COMPLETED
+    assert job["result"]["title"] == "Core"
+
+
+def test_run_plan_background_marks_failed_on_error(monkeypatch, sample_plan_request):
+    create_job("job-bg", request={"trip": {}})
+
+    def _boom(_body):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(rtp_pipeline, "run_pipeline", _boom)
+
+    # A daemon-thread runner has no caller to raise to — it must swallow + record.
+    rtp_pipeline.run_plan_background("job-bg", sample_plan_request)
+
+    job = get_job("job-bg")
+    assert job["status"] == JOB_STATUS_FAILED
+    assert "kaboom" in (job.get("error") or "")
