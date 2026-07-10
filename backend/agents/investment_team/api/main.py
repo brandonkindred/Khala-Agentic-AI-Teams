@@ -1480,10 +1480,6 @@ def _run_one_strategy_lab_cycle(
             when the paper-trading step runs.
     """
 
-    def _emit(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
-        if on_phase:
-            on_phase(phase, data or {})
-
     # When the caller (the wave driver) precomputes the prior records once per
     # wave, reuse that snapshot instead of re-reading + re-parsing the whole
     # table in every concurrent cycle. Each cycle persists only at its very end,
@@ -1500,6 +1496,74 @@ def _run_one_strategy_lab_cycle(
         on_phase=on_phase,
         exclude_asset_classes=exclude_asset_classes,
     )
+
+    return _finalize_strategy_lab_cycle_record(
+        record,
+        signal_brief_storage=signal_brief_storage,
+        paper_trading_enabled=paper_trading_enabled,
+        paper_trading_lookback_days=paper_trading_lookback_days,
+        on_phase=on_phase,
+    )
+
+
+def _persist_strategy_lab_record(record: StrategyLabRecord) -> None:
+    """Durably persist a completed cycle's record + strategy + backtest.
+
+    Preconditions:
+        ``record`` is a fully assembled ``StrategyLabRecord`` (post
+        paper-trading step) with ``record.strategy`` / ``record.backtest``
+        populated.
+    Postconditions:
+        ``record`` / ``record.strategy`` / ``record.backtest`` are written to
+        the ``JobServiceClient``-backed ``_strategy_lab_records`` /
+        ``_strategies`` / ``_backtests`` stores, keyed by their respective
+        ids. Extracted from ``_run_one_strategy_lab_cycle`` so a Temporal
+        activity can reuse the identical write without duplicating it.
+    """
+    with _lock:
+        _strategy_lab_records[record.lab_record_id] = record
+        _strategies[record.strategy.strategy_id] = record.strategy
+        _backtests[record.backtest.backtest_id] = record.backtest
+
+
+def _finalize_strategy_lab_cycle_record(
+    record: StrategyLabRecord,
+    *,
+    signal_brief_storage: Optional[Dict[str, Any]] = None,
+    paper_trading_enabled: bool = True,
+    paper_trading_lookback_days: int = 365,
+    on_phase: Optional[Any] = None,
+) -> StrategyLabRecord:
+    """Attach the signal brief, run the gated paper-trading step, and persist.
+
+    Extracted verbatim from ``_run_one_strategy_lab_cycle``'s tail so the
+    Temporal ``finalize_cycle_record_activity`` and the thread-mode wave driver
+    share one implementation of the post-``run_cycle`` finalization instead of
+    duplicating (and risking drift on) the ~60-line paper-trading branch.
+
+    Preconditions:
+        ``record`` is a fully assembled ``StrategyLabRecord`` returned by
+        ``StrategyLabOrchestrator.run_cycle`` (``record.strategy`` /
+        ``record.backtest`` populated). ``on_phase`` is either ``None`` or a
+        callable ``(phase: str, data: dict) -> None`` that receives
+        phase-change notifications (``paper_trading``, ``paper_trading_complete``,
+        ``paper_trading_skipped``, ``paper_trading_failed``); when ``None``, those
+        events are silently dropped (the Temporal ``finalize_cycle_record_activity``
+        passes ``None`` — SSE progress is a separate concern there).
+    Postconditions:
+        Returns the same ``record`` with its ``signal_intelligence_brief`` set
+        (when ``signal_brief_storage`` is given and it was empty) and its
+        ``paper_trading_*`` fields resolved — ``skipped`` for non-winning /
+        disabled / no-code / no-data cases, ``completed`` on success,
+        ``failed`` (non-fatal) on a paper-trading error. The record is durably
+        persisted via :func:`_persist_strategy_lab_record` before returning. Any
+        ``on_phase`` callback fires as a side effect only; it never affects the
+        returned record.
+    """
+
+    def _emit(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
+        if on_phase:
+            on_phase(phase, data or {})
 
     # Attach signal brief before persisting (PersistentDict serializes at assignment)
     if signal_brief_storage and not record.signal_intelligence_brief:
@@ -1571,26 +1635,6 @@ def _run_one_strategy_lab_cycle(
     return record
 
 
-def _persist_strategy_lab_record(record: StrategyLabRecord) -> None:
-    """Durably persist a completed cycle's record + strategy + backtest.
-
-    Preconditions:
-        ``record`` is a fully assembled ``StrategyLabRecord`` (post
-        paper-trading step) with ``record.strategy`` / ``record.backtest``
-        populated.
-    Postconditions:
-        ``record`` / ``record.strategy`` / ``record.backtest`` are written to
-        the ``JobServiceClient``-backed ``_strategy_lab_records`` /
-        ``_strategies`` / ``_backtests`` stores, keyed by their respective
-        ids. Extracted from ``_run_one_strategy_lab_cycle`` so a Temporal
-        activity can reuse the identical write without duplicating it.
-    """
-    with _lock:
-        _strategy_lab_records[record.lab_record_id] = record
-        _strategies[record.strategy.strategy_id] = record.strategy
-        _backtests[record.backtest.backtest_id] = record.backtest
-
-
 def _strategy_lab_signal_expert_enabled() -> bool:
     return os.environ.get("STRATEGY_LAB_SIGNAL_EXPERT_ENABLED", "true").lower() in (
         "true",
@@ -1604,6 +1648,103 @@ def _get_lab_run_job_client():
     from job_service_client import JobServiceClient
 
     return JobServiceClient(team="investment_strategy_lab_runs")
+
+
+def _compute_signal_brief_snapshot(
+    benchmark_symbol: str,
+) -> tuple[Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]]:
+    """Build a per-batch signal brief over all currently-persisted prior records.
+
+    Extracted from ``_strategy_lab_worker``'s ``_compute_signal_brief`` closure so
+    the Temporal ``compute_signal_brief_activity`` and the thread-mode wave driver
+    share one implementation. Called at the start of every batch so batch N+1 sees
+    results from batches 1..N (and prior runs).
+
+    Preconditions:
+        ``benchmark_symbol`` is the run's benchmark ticker.
+    Postconditions:
+        Returns ``(brief, storage)``. Fail-open: on disabled expert / market-fetch
+        failure / expert failure it returns ``(None, {"skipped": True, ...})`` (or a
+        degraded-market brief) rather than raising.
+    """
+    if not _strategy_lab_signal_expert_enabled():
+        return None, {"skipped": True, "skipped_reason": "signal_expert_disabled"}
+
+    provider = FreeTierMarketDataProvider()
+    try:
+        try:
+            market_ctx = provider.fetch_context(
+                StrategyLabDataRequest(benchmark_symbol=benchmark_symbol)
+            )
+        except Exception as exc:
+            logger.warning("Market data fetch failed: %s", exc)
+            market_ctx = MarketLabContext(
+                fetched_at=_now(),
+                degraded=True,
+                degraded_reason=str(exc),
+                sources_used=[],
+            )
+        prior_for_brief = _snapshot_prior_records()
+
+        expert = SignalIntelligenceExpert()
+        t0 = datetime.now(tz=timezone.utc)
+        try:
+            brief = expert.produce_signal_brief(prior_for_brief, market_ctx)
+            storage = brief.model_dump(mode="json")
+            prov_text = market_ctx.as_prompt_text()
+            storage["brief_provenance"] = {
+                "expert": "signal_intelligence_v1",
+                "market_snapshot_hash": hashlib.sha256(prov_text.encode()).hexdigest()[:16],
+                "market_fetched_at": market_ctx.fetched_at,
+                "market_degraded": market_ctx.degraded,
+                "duration_ms": int((datetime.now(tz=timezone.utc) - t0).total_seconds() * 1000),
+            }
+            logger.info(
+                "signal_intelligence brief_version=%s len=%s degraded_market=%s",
+                storage.get("brief_version"),
+                len(str(storage)),
+                market_ctx.degraded,
+            )
+            return brief, storage
+        except Exception as exc:
+            logger.warning("Signal intelligence expert failed: %s", exc)
+            return None, {
+                "skipped": True,
+                "skipped_reason": "expert_failed",
+                "error": str(exc),
+            }
+    finally:
+        provider.close()
+
+
+# Narrower than ``STRATEGY_LAB_TERMINAL_STATUSES`` (defined above): a run that
+# reached ``completed``/``completed_with_errors`` is NOT an external cancellation,
+# so those are deliberately excluded from the cancel check.
+_STRATEGY_LAB_CANCEL_STATUSES = frozenset({"cancelled", "failed", "interrupted"})
+
+
+def _is_strategy_lab_run_cancelled(run_id: str) -> bool:
+    """Return True if the run's job-store status is terminal (external cancel).
+
+    Extracted from ``_strategy_lab_worker``'s ``_is_run_cancelled`` closure so the
+    Temporal ``is_run_cancelled_activity`` and the thread-mode wave driver share
+    one implementation.
+
+    Preconditions:
+        ``run_id`` is the strategy-lab run identifier.
+    Postconditions:
+        Returns True when the persisted job's ``status`` is one of
+        ``cancelled``/``failed``/``interrupted``; False on any read error or a
+        non-terminal/absent status (never raises).
+    """
+    try:
+        client = _get_lab_run_job_client()
+        persisted = client.get_job(run_id)
+        if persisted:
+            return persisted.get("status", "") in _STRATEGY_LAB_CANCEL_STATUSES
+    except Exception:
+        pass
+    return False
 
 
 def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = False) -> None:
@@ -1869,78 +2010,6 @@ def _strategy_lab_worker(
             # "no constraint" handling (which keys off ``None``) is uniform.
             exclude_asset_classes = excluded_for_allowed(request.allowed_asset_classes) or None
 
-        def _compute_signal_brief() -> tuple[
-            Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]
-        ]:
-            """Build the per-batch signal brief over all currently-persisted prior records.
-
-            Called at the start of every batch so that batch N+1 sees results from
-            batches 1..N (and prior runs).
-            """
-            if not _strategy_lab_signal_expert_enabled():
-                return None, {"skipped": True, "skipped_reason": "signal_expert_disabled"}
-
-            provider = FreeTierMarketDataProvider()
-            try:
-                try:
-                    market_ctx = provider.fetch_context(
-                        StrategyLabDataRequest(benchmark_symbol=request.benchmark_symbol)
-                    )
-                except Exception as exc:
-                    logger.warning("Market data fetch failed: %s", exc)
-                    market_ctx = MarketLabContext(
-                        fetched_at=_now(),
-                        degraded=True,
-                        degraded_reason=str(exc),
-                        sources_used=[],
-                    )
-                prior_for_brief = _snapshot_prior_records()
-
-                expert = SignalIntelligenceExpert()
-                t0 = datetime.now(tz=timezone.utc)
-                try:
-                    brief = expert.produce_signal_brief(prior_for_brief, market_ctx)
-                    storage = brief.model_dump(mode="json")
-                    prov_text = market_ctx.as_prompt_text()
-                    storage["brief_provenance"] = {
-                        "expert": "signal_intelligence_v1",
-                        "market_snapshot_hash": hashlib.sha256(prov_text.encode()).hexdigest()[:16],
-                        "market_fetched_at": market_ctx.fetched_at,
-                        "market_degraded": market_ctx.degraded,
-                        "duration_ms": int(
-                            (datetime.now(tz=timezone.utc) - t0).total_seconds() * 1000
-                        ),
-                    }
-                    logger.info(
-                        "signal_intelligence brief_version=%s len=%s degraded_market=%s",
-                        storage.get("brief_version"),
-                        len(str(storage)),
-                        market_ctx.degraded,
-                    )
-                    return brief, storage
-                except Exception as exc:
-                    logger.warning("Signal intelligence expert failed: %s", exc)
-                    return None, {
-                        "skipped": True,
-                        "skipped_reason": "expert_failed",
-                        "error": str(exc),
-                    }
-            finally:
-                provider.close()
-
-        _TERMINAL_STATUSES = frozenset({"cancelled", "failed", "interrupted"})
-
-        def _is_run_cancelled() -> bool:
-            """Check the job service for external cancellation."""
-            try:
-                client = _get_lab_run_job_client()
-                persisted = client.get_job(run_id)
-                if persisted:
-                    return persisted.get("status", "") in _TERMINAL_STATUSES
-            except Exception:
-                pass
-            return False
-
         # Resume support: derive starting batch + within-batch index from the flat offset.
         start_batch_idx, start_within_batch = divmod(start_cycle_offset, batch_size)
         if start_cycle_offset > 0:
@@ -1996,10 +2065,12 @@ def _strategy_lab_worker(
 
             # Refresh the signal-intelligence brief at the start of every batch so the
             # next batch's strategies are informed by every prior batch's results.
-            # Belt-and-suspenders: _compute_signal_brief already catches expected
-            # failures, but an unexpected raise here must not kill the whole run.
+            # Belt-and-suspenders: _compute_signal_brief_snapshot already catches
+            # expected failures, but an unexpected raise here must not kill the run.
             try:
-                precomputed_brief, signal_brief_storage = _compute_signal_brief()
+                precomputed_brief, signal_brief_storage = _compute_signal_brief_snapshot(
+                    request.benchmark_symbol
+                )
             except Exception as exc:  # pragma: no cover — signal brief failure path defensive; happy path covered by integration tests
                 logger.exception(
                     "Signal brief computation raised unexpectedly at batch %d", batch_num
@@ -2219,7 +2290,7 @@ def _strategy_lab_worker(
                             )
 
                 # Check for external cancellation between waves
-                if not run_failed and _is_run_cancelled():
+                if not run_failed and _is_strategy_lab_run_cancelled(run_id):
                     logger.info(
                         "Strategy lab run %s cancelled externally — stopping after wave",
                         run_id,
