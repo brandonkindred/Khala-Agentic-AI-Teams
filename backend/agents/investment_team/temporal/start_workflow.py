@@ -16,36 +16,15 @@ from investment_team.temporal import (
     TASK_QUEUE,
     WORKFLOW_ID_PREFIX,
     InvestmentBacktestWorkflow,
-    InvestmentStrategyLabWorkflow,
 )
 from shared_temporal import start_workflow_sync
 
 logger = logging.getLogger(__name__)
 
-
-def start_strategy_lab_workflow(run_id: str, request: Any) -> None:
-    """Start :class:`InvestmentStrategyLabWorkflow` for a Strategy Lab run.
-
-    Preconditions:
-        - ``run_id`` is non-empty and already registered in the active-run
-          registry / job store.
-        - ``request`` is a ``RunStrategyLabRequest`` (exposes ``model_dump``).
-        - Temporal is enabled and the investment worker is running.
-
-    Postconditions:
-        - The workflow is started under id ``investment-{run_id}`` on the
-          investment task queue. Raises ``RuntimeError`` if the worker client
-          never becomes available.
-    """
-    workflow_id = f"{WORKFLOW_ID_PREFIX}{run_id}"
-    start_workflow_sync(
-        InvestmentStrategyLabWorkflow.run,
-        run_id,
-        request.model_dump(mode="json"),
-        workflow_id=workflow_id,
-        task_queue=TASK_QUEUE,
-    )
-    logger.info("Started InvestmentStrategyLabWorkflow id=%s", workflow_id)
+# The Strategy Lab run is now started via
+# ``investment_team.strategy_lab.temporal.start_workflow.start_strategy_lab_batch_workflow``
+# (the fine-grained ``StrategyLabBatchWorkflow`` on ``strategy-lab-queue``); the
+# old coarse ``start_strategy_lab_workflow`` here has been removed in the cutover.
 
 
 def start_backtest_workflow(
