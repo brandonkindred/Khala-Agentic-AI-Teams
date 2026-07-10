@@ -29,6 +29,7 @@ from shared_repo_context.repo_utils import (
     REPO_EXCLUDE_DIRS,
     REPO_INSPECT_EXCLUDE_DIRS,
     REPO_INSPECT_EXTRA_EXCLUDE_DIRS,
+    find_repo_files,
     int_env,
     is_secret_template_path,
     is_sensitive_path,
@@ -53,6 +54,7 @@ __all__ = [
     # scanner + helpers
     "read_repo_code",
     "read_repo_code_budgeted",
+    "find_repo_files",
     "read_files_as_dict",
     "read_repo_files_as_dict",
     "truncate_for_context",

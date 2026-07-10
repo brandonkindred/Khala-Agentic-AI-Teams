@@ -60,28 +60,68 @@ def test_importing_temporal_package_does_not_call_start_team_worker():
         )
 
 
-def test_workflows_and_package_do_not_call_os_getenv_at_import_time():
-    """The workflow module + package __init__ are replayed by the temporalio
-    sandbox during workflow registration. Neither may invoke ``os.getenv`` at
-    module top level — it has to live inside activity bodies or the worker
-    bootstrap."""
-    _purge("sales_team.temporal")
-    import os
+def test_workflow_registers_in_temporalio_sandbox():
+    """Ground truth for sandbox safety: ``SalesWorkflow`` (which now imports the
+    sales models + activities under ``workflow.unsafe.imports_passed_through()``)
+    must import and instantiate inside the real ``SandboxedWorkflowRunner`` with
+    ``shared_temporal``'s passthrough restrictions, without a
+    ``RestrictedWorkflowAccessError``.
 
-    with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
-        importlib.import_module("sales_team.temporal.workflows")
-        assert spy.call_count == 0, (
-            f"sales_team.temporal.workflows called os.getenv {spy.call_count} "
-            f"time(s) at import — this trips the temporalio workflow sandbox "
-            f"during workflow registration."
-        )
-        spy.reset_mock()
-        importlib.import_module("sales_team.temporal")
-        assert spy.call_count == 0, (
-            f"sales_team.temporal.__init__ called os.getenv {spy.call_count} "
-            f"time(s) at import — this trips the temporalio workflow sandbox "
-            f"during workflow registration."
-        )
+    This supersedes the old "zero ``os.getenv`` at import" spy: the workflow now
+    legitimately imports pydantic models under passthrough (pydantic reads
+    ``PYDANTIC_DISABLE_PLUGINS`` while building model classes), which the sandbox
+    explicitly permits. Registering the workflow for real is a stronger check
+    than the proxy — it exercises exactly what the worker does at boot.
+    """
+    import asyncio
+
+    import temporalio.workflow as _wf
+
+    from shared_temporal.worker import _build_workflow_runner
+
+    _purge("sales_team.temporal")
+    from sales_team.temporal import WORKFLOWS
+
+    async def _prepare() -> None:
+        runner = _build_workflow_runner()
+        for wfc in WORKFLOWS:  # SalesWorkflow + DeepResearchWorkflow
+            runner.prepare_workflow(_wf._Definition.must_from_class(wfc))
+
+    # No RestrictedWorkflowAccessError => the modules (and their passthrough
+    # imports) loaded cleanly in the sandbox.
+    asyncio.run(_prepare())
+
+
+def test_activities_list_exposes_every_stage_activity():
+    """The worker registers the whole ``ACTIVITIES`` list; guard that all twelve
+    fine-grained activities are exported so a rename can't silently drop one from
+    the worker's registration."""
+    from sales_team.temporal import ACTIVITIES
+
+    names = {getattr(a, "__name__", None) for a in ACTIVITIES}
+    assert names == {
+        # main pipeline
+        "prepare_sales_pipeline_activity",
+        "prospect_activity",
+        "load_dossiers_activity",
+        "outreach_one_activity",
+        "qualify_one_activity",
+        "nurture_one_activity",
+        "discovery_one_activity",
+        "proposal_one_activity",
+        "close_one_activity",
+        "coach_activity",
+        "report_progress_activity",
+        "mark_failed_activity",
+        "finalize_sales_pipeline_activity",
+        # deep research
+        "prepare_deep_research_activity",
+        "companies_activity",
+        "map_company_one_activity",
+        "rank_activity",
+        "build_dossier_one_activity",
+        "finalize_deep_research_activity",
+    }
 
 
 def test_worker_module_exposes_team_service_entrypoint():
@@ -96,6 +136,22 @@ def test_worker_module_exposes_team_service_entrypoint():
         "team_service entrypoint expects a no-arg "
         "start_sales_temporal_worker_thread() in sales_team.temporal.worker"
     )
+
+
+def test_max_concurrent_activities_env_parsing(monkeypatch):
+    """The fan-out ceiling is env-tunable (shared env_int parser): a valid value
+    is honoured, unset/garbage falls back to the default, and a non-positive
+    value is clamped up to the floor of 1."""
+    from sales_team.temporal import worker as worker_mod
+
+    monkeypatch.setenv("SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES", "16")
+    assert worker_mod._max_concurrent_activities() == 16
+    monkeypatch.setenv("SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES", "nan")
+    assert worker_mod._max_concurrent_activities() == 8  # garbage → default
+    monkeypatch.setenv("SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES", "0")
+    assert worker_mod._max_concurrent_activities() == 1  # clamped to floor
+    monkeypatch.delenv("SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES", raising=False)
+    assert worker_mod._max_concurrent_activities() == 8
 
 
 def test_worker_start_is_no_op_when_temporal_disabled(monkeypatch):
@@ -116,9 +172,13 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
     monkeypatch.setattr(worker_mod, "is_temporal_enabled", lambda: True)
     captured: dict = {}
 
-    def _fake_start(team, workflows, activities, *, task_queue):
+    def _fake_start(team, workflows, activities, *, task_queue, max_concurrent_activities):
         captured.update(
-            team=team, workflows=workflows, activities=activities, task_queue=task_queue
+            team=team,
+            workflows=workflows,
+            activities=activities,
+            task_queue=task_queue,
+            max_concurrent_activities=max_concurrent_activities,
         )
         return True
 
@@ -130,6 +190,9 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
         "workflows": WORKFLOWS,
         "activities": ACTIVITIES,
         "task_queue": TASK_QUEUE,
+        # Fan-out is now Temporal-managed; the ceiling defaults to the old
+        # thread-pool width so throughput is preserved.
+        "max_concurrent_activities": 8,
     }
     assert TASK_QUEUE == "sales-queue"
 
@@ -154,4 +217,27 @@ def test_start_sales_workflow_delegates_to_shared_bridge(monkeypatch):
     assert captured["workflow_run"] is SalesWorkflow.run
     assert captured["args"] == ("job-abc", {"product_name": "x"})
     assert captured["workflow_id"] == "sales-job-abc"
+    assert captured["task_queue"] == "sales-queue"
+
+
+def test_start_deep_research_workflow_delegates_to_shared_bridge(monkeypatch):
+    """The deep-research wrapper forwards to ``start_workflow_sync`` with the
+    deep-research workflow id prefix + the shared sales task queue."""
+    from sales_team.temporal import DeepResearchWorkflow
+    from sales_team.temporal import start_workflow as sw
+
+    captured: dict = {}
+
+    def _fake_start_workflow_sync(workflow_run, *args, workflow_id, task_queue, **_kw):
+        captured.update(
+            workflow_run=workflow_run, args=args, workflow_id=workflow_id, task_queue=task_queue
+        )
+
+    monkeypatch.setattr(sw, "start_workflow_sync", _fake_start_workflow_sync)
+
+    sw.start_deep_research_workflow("job-xyz", {"product_name": "x"})
+
+    assert captured["workflow_run"] is DeepResearchWorkflow.run
+    assert captured["args"] == ("job-xyz", {"product_name": "x"})
+    assert captured["workflow_id"] == "sales-deep-research-job-xyz"
     assert captured["task_queue"] == "sales-queue"

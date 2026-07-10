@@ -169,6 +169,24 @@ Temporal namespace.
 ### TEMPORAL_TASK_QUEUE
 Temporal task queue name.
 
+### SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES
+Int (default `8`, floor `1`). Ceiling on how many sales activities the sales
+Temporal worker runs at once. The sales pipeline fans each stage out into one
+activity per prospect, so this — not the old in-process
+`SalesPipelineConfig.pipeline_stage_workers` thread pool — bounds fan-out
+throughput; the default matches that pool's width (`8`) so wall-clock is
+preserved. Parsed via the shared `env_int` (unset/garbage/`≤0` → default, with a
+warning on a set-but-unparseable value). Only read by the sales worker.
+
+### SALES_TEMPORAL_HEARTBEAT_INTERVAL_S
+Float seconds (default `30`, clamped to `[1, 60]`). How often each long sales
+LLM activity emits `activity.heartbeat` so Temporal can detect a hung activity
+faster than its full timeout. The ceiling is one third of the fixed 180s
+activity heartbeat timeout, guaranteeing at least ~3 beats per window regardless
+of configuration — so a mis-set value can never make a healthy activity
+heartbeat-timeout. Parsed via the shared `env_float` (unset/garbage/non-finite →
+default, with a warning on a set-but-unparseable value).
+
 ### Code review agent: Temporal by default
 **The code review agent runs Temporal by default** (unlike the other teams, which
 only switch on when `TEMPORAL_ADDRESS` is set): `CodeReviewAgent.run` dispatches
@@ -188,6 +206,35 @@ dispatch decision is unchanged.
 Test-only escape hatch (truthy: `1`/`true`/`yes`/`on`) that re-enables code-review
 Temporal mode despite the `pytest`/`dummy` guards, provided an address still
 resolves. Not load-bearing outside integration tests.
+
+### TEMPORAL_PAYLOAD_COMPRESSION
+Boolean (default `false` — opt-in). The shared Temporal client
+(`shared_temporal.client`, used by every team's client and worker) always
+installs a gzip `PayloadCodec` on its `DataConverter`; this var gates only
+whether that codec *writes* compressed payloads — decoding an already-compressed
+payload is never gated, so any process running this codec can always read what
+another process wrote. Source code and JSON compress well, so turning this on
+transparently keeps large activity/workflow payloads — e.g. the code review
+agent's map-reduce chunks, which deliberately carry the full, untruncated diff —
+under Temporal's 512 KiB `PayloadSizeWarning` (`TMPRL1103`) threshold instead of
+just alerting on it; smaller payloads (below `TEMPORAL_PAYLOAD_COMPRESSION_MIN_BYTES`)
+pass through uncompressed either way, and compression that wouldn't actually
+shrink a payload (already-compressed/high-entropy binary data) is skipped too.
+
+**Rollout**: many teams here are independently deployable services sharing one
+Temporal cluster, so a fleet-wide upgrade is not atomic — a process built
+*before* this codec existed can never decode a payload one running it already
+compressed. That's why encoding defaults off: deploy this code everywhere first
+(every process can now decode, but nothing compresses yet, so behavior is
+unchanged), then set this to `true` once every service on that cluster is
+confirmed running a build with the codec. Turn it off again (or never turn it
+on) if you need the Temporal Web UI to render raw, human-readable payloads
+without a codec server configured there.
+
+### TEMPORAL_PAYLOAD_COMPRESSION_MIN_BYTES
+Int (default `1024`, floor `0`). Serialized payloads smaller than this many bytes
+skip gzip entirely (compression overhead outweighs the benefit below this size,
+and small payloads are nowhere near the warning threshold anyway).
 
 ### SECURITY_GATEWAY_ENABLED
 Security gateway toggle (default: true).
@@ -265,7 +312,23 @@ figure.
 When truthy (`true`/`1`/`yes`; default off), each SE-attributed LLM call is also
 persisted as a row in `se_agent_traces` — the substrate the metrics endpoint
 reads for per-job and total spend, so cost metrics work even without an OTLP
-collector. No-op when Postgres is disabled.
+collector. No-op when Postgres is disabled. Traces are written off the LLM call
+path: the observer enqueues into a bounded in-memory buffer and a background
+heartbeat drains it via batched `executemany` (see `SE_TRACE_FLUSH_INTERVAL_S`
+and `SE_TRACE_BUFFER_MAX`); a final drain runs at shutdown before the Postgres
+pool closes, so no row is lost on a clean shutdown.
+
+### SE_TRACE_FLUSH_INTERVAL_S
+Seconds between background drains of the in-memory trace buffer to
+`se_agent_traces` (default `2`, mirroring `SE_COST_FLUSH_INTERVAL_S`; garbage →
+`2`, negatives clamped to `0` which floors the loop at `0.1s` so it never
+busy-loops). The observer does zero DB I/O on the LLM call path; rows are
+eventually consistent within this interval.
+
+### SE_TRACE_BUFFER_MAX
+Maximum number of trace rows held in memory before the oldest is dropped
+(default `1000`; floor `1`). Overflow drops the oldest row and logs a WARNING
+once per burst — bounded memory, never blocks the caller.
 
 ### SE_TRACE_RETENTION_DAYS
 Retention window for `se_agent_traces` rows used by `trace_store.prune_traces`

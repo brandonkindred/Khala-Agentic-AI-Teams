@@ -104,7 +104,7 @@ def test_connect_temporal_client_connects_when_address_set(
 
     sentinel = object()
 
-    async def _fake_connect(address, namespace):  # noqa: ANN001
+    async def _fake_connect(address, namespace, **kwargs):  # noqa: ANN001
         assert address == "temporal:7233"
         assert namespace == "social"
         return sentinel
@@ -119,12 +119,10 @@ def test_connect_temporal_client_connects_when_address_set(
     assert result is sentinel
 
 
-def test_connect_temporal_client_raises_on_failure(
-    monkeypatch: pytest.MonkeyPatch, caplog
-) -> None:
+def test_connect_temporal_client_raises_on_failure(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
 
-    async def _bad_connect(address, namespace):  # noqa: ANN001
+    async def _bad_connect(address, namespace, **kwargs):  # noqa: ANN001
         raise RuntimeError("boom")
 
     import temporalio.client as tc
@@ -279,9 +277,7 @@ def test_run_team_job_activity_success(monkeypatch: pytest.MonkeyPatch) -> None:
         captured["client_id"] = request.client_id
         captured["ctx"] = ctx
 
-    monkeypatch.setattr(
-        "social_media_marketing_team.adapters.branding.fetch_brand", _fake_fetch
-    )
+    monkeypatch.setattr("social_media_marketing_team.adapters.branding.fetch_brand", _fake_fetch)
     monkeypatch.setattr(
         "social_media_marketing_team.adapters.branding.validate_brand_for_social_marketing",
         _fake_validate,
@@ -309,9 +305,7 @@ def test_run_team_job_activity_brand_not_found_non_retryable(
     def _fake_fetch(*a, **k):
         raise BrandNotFoundError("c", "b")
 
-    monkeypatch.setattr(
-        "social_media_marketing_team.adapters.branding.fetch_brand", _fake_fetch
-    )
+    monkeypatch.setattr("social_media_marketing_team.adapters.branding.fetch_brand", _fake_fetch)
 
     with pytest.raises(ApplicationError) as exc:
         amod.run_team_job_activity(
@@ -336,9 +330,7 @@ def test_run_team_job_activity_brand_incomplete_non_retryable(
     def _fake_validate(*a, **k):
         raise BrandIncompleteError("c", "b", ["strategic_core"], "draft")
 
-    monkeypatch.setattr(
-        "social_media_marketing_team.adapters.branding.fetch_brand", _fake_fetch
-    )
+    monkeypatch.setattr("social_media_marketing_team.adapters.branding.fetch_brand", _fake_fetch)
     monkeypatch.setattr(
         "social_media_marketing_team.adapters.branding.validate_brand_for_social_marketing",
         _fake_validate,
@@ -357,9 +349,7 @@ def test_run_team_job_activity_unexpected_reraises(monkeypatch: pytest.MonkeyPat
     def _fake_fetch(*a, **k):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(
-        "social_media_marketing_team.adapters.branding.fetch_brand", _fake_fetch
-    )
+    monkeypatch.setattr("social_media_marketing_team.adapters.branding.fetch_brand", _fake_fetch)
 
     with pytest.raises(RuntimeError):
         amod.run_team_job_activity(
@@ -506,9 +496,7 @@ def test_worker_thread_target_runs_loop(monkeypatch: pytest.MonkeyPatch) -> None
     assert state["ran"] is True
 
 
-def test_worker_thread_target_handles_exception(
-    monkeypatch: pytest.MonkeyPatch, caplog
-) -> None:
+def test_worker_thread_target_handles_exception(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
     from social_media_marketing_team.temporal import worker as wmod
 

@@ -1566,13 +1566,29 @@ def _run_one_strategy_lab_cycle(
             record.paper_trading_error = str(exc)[:500]
             _emit("paper_trading_failed", {"detail": record.paper_trading_error})
 
-    # Persist to in-memory stores
+    _persist_strategy_lab_record(record)
+
+    return record
+
+
+def _persist_strategy_lab_record(record: StrategyLabRecord) -> None:
+    """Durably persist a completed cycle's record + strategy + backtest.
+
+    Preconditions:
+        ``record`` is a fully assembled ``StrategyLabRecord`` (post
+        paper-trading step) with ``record.strategy`` / ``record.backtest``
+        populated.
+    Postconditions:
+        ``record`` / ``record.strategy`` / ``record.backtest`` are written to
+        the ``JobServiceClient``-backed ``_strategy_lab_records`` /
+        ``_strategies`` / ``_backtests`` stores, keyed by their respective
+        ids. Extracted from ``_run_one_strategy_lab_cycle`` so a Temporal
+        activity can reuse the identical write without duplicating it.
+    """
     with _lock:
         _strategy_lab_records[record.lab_record_id] = record
         _strategies[record.strategy.strategy_id] = record.strategy
         _backtests[record.backtest.backtest_id] = record.backtest
-
-    return record
 
 
 def _strategy_lab_signal_expert_enabled() -> bool:

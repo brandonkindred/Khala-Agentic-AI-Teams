@@ -106,8 +106,10 @@ def read_repo_code_budgeted(
     """Read source files under *repo_path* until a character budget is hit.
 
     The single implementation behind the per-domain ``_read_repo_code`` readers in
-    the code-v2 and ai-agent-development teams: a sorted ``rglob`` walk that emits
-    ``--- <relpath> ---\\n<content>\\n`` chunks joined by newlines and stops once
+    the code-v2 and ai-agent-development teams: a streamed ``os.walk`` that prunes
+    excluded directories in place (so a checkout with a huge ``node_modules`` /
+    ``.git`` / ``.venv`` is never descended into) and emits
+    ``--- <relpath> ---\\n<content>\\n`` chunks joined by newlines, stopping once
     adding the next chunk would exceed *max_chars* (whole files only — never a
     partial file).
 
@@ -122,39 +124,48 @@ def read_repo_code_budgeted(
           (logged at WARNING), and a mid-walk filesystem error (e.g. a directory
           deleted by a parallel build while scanning, or an untraversable dir)
           degrades to a briefing built from the entries enumerated *before* the
-          error, instead of failing the caller's workflow. The tree is
-          enumerated first, then sorted, then read — so a walk that aborts
-          partway still yields real content, not the empty string.
+          error, instead of failing the caller's workflow. Eligible files are
+          collected, then sorted, then read — so a walk that aborts partway still
+          yields real content, not the empty string.
     """
     assert max_chars > 0, "max_chars must be positive"
     ext_set = frozenset(extensions)
     excl_set = frozenset(exclude_dirs)
-    parts: List[str] = []
-    total = 0
-    # Enumerate the walk into a list under its own guard: ``rglob`` can raise
-    # mid-iteration (a dir deleted by a parallel build, an untraversable dir),
-    # and materializing here — rather than inside ``sorted(...)`` in the read
-    # loop — keeps the entries gathered so far so the read below still produces a
-    # partial briefing. ``OSError`` is the only family a filesystem walk raises;
-    # a broader catch would bury real programming errors as empty briefings.
-    walked: List[Path] = []
+    # Stream the walk with ``os.walk`` and prune excluded dirs in place so the
+    # traversal never descends into node_modules/.git/etc. The previous
+    # ``rglob("*")`` materialized the *entire* tree (including every entry under
+    # those excluded dirs) into a list before the sort + budget loop, which is
+    # precisely the stat storm a large frontend repo makes expensive. Collecting
+    # eligible files only, then sorting, matches the prior output (same files,
+    # same order, same budget cut) without enumerating the excluded subtrees.
+    # ``OSError`` is the only family a filesystem walk raises; a broader catch
+    # would bury real programming errors as empty briefings.
+    eligible: List[Path] = []
     try:
-        for f in repo_path.rglob("*"):
-            walked.append(f)
+        for dirpath, dirnames, filenames in os.walk(repo_path):
+            dirnames[:] = [d for d in dirnames if d not in excl_set]
+            for name in filenames:
+                f = Path(dirpath) / name
+                # is_file() (not just the suffix) guards against special files:
+                # a FIFO / socket / device named e.g. ``pipe.py`` would pass the
+                # suffix check and block read_text() forever (a hang the
+                # try/except in the read loop cannot catch). is_file() is False
+                # for those and for broken symlinks, matching the prior rglob
+                # path's ``f.is_file()`` filter.
+                if f.suffix in ext_set and f.is_file():
+                    eligible.append(f)
     except OSError as exc:
         logger.warning(
             "Repo briefing walk under %s aborted early (%s); using the %d entries found so far",
             repo_path,
             exc,
-            len(walked),
+            len(eligible),
             exc_info=True,
         )
-    for f in sorted(walked):
+    parts: List[str] = []
+    total = 0
+    for f in sorted(eligible):
         try:
-            if not f.is_file() or f.suffix not in ext_set:
-                continue
-            if excl_set & set(f.parts):
-                continue
             content = f.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             logger.warning("Repo briefing skipped %s: %s", f, exc)
@@ -595,6 +606,68 @@ def read_repo_files_as_dict(
     return read_files_as_dict(
         repo_path, paths, extensions=None, omitted=omitted, key_to_path=key_to_path
     )
+
+
+def find_repo_files(
+    repo_path: Path,
+    *,
+    suffixes: Iterable[str] = (),
+    names: Iterable[str] = (),
+    exclude_dirs: Iterable[str] = REPO_INSPECT_EXCLUDE_DIRS,
+) -> List[Path]:
+    """Return regular files under *repo_path* matching *suffixes* and/or *names*.
+
+    The pruned-walk counterpart of :func:`read_repo_code_budgeted` for callers
+    that need *paths* (not concatenated content): stack-language detection
+    (``_detect_language``) and the build-fix file collector. A streamed
+    ``os.walk`` prunes *exclude_dirs* in place via ``dirnames[:]``, so a checkout
+    with a huge ``node_modules`` / ``.git`` / ``.venv`` is never descended into —
+    the same I/O discipline ``read_repo_code_budgeted`` established, replacing the
+    ``rglob`` calls that materialized those excluded subtrees before filtering.
+
+    Preconditions:
+        - *repo_path* is a ``Path`` (may not exist). A non-directory yields ``[]``
+          rather than raising, so best-effort detectors (``_detect_language``)
+          can call this unconditionally.
+        - *suffixes* are file suffixes including the leading dot (``.py``);
+          *names* are exact basenames (``pom.xml``). Either may be empty (no
+          filter on that axis). A file matches when it satisfies either axis.
+    Postconditions:
+        - Returns paths for regular files matching a requested suffix or name,
+          in walk order; ``[]`` when none match or *repo_path* is not a
+          directory. Never raises: a mid-walk ``OSError`` degrades to the entries
+          found so far, mirroring :func:`read_repo_code_budgeted`.
+    """
+    try:
+        if not repo_path.is_dir():
+            return []
+    except OSError:
+        return []
+    suffix_set = frozenset(suffixes)
+    name_set = frozenset(names)
+    excl_set = frozenset(exclude_dirs)
+    matched: List[Path] = []
+    try:
+        for dirpath, dirnames, filenames in os.walk(repo_path):
+            dirnames[:] = [d for d in dirnames if d not in excl_set]
+            for name in filenames:
+                f = Path(dirpath) / name
+                # is_file() guards against special files (FIFO/socket/device) the
+                # way read_repo_code_budgeted's does; a name match alone is not
+                # enough since a dir could be named e.g. ``pom.xml``.
+                if not f.is_file():
+                    continue
+                if (suffix_set and f.suffix in suffix_set) or (name_set and name in name_set):
+                    matched.append(f)
+    except OSError as exc:
+        logger.warning(
+            "find_repo_files walk under %s aborted early (%s); using %d entries found so far",
+            repo_path,
+            exc,
+            len(matched),
+            exc_info=True,
+        )
+    return matched
 
 
 def truncate_for_context(

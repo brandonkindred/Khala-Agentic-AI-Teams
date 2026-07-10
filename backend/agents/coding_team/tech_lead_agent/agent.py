@@ -393,6 +393,7 @@ class TechLeadAgent:
         changes_summary: str,
         user_decisions: Optional[List[str]] = None,
         progress_callback: Optional[Callable[[str, str, float], None]] = None,
+        spec_content: str = "",
     ) -> Dict[str, Any]:
         """Review feature branch: approved (bool), reason (str), requested_changes (list).
 
@@ -405,6 +406,10 @@ class TechLeadAgent:
               ``(step, detail, fraction)``; steps emitted here are
               ``reviewing | waiting_retry | done``. Exceptions it raises are
               logged and swallowed — they must never count as failed attempts.
+            - ``spec_content`` is the plan's full spec text (``CodingTeamPlanInput.final_spec_content``)
+              or "". This is the swarm's sole code-review call (the quality gate's duplicate review
+              was removed), so it is the only place global spec constraints outside a task's own
+              description/acceptance criteria can be checked. Empty adds nothing to the prompt.
 
         Postconditions:
             - When ``progress_callback`` is provided, each LLM attempt and each
@@ -418,6 +423,13 @@ class TechLeadAgent:
             acceptance_criteria=json.dumps(acceptance_criteria),
             changes_summary=changes_summary,
         )
+        if spec_content.strip():
+            # Appended (not a CODE_REVIEW_USER placeholder) so the template's .format() keys are
+            # untouched, mirroring the user-decisions block below.
+            user += (
+                "\n\nProject specification (check the change complies with any constraints here "
+                "beyond the task's own description/acceptance criteria):\n" + spec_content
+            )
         decisions = [str(d).strip() for d in (user_decisions or []) if str(d).strip()]
         if decisions:
             # Appended (not a CODE_REVIEW_USER placeholder) so the template's .format() keys are

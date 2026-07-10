@@ -35,6 +35,7 @@ class StubTechLead:
         changes_summary,
         user_decisions=None,
         progress_callback=None,
+        spec_content="",
     ):
         return {"approved": self.approved, "reason": "ok", "requested_changes": []}
 

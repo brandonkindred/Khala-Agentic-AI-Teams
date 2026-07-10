@@ -8,7 +8,6 @@ every write lands in the in-memory ``FakeJobServiceClient``.
 
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -107,93 +106,3 @@ def test_repair_agent_returns_empty_when_no_fix() -> None:
     )
     assert not result.suggested_fixes
     assert result.summary
-
-
-def test_parse_traceback_for_crash_extracts_location() -> None:
-    """_parse_traceback_for_crash extracts file_path, line_number, function_name."""
-    import orchestrator
-
-    try:
-        raise NameError("test")
-    except NameError as e:
-        file_path, line_number, func_name = orchestrator._parse_traceback_for_crash(e)
-    assert file_path
-    assert "test_repair_agent" in str(file_path) or "orchestrator" in str(file_path)
-    assert line_number is not None
-    assert isinstance(line_number, int)
-
-
-def test_log_agent_crash_banner_does_not_raise() -> None:
-    """_log_agent_crash_banner logs without raising."""
-    import orchestrator
-
-    try:
-        raise ValueError("test crash")
-    except ValueError as e:
-        orchestrator._log_agent_crash_banner("task-1", "backend", e, "")
-
-
-def test_log_agent_crash_banner_logs_error_with_task_and_exception() -> None:
-    """_log_agent_crash_banner logs at ERROR level with task_id and exception info."""
-    import orchestrator
-
-    error_calls = []
-    original_error = orchestrator.logger.error
-
-    def capture_error(msg, *args, **kwargs):
-        error_calls.append((msg, args, kwargs))
-        original_error(msg, *args, **kwargs)
-
-    try:
-        raise NameError("undefined_var")
-    except NameError as e:
-        with patch.object(orchestrator.logger, "error", side_effect=capture_error):
-            orchestrator._log_agent_crash_banner("backend-task-1", "backend", e, "")
-    assert len(error_calls) >= 3
-    all_text = " ".join(str(c[0]) + " " + " ".join(str(a) for a in c[1]) for c in error_calls)
-    assert "backend-task-1" in all_text
-    assert "NameError" in all_text or "undefined_var" in all_text
-
-
-def test_apply_repair_fixes_applies_valid_fix(tmp_path: Path) -> None:
-    """_apply_repair_fixes applies a valid fix and returns True."""
-    import orchestrator
-
-    target_file = tmp_path / "test_file.py"
-    target_file.write_text("line1\nline2\nline3\nline4\nline5\n")
-    suggested_fixes = [
-        {
-            "file_path": str(target_file.name),
-            "line_start": 2,
-            "line_end": 2,
-            "replacement_content": "fixed\n",
-        }
-    ]
-    # agent_source_path is tmp_path so target is tmp_path/test_file.py
-    applied = orchestrator._apply_repair_fixes(tmp_path, suggested_fixes)
-    assert applied
-    content = target_file.read_text()
-    assert "fixed" in content
-    assert "line2" not in content
-
-
-def test_apply_repair_fixes_rejects_path_outside_tree(tmp_path: Path) -> None:
-    """_apply_repair_fixes rejects paths outside agent_source_path."""
-    import orchestrator
-
-    agent_root = tmp_path / "software_engineering_team"
-    agent_root.mkdir()
-    (agent_root / "backend_agent").mkdir(parents=True)
-    target = agent_root / "backend_agent" / "agent.py"
-    target.write_text("x = 1\n")
-    # Try to fix a path that resolves outside agent_root
-    suggested_fixes = [
-        {
-            "file_path": "../../../etc/passwd",
-            "line_start": 1,
-            "line_end": 1,
-            "replacement_content": "evil\n",
-        }
-    ]
-    applied = orchestrator._apply_repair_fixes(agent_root, suggested_fixes)
-    assert not applied

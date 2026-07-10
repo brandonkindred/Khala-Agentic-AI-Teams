@@ -18,10 +18,10 @@ def _se_startup() -> None:  # pragma: no cover - integration-only ASGI startup h
     """
     try:
         from software_engineering_team.shared.cost_tracker import register_cost_observer
-        from software_engineering_team.shared.trace_store import register_trace_observer
+        from software_engineering_team.shared.trace_flusher import register_trace_flusher
 
         register_cost_observer()
-        register_trace_observer()
+        register_trace_flusher()
     except Exception as e:
         logger.warning("Could not register SE telemetry observers: %s", e)
     try:
@@ -33,10 +33,19 @@ def _se_startup() -> None:  # pragma: no cover - integration-only ASGI startup h
 
 
 def _se_shutdown() -> None:  # pragma: no cover - integration-only ASGI shutdown hook
-    """Mark active SE jobs as failed so they can be resumed after a restart.
+    """Flush buffered traces and mark active SE jobs as failed for resume.
 
-    Runs before the factory closes the Postgres pool. Log-and-continue.
+    Runs before the factory closes the Postgres pool (see
+    ``shared_app/factory.py``), so the trace flusher's final drain can still use
+    the pool. Log-and-continue — a single failure never aborts shutdown or leaks
+    the pool the factory closes next.
     """
+    try:
+        from software_engineering_team.shared.trace_flusher import shutdown as flush_shutdown
+
+        flush_shutdown()
+    except Exception as e:
+        logger.warning("Could not flush SE traces on shutdown: %s", e)
     try:
         from software_engineering_team.shared.job_store import mark_all_running_jobs_failed
 

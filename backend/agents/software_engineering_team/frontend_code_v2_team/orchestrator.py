@@ -1,8 +1,8 @@
 """
-Frontend-Code-V2 team orchestrator: Setup + 5-phase state machine.
+Frontend-Code-V2 team orchestrator: 5-phase state machine (Setup → Planning →
+Execution → Documentation → Deliver) for frontend code-generation tasks.
 
 Entry point used by the main orchestrator and by the frontend-code-v2 API.
-No code from frontend_team or feature_agent is imported or reused.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from llm_service import LLMClient
 from shared_repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
+from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.tool_agent_runners import build_tool_runners
 
 from .models import (
@@ -36,11 +37,37 @@ from .phases.setup import configure_quality_tooling, run_setup
 
 logger = logging.getLogger(__name__)
 
-MAX_REVIEW_ITERATIONS = 15
+# Frontend repo-briefing filter contract: the extensions read into the development
+# agent's context and the directories pruned from the walk. Single-sourced here so
+# the fresh-walk ``_read_repo_code`` and the incremental ``RepoContextCache`` the
+# team lead threads in cannot drift apart (the cache's byte-identical invariant
+# depends on them matching).
+_FRONTEND_REPO_EXTENSIONS = frozenset(
+    {".ts", ".tsx", ".js", ".jsx", ".html", ".css", ".scss", ".json", ".yaml", ".yml"}
+)
+_FRONTEND_REPO_EXCLUDE_DIRS = frozenset({"node_modules", ".git", "dist", "build", ".angular"})
+# Character budget for the repo briefing (whole files only; the next chunk that
+# would exceed it stops the briefing).
+_FRONTEND_REPO_BRIEFING_MAX_CHARS = 30_000
 
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
-    """Build team-owned tool agent instances with LLM support where applicable."""
+    """Build team-owned tool agent instances with LLM support where applicable.
+
+    The tool-agent imports are deferred to call time on purpose: each adapter
+    module pulls in heavy strands/llm_service machinery and several import the
+    orchestrator's own package, so hoisting them to module top would both make
+    this module expensive to import and reintroduce a circular import. Keeping
+    them lazy bounds the import cost to actual runs, so they are not hoisted to
+    module scope.
+
+    Preconditions: ``llm`` is a configured ``LLMClient`` (not ``None``) — agents
+      that need an LLM (documentation, testing, security, UI/UX, accessibility,
+      performance, architecture, build) are constructed with it.
+    Postconditions: returns a ``Dict[ToolAgentKind, Any]`` mapping every
+      ``ToolAgentKind`` this team uses to a constructed agent instance; does
+      not raise on the happy path.
+    """
     from software_engineering_team.shared.tool_agent_git_branch import (
         GitBranchManagementToolAgent,
     )
@@ -81,13 +108,19 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
 
 class FrontendDevelopmentAgent:
     """
-    Frontend Development Agent: runs the 5-phase cycle (Planning → Execution →
-    Review → Problem-solving → Deliver). Used by FrontendCodeV2TeamLead after Setup.
+    Frontend Development Agent: runs the 4-phase cycle (Planning → Execution →
+    Documentation → Deliver) with per-microtask review gates embedded in the
+    Execution phase. Used by FrontendCodeV2TeamLead after it runs Setup.
     """
 
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
+        # Optional incremental repo-context cache threaded in by the team lead so
+        # the per-task briefing re-reads only changed files instead of re-walking
+        # the whole repo. None (the direct-construction/test path) falls back to
+        # the fresh-walk ``_read_repo_code``.
+        self._repo_context_cache: Optional[RepoContextCache] = None
 
     def _build_tool_runners(
         self, tool_agents: Dict[ToolAgentKind, Any]
@@ -95,7 +128,7 @@ class FrontendDevelopmentAgent:
         return build_tool_runners(tool_agents)
 
     @staticmethod
-    def _read_repo_code(repo_path: Path, max_chars: int = 30_000) -> str:
+    def _read_repo_code(repo_path: Path, max_chars: int = _FRONTEND_REPO_BRIEFING_MAX_CHARS) -> str:
         """Read frontend source files from repo into a single string.
 
         Delegates to the shared budgeted scanner so every per-domain reader shares
@@ -103,21 +136,72 @@ class FrontendDevelopmentAgent:
         """
         return read_repo_code_budgeted(
             repo_path,
-            extensions={
-                ".ts",
-                ".tsx",
-                ".js",
-                ".jsx",
-                ".html",
-                ".css",
-                ".scss",
-                ".json",
-                ".yaml",
-                ".yml",
-            },
-            exclude_dirs={"node_modules", ".git", "dist", "build", ".angular"},
+            extensions=_FRONTEND_REPO_EXTENSIONS,
+            exclude_dirs=_FRONTEND_REPO_EXCLUDE_DIRS,
             max_chars=max_chars,
         )
+
+    def _read_existing_code(self, repo_path: Path) -> str:
+        """Return the repo briefing, consulting the incremental cache when one is threaded in.
+
+        Preconditions: ``repo_path`` is an existing directory.
+        Postconditions: returns a briefing byte-identical to
+          ``_read_repo_code(repo_path)`` for the current on-disk state; when a
+          cache is present it re-reads only changed eligible files. Raises
+          ``AssertionError`` if the precondition is violated (caller bug).
+        Invariants: with no cache the fresh walk runs each call; with a cache the
+          output never differs from the fresh walk, only the amount of file I/O.
+
+        The no-cache branch calls ``_read_repo_code(repo_path)`` with no kwargs
+        deliberately: callers (and tests) monkeypatch it with a no-kwargs
+        signature, and the cache carries its own char budget, so forwarding one
+        here would both break that patch surface and be ignored.
+        """
+        assert repo_path.is_dir(), "repo_path must be an existing directory"
+        if self._repo_context_cache is not None:
+            return self._repo_context_cache.read(repo_path)
+        return self._read_repo_code(repo_path)
+
+    @staticmethod
+    def _detect_tooling(repo_path: Path) -> Tuple[bool, bool]:
+        """Return ``(has_lint, has_test)`` for the configured frontend tooling.
+
+        Detects ESLint/Angular configs as lint, and Vitest/Jest/Karma or a real
+        ``npm test`` script as testing. Best-effort: an unparseable ``package.json``
+        just means no test script was found.
+
+        Preconditions: ``repo_path`` is a directory.
+        Postconditions: returns two booleans. Raises ``AssertionError`` if the
+          precondition is violated (a non-directory ``repo_path`` is a caller
+          bug, not a runtime failure mode this method recovers from).
+        """
+        assert repo_path.is_dir(), "repo_path must be a directory"
+        has_lint = (
+            next(repo_path.glob("eslint.config.*"), None) is not None
+            or next(repo_path.glob(".eslintrc*"), None) is not None
+            or (repo_path / "angular.json").exists()
+        )
+        has_test = False
+        if (
+            next(repo_path.glob("vitest.config.*"), None) is not None
+            or next(repo_path.glob("jest.config.*"), None) is not None
+            or (repo_path / "karma.conf.js").exists()
+        ):
+            has_test = True
+        else:
+            pkg_json = repo_path / "package.json"
+            if pkg_json.exists():
+                try:
+                    pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+                    test_script = pkg.get("scripts", {}).get("test", "")
+                    if test_script and "no test" not in test_script and "exit 1" not in test_script:
+                        has_test = True
+                except Exception as exc:
+                    # A malformed package.json means no test script was found;
+                    # log at DEBUG so a real config problem is observable during
+                    # debugging without failing the best-effort pre-flight gate.
+                    logger.debug("[%s] failed to parse package.json: %s", repo_path, exc)
+        return has_lint, has_test
 
     def run_workflow(
         self,
@@ -134,6 +218,7 @@ class FrontendDevelopmentAgent:
         job_updater: Optional[Callable[..., None]] = None,
         review_config: Optional[MicrotaskReviewConfig] = None,
         merge_to_development: bool = True,
+        repo_context_cache: Optional[RepoContextCache] = None,
     ) -> FrontendCodeV2WorkflowResult:
         """
         Execute the full 5-phase frontend lifecycle with per-microtask review gates.
@@ -145,6 +230,7 @@ class FrontendDevelopmentAgent:
         a feature branch and leaves it ready for external Tech Lead review instead of
         merging it into the development branch.
         """
+        self._repo_context_cache = repo_context_cache
         task_id = task.id
         start_time = time.monotonic()
         result = FrontendCodeV2WorkflowResult(task_id=task_id)
@@ -153,8 +239,11 @@ class FrontendDevelopmentAgent:
             if job_updater:
                 try:
                     job_updater(**kwargs)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # A job-update failure must not crash the workflow, but log it
+                    # at DEBUG so a persistently broken updater callback stays
+                    # observable during debugging instead of vanishing silently.
+                    logger.debug("[%s] job_updater failed: %s", task_id, exc)
 
         logger.info(
             "[%s] WORKFLOW START: Frontend Development Agent (per-microtask review gates)", task_id
@@ -178,27 +267,7 @@ class FrontendDevelopmentAgent:
         # ── Pre-flight: verify linting & testing are configured ───────
         # Runs after the feature-branch checkout so it validates the branch that
         # will actually be edited, not whatever branch setup last left checked out.
-        _has_lint = bool(
-            list(repo_path.glob("eslint.config.*"))
-            or list(repo_path.glob(".eslintrc*"))
-            or (repo_path / "angular.json").exists()
-        )
-        pkg_json = repo_path / "package.json"
-        _has_test = False
-        if bool(
-            list(repo_path.glob("vitest.config.*"))
-            or list(repo_path.glob("jest.config.*"))
-            or (repo_path / "karma.conf.js").exists()
-        ):
-            _has_test = True
-        elif pkg_json.exists():
-            try:
-                pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
-                test_script = pkg.get("scripts", {}).get("test", "")
-                if test_script and "no test" not in test_script and "exit 1" not in test_script:
-                    _has_test = True
-            except Exception:
-                pass
+        _has_lint, _has_test = self._detect_tooling(repo_path)
 
         if not _has_lint or not _has_test:
             missing = []
@@ -219,7 +288,7 @@ class FrontendDevelopmentAgent:
             return result
         logger.info("[%s] Pre-flight check passed: linting and testing configured", task_id)
 
-        existing_code = self._read_repo_code(repo_path)
+        existing_code = self._read_existing_code(repo_path)
         tool_agents = _build_tool_agents(self.llm)
         tool_runners = self._build_tool_runners(tool_agents)
 
@@ -471,6 +540,32 @@ class FrontendCodeV2TeamLead:
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
+        # Per-repo incremental briefing cache, reused across the team lead's
+        # run_workflow calls (the coding-team worker reuses one team lead for all
+        # tasks in a job), so the N tasks of a job re-read only the files each
+        # merge touched instead of re-walking the whole repo N times.
+        self._repo_context_caches: Dict[Path, RepoContextCache] = {}
+
+    def _repo_context_cache_for(self, repo_path: Path) -> RepoContextCache:
+        """Return the incremental briefing cache for ``repo_path``, creating it lazily.
+
+        Preconditions: ``repo_path`` is a directory the development agent will scan.
+        Postconditions: returns a ``RepoContextCache`` configured with the frontend
+          repo-briefing contract (extensions / exclude dirs / char budget); the same
+          instance is returned for the same resolved repo across calls. Raises
+          ``AssertionError`` if the precondition is violated (caller bug).
+        """
+        assert repo_path.is_dir(), "repo_path must be a directory"
+        key = repo_path.resolve()
+        cache = self._repo_context_caches.get(key)
+        if cache is None:
+            cache = RepoContextCache(
+                extensions=_FRONTEND_REPO_EXTENSIONS,
+                exclude_dirs=_FRONTEND_REPO_EXCLUDE_DIRS,
+                max_chars=_FRONTEND_REPO_BRIEFING_MAX_CHARS,
+            )
+            self._repo_context_caches[key] = cache
+        return cache
 
     def run_workflow(
         self,
@@ -500,8 +595,8 @@ class FrontendCodeV2TeamLead:
             if job_updater:
                 try:
                     job_updater(**kwargs)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("[%s] job_updater failed: %s", task_id, exc)
 
         result.current_phase = Phase.SETUP
         _update_job(current_phase="setup", progress=2)
@@ -558,7 +653,17 @@ class FrontendCodeV2TeamLead:
             job_updater=job_updater,
             review_config=review_config,
             merge_to_development=merge_to_development,
+            repo_context_cache=self._repo_context_cache_for(repo_path),
         )
+        # Overlay the dev agent's execution-stage fields onto the team-lead
+        # result. This copy is deliberately selective: ``setup_result`` is NOT
+        # copied, so the team-lead's own setup phase (run above) is preserved
+        # rather than replaced by the dev agent's internal setup. Because the
+        # two results share the same Pydantic model, a blanket ``model_copy``
+        # would clobber ``setup_result`` — so the fields are listed explicitly.
+        # Maintenance contract: any new field ``FrontendCodeV2WorkflowResult``
+        # gains that the dev agent populates must be added here, or it will be
+        # dropped on the team-lead path.
         result.success = inner.success
         result.current_phase = inner.current_phase
         result.iterations_used = inner.iterations_used
