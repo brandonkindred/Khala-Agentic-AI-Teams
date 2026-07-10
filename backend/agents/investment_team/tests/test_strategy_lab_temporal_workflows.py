@@ -387,6 +387,6 @@ def test_run_seeds_failure_directives_from_tracker_state():
 def test_module_exports_workflow_and_activities():
     from investment_team.strategy_lab.temporal import activities as act
 
-    assert wf.WORKFLOWS == [wf.StrategyLabCycleWorkflow]
+    assert wf.WORKFLOWS == [wf.StrategyLabCycleWorkflow, wf.StrategyLabBatchWorkflow]
     assert wf.TASK_QUEUE == "strategy-lab-queue"
     assert wf.ACTIVITIES == act.ACTIVITIES
