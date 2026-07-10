@@ -24,11 +24,11 @@ Invariants:
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from llm_service import get_client
+from shared_concurrency import parallel_map
 
 from .agents import (
     AvailabilityTSCAgent,
@@ -39,7 +39,6 @@ from .agents import (
     SecurityTSCAgent,
 )
 from .models import (
-    FindingSeverity,
     NextStepsDocument,
     RepoContext,
     SOC2AuditResult,
@@ -64,23 +63,19 @@ _TSC_AGENTS = {
     TSCCategory.PRIVACY: PrivacyTSCAgent(),
 }
 
-# The five TSC categories, in canonical order (used to fan out).
-TSC_CRITERIA: List[TSCCategory] = list(_TSC_AGENTS.keys())
+# Invariant: every Trust Service Criterion has a registered auditor. Both drivers
+# fan out over the full ``TSCCategory`` enum — the Temporal workflow derives its
+# list directly from the enum (it can't import this module, which pulls in
+# ``strands``), so this guard keeps the two lists from silently diverging if a
+# criterion is ever added without an agent. Explicit raise (not ``assert``) so it
+# still fires under ``python -O``.
+_MISSING_AGENTS = set(TSCCategory) - set(_TSC_AGENTS)
+if _MISSING_AGENTS:  # pragma: no cover - build-time invariant
+    raise RuntimeError(f"Every TSCCategory needs a _TSC_AGENTS entry; missing {_MISSING_AGENTS}")
 
-
-def _has_material_findings(tsc_results: List[TSCAuditResult]) -> bool:
-    """Return True if any criterion is non-compliant or has a critical/high finding.
-
-    Preconditions:
-        - ``tsc_results`` is a list of ``TSCAuditResult``.
-    Postconditions:
-        - Returns a bool; does not mutate ``tsc_results``.
-    """
-    return any(
-        not r.compliant
-        or any(f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH) for f in r.findings)
-        for r in tsc_results
-    )
+# The TSC categories in canonical (enum) order — the fan-out set, shared with the
+# Temporal workflow via the ``TSCCategory`` enum (see the invariant above).
+TSC_CRITERIA: List[TSCCategory] = list(TSCCategory)
 
 
 def load_context(repo_path: str | Path) -> RepoContext:
@@ -112,25 +107,35 @@ def audit_criterion(category: TSCCategory, context: RepoContext) -> TSCAuditResu
 
 
 def audit_criterion_safe(category: TSCCategory, context: RepoContext) -> TSCAuditResult:
-    """Audit one criterion, isolating failures into a placeholder result.
+    """Audit one criterion, isolating *runtime* failures into a placeholder result.
 
     Both drivers use this so a single failed auditor never sinks the whole
     audit and both execution modes produce identical output.
 
     Preconditions:
         - ``category`` is a valid ``TSCCategory``; ``context`` is a ``RepoContext``.
+          An unknown category is a caller/contract bug and is raised (never
+          masked as an audit failure) — validated before the isolation boundary.
     Postconditions:
-        - Returns a ``TSCAuditResult`` for ``category``. On failure, returns a
-          non-compliant placeholder whose summary carries the error (never
-          raises).
+        - Returns a ``TSCAuditResult`` for ``category``. On a runtime audit error
+          the result is **fail-closed**: ``compliant=False`` (never silently
+          "compliant" for a criterion that could not be assessed) with the error
+          in the summary, so an un-auditable criterion surfaces in the report
+          instead of being reported as a pass. Never raises for a runtime error.
     """
+    # Surface a contract violation directly — do not let the try/except below
+    # mask an unknown category as a fabricated "audit failed" finding. Explicit
+    # raise (not ``assert``) so it holds under ``python -O``.
+    if category not in _TSC_AGENTS:
+        raise KeyError(f"Unknown TSC category: {category}")
     try:
         return audit_criterion(category, context)
-    except Exception as e:  # noqa: BLE001 - isolate a single criterion's failure
+    except Exception as e:  # noqa: BLE001 - isolate a single criterion's runtime failure
         logger.exception("TSC audit failed for %s", category.value)
+        # Fail-closed: an un-assessable criterion is non-compliant, not a pass.
         return TSCAuditResult(
             category=category,
-            summary=f"Audit for {category.value} failed: {e}",
+            summary=f"Audit for {category.value} could not be completed: {e}",
             findings=[],
             compliant=False,
         )
@@ -143,10 +148,15 @@ def run_all_criteria(context: RepoContext) -> List[TSCAuditResult]:
         - ``context`` is a ``RepoContext``.
     Postconditions:
         - Returns one ``TSCAuditResult`` per criterion in ``TSC_CRITERIA``
-          order (failures isolated per :func:`audit_criterion_safe`).
+          order (failures isolated per :func:`audit_criterion_safe`). Uses the
+          shared context-propagating fan-out so each audit thread inherits the
+          caller's LLM attribution / request-id contextvars.
     """
-    with ThreadPoolExecutor(max_workers=len(TSC_CRITERIA), thread_name_prefix="soc2-tsc") as pool:
-        return list(pool.map(lambda c: audit_criterion_safe(c, context), TSC_CRITERIA))
+    return parallel_map(
+        TSC_CRITERIA,
+        lambda c: audit_criterion_safe(c, context),
+        max_workers=len(TSC_CRITERIA),
+    )
 
 
 def write_report(
@@ -178,14 +188,16 @@ def assemble_result(
         - Exactly one of ``compliance_report`` / ``next_steps_document`` is
           non-None (as returned by :func:`write_report`).
     Postconditions:
-        - Returns a ``SOC2AuditResult`` with ``status="completed"`` and
-          ``has_findings`` reflecting whether material findings exist.
+        - Returns a ``SOC2AuditResult`` with ``status="completed"``.
+          ``has_findings`` is taken from the single decision already made by the
+          report writer (a compliance report is produced iff material findings
+          exist), so it can never disagree with the report-vs-next-steps choice.
     """
     return SOC2AuditResult(
         status="completed",
         repo_path=str(repo_path),
         tsc_results=tsc_results,
-        has_findings=_has_material_findings(tsc_results),
+        has_findings=compliance_report is not None,
         compliance_report=compliance_report,
         next_steps_document=next_steps_document,
     )

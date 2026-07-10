@@ -105,3 +105,24 @@ def test_dispatch_marks_failed_on_error(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert r.status_code == 503
     # The job row must be marked failed, not left pending.
     assert any(u.get("status") == "failed" for u in updates)
+
+
+def test_dispatch_503_survives_job_store_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If marking the job failed also errors, the client still gets the 503."""
+    (tmp_path / "f.txt").write_text("x")
+    monkeypatch.setattr(api_main, "_is_temporal_enabled", lambda: True)
+
+    def _boom(job_id, repo_path):
+        raise RuntimeError("no worker client")
+
+    monkeypatch.setattr("soc2_compliance_team.temporal.start_workflow.start_audit_workflow", _boom)
+
+    def _update_boom(job_id, **fields):
+        raise RuntimeError("job store down")
+
+    monkeypatch.setattr(api_main, "_update_job", _update_boom)
+
+    r = client.post("/soc2-audit/run", json={"repo_path": str(tmp_path)})
+    assert r.status_code == 503

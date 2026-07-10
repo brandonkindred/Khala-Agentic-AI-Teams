@@ -24,6 +24,11 @@ with workflow.unsafe.imports_passed_through():
     from soc2_compliance_team.temporal import activities as _activities
 
 # The five Trust Service Criteria value strings, in enum order — the fan-out set.
+# Derived from the ``TSCCategory`` enum, the same source ``pipeline.TSC_CRITERIA``
+# uses (pipeline asserts every category has a registered auditor), so the thread
+# and Temporal drivers can never fan out over different criteria. We derive from
+# the enum here rather than importing ``pipeline`` because that module pulls in
+# ``strands`` / ``llm_service``, which the temporalio sandbox replays on registration.
 _TSC_CRITERIA = [c.value for c in TSCCategory]
 
 # Per-activity timeouts.

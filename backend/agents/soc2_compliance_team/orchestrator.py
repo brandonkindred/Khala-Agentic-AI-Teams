@@ -76,13 +76,13 @@ class SOC2AuditOrchestrator:
         )
 
 
-def run_soc2_audit(repo_path: str | Path, llm_client=None) -> SOC2AuditResult:
+def run_soc2_audit(repo_path: str | Path) -> SOC2AuditResult:
     """One-shot SOC2 audit over the shared pipeline.
 
     Preconditions:
-        - ``repo_path`` refers to an existing directory. ``llm_client`` is
-          accepted for backward compatibility and ignored (each pipeline step
-          resolves its own client from the provider list).
+        - ``repo_path`` refers to an existing directory. Each pipeline step
+          resolves its own LLM client from the provider list, so no client is
+          injected here.
     Postconditions:
         - Returns a ``SOC2AuditResult`` (see :meth:`SOC2AuditOrchestrator.run`).
     """

@@ -135,6 +135,6 @@ def test_run_soc2_audit_module_wrapper(monkeypatch: pytest.MonkeyPatch, tmp_path
     monkeypatch.setattr(
         pipeline, "write_report", lambda rp, tsc: (None, NextStepsDocument(title="Next"))
     )
-    out = run_soc2_audit(tmp_path, llm_client=object())
+    out = run_soc2_audit(tmp_path)
     assert isinstance(out, SOC2AuditResult)
     assert out.status == "completed"

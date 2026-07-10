@@ -186,9 +186,14 @@ def run_audit(request: RunAuditRequest) -> RunAuditResponse:
 
             start_audit_workflow(job_id, str(repo_path))
         except Exception as e:
-            # Don't leave the job orphaned in `pending` if dispatch fails.
+            # Don't leave the job orphaned in `pending` if dispatch fails. The
+            # terminal write is best-effort — a job-store error here must not mask
+            # the 503 we owe the client.
             logger.exception("Failed to dispatch SOC2 audit workflow for job %s", job_id)
-            _update_job(job_id, status="failed", current_stage="Failed", error=str(e))
+            try:
+                _update_job(job_id, status="failed", current_stage="Failed", error=str(e))
+            except Exception:
+                logger.exception("Also failed to mark job %s failed after dispatch error", job_id)
             raise HTTPException(status_code=503, detail=f"Failed to start audit workflow: {e}")
         return RunAuditResponse(
             job_id=job_id,
