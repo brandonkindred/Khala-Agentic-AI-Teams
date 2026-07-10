@@ -13,13 +13,17 @@ Covers three things the runtime depends on:
    ``on_startup`` lifespan backstop (covering standalone ``uvicorn ...:app`` runs
    and a wrapper start that silently failed).
 
-2. **Activity wiring.** The two activities reconstruct their request models and
-   delegate to the *existing* background workers (``_strategy_lab_worker`` /
-   ``_run_backtest_background``).
+2. **Activity wiring.** The backtest activity reconstructs its request models
+   and delegates to the *existing* ``_run_backtest_background`` worker. (The
+   Strategy Lab batch run is no longer a coarse activity here — it is driven by
+   the fine-grained ``StrategyLabBatchWorkflow`` in
+   ``investment_team.strategy_lab.temporal`` on ``strategy-lab-queue``.)
 
 3. **Dispatch branch.** ``POST /strategy-lab/run`` and ``POST /backtests`` route
    through a Temporal workflow when ``is_temporal_enabled()`` and fall back to a
-   daemon thread otherwise.
+   daemon thread otherwise. Strategy Lab dispatch targets
+   ``strategy_lab.temporal.start_workflow.start_strategy_lab_batch_workflow``;
+   backtests target ``temporal.start_workflow.start_backtest_workflow``.
 """
 
 from __future__ import annotations
@@ -49,15 +53,14 @@ def test_workflows_and_activities_are_registered() -> None:
         WORKFLOW_ID_PREFIX,
         WORKFLOWS,
         InvestmentBacktestWorkflow,
-        InvestmentStrategyLabWorkflow,
     )
 
-    assert WORKFLOWS == [InvestmentStrategyLabWorkflow, InvestmentBacktestWorkflow]
-    assert len(ACTIVITIES) == 2
-    assert {a.__name__ for a in ACTIVITIES} == {
-        "run_strategy_lab_activity",
-        "run_backtest_activity",
-    }
+    # After the Strategy Lab cutover this coarse queue serves only the ad hoc
+    # single-backtest workflow; the batch run moved to
+    # ``investment_team.strategy_lab.temporal`` on ``strategy-lab-queue``.
+    assert WORKFLOWS == [InvestmentBacktestWorkflow]
+    assert len(ACTIVITIES) == 1
+    assert {a.__name__ for a in ACTIVITIES} == {"run_backtest_activity"}
     assert TASK_QUEUE == "investment-queue"
     assert WORKFLOW_ID_PREFIX == "investment-"
 
@@ -180,58 +183,6 @@ def test_startup_backstop_swallows_worker_error(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_run_strategy_lab_activity_reconstructs_request_and_runs_worker(monkeypatch) -> None:
-    from investment_team.api import main as api_main
-    from investment_team.temporal.workflows import run_strategy_lab_activity
-
-    sentinel_request = object()
-    built = {}
-
-    def _fake_request(**kwargs):
-        built.update(kwargs)
-        return sentinel_request
-
-    calls = []
-    monkeypatch.setattr(api_main, "RunStrategyLabRequest", _fake_request)
-    monkeypatch.setattr(
-        api_main,
-        "_strategy_lab_worker",
-        lambda run_id, req, start_cycle_offset=0: calls.append((run_id, req, start_cycle_offset)),
-    )
-    # No durable state for this run_id → offset 0, no failure.
-    monkeypatch.setattr(api_main, "_rehydrate_active_run_offset", lambda rid: 0)
-    monkeypatch.setattr(api_main, "_strategy_lab_run_failure", lambda rid: None)
-
-    result = run_strategy_lab_activity("run-abc", {"batch_size": 3})
-
-    assert built == {"batch_size": 3}
-    assert calls == [("run-abc", sentinel_request, 0)]
-    assert result == {"run_id": "run-abc", "status": "completed"}
-
-
-def test_run_strategy_lab_activity_resumes_from_offset_and_raises_on_failure(monkeypatch) -> None:
-    from investment_team.api import main as api_main
-    from investment_team.temporal.workflows import run_strategy_lab_activity
-
-    monkeypatch.setattr(api_main, "RunStrategyLabRequest", lambda **kw: object())
-    monkeypatch.setattr(api_main, "_rehydrate_active_run_offset", lambda rid: 7)
-    seen = {}
-    monkeypatch.setattr(
-        api_main,
-        "_strategy_lab_worker",
-        lambda run_id, req, start_cycle_offset=0: seen.update(offset=start_cycle_offset),
-    )
-    # Worker ended in a hard-failed state → activity must raise so Temporal sees it.
-    monkeypatch.setattr(api_main, "_strategy_lab_run_failure", lambda rid: "boom")
-
-    from temporalio.exceptions import ApplicationError
-
-    with pytest.raises(ApplicationError, match="boom"):
-        run_strategy_lab_activity("run-z", {})
-
-    assert seen == {"offset": 7}  # resumed from the persisted offset
-
-
 def test_run_backtest_activity_reconstructs_models_and_runs_worker(monkeypatch) -> None:
     from investment_team import models as inv_models
     from investment_team.api import main as api_main
@@ -310,22 +261,26 @@ def api_client(monkeypatch):
     return TestClient(api_main.app)
 
 
-def _enable_temporal(monkeypatch, starter_name, starter):
+def _enable_temporal(monkeypatch, starter_name, starter, module=None):
     import shared_temporal
-    from investment_team.temporal import start_workflow as sw
+
+    if module is None:
+        from investment_team.temporal import start_workflow as module
 
     monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
-    monkeypatch.setattr(sw, starter_name, starter)
+    monkeypatch.setattr(module, starter_name, starter)
 
 
 def test_strategy_lab_dispatch_uses_temporal_when_enabled(monkeypatch, api_client) -> None:
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab.temporal import start_workflow as sl_sw
 
     started = []
     _enable_temporal(
         monkeypatch,
-        "start_strategy_lab_workflow",
+        "start_strategy_lab_batch_workflow",
         lambda run_id, request: started.append(run_id),
+        module=sl_sw,
     )
     thread_ctor = mock.Mock()
     monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
@@ -429,14 +384,14 @@ def test_strategy_lab_dispatch_falls_back_to_thread_on_dispatch_failure(
     leave a stuck 'running' entry — it falls back to the daemon thread."""
     import shared_temporal
     from investment_team.api import main as api_main
-    from investment_team.temporal import start_workflow as sw
+    from investment_team.strategy_lab.temporal import start_workflow as sl_sw
 
     monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
 
     def _boom(run_id, request):
         raise RuntimeError("Temporal client not available")
 
-    monkeypatch.setattr(sw, "start_strategy_lab_workflow", _boom)
+    monkeypatch.setattr(sl_sw, "start_strategy_lab_batch_workflow", _boom)
     thread_ctor = mock.Mock()
     monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
 
@@ -526,7 +481,7 @@ def test_resume_dispatches_via_temporal_when_enabled(monkeypatch, api_client) ->
     """Finding 6: resume must also route through Temporal when enabled."""
     import shared_temporal
     from investment_team.api import main as api_main
-    from investment_team.temporal import start_workflow as sw
+    from investment_team.strategy_lab.temporal import start_workflow as sl_sw
 
     state = {
         "run_id": "run-r",
@@ -543,7 +498,9 @@ def test_resume_dispatches_via_temporal_when_enabled(monkeypatch, api_client) ->
     monkeypatch.setattr(api_main, "_load_run_from_job_service", lambda rid: dict(state))
     monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
     started = []
-    monkeypatch.setattr(sw, "start_strategy_lab_workflow", lambda rid, req: started.append(rid))
+    monkeypatch.setattr(
+        sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req: started.append(rid)
+    )
     thread_ctor = mock.Mock()
     monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
 
@@ -560,7 +517,7 @@ def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_clie
     re-runs from scratch."""
     import shared_temporal
     from investment_team.api import main as api_main
-    from investment_team.temporal import start_workflow as sw
+    from investment_team.strategy_lab.temporal import start_workflow as sl_sw
 
     state = {
         "run_id": "run-x",
@@ -578,7 +535,9 @@ def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_clie
     monkeypatch.setattr(api_main, "_persist_run_state", lambda rid, s, **k: persisted.update(s))
     monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
     started = []
-    monkeypatch.setattr(sw, "start_strategy_lab_workflow", lambda rid, req: started.append(rid))
+    monkeypatch.setattr(
+        sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req: started.append(rid)
+    )
     thread_ctor = mock.Mock()
     monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
 

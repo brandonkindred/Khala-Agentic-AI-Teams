@@ -6,9 +6,9 @@ JSON-shaped ``batch_input`` that ``StrategyLabBatchWorkflow.run`` consumes —
 mirroring the config/clamp/exclusion construction ``_strategy_lab_worker`` does
 today, so the two entrypoints stay behaviorally aligned.
 
-Not yet called by ``_dispatch_strategy_lab_run`` — repointing dispatch at this
-helper (and deleting the coarse ``start_strategy_lab_workflow``) is the Stage 5
-cutover. Import-time side-effect-free.
+Called by ``_dispatch_strategy_lab_run`` (``api/main.py``) on the Temporal
+branch — the coarse ``start_strategy_lab_workflow`` it replaced has been
+deleted. Import-time side-effect-free.
 """
 
 from __future__ import annotations
