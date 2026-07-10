@@ -18,7 +18,7 @@ from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.text_utils import has_section_header, toml_has_section
-from software_engineering_team.shared.tool_agent_runners import build_tool_runners
+from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
 
 from .models import (
     BackendCodeV2WorkflowResult,
@@ -26,9 +26,7 @@ from .models import (
     MicrotaskReviewFailedError,
     MicrotaskStatus,
     Phase,
-    ToolAgentInput,
     ToolAgentKind,
-    ToolAgentOutput,
 )
 from .phases.deliver import run_deliver
 from .phases.execution import ReviewDependencies, run_execution_with_review_gates
@@ -85,27 +83,16 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     }
 
 
-class BackendDevelopmentAgent:
+class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
     """
     Backend Development Agent: runs the 4-phase cycle (Planning → Execution →
     Documentation → Deliver) with per-microtask review gates embedded in the
     Execution phase. Used by BackendCodeV2TeamLead after it runs Setup.
+
+    Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` from
+    :class:`BaseV2DevelopmentAgent`; supplies the backend tooling detection,
+    repo-briefing sets, progress callback, and the integration-only ``run_workflow``.
     """
-
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
-        # Optional incremental repo-context cache threaded in by the team lead so
-        # the per-task briefing re-reads only changed files instead of re-walking
-        # the whole repo. None (the direct-construction/test path) falls back to
-        # the fresh-walk ``_read_repo_code``.
-        self._repo_context_cache: Optional[RepoContextCache] = None
-
-    def _build_tool_runners(
-        self, tool_agents: Dict[ToolAgentKind, Any]
-    ) -> Dict[ToolAgentKind, Callable[[ToolAgentInput], ToolAgentOutput]]:
-        """Build run callables from tool agent instances (for Execution phase)."""
-        return build_tool_runners(tool_agents)
 
     @staticmethod
     def _build_progress_callback(update_job: Callable[..., None]) -> Callable[..., None]:
@@ -176,27 +163,6 @@ class BackendDevelopmentAgent:
             exclude_dirs=_BACKEND_REPO_EXCLUDE_DIRS,
             max_chars=max_chars,
         )
-
-    def _read_existing_code(self, repo_path: Path) -> str:
-        """Return the repo briefing, consulting the incremental cache when one is threaded in.
-
-        Preconditions: ``repo_path`` is an existing directory.
-        Postconditions: returns a briefing byte-identical to
-          ``_read_repo_code(repo_path)`` for the current on-disk state; when a
-          cache is present it re-reads only changed eligible files. Raises
-          ``AssertionError`` if the precondition is violated (caller bug).
-        Invariants: with no cache the fresh walk runs each call; with a cache the
-          output never differs from the fresh walk, only the amount of file I/O.
-
-        The no-cache branch calls ``_read_repo_code(repo_path)`` with no kwargs
-        deliberately: callers (and tests) monkeypatch it with a no-kwargs
-        signature, and the cache carries its own char budget, so forwarding one
-        here would both break that patch surface and be ignored.
-        """
-        assert repo_path.is_dir(), "repo_path must be an existing directory"
-        if self._repo_context_cache is not None:
-            return self._repo_context_cache.read(repo_path)
-        return self._read_repo_code(repo_path)
 
     @staticmethod
     def _detect_tooling(repo_path: Path) -> Tuple[bool, bool]:
