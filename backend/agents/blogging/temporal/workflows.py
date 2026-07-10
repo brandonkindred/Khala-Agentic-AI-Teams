@@ -22,12 +22,11 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from blogging.temporal import activities as _activities
-    from blogging.temporal.constants import TASK_QUEUE
+    from blogging.temporal.constants import FINALIZE_MAX_ATTEMPTS, TASK_QUEUE
 
 # HITL-bearing phases may wait on a human for hours; keep a wide ceiling (>= the
 # former whole-pipeline 12h) so Temporal does not time the activity out mid-wait.
 HITL_STAGE_TIMEOUT = timedelta(hours=12)
-GATES_STAGE_TIMEOUT = timedelta(hours=12)
 FINALIZE_TIMEOUT = timedelta(minutes=10)
 
 DEFAULT_RETRY_POLICY = RetryPolicy(
@@ -35,6 +34,24 @@ DEFAULT_RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=30),
     maximum_interval=timedelta(minutes=2),
     backoff_coefficient=2.0,
+)
+
+# Finalize's maximum_attempts is shared with finalize_job_activity's last-attempt
+# check (it re-raises transient store errors until the final attempt).
+FINALIZE_RETRY_POLICY = RetryPolicy(
+    maximum_attempts=FINALIZE_MAX_ATTEMPTS,
+    initial_interval=timedelta(seconds=30),
+    maximum_interval=timedelta(minutes=2),
+    backoff_coefficient=2.0,
+)
+
+# One option block shared by every pipeline-stage activity (and the legacy
+# drain-out branch) so tuning a timeout/heartbeat/retry is a single edit.
+_STAGE_ACTIVITY_OPTS: Dict[str, Any] = dict(
+    task_queue=TASK_QUEUE,
+    schedule_to_close_timeout=HITL_STAGE_TIMEOUT,
+    heartbeat_timeout=timedelta(minutes=5),
+    retry_policy=DEFAULT_RETRY_POLICY,
 )
 
 
@@ -63,20 +80,14 @@ class BlogFullPipelineWorkflow:
             await workflow.execute_activity(
                 _activities.run_full_pipeline_activity,
                 args=[job_id, request_dict],
-                task_queue=TASK_QUEUE,
-                schedule_to_close_timeout=HITL_STAGE_TIMEOUT,
-                heartbeat_timeout=timedelta(minutes=5),
-                retry_policy=DEFAULT_RETRY_POLICY,
+                **_STAGE_ACTIVITY_OPTS,
             )
             return
 
         planning = await workflow.execute_activity(
             _activities.plan_stage_activity,
             args=[job_id, request_dict],
-            task_queue=TASK_QUEUE,
-            schedule_to_close_timeout=HITL_STAGE_TIMEOUT,
-            heartbeat_timeout=timedelta(minutes=5),
-            retry_policy=DEFAULT_RETRY_POLICY,
+            **_STAGE_ACTIVITY_OPTS,
         )
         if planning.get("status") != "PASS":
             return
@@ -84,10 +95,7 @@ class BlogFullPipelineWorkflow:
         draft = await workflow.execute_activity(
             _activities.draft_stage_activity,
             args=[job_id, request_dict, planning],
-            task_queue=TASK_QUEUE,
-            schedule_to_close_timeout=HITL_STAGE_TIMEOUT,
-            heartbeat_timeout=timedelta(minutes=5),
-            retry_policy=DEFAULT_RETRY_POLICY,
+            **_STAGE_ACTIVITY_OPTS,
         )
         if draft.get("status") != "PASS":
             return
@@ -95,10 +103,7 @@ class BlogFullPipelineWorkflow:
         gates = await workflow.execute_activity(
             _activities.gates_stage_activity,
             args=[job_id, request_dict, planning, draft],
-            task_queue=TASK_QUEUE,
-            schedule_to_close_timeout=GATES_STAGE_TIMEOUT,
-            heartbeat_timeout=timedelta(minutes=5),
-            retry_policy=DEFAULT_RETRY_POLICY,
+            **_STAGE_ACTIVITY_OPTS,
         )
         # "FAIL" means the job was cancelled/failed mid-stage (already terminal,
         # no final draft) — skip finalize. NEEDS_HUMAN_REVIEW still finalizes.
@@ -110,5 +115,5 @@ class BlogFullPipelineWorkflow:
             args=[job_id, planning, gates],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=FINALIZE_TIMEOUT,
-            retry_policy=DEFAULT_RETRY_POLICY,
+            retry_policy=FINALIZE_RETRY_POLICY,
         )

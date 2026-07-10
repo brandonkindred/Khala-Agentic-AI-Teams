@@ -116,13 +116,13 @@ def test_run_blog_full_pipeline_job_completes_needs_review(
 
 
 def _import_errors_used_by_run_pipeline_job():
-    """Mirror the import order in shared.run_pipeline_job: try blogging.shared.errors
-    first, then fall back to shared.errors. Returns (BloggingError, PlanningError, DraftError).
+    """Import the error classes the way blog_writing_process_v2 raises them: from the
+    top-level ``shared.errors`` module. run_pipeline_job must catch these exact class
+    objects — in dual-layout runtimes ``blogging.shared.errors`` is a distinct module
+    whose classes never match. Returns (BloggingError, PlanningError, DraftError).
     """
-    try:
-        from blogging.shared.errors import BloggingError, DraftError, PlanningError
-    except ImportError:
-        from shared.errors import BloggingError, DraftError, PlanningError
+    from shared.errors import BloggingError, DraftError, PlanningError
+
     return BloggingError, PlanningError, DraftError
 
 
@@ -145,7 +145,10 @@ def test_run_blog_full_pipeline_job_planning_error(
     rpj.run_blog_full_pipeline_job(job_id, {"brief": "hi"})
     job = bjs.get_blog_job(job_id)
     assert job["status"] == "failed"
+    # The typed except clause must match the sibling-module PlanningError v2 raises;
+    # falling into the generic handler would lose both attribution fields below.
     assert job["failed_phase"] == "planning"
+    assert job["planning_failure_reason"] == "MAX_ITER"
 
 
 def test_run_blog_full_pipeline_job_blogging_error(

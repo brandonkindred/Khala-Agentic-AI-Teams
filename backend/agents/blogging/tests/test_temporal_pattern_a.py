@@ -129,6 +129,50 @@ def test_load_required_guidelines_returns_contents(monkeypatch) -> None:
     assert v2._load_required_guidelines("start drafting") == ("ok", "ok")
 
 
+def test_load_required_guidelines_phase_override(monkeypatch) -> None:
+    """The phase kwarg overrides DraftError's hardcoded phase so a gates-stage
+    guidelines failure is attributed to gates, not to the draft stage."""
+    import importlib
+
+    import pytest
+
+    v2 = importlib.import_module("blogging.agent_implementations.blog_writing_process_v2")
+    monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "")
+    with pytest.raises(v2.DraftError) as exc_info:
+        v2._load_required_guidelines("run gate-driven rewrites", phase="gates")
+    assert exc_info.value.phase == "gates"
+
+
+def test_is_last_attempt_outside_activity_context() -> None:
+    """No activity context (direct/thread use) -> treated as the last attempt."""
+    from blogging.temporal import activities as acts
+
+    assert acts._is_last_attempt(3) is True
+
+
+def test_is_last_attempt_reads_activity_attempt(monkeypatch) -> None:
+    """Inside an activity context the current attempt is compared to the maximum."""
+    from types import SimpleNamespace
+
+    import temporalio.activity as ta
+
+    from blogging.temporal import activities as acts
+
+    monkeypatch.setattr(ta, "info", lambda: SimpleNamespace(attempt=1))
+    assert acts._is_last_attempt(3) is False
+    monkeypatch.setattr(ta, "info", lambda: SimpleNamespace(attempt=3))
+    assert acts._is_last_attempt(3) is True
+
+
+def test_finalize_retry_policy_matches_activity_constant() -> None:
+    """The workflow's finalize maximum_attempts and the activity's last-attempt
+    check share one constant — drift between them would break retry-then-mark."""
+    from blogging.temporal import workflows as wf
+    from blogging.temporal.constants import FINALIZE_MAX_ATTEMPTS
+
+    assert wf.FINALIZE_RETRY_POLICY.maximum_attempts == FINALIZE_MAX_ATTEMPTS
+
+
 def test_run_pipeline_short_circuits_on_planning_abort(monkeypatch, tmp_path) -> None:
     """A planning abort tuple short-circuits before draft/gates run."""
     import importlib

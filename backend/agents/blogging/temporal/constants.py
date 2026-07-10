@@ -17,3 +17,8 @@ ACTIVITY_FINALIZE = "blog_finalize"
 # Legacy monolithic activity, still registered so pre-decomposition workflow
 # histories can drain out (see the workflow's unpatched replay branch).
 ACTIVITY_FULL_PIPELINE = "run_blog_full_pipeline"
+
+# Shared between the workflow's finalize RetryPolicy and finalize_job_activity's
+# last-attempt check: the activity re-raises transient errors until this attempt,
+# then marks the job failed. Keeping one constant stops the two from drifting.
+FINALIZE_MAX_ATTEMPTS = 3

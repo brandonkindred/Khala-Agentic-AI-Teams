@@ -581,8 +581,8 @@ def test_gates_stage_activity_hard_error_returns_fail(monkeypatch, tmp_path) -> 
     assert failed == {"phase": "gates"}
 
 
-def test_finalize_job_activity_swallows_error(monkeypatch, tmp_path) -> None:
-    """finalize failing (non-cancellation) fails the job and swallows — retrying cannot help."""
+def test_finalize_job_activity_marks_failed_on_last_attempt(monkeypatch, tmp_path) -> None:
+    """On the final Temporal attempt a finalize error fails the job and swallows."""
     import importlib
 
     from blogging.temporal import activities as acts
@@ -593,6 +593,7 @@ def test_finalize_job_activity_swallows_error(monkeypatch, tmp_path) -> None:
         raise ValueError("bad model")
 
     monkeypatch.setattr(cp.PlanningPhaseResult, "model_validate", classmethod(boom))
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda max_attempts: True)
     failed: dict = {}
     monkeypatch.setattr(
         acts, "_fail_activity", lambda job_id, exc, failed_phase: failed.update(phase=failed_phase)
@@ -600,6 +601,65 @@ def test_finalize_job_activity_swallows_error(monkeypatch, tmp_path) -> None:
 
     assert acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": None}) is None
     assert failed == {"phase": "finalize"}
+
+
+def test_finalize_job_activity_reraises_before_last_attempt(monkeypatch, tmp_path) -> None:
+    """Before the final attempt a finalize error re-raises so Temporal retries —
+    nothing is terminal yet, and a transient store blip must not permanently fail
+    a successful pipeline."""
+    import importlib
+
+    from blogging.temporal import activities as acts
+
+    cp = importlib.import_module("blogging.shared.content_plan")
+
+    def boom(cls, d):
+        raise ValueError("transient store blip")
+
+    monkeypatch.setattr(cp.PlanningPhaseResult, "model_validate", classmethod(boom))
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda max_attempts: False)
+    monkeypatch.setattr(
+        acts,
+        "_fail_activity",
+        lambda *a, **kw: pytest.fail("job must not be marked failed before the last attempt"),
+    )
+
+    with pytest.raises(ValueError):
+        acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": None})
+
+
+def test_draft_stage_activity_malformed_dto_raises_loudly(monkeypatch, tmp_path) -> None:
+    """A malformed input DTO (missing key) is a code/schema defect: it must raise
+    out of the activity instead of being recorded as a pipeline failure."""
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        acts,
+        "_fail_activity",
+        lambda *a, **kw: pytest.fail("a malformed DTO must not mark the job failed"),
+    )
+
+    with pytest.raises(KeyError):
+        acts.draft_stage_activity("j1", {"brief": "x"}, {"status": "PASS"})  # no planning key
+
+
+def test_gates_stage_activity_malformed_dto_raises_loudly(monkeypatch, tmp_path) -> None:
+    """Same loud-failure contract for the gates activity's input DTOs."""
+    import importlib
+
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+    cp = importlib.import_module("blogging.shared.content_plan")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+    monkeypatch.setattr(
+        acts,
+        "_fail_activity",
+        lambda *a, **kw: pytest.fail("a malformed DTO must not mark the job failed"),
+    )
+
+    planning = {"planning_phase_result": {"content_plan": {}}}
+    with pytest.raises(KeyError):
+        acts.gates_stage_activity("j1", {"brief": "x"}, planning, {"status": "PASS"})  # no draft
 
 
 # ---------------------------------------------------------------------------

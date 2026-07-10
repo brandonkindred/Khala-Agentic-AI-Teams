@@ -9,16 +9,18 @@ retryable activities orchestrated by ``BlogFullPipelineWorkflow``:
 * ``finalize_job_activity``   -> completes the job-store entry from the final result
 
 State crosses each boundary as a JSON-native dict (the ``temporal.phase_models``
-DTOs). Every activity re-seeds a ``_PipelineContext`` from the previous stage's DTO,
-runs the corresponding stage function (shared with thread mode via ``run_pipeline``),
-and serializes its output. Heavy imports live inside the activity bodies so importing
-this module stays cheap and sandbox-safe.
+DTOs). Every stage activity re-seeds a ``_PipelineContext`` from the previous
+stage's DTO and runs the corresponding stage function (shared with thread mode via
+``run_pipeline``) under the shared ``_run_stage`` funnel; input-DTO deserialization
+happens OUTSIDE the funnel so schema/plumbing defects fail the activity loudly
+instead of masquerading as pipeline failures. Heavy imports live inside function
+bodies so importing this module stays cheap and sandbox-safe.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from temporalio import activity
 
@@ -100,6 +102,66 @@ def _fail_activity(job_id: str, exc: Exception, failed_phase: Optional[str]) -> 
     _publish_terminal(job_id, "error", error=str(exc), failed_phase=phase)
 
 
+def _is_last_attempt(max_attempts: int) -> bool:
+    """True when this is the final Temporal retry attempt (or no activity context).
+
+    Preconditions:
+        - ``max_attempts`` is the retry policy's ``maximum_attempts`` configured for
+          the calling activity.
+    Postconditions:
+        - Returns True when the current activity attempt is the last one Temporal
+          will make, or when called outside an activity context (direct/thread use),
+          where there are no retries to defer to.
+    """
+    from temporalio import activity as _act
+
+    try:
+        return _act.info().attempt >= max_attempts
+    except RuntimeError:
+        return True
+
+
+def _run_stage(
+    job_id: str,
+    failed_phase: str,
+    fail_dto: Callable[[], Dict[str, Any]],
+    body: Callable[[], Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Run one pipeline-stage body under the shared heartbeat + error funnel.
+
+    The funnel is the correctness contract every stage activity must share: handled
+    errors terminate the job store and short-circuit the workflow (never leaking to
+    Temporal retry), Temporal-native cancellation propagates, and the background
+    heartbeat always stops. Keeping it in one place makes the contract structural —
+    a new stage activity cannot forget it.
+
+    Preconditions:
+        - ``body`` is a zero-arg callable that runs the stage and returns its
+          serialized DTO dict; ``fail_dto`` builds the stage's FAIL DTO dict.
+    Postconditions:
+        - Returns ``body()``'s DTO on success. On any handled error the job is
+          marked cancelled/failed (via ``_fail_activity`` with ``failed_phase``)
+          and ``fail_dto()`` is returned. Re-raises ``CancelledError``.
+    """
+    from temporalio.exceptions import CancelledError
+
+    from blogging.shared.run_pipeline_job import start_pipeline_heartbeat
+
+    hb = None
+    try:
+        hb = start_pipeline_heartbeat(job_id)
+        return body()
+    except CancelledError:
+        logger.info("Blog %s stage cancelled for job %s", failed_phase, job_id)
+        raise
+    except Exception as e:
+        _fail_activity(job_id, e, failed_phase=failed_phase)
+        return fail_dto()
+    finally:
+        if hb is not None:
+            hb.stop()
+
+
 @activity.defn(name="blog_plan_stage")
 def plan_stage_activity(job_id: str, request_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Planning stage: content planning, story elicitation, outline approval.
@@ -110,23 +172,18 @@ def plan_stage_activity(job_id: str, request_dict: Dict[str, Any]) -> Dict[str, 
     Postconditions:
         - Starts the job, runs ``run_planning_stage``, and returns a serialized
           ``PlanningStageResult``. On any handled error the job is marked
-          cancelled/failed (via ``_fail_activity``) and a ``FAIL`` DTO is returned
-          so the workflow short-circuits; only Temporal-native ``CancelledError``
-          propagates.
+          cancelled/failed and a ``FAIL`` DTO is returned so the workflow
+          short-circuits; only Temporal-native ``CancelledError`` propagates.
     """
-    from temporalio.exceptions import CancelledError
-
-    from blogging.agent_implementations.blog_writing_process_v2 import run_planning_stage
-    from blogging.shared.blog_job_store import start_blog_job
-    from blogging.shared.run_pipeline_job import start_pipeline_heartbeat
     from blogging.temporal.phase_models import PlanningStageResult
 
-    hb = None
-    try:
+    def _body() -> Dict[str, Any]:
+        from blogging.agent_implementations.blog_writing_process_v2 import run_planning_stage
+        from blogging.shared.blog_job_store import start_blog_job
+
         ctx = _build_pipeline_context(job_id, request_dict)
         start_blog_job(job_id)
         ctx.job_updater(work_dir=str(ctx.work_dir))
-        hb = start_pipeline_heartbeat(job_id)
 
         abort = run_planning_stage(ctx)
         if abort is not None:
@@ -137,15 +194,10 @@ def plan_stage_activity(job_id: str, request_dict: Dict[str, Any]) -> Dict[str, 
             elicited_stories_text=ctx.elicited_stories_text,
             status="PASS",
         ).model_dump()
-    except CancelledError:
-        logger.info("Blog plan stage cancelled for job %s", job_id)
-        raise
-    except Exception as e:
-        _fail_activity(job_id, e, failed_phase="planning")
-        return PlanningStageResult(status="FAIL").model_dump()
-    finally:
-        if hb is not None:
-            hb.stop()
+
+    return _run_stage(
+        job_id, "planning", lambda: PlanningStageResult(status="FAIL").model_dump(), _body
+    )
 
 
 @activity.defn(name="blog_draft_stage")
@@ -161,25 +213,26 @@ def draft_stage_activity(
           ``status == "PASS"`` (the workflow short-circuits otherwise).
     Postconditions:
         - Runs ``run_draft_stage`` and returns a serialized ``DraftStageResult``.
-          On any handled error the job is marked cancelled/failed (via
-          ``_fail_activity``) and a ``FAIL`` DTO is returned so the workflow
-          short-circuits; only Temporal-native ``CancelledError`` propagates.
+          On any handled stage error the job is marked cancelled/failed and a
+          ``FAIL`` DTO is returned; only Temporal-native ``CancelledError``
+          propagates. A malformed input DTO raises out of the activity (a
+          code/schema defect must fail loudly, not read as a pipeline failure).
     """
-    from temporalio.exceptions import CancelledError
-
-    from blogging.agent_implementations.blog_writing_process_v2 import run_draft_stage
     from blogging.shared.content_plan import PlanningPhaseResult
-    from blogging.shared.run_pipeline_job import start_pipeline_heartbeat
     from blogging.temporal.phase_models import DraftStageResult
 
-    hb = None
-    try:
+    # Rebuild inputs OUTSIDE the funnel: a malformed inter-activity DTO is a code
+    # bug (or cross-deploy schema skew), not a pipeline failure.
+    ppr = PlanningPhaseResult.model_validate(planning_stage["planning_phase_result"])
+    elicited_stories_text = planning_stage.get("elicited_stories_text")
+
+    def _body() -> Dict[str, Any]:
+        from blogging.agent_implementations.blog_writing_process_v2 import run_draft_stage
+
         ctx = _build_pipeline_context(job_id, request_dict)
-        ppr = PlanningPhaseResult.model_validate(planning_stage["planning_phase_result"])
         ctx.planning_phase_result = ppr
         ctx.plan = ppr.content_plan
-        ctx.elicited_stories_text = planning_stage.get("elicited_stories_text")
-        hb = start_pipeline_heartbeat(job_id)
+        ctx.elicited_stories_text = elicited_stories_text
 
         abort = run_draft_stage(ctx)
         if abort is not None:
@@ -194,15 +247,8 @@ def draft_stage_activity(
             elicited_stories_text=ctx.elicited_stories_text,
             status="PASS",
         ).model_dump()
-    except CancelledError:
-        logger.info("Blog draft stage cancelled for job %s", job_id)
-        raise
-    except Exception as e:
-        _fail_activity(job_id, e, failed_phase="draft")
-        return DraftStageResult(status="FAIL").model_dump()
-    finally:
-        if hb is not None:
-            hb.stop()
+
+    return _run_stage(job_id, "draft", lambda: DraftStageResult(status="FAIL").model_dump(), _body)
 
 
 @activity.defn(name="blog_gates_stage")
@@ -220,42 +266,38 @@ def gates_stage_activity(
     Postconditions:
         - Runs ``run_gates_stage`` and returns a serialized ``GatesStageResult``
           carrying the final draft and terminal status (PASS or NEEDS_HUMAN_REVIEW).
-          On any handled error the job is marked cancelled/failed (via
-          ``_fail_activity``) and a ``FAIL`` DTO is returned so the workflow skips
-          finalize; only Temporal-native ``CancelledError`` propagates.
+          On any handled stage error the job is marked cancelled/failed and a
+          ``FAIL`` DTO is returned so the workflow skips finalize; only
+          Temporal-native ``CancelledError`` propagates. A malformed input DTO
+          raises out of the activity (code/schema defects fail loudly).
     """
     from blog_writer_agent.models import WriterOutput
-    from temporalio.exceptions import CancelledError
 
-    from blogging.agent_implementations.blog_writing_process_v2 import run_gates_stage
     from blogging.shared.content_plan import PlanningPhaseResult
-    from blogging.shared.run_pipeline_job import start_pipeline_heartbeat
     from blogging.temporal.phase_models import GatesStageResult
 
-    hb = None
-    try:
+    # Rebuild inputs OUTSIDE the funnel: a malformed inter-activity DTO is a code
+    # bug (or cross-deploy schema skew), not a pipeline failure.
+    ppr = PlanningPhaseResult.model_validate(planning_stage["planning_phase_result"])
+    draft_result = WriterOutput.model_validate(draft_stage["draft"])
+    elicited_stories_text = draft_stage.get("elicited_stories_text")
+
+    def _body() -> Dict[str, Any]:
+        from blogging.agent_implementations.blog_writing_process_v2 import run_gates_stage
+
         ctx = _build_pipeline_context(job_id, request_dict)
-        ppr = PlanningPhaseResult.model_validate(planning_stage["planning_phase_result"])
         ctx.planning_phase_result = ppr
         ctx.plan = ppr.content_plan
-        ctx.draft_result = WriterOutput.model_validate(draft_stage["draft"])
-        ctx.elicited_stories_text = draft_stage.get("elicited_stories_text")
-        hb = start_pipeline_heartbeat(job_id)
+        ctx.draft_result = draft_result
+        ctx.elicited_stories_text = elicited_stories_text
 
         run_gates_stage(ctx)
         return GatesStageResult(
             draft=ctx.draft_result.model_dump(mode="json"),
             status=ctx.status,
         ).model_dump()
-    except CancelledError:
-        logger.info("Blog gates stage cancelled for job %s", job_id)
-        raise
-    except Exception as e:
-        _fail_activity(job_id, e, failed_phase="gates")
-        return GatesStageResult(status="FAIL").model_dump()
-    finally:
-        if hb is not None:
-            hb.stop()
+
+    return _run_stage(job_id, "gates", lambda: GatesStageResult(status="FAIL").model_dump(), _body)
 
 
 @activity.defn(name="blog_finalize")
@@ -268,20 +310,21 @@ def finalize_job_activity(
 
     Preconditions:
         - ``planning_stage``/``gates_stage`` are serialized stage results from a run
-          that reached the gates stage.
+          that reached the gates stage with a non-FAIL status.
     Postconditions:
         - Reconstructs the planning result and final draft and calls
           ``finalize_blog_job`` (COMPLETED when ``status == "PASS"``, else
-          NEEDS_REVIEW). On any handled error the job is marked cancelled/failed
-          (via ``_fail_activity``) and the error is swallowed — the job store is
-          already terminal, so retrying finalize cannot help; only Temporal-native
-          ``CancelledError`` propagates.
+          NEEDS_REVIEW). Unlike the stage activities, nothing is terminal before
+          finalize runs, so a transient store error must not permanently fail a
+          successful pipeline: errors re-raise (letting Temporal retry) until the
+          final attempt, which marks the job failed and swallows.
     """
     from blog_writer_agent.models import WriterOutput
     from temporalio.exceptions import CancelledError
 
     from blogging.shared.content_plan import PlanningPhaseResult
     from blogging.shared.run_pipeline_job import finalize_blog_job
+    from blogging.temporal.constants import FINALIZE_MAX_ATTEMPTS
 
     try:
         ppr = PlanningPhaseResult.model_validate(planning_stage["planning_phase_result"])
@@ -292,6 +335,8 @@ def finalize_job_activity(
         logger.info("Blog finalize cancelled for job %s", job_id)
         raise
     except Exception as e:
+        if not _is_last_attempt(FINALIZE_MAX_ATTEMPTS):
+            raise
         _fail_activity(job_id, e, failed_phase="finalize")
 
 

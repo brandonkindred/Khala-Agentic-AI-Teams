@@ -685,15 +685,18 @@ def _run_title_selection(
     return None
 
 
-def _load_required_guidelines(action: str) -> Tuple[str, str]:
+def _load_required_guidelines(action: str, *, phase: str = "draft") -> Tuple[str, str]:
     """Load the writing-style and brand-spec guideline files, failing loudly if absent.
 
     Preconditions:
         - ``action`` is a short phrase for the error message (e.g. "start drafting").
+        - ``phase`` names the pipeline stage the failure should be attributed to.
     Postconditions:
         - Returns ``(writing_style_content, brand_spec_content)``, both non-empty.
         - Raises ``DraftError`` naming each missing file when either cannot be
-          loaded — agents must never run with silently-empty guidelines.
+          loaded — agents must never run with silently-empty guidelines. The raised
+          error carries ``phase`` (overriding DraftError's hardcoded "draft") so the
+          job store's ``failed_phase`` points at the stage that actually failed.
     """
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
     brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
@@ -704,10 +707,12 @@ def _load_required_guidelines(action: str) -> Tuple[str, str]:
         if not brand_spec_content:
             missing_parts.append(f"brand guidelines ({BRAND_SPEC_PROMPT_PATH})")
         missing_msg = ", ".join(missing_parts)
-        raise DraftError(
+        err = DraftError(
             f"Cannot {action} without required guideline inputs. Missing: {missing_msg}.",
             cause=ValueError(missing_msg),
         )
+        err.phase = phase
+        raise err
     return writing_style_content, brand_spec_content
 
 
@@ -1754,6 +1759,8 @@ def run_gates_stage(
     Postconditions:
         - Sets ``ctx.draft_result`` (final) and ``ctx.status`` (PASS or
           NEEDS_HUMAN_REVIEW). Always returns None (no early aborts).
+        - Raises ``DraftError`` (phase="gates") when gates are enabled but the
+          guideline files required for gate-driven rewrites cannot be loaded.
     """
     brief = ctx.brief
     work_dir = ctx.work_dir
@@ -1784,7 +1791,7 @@ def run_gates_stage(
         # picks them up — this also makes the gates stage self-contained when it runs
         # as its own Temporal activity (a fresh process with no in-memory draft agent).
         writing_style_content, brand_spec_content = _load_required_guidelines(
-            "run gate-driven rewrites"
+            "run gate-driven rewrites", phase="gates"
         )
         draft_agent = BlogWriterAgent(
             llm_client=llm_client,

@@ -61,16 +61,26 @@ def _make_pipeline_doubles():
 
 
 def test_publish_terminal_swallows_publish_errors(monkeypatch) -> None:
-    from shared import job_event_bus
+    """A raising bus is swallowed. Patched via _import_shared — production resolves
+    blogging.shared.job_event_bus first, a distinct module object from shared.job_event_bus,
+    so patching only the sibling module would never reach the code under test."""
     from shared import run_pipeline_job as rpj
 
-    def boom_publish(*a, **kw):
-        raise RuntimeError("publish failed")
+    calls: list[str] = []
 
-    monkeypatch.setattr(job_event_bus, "publish", boom_publish)
-    monkeypatch.setattr(job_event_bus, "cleanup_job", lambda *a, **kw: None)
+    class _BoomBus:
+        @staticmethod
+        def publish(*a, **kw):
+            calls.append("publish")
+            raise RuntimeError("publish failed")
 
-    rpj._publish_terminal("job-id", "complete", status="completed")
+        @staticmethod
+        def cleanup_job(*a, **kw):
+            calls.append("cleanup")
+
+    monkeypatch.setattr(rpj, "_import_shared", lambda name: _BoomBus)
+    rpj._publish_terminal("job-id", "complete", status="completed")  # must not raise
+    assert calls == ["publish"]
 
 
 def test_fail_job_works_via_shared_blog_job_store(
@@ -127,17 +137,31 @@ def test_publish_publishes_via_job_event_bus(monkeypatch, tmp_path: Path, patche
     assert any(et == "update" for et, _ in seen)
 
 
-def test_job_updater_swallows_publish_exception(monkeypatch, tmp_path: Path, patched_client) -> None:
+def test_job_updater_swallows_publish_exception(
+    monkeypatch, tmp_path: Path, patched_client
+) -> None:
     from shared import blog_job_store as bjs
-    from shared import job_event_bus
     from shared import run_pipeline_job as rpj
 
     _setup_artifacts_root(monkeypatch, tmp_path)
 
+    boomed: list[str] = []
+
     def boom(*a, **kw):
+        boomed.append("publish")
         raise RuntimeError("event bus down")
 
-    monkeypatch.setattr(job_event_bus, "publish", boom)
+    # Patch BOTH module objects: production resolves blogging.shared.job_event_bus
+    # first (distinct from the sibling shared.job_event_bus in this layout).
+    try:
+        from blogging.shared import job_event_bus as bus_b
+
+        monkeypatch.setattr(bus_b, "publish", boom)
+    except ImportError:
+        pass
+    from shared import job_event_bus as bus_s
+
+    monkeypatch.setattr(bus_s, "publish", boom)
 
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(
@@ -150,6 +174,7 @@ def test_job_updater_swallows_publish_exception(monkeypatch, tmp_path: Path, pat
     rpj.run_blog_full_pipeline_job(job_id, {"brief": "hi"})
     job = bjs.get_blog_job(job_id)
     assert job["status"] == "completed"
+    assert boomed  # the raising publish was actually reached and swallowed
 
 
 def test_external_cancellation_planning_path(monkeypatch, tmp_path: Path, patched_client) -> None:
@@ -175,7 +200,9 @@ def test_external_cancellation_planning_path(monkeypatch, tmp_path: Path, patche
     assert job["status"] == "cancelled"
 
 
-def test_external_cancellation_blogging_error_path(monkeypatch, tmp_path: Path, patched_client) -> None:
+def test_external_cancellation_blogging_error_path(
+    monkeypatch, tmp_path: Path, patched_client
+) -> None:
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
     from shared.errors import DraftError
@@ -198,7 +225,9 @@ def test_external_cancellation_blogging_error_path(monkeypatch, tmp_path: Path, 
     assert job["status"] == "cancelled"
 
 
-def test_external_cancellation_unexpected_error_path(monkeypatch, tmp_path: Path, patched_client) -> None:
+def test_external_cancellation_unexpected_error_path(
+    monkeypatch, tmp_path: Path, patched_client
+) -> None:
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
     from temporalio.exceptions import CancelledError as TemporalCancelled
@@ -220,7 +249,9 @@ def test_external_cancellation_unexpected_error_path(monkeypatch, tmp_path: Path
     assert job["status"] == "cancelled"
 
 
-def test_mark_cancelled_swallows_update_exception(monkeypatch, tmp_path: Path, patched_client) -> None:
+def test_mark_cancelled_swallows_update_exception(
+    monkeypatch, tmp_path: Path, patched_client
+) -> None:
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
     from shared.errors import PlanningError
@@ -252,7 +283,9 @@ def test_mark_cancelled_swallows_update_exception(monkeypatch, tmp_path: Path, p
     rpj.run_blog_full_pipeline_job(job_id, {"brief": "hi"})
 
 
-def test_pipeline_heartbeat_loop_runs_body_directly(monkeypatch, tmp_path: Path, patched_client) -> None:
+def test_pipeline_heartbeat_loop_runs_body_directly(
+    monkeypatch, tmp_path: Path, patched_client
+) -> None:
     """Drive the inner ``_pipeline_heartbeat`` body by patching threading.Event.wait."""
     from shared import blog_job_store as bjs
 

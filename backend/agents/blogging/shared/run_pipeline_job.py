@@ -329,7 +329,15 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
 
     try:
         start_blog_job = _import_shared("blog_job_store").start_blog_job
-        _errors = _import_shared("errors")
+        # Bind the exception classes from the top-level ``shared.errors`` module
+        # FIRST: blog_writing_process_v2 raises via its absolute
+        # ``from shared.errors import ...``, and in dual-layout runtimes
+        # ``blogging.shared.errors`` is a DISTINCT module object whose classes
+        # would never match these except clauses.
+        try:
+            import shared.errors as _errors
+        except ImportError:  # pragma: no cover - package-only layout; sibling path covers tests.
+            _errors = _import_shared("errors")
         BloggingError = _errors.BloggingError
         PlanningError = _errors.PlanningError
     except ImportError:
@@ -398,7 +406,16 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
 
 
 def _publish_terminal(job_id: str, event_type: str, **kwargs: Any) -> None:
-    """Publish a terminal SSE event and clean up subscribers."""
+    """Publish a terminal SSE event and clean up subscribers.
+
+    Preconditions:
+        - ``job_id`` identifies the finished job; ``event_type`` is a terminal SSE
+          type (``complete``/``error``/``cancelled``) and ``kwargs`` its payload.
+    Postconditions:
+        - Best-effort only — never raises. Silently no-ops when the event-bus
+          module is unavailable or the publish/cleanup itself fails, so callers
+          must not rely on the terminal event actually being delivered.
+    """
     try:
         bus = _import_shared("job_event_bus")
     except ImportError:
@@ -416,6 +433,18 @@ def _fail_job(
     failed_phase: Optional[str] = None,
     planning_failure_reason: Optional[str] = None,
 ) -> None:
+    """Mark a job as failed in the job store.
+
+    Preconditions:
+        - ``job_id`` identifies a created job record; ``error`` is the failure
+          message; ``failed_phase``/``planning_failure_reason`` are optional
+          attribution fields.
+    Postconditions:
+        - ``fail_blog_job`` has recorded the failure — or, when the job-store
+          module is unavailable (degraded layout), the failure record is silently
+          dropped and this function no-ops. Store errors raised by the call itself
+          propagate to the caller.
+    """
     try:
         fn = _import_shared("blog_job_store").fail_blog_job
     except ImportError:
