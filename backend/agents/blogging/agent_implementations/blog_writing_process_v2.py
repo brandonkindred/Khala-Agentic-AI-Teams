@@ -1868,6 +1868,9 @@ def run_gates_stage(
                 compliance_report = compliance_agent.run(
                     draft_result.draft,
                     brand_spec_prompt=brand_spec_prompt_text,
+                    # validator_report is normally a Pydantic model, but the
+                    # hasattr guard tolerates plain-object stand-ins from test
+                    # doubles / legacy validator paths (passes None if absent).
                     validator_report=validator_report.model_dump()
                     if hasattr(validator_report, "model_dump")
                     else None,
