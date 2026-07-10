@@ -106,10 +106,12 @@ def test_complete_plan_json_recovers_on_parse_retry(monkeypatch) -> None:
     agent = BlogPlanningAgent(DummyLLMClient())
     good = _good_plan_dict()
 
-    responses = iter([
-        "not json at all",
-        json.dumps(good),
-    ])
+    responses = iter(
+        [
+            "not json at all",
+            json.dumps(good),
+        ]
+    )
 
     def fake_call(self, prompt: str, system: str) -> str:
         return next(responses)

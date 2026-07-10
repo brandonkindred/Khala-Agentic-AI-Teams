@@ -15,6 +15,7 @@ import pytest
 
 
 def test_create_blogging_worker_with_client(monkeypatch) -> None:
+    """create_blogging_worker builds a Worker on the blogging task queue."""
     from blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
@@ -38,6 +39,7 @@ def test_create_blogging_worker_with_client(monkeypatch) -> None:
 
 
 def test_start_blogging_temporal_worker_thread_when_enabled(monkeypatch) -> None:
+    """The worker thread starts once and is idempotent while already alive."""
     from blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
@@ -90,6 +92,7 @@ def test_worker_thread_target_handles_runtime_error_loop_stopped(monkeypatch) ->
 
 
 def test_worker_thread_target_handles_unknown_runtime_error(monkeypatch) -> None:
+    """An unrelated RuntimeError in the worker loop is logged, not raised."""
     from blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
@@ -110,6 +113,7 @@ def test_worker_thread_target_handles_unknown_runtime_error(monkeypatch) -> None
 
 
 def test_worker_thread_target_handles_generic_exception(monkeypatch) -> None:
+    """A generic exception in the worker loop is logged, not raised."""
     from blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
@@ -498,14 +502,18 @@ class _FakeHeartbeat:
 
 
 def test_plan_stage_activity_swallows_external_cancellation(monkeypatch, tmp_path) -> None:
-    """External cancellation -> _fail_activity marks cancelled -> FAIL DTO; hb stopped."""
+    """A stage error the funnel recognizes as external cancellation marks the job
+    cancelled (via the real _fail_activity) and returns a FAIL DTO; heartbeat stopped."""
     import importlib
 
     acts, _ = _patch_context(monkeypatch, tmp_path)
     rpj = importlib.import_module("blogging.shared.run_pipeline_job")
     hb = _FakeHeartbeat()
     monkeypatch.setattr(rpj, "start_pipeline_heartbeat", lambda job_id: hb)
-    monkeypatch.setattr(acts, "_fail_activity", lambda job_id, exc, failed_phase: None)
+    # Drive the real _fail_activity down its external-cancellation branch.
+    marked: dict = {}
+    monkeypatch.setattr(rpj, "_is_external_cancellation", lambda exc: True)
+    monkeypatch.setattr(rpj, "mark_job_cancelled", lambda job_id: marked.setdefault("job", job_id))
 
     def boom(c):
         raise RuntimeError("wrapped cancel")
@@ -513,6 +521,7 @@ def test_plan_stage_activity_swallows_external_cancellation(monkeypatch, tmp_pat
     monkeypatch.setattr(_v2(), "run_planning_stage", boom)
     out = acts.plan_stage_activity("j1", {"brief": "x"})
     assert out["status"] == "FAIL"
+    assert marked == {"job": "j1"}
     assert hb.stopped is True
 
 
@@ -536,6 +545,7 @@ def test_draft_stage_activity_abort_returns_fail_with_partial_draft(monkeypatch,
 
 
 def test_draft_stage_activity_reraises_cancelled(monkeypatch, tmp_path) -> None:
+    """A Temporal CancelledError from the draft stage propagates out of the activity."""
     import importlib
 
     from temporalio.exceptions import CancelledError
@@ -581,8 +591,68 @@ def test_gates_stage_activity_hard_error_returns_fail(monkeypatch, tmp_path) -> 
     assert failed == {"phase": "gates"}
 
 
+def _patch_finalize(monkeypatch):
+    """Patch finalize's model rebuilds to stubs and return the (acts, rpj) modules.
+
+    Leaves ``finalize_blog_job`` (the transient store call) for the test to drive.
+    """
+    import importlib
+
+    from blogging.temporal import activities as acts
+
+    cp = importlib.import_module("blogging.shared.content_plan")
+    wm = importlib.import_module("blog_writer_agent.models")
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+    monkeypatch.setattr(wm.WriterOutput, "model_validate", classmethod(lambda cls, d: _Dumpable(d)))
+    return acts, rpj
+
+
 def test_finalize_job_activity_marks_failed_on_last_attempt(monkeypatch, tmp_path) -> None:
-    """On the final Temporal attempt a finalize error fails the job and swallows."""
+    """On the final Temporal attempt a transient store error fails the job and swallows."""
+    acts, rpj = _patch_finalize(monkeypatch)
+
+    def _raise(*a, **kw):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(rpj, "finalize_blog_job", _raise)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+    failed: dict = {}
+    monkeypatch.setattr(
+        acts, "_fail_activity", lambda job_id, exc, failed_phase: failed.update(phase=failed_phase)
+    )
+
+    assert (
+        acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": {"d": 1}}) is None
+    )
+    assert failed == {"phase": "finalize"}
+
+
+def test_finalize_job_activity_reraises_before_last_attempt(monkeypatch, tmp_path) -> None:
+    """Before the final attempt a transient store error re-raises so Temporal retries —
+    nothing is terminal yet, and a store blip must not permanently fail a successful pipeline."""
+    acts, rpj = _patch_finalize(monkeypatch)
+
+    def _raise(*a, **kw):
+        raise RuntimeError("transient store blip")
+
+    monkeypatch.setattr(rpj, "finalize_blog_job", _raise)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: False)
+    monkeypatch.setattr(
+        acts,
+        "_fail_activity",
+        lambda *a, **kw: pytest.fail("job must not be marked failed before the last attempt"),
+    )
+
+    with pytest.raises(RuntimeError):
+        acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": {"d": 1}})
+
+
+def test_finalize_job_activity_malformed_dto_raises_loudly(monkeypatch, tmp_path) -> None:
+    """A malformed finalize input DTO raises out of the activity (code/schema defect),
+    bypassing the retry-then-mark funnel — matching the draft/gates contract."""
     import importlib
 
     from blogging.temporal import activities as acts
@@ -593,35 +663,11 @@ def test_finalize_job_activity_marks_failed_on_last_attempt(monkeypatch, tmp_pat
         raise ValueError("bad model")
 
     monkeypatch.setattr(cp.PlanningPhaseResult, "model_validate", classmethod(boom))
-    monkeypatch.setattr(acts, "_is_last_attempt", lambda max_attempts: True)
-    failed: dict = {}
     monkeypatch.setattr(
-        acts, "_fail_activity", lambda job_id, exc, failed_phase: failed.update(phase=failed_phase)
+        acts, "_fail_activity", lambda *a, **kw: pytest.fail("malformed DTO must not mark the job")
     )
-
-    assert acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": None}) is None
-    assert failed == {"phase": "finalize"}
-
-
-def test_finalize_job_activity_reraises_before_last_attempt(monkeypatch, tmp_path) -> None:
-    """Before the final attempt a finalize error re-raises so Temporal retries —
-    nothing is terminal yet, and a transient store blip must not permanently fail
-    a successful pipeline."""
-    import importlib
-
-    from blogging.temporal import activities as acts
-
-    cp = importlib.import_module("blogging.shared.content_plan")
-
-    def boom(cls, d):
-        raise ValueError("transient store blip")
-
-    monkeypatch.setattr(cp.PlanningPhaseResult, "model_validate", classmethod(boom))
-    monkeypatch.setattr(acts, "_is_last_attempt", lambda max_attempts: False)
     monkeypatch.setattr(
-        acts,
-        "_fail_activity",
-        lambda *a, **kw: pytest.fail("job must not be marked failed before the last attempt"),
+        acts, "_is_last_attempt", lambda: pytest.fail("must not reach the retry funnel")
     )
 
     with pytest.raises(ValueError):
@@ -683,6 +729,7 @@ def test_legacy_full_pipeline_activity_delegates(monkeypatch) -> None:
 
 
 def test_legacy_full_pipeline_activity_reraises_cancelled(monkeypatch) -> None:
+    """The legacy drain-out activity re-raises a Temporal CancelledError."""
     import importlib
 
     from temporalio.exceptions import CancelledError
@@ -700,6 +747,7 @@ def test_legacy_full_pipeline_activity_reraises_cancelled(monkeypatch) -> None:
 
 
 def test_legacy_full_pipeline_activity_reraises_other(monkeypatch) -> None:
+    """The legacy drain-out activity re-raises non-cancellation errors."""
     import importlib
 
     from blogging.temporal import activities as acts

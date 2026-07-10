@@ -147,30 +147,57 @@ def test_is_last_attempt_outside_activity_context() -> None:
     """No activity context (direct/thread use) -> treated as the last attempt."""
     from blogging.temporal import activities as acts
 
-    assert acts._is_last_attempt(3) is True
+    assert acts._is_last_attempt() is True
 
 
-def test_is_last_attempt_reads_activity_attempt(monkeypatch) -> None:
-    """Inside an activity context the current attempt is compared to the maximum."""
+def test_is_last_attempt_reads_scheduled_retry_policy(monkeypatch) -> None:
+    """The check reads maximum_attempts off the scheduled policy (activity.info())."""
     from types import SimpleNamespace
 
     import temporalio.activity as ta
 
     from blogging.temporal import activities as acts
 
-    monkeypatch.setattr(ta, "info", lambda: SimpleNamespace(attempt=1))
-    assert acts._is_last_attempt(3) is False
-    monkeypatch.setattr(ta, "info", lambda: SimpleNamespace(attempt=3))
-    assert acts._is_last_attempt(3) is True
+    def _info(attempt, max_attempts):
+        return SimpleNamespace(
+            attempt=attempt, retry_policy=SimpleNamespace(maximum_attempts=max_attempts)
+        )
+
+    monkeypatch.setattr(ta, "info", lambda: _info(1, 3))
+    assert acts._is_last_attempt() is False
+    monkeypatch.setattr(ta, "info", lambda: _info(3, 3))
+    assert acts._is_last_attempt() is True
 
 
-def test_finalize_retry_policy_matches_activity_constant() -> None:
-    """The workflow's finalize maximum_attempts and the activity's last-attempt
-    check share one constant — drift between them would break retry-then-mark."""
+def test_is_last_attempt_unlimited_policy_never_last(monkeypatch) -> None:
+    """maximum_attempts <= 0 (unlimited retries) -> never the last attempt; and a
+    missing retry_policy is likewise treated as unlimited (defer to Temporal)."""
+    from types import SimpleNamespace
+
+    import temporalio.activity as ta
+
+    from blogging.temporal import activities as acts
+
+    monkeypatch.setattr(
+        ta,
+        "info",
+        lambda: SimpleNamespace(attempt=9, retry_policy=SimpleNamespace(maximum_attempts=0)),
+    )
+    assert acts._is_last_attempt() is False
+    monkeypatch.setattr(ta, "info", lambda: SimpleNamespace(attempt=9, retry_policy=None))
+    assert acts._is_last_attempt() is False
+
+
+def test_finalize_retry_policy_derived_from_default() -> None:
+    """FINALIZE_RETRY_POLICY is the default policy with a capped attempt count, so a
+    backoff retune of DEFAULT_RETRY_POLICY carries over automatically."""
     from blogging.temporal import workflows as wf
-    from blogging.temporal.constants import FINALIZE_MAX_ATTEMPTS
 
-    assert wf.FINALIZE_RETRY_POLICY.maximum_attempts == FINALIZE_MAX_ATTEMPTS
+    assert wf.FINALIZE_RETRY_POLICY.maximum_attempts == 3
+    assert wf.FINALIZE_RETRY_POLICY.initial_interval == wf.DEFAULT_RETRY_POLICY.initial_interval
+    assert (
+        wf.FINALIZE_RETRY_POLICY.backoff_coefficient == wf.DEFAULT_RETRY_POLICY.backoff_coefficient
+    )
 
 
 def test_run_pipeline_short_circuits_on_planning_abort(monkeypatch, tmp_path) -> None:

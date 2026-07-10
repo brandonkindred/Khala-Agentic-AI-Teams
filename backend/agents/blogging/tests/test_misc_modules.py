@@ -278,12 +278,12 @@ def test_medium_integration_modules_unavailable(monkeypatch) -> None:
 def test_run_pipeline_job_helpers(monkeypatch, tmp_path: Path) -> None:
     from shared import run_pipeline_job as rpj
 
-    # _format_audience_from_dict
-    assert rpj._format_audience_from_dict(None) is None
-    assert rpj._format_audience_from_dict("  hi ") == "hi"
-    assert rpj._format_audience_from_dict("") is None
-    assert rpj._format_audience_from_dict(42) is None
-    out = rpj._format_audience_from_dict(
+    # _normalize_audience
+    assert rpj._normalize_audience(None) is None
+    assert rpj._normalize_audience("  hi ") == "hi"
+    assert rpj._normalize_audience("") is None
+    assert rpj._normalize_audience(42) is None
+    out = rpj._normalize_audience(
         {
             "profession": "dev",
             "skill_level": "expert",
@@ -296,7 +296,7 @@ def test_run_pipeline_job_helpers(monkeypatch, tmp_path: Path) -> None:
     assert "interests: a, b" in out
     assert "extra" in out
     # empty dict → None
-    assert rpj._format_audience_from_dict({}) is None
+    assert rpj._normalize_audience({}) is None
 
 
 def test_run_pipeline_job_external_cancellation_detection() -> None:

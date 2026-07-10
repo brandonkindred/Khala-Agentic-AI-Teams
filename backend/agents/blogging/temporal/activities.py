@@ -71,9 +71,11 @@ def _fail_activity(job_id: str, exc: Exception, failed_phase: Optional[str]) -> 
 
     Handled pipeline errors are terminal, matching the pre-decomposition behavior
     (``run_blog_full_pipeline_job`` swallowed them after failing the job, so the
-    activity completed and Temporal never retried): the caller returns a FAIL DTO
-    so the workflow short-circuits, and Temporal's retry policy stays reserved for
-    worker crashes and timeouts.
+    activity completed and Temporal never retried): the stage-activity callers
+    return a FAIL DTO so the workflow short-circuits, keeping Temporal's stage
+    retries reserved for worker crashes and timeouts. (``finalize_job_activity``
+    is the exception — it deliberately re-raises transient store errors so Temporal
+    retries, calling this helper only on its final attempt.)
 
     Preconditions:
         - ``exc`` is the exception raised by a stage function.
@@ -102,23 +104,37 @@ def _fail_activity(job_id: str, exc: Exception, failed_phase: Optional[str]) -> 
     _publish_terminal(job_id, "error", error=str(exc), failed_phase=phase)
 
 
-def _is_last_attempt(max_attempts: int) -> bool:
+def _is_last_attempt() -> bool:
     """True when this is the final Temporal retry attempt (or no activity context).
 
+    Reads the ``maximum_attempts`` from the retry policy the activity was actually
+    scheduled with (``activity.info().retry_policy``) rather than a compile-time
+    constant, so the check never drifts from the workflow's policy and stays correct
+    for in-flight histories scheduled under an older policy.
+
     Preconditions:
-        - ``max_attempts`` is the retry policy's ``maximum_attempts`` configured for
-          the calling activity.
+        - Called from within a stage/finalize activity body (or directly/thread mode).
     Postconditions:
-        - Returns True when the current activity attempt is the last one Temporal
-          will make, or when called outside an activity context (direct/thread use),
-          where there are no retries to defer to.
+        - Returns True when the current attempt is the last one Temporal will make,
+          or when called outside an activity context (direct/thread use — the caller
+          then marks the job terminal).
+        - Returns False when the scheduled policy allows unlimited retries
+          (``maximum_attempts <= 0``): there is no last attempt to gate on, so the
+          caller keeps re-raising and defers to Temporal.
     """
     from temporalio import activity as _act
 
     try:
-        return _act.info().attempt >= max_attempts
+        info = _act.info()
     except RuntimeError:
         return True
+    policy = info.retry_policy
+    max_attempts = policy.maximum_attempts if policy is not None else 0
+    # maximum_attempts <= 0 means unlimited retries in Temporal; there is no
+    # "last attempt" to gate on, so never swallow — keep re-raising.
+    if max_attempts <= 0:
+        return False
+    return info.attempt >= max_attempts
 
 
 def _run_stage(
@@ -316,26 +332,33 @@ def finalize_job_activity(
           ``finalize_blog_job`` (COMPLETED when ``status == "PASS"``, else
           NEEDS_REVIEW). Unlike the stage activities, nothing is terminal before
           finalize runs, so a transient store error must not permanently fail a
-          successful pipeline: errors re-raise (letting Temporal retry) until the
-          final attempt, which marks the job failed and swallows.
+          successful pipeline: the store call re-raises (letting Temporal retry)
+          until the final attempt, which marks the job failed and swallows.
+        - A malformed input DTO raises out of the activity (a code/schema defect
+          must fail loudly, not read as a retryable store error) — matching the
+          draft/gates contract.
     """
     from blog_writer_agent.models import WriterOutput
     from temporalio.exceptions import CancelledError
 
     from blogging.shared.content_plan import PlanningPhaseResult
     from blogging.shared.run_pipeline_job import finalize_blog_job
-    from blogging.temporal.constants import FINALIZE_MAX_ATTEMPTS
+
+    # Rebuild inputs OUTSIDE the retry funnel: a malformed inter-activity DTO is a
+    # code bug (or cross-deploy schema skew), not a transient store error.
+    ppr = PlanningPhaseResult.model_validate(planning_stage["planning_phase_result"])
+    draft_data = gates_stage.get("draft")
+    draft_result = WriterOutput.model_validate(draft_data) if draft_data is not None else None
 
     try:
-        ppr = PlanningPhaseResult.model_validate(planning_stage["planning_phase_result"])
-        draft_data = gates_stage.get("draft")
-        draft_result = WriterOutput.model_validate(draft_data) if draft_data is not None else None
         finalize_blog_job(job_id, ppr, draft_result, gates_stage.get("status", "PASS"))
     except CancelledError:
         logger.info("Blog finalize cancelled for job %s", job_id)
         raise
     except Exception as e:
-        if not _is_last_attempt(FINALIZE_MAX_ATTEMPTS):
+        # Nothing is terminal yet; retry transient store errors, marking the job
+        # failed only once Temporal has no attempt left.
+        if not _is_last_attempt():
             raise
         _fail_activity(job_id, e, failed_phase="finalize")
 

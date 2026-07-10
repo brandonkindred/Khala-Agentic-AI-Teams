@@ -127,8 +127,9 @@ class DraftError(BloggingError):
         *,
         iteration: int = 0,
         cause: Optional[Exception] = None,
+        phase: str = "draft",
     ):
-        super().__init__(message, phase="draft", cause=cause)
+        super().__init__(message, phase=phase, cause=cause)
         self.iteration = iteration
 
 

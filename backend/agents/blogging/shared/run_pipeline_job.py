@@ -49,8 +49,15 @@ def _get_run_artifacts_base() -> Path:
     return fallback
 
 
-def _format_audience_from_dict(audience: Any) -> Optional[str]:
-    """Format audience from request dict (str or dict with profession, skill_level, etc.)."""
+def _normalize_audience(audience: Any) -> Optional[str]:
+    """Normalize an audience value (str, dict, or None) to a display string or None.
+
+    Preconditions:
+        - ``audience`` is a str, a dict (with optional profession/skill_level/hobbies/
+          other keys), None, or any other value (coerced to None).
+    Postconditions:
+        - Returns a trimmed string, or None when the input is empty/unusable.
+    """
     if audience is None:
         return None
     if isinstance(audience, str):
@@ -126,7 +133,7 @@ def build_brief_input(request_dict: Dict[str, Any]) -> Any:
     brief_text = (request_dict.get("brief") or "").strip()
     if request_dict.get("title_concept"):
         brief_text = f"{brief_text}. Title concept: {request_dict['title_concept'].strip()}"
-    audience_str = _format_audience_from_dict(request_dict.get("audience"))
+    audience_str = _normalize_audience(request_dict.get("audience"))
 
     return ResearchBriefInput(
         brief=brief_text,
@@ -229,6 +236,9 @@ def start_pipeline_heartbeat(job_id: str) -> Optional[BackgroundHeartbeat]:
 def mark_job_cancelled(job_id: str) -> bool:
     """Mark a job as cancelled and publish the terminal SSE event.
 
+    Preconditions:
+        - ``job_id`` identifies a job whose run was cancelled (typically detected
+          via ``_is_external_cancellation``).
     Postconditions:
         - The job store entry (when available) is set to CANCELLED and a terminal
           ``cancelled`` SSE event is published. Always returns True (for use in
@@ -308,11 +318,23 @@ def finalize_blog_job(
 
 
 def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> None:
-    """
-    Run the full blog pipeline and update the job store. Used by API and Temporal activity.
-    request_dict: brief, title_concept (optional), audience (str or dict), tone_or_purpose,
-                  max_results, run_gates, max_rewrite_iterations,
-                  content_profile, series_context, length_notes, target_word_count (all optional).
+    """Run the full blog pipeline and update the job store (thread-mode whole-run path).
+
+    Also used by the legacy ``run_blog_full_pipeline`` Temporal activity retained for
+    drain-out; the decomposed workflow uses the per-stage activities instead.
+
+    Preconditions:
+        - ``job_id`` identifies a job record already created in the job store.
+        - ``request_dict`` carries a ``brief`` plus optional ``title_concept``,
+          ``audience`` (str or dict), ``tone_or_purpose``, ``max_results``,
+          ``run_gates``, ``max_rewrite_iterations``, ``content_profile``,
+          ``series_context``, ``length_notes``, ``target_word_count``.
+    Postconditions:
+        - The job is started, run to completion, and terminalized in the job store:
+          ``finalize_blog_job`` on success, or (via ``_fail_job`` /
+          ``mark_job_cancelled``) failed/cancelled on error. Never raises except to
+          re-propagate a Temporal ``CancelledError``; all other errors are recorded
+          on the job and swallowed.
     """
     try:
         from agent_implementations.blog_writing_process_v2 import run_pipeline

@@ -86,6 +86,7 @@ def test_publish_terminal_swallows_publish_errors(monkeypatch) -> None:
 def test_fail_job_works_via_shared_blog_job_store(
     monkeypatch, patched_client, tmp_path: Path
 ) -> None:
+    """_fail_job records the failure (status/error) via the shared job store."""
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
 
@@ -104,6 +105,7 @@ def test_fail_job_works_via_shared_blog_job_store(
 
 
 def test_publish_publishes_via_job_event_bus(monkeypatch, tmp_path: Path, patched_client) -> None:
+    """A full run publishes at least one ``update`` event through the SSE bus."""
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
 
@@ -140,6 +142,7 @@ def test_publish_publishes_via_job_event_bus(monkeypatch, tmp_path: Path, patche
 def test_job_updater_swallows_publish_exception(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
+    """A raising SSE publish is swallowed; the run still completes."""
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
 
@@ -178,6 +181,7 @@ def test_job_updater_swallows_publish_exception(
 
 
 def test_external_cancellation_planning_path(monkeypatch, tmp_path: Path, patched_client) -> None:
+    """A PlanningError wrapping a Temporal cancellation marks the job cancelled."""
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
     from shared.errors import PlanningError
@@ -203,6 +207,7 @@ def test_external_cancellation_planning_path(monkeypatch, tmp_path: Path, patche
 def test_external_cancellation_blogging_error_path(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
+    """A BloggingError wrapping a Temporal cancellation marks the job cancelled."""
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
     from shared.errors import DraftError
@@ -228,6 +233,7 @@ def test_external_cancellation_blogging_error_path(
 def test_external_cancellation_unexpected_error_path(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
+    """A generic error wrapping a Temporal cancellation marks the job cancelled."""
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
     from temporalio.exceptions import CancelledError as TemporalCancelled
@@ -252,6 +258,7 @@ def test_external_cancellation_unexpected_error_path(
 def test_mark_cancelled_swallows_update_exception(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
+    """A failing update inside the cancellation path is swallowed (no crash)."""
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
     from shared.errors import PlanningError

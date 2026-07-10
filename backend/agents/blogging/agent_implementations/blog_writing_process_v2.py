@@ -693,10 +693,9 @@ def _load_required_guidelines(action: str, *, phase: str = "draft") -> Tuple[str
         - ``phase`` names the pipeline stage the failure should be attributed to.
     Postconditions:
         - Returns ``(writing_style_content, brand_spec_content)``, both non-empty.
-        - Raises ``DraftError`` naming each missing file when either cannot be
-          loaded — agents must never run with silently-empty guidelines. The raised
-          error carries ``phase`` (overriding DraftError's hardcoded "draft") so the
-          job store's ``failed_phase`` points at the stage that actually failed.
+        - Raises ``DraftError(phase=phase)`` naming each missing file when either
+          cannot be loaded — agents must never run with silently-empty guidelines —
+          so the job store's ``failed_phase`` points at the stage that actually failed.
     """
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
     brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
@@ -707,12 +706,11 @@ def _load_required_guidelines(action: str, *, phase: str = "draft") -> Tuple[str
         if not brand_spec_content:
             missing_parts.append(f"brand guidelines ({BRAND_SPEC_PROMPT_PATH})")
         missing_msg = ", ".join(missing_parts)
-        err = DraftError(
+        raise DraftError(
             f"Cannot {action} without required guideline inputs. Missing: {missing_msg}.",
             cause=ValueError(missing_msg),
+            phase=phase,
         )
-        err.phase = phase
-        raise err
     return writing_style_content, brand_spec_content
 
 
@@ -785,6 +783,13 @@ class _PipelineContext:
     draft_result: Any = None
     status: PipelineStatus = "PASS"
 
+    def __post_init__(self) -> None:
+        # Enforce the resolved-inputs invariant at construction so the Temporal
+        # activity path (which builds a context directly) fails loudly here rather
+        # than with an opaque error deep inside a stage.
+        assert self.llm_client is not None, "_PipelineContext.llm_client must be resolved"
+        assert self.length_policy is not None, "_PipelineContext.length_policy must be resolved"
+
 
 def run_pipeline(
     brief: ResearchBriefInput,
@@ -808,6 +813,12 @@ def run_pipeline(
     When work_dir is provided, persists artifacts. When run_gates is True (default when
     work_dir is set), runs validators, fact-check, and compliance. On FAIL, enters
     closed-loop rewrite until PASS or max_rewrite_iterations.
+
+    Internally the pipeline is decomposed into three stages — ``run_planning_stage``,
+    ``run_draft_stage``, ``run_gates_stage`` — that operate on a shared
+    ``_PipelineContext``. This function is a thin thread-mode sequencer over them;
+    the same stage functions run as independent Temporal activities when orchestrated
+    by ``BlogFullPipelineWorkflow``. The signature and return contract are unchanged.
 
     Args:
         brief: The research brief input describing the blog topic.
@@ -1184,6 +1195,7 @@ def run_draft_stage(
         - Returns a terminal ``(planning_phase_result, draft_result, "FAIL")`` tuple
           if the job was cancelled/failed while awaiting user review.
     """
+    assert ctx.plan is not None, "run_draft_stage requires ctx.plan (set by the planning stage)"
     brief = ctx.brief
     work_dir = ctx.work_dir
     llm_client = ctx.llm_client
@@ -1762,6 +1774,9 @@ def run_gates_stage(
         - Raises ``DraftError`` (phase="gates") when gates are enabled but the
           guideline files required for gate-driven rewrites cannot be loaded.
     """
+    assert ctx.draft_result is not None, (
+        "run_gates_stage requires ctx.draft_result (set by the draft stage)"
+    )
     brief = ctx.brief
     work_dir = ctx.work_dir
     llm_client = ctx.llm_client

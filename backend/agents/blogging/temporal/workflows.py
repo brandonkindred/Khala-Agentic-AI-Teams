@@ -14,6 +14,7 @@ require workflow-level signals; today's behavior is preserved.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import timedelta
 from typing import Any, Dict
 
@@ -22,7 +23,7 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from blogging.temporal import activities as _activities
-    from blogging.temporal.constants import FINALIZE_MAX_ATTEMPTS, TASK_QUEUE
+    from blogging.temporal.constants import TASK_QUEUE
 
 # HITL-bearing phases may wait on a human for hours; keep a wide ceiling (>= the
 # former whole-pipeline 12h) so Temporal does not time the activity out mid-wait.
@@ -36,14 +37,10 @@ DEFAULT_RETRY_POLICY = RetryPolicy(
     backoff_coefficient=2.0,
 )
 
-# Finalize's maximum_attempts is shared with finalize_job_activity's last-attempt
-# check (it re-raises transient store errors until the final attempt).
-FINALIZE_RETRY_POLICY = RetryPolicy(
-    maximum_attempts=FINALIZE_MAX_ATTEMPTS,
-    initial_interval=timedelta(seconds=30),
-    maximum_interval=timedelta(minutes=2),
-    backoff_coefficient=2.0,
-)
+# Same backoff as the stage policy, capped attempts. finalize_job_activity reads
+# the scheduled policy's maximum_attempts back via activity.info().retry_policy to
+# decide its last attempt, so there is no separate constant to keep in sync.
+FINALIZE_RETRY_POLICY = dataclasses.replace(DEFAULT_RETRY_POLICY, maximum_attempts=3)
 
 # One option block shared by every pipeline-stage activity (and the legacy
 # drain-out branch) so tuning a timeout/heartbeat/retry is a single edit.
