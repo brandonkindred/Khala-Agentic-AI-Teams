@@ -12,6 +12,7 @@ Public API:
     )
 """
 
+from shared_temporal.activity_utils import is_last_attempt
 from shared_temporal.checkpoints import (
     load_checkpoint,
     save_checkpoint,
@@ -51,6 +52,7 @@ __all__ = [
     "get_temporal_client",
     "get_temporal_loop",
     "get_temporal_namespace",
+    "is_last_attempt",
     "is_temporal_enabled",
     "load_checkpoint",
     "run_team_job",

@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
-from build_fix_specialist.models import CodeEdit
+from build_fix_specialist.models import CodeEdit, parse_code_edits
 from strands import Agent
 
 from llm_service import get_strands_model
@@ -164,23 +164,7 @@ class LintingToolAgent:
             logger.warning("Lint fix LLM call failed (non-blocking): %s", err)
             return []
 
-        edits: List[CodeEdit] = []
-        for entry in data.get("edits") or []:
-            if (
-                isinstance(entry, dict)
-                and entry.get("file_path")
-                and "old_text" in entry
-                and "new_text" in entry
-            ):
-                edits.append(
-                    CodeEdit(
-                        file_path=entry["file_path"],
-                        line_start=entry.get("line_start"),
-                        line_end=entry.get("line_end"),
-                        old_text=entry["old_text"],
-                        new_text=entry["new_text"],
-                    )
-                )
+        edits = parse_code_edits(data)
 
         logger.info("Lint fix LLM produced %d edit(s)", len(edits))
         return edits
