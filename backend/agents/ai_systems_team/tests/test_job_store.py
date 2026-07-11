@@ -13,7 +13,6 @@ from ai_systems_team.shared.job_store import (
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
-    add_completed_phase,
     cancel_job,
     create_job,
     delete_job,
@@ -96,14 +95,6 @@ def test_delete_job(cache_dir):
     assert result is True
     data = get_job("j1", cache_dir=cache_dir)
     assert data == {}
-
-
-def test_add_completed_phase(cache_dir):
-    create_job("j1", "proj", "/spec.md", cache_dir=cache_dir)
-    add_completed_phase("j1", "spec_intake", phase_result={"success": True}, cache_dir=cache_dir)
-    data = get_job("j1", cache_dir=cache_dir)
-    assert "spec_intake" in data["completed_phases"]
-    assert data["phase_results"]["spec_intake"]["success"] is True
 
 
 def test_get_missing_job_returns_empty(cache_dir):

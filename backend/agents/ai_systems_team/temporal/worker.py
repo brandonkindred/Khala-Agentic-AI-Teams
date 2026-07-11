@@ -10,7 +10,7 @@ from typing import Optional
 
 from temporalio.worker import Worker
 
-from ai_systems_team.temporal.activities import run_build_activity
+from ai_systems_team.temporal import ACTIVITIES, WORKFLOWS
 from ai_systems_team.temporal.client import (
     connect_temporal_client,
     get_temporal_loop,
@@ -19,7 +19,6 @@ from ai_systems_team.temporal.client import (
     set_temporal_loop,
 )
 from ai_systems_team.temporal.constants import TASK_QUEUE
-from ai_systems_team.temporal.workflows import AISystemsBuildWorkflow
 
 logger = logging.getLogger(__name__)
 
@@ -34,22 +33,26 @@ def create_ai_systems_worker(client: Optional[object] = None) -> Optional[Worker
         return None
     global _activity_executor
     if _activity_executor is None:
+        # The build pipeline runs one activity per phase; size the pool so the
+        # book-end and phase activities of a couple of concurrent jobs can co-run.
         _activity_executor = ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="ai-systems-temporal-activity"
+            max_workers=4, thread_name_prefix="ai-systems-temporal-activity"
         )
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[AISystemsBuildWorkflow],
-        activities=[run_build_activity],
+        workflows=WORKFLOWS,
+        activities=ACTIVITIES,
         activity_executor=_activity_executor,
-        max_concurrent_activities=2,
+        max_concurrent_activities=4,
     )
     logger.info("AI Systems Temporal worker created for task queue %s", TASK_QUEUE)
     return worker
 
 
-async def _run_worker_async() -> None:
+async def _run_worker_async() -> (
+    None
+):  # pragma: no cover - depends on a live Temporal server connection and the SDK worker loop; exercised only in integration tests with a real Temporal server.
     client = await connect_temporal_client()
     if client is None:
         return
@@ -62,7 +65,9 @@ async def _run_worker_async() -> None:
     await worker.run()
 
 
-def _worker_thread_target() -> None:
+def _worker_thread_target() -> (
+    None
+):  # pragma: no cover - thread target that drives the Temporal worker; runs only when TEMPORAL_ADDRESS is set and the worker thread is actually spawned.
     global _worker_thread
     if not is_temporal_enabled():
         return
