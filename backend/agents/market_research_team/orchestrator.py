@@ -91,18 +91,42 @@ class MarketResearchOrchestrator:
 
     @cached_property
     def psychology_agent(self) -> UserPsychologyAgent:
+        """Lazily-built psychology specialist.
+
+        Preconditions: None.
+        Postconditions: Returns a cached ``UserPsychologyAgent`` (built on first
+            access; its strands agent + LLM model resolve lazily).
+        """
         return UserPsychologyAgent()
 
     @cached_property
     def consistency_agent(self) -> ConsistencyAgent:
+        """Lazily-built cross-interview consistency specialist.
+
+        Preconditions: None.
+        Postconditions: Returns a cached ``ConsistencyAgent`` (built on first
+            access; its strands agent + LLM model resolve lazily).
+        """
         return ConsistencyAgent()
 
     @cached_property
     def viability_agent(self) -> MarketViabilityAgent:
+        """Lazily-built business-viability specialist.
+
+        Preconditions: None.
+        Postconditions: Returns a cached ``MarketViabilityAgent`` (built on first
+            access; its strands agent + LLM model resolve lazily).
+        """
         return MarketViabilityAgent()
 
     @cached_property
     def scripts_agent(self) -> ResearchScriptAgent:
+        """Lazily-built research-scripts specialist.
+
+        Preconditions: None.
+        Postconditions: Returns a cached ``ResearchScriptAgent`` (built on first
+            access; its strands agent + LLM model resolve lazily).
+        """
         return ResearchScriptAgent()
 
     # ------------------------------------------------------------------
@@ -205,9 +229,12 @@ class MarketResearchOrchestrator:
         """
         market_signals = list(signals)
         while len(market_signals) < 2:
-            # Copy the shared default so distinct outputs never alias (and mutate)
-            # the same module-level MarketSignal instance.
-            market_signals.append(_DEFAULT_SIGNALS_FALLBACK[len(market_signals)].model_copy())
+            # Deep-copy the shared default so distinct outputs never alias (and
+            # mutate) the same module-level MarketSignal — a shallow copy would
+            # still share the nested ``evidence`` list.
+            market_signals.append(
+                _DEFAULT_SIGNALS_FALLBACK[len(market_signals)].model_copy(deep=True)
+            )
 
         if not human_review.approved:
             return TeamOutput(

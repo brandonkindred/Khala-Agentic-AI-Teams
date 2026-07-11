@@ -89,17 +89,16 @@ def test_orchestrator_consistency_signal_survives_null_signal_name(monkeypatch) 
 
     def _custom_call_agent(agent, prompt):
         p = prompt.lower()
-        # Same routing discipline as the conftest mock: consistency on the
-        # instruction phrase, and viability before the psychology "market
-        # signals" key (see conftest for why).
+        # Same unique-instruction-phrase routing as the conftest mock (see there
+        # for why substring keys on shared/embedded words mis-route stages).
         if "cross-interview consistency" in p:
             return null_consistency_json
         if "viability" in p or "verdict" in p:
             return SAMPLE_VIABILITY_JSON
-        if "transcript" in p and "analyze" in p:
-            return SAMPLE_INSIGHT_JSON
-        if "psychology" in p or "adoption" in p or "market signals" in p:
+        if "user psychology" in p:
             return SAMPLE_SIGNALS_JSON
+        if "user interview transcript" in p:
+            return SAMPLE_INSIGHT_JSON
         if "research artifacts" in p or "interview script" in p:
             return SAMPLE_SCRIPTS_JSON
         return SAMPLE_INSIGHT_JSON

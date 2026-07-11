@@ -115,30 +115,27 @@ def _mock_strands(monkeypatch):
     def _fake_call_agent(agent, prompt):
         """Return mock JSON based on prompt keywords.
 
-        Order and phrasing both matter because stage outputs get embedded into
-        downstream prompts. The viability prompt reasons *over* market signals
-        (so it contains "market signals") and, in split mode, embeds the
-        consistency signal name "Cross-interview theme consistency" — so it must
-        be routed on "viability"/"verdict" BEFORE the psychology "market signals"
-        key, and the consistency branch must key on the instruction phrase
-        "cross-interview consistency" (which the embedded "cross-interview THEME
-        consistency" signal name does not contain) rather than a bare
-        "cross-interview"/"consistency" substring that the viability prompt would
-        trip.
+        Each stage is keyed on a phrase that appears ONLY in that stage's own
+        INSTRUCTION text, never in the stage-output data that gets embedded into
+        a downstream prompt. Substring keys on shared words are fragile: the
+        viability prompt reasons over "market signals" (would trip a psychology
+        key) and embeds the consistency signal name "Cross-interview theme
+        consistency"; the psychology/consistency/viability prompts all embed
+        insight ``source`` names like "inline_transcript_1" (would trip a
+        "transcript" key). So route on the unique instruction phrases instead —
+        "user interview transcript" (UX), "user psychology" (psychology),
+        "cross-interview consistency" (consistency), "viability"/"verdict"
+        (viability), "research artifacts"/"interview script" (scripts).
         """
         prompt_lower = prompt.lower()
         if "cross-interview consistency" in prompt_lower:
             return SAMPLE_CONSISTENCY_JSON
         if "viability" in prompt_lower or "verdict" in prompt_lower:
             return SAMPLE_VIABILITY_JSON
-        if "transcript" in prompt_lower and "analyze" in prompt_lower:
-            return SAMPLE_INSIGHT_JSON
-        if (
-            "psychology" in prompt_lower
-            or "adoption" in prompt_lower
-            or "market signals" in prompt_lower
-        ):
+        if "user psychology" in prompt_lower:
             return SAMPLE_SIGNALS_JSON
+        if "user interview transcript" in prompt_lower:
+            return SAMPLE_INSIGHT_JSON
         if "research artifacts" in prompt_lower or "interview script" in prompt_lower:
             return SAMPLE_SCRIPTS_JSON
         # Fallback
