@@ -6,9 +6,10 @@ Each ``@activity.defn`` takes/returns JSON (dicts) so the payloads are built wit
 than bare dicts) documents the contract and gives validation on the way in.
 
 Only the light state an activity actually needs travels through Temporal — a
-node's spec, the current knowledge-base entries, and the *compact* child
-summaries (deliberation/synthesis only read ``agent_name``/``focus_question``/
-``confidence``/``answer``), never the full recursive result subtrees.
+node's spec, a *bounded* pre-rendered knowledge summary (the workflow renders it
+so it never ships the whole growing knowledge base per node), and the *compact*
+child summaries (deliberation/synthesis only read ``agent_name``/
+``focus_question``/``confidence``/``answer``), never the full recursive subtrees.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from deepthought.models import AgentResult, AgentSpec, KnowledgeEntry
+from deepthought.models import AgentResult, AgentSpec
 
 
 class AnalysePayload(BaseModel):
@@ -28,7 +29,7 @@ class AnalysePayload(BaseModel):
     original_query: str
     conversation_history: list[dict[str, Any]] = Field(default_factory=list)
     decomposition_strategy: str
-    kb_entries: list[KnowledgeEntry] = Field(default_factory=list)
+    knowledge_summary: str = ""
     max_depth: int
 
 
@@ -38,7 +39,7 @@ class ForceDirectAnswerPayload(BaseModel):
     spec: AgentSpec
     parent_question: str = ""
     original_query: str
-    kb_entries: list[KnowledgeEntry] = Field(default_factory=list)
+    knowledge_summary: str = ""
 
 
 class ChildSummary(BaseModel):

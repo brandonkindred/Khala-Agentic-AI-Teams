@@ -18,6 +18,7 @@ performs, so ``/status/{job_id}`` polling is identical across runtimes.
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import Any
 
@@ -29,6 +30,7 @@ from deepthought.temporal.constants import (
     DELIBERATE_ACTIVITY,
     FINALIZE_JOB_ACTIVITY,
     FORCE_DIRECT_ANSWER_ACTIVITY,
+    IS_CANCELLED_ACTIVITY,
     RUN_PIPELINE_ACTIVITY,
     START_JOB_ACTIVITY,
     SYNTHESISE_ACTIVITY,
@@ -37,14 +39,21 @@ from deepthought.temporal.constants import (
 logger = logging.getLogger(__name__)
 
 
+@functools.lru_cache(maxsize=1)
 def _build_llm() -> (
     Any
 ):  # pragma: no cover - real provider wiring (mirrors DeepthoughtOrchestrator.__init__); patched out in tests
-    """Construct the strands LLM client the reasoning methods call.
+    """Construct (once per worker process) the strands LLM client.
 
     Mirrors ``DeepthoughtOrchestrator.__init__`` so every activity talks to the
-    same provider the thread path would. Per-call ``system_prompt`` overrides make
-    the constructor prompt irrelevant, but we keep it identical for parity.
+    same provider the thread path would. Cached with ``lru_cache`` because a
+    decomposed run issues one activity per LLM boundary (up to ~150 per run) and
+    ``get_strands_model`` re-resolves the Postgres provider list on every call —
+    building it once per process avoids that repeated resolution, and the
+    ``FailoverLLMClient`` it returns is designed to be reused (it remembers which
+    providers are rate-limited). Provider-config changes are picked up on the next
+    worker restart. Per-call ``system_prompt`` overrides make the constructor
+    prompt irrelevant, but we keep it identical for parity.
     """
     from strands import Agent
 
@@ -55,20 +64,6 @@ def _build_llm() -> (
         model=get_strands_model("deepthought"),
         system_prompt=CLASSIFY_QUESTION_SYSTEM_PROMPT,
     )
-
-
-def _kb_from_entries(entries: list[Any]) -> Any:
-    """Rebuild a :class:`SharedKnowledgeBase` seeded from the workflow's entries.
-
-    The seeded KB reproduces exactly what a node would have read in thread mode:
-    the reasoning methods call ``summary_for_prompt``/``find_similar`` on it.
-    """
-    from deepthought.knowledge_base import SharedKnowledgeBase
-
-    kb = SharedKnowledgeBase()
-    for entry in entries:
-        kb.add(entry)
-    return kb
 
 
 # --------------------------------------------------------------------------- #
@@ -92,7 +87,8 @@ def classify_strategy_activity(request: dict[str, Any]) -> str:
     from deepthought.orchestrator import DeepthoughtOrchestrator
 
     req = DeepthoughtRequest(**request)
-    return DeepthoughtOrchestrator()._resolve_strategy(req).value
+    # Pass the shared (cached) client so classify does not build its own.
+    return DeepthoughtOrchestrator(llm=_build_llm())._resolve_strategy(req).value
 
 
 @activity.defn(name=ANALYSE_ACTIVITY)
@@ -117,7 +113,7 @@ def analyse_activity(payload: dict[str, Any]) -> dict[str, Any]:
         original_query=p.original_query,
         conversation_history=p.conversation_history,
         decomposition_strategy=DecompositionStrategy(p.decomposition_strategy),
-        knowledge_base=_kb_from_entries(p.kb_entries),
+        knowledge_summary=p.knowledge_summary,
     )
     return agent._analyse(p.max_depth).model_dump()
 
@@ -140,7 +136,7 @@ def force_direct_answer_activity(payload: dict[str, Any]) -> str:
         llm=_build_llm(),
         parent_question=p.parent_question,
         original_query=p.original_query,
-        knowledge_base=_kb_from_entries(p.kb_entries),
+        knowledge_summary=p.knowledge_summary,
     )
     return agent._force_direct_answer()
 
@@ -208,6 +204,23 @@ def start_job_activity(job_id: str) -> bool:
         return False
     update_job(job_id, status=JOB_STATUS_RUNNING)
     return True
+
+
+@activity.defn(name=IS_CANCELLED_ACTIVITY)
+def is_cancelled_activity(job_id: str) -> bool:
+    """Report whether the job has been cancelled (cheap job-store read).
+
+    The workflow polls this between decomposition fan-outs so a job cancelled via
+    ``/deepthought/jobs/{job_id}/cancel`` (which only marks the store) stops
+    spawning further specialists instead of running the whole tree to completion.
+
+    Postconditions:
+        - Returns ``True`` iff the job is in a cancelled state; never raises for a
+          missing job (treated as not-cancelled by the job store).
+    """
+    from deepthought.shared.job_store import is_job_cancelled
+
+    return is_job_cancelled(job_id)
 
 
 @activity.defn(name=FINALIZE_JOB_ACTIVITY)
@@ -298,6 +311,7 @@ ALL_ACTIVITIES = [
     deliberate_activity,
     synthesise_activity,
     start_job_activity,
+    is_cancelled_activity,
     finalize_job_activity,
     run_pipeline_activity,
 ]

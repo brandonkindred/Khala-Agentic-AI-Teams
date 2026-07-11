@@ -16,7 +16,7 @@ from deepthought.models import KnowledgeEntry
 # The similarity primitives now live in ``deepthought.reasoning`` so the
 # deterministic Temporal workflow can reuse the exact same dedup logic.
 from deepthought.reasoning import SIMILARITY_THRESHOLD as _SIMILARITY_THRESHOLD
-from deepthought.reasoning import find_similar_entries
+from deepthought.reasoning import find_similar_entries, render_knowledge_summary
 
 logger = logging.getLogger(__name__)
 
@@ -70,20 +70,7 @@ class SharedKnowledgeBase:
     def summary_for_prompt(self, max_chars: int = 4000) -> str:
         """Render a concise text summary of all findings for prompt injection."""
         with self._lock:
-            if not self._entries:
-                return "(No prior findings.)"
-            parts: list[str] = []
-            total = 0
-            for e in self._entries:
-                line = f"- [{e.agent_name}] {e.finding[:200]}"
-                if total + len(line) > max_chars:
-                    parts.append(
-                        f"... and {len(self._entries) - len(parts)} more entries (truncated)"
-                    )
-                    break
-                parts.append(line)
-                total += len(line)
-            return "\n".join(parts)
+            return render_knowledge_summary(self._entries, max_chars)
 
     def cache_key(self, question: str) -> str:
         """Deterministic hash for a focus question (for result caching)."""

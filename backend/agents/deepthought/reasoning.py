@@ -48,6 +48,13 @@ SIMILARITY_THRESHOLD = 0.70
 # Max chars of an answer stored as a knowledge-base finding.
 _MAX_FINDING_CHARS = 500
 
+# Knowledge-summary char budgets injected into the analysis / direct-answer
+# prompts. Shared by the thread runtime (``DeepthoughtAgent``) and the Temporal
+# workflow (which pre-renders the summary so it never ships the whole knowledge
+# base as an activity argument).
+ANALYSIS_KB_SUMMARY_CHARS = 2000
+DIRECT_KB_SUMMARY_CHARS = 1500
+
 
 # ---------------------------------------------------------------------------
 # Similarity / knowledge-base dedup
@@ -91,6 +98,33 @@ def find_similar_entries(
           ``threshold`` (no mutation of ``entries``).
     """
     return [e for e in entries if jaccard_similarity(e.focus_question, question) >= threshold]
+
+
+def render_knowledge_summary(entries: list[KnowledgeEntry], max_chars: int = 4000) -> str:
+    """Render a concise text summary of findings for prompt injection (pure).
+
+    Oldest-first, one line per finding, stopping once ``max_chars`` is reached and
+    appending a truncation note. The single source of truth for both
+    ``SharedKnowledgeBase.summary_for_prompt`` and the Temporal workflow, which
+    renders the (bounded) summary itself so it never ships the whole knowledge
+    base as an activity argument.
+
+    Postconditions:
+        - Returns ``"(No prior findings.)"`` for an empty list; otherwise a
+          newline-joined summary no longer than ``max_chars`` (plus the note).
+    """
+    if not entries:
+        return "(No prior findings.)"
+    parts: list[str] = []
+    total = 0
+    for e in entries:
+        line = f"- [{e.agent_name}] {e.finding[:200]}"
+        if total + len(line) > max_chars:
+            parts.append(f"... and {len(entries) - len(parts)} more entries (truncated)")
+            break
+        parts.append(line)
+        total += len(line)
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

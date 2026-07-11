@@ -45,12 +45,15 @@ with workflow.unsafe.imports_passed_through():
         QueryAnalysis,
     )
     from deepthought.reasoning import (
+        ANALYSIS_KB_SUMMARY_CHARS,
         DEFAULT_AGENT_BUDGET,
+        DIRECT_KB_SUMMARY_CHARS,
         build_child_specs,
         build_finding_entry,
         compute_structural_confidence,
         find_similar_entries,
         format_answer,
+        render_knowledge_summary,
     )
     from deepthought.temporal import activities
     from deepthought.temporal.phase_models import (
@@ -85,6 +88,10 @@ class DeepthoughtWorkflow:
         self._max_depth_reached: int = 0
         self._kb: list[KnowledgeEntry] = []
         self._events: list[AgentEvent] = []
+        self._job_id: str = ""
+        # Latched once a cancellation check returns True, so later fan-outs
+        # short-circuit without re-polling the job store.
+        self._cancelled: bool = False
 
     @workflow.run
     async def run(self, job_id: str, request: dict[str, Any]) -> dict[str, Any]:
@@ -109,6 +116,7 @@ class DeepthoughtWorkflow:
                 retry_policy=RUN_PIPELINE_RETRY_POLICY,
             )
 
+        self._job_id = job_id
         started = await workflow.execute_activity(
             activities.start_job_activity, job_id, **JOB_ACTIVITY_OPTS
         )
@@ -139,13 +147,6 @@ class DeepthoughtWorkflow:
                 knowledge_entries=self._kb,
                 events=self._events,
             ).model_dump()
-
-            await workflow.execute_activity(
-                activities.finalize_job_activity,
-                args=[job_id, response, True, ""],
-                **JOB_ACTIVITY_OPTS,
-            )
-            return response
         except Exception as e:  # noqa: BLE001 — record FAILED then re-raise
             await workflow.execute_activity(
                 activities.finalize_job_activity,
@@ -153,6 +154,17 @@ class DeepthoughtWorkflow:
                 **JOB_ACTIVITY_OPTS,
             )
             raise
+
+        # Persist success OUTSIDE the try: the run genuinely succeeded, so a
+        # failure to write COMPLETED (e.g. the response exceeds a payload limit or
+        # the job service blips) must fail the workflow task for Temporal to retry
+        # — it must NEVER be re-recorded by the except branch as a run failure.
+        await workflow.execute_activity(
+            activities.finalize_job_activity,
+            args=[job_id, response, True, ""],
+            **JOB_ACTIVITY_OPTS,
+        )
+        return response
 
     # ------------------------------------------------------------------
     # Strategy
@@ -215,7 +227,9 @@ class DeepthoughtWorkflow:
                         spec=spec,
                         parent_question=parent_question,
                         original_query=request["message"],
-                        kb_entries=self._kb,
+                        knowledge_summary=render_knowledge_summary(
+                            self._kb, DIRECT_KB_SUMMARY_CHARS
+                        ),
                     ).model_dump(mode="json"),
                     **LLM_ACTIVITY_OPTS,
                 )
@@ -308,7 +322,7 @@ class DeepthoughtWorkflow:
                 original_query=request["message"],
                 conversation_history=request.get("conversation_history", []),
                 decomposition_strategy=strategy,
-                kb_entries=self._kb,
+                knowledge_summary=render_knowledge_summary(self._kb, ANALYSIS_KB_SUMMARY_CHARS),
                 max_depth=max_depth,
             ).model_dump(mode="json"),
             **LLM_ACTIVITY_OPTS,
@@ -332,21 +346,21 @@ class DeepthoughtWorkflow:
         if not specs:
             return []
 
+        # Stop spawning further specialists if the job was cancelled mid-run
+        # (/deepthought/jobs/{id}/cancel only marks the store, so the workflow
+        # cooperatively polls). One check per decomposition fan-out, latched.
+        if self._cancelled or await self._is_cancelled():
+            self._cancelled = True
+            return [self._truncated_result(cs, "Run cancelled.") for cs in specs]
+
         results: list[AgentResult | None] = [None] * len(specs)
         runnable: list[tuple[int, AgentSpec]] = []
         for i, cs in enumerate(specs):
             if self._register_spawn(cs):
                 runnable.append((i, cs))
             else:
-                results[i] = AgentResult(
-                    agent_id=cs.agent_id,
-                    agent_name=cs.name,
-                    depth=cs.depth,
-                    focus_question=cs.focus_question,
-                    answer="Agent budget exceeded — analysis truncated.",
-                    confidence=0.0,
-                    child_results=[],
-                    was_decomposed=False,
+                results[i] = self._truncated_result(
+                    cs, "Agent budget exceeded — analysis truncated."
                 )
 
         gathered = await asyncio.gather(
@@ -371,24 +385,36 @@ class DeepthoughtWorkflow:
 
         ``asyncio.CancelledError`` is a ``BaseException`` (not ``Exception``), so
         workflow cancellation propagates out of ``gather`` instead of being
-        swallowed here.
+        swallowed here. The full traceback is logged (not just the agent name) so a
+        genuine bug is not silently degraded to an "Error analysing" leaf.
         """
         try:
             return await self._run_agent(
                 spec, parent_spec.focus_question, request, strategy, max_depth
             )
         except Exception:
-            workflow.logger.warning("Child agent %s failed", spec.name)
-            return AgentResult(
-                agent_id=spec.agent_id,
-                agent_name=spec.name,
-                depth=spec.depth,
-                focus_question=spec.focus_question,
-                answer=f"Error analysing: {spec.focus_question}",
-                confidence=0.0,
-                child_results=[],
-                was_decomposed=False,
-            )
+            workflow.logger.exception("Child agent %s failed", spec.name)
+            return self._truncated_result(spec, f"Error analysing: {spec.focus_question}")
+
+    async def _is_cancelled(self) -> bool:
+        """Poll the job store (via activity) for cooperative cancellation."""
+        return await workflow.execute_activity(
+            activities.is_cancelled_activity, self._job_id, **JOB_ACTIVITY_OPTS
+        )
+
+    @staticmethod
+    def _truncated_result(spec: AgentSpec, answer: str) -> AgentResult:
+        """Build a childless, zero-confidence result for a node that did not run."""
+        return AgentResult(
+            agent_id=spec.agent_id,
+            agent_name=spec.name,
+            depth=spec.depth,
+            focus_question=spec.focus_question,
+            answer=answer,
+            confidence=0.0,
+            child_results=[],
+            was_decomposed=False,
+        )
 
     # ------------------------------------------------------------------
     # Deterministic workflow state (budget / events / knowledge base)

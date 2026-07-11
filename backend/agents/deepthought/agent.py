@@ -42,6 +42,8 @@ from deepthought.prompts import (
 # runtimes. ``DEFAULT_AGENT_BUDGET`` is imported by the orchestrator from
 # ``reasoning`` directly.
 from deepthought.reasoning import (
+    ANALYSIS_KB_SUMMARY_CHARS,
+    DIRECT_KB_SUMMARY_CHARS,
     MAX_CHARS_PER_CHILD_ANSWER,
     MAX_CHILDREN_PER_AGENT,
     build_child_specs,
@@ -68,6 +70,7 @@ class DeepthoughtAgent:
         conversation_history: list[dict] | None = None,
         decomposition_strategy: DecompositionStrategy = DecompositionStrategy.AUTO,
         knowledge_base: SharedKnowledgeBase | None = None,
+        knowledge_summary: str | None = None,
         result_cache: ResultCache | None = None,
         on_agent_spawned: Any | None = None,
         on_event: Any | None = None,
@@ -79,11 +82,23 @@ class DeepthoughtAgent:
         self.conversation_history = conversation_history or []
         self.decomposition_strategy = decomposition_strategy
         self.knowledge_base = knowledge_base or SharedKnowledgeBase()
+        # Pre-rendered knowledge summary override. When set (the Temporal path
+        # passes a bounded, workflow-rendered string), the LLM prompts use it
+        # directly instead of re-rendering from ``knowledge_base`` — so the
+        # activity never has to receive the whole knowledge base. ``None`` (the
+        # thread path) renders from the live ``knowledge_base`` as before.
+        self._knowledge_summary = knowledge_summary
         self.result_cache = result_cache
         # Callback invoked each time a child agent is created; returns False to halt.
         self._on_agent_spawned = on_agent_spawned
         # Callback for streaming events: on_event(AgentEvent) -> None
         self._on_event = on_event
+
+    def _kb_summary(self, max_chars: int) -> str:
+        """Knowledge summary for a prompt — the injected override, or a fresh render."""
+        if self._knowledge_summary is not None:
+            return self._knowledge_summary
+        return self.knowledge_base.summary_for_prompt(max_chars=max_chars)
 
     # ------------------------------------------------------------------
     # Public
@@ -209,7 +224,7 @@ class DeepthoughtAgent:
             max_depth=max_depth,
             original_query=self.original_query,
             strategy_instruction=strategy_instruction,
-            knowledge_summary=self.knowledge_base.summary_for_prompt(max_chars=2000),
+            knowledge_summary=self._kb_summary(ANALYSIS_KB_SUMMARY_CHARS),
         )
         context_text = (
             f"Parent question: {self.parent_question}"
@@ -252,7 +267,7 @@ class DeepthoughtAgent:
             specialist_description=self.spec.role_description,
             parent_question=self.parent_question or self.spec.focus_question,
             original_query=self.original_query,
-            knowledge_summary=self.knowledge_base.summary_for_prompt(max_chars=1500),
+            knowledge_summary=self._kb_summary(DIRECT_KB_SUMMARY_CHARS),
         )
         try:
             return self.llm.complete(

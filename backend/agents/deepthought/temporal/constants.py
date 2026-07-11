@@ -28,15 +28,23 @@ DELIBERATE_ACTIVITY = "deepthought_deliberate"
 SYNTHESISE_ACTIVITY = "deepthought_synthesise"
 START_JOB_ACTIVITY = "deepthought_start_job"
 FINALIZE_JOB_ACTIVITY = "deepthought_finalize_job"
+IS_CANCELLED_ACTIVITY = "deepthought_is_cancelled"
 # Legacy single-activity name — unchanged so ``workflow.patched`` replay of
 # in-flight histories still resolves it.
 RUN_PIPELINE_ACTIVITY = "deepthought_run_pipeline"
 
-# One attempt for the LLM reasoning activities: each already degrades gracefully
-# on an LLM error (it returns a fallback rather than raising), so a genuine raise
-# is a non-transient bug — retrying would only re-charge LLM cost. Worker/process
-# loss still reschedules an *incomplete* attempt (the durability benefit).
-_LLM_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
+# A small bounded retry for the LLM reasoning activities. The reasoning methods
+# already swallow LLM errors internally and return a fallback, so a *raise* out
+# of one of these activities is an infra/transient error around the call
+# (provider resolution, serialization, worker loss) rather than a bad LLM
+# response — exactly the class of failure a bounded retry with backoff should
+# ride out, instead of failing an entire run on a one-off blip. Bounded (not
+# unlimited) so a genuinely deterministic bug still surfaces quickly.
+_LLM_RETRY_POLICY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=1),
+    backoff_coefficient=2.0,
+)
 
 # Job-store transitions are idempotent status writes over HTTP, so a small
 # bounded retry rides out a transient job-service blip.

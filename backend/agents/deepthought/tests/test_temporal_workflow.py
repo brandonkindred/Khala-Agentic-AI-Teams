@@ -111,6 +111,7 @@ def _happy_handlers(finalize_sink: list | None = None) -> dict[str, Any]:
         "start_job_activity": lambda a: True,
         "classify_strategy_activity": lambda a: "by_discipline",
         "analyse_activity": _analyse_handler,
+        "is_cancelled_activity": lambda a: False,
         "deliberate_activity": lambda a: "deliberation notes",
         "synthesise_activity": lambda a: "SYNTHESISED",
         "finalize_job_activity": _finalize,
@@ -217,6 +218,7 @@ def test_workflow_forces_direct_answer_when_depth_exhausted():
     handlers = {
         "start_job_activity": lambda a: True,
         "analyse_activity": _analyse_decompose_then_leaf,
+        "is_cancelled_activity": lambda a: False,
         "force_direct_answer_activity": lambda a: "forced child answer",
         "synthesise_activity": lambda a: "root synth",
         "finalize_job_activity": lambda a: None,
@@ -343,7 +345,7 @@ def test_run_children_vetoes_over_budget():
         agent_id="root", name="root", role_description="r", focus_question="pq", depth=0
     )
     calls: list = []
-    with _driver({}, calls):
+    with _driver({"is_cancelled_activity": lambda a: False}, calls):
         res = asyncio.run(wf._run_children(specs, parent, {"message": "m"}, "auto", 3))
 
     assert len(res) == 2
@@ -351,6 +353,42 @@ def test_run_children_vetoes_over_budget():
     assert not any(c[0] == "analyse_activity" for c in calls)
     # Budget-warning events were emitted for both vetoed children.
     assert sum(1 for e in wf._events if e.event_type == AgentEventType.BUDGET_WARNING) == 2
+
+
+def test_run_children_short_circuits_when_cancelled():
+    """A job cancelled mid-run stops further fan-out; children are truncated."""
+    wf = wfmod.DeepthoughtWorkflow()
+    wf._job_id = "job-c"
+    specs = [
+        AgentSpec(
+            agent_id="a",
+            name="na",
+            role_description="r",
+            focus_question="qa",
+            depth=1,
+            parent_id="root",
+        ),
+        AgentSpec(
+            agent_id="b",
+            name="nb",
+            role_description="r",
+            focus_question="qb",
+            depth=1,
+            parent_id="root",
+        ),
+    ]
+    parent = AgentSpec(
+        agent_id="root", name="root", role_description="r", focus_question="pq", depth=0
+    )
+    calls: list = []
+    with _driver({"is_cancelled_activity": lambda a: True}, calls):
+        res = asyncio.run(wf._run_children(specs, parent, {"message": "m"}, "auto", 3))
+
+    assert [r.answer for r in res] == ["Run cancelled.", "Run cancelled."]
+    assert wf._cancelled is True
+    # No specialists were spawned and no analysis ran.
+    assert wf._spawned == 0
+    assert not any(c[0] == "analyse_activity" for c in calls)
 
 
 def test_run_children_returns_empty_for_no_specs():
@@ -413,6 +451,8 @@ def test_workflow_run_source_has_no_restricted_names():
         "time.monotonic(",
         "random.",
     )
+    from deepthought import reasoning as _reasoning
+
     sources = [
         inspect.getsource(wfmod.DeepthoughtWorkflow.run),
         inspect.getsource(wfmod.DeepthoughtWorkflow._resolve_strategy),
@@ -420,8 +460,21 @@ def test_workflow_run_source_has_no_restricted_names():
         inspect.getsource(wfmod.DeepthoughtWorkflow._analyse),
         inspect.getsource(wfmod.DeepthoughtWorkflow._run_children),
         inspect.getsource(wfmod.DeepthoughtWorkflow._run_child_guarded),
+        inspect.getsource(wfmod.DeepthoughtWorkflow._is_cancelled),
         inspect.getsource(wfmod.DeepthoughtWorkflow._register_spawn),
         inspect.getsource(wfmod.DeepthoughtWorkflow._store_finding),
+        inspect.getsource(wfmod.DeepthoughtWorkflow._truncated_result),
+        # The reasoning helpers execute inside the workflow too, so they must be
+        # just as free of nondeterministic calls as the workflow's own methods.
+        inspect.getsource(_reasoning.build_child_specs),
+        inspect.getsource(_reasoning.compute_structural_confidence),
+        inspect.getsource(_reasoning.find_similar_entries),
+        inspect.getsource(_reasoning.jaccard_similarity),
+        inspect.getsource(_reasoning.normalise_words),
+        inspect.getsource(_reasoning.build_finding_entry),
+        inspect.getsource(_reasoning.format_answer),
+        inspect.getsource(_reasoning.collect_specialists),
+        inspect.getsource(_reasoning.render_knowledge_summary),
     ]
     for src in sources:
         for name in banned:

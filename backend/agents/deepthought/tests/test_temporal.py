@@ -147,6 +147,7 @@ def test_pattern_a_exports_present():
         dt.deliberate_activity,
         dt.synthesise_activity,
         dt.start_job_activity,
+        dt.is_cancelled_activity,
         dt.finalize_job_activity,
         dt.run_pipeline_activity,
     ]
@@ -337,14 +338,26 @@ def test_classify_strategy_activity_returns_value():
     from deepthought.models import DecompositionStrategy
     from deepthought.temporal import activities
 
+    captured: dict = {}
+
     class _FakeOrchestrator:
+        def __init__(self, *, llm=None):
+            captured["llm"] = llm
+
         def _resolve_strategy(self, _req):
             return DecompositionStrategy.BY_CONCERN
 
-    with patch("deepthought.orchestrator.DeepthoughtOrchestrator", _FakeOrchestrator):
+    sentinel_llm = object()
+    with (
+        patch("deepthought.orchestrator.DeepthoughtOrchestrator", _FakeOrchestrator),
+        patch.object(activities, "_build_llm", return_value=sentinel_llm),
+    ):
         out = _run_activity(activities.classify_strategy_activity, {"message": "q"})
 
     assert out == "by_concern"
+    # The cached (shared) client is threaded into the orchestrator rather than
+    # letting it build its own.
+    assert captured["llm"] is sentinel_llm
 
 
 def test_analyse_activity_direct_answer():
@@ -370,9 +383,8 @@ def test_analyse_activity_direct_answer():
     assert out["direct_answer"] == "the answer"
 
 
-def test_analyse_activity_seeds_knowledge_base():
-    """The activity rebuilds a knowledge base from the passed entries."""
-    from deepthought.models import KnowledgeEntry
+def test_analyse_activity_injects_knowledge_summary():
+    """The bounded, pre-rendered summary is injected into the analysis system prompt."""
     from deepthought.temporal import activities
     from deepthought.temporal.phase_models import AnalysePayload
 
@@ -383,20 +395,11 @@ def test_analyse_activity_seeds_knowledge_base():
             captured["system"] = k.get("system_prompt", "")
             return {"can_answer_directly": True, "direct_answer": "ok", "confidence": 0.5}
 
-    entries = [
-        KnowledgeEntry(
-            agent_id="p",
-            agent_name="prior",
-            focus_question="earlier question",
-            finding="an earlier finding worth reusing",
-            confidence=0.8,
-        )
-    ]
     payload = AnalysePayload(
         spec=_spec(),
         original_query="q",
         decomposition_strategy="auto",
-        kb_entries=entries,
+        knowledge_summary="- [prior] an earlier finding worth reusing",
         max_depth=3,
     ).model_dump(mode="json")
 
@@ -404,8 +407,8 @@ def test_analyse_activity_seeds_knowledge_base():
         out = _run_activity(activities.analyse_activity, payload)
 
     assert out["can_answer_directly"] is True
-    # The prior finding was rendered into the analysis system prompt's knowledge
-    # summary — proving the KB was seeded from the passed entries.
+    # The workflow-rendered summary reaches the prompt verbatim — no per-node KB
+    # is shipped to the activity.
     assert "an earlier finding worth reusing" in captured["system"]
 
 
@@ -496,6 +499,15 @@ def test_start_job_activity_short_circuits_when_cancelled():
         assert _run_activity(activities.start_job_activity, "job-1") is False
 
     mock_update.assert_not_called()
+
+
+def test_is_cancelled_activity_reports_job_store():
+    from deepthought.temporal import activities
+
+    with patch("deepthought.shared.job_store.is_job_cancelled", return_value=True):
+        assert _run_activity(activities.is_cancelled_activity, "job-1") is True
+    with patch("deepthought.shared.job_store.is_job_cancelled", return_value=False):
+        assert _run_activity(activities.is_cancelled_activity, "job-1") is False
 
 
 def test_finalize_job_activity_writes_completed():
