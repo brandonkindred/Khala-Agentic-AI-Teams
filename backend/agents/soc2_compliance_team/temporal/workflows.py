@@ -7,14 +7,16 @@ performs no I/O, time, or randomness — only ``execute_activity`` calls — so 
 deterministic and replay-safe. Team imports are wrapped in
 ``workflow.unsafe.imports_passed_through()`` for the temporalio sandbox.
 
-Activities inherit the workflow's task queue (the queue its worker registered on),
-so no explicit ``task_queue`` is passed here.
+No explicit ``task_queue`` is passed to the ``execute_activity`` calls, so each
+activity is dispatched to the same task queue the workflow worker polls (the
+temporalio default).
 """
 
 from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from typing import Any, Dict
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -54,7 +56,7 @@ class Soc2AuditWorkflow:
     """Runs one SOC2 audit job as load → fan-out audits → report."""
 
     @workflow.run
-    async def run(self, job_id: str, repo_path: str) -> dict:
+    async def run(self, job_id: str, repo_path: str) -> Dict[str, Any]:
         """Execute the decomposed SOC2 audit.
 
         Preconditions:
@@ -93,10 +95,16 @@ class Soc2AuditWorkflow:
                 retry_policy=LLM_RETRY_POLICY,
             )
         except Exception as e:
-            await workflow.execute_activity(
-                _activities.mark_failed_activity,
-                args=[job_id, f"SOC2 audit failed: {e}"],
-                start_to_close_timeout=MARK_FAILED_TIMEOUT,
-                retry_policy=MARK_FAILED_RETRY_POLICY,
-            )
+            # Best-effort terminal marker — if it fails (e.g. the mark-failed
+            # activity times out), swallow that so the bare ``raise`` below still
+            # propagates the ORIGINAL audit failure rather than the marker's error.
+            try:
+                await workflow.execute_activity(
+                    _activities.mark_failed_activity,
+                    args=[job_id, f"SOC2 audit failed: {e}"],
+                    start_to_close_timeout=MARK_FAILED_TIMEOUT,
+                    retry_policy=MARK_FAILED_RETRY_POLICY,
+                )
+            except Exception:
+                workflow.logger.exception("Failed to mark SOC2 job %s failed", job_id)
             raise

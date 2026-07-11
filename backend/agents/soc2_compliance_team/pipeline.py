@@ -101,7 +101,10 @@ def audit_criterion(category: TSCCategory, context: RepoContext) -> TSCAuditResu
         - Returns a ``TSCAuditResult`` whose ``category`` equals ``category``.
         - Performs exactly one LLM call (via the criterion's agent).
     """
-    assert category in _TSC_AGENTS, f"Unknown TSC category: {category}"
+    # Explicit raise (not ``assert``) so the precondition still holds under
+    # ``python -O``, matching the module-level guard and ``audit_criterion_safe``.
+    if category not in _TSC_AGENTS:
+        raise KeyError(f"Unknown TSC category: {category}")
     llm = get_client(_AGENT_KEY)
     return _TSC_AGENTS[category].run(llm, context)
 

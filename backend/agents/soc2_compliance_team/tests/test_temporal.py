@@ -9,6 +9,7 @@ exercised by monkeypatching ``workflow.execute_activity`` (no worker/server).
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Dict, List
 
 import pytest
@@ -96,6 +97,38 @@ def test_audit_criterion_activity_returns_result_dict(monkeypatch: pytest.Monkey
     assert out["summary"] == "done"
     assert captured["category"] is TSCCategory.PRIVACY
     assert isinstance(captured["context"], RepoContext)
+
+
+def test_audit_criterion_activity_isolates_underlying_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the real audit fails, the activity returns a fail-closed placeholder
+    (via ``audit_criterion_safe``) rather than raising."""
+    from soc2_compliance_team import pipeline
+    from soc2_compliance_team.temporal import activities as amod
+
+    def _boom(_key: str) -> Any:
+        raise RuntimeError("no llm configured")
+
+    monkeypatch.setattr(pipeline, "get_client", _boom)
+
+    ctx = RepoContext(repo_path="/repo").model_dump(mode="json")
+    out = ActivityEnvironment().run(
+        amod.audit_criterion_activity, "job-1", TSCCategory.SECURITY.value, ctx
+    )
+
+    assert out["category"] == TSCCategory.SECURITY.value
+    assert out["compliant"] is False
+    assert "could not be completed" in out["summary"].lower()
+
+
+def test_audit_criterion_activity_rejects_bad_criterion() -> None:
+    """A criterion string that is not a valid TSCCategory value raises."""
+    from soc2_compliance_team.temporal import activities as amod
+
+    ctx = RepoContext(repo_path="/repo").model_dump(mode="json")
+    with pytest.raises(ValueError):
+        ActivityEnvironment().run(amod.audit_criterion_activity, "job-1", "bogus", ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -218,3 +251,31 @@ def test_workflow_marks_failed_on_activity_error(monkeypatch: pytest.MonkeyPatch
 
     # The except-path fires the terminal failure marker.
     assert any(c["name"] == "mark_failed_activity" for c in fake.calls)
+
+
+def test_workflow_reraises_original_when_mark_failed_also_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If ``mark_failed_activity`` itself raises, the ORIGINAL audit failure must
+    still propagate (not be replaced by the marker's error)."""
+    from soc2_compliance_team.temporal import workflows as wmod
+
+    class _BothFail:
+        async def __call__(self, activity, args=None, **kwargs):  # noqa: ANN001
+            name = getattr(activity, "__name__", "")
+            if name == "load_repo_activity":
+                return {"repo_path": args[1]}
+            if name == "audit_criterion_activity":
+                return {"category": args[1], "summary": "x", "findings": [], "compliant": True}
+            if name == "write_report_activity":
+                raise RuntimeError("original report failure")
+            if name == "mark_failed_activity":
+                raise RuntimeError("mark-failed also failed")
+            return None
+
+    monkeypatch.setattr(wmod.workflow, "execute_activity", _BothFail())
+    # The logger call in the inner except needs no workflow context here.
+    monkeypatch.setattr(wmod.workflow, "logger", logging.getLogger("test-soc2-wf"))
+
+    with pytest.raises(RuntimeError, match="original report failure"):
+        asyncio.run(wmod.Soc2AuditWorkflow().run("job-1", "/repo/path"))

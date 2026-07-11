@@ -73,6 +73,14 @@ def test_load_context_invalid_path_raises() -> None:
         pipeline.load_context("/nonexistent/path/soc2-xyz")
 
 
+def test_load_context_empty_directory(tmp_path: Path) -> None:
+    """An empty repo yields a valid, empty ``RepoContext`` (no crash)."""
+    ctx = pipeline.load_context(tmp_path)
+    assert isinstance(ctx, RepoContext)
+    assert ctx.file_list == []
+    assert ctx.repo_path == str(tmp_path.resolve())
+
+
 # ---------------------------------------------------------------------------
 # audit_criterion / audit_criterion_safe
 # ---------------------------------------------------------------------------
@@ -100,7 +108,7 @@ def test_audit_criterion_rejects_unknown_category(monkeypatch: pytest.MonkeyPatc
     class _Bogus:
         value = "bogus"
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(KeyError):
         pipeline.audit_criterion(_Bogus(), _ctx())  # type: ignore[arg-type]
 
 
@@ -187,6 +195,18 @@ def test_write_report_produces_next_steps_when_clean(monkeypatch: pytest.MonkeyP
     assert report is None
     assert next_steps is not None
     assert next_steps.title == "Next Steps"
+
+
+def test_write_report_handles_malformed_llm_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty/malformed LLM response yields a report with safe defaults, not a crash."""
+    _patch_llm(monkeypatch, {})  # LLM returns an empty dict
+    tsc = [_result(TSCCategory.SECURITY, compliant=False, severity=FindingSeverity.HIGH)]
+    report, next_steps = pipeline.write_report("/repo", tsc)
+    assert report is not None
+    assert next_steps is None
+    # Fields fall back to safe defaults rather than raising.
+    assert report.executive_summary == ""
+    assert report.recommendations_summary == []
 
 
 # ---------------------------------------------------------------------------
