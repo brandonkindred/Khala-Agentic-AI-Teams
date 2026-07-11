@@ -57,7 +57,9 @@ def start_accessibility_audit_workflow(job_id: str, audit_id: str, request_paylo
     return workflow_id
 
 
-def start_accessibility_audit_retest_workflow(job_id: str, audit_id: str, finding_ids: list) -> str:
+def start_accessibility_audit_retest_workflow(
+    job_id: str, audit_id: str, finding_ids: list[str]
+) -> str:
     """Dispatch ``AccessibilityRetestWorkflow`` for one retest job.
 
     Preconditions:

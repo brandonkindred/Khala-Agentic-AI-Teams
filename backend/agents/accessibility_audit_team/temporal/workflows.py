@@ -111,14 +111,17 @@ class AccessibilityAuditWorkflow:
         # (parity with thread mode's ``asyncio.wait_for``). Without it the per-phase
         # timeouts sum to more than a short timebox, so a ``timebox_hours=1`` audit
         # could overrun the caller's requested budget.
+        # A missing, zero, or negative timebox means "no wall-clock bound" (0/negative
+        # is nonsensical as a budget; the API rejects <1, so this is defense in depth
+        # and, notably, avoids treating an explicit 0 as an immediate timeout).
         timebox_hours = request.get("timebox_hours")
-        if not timebox_hours:
+        if timebox_hours is None or timebox_hours <= 0:
             return await self._run_phases(job_id, audit_id, request)
 
         phases = asyncio.ensure_future(self._run_phases(job_id, audit_id, request))
         timer = asyncio.ensure_future(workflow.sleep(timedelta(hours=timebox_hours)))
-        await asyncio.wait([phases, timer], return_when=asyncio.FIRST_COMPLETED)
-        if phases.done():
+        done, _pending = await asyncio.wait([phases, timer], return_when=asyncio.FIRST_COMPLETED)
+        if phases in done:
             timer.cancel()
             return phases.result()
 

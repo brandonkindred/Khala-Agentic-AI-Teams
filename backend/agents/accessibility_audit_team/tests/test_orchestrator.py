@@ -194,6 +194,52 @@ def test_get_audit_status_not_found():
     assert status["status"] == "not_found"
 
 
+def test_get_audit_status_reports_failed_for_failed_audit():
+    """A failed audit (success=False + failure_reason) is terminal → 'failed', not
+    'in_progress'."""
+    orchestrator = AccessibilityAuditOrchestrator()
+    orchestrator._audits["a1"] = AccessibilityAuditResult(
+        audit_id="a1", success=False, failure_reason="Discovery failed"
+    )
+    assert orchestrator.get_audit_status("a1")["status"] == "failed"
+
+
+def test_get_audit_status_reports_in_progress_when_running():
+    orchestrator = AccessibilityAuditOrchestrator()
+    orchestrator._audits["a1"] = AccessibilityAuditResult(audit_id="a1", success=False)
+    assert orchestrator.get_audit_status("a1")["status"] == "in_progress"
+
+
+@pytest.mark.anyio
+async def test_get_audit_state_loads_from_store(monkeypatch):
+    """The public get_audit_state resolves via the artifact store when not cached."""
+    orchestrator = AccessibilityAuditOrchestrator()
+    seeded = AccessibilityAuditResult(audit_id="a1", success=True)
+    monkeypatch.setattr(orchestrator, "_load_audit", AsyncMock(return_value=seeded))
+    loaded = await orchestrator.get_audit_state("a1")
+    assert loaded is seeded
+    # cached on the way out
+    assert orchestrator._audits["a1"] is seeded
+
+
+@pytest.mark.anyio
+async def test_run_audit_persists_state_on_phase_failure(monkeypatch):
+    """A logical phase failure persists the failed state (crash-recovery invariant)."""
+    with patch(
+        "accessibility_audit_team.orchestrator.run_intake_phase",
+        new_callable=AsyncMock,
+        return_value=IntakeResult(success=False, error="Bad request"),
+    ):
+        orchestrator = AccessibilityAuditOrchestrator()
+        persist = AsyncMock()
+        monkeypatch.setattr(orchestrator, "_persist_audit", persist)
+        request = AuditRequest(audit_id="audit_fail", web_urls=["https://example.com"])
+        result = await orchestrator.run_audit(request)
+
+    assert result.success is False
+    persist.assert_awaited()
+
+
 def test_get_findings_empty_when_not_found():
     orchestrator = AccessibilityAuditOrchestrator()
     findings = orchestrator.get_findings("nonexistent")

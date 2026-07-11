@@ -102,7 +102,7 @@ class AccessibilityAuditOrchestrator:
     async def run_audit(
         self,
         audit_request: AuditRequest,
-        tech_stack: Dict[str, str] = None,
+        tech_stack: Optional[Dict[str, str]] = None,
     ) -> AccessibilityAuditResult:
         """
         Run a complete accessibility audit.
@@ -167,7 +167,9 @@ class AccessibilityAuditOrchestrator:
         )
 
         if not intake_result.success:
+            result.success = False
             result.failure_reason = intake_result.error or "Intake failed"
+            await self._persist_audit(result)
             return result
 
         result.intake_result = intake_result
@@ -187,7 +189,9 @@ class AccessibilityAuditOrchestrator:
         )
 
         if not discovery_result.success:
+            result.success = False
             result.failure_reason = discovery_result.error or "Discovery failed"
+            await self._persist_audit(result)
             return result
 
         result.discovery_result = discovery_result
@@ -207,7 +211,9 @@ class AccessibilityAuditOrchestrator:
         )
 
         if not verification_result.success:
+            result.success = False
             result.failure_reason = verification_result.error or "Verification failed"
+            await self._persist_audit(result)
             return result
 
         result.verification_result = verification_result
@@ -227,7 +233,9 @@ class AccessibilityAuditOrchestrator:
         )
 
         if not report_result.success:
+            result.success = False
             result.failure_reason = report_result.error or "Report packaging failed"
+            await self._persist_audit(result)
             return result
 
         # Finalize result (severity counts + summary). Shared with the Temporal
@@ -305,6 +313,21 @@ class AccessibilityAuditOrchestrator:
             self._audits[audit_id] = loaded
         return loaded
 
+    async def get_audit_state(self, audit_id: str) -> Optional[AccessibilityAuditResult]:
+        """Return an audit's full state, loading it from the artifact store if needed.
+
+        The public, cross-process-aware lookup: it consults the in-memory cache and
+        falls back to the shared artifact store, so a caller in a different process
+        (e.g. the API when the audit ran in a Temporal worker) still resolves it.
+
+        Preconditions:
+            - ``audit_id`` is a non-empty audit identifier.
+        Postconditions:
+            - Returns the ``AccessibilityAuditResult`` (caching it), or ``None`` when
+              no state exists anywhere.
+        """
+        return await self._ensure_loaded(audit_id)
+
     async def run_retest(
         self,
         audit_id: str,
@@ -339,7 +362,7 @@ class AccessibilityAuditOrchestrator:
             return result
 
         # Run retest phase
-        logger.info(f"Starting retest phase for audit {audit_id}")
+        logger.info("Starting retest phase for audit %s", audit_id)
         result.current_phase = Phase.RETEST
 
         retest_result = await run_retest_phase(
@@ -388,9 +411,18 @@ class AccessibilityAuditOrchestrator:
 
         result = self._audits[audit_id]
 
+        # A failed audit (success=False with a failure_reason) is terminal — report
+        # "failed", not "in_progress", so consumers monitoring health aren't misled.
+        if result.success:
+            status = "complete"
+        elif result.failure_reason:
+            status = "failed"
+        else:
+            status = "in_progress"
+
         return {
             "audit_id": audit_id,
-            "status": "complete" if result.success else "in_progress",
+            "status": status,
             "current_phase": result.current_phase.value,
             "completed_phases": [p.value for p in result.completed_phases],
             "findings_count": result.total_findings,
@@ -453,14 +485,14 @@ class AccessibilityAuditOrchestrator:
 
 
 async def run_accessibility_audit(
-    web_urls: List[str] = None,
-    mobile_apps: List[Dict[str, str]] = None,
-    critical_journeys: List[str] = None,
+    web_urls: Optional[List[str]] = None,
+    mobile_apps: Optional[List[Dict[str, str]]] = None,
+    critical_journeys: Optional[List[str]] = None,
     audit_name: str = "",
-    timebox_hours: int = None,
+    timebox_hours: Optional[int] = None,
     auth_required: bool = False,
-    max_pages: int = None,
-    tech_stack: Dict[str, str] = None,
+    max_pages: Optional[int] = None,
+    tech_stack: Optional[Dict[str, str]] = None,
     llm_client: Optional[Any] = None,
 ) -> AccessibilityAuditResult:
     """

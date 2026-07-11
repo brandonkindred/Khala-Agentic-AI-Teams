@@ -293,6 +293,20 @@ def test_finalize_audit_step_raises_when_state_missing(monkeypatch):
         asyncio.run(ax.finalize_audit_step("j1", "a1"))
 
 
+def test_finalize_audit_step_raises_when_report_unsuccessful(monkeypatch):
+    """finalize_audit_result's precondition (report succeeded) is enforced — an
+    unsuccessful report reaching finalize is a plumbing defect that fails loudly."""
+    _seed(
+        monkeypatch,
+        AccessibilityAuditResult(
+            audit_id="a1",
+            report_packaging_result=ReportPackagingResult(success=False, error="nope"),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="did not succeed"):
+        asyncio.run(ax.finalize_audit_step("j1", "a1"))
+
+
 # ---------------------------------------------------------------------------
 # persist_audit_state / load_audit_state round-trip (real filesystem backend)
 # ---------------------------------------------------------------------------

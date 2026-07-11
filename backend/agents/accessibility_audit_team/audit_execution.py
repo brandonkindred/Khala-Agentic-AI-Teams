@@ -42,6 +42,11 @@ from .phases import (
 
 logger = logging.getLogger(__name__)
 
+#: Fallback tech stack applied when a request/verification step supplies none. Kept
+#: in one place so the API default (``CreateAuditRequest.tech_stack``) and the
+#: verification step's fallback can't drift apart.
+DEFAULT_TECH_STACK: Dict[str, str] = {"web": "other", "mobile": "other"}
+
 # Both singletons are reachable from two threads: the API event-loop thread (the
 # in-process background task) and the Temporal worker's own loop thread. Guard the
 # lazy check-then-set with a lock so a concurrent first-call can't build two
@@ -104,12 +109,14 @@ class CreateAuditRequest(BaseModel):
         description="Mobile apps: [{platform, name, version, build}]",
     )
     critical_journeys: List[str] = Field(default_factory=list, description="Critical user journeys")
-    timebox_hours: Optional[int] = Field(default=None, description="Maximum hours for the audit")
+    timebox_hours: Optional[int] = Field(
+        default=None, ge=1, description="Maximum hours for the audit (>= 1 when set)"
+    )
     auth_required: bool = Field(default=False)
     max_pages: Optional[int] = Field(default=None)
     sampling_strategy: str = Field(default="journey_based")
     wcag_levels: List[str] = Field(default_factory=lambda: ["A", "AA"])
-    tech_stack: Dict[str, str] = Field(default_factory=lambda: {"web": "other", "mobile": "other"})
+    tech_stack: Dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_TECH_STACK))
 
     @field_validator("web_urls")
     @classmethod
@@ -189,6 +196,10 @@ async def run_audit_job(job_id: str, audit_id: str, request: CreateAuditRequest)
         - On an infrastructure exception the exception propagates to the caller
           (the job's last persisted state is ``running``).
     """
+    if not job_id:
+        raise ValueError("job_id must be a non-empty job id")
+    if not audit_id:
+        raise ValueError("audit_id must be a non-empty audit id")
     manager = get_job_manager()
     existing = manager.get_job(job_id)
     if existing is not None and existing.get("status") in (JOB_STATUS_COMPLETED, JOB_STATUS_FAILED):
@@ -351,11 +362,16 @@ def finalize_audit_result(
     result.final_patterns = report_result.patterns
     result.coverage_matrix = report_result.coverage_matrix
 
+    # Count all severities in a single pass rather than four separate scans.
+    counts: Dict[Severity, int] = {sev: 0 for sev in Severity}
+    for finding in result.final_findings:
+        if finding.severity in counts:
+            counts[finding.severity] += 1
     result.total_findings = len(result.final_findings)
-    result.critical_count = sum(1 for f in result.final_findings if f.severity == Severity.CRITICAL)
-    result.high_count = sum(1 for f in result.final_findings if f.severity == Severity.HIGH)
-    result.medium_count = sum(1 for f in result.final_findings if f.severity == Severity.MEDIUM)
-    result.low_count = sum(1 for f in result.final_findings if f.severity == Severity.LOW)
+    result.critical_count = counts[Severity.CRITICAL]
+    result.high_count = counts[Severity.HIGH]
+    result.medium_count = counts[Severity.MEDIUM]
+    result.low_count = counts[Severity.LOW]
 
     result.summary = (
         f"Audit complete. {result.total_findings} findings "
@@ -463,7 +479,7 @@ async def run_verification_step(
     verification_result = await run_verification_phase(
         audit_id=audit_id,
         draft_findings=result.discovery_result.draft_findings,
-        stack=tech_stack or {"web": "other", "mobile": "other"},
+        stack=tech_stack or dict(DEFAULT_TECH_STACK),
         llm_client=_build_llm_client(),
         message_bus=MessageBus(),
     )
@@ -533,8 +549,13 @@ async def finalize_audit_step(job_id: str, audit_id: str) -> AccessibilityAuditR
     """
     logger.info("Finalize step for job %s audit %s", job_id, audit_id)
     result = await load_audit_state(audit_id)
+    # Enforce finalize_audit_result's precondition (report packaging succeeded). The
+    # workflow only schedules finalize after report_packaging returns PASS, so a
+    # missing/unsuccessful report here is a plumbing defect that must fail loudly.
     if result is None or result.report_packaging_result is None:
         raise RuntimeError(f"finalize step: report-packaging state missing for {audit_id}")
+    if not result.report_packaging_result.success:
+        raise RuntimeError(f"finalize step: report-packaging did not succeed for {audit_id}")
 
     finalize_audit_result(result, result.report_packaging_result)
     await persist_audit_state(result)

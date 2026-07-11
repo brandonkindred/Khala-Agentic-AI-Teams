@@ -263,10 +263,10 @@ async def create_audit(
             _job_manager.update_job(job_id, workflow_id=workflow_id)
         except Exception:
             logger.warning("Failed to record workflow_id for job %s", job_id, exc_info=True)
-        message = "Audit queued (Temporal). Poll /audit/status/{job_id} for progress."
+        message = f"Audit queued (Temporal). Poll /audit/status/{job_id} for progress."
     else:
         background_tasks.add_task(execute_audit_job, job_id, audit_id, request)
-        message = "Audit queued. Poll /audit/status/{job_id} for progress."
+        message = f"Audit queued. Poll /audit/status/{job_id} for progress."
 
     return AuditJobResponse(
         job_id=job_id,
@@ -375,19 +375,18 @@ async def get_audit_report(audit_id: str) -> Dict[str, Any]:
             detail=f"Audit {audit_id} is not complete yet",
         )
 
-    orchestrator.get_findings(audit_id)
     patterns = orchestrator.get_patterns(audit_id)
 
     # Build report
     return {
         "audit_id": audit_id,
         "summary": status.get("summary"),
-        "findings_count": status.get("findings_count"),
+        "findings_count": status.get("findings_count", 0),
         "by_severity": {
-            "critical": status.get("critical_count"),
-            "high": status.get("high_count"),
-            "medium": status.get("medium_count"),
-            "low": status.get("low_count"),
+            "critical": status.get("critical_count", 0),
+            "high": status.get("high_count", 0),
+            "medium": status.get("medium_count", 0),
+            "low": status.get("low_count", 0),
         },
         "patterns_count": status.get("patterns_count"),
         "patterns": [p.model_dump() for p in patterns],
@@ -418,7 +417,7 @@ async def retest_findings(
     # Existence check against the persisted audit state (via the artifact store), so a
     # Temporal-executed audit that ran in a worker process is still found from the API
     # process — the in-memory orchestrator cache alone would 404 every cross-process audit.
-    if await orchestrator._ensure_loaded(audit_id) is None:
+    if await orchestrator.get_audit_state(audit_id) is None:
         raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
 
     job_id = f"retest_{uuid.uuid4().hex[:8]}"
@@ -468,10 +467,10 @@ async def retest_findings(
             _job_manager.update_job(job_id, workflow_id=workflow_id)
         except Exception:
             logger.warning("Failed to record workflow_id for retest job %s", job_id, exc_info=True)
-        message = "Retest queued (Temporal). Poll /audit/status/{job_id} for progress."
+        message = f"Retest queued (Temporal). Poll /audit/status/{job_id} for progress."
     else:
         background_tasks.add_task(execute_retest_job, job_id, audit_id, request.finding_ids)
-        message = "Retest started."
+        message = f"Retest started. Poll /audit/status/{job_id} for progress."
 
     return AuditJobResponse(
         job_id=job_id,

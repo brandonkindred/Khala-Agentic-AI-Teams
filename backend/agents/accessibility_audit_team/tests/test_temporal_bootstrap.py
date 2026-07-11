@@ -613,6 +613,18 @@ def test_create_audit_request_validates_url_scheme():
         CreateAuditRequest(web_urls=["ftp://bad.example"])
 
 
+def test_create_audit_request_rejects_nonpositive_timebox():
+    """timebox_hours must be >= 1 when set, so 0/negative can't reach the workflow."""
+    from accessibility_audit_team.audit_execution import CreateAuditRequest
+
+    with pytest.raises(ValueError):
+        CreateAuditRequest(timebox_hours=0)
+    with pytest.raises(ValueError):
+        CreateAuditRequest(timebox_hours=-3)
+    assert CreateAuditRequest(timebox_hours=2).timebox_hours == 2
+    assert CreateAuditRequest().timebox_hours is None
+
+
 def test_get_orchestrator_builds_and_caches(monkeypatch):
     """Exercise the lazy orchestrator build (with strands/llm_service stubbed)."""
     import types
@@ -772,6 +784,17 @@ def test_run_audit_job_is_idempotent_on_retry_after_terminal(monkeypatch, termin
 
     orch.run_audit.assert_not_awaited()
     jm.update_job.assert_not_called()
+
+
+def test_run_audit_job_rejects_blank_ids():
+    """The documented precondition (non-empty job_id/audit_id) is enforced at runtime."""
+    from accessibility_audit_team import audit_execution as ax
+
+    req = ax.CreateAuditRequest(web_urls=["https://e.com"])
+    with pytest.raises(ValueError):
+        asyncio.run(ax.run_audit_job("", "a1", req))
+    with pytest.raises(ValueError):
+        asyncio.run(ax.run_audit_job("j1", "", req))
 
 
 def test_run_audit_job_runs_when_no_existing_job_row(monkeypatch):
@@ -1027,13 +1050,18 @@ def test_execute_retest_job_captures_exception(monkeypatch):
 
 
 def _patch_retest_api(monkeypatch, *, audit_found=True):
-    """Patch main._job_manager + get_orchestrator (audit existence) for retest tests."""
+    """Mock ``main._job_manager`` and the orchestrator for retest-endpoint tests.
+
+    ``audit_found`` controls what ``orchestrator.get_audit_state`` resolves to (a
+    sentinel object when True, ``None`` when False → 404). Returns ``(main, jm)`` so
+    callers can assert on the recorded ``update_job`` calls.
+    """
     from accessibility_audit_team.api import main
 
     jm = mock.Mock()
     monkeypatch.setattr(main, "_job_manager", jm)
     orch = mock.Mock()
-    orch._ensure_loaded = mock.AsyncMock(return_value=object() if audit_found else None)
+    orch.get_audit_state = mock.AsyncMock(return_value=object() if audit_found else None)
     monkeypatch.setattr(main, "get_orchestrator", lambda: orch)
     return main, jm
 
@@ -1078,6 +1106,7 @@ def test_retest_uses_temporal_when_enabled(monkeypatch):
     assert "(Temporal)" in body["message"]
     assert body["workflow_id"] == "accessibility_audit-retest-wf1"
     dispatch.assert_called_once()
+    # Dispatcher is called positionally as (job_id, audit_id, finding_ids).
     args = dispatch.call_args.args
     assert args[1] == "a1" and args[2] == ["f1"]
     exec_job.assert_not_awaited()
