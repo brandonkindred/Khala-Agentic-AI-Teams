@@ -170,7 +170,6 @@
                             type="button"
                             [class.github-issue-row--selected]="selectedIssue?.number === vm.number"
                             [attr.aria-expanded]="selectedIssue?.number === vm.number"
-                            [attr.aria-selected]="selectedIssue?.number === vm.number"
                             [attr.aria-controls]="'confirm-panel-' + vm.number"
                             (click)="selectIssue(vm.issue)"
                           >
