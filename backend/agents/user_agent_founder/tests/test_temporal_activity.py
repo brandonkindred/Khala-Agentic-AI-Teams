@@ -232,6 +232,53 @@ def test_enter_phase_persisted_job_id_resumes_without_resubmit(monkeypatch):
     adapter.start_from_spec.assert_not_called()
 
 
+def test_enter_phase_resume_skips_breadcrumb_when_already_polling(monkeypatch):
+    """Retry idempotency: if the run is already polling_<phase> (a prior attempt
+    ran), the resume path must not add a duplicate 'Resuming …' breadcrumb."""
+    adapter = MagicMock(name="adapter")
+    adapter.display_name = "Software Engineering"
+    m = _install(
+        monkeypatch,
+        run=_run(spec_content="SPEC", analysis_job_id="aj-1", status="polling_analysis"),
+        adapter=adapter,
+    )
+
+    acts.enter_phase_activity("r1", "analysis", "aj-1")
+
+    assert not any(
+        "Resuming" in (c.args[2] if len(c.args) > 2 else "")
+        for c in m.store.add_chat_message.call_args_list
+    )
+
+
+def test_record_started_job_id_retries_transient_store_failure(monkeypatch):
+    """A transient store failure on the just-started job-id persist is retried in
+    the activity, so it does not fail the activity and force a duplicate submit."""
+    monkeypatch.setattr(acts.time, "sleep", lambda _s: None)
+    store = MagicMock(name="store")
+    calls = {"n": 0}
+
+    def _update(_run_id, **_kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient")
+
+    store.update_run.side_effect = _update
+
+    acts._record_started_job_id(store, "r1", "analysis", "aj-1")
+    assert calls["n"] == 2  # failed once, then succeeded
+
+
+def test_record_started_job_id_raises_after_exhausting_retries(monkeypatch):
+    monkeypatch.setattr(acts.time, "sleep", lambda _s: None)
+    store = MagicMock(name="store")
+    store.update_run.side_effect = RuntimeError("store down")
+
+    with pytest.raises(RuntimeError, match="store down"):
+        acts._record_started_job_id(store, "r1", "build", "bj-1")
+    assert store.update_run.call_count == acts._PERSIST_RETRIES
+
+
 def test_enter_phase_start_failed_is_non_retryable(monkeypatch):
     from user_agent_founder.targets import StartFailed
 
@@ -363,6 +410,18 @@ def test_finalize_writes_completed(monkeypatch):
     assert out == {"run_id": "r1"}
     m.store.update_run.assert_any_call("r1", status="completed")
     orchestrator._sync_job_status.assert_any_call("r1", "completed", phase="completed")
+
+
+def test_finalize_skips_breadcrumb_when_already_completed(monkeypatch):
+    """Retry idempotency: a finalize retry (run already 'completed') must not add a
+    duplicate 'Build completed' breadcrumb, though the status write stays idempotent."""
+    m = _install(monkeypatch, run=_run(status="completed"))
+    acts.finalize_run_activity("r1")
+
+    assert not any(
+        "Build completed" in (c.args[2] if len(c.args) > 2 else "")
+        for c in m.store.add_chat_message.call_args_list
+    )
 
 
 def test_mark_failed_writes_failed_when_not_cancelled(monkeypatch):

@@ -65,7 +65,11 @@ ANSWER_RETRY = RetryPolicy(maximum_attempts=1)
 # schedule_to_close, so a saturated worker never starves a queued bookkeeping write).
 _IO_TIMEOUT = timedelta(minutes=2)
 _SPEC_TIMEOUT = timedelta(minutes=20)
-_ANSWER_TIMEOUT = timedelta(minutes=15)
+# Answering runs single-attempt (not idempotent); a generous start_to_close plus a
+# heartbeat lets a large/slow question batch run to completion while a genuine hang
+# still fails fast at the heartbeat_timeout instead of holding a slot for the ceiling.
+_ANSWER_TIMEOUT = timedelta(minutes=30)
+_ANSWER_HEARTBEAT_TIMEOUT = timedelta(minutes=3)
 _FINALIZE_TIMEOUT = timedelta(minutes=5)
 
 
@@ -269,6 +273,7 @@ class UserAgentFounderWorkflow:
                     pending,
                     retry=ANSWER_RETRY,
                     timeout=_ANSWER_TIMEOUT,
+                    heartbeat=_ANSWER_HEARTBEAT_TIMEOUT,
                 )
                 if not ans.get("ok"):
                     failed_question_sets[qset] = prior + 1
@@ -298,21 +303,34 @@ class UserAgentFounderWorkflow:
         if self._cancel_requested:
             raise _CancelledSignal()
 
-    async def _exec(self, fn: Any, *args: Any, retry: RetryPolicy, timeout: timedelta) -> Any:
+    async def _exec(
+        self,
+        fn: Any,
+        *args: Any,
+        retry: RetryPolicy,
+        timeout: timedelta,
+        heartbeat: timedelta | None = None,
+    ) -> Any:
         """Schedule ``fn`` as an activity with ``args``, timeout, and retry policy.
 
         Preconditions:
             - ``fn`` is one of this team's registered ``@activity.defn`` callables;
               ``timeout`` is a per-attempt ``start_to_close`` bound; ``retry`` is a
-              ``RetryPolicy``.
+              ``RetryPolicy``; ``heartbeat`` (when set) is the activity's
+              ``heartbeat_timeout`` for long, self-heartbeating activities.
         Postconditions:
             - Returns the activity's JSON result once it completes, or raises the
               activity's terminal error after its retry policy is exhausted (no
               side effects in the workflow body itself).
         """
-        return await workflow.execute_activity(
-            fn, args=list(args), start_to_close_timeout=timeout, retry_policy=retry
-        )
+        kwargs: dict[str, Any] = {
+            "args": list(args),
+            "start_to_close_timeout": timeout,
+            "retry_policy": retry,
+        }
+        if heartbeat is not None:
+            kwargs["heartbeat_timeout"] = heartbeat
+        return await workflow.execute_activity(fn, **kwargs)
 
     async def _safe_mark_failed(self, run_id: str, error: str) -> None:
         """Best-effort FAILED write; its own failure must not mask the cause.

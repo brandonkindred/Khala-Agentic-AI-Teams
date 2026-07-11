@@ -38,7 +38,9 @@ Job-store status ownership (retry-safe contract, mirroring ``sales_team``):
 
 from __future__ import annotations
 
+import atexit
 import threading
+import time
 from typing import Any
 
 from temporalio import activity
@@ -48,10 +50,19 @@ from temporalio.exceptions import ApplicationError
 # loop can fire hundreds of target-team calls per run (every poll/answer tick);
 # httpx.Client is documented thread-safe for concurrent requests and reuses its
 # connection pool, so one shared client avoids the construct/teardown churn of a
-# fresh client per activity. Lazily created (double-checked locking) and never
-# closed — it lives for the worker process, like any pooled resource.
+# fresh client per activity. Lazily created (double-checked locking) and closed
+# via atexit so the connection pool is torn down cleanly on worker shutdown.
 _HTTP_LOCK = threading.Lock()
 _HTTP_CLIENT: Any = None
+
+# Heartbeat cadence for long answer activities; comfortably inside the workflow's
+# answer heartbeat_timeout so a progressing batch always outpaces the timeout.
+_HEARTBEAT_INTERVAL_S = 30.0
+# In-activity retry budget for persisting a just-started target job id (see
+# _record_started_job_id) — absorbs a transient store blip so the activity does
+# not fail and re-submit a duplicate target job on Temporal retry.
+_PERSIST_RETRIES = 3
+_PERSIST_BACKOFF_S = 0.2
 
 
 def _http_client() -> Any:
@@ -61,8 +72,9 @@ def _http_client() -> Any:
         - None.
     Postconditions:
         - Returns a live ``httpx.Client`` (created on first use under a lock so
-          concurrent activity threads share one instance); never ``None`` and
-          never closed by callers.
+          concurrent activity threads share one instance); never ``None``. The
+          client is registered with ``atexit`` so its pool is closed on worker
+          shutdown.
     """
     global _HTTP_CLIENT
     if _HTTP_CLIENT is None:
@@ -70,8 +82,60 @@ def _http_client() -> Any:
 
         with _HTTP_LOCK:
             if _HTTP_CLIENT is None:
-                _HTTP_CLIENT = httpx.Client()
+                client = httpx.Client()
+                atexit.register(client.close)
+                _HTTP_CLIENT = client
     return _HTTP_CLIENT
+
+
+def _beating() -> Any:
+    """Background heartbeat keeping a long answer activity alive across LLM calls.
+
+    Preconditions:
+        - Called from inside a running activity body (the constructor snapshots
+          the calling thread's context so the beater can reach the Temporal
+          activity handle; beat errors outside an activity context — e.g. unit
+          tests — are swallowed by the beater).
+    Postconditions:
+        - Returns an unstarted ``BackgroundHeartbeat`` context manager; entering
+          it starts the daemon beater, exiting stops and joins it.
+    """
+    from shared_concurrency import BackgroundHeartbeat
+
+    return BackgroundHeartbeat(
+        activity.heartbeat,
+        _HEARTBEAT_INTERVAL_S,
+        name="user-agent-founder-answer-hb",
+        copy_context=True,
+        join_timeout=5.0,
+    )
+
+
+def _record_started_job_id(store: Any, run_id: str, phase: str, job_id: str) -> None:
+    """Persist a just-started target job id to its checkpoint column, with retry.
+
+    Preconditions:
+        - ``job_id`` is the id returned by a successful target submit; ``phase``
+          is ``"analysis"`` or ``"build"``.
+    Postconditions:
+        - The matching column (``analysis_job_id``/``se_job_id``) holds ``job_id``.
+        - Retries a transient store failure up to ``_PERSIST_RETRIES`` times so the
+          just-created target job id is not lost — losing it would fail the
+          activity and cause a Temporal retry to submit a *second* target job.
+          Re-raises the last error only if every attempt fails.
+    """
+    column = "analysis_job_id" if phase == "analysis" else "se_job_id"
+    last_exc: Exception | None = None
+    for attempt in range(_PERSIST_RETRIES):
+        try:
+            store.update_run(run_id, **{column: job_id})
+            return
+        except Exception as exc:  # noqa: BLE001 — retried below; re-raised if exhausted
+            last_exc = exc
+            if attempt < _PERSIST_RETRIES - 1:
+                time.sleep(_PERSIST_BACKOFF_S)
+    assert last_exc is not None
+    raise last_exc
 
 
 # ---------------------------------------------------------------------------
@@ -294,12 +358,17 @@ def enter_phase_activity(run_id: str, phase: str, existing_job_id: str | None) -
 
     if resume_job_id:
         # Resume: no submit, but transition to polling + clear error so the run
-        # row and central job reflect the live phase during the resumed poll.
+        # row and central job reflect the live phase during the resumed poll. The
+        # breadcrumb is gated on the status transition actually happening so a
+        # Temporal retry (which re-reads status already == polling_<phase>) does
+        # not add a duplicate 'Resuming …' row.
+        already_polling = run.status == f"polling_{phase}"
         store.update_run(run_id, status=f"polling_{phase}", error=None)
         orchestrator._sync_job_status(run_id, "running", phase=f"polling_{phase}")
-        store.add_chat_message(
-            run_id, "system", f"Resuming {label} poll (job: {resume_job_id})", "status_update"
-        )
+        if not already_polling:
+            store.add_chat_message(
+                run_id, "system", f"Resuming {label} poll (job: {resume_job_id})", "status_update"
+            )
         return {"job_id": resume_job_id}
 
     store.update_run(run_id, status=f"submitting_{phase}")
@@ -315,10 +384,10 @@ def enter_phase_activity(run_id: str, phase: str, existing_job_id: str | None) -
     except StartFailed as exc:
         raise ApplicationError(f"Failed to start {phase}: {exc}", non_retryable=True) from exc
 
-    if phase == "analysis":
-        store.update_run(run_id, analysis_job_id=job_id)
-    else:
-        store.update_run(run_id, se_job_id=job_id)
+    # Persist the just-started id immediately (with retry): if this were lost to a
+    # transient store error the activity would fail and a Temporal retry would
+    # submit a second target job.
+    _record_started_job_id(store, run_id, phase, job_id)
     store.update_run(run_id, status=f"polling_{phase}", error=None)
     orchestrator._sync_job_status(run_id, "running", phase=f"polling_{phase}")
     store.add_chat_message(run_id, "system", f"{label} started (job: {job_id})", "status_update")
@@ -426,7 +495,14 @@ def answer_questions_activity(
         def _submit(answers: list[dict[str, Any]]) -> None:
             adapter.submit_build_answers(client, job_id, answers)
 
-    ok = orchestrator._answer_pending_questions(agent, store, run_id, job_id, questions, _submit)
+    # Heartbeat across the per-question LLM calls so a long-but-progressing batch
+    # isn't killed by the activity's start_to_close timeout (the workflow schedules
+    # this with a heartbeat_timeout and no retry — a genuine hang fails fast, but
+    # a batch that keeps beating runs to completion).
+    with _beating():
+        ok = orchestrator._answer_pending_questions(
+            agent, store, run_id, job_id, questions, _submit
+        )
     return {"ok": bool(ok)}
 
 
@@ -439,12 +515,15 @@ def finalize_run_activity(run_id: str) -> dict[str, Any]:
     Postconditions:
         - Missing run → non-retryable ``ApplicationError``.
         - Otherwise the run row + central job are marked COMPLETED and a success
-          breadcrumb is recorded; returns ``{"run_id": run_id}``.
+          breadcrumb is recorded; returns ``{"run_id": run_id}``. The breadcrumb
+          is gated on the run not already being COMPLETED so a Temporal retry
+          (which re-reads status == "completed") does not add a duplicate row.
     """
     from user_agent_founder import orchestrator
 
-    store, _run = _require_run(run_id, "finalize")
-    store.add_chat_message(run_id, "system", "Build completed successfully.", "status_update")
+    store, run = _require_run(run_id, "finalize")
+    if run.status != "completed":
+        store.add_chat_message(run_id, "system", "Build completed successfully.", "status_update")
     store.update_run(run_id, status="completed")
     orchestrator._sync_job_status(run_id, "completed", phase="completed")
     return {"run_id": run_id}
