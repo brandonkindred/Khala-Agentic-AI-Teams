@@ -84,6 +84,8 @@ def _startup() -> None:
         )
 
         start_social_marketing_temporal_worker_thread()
+    except ImportError as exc:
+        logger.warning("social marketing Temporal worker module unavailable: %s", exc)
     except Exception:
         logger.warning(
             "social marketing Temporal worker start (lifespan backstop) failed",
@@ -327,8 +329,12 @@ def _dispatch_job(job_id: str, request: RunMarketingTeamRequest, brand_ctx: Bran
         if is_temporal_enabled():
             start_team_job_workflow(job_id, request.model_dump())
             return f"(Temporal). Poll GET /social-marketing/status/{job_id} for updates."
-    except ImportError:
-        pass
+    except ImportError as exc:
+        logger.warning(
+            "Temporal modules unavailable for job %s; falling back to thread mode: %s",
+            job_id,
+            exc,
+        )
 
     thread = threading.Thread(target=_run_team_job, args=(job_id, request, brand_ctx), daemon=True)
     thread.start()

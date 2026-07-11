@@ -1156,3 +1156,22 @@ def test_api_startup_worker_failure_is_non_fatal(monkeypatch: pytest.MonkeyPatch
     # Should not raise — the worker start is best-effort.
     api_main._startup()
     assert calls == ["scheduler"]
+
+
+def test_api_startup_worker_import_error_is_non_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing Temporal worker module logs and is swallowed (distinct ImportError path)."""
+    from social_media_marketing_team.api import main as api_main
+
+    calls: list[str] = []
+    monkeypatch.setattr(api_main, "start_scheduler", lambda: calls.append("scheduler"))
+
+    def _import_boom():
+        raise ImportError("temporalio not installed")
+
+    monkeypatch.setattr(
+        "social_media_marketing_team.temporal.worker.start_social_marketing_temporal_worker_thread",
+        _import_boom,
+    )
+
+    api_main._startup()
+    assert calls == ["scheduler"]

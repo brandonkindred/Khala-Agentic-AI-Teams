@@ -359,7 +359,8 @@ class SocialMediaMarketingOrchestrator:
             - Returns one ``PlatformExecutionPlan`` per configured platform
               specialist, in specialist order.
         """
-        assert num_ideas >= 0, f"build_platform_plans: num_ideas must be >= 0, got {num_ideas}"
+        if num_ideas < 0:
+            raise ValueError(f"build_platform_plans: num_ideas must be >= 0, got {num_ideas}")
         return [
             specialist.create_execution_plan(goals, campaign_name, num_ideas)
             for specialist in self.platform_specialists
@@ -411,13 +412,16 @@ class SocialMediaMarketingOrchestrator:
         # Enforce the documented precondition (Design by Contract): an
         # APPROVED_FOR_TESTING output must carry the full plan. Silently emitting a
         # TeamOutput with a null content_plan/experiment_plan would let an invalid
-        # state propagate to callers and the job store.
-        assert content_plan is not None, (
-            "assemble_team_output: content_plan is required when human_review.approved is True"
-        )
-        assert experiment_plan is not None, (
-            "assemble_team_output: experiment_plan is required when human_review.approved is True"
-        )
+        # state propagate to callers and the job store. Raise explicitly (not
+        # ``assert``) so the check survives ``python -O``.
+        if content_plan is None:
+            raise ValueError(
+                "assemble_team_output: content_plan is required when human_review.approved is True"
+            )
+        if experiment_plan is None:
+            raise ValueError(
+                "assemble_team_output: experiment_plan is required when human_review.approved is True"
+            )
 
         return TeamOutput(
             status=CampaignStatus.APPROVED_FOR_TESTING,

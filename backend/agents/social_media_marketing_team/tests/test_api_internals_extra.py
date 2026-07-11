@@ -277,9 +277,7 @@ def test_revise_endpoint_uses_dispatched_brand_summary(_mock, fake_jobs) -> None
         request_payload=payload,
     )
 
-    import pytest as _pt
-
-    monkeypatch = _pt.MonkeyPatch()
+    monkeypatch = pytest.MonkeyPatch()
     try:
         monkeypatch.setattr(api_main, "_dispatch_job", lambda *a, **k: "DISPATCHED")
         client = TestClient(app)
