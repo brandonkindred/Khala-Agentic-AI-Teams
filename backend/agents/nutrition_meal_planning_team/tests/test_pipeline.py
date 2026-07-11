@@ -19,37 +19,7 @@ from nutrition_meal_planning_team.shared.job_store import (
     get_job,
     update_job,
 )
-
-
-class _FakeResult:
-    def __init__(self, data: dict) -> None:
-        self._data = dict(data)
-
-    def model_dump(self) -> dict:
-        return dict(self._data)
-
-
-class _FakeOrchestrator:
-    def __init__(self, *, exc: Exception | None = None) -> None:
-        self._exc = exc
-
-    def _result(self, client_id: str) -> _FakeResult:
-        if self._exc is not None:
-            raise self._exc
-        return _FakeResult({"client_id": client_id})
-
-    def get_nutrition_plan(self, req) -> _FakeResult:
-        return self._result(req.client_id)
-
-    def regenerate_nutrition_plan(self, client_id: str) -> _FakeResult:
-        return self._result(client_id)
-
-    def get_meal_plan(self, req) -> _FakeResult:
-        return self._result(req.client_id)
-
-
-def _patch_orch(monkeypatch, *, exc: Exception | None = None) -> None:
-    monkeypatch.setattr(pipeline, "get_orchestrator", lambda: _FakeOrchestrator(exc=exc))
+from nutrition_meal_planning_team.tests._fakes import FakeResult, patch_orch
 
 
 @pytest.mark.parametrize(
@@ -61,7 +31,7 @@ def _patch_orch(monkeypatch, *, exc: Exception | None = None) -> None:
     ],
 )
 def test_background_marks_completed(monkeypatch, background, arg):
-    _patch_orch(monkeypatch)
+    patch_orch(monkeypatch)
     create_job("job-bg")
 
     background("job-bg", arg)
@@ -82,7 +52,7 @@ def test_background_marks_completed(monkeypatch, background, arg):
 def test_background_swallows_failure_as_failed(monkeypatch, background, arg):
     """A daemon thread has no caller to raise to — a failure must land the job
     in FAILED, not propagate."""
-    _patch_orch(monkeypatch, exc=RuntimeError("pipeline exploded"))
+    patch_orch(monkeypatch, exc=RuntimeError("pipeline exploded"))
     create_job("job-bg-fail")
 
     background("job-bg-fail", arg)  # must not raise
@@ -93,7 +63,7 @@ def test_background_swallows_failure_as_failed(monkeypatch, background, arg):
 
 
 def test_background_value_error_marks_not_found(monkeypatch):
-    _patch_orch(monkeypatch, exc=ValueError("Profile not found"))
+    patch_orch(monkeypatch, exc=ValueError("Profile not found"))
     create_job("job-bg-404")
 
     pipeline.run_nutrition_plan_background("job-bg-404", {"client_id": "client-1"})
@@ -126,17 +96,17 @@ def test_core_skips_completed_write_when_cancelled_mid_run(monkeypatch, core, ar
     orchestrator call, the core returns before writing COMPLETED."""
 
     class _CancellingOrch:
-        def _result(self, cid: str) -> _FakeResult:
+        def _result(self, cid: str) -> FakeResult:
             update_job("job-mid", status=JOB_STATUS_CANCELLED)
-            return _FakeResult({"client_id": cid})
+            return FakeResult({"client_id": cid})
 
-        def get_nutrition_plan(self, req) -> _FakeResult:
+        def get_nutrition_plan(self, req) -> FakeResult:
             return self._result(req.client_id)
 
-        def regenerate_nutrition_plan(self, client_id: str) -> _FakeResult:
+        def regenerate_nutrition_plan(self, client_id: str) -> FakeResult:
             return self._result(client_id)
 
-        def get_meal_plan(self, req) -> _FakeResult:
+        def get_meal_plan(self, req) -> FakeResult:
             return self._result(req.client_id)
 
     monkeypatch.setattr(pipeline, "get_orchestrator", lambda: _CancellingOrch())

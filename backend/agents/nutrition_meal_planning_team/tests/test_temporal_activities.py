@@ -24,38 +24,7 @@ from nutrition_meal_planning_team.shared.job_store import (
     update_job,
 )
 from nutrition_meal_planning_team.temporal import workflows as wf
-
-
-class _FakeResult:
-    """Stand-in for an orchestrator response with a ``model_dump``."""
-
-    def __init__(self, data: dict) -> None:
-        self._data = dict(data)
-
-    def model_dump(self) -> dict:
-        return dict(self._data)
-
-
-class _FakeOrchestrator:
-    """Returns a canned result, or raises ``exc`` from every pipeline method."""
-
-    def __init__(self, *, exc: Exception | None = None) -> None:
-        self._exc = exc
-
-    def _result(self, client_id: str) -> _FakeResult:
-        if self._exc is not None:
-            raise self._exc
-        return _FakeResult({"client_id": client_id})
-
-    def get_nutrition_plan(self, req) -> _FakeResult:
-        return self._result(req.client_id)
-
-    def regenerate_nutrition_plan(self, client_id: str) -> _FakeResult:
-        return self._result(client_id)
-
-    def get_meal_plan(self, req) -> _FakeResult:
-        return self._result(req.client_id)
-
+from nutrition_meal_planning_team.tests._fakes import patch_orch
 
 # activity fn + the second positional arg the workflow passes it.
 _CASES = {
@@ -68,10 +37,6 @@ _CASES = {
 @pytest.fixture(params=list(_CASES), ids=list(_CASES))
 def activity_case(request):
     return _CASES[request.param]
-
-
-def _patch_orch(monkeypatch, *, exc: Exception | None = None) -> None:
-    monkeypatch.setattr(pipeline, "get_orchestrator", lambda: _FakeOrchestrator(exc=exc))
 
 
 def test_activity_signatures():
@@ -90,7 +55,7 @@ def test_activity_signatures():
 
 def test_activity_marks_job_completed_with_result(monkeypatch, activity_case):
     fn, arg = activity_case
-    _patch_orch(monkeypatch)
+    patch_orch(monkeypatch)
     create_job("job-ok")
 
     result = fn("job-ok", arg)
@@ -103,7 +68,7 @@ def test_activity_marks_job_completed_with_result(monkeypatch, activity_case):
 
 def test_activity_value_error_marks_failed_not_found_and_reraises(monkeypatch, activity_case):
     fn, arg = activity_case
-    _patch_orch(monkeypatch, exc=ValueError("Profile not found"))
+    patch_orch(monkeypatch, exc=ValueError("Profile not found"))
     create_job("job-404")
 
     with pytest.raises(ValueError, match="Profile not found"):
@@ -116,7 +81,7 @@ def test_activity_value_error_marks_failed_not_found_and_reraises(monkeypatch, a
 
 def test_activity_generic_error_marks_failed_and_reraises(monkeypatch, activity_case):
     fn, arg = activity_case
-    _patch_orch(monkeypatch, exc=RuntimeError("pipeline exploded"))
+    patch_orch(monkeypatch, exc=RuntimeError("pipeline exploded"))
     create_job("job-boom")
 
     with pytest.raises(RuntimeError, match="pipeline exploded"):
@@ -132,7 +97,7 @@ def test_activity_generic_error_marks_failed_and_reraises(monkeypatch, activity_
 def test_activity_returns_early_when_cancelled(monkeypatch, activity_case):
     fn, arg = activity_case
     # Orchestrator would succeed if it ran — the pre-run cancel guard must skip it.
-    _patch_orch(monkeypatch)
+    patch_orch(monkeypatch)
     create_job("job-cancel")
     update_job("job-cancel", status=JOB_STATUS_CANCELLED)
 
@@ -192,7 +157,7 @@ def test_activity_heartbeats_during_core_run(monkeypatch):
             return False
 
     monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", _FakeHeartbeat)
-    _patch_orch(monkeypatch)
+    patch_orch(monkeypatch)
     create_job("job-hb")
 
     result = wf.run_meal_plan_activity("job-hb", {"client_id": "client-1"})

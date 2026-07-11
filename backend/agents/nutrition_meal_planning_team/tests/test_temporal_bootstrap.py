@@ -51,7 +51,7 @@ def test_temporal_package_exports_workflows_and_activities():
         "run_nutrition_regenerate_activity",
         "run_meal_plan_activity",
     ]
-    assert mod.TASK_QUEUE == "nutrition_meal_planning-queue"
+    assert mod.TASK_QUEUE == "nutrition-meal-planning"
     assert mod.WORKFLOW_ID_PREFIX == "nutrition-meal-planning-"
 
 
@@ -120,7 +120,7 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
         "activities": ACTIVITIES,
         "task_queue": TASK_QUEUE,
     }
-    assert TASK_QUEUE == "nutrition_meal_planning-queue"
+    assert TASK_QUEUE == "nutrition-meal-planning"
 
 
 def test_startup_backstop_never_raises(monkeypatch):

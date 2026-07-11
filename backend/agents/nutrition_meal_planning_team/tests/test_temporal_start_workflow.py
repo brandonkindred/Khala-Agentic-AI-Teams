@@ -41,7 +41,7 @@ def test_start_nutrition_plan_workflow_delegates(monkeypatch):
     assert captured["workflow_run"] is NutritionPlanWorkflow.run
     assert captured["args"] == ("job-abc", {"client_id": "c"})
     assert captured["workflow_id"] == "nutrition-meal-planning-job-abc"
-    assert captured["task_queue"] == "nutrition_meal_planning-queue"
+    assert captured["task_queue"] == "nutrition-meal-planning"
 
 
 def test_start_regenerate_workflow_delegates(monkeypatch):
@@ -52,7 +52,7 @@ def test_start_regenerate_workflow_delegates(monkeypatch):
     assert captured["workflow_run"] is NutritionRegenerateWorkflow.run
     assert captured["args"] == ("job-def", "client-7")
     assert captured["workflow_id"] == "nutrition-meal-planning-job-def"
-    assert captured["task_queue"] == "nutrition_meal_planning-queue"
+    assert captured["task_queue"] == "nutrition-meal-planning"
 
 
 def test_start_meal_plan_workflow_delegates(monkeypatch):
@@ -63,7 +63,7 @@ def test_start_meal_plan_workflow_delegates(monkeypatch):
     assert captured["workflow_run"] is NutritionMealPlanWorkflow.run
     assert captured["args"] == ("job-ghi", {"client_id": "c", "period_days": 7})
     assert captured["workflow_id"] == "nutrition-meal-planning-job-ghi"
-    assert captured["task_queue"] == "nutrition_meal_planning-queue"
+    assert captured["task_queue"] == "nutrition-meal-planning"
 
 
 def test_client_shim_reexports_shared_temporal_helpers():
