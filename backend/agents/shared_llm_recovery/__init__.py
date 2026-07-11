@@ -26,6 +26,7 @@ Postconditions:
 from __future__ import annotations
 
 from shared_llm_recovery.recovery import (
+    agent_call_json,
     extract_files_from_content,
     extract_json_object,
     extract_single_python_block,
@@ -34,6 +35,7 @@ from shared_llm_recovery.recovery import (
 )
 
 __all__ = [
+    "agent_call_json",
     "extract_json_object",
     "extract_task_assignment_from_content",
     "extract_files_from_content",
