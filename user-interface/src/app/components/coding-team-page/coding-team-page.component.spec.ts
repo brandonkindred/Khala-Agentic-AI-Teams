@@ -244,6 +244,42 @@ describe('CodingTeamPageComponent', () => {
     expect(integrationsSpy.getGitHubIssues.mock.calls.at(-1)?.[0]?.label).toBe('ai');
   });
 
+  it('the label-filter toggle button is wired to toggleLabelFilter (template click)', async () => {
+    await setup(); // default_label 'ai'
+    showView('github');
+    expandFirstRepo();
+    const btn: HTMLButtonElement | null = fixture.nativeElement.querySelector('.github-label-filter__toggle');
+    expect(btn).toBeTruthy();
+    btn!.click();
+    fixture.detectChanges();
+    expect(component.labelFilterActive).toBe(false);
+  });
+
+  it('the label toggle reloads the issue list only (no Runs refetch)', async () => {
+    await setup();
+    showView('github');
+    expandFirstRepo();
+    const loadSpy = vi.spyOn(component, 'loadIssues');
+    component.toggleLabelFilter();
+    // loadIssues(false) skips the refreshTrigger$ that refetches the Runs list.
+    expect(loadSpy).toHaveBeenCalledWith(false);
+  });
+
+  it('resets the label filter to on when a different repo is expanded (per-repo, not global)', async () => {
+    await setup(); // default_label 'ai'
+    showView('github');
+    expandFirstRepo(); // repo A, filter on
+    component.toggleLabelFilter(); // turn it off for repo A
+    expect(component.labelFilterActive).toBe(false);
+    // Expand a different repo.
+    const other: GitHubRepoItem = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
+    component.repos = [REPO, other];
+    component.toggleRepo(other);
+    // The newly-expanded repo starts with the operator's configured filter applied again.
+    expect(component.labelFilterActive).toBe(true);
+    expect(component.activeLabel()).toBe('ai');
+  });
+
   it('collapsing the expanded repo clears its issue state', async () => {
     await setup();
     expandFirstRepo();

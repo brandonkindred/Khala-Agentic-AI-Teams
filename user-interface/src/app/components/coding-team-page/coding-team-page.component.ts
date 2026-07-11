@@ -143,9 +143,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   // repo's issue listing, so the dashboard setting actually takes effect rather than only
   // ever reaching the backend's no-target fallback path (which the repo-scoped UI never uses).
   defaultLabel = '';
-  // Whether the configured `defaultLabel` filter is currently applied. Defaults on when a
-  // label is configured, but the operator can toggle it off from the issue-list header to
-  // browse/run on unlabelled issues without editing the dashboard (see `toggleLabelFilter`).
+  // Whether the configured `defaultLabel` filter is currently applied to the expanded repo.
+  // Per-repo and transient: reset to on whenever a repo is (re)expanded (see `resetIssueState`),
+  // so the operator can toggle it off from the issue-list header to browse/run on unlabelled
+  // issues in this repo without editing the dashboard or affecting other repos.
   labelFilterActive = true;
 
   // Repository list — every repo the configured PAT can access. The PAT's own
@@ -360,6 +361,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.issuesLoaded = false;
     this.selectedIssue = null;
     this.issueError = null;
+    // The label filter is per-repo: each newly-expanded repo starts with the operator's
+    // configured default applied, and the toggle is a transient override for that repo only
+    // (so turning it off for one repo doesn't silently unfilter every other repo).
+    this.labelFilterActive = true;
   }
 
   /**
@@ -383,20 +388,23 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    */
   toggleLabelFilter(): void {
     this.labelFilterActive = !this.labelFilterActive;
-    this.loadIssues();
+    // Reload the issue list only — the Runs list is unaffected by which issues are shown.
+    this.loadIssues(false);
   }
 
   /**
-   * Refresh the expanded repo's open-issue list and the Runs snapshot together so they never drift.
-   * Resets the selection/pagination, triggers a runs refresh (which re-syncs the "In progress"
-   * chips), then fetches issues. Sets `issueError` on failure.
+   * Refresh the expanded repo's open-issue list. Resets the selection/pagination and fetches
+   * issues; sets `issueError` on failure.
    *
    * Preconditions: none.
    * Postconditions: a no-op when no repo is expanded. A response that lands after the user switched
    * to a different repo is discarded, so rapid repo switches can never show one repo's issues under
-   * another repo's row.
+   * another repo's row. When `refreshRuns` is true (the default, used on repo expand/refresh) the
+   * Runs snapshot is refetched too so the two lists never drift; a label-filter toggle passes false
+   * to avoid a needless Runs refetch (the runs don't depend on which issues are listed — the "In
+   * progress" chips are recomputed from existing run state either way).
    */
-  loadIssues(): void {
+  loadIssues(refreshRuns = true): void {
     const repo = this.selectedRepo;
     if (!repo) return;
     // Claim a token so a slow response superseded by a newer load (collapse/re-expand of the
@@ -406,9 +414,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.loadingIssues = true;
     this.issueError = null;
     this.selectedIssue = null;
-    // Refreshing the issue list also refreshes the Runs list and the "In progress" chips, so the
-    // two lists never drift.
-    this.refreshTrigger$.next();
+    if (refreshRuns) {
+      // Refreshing the issue list also refreshes the Runs list and the "In progress" chips, so the
+      // two lists never drift.
+      this.refreshTrigger$.next();
+    }
     this.integrationsApi
       // Apply the operator's global default-label filter when active (else browse all issues).
       .getGitHubIssues({ owner: repo.owner, repo: repo.name, label: this.activeLabel() })
