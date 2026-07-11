@@ -192,6 +192,12 @@ class DeepthoughtWorkflow:
         max_depth: int,
     ) -> AgentResult:
         """Deterministic re-expression of ``DeepthoughtAgent.execute`` for one node."""
+        # Once cancellation has been detected anywhere in the tree, every remaining
+        # node (including leaves) short-circuits on the latched flag alone — no
+        # further LLM calls and no extra job-store polls.
+        if self._cancelled:
+            return self._truncated_result(spec, "Run cancelled.")
+
         self._emit(spec, AgentEventType.AGENT_ANALYSING, "Analysing question")
 
         # Knowledge-base near-duplicate reuse (dedup). The cross-request
@@ -397,10 +403,20 @@ class DeepthoughtWorkflow:
             return self._truncated_result(spec, f"Error analysing: {spec.focus_question}")
 
     async def _is_cancelled(self) -> bool:
-        """Poll the job store (via activity) for cooperative cancellation."""
-        return await workflow.execute_activity(
-            activities.is_cancelled_activity, self._job_id, **JOB_ACTIVITY_OPTS
-        )
+        """Poll the job store (via activity) for cooperative cancellation, fail-open.
+
+        Cancellation is a best-effort optimisation, so a job-store outage during the
+        poll must NOT fail an otherwise-healthy run — treat any poll error as
+        'not cancelled, continue'. (``asyncio.CancelledError`` is a ``BaseException``
+        and still propagates, so Temporal workflow cancellation is unaffected.)
+        """
+        try:
+            return await workflow.execute_activity(
+                activities.is_cancelled_activity, self._job_id, **JOB_ACTIVITY_OPTS
+            )
+        except Exception:
+            workflow.logger.warning("Cancellation poll failed; treating job as not cancelled")
+            return False
 
     @staticmethod
     def _truncated_result(spec: AgentSpec, answer: str) -> AgentResult:

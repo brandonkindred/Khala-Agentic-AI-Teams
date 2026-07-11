@@ -40,30 +40,37 @@ logger = logging.getLogger(__name__)
 
 
 @functools.lru_cache(maxsize=1)
+def _cached_model() -> Any:  # pragma: no cover - real provider wiring; patched/bypassed in tests
+    """Resolve the deepthought strands model once per worker process.
+
+    ``get_strands_model`` re-resolves the Postgres provider list on every call, and
+    a decomposed run issues one activity per LLM boundary (up to ~150 per run), so
+    the resolution is cached. The returned model / ``FailoverLLMClient`` is the
+    piece that is *designed* to be shared (it remembers which providers are
+    rate-limited, exactly as thread mode shares one model across a run's parallel
+    nodes). Provider-config changes are picked up on the next worker restart.
+    """
+    from llm_service import get_strands_model
+
+    return get_strands_model("deepthought")
+
+
 def _build_llm() -> (
     Any
 ):  # pragma: no cover - real provider wiring (mirrors DeepthoughtOrchestrator.__init__); patched out in tests
-    """Construct (once per worker process) the strands LLM client.
+    """Build a FRESH strands ``Agent`` (wrapping the cached model) per activity.
 
-    Mirrors ``DeepthoughtOrchestrator.__init__`` so every activity talks to the
-    same provider the thread path would. Cached with ``lru_cache`` because a
-    decomposed run issues one activity per LLM boundary (up to ~150 per run) and
-    ``get_strands_model`` re-resolves the Postgres provider list on every call —
-    building it once per process avoids that repeated resolution, and the
-    ``FailoverLLMClient`` it returns is designed to be reused (it remembers which
-    providers are rate-limited). Provider-config changes are picked up on the next
-    worker restart. Per-call ``system_prompt`` overrides make the constructor
-    prompt irrelevant, but we keep it identical for parity.
+    Only the expensive model resolution is cached (:func:`_cached_model`); each
+    activity gets its own ``Agent`` so no per-``Agent`` completion state can leak
+    across the concurrent jobs sharing a worker. Per-call ``system_prompt``
+    overrides make the constructor prompt irrelevant, but we keep it identical to
+    ``DeepthoughtOrchestrator.__init__`` for parity.
     """
     from strands import Agent
 
     from deepthought.prompts import CLASSIFY_QUESTION_SYSTEM_PROMPT
-    from llm_service import get_strands_model
 
-    return Agent(
-        model=get_strands_model("deepthought"),
-        system_prompt=CLASSIFY_QUESTION_SYSTEM_PROMPT,
-    )
+    return Agent(model=_cached_model(), system_prompt=CLASSIFY_QUESTION_SYSTEM_PROMPT)
 
 
 # --------------------------------------------------------------------------- #

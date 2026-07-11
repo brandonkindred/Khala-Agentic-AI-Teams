@@ -95,7 +95,15 @@ class DeepthoughtAgent:
         self._on_event = on_event
 
     def _kb_summary(self, max_chars: int) -> str:
-        """Knowledge summary for a prompt — the injected override, or a fresh render."""
+        """Knowledge summary for a prompt — the injected override, or a fresh render.
+
+        When a ``knowledge_summary`` was injected (the Temporal path), it is
+        authoritative: the workflow already bounded it at render time, so
+        ``max_chars`` applies only to the live-``knowledge_base`` render used by the
+        thread path. (Injected summaries are rendered at the analysis budget, so an
+        analysis activity that falls back to a direct answer reuses that slightly
+        larger summary — more context, never less; harmless on the fallback path.)
+        """
         if self._knowledge_summary is not None:
             return self._knowledge_summary
         return self.knowledge_base.summary_for_prompt(max_chars=max_chars)

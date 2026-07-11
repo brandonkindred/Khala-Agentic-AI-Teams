@@ -29,7 +29,7 @@ class AnalysePayload(BaseModel):
     original_query: str
     conversation_history: list[dict[str, Any]] = Field(default_factory=list)
     decomposition_strategy: str
-    knowledge_summary: str = ""
+    knowledge_summary: str | None = None
     max_depth: int
 
 
@@ -39,7 +39,7 @@ class ForceDirectAnswerPayload(BaseModel):
     spec: AgentSpec
     parent_question: str = ""
     original_query: str
-    knowledge_summary: str = ""
+    knowledge_summary: str | None = None
 
 
 class ChildSummary(BaseModel):

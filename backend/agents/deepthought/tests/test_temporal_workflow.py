@@ -391,6 +391,65 @@ def test_run_children_short_circuits_when_cancelled():
     assert not any(c[0] == "analyse_activity" for c in calls)
 
 
+def test_run_children_fails_open_when_cancel_poll_errors():
+    """A job-store outage during the cancellation poll must NOT stop the run."""
+    wf = wfmod.DeepthoughtWorkflow()
+    wf._job_id = "job-c"
+    specs = [
+        AgentSpec(
+            agent_id="a",
+            name="na",
+            role_description="r",
+            focus_question="qa",
+            depth=1,
+            parent_id="root",
+        )
+    ]
+    parent = AgentSpec(
+        agent_id="root", name="root", role_description="r", focus_question="pq", depth=0
+    )
+
+    def _poll_boom(_a):
+        raise RuntimeError("job service unreachable")
+
+    # The child then answers directly (depth 1 == max_depth via the analyse stub).
+    handlers = {
+        "is_cancelled_activity": _poll_boom,
+        "analyse_activity": lambda a: QueryAnalysis(
+            summary="c", can_answer_directly=True, direct_answer="child ans", confidence=0.6
+        ).model_dump(),
+    }
+    calls: list = []
+    with _driver(handlers, calls):
+        res = asyncio.run(wf._run_children(specs, parent, {"message": "m"}, "auto", 3))
+
+    # Poll error was swallowed: the child ran instead of being truncated.
+    assert wf._cancelled is False
+    assert res[0].answer == "child ans"
+    assert any(c[0] == "analyse_activity" for c in calls)
+
+
+def test_run_agent_short_circuits_when_cancellation_latched():
+    """Once _cancelled is latched, every node (incl. leaves) short-circuits, no LLM."""
+    wf = wfmod.DeepthoughtWorkflow()
+    wf._cancelled = True
+    spec = AgentSpec(
+        agent_id="leaf",
+        name="leaf",
+        role_description="r",
+        focus_question="lq",
+        depth=2,
+        parent_id="root",
+    )
+    calls: list = []
+    with _driver({}, calls):
+        res = asyncio.run(wf._run_agent(spec, "pq", {"message": "m"}, "auto", 3))
+
+    assert res.answer == "Run cancelled."
+    assert res.confidence == 0.0
+    assert calls == []  # no analyse / force-direct activity issued
+
+
 def test_run_children_returns_empty_for_no_specs():
     wf = wfmod.DeepthoughtWorkflow()
     parent = AgentSpec(
