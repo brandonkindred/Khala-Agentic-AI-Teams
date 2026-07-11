@@ -1173,7 +1173,11 @@ _GITHUB_ISSUES_PER_PAGE = 100
 # Safety bound against a pathological repo or a redirect loop in the Link header.
 # 100 issues/page * 50 pages = 5000 open issues, far beyond any realistic repo.
 _GITHUB_MAX_ISSUE_PAGES = 50
-# Open pull requests paginate the same way; bound the follow identically.
+# Open pull requests paginate the same way; bound the follow identically. GitHub's
+# pulls endpoint shares the issues endpoint's 100-item page ceiling, but PRs get their
+# own constant so the two page sizes can be tuned independently without one silently
+# changing the other.
+_GITHUB_PRS_PER_PAGE = 100
 _GITHUB_MAX_PR_PAGES = 50
 # The PAT's accessible-repository list (GET /user/repos) paginates the same way.
 # 100 repos/page * 20 pages = 2000 repositories, far beyond any realistic PAT grant.
@@ -1787,7 +1791,14 @@ async def _collect_github_pages(
                 raise HTTPException(status_code=502, detail="GitHub API returned a non-JSON response.") from e
             # A list endpoint always returns a JSON array on 200; a non-list body is
             # malformed, so treat it as an upstream error rather than iterating a dict's keys.
+            # Log the actual shape (e.g. a ``{"message": ...}`` error object served with a 200)
+            # so the 502 is diagnosable without reproducing the upstream response.
             if not isinstance(page, list):
+                logger.warning(
+                    "GitHub list endpoint %s returned a 200 with a non-list body (%s); mapping to 502",
+                    base_url,
+                    type(page).__name__,
+                )
                 raise HTTPException(status_code=502, detail="GitHub API returned an unexpected response shape.")
             raw.extend(page)
             has_more = bool(resp.links.get("next", {}).get("url"))
@@ -1997,12 +2008,12 @@ async def list_github_pulls(
           — each missing prerequisite raises ``HTTPException(400)``.
     Postconditions:
         - Returns every open pull request in GitHub's response order, bounded by
-          ``_GITHUB_MAX_PR_PAGES`` pages of 100 items. Hitting that bound logs a
-          warning and returns the PRs gathered so far rather than failing.
+          ``_GITHUB_MAX_PR_PAGES`` pages of ``_GITHUB_PRS_PER_PAGE`` items. Hitting that
+          bound logs a warning and returns the PRs gathered so far rather than failing.
     """
     _cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, owner, repo)
 
-    params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_ISSUES_PER_PAGE}
+    params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_PRS_PER_PAGE}
     headers = _github_api_headers(token)
     base_url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
 

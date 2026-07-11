@@ -171,10 +171,17 @@ describe('IntegrationsDashboardComponent', () => {
     expect(card).toBeTruthy();
     expect(card.textContent).toContain('Connected');
     // Repository access is defined by the PAT itself: the card explains this and never
-    // renders Owner/Repository input fields.
+    // renders an Owner/Repository input field. Inspect every rendered input's identifying
+    // attributes (rather than a single fixed name= selector that would pass trivially even
+    // if an owner/repo field were re-added under a different binding).
     expect(card.textContent).toContain('token');
-    expect(card.querySelector('input[name="githubOwner"]')).toBeNull();
-    expect(card.querySelector('input[name="githubRepo"]')).toBeNull();
+    const inputIdentifiers = Array.from(card.querySelectorAll('input, textarea')).map((el) =>
+      ['name', 'id', 'formcontrolname', 'placeholder', 'aria-label']
+        .map((attr) => el.getAttribute(attr) ?? '')
+        .join(' ')
+        .toLowerCase(),
+    );
+    expect(inputIdentifiers.some((ids) => /owner|repo/.test(ids))).toBe(false);
   });
 
   it('GitHub card shows Not configured when no token is stored', () => {
