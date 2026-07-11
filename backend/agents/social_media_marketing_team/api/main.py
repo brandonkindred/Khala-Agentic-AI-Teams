@@ -304,7 +304,9 @@ def _run_team_job(job_id: str, request: RunMarketingTeamRequest, brand_ctx: Bran
             current_stage="completed",
             progress=100,
             eta_hint="done",
-            result=result.model_dump(),
+            # mode="json" so Platform-enum-keyed dicts (channel_mix_strategy) become
+            # JSON-native string keys, matching the Temporal path's serialization.
+            result=result.model_dump(mode="json"),
         )
     except Exception as exc:
         logger.exception("Social marketing team job %s failed", job_id)

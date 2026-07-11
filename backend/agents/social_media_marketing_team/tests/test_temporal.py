@@ -56,6 +56,18 @@ def _patch_brand(monkeypatch: pytest.MonkeyPatch, ctx: BrandContext | None = Non
     return ctx
 
 
+def _raiser(exc: BaseException):
+    """Return a function that raises ``exc`` when called.
+
+    Clearer than ``lambda: (_ for _ in ()).throw(exc)`` and raises immediately.
+    """
+
+    def _raise(*args, **kwargs):
+        raise exc
+
+    return _raise
+
+
 # ---------------------------------------------------------------------------
 # constants
 # ---------------------------------------------------------------------------
@@ -369,7 +381,7 @@ def test_consensus_stage_activity_brand_error_non_retryable(
 
     monkeypatch.setattr(
         "social_media_marketing_team.adapters.branding.fetch_brand",
-        lambda client_id, brand_id: (_ for _ in ()).throw(BrandNotFoundError("c", "b")),
+        _raiser(BrandNotFoundError("c", "b")),
     )
     fake_job_client.create_job("job-brand", status="pending")
 
@@ -393,7 +405,7 @@ def test_consensus_stage_activity_unexpected_brand_error_marks_failed_and_rerais
 
     monkeypatch.setattr(
         "social_media_marketing_team.adapters.branding.fetch_brand",
-        lambda client_id, brand_id: (_ for _ in ()).throw(RuntimeError("branding API 502")),
+        _raiser(RuntimeError("branding API 502")),
     )
     fake_job_client.create_job("job-brand-net", status="pending")
 
@@ -412,7 +424,7 @@ def test_consensus_stage_activity_cancelled_brand_fetch_maps_to_cancelled(
 
     monkeypatch.setattr(
         "social_media_marketing_team.adapters.branding.fetch_brand",
-        lambda client_id, brand_id: (_ for _ in ()).throw(RuntimeError("interrupted")),
+        _raiser(RuntimeError("interrupted")),
     )
     monkeypatch.setattr("temporalio.activity.is_cancelled", lambda: True)
     fake_job_client.create_job("job-brand-cx", status="pending")
@@ -432,7 +444,7 @@ def test_consensus_stage_activity_body_error_returns_fail_dto(
     monkeypatch.setattr(
         SocialMediaMarketingOrchestrator,
         "build_consensus_proposal",
-        lambda self, goals: (_ for _ in ()).throw(RuntimeError("boom")),
+        _raiser(RuntimeError("boom")),
     )
     fake_job_client.create_job("job-fail", status="pending")
 
@@ -544,7 +556,7 @@ def test_content_plan_stage_activity_body_error_returns_fail_dto(
     monkeypatch.setattr(
         SocialMediaMarketingOrchestrator,
         "_plan_content",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        _raiser(RuntimeError("boom")),
     )
     out = amod.content_plan_stage_activity("job-2b", _req(), consensus)
     assert out["status"] == "FAIL"
@@ -598,7 +610,15 @@ def test_finalize_stage_activity_approved(monkeypatch: pytest.MonkeyPatch, fake_
     platform = amod.platform_stage_activity("job-5", req, consensus, content)
     experiment = amod.experiment_stage_activity("job-5", req, consensus, content)
 
-    amod.finalize_stage_activity("job-5", req, consensus, True, content, platform, experiment)
+    amod.finalize_stage_activity(
+        "job-5",
+        req,
+        consensus,
+        approved=True,
+        content=content,
+        platform=platform,
+        experiment=experiment,
+    )
 
     job = fake_job_client.get_job("job-5")
     assert job["status"] == "completed"
@@ -619,7 +639,7 @@ def test_finalize_stage_activity_needs_revision(
     consensus = amod.consensus_stage_activity("job-6", req)
 
     # Unapproved path: only consensus ran; finalize produces NEEDS_REVISION.
-    amod.finalize_stage_activity("job-6", req, consensus, False)
+    amod.finalize_stage_activity("job-6", req, consensus, approved=False)
 
     job = fake_job_client.get_job("job-6")
     assert job["status"] == "completed"
@@ -641,7 +661,7 @@ def test_finalize_stage_activity_approved_missing_content_non_retryable(
     consensus = amod.consensus_stage_activity("job-6b", req)
 
     with pytest.raises(ApplicationError) as exc:
-        amod.finalize_stage_activity("job-6b", req, consensus, True, content=None)
+        amod.finalize_stage_activity("job-6b", req, consensus, approved=True, content=None)
     assert exc.value.non_retryable is True
 
 
@@ -673,7 +693,15 @@ def test_finalize_stage_activity_store_failure_last_attempt_marks_failed(
     )
 
     with pytest.raises(RuntimeError):
-        amod.finalize_stage_activity("job-7", req, consensus, True, content, platform, experiment)
+        amod.finalize_stage_activity(
+            "job-7",
+            req,
+            consensus,
+            approved=True,
+            content=content,
+            platform=platform,
+            experiment=experiment,
+        )
     assert marked == {"job": "job-7", "phase": "finalize"}
 
 
@@ -710,7 +738,15 @@ def test_finalize_already_completed_on_last_attempt_returns_success(
     monkeypatch.setattr(amod, "_fail_activity", lambda *a, **k: fail_called.setdefault("hit", True))
 
     # Should NOT raise and should NOT mark failed -- the job is already completed.
-    amod.finalize_stage_activity("job-9", req, consensus, True, content, platform, experiment)
+    amod.finalize_stage_activity(
+        "job-9",
+        req,
+        consensus,
+        approved=True,
+        content=content,
+        platform=platform,
+        experiment=experiment,
+    )
     assert "hit" not in fail_called
     assert fake_job_client.get_job("job-9")["status"] == "completed"
 
@@ -754,7 +790,15 @@ def test_finalize_last_attempt_recheck_failure_still_marks_failed(
     )
 
     with pytest.raises(RuntimeError):
-        amod.finalize_stage_activity("job-9b", req, consensus, True, content, platform, experiment)
+        amod.finalize_stage_activity(
+            "job-9b",
+            req,
+            consensus,
+            approved=True,
+            content=content,
+            platform=platform,
+            experiment=experiment,
+        )
     assert marked == {"job": "job-9b", "phase": "finalize"}
 
 
@@ -783,7 +827,15 @@ def test_finalize_stage_activity_store_failure_not_last_attempt_reraises(
     monkeypatch.setattr(amod, "_fail_activity", lambda *a, **k: fail_called.setdefault("hit", True))
 
     with pytest.raises(RuntimeError):
-        amod.finalize_stage_activity("job-7b", req, consensus, True, content, platform, experiment)
+        amod.finalize_stage_activity(
+            "job-7b",
+            req,
+            consensus,
+            approved=True,
+            content=content,
+            platform=platform,
+            experiment=experiment,
+        )
     assert "hit" not in fail_called  # not marked failed while retries remain
 
 
@@ -818,7 +870,15 @@ def test_finalize_cancellederror_maps_to_cancelled(
         monkeypatch, fake_job_client, "job-8", CancelledError("cancelled")
     )
     with pytest.raises(CancelledError):
-        amod.finalize_stage_activity("job-8", req, consensus, True, content, platform, experiment)
+        amod.finalize_stage_activity(
+            "job-8",
+            req,
+            consensus,
+            approved=True,
+            content=content,
+            platform=platform,
+            experiment=experiment,
+        )
     assert fake_job_client.get_job("job-8")["status"] == "cancelled"
 
 
@@ -832,7 +892,15 @@ def test_finalize_store_error_while_cancelled_maps_to_cancelled(
     )
     monkeypatch.setattr("temporalio.activity.is_cancelled", lambda: True)
     with pytest.raises(CancelledError):
-        amod.finalize_stage_activity("job-8b", req, consensus, True, content, platform, experiment)
+        amod.finalize_stage_activity(
+            "job-8b",
+            req,
+            consensus,
+            approved=True,
+            content=content,
+            platform=platform,
+            experiment=experiment,
+        )
     assert fake_job_client.get_job("job-8b")["status"] == "cancelled"
 
 
@@ -951,7 +1019,7 @@ def _fake_workflow(monkeypatch, *, patched: bool, results: dict[str, dict] | Non
     results = results or {}
     order: list[str] = []
 
-    async def _fake_execute(activity, args=None, **kwargs):  # noqa: ANN001
+    async def _fake_execute(activity, *activity_args, **kwargs):  # noqa: ANN001
         name = getattr(activity, "__name__", str(activity))
         order.append(name)
         return results.get(name, {"status": "PASS"})

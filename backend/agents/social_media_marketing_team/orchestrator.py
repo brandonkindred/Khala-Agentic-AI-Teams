@@ -442,6 +442,23 @@ class SocialMediaMarketingOrchestrator:
         performance: CampaignPerformanceSnapshot | None = None,
         brand_id: str = "",
     ) -> TeamOutput:
+        """Execute the full marketing-team pipeline (thread mode).
+
+        Composes the public phase methods (``build_consensus_proposal`` ->
+        ``_load_winners`` -> ``_plan_content`` -> ``build_platform_plans`` ->
+        ``build_experiment`` -> ``assemble_team_output``) into a single ``TeamOutput``.
+        The Temporal path runs the same phase methods across separate activities, so
+        the two modes stay in parity.
+
+        Preconditions:
+            - ``goals`` is a fully populated ``BrandGoals``; ``brand_id`` identifies the
+              brand for Winning-Posts-Bank retrieval (empty disables it).
+        Postconditions:
+            - When ``human_review.approved`` is False, returns early with a
+              ``NEEDS_REVISION`` output carrying only the consensus proposal.
+            - Otherwise returns an ``APPROVED_FOR_TESTING`` output with the content
+              plan, per-platform plans, experiment plan, and any ingested performance.
+        """
         proposal = self.build_consensus_proposal(goals)
 
         if not human_review.approved:

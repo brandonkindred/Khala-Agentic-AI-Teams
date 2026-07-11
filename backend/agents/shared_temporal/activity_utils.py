@@ -43,12 +43,12 @@ def is_last_attempt() -> bool:
     check never drifts from the workflow's policy.
 
     Preconditions:
-        - Called from within an activity body (or directly / thread mode).
+        - None (safe to call outside an activity context; it degrades to ``True``).
     Postconditions:
         - Returns True when the current attempt is the last Temporal will make, or
-          when called outside an activity context (the caller then marks the job
-          terminal). Returns False when the policy allows unlimited retries
-          (``maximum_attempts <= 0``) -- there is no last attempt to gate on.
+          when called outside an activity context (direct/thread use -- the caller
+          then treats it as terminal). Returns False when the policy allows unlimited
+          retries (``maximum_attempts <= 0``) -- there is no last attempt to gate on.
     """
     try:
         info = activity.info()

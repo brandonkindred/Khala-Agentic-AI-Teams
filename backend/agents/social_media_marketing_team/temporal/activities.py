@@ -133,6 +133,29 @@ def _run_stage(
         return fail_dto()
 
 
+def _consensus_models(consensus: Dict[str, Any]) -> tuple[Any, Any, str]:
+    """Validate a serialized ``ConsensusStageResult`` and rebuild its domain models.
+
+    Preconditions:
+        - ``consensus`` is the serialized ``ConsensusStageResult`` from the consensus
+          stage.
+    Postconditions:
+        - Returns ``(goals, proposal, brand_name)`` rebuilt from the validated DTO. A
+          missing or malformed field raises ``pydantic.ValidationError`` (a code /
+          cross-deploy schema defect that must fail loudly) rather than a bare
+          ``KeyError`` on raw dict access.
+    """
+    from social_media_marketing_team.models import BrandGoals, CampaignProposal
+    from social_media_marketing_team.temporal.phase_models import ConsensusStageResult
+
+    dto = ConsensusStageResult.model_validate(consensus)
+    return (
+        BrandGoals.model_validate(dto.goals),
+        CampaignProposal.model_validate(dto.proposal),
+        dto.brand_name,
+    )
+
+
 def _build_orchestrator(request: Any) -> Any:
     """Construct the orchestrator for a request (shared with thread mode).
 
@@ -267,15 +290,12 @@ def content_plan_stage_activity(
           job failed and returns a ``FAIL`` DTO.
     """
     from social_media_marketing_team.api.main import RunMarketingTeamRequest, _update_job
-    from social_media_marketing_team.models import BrandGoals, CampaignProposal
     from social_media_marketing_team.temporal.phase_models import ContentPlanStageResult
 
     # Rebuild inputs OUTSIDE the funnel: a malformed inter-activity DTO is a code
     # bug (or cross-deploy schema skew), not a pipeline failure.
     request = RunMarketingTeamRequest(**request_dict)
-    goals = BrandGoals.model_validate(consensus["goals"])
-    proposal = CampaignProposal.model_validate(consensus["proposal"])
-    brand_name = consensus.get("brand_name", "")
+    goals, proposal, brand_name = _consensus_models(consensus)
 
     _update_job(
         job_id,
@@ -318,12 +338,11 @@ def platform_stage_activity(
           marks the job failed and returns a ``FAIL`` DTO.
     """
     from social_media_marketing_team.api.main import RunMarketingTeamRequest
-    from social_media_marketing_team.models import BrandGoals, CampaignProposal, ContentPlan
+    from social_media_marketing_team.models import ContentPlan
     from social_media_marketing_team.temporal.phase_models import PlatformStageResult
 
     request = RunMarketingTeamRequest(**request_dict)
-    goals = BrandGoals.model_validate(consensus["goals"])
-    proposal = CampaignProposal.model_validate(consensus["proposal"])
+    goals, proposal, _ = _consensus_models(consensus)
     content_plan = ContentPlan.model_validate(content["content_plan"])
 
     def _body() -> Dict[str, Any]:
@@ -359,11 +378,11 @@ def experiment_stage_activity(
           and returns a ``FAIL`` DTO.
     """
     from social_media_marketing_team.api.main import RunMarketingTeamRequest
-    from social_media_marketing_team.models import CampaignProposal, ContentPlan
+    from social_media_marketing_team.models import ContentPlan
     from social_media_marketing_team.temporal.phase_models import ExperimentStageResult
 
     request = RunMarketingTeamRequest(**request_dict)
-    proposal = CampaignProposal.model_validate(consensus["proposal"])
+    _, proposal, _ = _consensus_models(consensus)
     content_plan = ContentPlan.model_validate(content["content_plan"])
 
     def _body() -> Dict[str, Any]:
@@ -422,7 +441,6 @@ def finalize_stage_activity(
         _update_job,
     )
     from social_media_marketing_team.models import (
-        CampaignProposal,
         ContentPlan,
         ExperimentPlan,
         HumanReview,
@@ -436,8 +454,7 @@ def finalize_stage_activity(
 
     # Rebuild inputs OUTSIDE any funnel: a malformed inter-activity DTO is a code bug.
     request = RunMarketingTeamRequest(**request_dict)
-    proposal = CampaignProposal.model_validate(consensus["proposal"])
-    brand_name = consensus.get("brand_name", "")
+    _, proposal, brand_name = _consensus_models(consensus)
     human_review = HumanReview(
         approved=approved,
         feedback=request.human_feedback,
@@ -493,7 +510,9 @@ def finalize_stage_activity(
             current_stage="completed",
             progress=100,
             eta_hint="done",
-            result=output.model_dump(),
+            # mode="json" so Platform-enum-keyed dicts (channel_mix_strategy) become
+            # JSON-native string keys before they reach the job store.
+            result=output.model_dump(mode="json"),
         )
     except Exception as e:
         raise_if_cancelled(e, "finalize stage cancelled", lambda: _mark_cancelled(job_id))
