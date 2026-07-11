@@ -57,9 +57,12 @@ _BOOKKEEPING_RETRY = RetryPolicy(
 
 _SHORT_TIMEOUT = timedelta(minutes=5)
 _STEP_TIMEOUT = timedelta(minutes=30)
-# recommend_activities loops one LLM call per stop and heartbeats after each, so a
-# stalled worker is caught within this window rather than only at start-to-close.
-_STEP_HEARTBEAT_TIMEOUT = timedelta(minutes=5)
+# recommend_activities loops one LLM call per stop and heartbeats before each, so
+# a stalled worker is caught within this window rather than only at start-to-close.
+# Sized to comfortably exceed a single (possibly slow) per-stop LLM call so a
+# legitimately-long call is never mistaken for a stall, while still detecting a
+# genuine hang well before the 30-minute start-to-close budget.
+_STEP_HEARTBEAT_TIMEOUT = timedelta(minutes=10)
 
 
 @workflow.defn(name="RoadTripWorkflow")

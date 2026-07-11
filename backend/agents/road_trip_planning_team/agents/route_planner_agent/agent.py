@@ -83,11 +83,12 @@ class RoutePlannerAgent:
 
         raw_stops = data.get("ordered_stops") or []
         stops = [RouteStop.model_validate(s) for s in raw_stops if isinstance(s, dict)]
-        if not stops:
-            # Valid JSON without usable stops (e.g. an empty object from a
-            # refusal) — fall back to a route covering start → required stops →
-            # end rather than composing an empty itinerary downstream.
-            logger.warning("RoutePlannerAgent produced no stops; using fallback route")
+        if not stops or not self._covers_required_stops(stops, trip):
+            # Valid JSON that yields no usable stops (e.g. an empty object from a
+            # refusal) or that silently drops a must-visit stop — fall back to a
+            # route covering start → required stops → end rather than composing an
+            # itinerary that is empty or missing a required stop.
+            logger.warning("RoutePlannerAgent route missing required stops; using fallback route")
             return self._fallback_route(trip, end)
 
         return RoutePlan(
@@ -98,6 +99,28 @@ class RoutePlannerAgent:
             suggested_total_days=data.get("suggested_total_days", trip.trip_duration_days or 7),
         )
 
+    def _covers_required_stops(self, stops: list[RouteStop], trip: TripRequest) -> bool:
+        """Return True if every ``trip.required_stops`` location is represented.
+
+        Matching is case-insensitive and bidirectional-substring (a required
+        ``"Yosemite"`` matches a planned ``"Yosemite National Park"`` and vice
+        versa) to tolerate the LLM naming a stop more or less verbosely than the
+        request.
+
+        Preconditions:
+            - ``stops`` is the parsed, non-empty route.
+
+        Postconditions:
+            - Returns True when no required stop is missing (trivially True when
+              there are no required stops).
+        """
+        planned = [s.location.lower() for s in stops if s.location]
+        for req in trip.required_stops:
+            r = req.lower()
+            if not any(r in p or p in r for p in planned):
+                return False
+        return True
+
     def _fallback_route(self, trip: TripRequest, end: str) -> RoutePlan:
         """Build a minimal route covering start → required stops → end.
 
@@ -106,14 +129,17 @@ class RoutePlannerAgent:
               start location for a round trip).
 
         Postconditions:
-            - Returns a ``RoutePlan`` whose ``ordered_stops`` begins at the start,
-              includes every required stop as an overnight destination, and ends
-              at ``end`` — never empty.
+            - Returns a ``RoutePlan`` whose ``ordered_stops`` begins at a
+              pass-through start, includes every required stop as an overnight
+              destination, and ends at a pass-through end — never empty. The
+              start/end carry ``recommended_nights=0`` so the activities and
+              composer steps treat them as pass-through and don't turn them into
+              extra overnight days or LLM calls.
         """
-        stops = [RouteStop(location=trip.start_location, stop_type="start")]
+        stops = [RouteStop(location=trip.start_location, stop_type="start", recommended_nights=0)]
         for s in trip.required_stops:
             stops.append(RouteStop(location=s, stop_type="destination", recommended_nights=1))
-        stops.append(RouteStop(location=end, stop_type="end"))
+        stops.append(RouteStop(location=end, stop_type="end", recommended_nights=0))
         return RoutePlan(
             ordered_stops=stops,
             suggested_total_days=trip.trip_duration_days or len(trip.required_stops) * 2,

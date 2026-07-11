@@ -57,20 +57,22 @@ class ActivitiesExpertAgent:
     ) -> List[StopActivities]:
         """Generate activity recommendations for each stop on the route.
 
-        ``on_stop`` (if provided) is a no-arg callable invoked after each stop is
-        processed — used by the Temporal activity to emit a heartbeat during the
-        per-stop LLM loop so a stalled worker is detected within the activity's
-        heartbeat timeout rather than only at its start-to-close timeout.
+        ``on_stop`` (if provided) is a no-arg callable invoked *before* each stop
+        is processed — used by the Temporal activity to emit a heartbeat ahead of
+        the (potentially slow) per-stop LLM call, so the heartbeat timer covers
+        each call rather than only firing once the blocking call has already
+        returned. A stalled worker is then detected within the heartbeat timeout
+        instead of only at the activity's start-to-close timeout.
         """
         results: List[StopActivities] = []
 
         for stop in route.ordered_stops:
+            if on_stop is not None:
+                on_stop()
             if stop.stop_type in ("start", "end") and stop.recommended_nights == 0:
                 results.append(StopActivities(location=stop.location))
             else:
                 results.append(self._get_stop_activities(stop.location, group_profile, trip))
-            if on_stop is not None:
-                on_stop()
 
         return results
 

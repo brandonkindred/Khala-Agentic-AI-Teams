@@ -63,8 +63,11 @@ def test_profile_travelers_falls_back_on_bad_json(sample_plan_request):
 
 
 def test_plan_route_parses_llm_json(sample_plan_request):
+    # The LLM route must cover the required stop (Yosemite) or the coverage guard
+    # substitutes the fallback.
     llm = _FakeLLM(
-        '{"ordered_stops": [{"location": "SF", "stop_type": "start"}],'
+        '{"ordered_stops": [{"location": "SF", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination"}],'
         ' "route_summary": "coastal", "suggested_total_days": 3}'
     )
     route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
@@ -95,6 +98,32 @@ def test_plan_route_falls_back_when_json_omits_stops(sample_plan_request):
     assert "San Francisco, CA" in locations
     assert "Yosemite" in locations
     assert "Los Angeles, CA" in locations
+
+
+def test_plan_route_falls_back_when_required_stop_missing(sample_plan_request):
+    # A non-empty route that drops a required stop (Yosemite) must be replaced by
+    # the fallback so a must-visit stop can't silently vanish from the itinerary.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "Reno, NV", "stop_type": "destination"}],'
+        ' "route_summary": "wrong", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    locations = [s.location for s in route.ordered_stops]
+    assert "Yosemite" in locations  # fallback restored the required stop
+    assert route.route_summary == ""  # fallback route, not the LLM's "wrong" summary
+
+
+def test_fallback_route_endpoints_are_pass_through(sample_plan_request):
+    # Fallback endpoints must be pass-through (recommended_nights=0) so the
+    # activities/composer steps don't turn the start and end into extra days.
+    route = rtp_pipeline.plan_route(
+        sample_plan_request.trip, TravelerGroupProfile(), llm=_FakeLLM("x")
+    )
+    by_type = {s.stop_type: s for s in route.ordered_stops}
+    assert by_type["start"].recommended_nights == 0
+    assert by_type["end"].recommended_nights == 0
+    dests = [s for s in route.ordered_stops if s.stop_type == "destination"]
+    assert dests and all(s.recommended_nights == 1 for s in dests)
 
 
 def test_recommend_activities_parses_and_skips_passthrough(sample_plan_request):
@@ -135,6 +164,32 @@ def test_recommend_activities_invokes_on_stop_per_stop(sample_plan_request):
     # on_stop fires once per stop, including the pass-through start/end — this is
     # what the Temporal activity uses to heartbeat during the per-stop loop.
     assert len(beats) == 3
+
+
+def test_recommend_activities_heartbeats_before_stop_work(sample_plan_request):
+    # The heartbeat for a stop must be emitted BEFORE its (potentially slow) LLM
+    # call, so the heartbeat timer covers the call rather than firing only after.
+    route = RoutePlan(
+        ordered_stops=[
+            RouteStop(location="Yosemite", stop_type="destination", recommended_nights=1)
+        ]
+    )
+    events: list[str] = []
+
+    class _RecordingLLM:
+        def __call__(self, prompt: str) -> str:
+            events.append("llm")
+            return '{"activities": [], "dining": [], "tips": []}'
+
+    rtp_pipeline.recommend_activities(
+        route,
+        TravelerGroupProfile(),
+        sample_plan_request.trip,
+        llm=_RecordingLLM(),
+        on_stop=lambda: events.append("beat"),
+    )
+    assert events[0] == "beat"
+    assert "llm" in events
 
 
 def test_plan_logistics_parses_llm_json(sample_plan_request):
