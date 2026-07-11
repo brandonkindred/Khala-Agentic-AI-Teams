@@ -72,16 +72,14 @@ _STAGE_ACTIVITY_OPTS: Mapping[str, Any] = MappingProxyType(
     )
 )
 
-# Options for the legacy whole-pipeline activity in the drain-out branch: the shared
-# stage options with both ceilings widened back to the pre-decomposition envelope (4h)
-# so in-flight histories replay unchanged. Derived from _STAGE_ACTIVITY_OPTS so the
-# task queue and retry policy stay in lockstep.
+# Options for the legacy whole-pipeline activity in the drain-out branch: reproduce
+# the pre-decomposition envelope exactly -- a single 4h schedule-to-close and NO
+# per-attempt start-to-close (the option the monolith was scheduled without) -- so
+# in-flight histories replay under identical options. Derived from _STAGE_ACTIVITY_OPTS
+# (dropping the per-attempt cap) so the task queue and retry policy stay in lockstep.
 _LEGACY_ACTIVITY_OPTS: Mapping[str, Any] = MappingProxyType(
-    {
-        **_STAGE_ACTIVITY_OPTS,
-        "schedule_to_close_timeout": RUN_TIMEOUT,
-        "start_to_close_timeout": RUN_TIMEOUT,
-    }
+    {k: v for k, v in _STAGE_ACTIVITY_OPTS.items() if k != "start_to_close_timeout"}
+    | {"schedule_to_close_timeout": RUN_TIMEOUT}
 )
 
 

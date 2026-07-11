@@ -393,7 +393,9 @@ def finalize_stage_activity(
           should not retry). Nothing is terminal before the completion write, so a
           transient store error re-raises for Temporal to retry until the final
           attempt, which marks the job failed and re-raises rather than completing as
-          if finalization had succeeded.
+          if finalization had succeeded -- unless a re-check finds the job already
+          ``completed`` (a prior attempt's write landed but its ack was lost), in
+          which case the activity returns success without re-failing it.
     """
     from job_service_client import JOB_STATUS_COMPLETED
     from social_media_marketing_team.api.main import (
@@ -482,8 +484,15 @@ def finalize_stage_activity(
         # Under at-least-once delivery a prior attempt's completion write may have
         # succeeded server-side while its ack was lost, triggering this retry. Don't
         # clobber an already-completed job with a failure -- treat finalization as done.
-        existing = _job_manager.get_job(job_id) or {}
-        if existing.get("status") == JOB_STATUS_COMPLETED:
+        # The re-check is best-effort: if it fails (the store is usually still down --
+        # it's why we're on the last attempt) or the manager is unavailable, fall
+        # through to the terminal failure rather than let the lookup error suppress it.
+        try:
+            existing = _job_manager.get_job(job_id) or {}
+            already_completed = existing.get("status") == JOB_STATUS_COMPLETED
+        except Exception:
+            already_completed = False
+        if already_completed:
             logger.info("Finalize retry for job %s: already completed; treating as success", job_id)
             return
         _fail_activity(job_id, e, "finalize")

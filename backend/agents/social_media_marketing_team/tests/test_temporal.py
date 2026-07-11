@@ -680,6 +680,49 @@ def test_finalize_already_completed_on_last_attempt_returns_success(
     assert fake_job_client.get_job("job-9")["status"] == "completed"
 
 
+def test_finalize_last_attempt_recheck_failure_still_marks_failed(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    """If the already-completed re-check itself fails, finalize still marks failed.
+
+    The re-check is best-effort: a failing get_job (the store is usually still down --
+    it's why we're on the last attempt) must not suppress the terminal failure.
+    """
+    from social_media_marketing_team.api import main as api_main
+    from social_media_marketing_team.temporal import activities as amod
+
+    _patch_brand(monkeypatch)
+    fake_job_client.create_job("job-9b", status="running")
+    req = _req(human_approved_for_testing=True)
+    consensus = amod.consensus_stage_activity("job-9b", req)
+    content = amod.content_plan_stage_activity("job-9b", req, consensus)
+    platform = amod.platform_stage_activity("job-9b", req, consensus, content)
+    experiment = amod.experiment_stage_activity("job-9b", req, consensus, content)
+
+    def _raise_on_complete(job_id, **fields):
+        if fields.get("status") == "completed":
+            raise RuntimeError("store down")
+
+    class _BrokenManager:
+        def get_job(self, job_id):
+            raise RuntimeError("store still down")
+
+    marked: dict[str, Any] = {}
+    monkeypatch.setattr(api_main, "_update_job", _raise_on_complete)
+    monkeypatch.setattr(api_main, "_job_manager", _BrokenManager())
+    # Isolate the failure to the completion re-check: skip the pre-write performance
+    # read (which also uses the now-broken _job_manager).
+    monkeypatch.setattr(amod, "_build_performance", lambda *a, **k: None)
+    monkeypatch.setattr(amod, "_is_last_attempt", lambda: True)
+    monkeypatch.setattr(
+        amod, "_fail_activity", lambda job_id, exc, phase: marked.update(job=job_id, phase=phase)
+    )
+
+    with pytest.raises(RuntimeError):
+        amod.finalize_stage_activity("job-9b", req, consensus, True, content, platform, experiment)
+    assert marked == {"job": "job-9b", "phase": "finalize"}
+
+
 def test_finalize_stage_activity_store_failure_not_last_attempt_reraises(
     monkeypatch: pytest.MonkeyPatch, fake_job_client
 ) -> None:
@@ -892,9 +935,12 @@ def test_stage_activity_opts_bound_each_attempt() -> None:
     assert stage["start_to_close_timeout"] == wmod.STAGE_START_TO_CLOSE_TIMEOUT
     assert stage["start_to_close_timeout"] < stage["schedule_to_close_timeout"]
 
+    # Legacy drain-out opts reproduce the pre-decomposition envelope exactly: 4h
+    # schedule-to-close and NO per-attempt start-to-close (as the monolith was
+    # originally scheduled), so in-flight histories replay under identical options.
     legacy = dict(wmod._LEGACY_ACTIVITY_OPTS)
     assert legacy["schedule_to_close_timeout"] == wmod.RUN_TIMEOUT
-    assert legacy["start_to_close_timeout"] == wmod.RUN_TIMEOUT
+    assert "start_to_close_timeout" not in legacy
     # Task queue + retry policy stay in lockstep with the stage opts.
     assert legacy["task_queue"] == stage["task_queue"]
     assert legacy["retry_policy"] is stage["retry_policy"]
