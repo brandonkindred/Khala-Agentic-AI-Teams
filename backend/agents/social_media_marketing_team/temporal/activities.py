@@ -41,14 +41,19 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _fail_activity(job_id: str, exc: Exception, failed_phase: str) -> None:
+def _fail_activity(job_id: str, exc: Exception, failed_phase: str) -> bool:
     """Mark the job failed, mirroring ``_run_team_job``'s error funnel.
 
     Preconditions:
         - ``exc`` is the exception raised by a stage body.
     Postconditions:
-        - The job store entry is marked failed with the exception detail; a
-          best-effort update failure is swallowed so the FAIL DTO still returns.
+        - Attempts to mark the job store entry failed with the exception detail.
+          Returns ``True`` when that write lands, ``False`` when it fails (the store
+          is unavailable). The caller decides what to do with a ``False`` -- callers
+          that re-raise their own exception can ignore it, but ``_run_stage`` must
+          NOT report a handled FAIL when the terminal write did not land (otherwise
+          the workflow short-circuits as if the job were failed while the row stays
+          running).
     """
     from job_service_client import JOB_STATUS_FAILED
     from social_media_marketing_team.api.main import _update_job
@@ -62,8 +67,12 @@ def _fail_activity(job_id: str, exc: Exception, failed_phase: str) -> None:
             error=f"{type(exc).__name__}: {exc}",
             eta_hint=None,
         )
-    except Exception:  # pragma: no cover - job store best-effort on the failure path
-        logger.warning("Failed to mark job %s failed after stage %r", job_id, failed_phase)
+        return True
+    except Exception:
+        logger.warning(
+            "Failed to mark job %s failed after stage %r", job_id, failed_phase, exc_info=True
+        )
+        return False
 
 
 def _mark_cancelled(job_id: str) -> None:
@@ -105,13 +114,22 @@ def _run_stage(
     Postconditions:
         - Returns ``body()``'s DTO on success. When the activity was cancelled the
           job is marked cancelled and a ``CancelledError`` propagates. On any other
-          handled error the job is marked failed and ``fail_dto()`` is returned.
+          handled error the job is marked failed and ``fail_dto()`` is returned --
+          UNLESS that terminal-failure write itself fails (store unavailable), in
+          which case the original error re-raises so Temporal retries the stage
+          rather than short-circuiting the workflow as handled while the job row
+          stays running.
     """
     try:
         return body()
     except Exception as e:
         raise_if_cancelled(e, f"{failed_phase} stage cancelled", lambda: _mark_cancelled(job_id))
-        _fail_activity(job_id, e, failed_phase)
+        if not _fail_activity(job_id, e, failed_phase):
+            # The terminal-failure write did not land, so we cannot honestly report a
+            # handled FAIL (that would let the workflow short-circuit as if the job
+            # were failed). Re-raise the original error: Temporal retries the stage,
+            # which re-attempts both the body and the failure write.
+            raise
         return fail_dto()
 
 

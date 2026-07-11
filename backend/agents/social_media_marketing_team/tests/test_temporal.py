@@ -478,6 +478,41 @@ def test_run_stage_cancelled_body_error_maps_to_cancellation(
     assert fake_job_client.get_job("job-cx")["status"] == "cancelled"
 
 
+def test_run_stage_reraises_when_failed_write_does_not_land(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    """If the terminal-failure write itself fails, the stage re-raises (no FAIL DTO).
+
+    Otherwise the workflow would short-circuit as if the job were marked failed while
+    the job row stays running -- Temporal must retry instead.
+    """
+    from social_media_marketing_team.api import main as api_main
+    from social_media_marketing_team.temporal import activities as amod
+
+    fake_job_client.create_job("job-fw", status="running")
+
+    # The stage body fails, and the failure-marking store write also fails.
+    def _raise_on_failed(job_id, **fields):
+        if fields.get("status") == "failed":
+            raise RuntimeError("store down")
+
+    monkeypatch.setattr(api_main, "_update_job", _raise_on_failed)
+
+    def _body():
+        raise ValueError("pipeline boom")
+
+    fail_dto_called: dict[str, Any] = {}
+
+    def _fail_dto():
+        fail_dto_called["hit"] = True
+        return {"status": "FAIL"}
+
+    # The ORIGINAL pipeline error propagates so Temporal retries the stage.
+    with pytest.raises(ValueError, match="pipeline boom"):
+        amod._run_stage("job-fw", "content_plan", _fail_dto, _body)
+    assert "hit" not in fail_dto_called  # no handled FAIL was reported
+
+
 def test_content_plan_stage_activity_success(
     monkeypatch: pytest.MonkeyPatch, fake_job_client
 ) -> None:
