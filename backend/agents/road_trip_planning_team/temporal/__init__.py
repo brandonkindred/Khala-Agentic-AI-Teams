@@ -25,7 +25,7 @@ from road_trip_planning_team.temporal.activities import (
     recommend_activities_activity,
 )
 from road_trip_planning_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
-from road_trip_planning_team.temporal.workflows import RoadTripWorkflow
+from road_trip_planning_team.temporal.workflows import RoadTripWorkflow, run_pipeline_activity
 
 WORKFLOWS = [RoadTripWorkflow]
 ACTIVITIES = [
@@ -37,6 +37,9 @@ ACTIVITIES = [
     compose_itinerary_activity,
     persist_itinerary_activity,
     mark_road_trip_failed_activity,
+    # Legacy whole-pipeline activity — kept registered so a workflow started
+    # under the pre-decomposition version can replay/drain across a deploy.
+    run_pipeline_activity,
 ]
 
 __all__ = [
@@ -53,4 +56,5 @@ __all__ = [
     "plan_route_activity",
     "profile_travelers_activity",
     "recommend_activities_activity",
+    "run_pipeline_activity",
 ]

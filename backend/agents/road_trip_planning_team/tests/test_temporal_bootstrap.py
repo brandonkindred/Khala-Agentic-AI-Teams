@@ -27,6 +27,8 @@ def test_temporal_package_exports_workflows_and_activities():
         "compose_itinerary_activity",
         "persist_itinerary_activity",
         "mark_road_trip_failed_activity",
+        # Legacy whole-pipeline activity retained for pre-patch workflow drain-out.
+        "run_pipeline_activity",
     ]
     assert mod.TASK_QUEUE == "road_trip_planning-queue"
 

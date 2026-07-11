@@ -220,6 +220,8 @@ def test_workflow_dispatches_begin_five_steps_persist(monkeypatch, sample_trip_b
         # Thread an identifiable stub forward so arg-threading is checkable.
         return {"stub": fn.__name__}
 
+    # New executions take the per-step (patched) branch.
+    monkeypatch.setattr(wf.workflow, "patched", lambda _patch_id: True)
     monkeypatch.setattr(wf.workflow, "execute_activity", _fake_execute_activity)
 
     instance = wf.RoadTripWorkflow()
@@ -286,6 +288,7 @@ def test_workflow_marks_failed_and_reraises_on_step_error(monkeypatch, sample_tr
             raise RuntimeError("route boom")
         return {"stub": fn.__name__}
 
+    monkeypatch.setattr(wf.workflow, "patched", lambda _patch_id: True)
     monkeypatch.setattr(wf.workflow, "execute_activity", _fake_execute_activity)
 
     with pytest.raises(RuntimeError, match="route boom"):
@@ -309,7 +312,70 @@ def test_workflow_reraises_original_error_even_if_mark_failed_fails(monkeypatch,
             raise RuntimeError("mark boom")
         return {}
 
+    monkeypatch.setattr(wf.workflow, "patched", lambda _patch_id: True)
     monkeypatch.setattr(wf.workflow, "execute_activity", _fake_execute_activity)
 
     with pytest.raises(RuntimeError, match="begin boom"):
         asyncio.run(wf.RoadTripWorkflow().run("job-y", sample_trip_body))
+
+
+def test_workflow_legacy_branch_dispatches_single_activity(monkeypatch, sample_trip_body):
+    """A pre-patch history replays the legacy single-activity path deterministically.
+
+    ``workflow.patched`` returns False when replaying a workflow started before the
+    per-step patch, so ``run`` must dispatch exactly one ``run_pipeline_activity``
+    (the old contract: 2h timeout, single attempt) and none of the per-step
+    bookkeeping activities.
+    """
+    captured: dict = {}
+
+    async def _fake_execute_activity(fn, *args, **kwargs):
+        captured["fn"] = fn
+        captured["args"] = kwargs.get("args")
+        captured["retry"] = kwargs.get("retry_policy")
+        captured["timeout"] = kwargs.get("start_to_close_timeout")
+        return {"job_id": "job-legacy"}
+
+    monkeypatch.setattr(wf.workflow, "patched", lambda _patch_id: False)
+    monkeypatch.setattr(wf.workflow, "execute_activity", _fake_execute_activity)
+
+    out = asyncio.run(wf.RoadTripWorkflow().run("job-legacy", sample_trip_body))
+
+    assert out == {"job_id": "job-legacy"}
+    assert captured["fn"] is wf.run_pipeline_activity
+    assert captured["args"] == ["job-legacy", sample_trip_body]
+    assert captured["retry"] is wf.NO_RETRY
+    assert captured["timeout"] == wf.PIPELINE_TIMEOUT
+
+
+def test_run_pipeline_activity_marks_completed(monkeypatch, sample_trip_body):
+    """The retained legacy activity keeps its RUNNING → COMPLETED bookkeeping."""
+    from road_trip_planning_team import pipeline as rtp_pipeline
+
+    canned = TripItinerary(title="Legacy Trip", overview="ok", total_days=3)
+    monkeypatch.setattr(rtp_pipeline, "run_pipeline", lambda body: canned)
+    create_job("job-legacy-ok", request=sample_trip_body)
+
+    result = wf.run_pipeline_activity("job-legacy-ok", sample_trip_body)
+
+    assert result == {"job_id": "job-legacy-ok"}
+    job = get_job("job-legacy-ok")
+    assert job["status"] == JOB_STATUS_COMPLETED
+    assert job["result"]["title"] == "Legacy Trip"
+
+
+def test_run_pipeline_activity_marks_failed_and_reraises(monkeypatch, sample_trip_body):
+    from road_trip_planning_team import pipeline as rtp_pipeline
+
+    def _boom(_body):
+        raise RuntimeError("legacy pipeline exploded")
+
+    monkeypatch.setattr(rtp_pipeline, "run_pipeline", _boom)
+    create_job("job-legacy-boom", request=sample_trip_body)
+
+    with pytest.raises(RuntimeError, match="legacy pipeline exploded"):
+        wf.run_pipeline_activity("job-legacy-boom", sample_trip_body)
+
+    job = get_job("job-legacy-boom")
+    assert job["status"] == JOB_STATUS_FAILED
+    assert "legacy pipeline exploded" in (job.get("error") or "")

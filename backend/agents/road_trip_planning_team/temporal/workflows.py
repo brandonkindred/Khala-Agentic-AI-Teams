@@ -12,6 +12,12 @@ thread path also uses, so the two modes stay behavior-equivalent (same
 ``TripItinerary`` result). Job-store status bookkeeping lives entirely in the
 activities (begin / persist / mark-failed), never in the workflow body.
 
+The per-step orchestration is gated behind ``workflow.patched`` so that a
+workflow started under the earlier single-activity version replays the retained
+legacy path (``run_pipeline_activity``) instead of a mismatched command sequence
+— an in-flight run therefore drains cleanly across a rolling deploy. See
+``_PER_STEP_PATCH`` for the drain/retirement plan.
+
 Kept in its own module (separate from the package ``__init__``) so the
 temporalio workflow sandbox can re-import the workflow class without executing
 any non-deterministic top-level code (e.g. ``os.getenv``, worker bootstrap).
@@ -27,12 +33,21 @@ import asyncio
 from datetime import timedelta
 from typing import Any, Dict
 
-from temporalio import workflow
+from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from road_trip_planning_team.temporal import activities as _activities
     from road_trip_planning_team.temporal.constants import TASK_QUEUE
+
+# Patch marker gating the per-step orchestration. New executions take the
+# ``workflow.patched`` branch (per-step activities); executions started under the
+# pre-decomposition version replay the legacy single-activity branch below, so an
+# in-flight run during a rolling deploy drains cleanly instead of hitting a
+# non-determinism error. Once all pre-patch runs have drained, swap ``patched``
+# for ``deprecate_patch`` and (a release later) delete the legacy branch and
+# ``run_pipeline_activity``.
+_PER_STEP_PATCH = "road-trip-per-step-v1"
 
 # Each specialist step is one LLM-driven agent; the llm_service layer already
 # fails over on transient provider errors, so one bounded retry is enough — and
@@ -63,6 +78,41 @@ _STEP_TIMEOUT = timedelta(minutes=30)
 # legitimately-long call is never mistaken for a stall, while still detecting a
 # genuine hang well before the 30-minute start-to-close budget.
 _STEP_HEARTBEAT_TIMEOUT = timedelta(minutes=10)
+
+# Legacy single-activity path (the pre-decomposition contract): the whole pipeline
+# ran as one long, non-idempotent activity, capped at a single attempt because the
+# llm_service layer already fails over on transient provider errors. Retained only
+# so pre-patch workflow histories can replay/drain — not used by new executions.
+PIPELINE_TIMEOUT = timedelta(hours=2)
+NO_RETRY = RetryPolicy(maximum_attempts=1)
+
+
+@activity.defn(name="road_trip_run_pipeline")
+def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
+    """Legacy whole-pipeline activity — kept for replay/drain of pre-upgrade runs.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+        - ``request`` is the serialized ``PlanTripRequest`` (``body.model_dump()``).
+
+    Postconditions:
+        - Runs the full pipeline via ``run_plan_core`` (RUNNING → COMPLETED) and
+          returns ``{"job_id": job_id}``; on failure marks the row FAILED and
+          re-raises. Only reached when replaying a workflow started before the
+          per-step patch; new executions never schedule it.
+    """
+    from road_trip_planning_team.models import PlanTripRequest
+    from road_trip_planning_team.pipeline import run_plan_core
+    from road_trip_planning_team.shared.job_store import JOB_STATUS_FAILED, update_job
+
+    body = PlanTripRequest(**request)
+    try:
+        run_plan_core(job_id, body)
+    except Exception as e:
+        activity.logger.exception("Road trip planning job %s failed", job_id)
+        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+        raise
+    return {"job_id": job_id}
 
 
 @workflow.defn(name="RoadTripWorkflow")
@@ -126,8 +176,30 @@ class RoadTripWorkflow:
             - ``request`` is the serialized ``PlanTripRequest`` (``body.model_dump()``).
 
         Postconditions:
+            - New executions (``workflow.patched(_PER_STEP_PATCH)``) drive the
+              per-step orchestration in ``_run_per_step``. A workflow started
+              before the patch replays the legacy single-activity path instead,
+              so an in-flight pre-upgrade run drains without a non-determinism
+              error. Both return ``{"job_id": job_id}``.
+        """
+        if workflow.patched(_PER_STEP_PATCH):
+            return await self._run_per_step(job_id, request)
+        # Legacy branch — reached only when replaying a workflow started before
+        # the per-step patch; deterministic for those histories.
+        return await workflow.execute_activity(
+            run_pipeline_activity,
+            args=[job_id, request],
+            task_queue=TASK_QUEUE,
+            start_to_close_timeout=PIPELINE_TIMEOUT,
+            retry_policy=NO_RETRY,
+        )
+
+    async def _run_per_step(self, job_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Per-step orchestration: begin → specialists → persist.
+
+        Postconditions:
             - Drives begin → the five specialist steps → persist; the persist
-              activity owns the COMPLETED transition and the workflow returns
+              activity owns the COMPLETED transition and returns
               ``{"job_id": job_id}``. Any step/bookkeeping failure records a
               FAILED row (best-effort) and re-raises so the workflow reflects the
               failure rather than completing silently.
