@@ -23,6 +23,8 @@ from user_agent_founder.temporal import workflows as wf
 
 
 def _snap(**over):
+    """Return a ``begin_run`` snapshot dict (poll intervals 0 so patched sleeps
+    are instant); override any field via kwargs."""
     s = dict(
         skip_spec=False,
         skip_analysis=False,
@@ -42,14 +44,17 @@ def _snap(**over):
 
 
 def _running():
+    """A normalized poll verdict for a still-running phase (not terminal, no questions)."""
     return {"status": "running", "waiting": False, "poll_error": None}
 
 
 def _completed(repo_path=None):
+    """A normalized poll verdict for a completed phase, carrying the repo_path handoff."""
     return {"status": "completed", "waiting": False, "poll_error": None, "repo_path": repo_path}
 
 
 def _waiting(qid="q1"):
+    """A normalized poll verdict where the target is waiting on one pending question."""
     return {
         "status": "waiting_for_answers",
         "waiting": True,
@@ -58,7 +63,7 @@ def _waiting(qid="q1"):
     }
 
 
-class _Rec:
+class _ActivityRecorder:
     """Fake ``workflow.execute_activity`` returning canned per-activity results."""
 
     def __init__(
@@ -149,7 +154,7 @@ def _run(monkeypatch, rec, *, cancel_before=False):
 
 
 def test_full_pipeline_order(monkeypatch):
-    rec = _Rec(
+    rec = _ActivityRecorder(
         snap=_snap(),
         analysis_polls=[_running(), _completed("/repo")],
         build_polls=[_running(), _completed()],
@@ -167,7 +172,9 @@ def test_full_pipeline_order(monkeypatch):
 
 
 def test_resume_skips_spec_and_analysis(monkeypatch):
-    rec = _Rec(snap=_snap(skip_spec=True, skip_analysis=True), build_polls=[_completed()])
+    rec = _ActivityRecorder(
+        snap=_snap(skip_spec=True, skip_analysis=True), build_polls=[_completed()]
+    )
     _inst, out = _run(monkeypatch, rec)
 
     assert out == {"run_id": "r1"}
@@ -178,7 +185,7 @@ def test_resume_skips_spec_and_analysis(monkeypatch):
 
 
 def test_resume_existing_job_ids_enter_without_restart(monkeypatch):
-    rec = _Rec(
+    rec = _ActivityRecorder(
         snap=_snap(analysis_job_id="aj", build_job_id="bj"),
         analysis_polls=[_completed("/repo")],
         build_polls=[_completed()],
@@ -196,7 +203,7 @@ def test_resume_existing_job_ids_enter_without_restart(monkeypatch):
 
 
 def test_waiting_triggers_answer_then_completes(monkeypatch):
-    rec = _Rec(
+    rec = _ActivityRecorder(
         snap=_snap(),
         analysis_polls=[_waiting("q1"), _completed("/repo")],
         build_polls=[_completed()],
@@ -219,7 +226,7 @@ def test_waiting_triggers_answer_then_completes(monkeypatch):
 
 
 def test_answer_retry_budget_exhausted_aborts(monkeypatch):
-    rec = _Rec(
+    rec = _ActivityRecorder(
         snap=_snap(max_answer_retries=1),
         analysis_polls=[_waiting(), _waiting(), _waiting()],
         answer_ok=False,
@@ -235,7 +242,7 @@ def test_answer_retry_budget_exhausted_aborts(monkeypatch):
 
 
 def test_target_failed_marks_failed(monkeypatch):
-    rec = _Rec(
+    rec = _ActivityRecorder(
         snap=_snap(), analysis_polls=[{"status": "failed", "waiting": False, "error": "boom"}]
     )
     inst = wf.UserAgentFounderWorkflow()
@@ -247,7 +254,9 @@ def test_target_failed_marks_failed(monkeypatch):
 
 
 def test_target_cancelled_marks_failed(monkeypatch):
-    rec = _Rec(snap=_snap(), analysis_polls=[{"status": "cancelled", "waiting": False}])
+    rec = _ActivityRecorder(
+        snap=_snap(), analysis_polls=[{"status": "cancelled", "waiting": False}]
+    )
     inst = wf.UserAgentFounderWorkflow()
     _prepare(monkeypatch, inst, rec)
     with pytest.raises(wf._PhaseFailed) as ei:
@@ -257,7 +266,7 @@ def test_target_cancelled_marks_failed(monkeypatch):
 
 
 def test_poll_timeout_marks_failed(monkeypatch):
-    rec = _Rec(snap=_snap(max_poll_attempts=1), analysis_polls=[_running()])
+    rec = _ActivityRecorder(snap=_snap(max_poll_attempts=1), analysis_polls=[_running()])
     inst = wf.UserAgentFounderWorkflow()
     _prepare(monkeypatch, inst, rec)
     with pytest.raises(wf._PhaseFailed) as ei:
@@ -267,7 +276,7 @@ def test_poll_timeout_marks_failed(monkeypatch):
 
 
 def test_begin_failure_marks_failed(monkeypatch):
-    rec = _Rec(snap=_snap(), begin_exc=RuntimeError("begin boom"))
+    rec = _ActivityRecorder(snap=_snap(), begin_exc=RuntimeError("begin boom"))
     inst = wf.UserAgentFounderWorkflow()
     _prepare(monkeypatch, inst, rec)
     with pytest.raises(RuntimeError):
@@ -276,7 +285,7 @@ def test_begin_failure_marks_failed(monkeypatch):
 
 
 def test_poll_error_is_retried_not_fatal(monkeypatch):
-    rec = _Rec(
+    rec = _ActivityRecorder(
         snap=_snap(),
         analysis_polls=[
             {"poll_error": "transient", "status": "", "waiting": False},
@@ -295,7 +304,7 @@ def test_poll_error_is_retried_not_fatal(monkeypatch):
 def test_mark_failed_own_failure_is_swallowed(monkeypatch):
     """If the FAILED write itself fails, the original error is still re-raised
     (the catch-all must never mask the pipeline error with a bookkeeping error)."""
-    rec = _Rec(
+    rec = _ActivityRecorder(
         snap=_snap(),
         analysis_polls=[{"status": "failed", "waiting": False, "error": "boom"}],
         mark_failed_exc=RuntimeError("store down"),
@@ -313,7 +322,9 @@ def test_mark_failed_own_failure_is_swallowed(monkeypatch):
 
 
 def test_cancel_before_run_short_circuits(monkeypatch):
-    rec = _Rec(snap=_snap(), analysis_polls=[_completed("/repo")], build_polls=[_completed()])
+    rec = _ActivityRecorder(
+        snap=_snap(), analysis_polls=[_completed("/repo")], build_polls=[_completed()]
+    )
     inst, out = _run(monkeypatch, rec, cancel_before=True)
 
     assert out == {"run_id": "r1", "cancelled": True}
@@ -326,7 +337,9 @@ def test_cancel_before_run_short_circuits(monkeypatch):
 
 def test_cancel_mid_poll_loop_short_circuits(monkeypatch):
     running_then_cancel = {**_running(), "_cancel": True}
-    rec = _Rec(snap=_snap(), analysis_polls=[running_then_cancel], build_polls=[_completed()])
+    rec = _ActivityRecorder(
+        snap=_snap(), analysis_polls=[running_then_cancel], build_polls=[_completed()]
+    )
     inst, out = _run(monkeypatch, rec)
 
     assert out == {"run_id": "r1", "cancelled": True}
@@ -349,7 +362,7 @@ def test_signal_and_query_handlers():
 
 
 def test_activities_use_expected_retry_policies(monkeypatch):
-    rec = _Rec(
+    rec = _ActivityRecorder(
         snap=_snap(),
         analysis_polls=[_waiting(), _completed("/repo")],
         build_polls=[_completed()],

@@ -915,6 +915,12 @@ def cancel_job(job_id: str) -> dict[str, str]:
 
     job_store.update_job(job_id, status=job_store.JOB_STATUS_CANCELLED, error="Cancelled by user")
     store = get_founder_store()
+    # The centralized job service has a dedicated CANCELLED status; the founder run
+    # store does not — its status vocabulary only has a terminal-non-success value,
+    # "failed" (the orchestrator likewise maps a target-team cancellation to
+    # "failed" in _run_phase). So a user cancel is CANCELLED on the job and "failed"
+    # on the run row by design; both carry the "Cancelled by user" error for the
+    # audit trail. (Behavior predates the Temporal work; documented here per review.)
     store.update_run(job_id, status="failed", error="Cancelled by user")
 
     # Best-effort: signal the Temporal workflow so its poll loops stop at the next

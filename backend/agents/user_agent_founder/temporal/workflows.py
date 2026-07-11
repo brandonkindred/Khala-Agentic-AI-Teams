@@ -84,7 +84,8 @@ class _CancelledSignal(Exception):
     """The workflow observed a cooperative ``cancel`` signal between poll ticks.
 
     Caught in :meth:`UserAgentFounderWorkflow.run` to end cleanly (no FAILED
-    write) — the API cancel route already wrote the terminal CANCELLED state.
+    write) — the API cancel route already wrote the terminal cancel state (job
+    CANCELLED; run row "failed").
     """
 
 
@@ -119,8 +120,8 @@ class UserAgentFounderWorkflow:
         Postconditions:
             - Sets ``_cancel_requested``; the poll loops check it between ticks so
               a cancel short-circuits before the next expensive activity. The API
-              cancel route also writes the terminal CANCELLED state, so the
-              workflow just needs to stop. Idempotent.
+              cancel route also writes the terminal cancel state (job CANCELLED;
+              run row "failed"), so the workflow just needs to stop. Idempotent.
         """
         self._cancel_requested = True
 
@@ -243,11 +244,17 @@ class UserAgentFounderWorkflow:
         )
         job_id = started["job_id"]
 
+        # Loop-local, and correctly so under Temporal replay: the workflow method
+        # is re-run deterministically against the cached activity results, so this
+        # counter is rebuilt from the same sequence of answer-activity outcomes and
+        # reaches the identical state — no divergence. Only state read OUTSIDE the
+        # linear run (the cancel signal / progress query) needs to be an instance
+        # attribute; this per-phase counter does not.
         failed_question_sets: dict[frozenset[str], int] = {}
         for attempt in range(self._max_attempts):
             self._raise_if_cancelled()
             self._attempt = attempt
-            await workflow.sleep(poll_interval)
+            await workflow.sleep(timedelta(seconds=poll_interval))
             self._raise_if_cancelled()
 
             r = await self._exec(

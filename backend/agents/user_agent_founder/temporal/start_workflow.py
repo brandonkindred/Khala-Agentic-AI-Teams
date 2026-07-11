@@ -79,7 +79,8 @@ def cancel_founder_workflow(run_id: str) -> None:
 
     Delivers the ``cancel`` signal so the workflow's poll loops short-circuit at
     the next tick instead of continuing to spend on target-team polls/answers.
-    The API cancel route already writes the terminal CANCELLED state; this only
+    The API cancel route already wrote the terminal cancel state (central job
+    CANCELLED; run row "failed" — the run store has no CANCELLED status); this only
     stops the in-flight workflow.
 
     Preconditions:
