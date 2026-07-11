@@ -1,3 +1,5 @@
+import pytest
+
 from social_media_marketing_team import (
     BrandGoals,
     CampaignStatus,
@@ -6,6 +8,8 @@ from social_media_marketing_team import (
 )
 from social_media_marketing_team.models import (
     CampaignPerformanceSnapshot,
+    CampaignProposal,
+    ContentPlan,
     MetricDefinition,
     Platform,
     PostPerformanceObservation,
@@ -84,3 +88,41 @@ def test_performance_calibration_is_reflected_in_output() -> None:
         performance=performance,
     )
     assert result.ingested_performance
+
+
+def _proposal() -> CampaignProposal:
+    return CampaignProposal(campaign_name="c", objective="o", audience_hypothesis="a")
+
+
+def test_assemble_team_output_requires_content_plan_when_approved() -> None:
+    """DbC: an approved output must carry a content plan (caller-bug precondition)."""
+    orchestrator = SocialMediaMarketingOrchestrator()
+    with pytest.raises(AssertionError, match="content_plan is required"):
+        orchestrator.assemble_team_output(_proposal(), HumanReview(approved=True))
+
+
+def test_assemble_team_output_requires_experiment_plan_when_approved() -> None:
+    """DbC: an approved output must carry an experiment plan."""
+    orchestrator = SocialMediaMarketingOrchestrator()
+    content = ContentPlan(
+        campaign_name="c", cadence_posts_per_day=1, duration_days=1, total_required_posts=1
+    )
+    with pytest.raises(AssertionError, match="experiment_plan is required"):
+        orchestrator.assemble_team_output(
+            _proposal(), HumanReview(approved=True), content_plan=content
+        )
+
+
+def test_assemble_team_output_not_approved_ignores_missing_artifacts() -> None:
+    """The not-approved path produces NEEDS_REVISION without requiring artifacts."""
+    orchestrator = SocialMediaMarketingOrchestrator()
+    out = orchestrator.assemble_team_output(_proposal(), HumanReview(approved=False))
+    assert out.status == CampaignStatus.NEEDS_REVISION
+    assert out.content_plan is None
+
+
+def test_build_platform_plans_rejects_negative_num_ideas() -> None:
+    """DbC: num_ideas must be >= 0."""
+    orchestrator = SocialMediaMarketingOrchestrator()
+    with pytest.raises(AssertionError, match="num_ideas must be >= 0"):
+        orchestrator.build_platform_plans(_goals(), "campaign", -1)

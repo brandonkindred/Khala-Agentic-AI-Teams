@@ -359,6 +359,7 @@ class SocialMediaMarketingOrchestrator:
             - Returns one ``PlatformExecutionPlan`` per configured platform
               specialist, in specialist order.
         """
+        assert num_ideas >= 0, f"build_platform_plans: num_ideas must be >= 0, got {num_ideas}"
         return [
             specialist.create_execution_plan(goals, campaign_name, num_ideas)
             for specialist in self.platform_specialists
@@ -393,7 +394,8 @@ class SocialMediaMarketingOrchestrator:
             - When ``human_review.approved`` is False the downstream artifacts
               (``content_plan``/``platform_plans``/``experiment_plan``) are ignored.
             - When ``human_review.approved`` is True, ``content_plan`` and
-              ``experiment_plan`` must be provided.
+              ``experiment_plan`` must be provided (enforced below). A missing
+              artifact on the approved path is a caller bug, not a recoverable state.
         Postconditions:
             - Returns a ``NEEDS_REVISION`` output (proposal only) when not approved,
               otherwise an ``APPROVED_FOR_TESTING`` output carrying the full plan.
@@ -405,6 +407,17 @@ class SocialMediaMarketingOrchestrator:
                 human_feedback=human_review.feedback or "Human requested revisions before testing.",
                 llm_model_name=self.llm_model_name,
             )
+
+        # Enforce the documented precondition (Design by Contract): an
+        # APPROVED_FOR_TESTING output must carry the full plan. Silently emitting a
+        # TeamOutput with a null content_plan/experiment_plan would let an invalid
+        # state propagate to callers and the job store.
+        assert content_plan is not None, (
+            "assemble_team_output: content_plan is required when human_review.approved is True"
+        )
+        assert experiment_plan is not None, (
+            "assemble_team_output: experiment_plan is required when human_review.approved is True"
+        )
 
         return TeamOutput(
             status=CampaignStatus.APPROVED_FOR_TESTING,
