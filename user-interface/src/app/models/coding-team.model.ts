@@ -97,6 +97,24 @@ export interface CodingTeamJobListItem {
 }
 
 /** Summary of a posted PR review (from the /review-pr flow). */
+/**
+ * One pre-existing bug the reviewer flagged in code the pull request did not
+ * change. It is NOT posted on the PR; instead it is offered to the user on the
+ * Code Review page as a GitHub-issue candidate. Once filed, `issue_url` /
+ * `issue_number` are populated.
+ */
+export interface PendingIssueProposal {
+  id: string;
+  severity: string;
+  category: string;
+  file_path: string;
+  line: number | null;
+  description: string;
+  suggestion: string;
+  issue_number?: number | null;
+  issue_url?: string | null;
+}
+
 export interface CodeReviewSummary {
   total_issues: number;
   inline_comments: number;
@@ -110,6 +128,11 @@ export interface CodeReviewSummary {
   /** Findings that could not be posted as their own comment (review still submitted). */
   comments_failed?: number;
   event: string;
+  /** Pre-existing bugs the reviewer flagged in unchanged code, offered as
+   * GitHub-issue candidates. Absent on reviews run before this feature. */
+  pending_issue_proposals?: PendingIssueProposal[];
+  /** Count of `pending_issue_proposals` (denormalized). */
+  preexisting_findings?: number;
 }
 
 export interface TaskSnapshot {

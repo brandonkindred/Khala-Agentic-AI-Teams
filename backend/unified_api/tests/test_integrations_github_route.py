@@ -1162,6 +1162,138 @@ def test_redact_url_userinfo_strips_embedded_credentials():
 
 
 # ---------------------------------------------------------------------------
+# POST /github/reviews/{job_id}/issues (create issues from pre-existing findings)
+# ---------------------------------------------------------------------------
+
+_REVIEW_ISSUES = "/api/integrations/github/reviews/rev-9/issues"
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_create_review_issues_forwards_and_injects_token(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(
+        result=_FakeResp(
+            200,
+            {
+                "job_id": "rev-9",
+                "created": [
+                    {
+                        "proposal_id": "p0",
+                        "issue_number": 3,
+                        "issue_url": "https://github.com/acme/widget/issues/3",
+                        "title": "[high] bug",
+                    }
+                ],
+                "proposals": [{"id": "p0", "issue_url": "https://github.com/acme/widget/issues/3"}],
+            },
+        )
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_REVIEW_ISSUES, json={"proposal_ids": ["p0"], "owner": "acme", "repo": "widget"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["created"][0]["issue_number"] == 3
+    # The coding-team endpoint is targeted with the job id; the token is injected
+    # server-side (never sent by the browser), and the caller's owner/repo are
+    # forwarded so the review's repository can be validated downstream.
+    assert fake.calls[0][0] == "http://coding:8103/reviews/rev-9/issues"
+    assert fake.calls[0][1]["proposal_ids"] == ["p0"]
+    assert fake.calls[0][1]["github_token"] == "ghp_token"
+    assert fake.calls[0][1]["owner"] == "acme"
+    assert fake.calls[0][1]["repo"] == "widget"
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_create_review_issues_preserves_upstream_409(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(result=_FakeResp(409, {"detail": "review rev-9 belongs to acme/other, not acme/widget"}))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_REVIEW_ISSUES, json={"proposal_ids": ["p0"], "owner": "acme", "repo": "widget"})
+    assert resp.status_code == 409
+    assert "belongs to" in resp.json()["detail"]
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_create_review_issues_400_on_blank_owner(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    # A blank owner/repo can never resolve a repository; refuse before any call.
+    resp = client.post(_REVIEW_ISSUES, json={"proposal_ids": ["p0"], "owner": "", "repo": "widget"})
+    assert resp.status_code == 400
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_create_review_issues_400_on_malformed_repo(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    # A repo with a path separator is rejected by the owner/repo validator.
+    resp = client.post(_REVIEW_ISSUES, json={"proposal_ids": ["p0"], "owner": "acme", "repo": "a/b"})
+    assert resp.status_code == 400
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_create_review_issues_preserves_upstream_404(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(result=_FakeResp(404, {"detail": "no review found for job rev-9"}))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_REVIEW_ISSUES, json={"proposal_ids": ["p0"], "owner": "acme", "repo": "widget"})
+    assert resp.status_code == 404
+    assert "no review found" in resp.json()["detail"]
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_create_review_issues_masks_upstream_5xx(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(result=_FakeResp(500, text="stacktrace"))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_REVIEW_ISSUES, json={"proposal_ids": ["p0"], "owner": "acme", "repo": "widget"})
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "Failed to create issues."
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_create_review_issues_503_when_service_url_unset(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.delenv("CODING_TEAM_SERVICE_URL", raising=False)
+    resp = client.post(_REVIEW_ISSUES, json={"proposal_ids": ["p0"], "owner": "acme", "repo": "widget"})
+    assert resp.status_code == 503
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_create_review_issues_504_on_timeout(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(exc=httpx.ReadTimeout("timed out"))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_REVIEW_ISSUES, json={"proposal_ids": ["p0"], "owner": "acme", "repo": "widget"})
+    assert resp.status_code == 504
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_create_review_issues_502_on_connect_error(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(exc=httpx.ConnectError("connection refused"))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_REVIEW_ISSUES, json={"proposal_ids": ["p0"], "owner": "acme", "repo": "widget"})
+    assert resp.status_code == 502
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_create_review_issues_502_on_malformed_body(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(result=_FakeResp(200, json_data={"unexpected": True}))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_REVIEW_ISSUES, json={"proposal_ids": ["p0"], "owner": "acme", "repo": "widget"})
+    assert resp.status_code == 502
+
+
+# ---------------------------------------------------------------------------
 # _start_pr_review(token=...): webhook path reuses a pre-resolved PAT (no 2nd read)
 # ---------------------------------------------------------------------------
 

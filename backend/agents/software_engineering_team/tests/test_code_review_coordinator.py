@@ -1867,6 +1867,40 @@ def test_malformed_severity_and_category_are_sanitized_not_crashing() -> None:
     assert issues[0].category == "general"
 
 
+def test_pre_existing_tag_is_carried_through_and_defaults_false() -> None:
+    """The optional ``pre_existing`` tag (used by the PR-review path to route a
+    finding to an issue proposal instead of a PR comment) survives conversion,
+    tolerates string encodings, and defaults False when absent."""
+    seg = FileSegment(path="a.py", content="x = 1\ny = 2\nz = 3", total_lines=3)
+    chunk = ReviewChunk(segments=[seg])
+    issues = _issues_from_chunk_output(
+        chunk,
+        [
+            {"description": "tagged bool", "line": 1, "pre_existing": True},
+            {"description": "tagged str", "line": 2, "pre_existing": "true"},
+            {"description": "tagged false str", "line": 3, "pre_existing": "false"},
+            {"description": "untagged", "line": 1},
+        ],
+    )
+    assert [i.pre_existing for i in issues] == [True, True, False, False]
+
+
+def test_coerce_bool_recognizes_truthy_tokens_only() -> None:
+    from code_review_agent.chunking import _coerce_bool
+
+    assert _coerce_bool(True) is True
+    assert _coerce_bool("true") is True
+    assert _coerce_bool("YES") is True
+    assert _coerce_bool("1") is True
+    assert _coerce_bool(1) is True
+    # Falsey / unrecognized string tokens (note: bare bool("false") would be True).
+    assert _coerce_bool("false") is False
+    assert _coerce_bool("no") is False
+    assert _coerce_bool("") is False
+    assert _coerce_bool(None) is False
+    assert _coerce_bool(0) is False
+
+
 def test_validate_line_absolute_numbering_has_no_overlap_ambiguity() -> None:
     """Partial segments are rendered with original line-number prefixes, so a
     citation is absolute by construction: a segment whose absolute range

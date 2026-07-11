@@ -18,7 +18,11 @@ import type {
   GitHubRepoItem,
   RunPrReviewResponse,
 } from '../../models/integrations.model';
-import type { CodeReviewSummary, CodingTeamJobStatus } from '../../models/coding-team.model';
+import type {
+  CodeReviewSummary,
+  CodingTeamJobStatus,
+  PendingIssueProposal,
+} from '../../models/coding-team.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
@@ -120,6 +124,14 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   // a newer one (rapid collapse/re-expand of the same repo, or a fast repo switch).
   private readonly pullsLoad = new LatestOnly();
   private readonly reviewsLoad = new LatestOnly();
+
+  // Per-review selection of pending pre-existing-bug proposals
+  // (jobId -> set of selected proposal ids).
+  private selectedProposals = new Map<string, Set<string>>();
+  // Job ids whose "create issues" request is in flight (disables the button).
+  creatingIssues = new Set<string>();
+  // Per-review "create issues" failure, shown beneath that review's proposals.
+  createIssueErrors = new Map<string, string>();
 
   // Live status pollers keyed by job id, so ngOnDestroy can tear them all down.
   private pollers = new Map<string, Subscription>();
@@ -541,5 +553,103 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     if (latest.error || latest.status === 'failed') return 'cr-job-status--failed';
     if (isCodingTeamTerminalStatus(latest.status)) return 'cr-job-status--completed';
     return '';
+  }
+
+  // --- Pre-existing-bug proposals -> GitHub issues -------------------------
+
+  /** Pre-existing-bug proposals for a review run (empty when none). */
+  proposalsFor(record: PrReviewRecord): PendingIssueProposal[] {
+    return record.reviewSummary?.pending_issue_proposals ?? [];
+  }
+
+  /**
+   * True when a *terminal* review has pre-existing-bug proposals to show.
+   * Gated on terminal so proposals never flash mid-review, before the summary
+   * (and its proposal list) is final.
+   */
+  hasProposals(record: PrReviewRecord): boolean {
+    return this.isRecordTerminal(record) && this.proposalsFor(record).length > 0;
+  }
+
+  /** Proposals not yet filed as a GitHub issue (selectable). */
+  openProposals(record: PrReviewRecord): PendingIssueProposal[] {
+    return this.proposalsFor(record).filter((p) => !p.issue_url);
+  }
+
+  /** A proposal's `path:line` (or `path`, or '') location for display. */
+  proposalLocation(proposal: PendingIssueProposal): string {
+    if (!proposal.file_path) return '';
+    return proposal.line ? `${proposal.file_path}:${proposal.line}` : proposal.file_path;
+  }
+
+  /** Whether a proposal is currently selected for filing. */
+  isProposalSelected(jobId: string, proposalId: string): boolean {
+    return this.selectedProposals.get(jobId)?.has(proposalId) ?? false;
+  }
+
+  /** Toggle a proposal's selection. */
+  toggleProposal(jobId: string, proposalId: string): void {
+    const set = this.selectedProposals.get(jobId) ?? new Set<string>();
+    if (set.has(proposalId)) {
+      set.delete(proposalId);
+    } else {
+      set.add(proposalId);
+    }
+    this.selectedProposals.set(jobId, set);
+  }
+
+  /** Number of proposals selected for a review. */
+  selectedCount(jobId: string): number {
+    return this.selectedProposals.get(jobId)?.size ?? 0;
+  }
+
+  isCreatingIssues(jobId: string): boolean {
+    return this.creatingIssues.has(jobId);
+  }
+
+  createIssueErrorFor(jobId: string): string | null {
+    return this.createIssueErrors.get(jobId) ?? null;
+  }
+
+  /**
+   * File GitHub issues for the currently-selected proposals of a review. On
+   * success the record's proposal list is replaced with the server's updated
+   * copy (filed proposals now carry `issue_url`), and the filed ids are dropped
+   * from the selection so the button reflects only what is still pending.
+   */
+  createIssuesFor(record: PrReviewRecord): void {
+    const jobId = record.jobId;
+    const ids = Array.from(this.selectedProposals.get(jobId) ?? []);
+    if (ids.length === 0 || this.creatingIssues.has(jobId)) return;
+    this.creatingIssues.add(jobId);
+    this.createIssueErrors.delete(jobId);
+    this.integrationsApi
+      .createGitHubReviewIssues(record.owner, record.repo, jobId, ids)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (resp) => {
+          this.creatingIssues.delete(jobId);
+          if (record.reviewSummary) {
+            record.reviewSummary = {
+              ...record.reviewSummary,
+              pending_issue_proposals: resp.proposals,
+            };
+          }
+          const filed = new Set(resp.created.map((c) => c.proposal_id));
+          const remaining = new Set(
+            Array.from(this.selectedProposals.get(jobId) ?? []).filter((id) => !filed.has(id)),
+          );
+          this.selectedProposals.set(jobId, remaining);
+          this.cdr.markForCheck();
+        },
+        error: (err: { error?: { detail?: string }; message?: string }) => {
+          this.creatingIssues.delete(jobId);
+          this.createIssueErrors.set(
+            jobId,
+            err?.error?.detail || err?.message || 'Failed to create issue(s).',
+          );
+          this.cdr.markForCheck();
+        },
+      });
   }
 }

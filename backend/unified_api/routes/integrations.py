@@ -1363,6 +1363,45 @@ class CodeReviewRunItem(BaseModel):
     completed_at: str | None = None
 
 
+class CreateReviewIssuesBody(BaseModel):
+    """Request body for POST /github/reviews/{job_id}/issues.
+
+    The GitHub token is injected server-side (never sent by the browser). The
+    Code Review page sends the repository the review belongs to (``owner``/
+    ``repo``) so the coding-team service can confirm the issues are filed into
+    the reviewed repository — access itself comes from the PAT.
+    """
+
+    proposal_ids: list[str] = Field(
+        default_factory=list,
+        description="Ids of the review's pending issue proposals to file as GitHub issues.",
+    )
+    owner: str = Field(description="Owner of the repository the review belongs to.")
+    repo: str = Field(description="Name of the repository the review belongs to.")
+
+
+class CreatedReviewIssueItem(BaseModel):
+    """One GitHub issue opened from a review's pending issue proposal."""
+
+    proposal_id: str
+    issue_number: int
+    issue_url: str
+    title: str
+
+
+class CreateReviewIssuesResponse(BaseModel):
+    """Result of POST /github/reviews/{job_id}/issues.
+
+    ``proposals`` is the review's full, updated pending-proposal list (created
+    ones now carry ``issue_number``/``issue_url``); ``created`` names only the
+    issues opened by this request.
+    """
+
+    job_id: str
+    created: list[CreatedReviewIssueItem] = Field(default_factory=list)
+    proposals: list[dict[str, Any]] = Field(default_factory=list)
+
+
 def _build_github_config_response(
     cfg: dict[str, Any], *, credential_store_unreachable: bool = False
 ) -> GitHubConfigResponse:
@@ -2716,8 +2755,90 @@ async def list_github_reviews(
         raise HTTPException(status_code=resp.status_code, detail=client_detail)
 
     try:
-        data = resp.json()
-        return [CodeReviewRunItem.model_validate(item) for item in data]
+        return [CodeReviewRunItem.model_validate(item) for item in resp.json()]
+    except (ValueError, TypeError) as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Coding team service returned an unexpected response: {e}",
+        ) from e
+
+
+@router.post("/github/reviews/{job_id}/issues", response_model=CreateReviewIssuesResponse)
+async def create_github_review_issues(job_id: str, body: CreateReviewIssuesBody) -> CreateReviewIssuesResponse:
+    """File GitHub issues for a review's selected pre-existing findings.
+
+    A PR review does not comment on bugs it finds in pre-existing, unchanged code;
+    it collects them as proposals on the review summary. The Code Review page
+    calls this with the proposal ids the user chose to file, plus the repository
+    the review belongs to (``owner``/``repo``). The GitHub token is injected
+    server-side (never sent by the browser); access comes from the PAT. The
+    request is forwarded to the coding-team service, which validates owner/repo
+    against the stored review before opening any issue.
+
+    Preconditions:
+        - GitHub integration is enabled and a PAT is configured.
+        - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
+    Postconditions:
+        - Returns the issues opened by this request plus the review's updated
+          proposal list. Every failure path raises ``HTTPException``; no ``httpx``
+          error escapes unhandled. The upstream status code is preserved (404 for
+          an unknown review, 409 when owner/repo do not match the review, 502 for
+          a GitHub API failure, etc.). A 400 is raised for a missing or malformed
+          owner/repo.
+    """
+    # Access is defined by the PAT, so resolve only the token — the target repo is
+    # the caller's own (validated below and re-checked against the stored review by
+    # the coding-team service), not a single configured default.
+    _cfg, token = await asyncio.to_thread(_resolve_github_access)
+    owner = _validate_repo_component("owner", body.owner)
+    repo = _validate_repo_component("repo", body.repo)
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="GitHub owner and repo are required.")
+
+    coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
+    if not coding_team_url:
+        raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
+
+    payload: dict[str, Any] = {
+        "proposal_ids": body.proposal_ids,
+        "owner": owner,
+        "repo": repo,
+        "github_token": token,
+    }
+    target = f"{coding_team_url.rstrip('/')}/reviews/{job_id}/issues"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+            resp = await client.post(target, json=payload)
+    except httpx.TimeoutException as e:
+        logger.warning("github create-issues: coding team service timed out: %s", e)
+        raise HTTPException(
+            status_code=504,
+            detail="Coding team service timed out while creating issues.",
+        ) from e
+    except httpx.HTTPError as e:
+        logger.warning("github create-issues: cannot reach coding team service at %s: %s", coding_team_url, e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not reach coding team service: {e}",
+        ) from e
+
+    if resp.status_code != 200:
+        # Preserve the upstream status code (404 unknown review, 502 GitHub error).
+        # Return client-actionable 4xx detail verbatim (bounded); mask 5xx bodies.
+        try:
+            upstream_detail = resp.json().get("detail", resp.text)
+        except Exception:
+            upstream_detail = resp.text
+        logger.warning(
+            "github create-issues: coding team service returned %s: %s",
+            resp.status_code,
+            upstream_detail,
+        )
+        client_detail = str(upstream_detail)[:500] if resp.status_code < 500 else "Failed to create issues."
+        raise HTTPException(status_code=resp.status_code, detail=client_detail)
+
+    try:
+        return CreateReviewIssuesResponse.model_validate(resp.json())
     except (ValueError, TypeError) as e:
         raise HTTPException(
             status_code=502,

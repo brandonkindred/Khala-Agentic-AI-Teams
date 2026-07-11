@@ -357,7 +357,8 @@ class _FakeOutput:
 
 class _FakeReviewIssue:
     """Duck-typed stand-in for a CodeReviewIssue, with the attributes the PR-review
-    flow reads (severity, category, file_path, line, description, suggestion)."""
+    flow reads (severity, category, file_path, line, description, suggestion,
+    pre_existing)."""
 
     def __init__(
         self,
@@ -365,6 +366,7 @@ class _FakeReviewIssue:
         line: Optional[int],
         file_path: str = "a.py",
         description: str = "desc",
+        pre_existing: bool = False,
     ) -> None:
         self.severity = severity
         self.category = "logic"
@@ -372,6 +374,7 @@ class _FakeReviewIssue:
         self.line = line
         self.description = description
         self.suggestion = "fix"
+        self.pre_existing = pre_existing
 
 
 class _FakeReviewClient:
@@ -430,6 +433,8 @@ class _FakeReviewClient:
         self.comment_fail_times = 0  # number of leading add_issue_comment calls that 422
         self._comment_calls = 0
         self.reaction_fail = False  # create_issue_reaction raises a 403 when True
+        self.created_issues: list[dict[str, Any]] = []  # each create_issue call's kwargs
+        self.create_issue_fail = False  # create_issue raises a 403 when True
 
     def __enter__(self) -> "_FakeReviewClient":
         return self
@@ -495,6 +500,22 @@ class _FakeReviewClient:
         if self.reaction_fail:
             raise GitHubAPIError(403, "rate limited")
         self.reactions.append((n, content))
+
+    def create_issue(self, _o: str, _r: str, *, title: str, body: str, labels: Any = None) -> Any:
+        """Record a created issue and return an object exposing number/html_url.
+
+        ``create_issue_fail`` (set on the instance) raises a 403 to exercise the
+        create-issues error path.
+        """
+        if getattr(self, "create_issue_fail", False):
+            raise GitHubAPIError(403, "no issue-write scope")
+        self.created_issues.append({"title": title, "body": body, "labels": labels})
+        number = len(self.created_issues)
+        return type(
+            "_Issue",
+            (),
+            {"number": number, "html_url": f"https://example/issues/{number}"},
+        )()
 
 
 @pytest.fixture
@@ -2576,3 +2597,446 @@ class TestWholeFileReview:
         assert captured.get("files") is None
         assert captured["pre_numbered"] is True
         assert captured["code"]
+
+
+# ---------------------------------------------------------------------------
+# Pre-existing findings -> issue proposals -> GitHub issues
+# ---------------------------------------------------------------------------
+
+
+def _run_review_with(review_app, issues: list[Any]) -> dict[str, Any]:
+    """Run a PR review whose agent returns ``issues`` and return the completed job."""
+    review_app["github"]["agent_output"] = _FakeOutput(issues=issues)
+    resp = review_app["client"].post("/review-pr", json=_review_body())
+    assert resp.status_code == 200
+    return review_app["jobs"].get_job(resp.json()["job_id"])
+
+
+class TestPreExistingFindings:
+    def test_preexisting_finding_is_not_commented_but_stored_as_proposal(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue("high", line=2, description="real PR bug"),
+                _FakeReviewIssue(
+                    "critical",
+                    line=2,
+                    description="old latent bug",
+                    pre_existing=True,
+                ),
+            ],
+        )
+        summary = job["review_summary"]
+        # Only the PR finding is posted; it drives the summary counts + event.
+        assert summary["total_issues"] == 1
+        assert summary["inline_comments"] == 1
+        assert gh.submitted_reviews and gh.submitted_reviews[0]["event"] == "REQUEST_CHANGES"
+        # The pre-existing finding never became a comment on the PR.
+        for review in gh.reviews:
+            for c in review.get("comments", []):
+                assert "old latent bug" not in c.get("body", "")
+        assert all("old latent bug" not in b for _n, b in gh.comments)
+        assert all("old latent bug" not in rc.get("body", "") for rc in gh.review_comments)
+        # It is stored as a proposal instead.
+        proposals = summary["pending_issue_proposals"]
+        assert summary["preexisting_findings"] == 1
+        assert len(proposals) == 1
+        p = proposals[0]
+        assert p["id"] == "p0"
+        assert p["severity"] == "critical"
+        assert p["description"] == "old latent bug"
+        assert p["issue_url"] is None
+
+    def test_only_preexisting_findings_reads_as_clean_pr(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        job = _run_review_with(
+            review_app,
+            [_FakeReviewIssue("high", line=2, description="latent", pre_existing=True)],
+        )
+        summary = job["review_summary"]
+        # The PR's own change is clean: no PR findings, a COMMENT (not
+        # REQUEST_CHANGES) event, and a +1 reaction.
+        assert summary["total_issues"] == 0
+        assert gh.submitted_reviews and gh.submitted_reviews[0]["event"] == "COMMENT"
+        assert gh.reactions and gh.reactions[0][1] == "+1"
+        # But the pre-existing bug is still surfaced as a proposal.
+        assert summary["preexisting_findings"] == 1
+
+    def test_status_text_mentions_preexisting_count(self, review_app) -> None:
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue("high", line=2),
+                _FakeReviewIssue("low", line=2, pre_existing=True),
+                _FakeReviewIssue("low", line=2, pre_existing=True),
+            ],
+        )
+        assert "2 pre-existing bugs to review" in job["status_text"]
+
+    def test_create_issues_files_selected_proposal(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue("high", line=2, description="latent A", pre_existing=True),
+                _FakeReviewIssue("low", line=3, description="latent B", pre_existing=True),
+            ],
+        )
+        job_id = job["job_id"]
+        resp = review_app["client"].post(f"/reviews/{job_id}/issues", json={"proposal_ids": ["p0"]})
+        assert resp.status_code == 200
+        data = resp.json()
+        # Exactly the selected proposal was filed.
+        assert len(gh.created_issues) == 1
+        assert "latent A" in gh.created_issues[0]["body"]
+        assert data["created"][0]["proposal_id"] == "p0"
+        assert data["created"][0]["issue_url"].startswith("https://example/issues/")
+        # The returned + persisted proposal now carries the issue url; p1 is untouched.
+        by_id = {p["id"]: p for p in data["proposals"]}
+        assert by_id["p0"]["issue_url"] is not None
+        assert by_id["p1"]["issue_url"] is None
+        stored = review_app["jobs"].get_job(job_id)["review_summary"]["pending_issue_proposals"]
+        assert {p["id"]: bool(p["issue_url"]) for p in stored} == {"p0": True, "p1": False}
+
+    def test_create_issues_is_idempotent(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        job = _run_review_with(
+            review_app,
+            [_FakeReviewIssue("high", line=2, pre_existing=True)],
+        )
+        job_id = job["job_id"]
+        review_app["client"].post(f"/reviews/{job_id}/issues", json={"proposal_ids": ["p0"]})
+        # Second call for the same proposal opens no new issue.
+        resp = review_app["client"].post(f"/reviews/{job_id}/issues", json={"proposal_ids": ["p0"]})
+        assert resp.status_code == 200
+        assert resp.json()["created"] == []
+        assert len(gh.created_issues) == 1
+
+    def test_create_issues_ignores_unknown_proposal_id(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        job = _run_review_with(
+            review_app,
+            [_FakeReviewIssue("high", line=2, pre_existing=True)],
+        )
+        resp = review_app["client"].post(
+            f"/reviews/{job['job_id']}/issues", json={"proposal_ids": ["nope"]}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["created"] == []
+        assert gh.created_issues == []
+
+    def test_create_issues_unknown_job_returns_404(self, review_app) -> None:
+        resp = review_app["client"].post(
+            "/reviews/does-not-exist/issues", json={"proposal_ids": ["p0"]}
+        )
+        assert resp.status_code == 404
+
+    def test_create_issues_missing_token_returns_400(
+        self, review_app, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        job = _run_review_with(
+            review_app,
+            [_FakeReviewIssue("high", line=2, pre_existing=True)],
+        )
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        resp = review_app["client"].post(
+            f"/reviews/{job['job_id']}/issues", json={"proposal_ids": ["p0"]}
+        )
+        assert resp.status_code == 400
+
+    def test_create_issues_github_error_returns_502(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        gh.create_issue_fail = True
+        job = _run_review_with(
+            review_app,
+            [_FakeReviewIssue("high", line=2, pre_existing=True)],
+        )
+        resp = review_app["client"].post(
+            f"/reviews/{job['job_id']}/issues", json={"proposal_ids": ["p0"]}
+        )
+        assert resp.status_code == 502
+
+    def test_create_issues_matching_owner_repo_succeeds(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        job = _run_review_with(
+            review_app,
+            [_FakeReviewIssue("high", line=2, pre_existing=True)],
+        )
+        # The review ran against o/r (see _review_body); a matching request files.
+        resp = review_app["client"].post(
+            f"/reviews/{job['job_id']}/issues",
+            json={"proposal_ids": ["p0"], "owner": "O", "repo": "R"},
+        )
+        assert resp.status_code == 200
+        assert len(gh.created_issues) == 1
+
+    def test_create_issues_wrong_owner_repo_returns_409(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        job = _run_review_with(
+            review_app,
+            [_FakeReviewIssue("high", line=2, pre_existing=True)],
+        )
+        resp = review_app["client"].post(
+            f"/reviews/{job['job_id']}/issues",
+            json={"proposal_ids": ["p0"], "owner": "o", "repo": "other"},
+        )
+        assert resp.status_code == 409
+        # No issue was opened for the mismatched repository.
+        assert gh.created_issues == []
+
+
+class TestCreateReviewIssuesUnit:
+    """Direct unit tests for create_review_issues / its context loader."""
+
+    def test_review_store_fallback_when_job_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from coding_team.api import main as api_main
+        from coding_team.api import pr_review
+
+        # No live job, but a durable review row carries the proposals.
+        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: None)
+        row = {
+            "owner": "o",
+            "repo": "r",
+            "pr_number": 5,
+            "pr_url": "https://example/pull/5",
+            "status": "completed",
+            "review_summary": {
+                "pending_issue_proposals": [
+                    {
+                        "id": "p0",
+                        "severity": "high",
+                        "category": "logic",
+                        "file_path": "a.py",
+                        "line": 3,
+                        "description": "d",
+                        "suggestion": "s",
+                        "issue_number": None,
+                        "issue_url": None,
+                    }
+                ]
+            },
+        }
+        monkeypatch.setattr(api_main, "get_review", lambda *_a, **_k: row)
+        created_titles: list[str] = []
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return None
+
+            def create_issue(self, _o, _r, *, title, body, labels=None):
+                created_titles.append(title)
+                return type("_I", (), {"number": 11, "html_url": "u11"})()
+
+        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
+        monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
+
+        out = pr_review.create_review_issues("job1", ["p0"], token="t")
+        assert created_titles and out["created"][0]["issue_number"] == 11
+        assert out["proposals"][0]["issue_url"] == "u11"
+
+    def test_raises_review_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from coding_team.api import main as api_main
+        from coding_team.api import pr_review
+
+        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: None)
+        monkeypatch.setattr(api_main, "get_review", lambda *_a, **_k: None)
+        with pytest.raises(pr_review.ReviewNotFoundError):
+            pr_review.create_review_issues("missing", ["p0"], token="t")
+
+    def test_partial_failure_persists_progress(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from coding_team.api import main as api_main
+        from coding_team.api import pr_review
+
+        job = {
+            "github_context": {
+                "owner": "o",
+                "repo": "r",
+                "pr_number": 9,
+                "pr_url": "https://example/pull/9",
+            },
+            "status": "completed",
+            "review_summary": {
+                "pending_issue_proposals": [
+                    {"id": "p0", "description": "a", "issue_url": None},
+                    {"id": "p1", "description": "b", "issue_url": None},
+                ]
+            },
+        }
+        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
+        persisted: dict[str, Any] = {}
+        calls = {"n": 0}
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return None
+
+            def create_issue(self, _o, _r, *, title, body, labels=None):
+                # Succeed on the first proposal, fail on the second.
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise GitHubAPIError(403, "boom")
+                return type("_I", (), {"number": 1, "html_url": "u1"})()
+
+        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        monkeypatch.setattr(api_main, "update_review", lambda _j, **kw: persisted.update(kw))
+        monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
+
+        with pytest.raises(GitHubAPIError):
+            pr_review.create_review_issues("job1", ["p0", "p1"], token="t")
+        # The issue opened before the failure was persisted (p0 filed, p1 not).
+        saved = {
+            p["id"]: bool(p["issue_url"])
+            for p in persisted["review_summary"]["pending_issue_proposals"]
+        }
+        assert saved == {"p0": True, "p1": False}
+
+    def test_malformed_proposals_field_yields_no_candidates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from coding_team.api import main as api_main
+        from coding_team.api import pr_review
+
+        job = {
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
+            "status": "completed",
+            "review_summary": {"pending_issue_proposals": "not-a-list"},
+        }
+        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
+        # No client is needed: a malformed proposals field yields no candidates.
+        out = pr_review.create_review_issues("job1", ["p0"], token="t")
+        assert out["created"] == []
+        assert out["proposals"] == []
+
+    def test_skips_already_filed_proposal_within_one_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from coding_team.api import main as api_main
+        from coding_team.api import pr_review
+
+        job = {
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
+            "status": "completed",
+            "review_summary": {
+                "pending_issue_proposals": [
+                    {"id": "p0", "description": "a", "issue_url": "already"},
+                    {"id": "p1", "description": "b", "issue_url": None},
+                ]
+            },
+        }
+        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
+        monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
+        monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
+        calls: list[str] = []
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return None
+
+            def create_issue(self, _o, _r, *, title, body, labels=None):
+                calls.append(title)
+                return type("_I", (), {"number": 2, "html_url": "u2"})()
+
+        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        # Both requested, but p0 is already filed -> only p1 opens a new issue.
+        out = pr_review.create_review_issues("job1", ["p0", "p1"], token="t")
+        assert len(calls) == 1
+        assert [c["proposal_id"] for c in out["created"]] == ["p1"]
+
+    def test_persist_swallows_store_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from coding_team.api import main as api_main
+        from coding_team.api import pr_review
+
+        job = {
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
+            "status": "completed",
+            "review_summary": {
+                "pending_issue_proposals": [{"id": "p0", "description": "a", "issue_url": None}]
+            },
+        }
+        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("store down")
+
+        monkeypatch.setattr(api_main, "update_job", _boom)
+        monkeypatch.setattr(api_main, "update_review", _boom)
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return None
+
+            def create_issue(self, _o, _r, *, title, body, labels=None):
+                return type("_I", (), {"number": 1, "html_url": "u1"})()
+
+        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        # Both stores fail, but the issue was created, so the call still succeeds.
+        out = pr_review.create_review_issues("job1", ["p0"], token="t")
+        assert out["created"][0]["issue_url"] == "u1"
+
+    def test_repo_mismatch_raises_before_any_issue(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from coding_team.api import main as api_main
+        from coding_team.api import pr_review
+
+        job = {
+            "github_context": {"owner": "acme", "repo": "widget", "pr_number": 1, "pr_url": "u"},
+            "status": "completed",
+            "review_summary": {
+                "pending_issue_proposals": [{"id": "p0", "description": "a", "issue_url": None}]
+            },
+        }
+        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
+
+        def _fail_client(**_k):  # a GitHub call would be a bug — the guard must fire first
+            raise AssertionError("GitHubClient must not be constructed on a repo mismatch")
+
+        monkeypatch.setattr(api_main, "GitHubClient", _fail_client)
+        with pytest.raises(pr_review.RepoMismatchError):
+            pr_review.create_review_issues(
+                "job1", ["p0"], token="t", expected_owner="acme", expected_repo="other"
+            )
+
+    def test_repo_match_is_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from coding_team.api import main as api_main
+        from coding_team.api import pr_review
+
+        job = {
+            "github_context": {"owner": "Acme", "repo": "Widget", "pr_number": 1, "pr_url": "u"},
+            "status": "completed",
+            "review_summary": {
+                "pending_issue_proposals": [{"id": "p0", "description": "a", "issue_url": None}]
+            },
+        }
+        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
+        monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
+        monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return None
+
+            def create_issue(self, _o, _r, *, title, body, labels=None):
+                return type("_I", (), {"number": 1, "html_url": "u1"})()
+
+        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        # "acme/widget" matches the stored "Acme/Widget" (GitHub is case-insensitive).
+        out = pr_review.create_review_issues(
+            "job1", ["p0"], token="t", expected_owner="acme", expected_repo="widget"
+        )
+        assert out["created"][0]["issue_url"] == "u1"

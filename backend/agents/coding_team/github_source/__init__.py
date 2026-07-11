@@ -23,6 +23,7 @@ from .dependency_resolver import ReadyCheckResult, is_ready, pick_ready_issue
 from .issue_to_plan import issue_to_plan_input
 from .pr_review_mapping import (
     anchor_to_first_file,
+    build_issue_from_proposal,
     build_review_body,
     choose_event,
     format_comment_body,
@@ -30,6 +31,7 @@ from .pr_review_mapping import (
     inline_comment_to_timeline_body,
     map_issues_to_comments,
     parse_valid_lines,
+    proposal_from_finding,
     render_annotated_hunks,
     split_review_comments,
 )
@@ -49,6 +51,7 @@ __all__ = [
     "Repo",
     "SubIssue",
     "anchor_to_first_file",
+    "build_issue_from_proposal",
     "build_review_body",
     "choose_event",
     "format_comment_body",
@@ -59,6 +62,7 @@ __all__ = [
     "map_issues_to_comments",
     "parse_valid_lines",
     "pick_ready_issue",
+    "proposal_from_finding",
     "render_annotated_hunks",
     "scrub_token_from_text",
     "split_review_comments",

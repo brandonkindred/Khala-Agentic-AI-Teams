@@ -50,3 +50,19 @@ def test_update_refuses_non_allowlisted_column(monkeypatch) -> None:
     monkeypatch.setattr(store, "get_conn", _no_conn)
     # status_text is no longer allowlisted -> the guard logs and returns early.
     store.update_review("j", status="running", status_text="x")
+
+
+def test_get_review_none_when_postgres_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: False)
+    assert store.get_review("j") is None
+
+
+def test_get_review_degrades_on_db_error(monkeypatch) -> None:
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(store, "get_conn", _boom)
+    # A DB failure is logged, never raised; the read degrades to None.
+    assert store.get_review("j") is None

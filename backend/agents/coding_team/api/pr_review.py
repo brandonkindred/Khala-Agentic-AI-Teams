@@ -30,11 +30,13 @@ from coding_team.github_source import (
     GitHubAPIError,
     GitHubRepoReader,
     anchor_to_first_file,
+    build_issue_from_proposal,
     build_review_body,
     choose_event,
     inline_comment_to_timeline_body,
     map_issues_to_comments,
     parse_valid_lines,
+    proposal_from_finding,
     render_annotated_hunks,
     scrub_token_from_text,
     split_review_comments,
@@ -200,25 +202,35 @@ WHOLE_FILE_FOCUS_NOTE_PREFIX = "Review focus:"
 
 
 def _whole_file_focus(body: str) -> str:
-    """Append a "review the change, not the whole file" instruction to ``body``.
+    """Append a "tag pre-existing findings" instruction to ``body``.
 
     Whole-file review shows the reviewer complete files (for context and existing-
-    code awareness), which also lets it see unchanged code. This note keeps it
-    from filing comments on pre-existing problems in code the PR never touched —
-    behavior the old hunk-scoped review could not produce.
+    code awareness), which also lets it see unchanged code. Rather than silently
+    dropping problems it notices in that unchanged code, the reviewer is told to
+    still report them but tag each issue with a ``pre_existing`` boolean, so the
+    review flow can route pre-existing findings to GitHub-issue proposals (offered
+    to a human) instead of posting them as comments on this PR.
 
     Preconditions:
         - ``body`` is a string (the PR body or "").
 
     Postconditions:
         - Returns ``body`` with the focus note appended (or the note alone when
-          ``body`` is blank). The note starts with ``WHOLE_FILE_FOCUS_NOTE_PREFIX``.
+          ``body`` is blank). The note starts with ``WHOLE_FILE_FOCUS_NOTE_PREFIX``
+          and instructs the reviewer to emit a ``pre_existing`` field per issue.
     """
     note = (
         f"{WHOLE_FILE_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. The complete "
-        "file contents are provided for context, but only raise issues about code "
-        "the PR adds or modifies — do not report pre-existing problems in "
-        "unrelated, unchanged code."
+        "file contents are provided for context. For EVERY issue you report, add a boolean field "
+        "named `pre_existing` to the issue object:\n"
+        "- Set `pre_existing: false` for a defect in the code this pull request ADDS or MODIFIES — "
+        "these are the findings that matter for reviewing the PR.\n"
+        "- Set `pre_existing: true` for a genuine bug you notice in PRE-EXISTING, UNCHANGED code "
+        "that this pull request did not touch (an unrelated defect visible in the surrounding "
+        "file). Still report such bugs — do not stay silent about them — but tag them so they are "
+        "recorded separately instead of blamed on this change.\n"
+        "Do not invent pre-existing issues to pad the review; only tag a finding `pre_existing: "
+        "true` when it is a real defect in code outside this PR's change."
     )
     return f"{body}\n\n{note}" if body.strip() else note
 
@@ -419,8 +431,14 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
         - On success the job is ``completed`` with ``github_pr_url`` set and one PR
           review submitted (REQUEST_CHANGES on critical/high findings from a PR the
           bot did not author, else COMMENT) whose body carries only the summary.
-          Every finding produces exactly one comment and no comment lists more than
-          one finding: a finding tied to a changed line becomes an individual
+          Only findings about the code this PR added or modified are posted; a
+          finding the reviewer tagged ``pre_existing`` (a bug in unchanged code the
+          PR did not touch) is NOT commented — instead it is serialized into
+          ``review_summary["pending_issue_proposals"]`` for a human to optionally
+          file as a GitHub issue, and it drives neither the review event nor the
+          "no issues" reaction.
+          Every posted finding produces exactly one comment and no comment lists
+          more than one finding: a finding tied to a changed line becomes an individual
           line-anchored inline comment carried in the single review (a stray
           off-diff line is bisected out so the rest stay anchored); a finding whose
           file changed but whose cited line is off-diff becomes an individual
@@ -833,7 +851,18 @@ def _run_pr_review_body(
             if output is None:
                 return
 
-            comments, leftovers = map_issues_to_comments(output.issues, valid_by_path)
+            # Split the reviewer's findings by whether they belong to this PR.
+            # Defects in the code the PR added or modified drive the review
+            # (comments + REQUEST_CHANGES); pre-existing bugs the reviewer noticed
+            # in unchanged code are NOT posted on this PR — they become GitHub-issue
+            # proposals a human approves later on the Code Review page. A finding
+            # without the tag defaults to a PR finding (hunk-mode reviews never
+            # tag, so they behave exactly as before).
+            pr_issues = [i for i in output.issues if not getattr(i, "pre_existing", False)]
+            preexisting_issues = [i for i in output.issues if getattr(i, "pre_existing", False)]
+            proposals = [proposal_from_finding(i, idx) for idx, i in enumerate(preexisting_issues)]
+
+            comments, leftovers = map_issues_to_comments(pr_issues, valid_by_path)
 
             # Re-anchor leftover findings (file not in diff) as file-level
             # comments on the first changed file in the diff, so they travel as
@@ -852,9 +881,9 @@ def _run_pr_review_body(
             line_comments, file_comments = split_review_comments(comments)
 
             body = build_review_body(
-                output.summary, output.spec_compliance_notes, issue_count=len(output.issues)
+                output.summary, output.spec_compliance_notes, issue_count=len(pr_issues)
             )
-            event = choose_event(output.issues, author=pr.author, reviewer=reviewer_login)
+            event = choose_event(pr_issues, author=pr.author, reviewer=reviewer_login)
 
             # Submit line-anchored comments in the review, bisecting out any
             # off-diff line so the rest stay anchored. Whatever GitHub still
@@ -896,13 +925,19 @@ def _run_pr_review_body(
 
             comment_findings = len(standalone)
             review_summary = {
-                "total_issues": len(output.issues),
+                "total_issues": len(pr_issues),
                 "inline_comments": inline_count,
                 "file_comments": file_comment_count,
                 "comment_findings": comment_findings,
                 "comments_failed": comments_failed,
                 "event": event,
                 "files_reviewed": files_reviewed,
+                # Pre-existing bugs the reviewer flagged in unchanged code, offered
+                # to a human on the Code Review page as GitHub-issue candidates.
+                # Not posted on this PR. Each carries a stable ``id`` and starts
+                # with ``issue_url``/``issue_number`` unset until an issue is filed.
+                "pending_issue_proposals": proposals,
+                "preexisting_findings": len(proposals),
             }
             if comments_failed:
                 # Some findings could not be posted as their own comment; the
@@ -933,11 +968,17 @@ def _run_pr_review_body(
                 )
                 return
             status_text = (
-                f"Review posted: {len(output.issues)} finding(s), "
+                f"Review posted: {len(pr_issues)} finding(s), "
                 f"{inline_count} inline, {file_comment_count} file-level, "
                 f"{comment_findings} comment(s), event={event}"
             )
-            if not output.issues:
+            if proposals:
+                noun = "bug" if len(proposals) == 1 else "bugs"
+                status_text += f"; {len(proposals)} pre-existing {noun} to review"
+            # React only when the PR's OWN change is clean. Pre-existing findings
+            # are about unchanged code, so they do not withhold the "looks good"
+            # signal for the change under review.
+            if not pr_issues:
                 _react_to_pr(client, owner, repo, pr_number)
             _finalize_review(
                 job_id,
@@ -1251,3 +1292,250 @@ def _format_questions_comment(questions: List[Dict[str, Any]], job_id: str) -> s
             opt_str = ", ".join(f"`{o.get('id')}` ({o.get('label')})" for o in opts)
             lines.append(f"   - Options: {opt_str} (or `other` with free text)")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Creating GitHub issues from a review's pre-existing findings
+# ---------------------------------------------------------------------------
+
+
+class ReviewNotFoundError(LookupError):
+    """Raised when no review (live job or persisted row) exists for a job id."""
+
+
+class RepoMismatchError(ValueError):
+    """Raised when the caller's expected owner/repo disagree with the stored review.
+
+    Guards against filing issues into a repository other than the one that was
+    actually reviewed — e.g. after the integration is repointed, or if a job id
+    from a different (PAT-accessible) repository is submitted.
+    """
+
+
+# Per-job locks serializing ``create_review_issues`` within this process, so two
+# concurrent requests for the same review (two browser tabs, a double-click)
+# cannot both load a proposal as unfiled and open duplicate GitHub issues. The
+# guarded registry hands out one lock per job id. Cross-worker races are bounded
+# by the per-proposal ``issue_url`` idempotency check (a request that lands after
+# another worker persisted the url still skips it), which is why the load happens
+# inside the lock — a second same-process request re-reads the just-persisted url.
+_ISSUE_CREATION_LOCKS: Dict[str, threading.Lock] = {}
+_ISSUE_CREATION_LOCKS_GUARD = threading.Lock()
+
+
+def _issue_creation_lock(job_id: str) -> threading.Lock:
+    """Return the process-wide lock serializing issue creation for ``job_id``."""
+    with _ISSUE_CREATION_LOCKS_GUARD:
+        lock = _ISSUE_CREATION_LOCKS.get(job_id)
+        if lock is None:
+            lock = threading.Lock()
+            _ISSUE_CREATION_LOCKS[job_id] = lock
+        return lock
+
+
+class _ReviewIssueContext(NamedTuple):
+    """A completed review's coordinates plus its (mutable) pending proposals.
+
+    ``summary`` is a shallow copy of the review summary whose
+    ``pending_issue_proposals`` entry IS ``proposals`` (the same list objects), so
+    mutating a proposal dict updates both and persisting ``summary`` records it.
+    """
+
+    owner: str
+    repo: str
+    pr_number: int
+    pr_url: str
+    status: str
+    summary: Dict[str, Any]
+    proposals: List[Dict[str, Any]]
+
+
+def _proposals_copy(summary: Any) -> List[Dict[str, Any]]:
+    """Return an independent, mutable copy of a summary's pending issue proposals.
+
+    Postconditions:
+        - Returns a list of dict copies of ``summary["pending_issue_proposals"]``
+          (each a fresh dict so mutating it never aliases the stored record), or
+          ``[]`` when the field is absent or malformed. Never raises.
+    """
+    raw = summary.get("pending_issue_proposals") if isinstance(summary, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [dict(p) for p in raw if isinstance(p, dict)]
+
+
+def _load_review_issue_context(job_id: str) -> Optional[_ReviewIssueContext]:
+    """Load a completed review's repo coordinates and pending issue proposals.
+
+    Reads the in-memory job first (present for the life of the session), then
+    falls back to the durable ``code_review_runs`` row (survives restarts when
+    Postgres is configured).
+
+    Postconditions:
+        - Returns a context carrying the reviewed repository's owner/repo, the PR
+          number/url, the review's terminal status, and a mutable copy of its
+          pending issue proposals; or None when neither store knows the job. The
+          returned ``summary`` shares its proposal list with ``proposals`` so a
+          caller mutates the proposals and persists ``summary``.
+    """
+    job = _main.get_job(job_id)
+    if job:
+        ctx = job.get("github_context") or {}
+        owner = str(ctx.get("owner") or "")
+        repo = str(ctx.get("repo") or "")
+        pr_number = ctx.get("pr_number")
+        if owner and repo and pr_number is not None:
+            summary = dict(job.get("review_summary") or {})
+            proposals = _proposals_copy(summary)
+            summary["pending_issue_proposals"] = proposals
+            return _ReviewIssueContext(
+                owner=owner,
+                repo=repo,
+                pr_number=int(pr_number),
+                pr_url=str(ctx.get("pr_url") or ""),
+                status=str(job.get("status") or "completed"),
+                summary=summary,
+                proposals=proposals,
+            )
+    row = _main.get_review(job_id)
+    if row:
+        pr_number = row.get("pr_number")
+        summary = dict(row.get("review_summary") or {})
+        proposals = _proposals_copy(summary)
+        summary["pending_issue_proposals"] = proposals
+        return _ReviewIssueContext(
+            owner=str(row.get("owner") or ""),
+            repo=str(row.get("repo") or ""),
+            pr_number=int(pr_number) if pr_number is not None else 0,
+            pr_url=str(row.get("pr_url") or ""),
+            status=str(row.get("status") or "completed"),
+            summary=summary,
+            proposals=proposals,
+        )
+    return None
+
+
+def _persist_review_proposals(job_id: str, status: str, summary: Dict[str, Any]) -> None:
+    """Write the updated review summary back to both stores (best-effort each).
+
+    Postconditions:
+        - Attempts ``update_job`` (in-memory; may have aged out) and
+          ``update_review`` (durable). A failure of either is logged and
+          swallowed — the newly-created GitHub issues already exist regardless of
+          whether the local record is updated, so a store hiccup must not surface
+          as a failed request. Never raises.
+    """
+    try:
+        _main.update_job(job_id, review_summary=summary)
+    except Exception:  # noqa: BLE001 - job may have aged out; the review row is the durable copy
+        logger.warning(
+            "could not update job %s review_summary after issue creation", job_id, exc_info=True
+        )
+    try:
+        _main.update_review(job_id, status=status, review_summary=summary)
+    except Exception:  # noqa: BLE001 - persistence is best-effort; the issues already exist
+        logger.warning("could not update review row %s after issue creation", job_id, exc_info=True)
+
+
+def create_review_issues(
+    job_id: str,
+    proposal_ids: List[str],
+    token: str,
+    *,
+    expected_owner: Optional[str] = None,
+    expected_repo: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Open GitHub issues for the selected pre-existing findings of a review.
+
+    Preconditions:
+        - ``job_id`` names a completed PR review; ``proposal_ids`` are ids drawn
+          from that review's ``pending_issue_proposals``; ``token`` is a GitHub
+          PAT with issue-write scope on the reviewed repository.
+        - ``expected_owner``/``expected_repo``, when supplied, are the repository
+          the caller believes the review belongs to (the Code Review page passes
+          the review row's own owner/repo). They are validated against the stored
+          review so a mismatched or forged ``job_id`` cannot file issues into a
+          different (PAT-accessible) repository than the one reviewed.
+    Postconditions:
+        - Runs under a per-``job_id`` lock, so concurrent requests for the same
+          review are serialized and cannot both open an issue for one proposal.
+        - For each requested proposal that exists and has not already been filed,
+          opens one GitHub issue (carrying the finding's full detail, token-
+          scrubbed) in the reviewed repository, records the created issue's
+          number/url on the proposal, and persists the updated proposals to both
+          the job store and the durable review row. Idempotent: a proposal already
+          carrying an ``issue_url`` is skipped, so a repeated request never opens a
+          duplicate; an unknown id is ignored. Returns ``{"job_id", "created",
+          "proposals"}`` where ``created`` lists each newly-opened issue and
+          ``proposals`` is the full, updated proposal list.
+        - Raises :class:`ReviewNotFoundError` when neither store knows ``job_id``,
+          and :class:`RepoMismatchError` when the expected owner/repo disagree with
+          the stored review (owner/repo compared case-insensitively, as GitHub
+          treats them). Raises ``GitHubAPIError`` when GitHub rejects an issue
+          creation — any issues opened before the failure are still recorded and
+          persisted.
+    """
+    # Serialize the whole load → create → persist section per job. The context is
+    # loaded INSIDE the lock so a second same-process request that ran after the
+    # first persisted an issue url re-reads it and skips the already-filed proposal.
+    with _issue_creation_lock(job_id):
+        ctx = _load_review_issue_context(job_id)
+        if ctx is None:
+            raise ReviewNotFoundError(job_id)
+
+        if (
+            expected_owner is not None
+            and expected_repo is not None
+            and (
+                ctx.owner.casefold() != expected_owner.casefold()
+                or ctx.repo.casefold() != expected_repo.casefold()
+            )
+        ):
+            raise RepoMismatchError(
+                f"review {job_id} belongs to {ctx.owner}/{ctx.repo}, "
+                f"not the requested {expected_owner}/{expected_repo}"
+            )
+
+        by_id = {str(p.get("id")): p for p in ctx.proposals}
+        requested = [pid for pid in proposal_ids if pid in by_id]
+        created: List[Dict[str, Any]] = []
+        changed = False
+        try:
+            # Only open the client when there is genuinely something to file (a
+            # requested proposal that has not already been filed), so a redundant
+            # or all-unknown request makes no GitHub call.
+            if any(not by_id[pid].get("issue_url") for pid in requested):
+                with _main.GitHubClient(token=token) as client:
+                    for pid in requested:
+                        proposal = by_id[pid]
+                        if proposal.get("issue_url"):
+                            continue  # already filed — idempotent, never duplicate
+                        title, body = build_issue_from_proposal(
+                            proposal, pr_number=ctx.pr_number, pr_url=ctx.pr_url
+                        )
+                        # The finding text is LLM output over the reviewed code and
+                        # can echo a secret from it, exactly like the PR comments —
+                        # scrub both title and body before anything reaches GitHub.
+                        issue = client.create_issue(
+                            ctx.owner,
+                            ctx.repo,
+                            title=scrub_token_from_text(title),
+                            body=scrub_token_from_text(body),
+                        )
+                        proposal["issue_number"] = issue.number
+                        proposal["issue_url"] = issue.html_url
+                        changed = True
+                        created.append(
+                            {
+                                "proposal_id": pid,
+                                "issue_number": issue.number,
+                                "issue_url": issue.html_url,
+                                "title": title,
+                            }
+                        )
+        finally:
+            # Persist whatever was created — even on a mid-loop GitHub failure — so
+            # a partially-successful request never loses the issues it did open.
+            if changed:
+                _persist_review_proposals(job_id, ctx.status, ctx.summary)
+        return {"job_id": job_id, "created": created, "proposals": ctx.proposals}
