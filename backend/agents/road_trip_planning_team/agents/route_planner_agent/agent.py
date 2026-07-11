@@ -50,7 +50,15 @@ class RoutePlannerAgent:
         )
 
     def run(self, trip: TripRequest, group_profile: TravelerGroupProfile) -> RoutePlan:
-        """Generate an ordered route plan from the trip request."""
+        """Generate an ordered route plan from the trip request.
+
+        Postconditions:
+            - The returned ``RoutePlan`` always has a non-empty ``ordered_stops``
+              covering start → required stops → end. If the LLM output can't be
+              parsed, or is valid JSON that yields no usable stops (e.g. ``{}``
+              from a refusal), a derived fallback route is returned so a request
+              with required stops never composes into an empty itinerary.
+        """
         end = trip.end_location or trip.start_location
         prompt = (
             f"Start: {trip.start_location}\n"
@@ -71,20 +79,16 @@ class RoutePlannerAgent:
             data = json.loads(raw)
         except Exception as e:
             logger.warning("RoutePlannerAgent JSON parse failed: %s", e)
-            stops = [RouteStop(location=trip.start_location, stop_type="start")]
-            for s in trip.required_stops:
-                stops.append(RouteStop(location=s, stop_type="destination", recommended_nights=1))
-            stops.append(RouteStop(location=end, stop_type="end"))
-            return RoutePlan(
-                ordered_stops=stops,
-                suggested_total_days=trip.trip_duration_days or len(trip.required_stops) * 2,
-            )
+            return self._fallback_route(trip, end)
 
         raw_stops = data.get("ordered_stops") or []
-        stops = []
-        for s in raw_stops:
-            if isinstance(s, dict):
-                stops.append(RouteStop.model_validate(s))
+        stops = [RouteStop.model_validate(s) for s in raw_stops if isinstance(s, dict)]
+        if not stops:
+            # Valid JSON without usable stops (e.g. an empty object from a
+            # refusal) — fall back to a route covering start → required stops →
+            # end rather than composing an empty itinerary downstream.
+            logger.warning("RoutePlannerAgent produced no stops; using fallback route")
+            return self._fallback_route(trip, end)
 
         return RoutePlan(
             ordered_stops=stops,
@@ -92,4 +96,25 @@ class RoutePlannerAgent:
             total_driving_hours=data.get("total_driving_hours"),
             route_summary=data.get("route_summary", ""),
             suggested_total_days=data.get("suggested_total_days", trip.trip_duration_days or 7),
+        )
+
+    def _fallback_route(self, trip: TripRequest, end: str) -> RoutePlan:
+        """Build a minimal route covering start → required stops → end.
+
+        Preconditions:
+            - ``end`` is the resolved end location (``trip.end_location`` or the
+              start location for a round trip).
+
+        Postconditions:
+            - Returns a ``RoutePlan`` whose ``ordered_stops`` begins at the start,
+              includes every required stop as an overnight destination, and ends
+              at ``end`` — never empty.
+        """
+        stops = [RouteStop(location=trip.start_location, stop_type="start")]
+        for s in trip.required_stops:
+            stops.append(RouteStop(location=s, stop_type="destination", recommended_nights=1))
+        stops.append(RouteStop(location=end, stop_type="end"))
+        return RoutePlan(
+            ordered_stops=stops,
+            suggested_total_days=trip.trip_duration_days or len(trip.required_stops) * 2,
         )

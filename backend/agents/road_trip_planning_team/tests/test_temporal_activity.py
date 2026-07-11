@@ -196,7 +196,12 @@ def test_compose_itinerary_activity_returns_itinerary_dict(monkeypatch, sample_t
 def test_workflow_run_signature_takes_job_id_and_request():
     """Regression guard: the dispatcher passes (job_id, request)."""
     sig = inspect.signature(wf.RoadTripWorkflow.run)
-    assert list(sig.parameters) == ["self", "job_id", "request"]
+    params = list(sig.parameters.values())
+    assert [p.name for p in params] == ["self", "job_id", "request"]
+    # ``from __future__ import annotations`` stringizes annotations, so
+    # inspect.signature returns their string forms rather than the resolved types.
+    assert params[1].annotation == "str"
+    assert params[2].annotation == "dict[str, Any]"
 
 
 def test_workflow_dispatches_begin_five_steps_persist(monkeypatch, sample_trip_body):

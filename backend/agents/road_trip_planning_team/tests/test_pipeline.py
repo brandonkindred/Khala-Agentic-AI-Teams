@@ -83,6 +83,20 @@ def test_plan_route_falls_back_on_bad_json(sample_plan_request):
     assert "Yosemite" in locations
 
 
+def test_plan_route_falls_back_when_json_omits_stops(sample_plan_request):
+    # Valid JSON that omits ordered_stops (e.g. a `{}` refusal) must still yield a
+    # route covering start → required stops → end, not an empty route that would
+    # compose into an itinerary with no days.
+    route = rtp_pipeline.plan_route(
+        sample_plan_request.trip, TravelerGroupProfile(), llm=_FakeLLM("{}")
+    )
+    assert isinstance(route, RoutePlan)
+    locations = [s.location for s in route.ordered_stops]
+    assert "San Francisco, CA" in locations
+    assert "Yosemite" in locations
+    assert "Los Angeles, CA" in locations
+
+
 def test_recommend_activities_parses_and_skips_passthrough(sample_plan_request):
     route = RoutePlan(
         ordered_stops=[
