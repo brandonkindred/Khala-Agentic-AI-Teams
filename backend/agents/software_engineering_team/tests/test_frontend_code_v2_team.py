@@ -581,6 +581,7 @@ class TestFrontendCodeV2TeamLead:
         from frontend_code_v2_team import orchestrator as orch
         from frontend_code_v2_team.models import (
             DeliverResult,
+            DocumentationPhaseResult,
             FrontendCodeV2WorkflowResult,
             Phase,
             SetupResult,
@@ -594,11 +595,13 @@ class TestFrontendCodeV2TeamLead:
             delivered_files=["src/app.component.ts"],
             summary="handoff ready",
         )
+        documentation = DocumentationPhaseResult(summary="docs updated")
         inner = FrontendCodeV2WorkflowResult(
             task_id="ui",
             success=True,
             current_phase=Phase.DELIVER,
             iterations_used=2,
+            documentation_result=documentation,
             deliver_result=deliver,
             final_files={"src/app.component.ts": "export class AppComponent {}\n"},
             summary="implemented and ready",
@@ -639,6 +642,9 @@ class TestFrontendCodeV2TeamLead:
         assert result.current_phase == Phase.DELIVER
         assert result.iterations_used == 2
         assert result.deliver_result is deliver
+        # The documentation phase output must survive the team-lead overlay (it was
+        # previously dropped, leaving callers with None).
+        assert result.documentation_result is documentation
         assert result.final_files == {"src/app.component.ts": "export class AppComponent {}\n"}
         assert result.summary == "implemented and ready"
         assert result.needs_followup is True
