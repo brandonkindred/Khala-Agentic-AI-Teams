@@ -143,6 +143,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   // repo's issue listing, so the dashboard setting actually takes effect rather than only
   // ever reaching the backend's no-target fallback path (which the repo-scoped UI never uses).
   defaultLabel = '';
+  // Whether the configured `defaultLabel` filter is currently applied. Defaults on when a
+  // label is configured, but the operator can toggle it off from the issue-list header to
+  // browse/run on unlabelled issues without editing the dashboard (see `toggleLabelFilter`).
+  labelFilterActive = true;
 
   // Repository list — every repo the configured PAT can access. The PAT's own
   // authorization configuration is the source of truth; nothing is configured in Khala.
@@ -359,6 +363,30 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   }
 
   /**
+   * The label to filter the issue listing by, or `undefined` for no filter.
+   *
+   * Preconditions: none.
+   * Postconditions: returns the configured `defaultLabel` when a non-empty label is configured
+   * AND the filter is active; `undefined` otherwise (so a blank/toggled-off filter is unfiltered).
+   */
+  activeLabel(): string | undefined {
+    return this.labelFilterActive && this.defaultLabel ? this.defaultLabel : undefined;
+  }
+
+  /**
+   * Toggle the configured default-label filter on/off for this session and reload the issues.
+   *
+   * Preconditions: a `defaultLabel` is configured (the toggle only renders then) and a repo is
+   * expanded (else the reload is a no-op).
+   * Postconditions: `labelFilterActive` is flipped and `loadIssues` re-fetches with/without the
+   * filter, letting the operator browse unlabelled issues without editing the dashboard setting.
+   */
+  toggleLabelFilter(): void {
+    this.labelFilterActive = !this.labelFilterActive;
+    this.loadIssues();
+  }
+
+  /**
    * Refresh the expanded repo's open-issue list and the Runs snapshot together so they never drift.
    * Resets the selection/pagination, triggers a runs refresh (which re-syncs the "In progress"
    * chips), then fetches issues. Sets `issueError` on failure.
@@ -382,8 +410,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     // two lists never drift.
     this.refreshTrigger$.next();
     this.integrationsApi
-      // Apply the operator's global default-label filter (blank → undefined → unfiltered).
-      .getGitHubIssues({ owner: repo.owner, repo: repo.name, label: this.defaultLabel || undefined })
+      // Apply the operator's global default-label filter when active (else browse all issues).
+      .getGitHubIssues({ owner: repo.owner, repo: repo.name, label: this.activeLabel() })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
       next: (issues) => {

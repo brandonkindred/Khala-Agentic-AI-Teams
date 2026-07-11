@@ -137,8 +137,17 @@
                   @if (defaultLabel) {
                     <p class="github-label-filter">
                       <mat-icon aria-hidden="true">filter_list</mat-icon>
-                      Showing only issues labelled <strong>{{ defaultLabel }}</strong> — set the
-                      default label filter in Integrations → GitHub.
+                      @if (labelFilterActive) {
+                        <span>Showing only issues labelled <strong>{{ defaultLabel }}</strong>.</span>
+                        <button type="button" class="github-label-filter__toggle" (click)="toggleLabelFilter()">
+                          Show all issues
+                        </button>
+                      } @else {
+                        <span>Showing all issues (default label filter off).</span>
+                        <button type="button" class="github-label-filter__toggle" (click)="toggleLabelFilter()">
+                          Filter by “{{ defaultLabel }}”
+                        </button>
+                      }
                     </p>
                   }
                   @if (loadingIssues) {

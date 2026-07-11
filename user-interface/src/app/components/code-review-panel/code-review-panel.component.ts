@@ -366,12 +366,24 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     this.expandedPrNumber = this.expandedPrNumber === pull.number ? null : pull.number;
   }
 
-  /** Repo-scoped key for the in-flight `starting` set (PR numbers collide across repos). */
+  /**
+   * Repo-scoped key for the in-flight `starting` set (PR numbers collide across repos).
+   *
+   * Preconditions: `repo` is a repository item; `prNumber` is a PR number.
+   * Postconditions: returns a stable `owner/repo#number` key, lowercased so it is
+   * case-insensitive (GitHub treats owner/repo case-insensitively). Pure — no side effects.
+   */
   private startKey(repo: GitHubRepoItem, prNumber: number): string {
     return `${repo.owner.toLowerCase()}/${repo.name.toLowerCase()}#${prNumber}`;
   }
 
-  /** True while a Start Review request for this PR in the expanded repo is in flight. */
+  /**
+   * Whether a Start Review request for this PR in the expanded repo is in flight.
+   *
+   * Preconditions: `pull` is a PR from the currently expanded repo's list.
+   * Postconditions: returns true iff a repo is expanded and its `owner/repo#pull.number`
+   * key is in `starting`; false when no repo is expanded. Pure — no side effects.
+   */
   isStarting(pull: GitHubPullRequestItem): boolean {
     return !!this.selectedRepo && this.starting.has(this.startKey(this.selectedRepo, pull.number));
   }

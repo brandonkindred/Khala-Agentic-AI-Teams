@@ -209,14 +209,39 @@ describe('CodingTeamPageComponent', () => {
     expect(filter?.textContent).toContain('ai');
   });
 
-  it('omits the label param when no default label is configured', async () => {
+  it('passes label undefined and shows no filter chip when no default label is configured', async () => {
     integrationsSpy.getGitHubConfig.mockReturnValue(
       of({ enabled: true, token_configured: true, default_label: '' }),
     );
     await setup();
+    showView('github');
     expandFirstRepo();
-    expect(integrationsSpy.getGitHubIssues).toHaveBeenCalledWith({ owner: 'acme', repo: 'widgets', label: undefined });
+    // The component passes label: undefined; that undefined does not become a `label` query
+    // param is asserted at the HTTP boundary in integrations-api.service.spec.ts.
+    const arg = integrationsSpy.getGitHubIssues.mock.calls.at(-1)?.[0];
+    expect(arg).toMatchObject({ owner: 'acme', repo: 'widgets' });
+    expect(arg?.label).toBeUndefined();
     expect(fixture.nativeElement.querySelector('.github-label-filter')).toBeNull();
+  });
+
+  it('toggling the default-label filter off reloads issues unfiltered (and back on re-applies it)', async () => {
+    await setup(); // CONFIGURED carries default_label 'ai'
+    showView('github');
+    expandFirstRepo();
+    expect(component.activeLabel()).toBe('ai');
+    integrationsSpy.getGitHubIssues.mockClear();
+
+    component.toggleLabelFilter(); // turn the filter off
+    fixture.detectChanges();
+    expect(component.labelFilterActive).toBe(false);
+    expect(component.activeLabel()).toBeUndefined();
+    expect(integrationsSpy.getGitHubIssues.mock.calls.at(-1)?.[0]?.label).toBeUndefined();
+    expect(fixture.nativeElement.querySelector('.github-label-filter')?.textContent).toContain('all issues');
+
+    component.toggleLabelFilter(); // turn it back on
+    fixture.detectChanges();
+    expect(component.activeLabel()).toBe('ai');
+    expect(integrationsSpy.getGitHubIssues.mock.calls.at(-1)?.[0]?.label).toBe('ai');
   });
 
   it('collapsing the expanded repo clears its issue state', async () => {

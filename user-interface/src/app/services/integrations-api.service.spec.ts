@@ -206,6 +206,17 @@ describe('IntegrationsApiService', () => {
     req.flush([]);
   });
 
+  it('getGitHubIssues GET with an explicit undefined label sends no label param', () => {
+    // Mirrors what the coding-team page sends when its default-label filter is off/unset:
+    // `label: undefined` must not become a `label` query param (would filter to nothing).
+    service.getGitHubIssues({ owner: 'acme', repo: 'widget', label: undefined }).subscribe();
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/github/issues`);
+    expect(req.request.params.has('label')).toBe(false);
+    expect(req.request.params.get('owner')).toBe('acme');
+    expect(req.request.params.get('repo')).toBe('widget');
+    req.flush([]);
+  });
+
   it('getGitHubIssues GET with only a label param', () => {
     service.getGitHubIssues({ label: 'bug' }).subscribe();
     const req = httpMock.expectOne((r) => r.url === `${baseUrl}/github/issues`);

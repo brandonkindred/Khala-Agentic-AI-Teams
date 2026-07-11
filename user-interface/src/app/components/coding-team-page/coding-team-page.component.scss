@@ -619,6 +619,20 @@
     height: 1rem;
     color: var(--kh-text-tertiary);
   }
+
+  &__toggle {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--kh-accent, #3f51b5);
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+
+    &:hover {
+      text-decoration: none;
+    }
+  }
 }
 
 .thinking-panel {
