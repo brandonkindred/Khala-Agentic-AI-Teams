@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from typing import Any, Callable, Collection, Dict, List, Optional
 
 from strands import Agent
@@ -18,7 +17,7 @@ from coding_team.hitl import resolved_decision_lines
 from coding_team.models import CodingTeamPlanInput
 from coding_team.tech_lead_agent import prompts
 from llm_service import call_llm_with_retries
-from shared_llm_recovery import extract_json_object
+from shared_llm_recovery import agent_call_json
 
 logger = logging.getLogger(__name__)
 
@@ -148,17 +147,7 @@ def _agent_call_json(
           think-block-wrapped output, anchored on ``required_keys``. Raises
           ``json.JSONDecodeError`` only when no object can be recovered.
     """
-    result = agent(prompt)
-    raw = str(result).strip()
-    fenced = re.sub(r"^```(?:json)?\s*", "", raw)
-    fenced = re.sub(r"\s*```$", "", fenced)
-    try:
-        return json.loads(fenced)
-    except json.JSONDecodeError:
-        recovered = extract_json_object(raw, required_keys=required_keys)
-        if recovered is not None:
-            return recovered
-        raise
+    return agent_call_json(agent, prompt, required_keys)
 
 
 class TechLeadAgent:

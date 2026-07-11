@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-import json
+from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
-from strands import Agent
-
-from llm_service import get_strands_model
-from llm_service.strands_model import resolve_strands_model
-
-from ...models import ToolAgentInput, ToolAgentOutput
+from .._base import JsonGeneratorToolAgent
 
 PROMPT = """You are an expert AI safety and governance specialist.
 Generate policy guards, approval gates, and risk controls.
@@ -19,21 +14,7 @@ Return JSON with files/recommendations/summary.
 """
 
 
-class SafetyGovernanceToolAgent:
-    def __init__(self, llm=None) -> None:
-        self._model = resolve_strands_model(llm, get_strands_model_fn=get_strands_model)
+class SafetyGovernanceToolAgent(JsonGeneratorToolAgent):
+    """Generates policy guards, approval gates, and risk-control artifacts."""
 
-    def run(
-        self, inp: ToolAgentInput
-    ) -> ToolAgentOutput:  # pragma: no cover  # integration-only: runs live LLM agent
-        agent = Agent(model=self._model)
-        prompt = PROMPT.format(
-            microtask=inp.microtask.description or inp.microtask.title,
-            spec=inp.spec_context[:5000],
-        )
-        raw = json.loads(str(agent(prompt)).strip())
-        return ToolAgentOutput(
-            files=raw.get("files") or {},
-            recommendations=raw.get("recommendations") or [],
-            summary=raw.get("summary", ""),
-        )
+    PROMPT = PROMPT

@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import List
 
 from strands import Agent
 
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
+from shared_llm_recovery import agent_call_json
 
-from .models import BuildFixInput, BuildFixOutput, CodeEdit
+from .models import BuildFixInput, BuildFixOutput, parse_code_edits
 from .prompts import BUILD_FIX_SPECIALIST_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -63,24 +62,10 @@ class BuildFixSpecialistAgent:
             context_parts.insert(0, f"**Task context:** {input_data.task_description}\n")
 
         prompt = "\n".join(context_parts)
-        result = self._agent(prompt)
-        raw = str(result).strip()
-        data = json.loads(raw)
+        data = agent_call_json(self._agent, prompt, required_keys={"edits"})
+        edits = parse_code_edits(data)
 
-        edits: List[CodeEdit] = []
-        for e in data.get("edits") or []:
-            if isinstance(e, dict) and e.get("file_path") and "old_text" in e and "new_text" in e:
-                edits.append(
-                    CodeEdit(
-                        file_path=e["file_path"],
-                        line_start=e.get("line_start"),
-                        line_end=e.get("line_end"),
-                        old_text=e["old_text"],
-                        new_text=e["new_text"],
-                    )
-                )
-
-        summary = data.get("summary", "")
+        summary = data.get("summary", "") if isinstance(data, dict) else ""
         logger.info(
             "BuildFixSpecialist: produced %d edits, summary=%s",
             len(edits),
