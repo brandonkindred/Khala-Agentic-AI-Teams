@@ -69,7 +69,11 @@ class Soc2AuditWorkflow:
               workflow itself fails.
         """
         try:
-            context = await workflow.execute_activity(
+            # load_repo_activity returns only the resolved repo *path* (a short
+            # string), not the loaded context — the uncapped code corpus is
+            # re-loaded inside each audit activity so it never enters workflow
+            # history. Every downstream activity gets that path.
+            resolved_path = await workflow.execute_activity(
                 _activities.load_repo_activity,
                 args=[job_id, repo_path],
                 start_to_close_timeout=LOAD_TIMEOUT,
@@ -80,7 +84,7 @@ class Soc2AuditWorkflow:
                 *[
                     workflow.execute_activity(
                         _activities.audit_criterion_activity,
-                        args=[job_id, criterion, context],
+                        args=[job_id, criterion, resolved_path],
                         start_to_close_timeout=AUDIT_TIMEOUT,
                         retry_policy=LLM_RETRY_POLICY,
                     )
@@ -90,7 +94,7 @@ class Soc2AuditWorkflow:
 
             return await workflow.execute_activity(
                 _activities.write_report_activity,
-                args=[job_id, repo_path, list(tsc_results)],
+                args=[job_id, resolved_path, list(tsc_results)],
                 start_to_close_timeout=REPORT_TIMEOUT,
                 retry_policy=LLM_RETRY_POLICY,
             )

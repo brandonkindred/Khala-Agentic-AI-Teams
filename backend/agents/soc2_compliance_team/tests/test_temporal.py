@@ -39,16 +39,18 @@ def _patch_update_job(monkeypatch: pytest.MonkeyPatch) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def test_load_repo_activity_returns_context_dict(monkeypatch: pytest.MonkeyPatch) -> None:
-    from soc2_compliance_team import pipeline
+def test_load_repo_activity_returns_resolved_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Returns the resolved repo path (a small string), never the full context,
+    and advances the job stages."""
     from soc2_compliance_team.temporal import activities as amod
 
     calls = _patch_update_job(monkeypatch)
-    monkeypatch.setattr(pipeline, "load_context", lambda p: RepoContext(repo_path=p))
 
-    out = ActivityEnvironment().run(amod.load_repo_activity, "job-1", "/repo/x")
+    out = ActivityEnvironment().run(amod.load_repo_activity, "job-1", str(tmp_path))
 
-    assert out["repo_path"] == "/repo/x"
+    assert out == str(tmp_path.resolve())
     statuses = [c.get("status") for c in calls]
     stages = [c.get("current_stage") for c in calls]
     assert "running" in statuses
@@ -56,18 +58,13 @@ def test_load_repo_activity_returns_context_dict(monkeypatch: pytest.MonkeyPatch
     assert "Running TSC audits" in stages
 
 
-def test_load_repo_activity_reraises_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    from soc2_compliance_team import pipeline
+def test_load_repo_activity_reraises_on_bad_path(monkeypatch: pytest.MonkeyPatch) -> None:
     from soc2_compliance_team.temporal import activities as amod
 
     _patch_update_job(monkeypatch)
 
-    def _boom(_p):
-        raise ValueError("bad repo")
-
-    monkeypatch.setattr(pipeline, "load_context", _boom)
-    with pytest.raises(ValueError, match="bad repo"):
-        ActivityEnvironment().run(amod.load_repo_activity, "job-1", "/repo/x")
+    with pytest.raises(ValueError, match="not a directory"):
+        ActivityEnvironment().run(amod.load_repo_activity, "job-1", "/nonexistent/soc2-xyz")
 
 
 # ---------------------------------------------------------------------------
@@ -86,17 +83,19 @@ def test_audit_criterion_activity_returns_result_dict(monkeypatch: pytest.Monkey
         captured["context"] = context
         return TSCAuditResult(category=category, summary="done", findings=[], compliant=True)
 
+    # The activity loads the context itself from the path (not shuttled in).
+    monkeypatch.setattr(pipeline, "load_context", lambda p: RepoContext(repo_path=p))
     monkeypatch.setattr(pipeline, "audit_criterion_safe", _fake_safe)
 
-    ctx = RepoContext(repo_path="/repo").model_dump(mode="json")
     out = ActivityEnvironment().run(
-        amod.audit_criterion_activity, "job-1", TSCCategory.PRIVACY.value, ctx
+        amod.audit_criterion_activity, "job-1", TSCCategory.PRIVACY.value, "/repo"
     )
 
     assert out["category"] == TSCCategory.PRIVACY.value
     assert out["summary"] == "done"
     assert captured["category"] is TSCCategory.PRIVACY
     assert isinstance(captured["context"], RepoContext)
+    assert captured["context"].repo_path == "/repo"
 
 
 def test_audit_criterion_activity_isolates_underlying_failure(
@@ -107,14 +106,15 @@ def test_audit_criterion_activity_isolates_underlying_failure(
     from soc2_compliance_team import pipeline
     from soc2_compliance_team.temporal import activities as amod
 
+    monkeypatch.setattr(pipeline, "load_context", lambda p: RepoContext(repo_path=p))
+
     def _boom(_key: str) -> Any:
         raise RuntimeError("no llm configured")
 
     monkeypatch.setattr(pipeline, "get_client", _boom)
 
-    ctx = RepoContext(repo_path="/repo").model_dump(mode="json")
     out = ActivityEnvironment().run(
-        amod.audit_criterion_activity, "job-1", TSCCategory.SECURITY.value, ctx
+        amod.audit_criterion_activity, "job-1", TSCCategory.SECURITY.value, "/repo"
     )
 
     assert out["category"] == TSCCategory.SECURITY.value
@@ -122,13 +122,14 @@ def test_audit_criterion_activity_isolates_underlying_failure(
     assert "could not be completed" in out["summary"].lower()
 
 
-def test_audit_criterion_activity_rejects_bad_criterion() -> None:
+def test_audit_criterion_activity_rejects_bad_criterion(monkeypatch: pytest.MonkeyPatch) -> None:
     """A criterion string that is not a valid TSCCategory value raises."""
+    from soc2_compliance_team import pipeline
     from soc2_compliance_team.temporal import activities as amod
 
-    ctx = RepoContext(repo_path="/repo").model_dump(mode="json")
+    monkeypatch.setattr(pipeline, "load_context", lambda p: RepoContext(repo_path=p))
     with pytest.raises(ValueError):
-        ActivityEnvironment().run(amod.audit_criterion_activity, "job-1", "bogus", ctx)
+        ActivityEnvironment().run(amod.audit_criterion_activity, "job-1", "bogus", "/repo")
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +215,7 @@ class _FakeExecute:
         if self.fail_on and name == self.fail_on:
             raise RuntimeError(f"{name} failed")
         if name == "load_repo_activity":
-            return {"repo_path": args[1]}
+            return args[1]  # resolved repo path (a string), not the context
         if name == "audit_criterion_activity":
             return {"category": args[1], "summary": "x", "findings": [], "compliant": True}
         if name == "write_report_activity":
@@ -264,7 +265,7 @@ def test_workflow_reraises_original_when_mark_failed_also_fails(
         async def __call__(self, activity, args=None, **kwargs):  # noqa: ANN001
             name = getattr(activity, "__name__", "")
             if name == "load_repo_activity":
-                return {"repo_path": args[1]}
+                return args[1]  # resolved repo path (a string)
             if name == "audit_criterion_activity":
                 return {"category": args[1], "summary": "x", "findings": [], "compliant": True}
             if name == "write_report_activity":

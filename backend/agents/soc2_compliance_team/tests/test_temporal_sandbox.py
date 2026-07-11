@@ -44,7 +44,7 @@ def _fake_execute_handlers():
     async def _fake_exec(fn, *, args, **_kw):  # noqa: ANN001
         name = fn.__name__
         if name == "load_repo_activity":
-            return {"repo_path": args[1]}
+            return args[1]  # resolved repo path (a string)
         if name == "audit_criterion_activity":
             return {"category": args[1], "summary": "x", "findings": [], "compliant": True}
         if name == "write_report_activity":
