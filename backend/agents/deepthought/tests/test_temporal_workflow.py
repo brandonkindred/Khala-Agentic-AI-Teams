@@ -450,6 +450,40 @@ def test_run_agent_short_circuits_when_cancellation_latched():
     assert calls == []  # no analyse / force-direct activity issued
 
 
+def test_run_agent_skips_deliberate_synthesise_when_cancelled_mid_fanout():
+    """Cancellation during a node's fan-out skips its deliberate + synthesise LLM calls."""
+    wf = wfmod.DeepthoughtWorkflow()
+    wf._job_id = "job-c"
+    root = AgentSpec(
+        agent_id="root", name="root", role_description="r", focus_question="rq", depth=0
+    )
+    handlers = {
+        "analyse_activity": lambda a: QueryAnalysis(
+            summary="root",
+            can_answer_directly=False,
+            skill_requirements=[
+                SkillRequirement(name="a", description="d", focus_question="qa", reasoning="r"),
+                SkillRequirement(name="b", description="d", focus_question="qb", reasoning="r"),
+            ],
+        ).model_dump(),
+        "is_cancelled_activity": lambda a: True,
+        # deliberate_activity / synthesise_activity intentionally absent — a call
+        # to either would raise 'unexpected activity' and fail the test.
+    }
+    calls: list = []
+    with _driver(handlers, calls):
+        res = asyncio.run(wf._run_agent(root, "", {"message": "m"}, "auto", 3))
+
+    assert res.answer == "Run cancelled."
+    names = [c[0] for c in calls]
+    assert "deliberate_activity" not in names
+    assert "synthesise_activity" not in names
+    # Cancellation is auditable: an AGENT_CANCELLED event per short-circuited node
+    # (the two children + the root itself).
+    cancelled = [e for e in wf._events if e.event_type == AgentEventType.AGENT_CANCELLED]
+    assert len(cancelled) == 3
+
+
 def test_run_children_returns_empty_for_no_specs():
     wf = wfmod.DeepthoughtWorkflow()
     parent = AgentSpec(
@@ -520,6 +554,7 @@ def test_workflow_run_source_has_no_restricted_names():
         inspect.getsource(wfmod.DeepthoughtWorkflow._run_children),
         inspect.getsource(wfmod.DeepthoughtWorkflow._run_child_guarded),
         inspect.getsource(wfmod.DeepthoughtWorkflow._is_cancelled),
+        inspect.getsource(wfmod.DeepthoughtWorkflow._cancel_node),
         inspect.getsource(wfmod.DeepthoughtWorkflow._register_spawn),
         inspect.getsource(wfmod.DeepthoughtWorkflow._store_finding),
         inspect.getsource(wfmod.DeepthoughtWorkflow._truncated_result),

@@ -92,6 +92,9 @@ class DeepthoughtWorkflow:
         # Latched once a cancellation check returns True, so later fan-outs
         # short-circuit without re-polling the job store.
         self._cancelled: bool = False
+        # Latched after the first cancellation-poll failure so a job-store outage
+        # logs one warning per run instead of one per fan-out.
+        self._cancel_poll_warned: bool = False
 
     @workflow.run
     async def run(self, job_id: str, request: dict[str, Any]) -> dict[str, Any]:
@@ -196,7 +199,7 @@ class DeepthoughtWorkflow:
         # node (including leaves) short-circuits on the latched flag alone — no
         # further LLM calls and no extra job-store polls.
         if self._cancelled:
-            return self._truncated_result(spec, "Run cancelled.")
+            return self._cancel_node(spec)
 
         self._emit(spec, AgentEventType.AGENT_ANALYSING, "Analysing question")
 
@@ -264,6 +267,12 @@ class DeepthoughtWorkflow:
         )
         child_specs = build_child_specs(analysis.skill_requirements, spec, workflow.uuid4)
         child_results = await self._run_children(child_specs, spec, request, strategy, max_depth)
+
+        # If cancellation latched during the fan-out, the children are already
+        # truncated placeholders — skip the (wasted) deliberate + synthesise LLM
+        # calls over them and short-circuit this node too.
+        if self._cancelled:
+            return self._cancel_node(spec)
 
         self._emit(spec, AgentEventType.AGENT_DELIBERATING, "Reviewing specialist results")
         deliberation_notes = ""
@@ -357,7 +366,7 @@ class DeepthoughtWorkflow:
         # cooperatively polls). One check per decomposition fan-out, latched.
         if self._cancelled or await self._is_cancelled():
             self._cancelled = True
-            return [self._truncated_result(cs, "Run cancelled.") for cs in specs]
+            return [self._cancel_node(cs) for cs in specs]
 
         results: list[AgentResult | None] = [None] * len(specs)
         runnable: list[tuple[int, AgentSpec]] = []
@@ -415,8 +424,22 @@ class DeepthoughtWorkflow:
                 activities.is_cancelled_activity, self._job_id, **JOB_ACTIVITY_OPTS
             )
         except Exception:
-            workflow.logger.warning("Cancellation poll failed; treating job as not cancelled")
+            # Warn once per run so a sustained job-store outage doesn't emit one
+            # warning per fan-out for a run it is otherwise surviving by design.
+            if not self._cancel_poll_warned:
+                self._cancel_poll_warned = True
+                workflow.logger.warning("Cancellation poll failed; treating job as not cancelled")
             return False
+
+    def _cancel_node(self, spec: AgentSpec) -> AgentResult:
+        """Emit a cancellation event and return this node's truncated result.
+
+        The single entry point for every cancellation short-circuit (top-of-node
+        latch, post-fan-out check, and per-child in ``_run_children``), so the
+        'stop work on cancel' behaviour and its audit event stay in one place.
+        """
+        self._emit(spec, AgentEventType.AGENT_CANCELLED, "Run cancelled")
+        return self._truncated_result(spec, "Run cancelled.")
 
     @staticmethod
     def _truncated_result(spec: AgentSpec, answer: str) -> AgentResult:
