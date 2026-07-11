@@ -546,6 +546,29 @@ async def finalize_audit_step(job_id: str, audit_id: str) -> AccessibilityAuditR
 # ---------------------------------------------------------------------------
 
 
+async def mark_audit_timed_out(job_id: str, audit_id: str, timebox_hours: int) -> None:
+    """Mark an audit job failed because it exceeded its ``timebox_hours`` budget.
+
+    The Temporal counterpart of thread mode's ``asyncio.wait_for`` timeout branch:
+    it records the same failure reason (including the phases that did complete) on
+    both the persisted audit state and the durable job record.
+
+    Preconditions:
+        - ``job_id``/``audit_id`` are non-empty and a job row exists for ``job_id``.
+    Postconditions:
+        - The job is marked ``failed`` with a timeout reason; when persisted audit
+          state exists it is also flipped to ``success=False`` with that reason.
+    """
+    result = await load_audit_state(audit_id)
+    completed = [p.value for p in result.completed_phases] if result is not None else []
+    reason = f"Audit timed out after {timebox_hours} hour(s). Completed phases: {completed}"
+    if result is not None:
+        result.success = False
+        result.failure_reason = reason
+        await persist_audit_state(result)
+    get_job_manager().update_job(job_id, status=JOB_STATUS_FAILED, error=reason)
+
+
 async def run_retest_job(job_id: str, audit_id: str, finding_ids: List[str]) -> None:
     """Run a retest and persist its lifecycle to the shared job store.
 

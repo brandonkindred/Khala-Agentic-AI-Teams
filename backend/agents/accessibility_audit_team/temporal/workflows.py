@@ -17,6 +17,7 @@ already-imported modules rather than re-executing them during registration.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any, Dict
 
@@ -106,6 +107,43 @@ class AccessibilityAuditWorkflow:
                 retry_policy=_AUDIT_RETRY_POLICY,
             )
 
+        # Enforce the caller's ``timebox_hours`` as an overall wall-clock budget
+        # (parity with thread mode's ``asyncio.wait_for``). Without it the per-phase
+        # timeouts sum to more than a short timebox, so a ``timebox_hours=1`` audit
+        # could overrun the caller's requested budget.
+        timebox_hours = request.get("timebox_hours")
+        if not timebox_hours:
+            return await self._run_phases(job_id, audit_id, request)
+
+        phases = asyncio.ensure_future(self._run_phases(job_id, audit_id, request))
+        timer = asyncio.ensure_future(workflow.sleep(timedelta(hours=timebox_hours)))
+        await asyncio.wait([phases, timer], return_when=asyncio.FIRST_COMPLETED)
+        if phases.done():
+            timer.cancel()
+            return phases.result()
+
+        # Timebox expired first: abandon the in-flight phase (its heartbeat delivers
+        # the activity cancellation) and mark the job failed with the timeout reason.
+        phases.cancel()
+        return await workflow.execute_activity(
+            _activities.mark_timed_out_activity,
+            args=[job_id, audit_id, timebox_hours],
+            task_queue=TASK_QUEUE,
+            start_to_close_timeout=QUICK_TIMEOUT,
+            retry_policy=_PHASE_RETRY_POLICY,
+        )
+
+    async def _run_phases(
+        self, job_id: str, audit_id: str, request: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Chain the per-phase activities, short-circuiting on the first ``FAIL``.
+
+        Postconditions:
+            - Runs intake -> discovery -> verification -> report_packaging ->
+              finalize, returning the first phase's ``FAIL`` status dict or the
+              finalize status dict. Kept separate from :meth:`run` so the whole
+              chain can be raced against the timebox timer as one cancellable task.
+        """
         intake = await workflow.execute_activity(
             _activities.intake_activity,
             args=[job_id, audit_id, request],

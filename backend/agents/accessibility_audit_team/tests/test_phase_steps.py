@@ -314,6 +314,40 @@ def test_load_audit_state_returns_none_when_absent():
     assert asyncio.run(ax.load_audit_state("does_not_exist")) is None
 
 
+def test_mark_audit_timed_out_marks_job_and_state(monkeypatch):
+    """The timeout helper records the timebox reason on both the job and the
+    persisted audit state, listing the phases that did complete."""
+    seeded = AccessibilityAuditResult(audit_id="a1", completed_phases=[Phase.INTAKE])
+    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=seeded))
+    jm = mock.Mock()
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+
+    asyncio.run(ax.mark_audit_timed_out("j1", "a1", 2))
+
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed
+    error = failed[0].kwargs["error"]
+    assert "timed out after 2 hour" in error
+    assert "intake" in error
+    assert seeded.success is False
+
+
+def test_mark_audit_timed_out_without_persisted_state(monkeypatch):
+    """With no persisted state, the job is still marked failed with a timeout reason."""
+    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=None))
+    jm = mock.Mock()
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+
+    asyncio.run(ax.mark_audit_timed_out("j1", "a1", 1))
+
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed and "timed out after 1 hour" in failed[0].kwargs["error"]
+
+
 def test_persist_and_load_swallow_store_errors(monkeypatch):
     """A store failure is logged and swallowed by both helpers (best-effort recovery)."""
     import accessibility_audit_team.artifact_store as store_mod

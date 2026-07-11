@@ -23,6 +23,7 @@ from accessibility_audit_team.temporal.activities import (
     discovery_activity,
     finalize_activity,
     intake_activity,
+    mark_timed_out_activity,
     report_packaging_activity,
     retest_activity,
     run_pipeline_activity,
@@ -43,6 +44,7 @@ ACTIVITIES = [
     report_packaging_activity,
     finalize_activity,
     retest_activity,
+    mark_timed_out_activity,
     run_pipeline_activity,  # legacy whole-pipeline activity, last, for drain-out
 ]
 
@@ -60,5 +62,6 @@ __all__ = [
     "report_packaging_activity",
     "finalize_activity",
     "retest_activity",
+    "mark_timed_out_activity",
     "run_pipeline_activity",
 ]

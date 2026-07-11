@@ -27,6 +27,8 @@ ACTIVITY_VERIFICATION = "accessibility_audit_verification"
 ACTIVITY_REPORT_PACKAGING = "accessibility_audit_report_packaging"
 ACTIVITY_FINALIZE = "accessibility_audit_finalize"
 ACTIVITY_RETEST = "accessibility_audit_retest"
+#: Marks a job failed when the audit exceeds its ``timebox_hours`` budget.
+ACTIVITY_TIMEOUT = "accessibility_audit_mark_timed_out"
 #: Legacy whole-pipeline activity, retained for history drain-out.
 ACTIVITY_RUN_PIPELINE = "accessibility_audit_run_pipeline"
 

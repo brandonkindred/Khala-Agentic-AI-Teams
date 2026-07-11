@@ -335,6 +335,70 @@ def test_retest_workflow_runs_retest_activity(monkeypatch):
     assert out == {"status": "done", "audit_id": "a1"}
 
 
+def test_workflow_timebox_marks_timed_out_when_budget_exceeded(monkeypatch):
+    """When the timebox timer wins the race, the workflow abandons the phases and
+    marks the job timed out."""
+    from accessibility_audit_team.temporal import workflows as wf
+
+    calls: list[str] = []
+
+    async def fake_execute(activity, *args, **kwargs):
+        name = getattr(activity, "__name__", str(activity))
+        calls.append(name)
+        if name == "mark_timed_out_activity":
+            return {"status": "TIMEOUT", "audit_id": "a1"}
+        await asyncio.sleep(3600)  # phase never completes -> the timer wins
+
+    async def fake_sleep(_duration):
+        return  # timebox fires immediately
+
+    monkeypatch.setattr(wf.workflow, "execute_activity", fake_execute)
+    monkeypatch.setattr(wf.workflow, "patched", lambda _id: True)
+    monkeypatch.setattr(wf.workflow, "sleep", fake_sleep)
+
+    payload = {"job_id": "j1", "audit_id": "a1", "request": {"timebox_hours": 1, "tech_stack": {}}}
+    out = asyncio.run(wf.AccessibilityAuditWorkflow().run(payload))
+    assert out["status"] == "TIMEOUT"
+    assert "mark_timed_out_activity" in calls
+    assert "intake_activity" in calls  # a phase was started before the timeout
+
+
+def test_workflow_timebox_completes_when_within_budget(monkeypatch):
+    """A timeboxed audit that finishes before the timer returns the finalize result
+    and never marks itself timed out."""
+    from accessibility_audit_team.temporal import workflows as wf
+
+    calls: list[str] = []
+
+    async def fake_execute(activity, *args, **kwargs):
+        calls.append(getattr(activity, "__name__", str(activity)))
+        return {"status": "PASS", "audit_id": "a1"}
+
+    async def fake_sleep(_duration):
+        await asyncio.sleep(3600)  # timer never fires within the test
+
+    monkeypatch.setattr(wf.workflow, "execute_activity", fake_execute)
+    monkeypatch.setattr(wf.workflow, "patched", lambda _id: True)
+    monkeypatch.setattr(wf.workflow, "sleep", fake_sleep)
+
+    payload = {"job_id": "j1", "audit_id": "a1", "request": {"timebox_hours": 2, "tech_stack": {}}}
+    out = asyncio.run(wf.AccessibilityAuditWorkflow().run(payload))
+    assert out == {"status": "PASS", "audit_id": "a1"}
+    assert "mark_timed_out_activity" not in calls
+    assert calls[-1] == "finalize_activity"
+
+
+def test_mark_timed_out_activity_delegates(monkeypatch):
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    called = mock.AsyncMock()
+    monkeypatch.setattr(ax, "mark_audit_timed_out", called)
+    out = asyncio.run(acts.mark_timed_out_activity("j1", "a1", 2))
+    called.assert_awaited_once_with("j1", "a1", 2)
+    assert out == {"status": "TIMEOUT", "audit_id": "a1"}
+
+
 def test_pattern_a_exports_in_sync():
     """WORKFLOWS/ACTIVITIES exports line up with the workflow classes and name
     constants — the seam that silently hangs a workflow on an unregistered activity."""
@@ -352,6 +416,7 @@ def test_pattern_a_exports_in_sync():
         constants.ACTIVITY_REPORT_PACKAGING,
         constants.ACTIVITY_FINALIZE,
         constants.ACTIVITY_RETEST,
+        constants.ACTIVITY_TIMEOUT,
         constants.ACTIVITY_RUN_PIPELINE,
     }
 

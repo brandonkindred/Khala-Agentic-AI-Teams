@@ -11,6 +11,7 @@ heartbeats — instead of one opaque 2-hour black-box activity:
 * :func:`report_packaging_activity`  -> final QA + backlog (wraps ``run_report_packaging_step``)
 * :func:`finalize_activity`          -> assemble result + mark the job completed
 * :func:`retest_activity`            -> re-verify fixed findings (wraps ``run_retest_job``)
+* :func:`mark_timed_out_activity`    -> fail the job when the audit exceeds its timebox
 
 State crosses each boundary via the artifact store (``audit_state_{audit_id}``),
 not by threading large findings lists through Temporal payloads: every step loads
@@ -42,6 +43,7 @@ from accessibility_audit_team.temporal.constants import (
     ACTIVITY_REPORT_PACKAGING,
     ACTIVITY_RETEST,
     ACTIVITY_RUN_PIPELINE,
+    ACTIVITY_TIMEOUT,
     ACTIVITY_VERIFICATION,
 )
 
@@ -261,6 +263,23 @@ async def retest_activity(job_id: str, audit_id: str, finding_ids: List[str]) ->
     with BackgroundHeartbeat(activity.heartbeat, _HEARTBEAT_INTERVAL_S, copy_context=True):
         await run_retest_job(job_id, audit_id, finding_ids)
     return {"status": "done", "audit_id": audit_id}
+
+
+@activity.defn(name=ACTIVITY_TIMEOUT)
+async def mark_timed_out_activity(job_id: str, audit_id: str, timebox_hours: int) -> Dict[str, Any]:
+    """Mark the audit job failed because it exceeded its timebox budget.
+
+    Preconditions:
+        - ``job_id``/``audit_id`` are non-empty; the workflow schedules this only
+          when the timebox timer wins the race against the phase chain.
+    Postconditions:
+        - Records the timeout failure on the job (and persisted state) and returns a
+          ``{"status": "TIMEOUT"}`` dict.
+    """
+    from accessibility_audit_team.audit_execution import mark_audit_timed_out
+
+    await mark_audit_timed_out(job_id, audit_id, timebox_hours)
+    return {"status": "TIMEOUT", "audit_id": audit_id}
 
 
 @activity.defn(name=ACTIVITY_RUN_PIPELINE)
