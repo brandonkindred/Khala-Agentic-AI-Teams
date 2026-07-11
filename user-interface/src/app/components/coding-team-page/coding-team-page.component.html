@@ -105,13 +105,13 @@
           </div>
         } @else {
           <div class="github-repos-list">
-            @for (repo of repos; track repo.full_name) {
+            @for (repo of repos; track repo.full_name; let i = $index) {
               <button
                 class="github-repo-row"
                 type="button"
                 [class.github-repo-row--expanded]="selectedRepo?.full_name === repo.full_name"
                 [attr.aria-expanded]="selectedRepo?.full_name === repo.full_name"
-                [attr.aria-controls]="'repo-issues-' + repo.full_name"
+                [attr.aria-controls]="'repo-issues-' + i"
                 (click)="toggleRepo(repo)"
               >
                 <mat-icon aria-hidden="true">{{ repo.private ? 'lock' : 'public' }}</mat-icon>
@@ -130,7 +130,7 @@
 
               <!-- Issues for the expanded repository -->
               @if (selectedRepo?.full_name === repo.full_name) {
-                <div class="github-repo-issues" [id]="'repo-issues-' + repo.full_name">
+                <div class="github-repo-issues" [id]="'repo-issues-' + i">
                   @if (issueError) {
                     <app-inline-banner variant="error" [message]="issueError" />
                   }

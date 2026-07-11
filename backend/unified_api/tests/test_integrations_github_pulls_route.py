@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+
 _backend = Path(__file__).resolve().parent.parent.parent
 if str(_backend) not in sys.path:
     sys.path.insert(0, str(_backend))
@@ -310,8 +312,6 @@ def test_review_success_does_not_clone(mock_cfg, mock_cred, mock_path, monkeypat
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_review_504_on_timeout(mock_cfg, mock_cred, mock_path, monkeypatch):
-    import httpx
-
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(exc=httpx.ReadTimeout("timed out"))
     with patch(f"{_M}._ensure_repo_clone"), patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -322,8 +322,6 @@ def test_review_504_on_timeout(mock_cfg, mock_cred, mock_path, monkeypatch):
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_review_502_on_unreachable(mock_cfg, mock_cred, mock_path, monkeypatch):
-    import httpx
-
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(exc=httpx.ConnectError("refused"))
     with patch(f"{_M}._ensure_repo_clone"), patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -486,8 +484,6 @@ def test_reviews_rejects_out_of_range_limit(mock_cfg, mock_cred, monkeypatch):
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_504_on_timeout(mock_cfg, mock_cred, monkeypatch):
-    import httpx
-
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeReviewsClient(exc=httpx.ReadTimeout("slow"))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -497,8 +493,6 @@ def test_reviews_504_on_timeout(mock_cfg, mock_cred, monkeypatch):
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_502_on_connect_error(mock_cfg, mock_cred, monkeypatch):
-    import httpx
-
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeReviewsClient(exc=httpx.ConnectError("nope"))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):

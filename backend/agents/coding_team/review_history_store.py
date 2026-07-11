@@ -151,7 +151,9 @@ def list_reviews(
     """Return review rows for a repo (optionally one PR), newest first.
 
     Preconditions:
-        - ``owner``/``repo`` name the configured repository.
+        - ``owner``/``repo`` are the caller-provided repository identifiers to look up
+          (matched case-insensitively); repository access is per-request, not a
+          statically configured default.
     Postconditions:
         - Returns up to ``limit`` rows ordered by ``created_at`` DESC. Returns
           ``[]`` when Postgres is unavailable or the query fails (never raises).

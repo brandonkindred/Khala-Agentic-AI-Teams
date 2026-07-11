@@ -66,13 +66,13 @@
         </div>
       } @else {
         <div class="cr-repos-list">
-          @for (repo of repos; track repo.full_name) {
+          @for (repo of repos; track repo.full_name; let i = $index) {
             <button
               class="cr-repo-row"
               type="button"
               [class.cr-repo-row--expanded]="selectedRepo?.full_name === repo.full_name"
               [attr.aria-expanded]="selectedRepo?.full_name === repo.full_name"
-              [attr.aria-controls]="'repo-pulls-' + repo.full_name"
+              [attr.aria-controls]="'repo-pulls-' + i"
               (click)="toggleRepo(repo)"
             >
               <mat-icon aria-hidden="true">{{ repo.private ? 'lock' : 'public' }}</mat-icon>
@@ -86,7 +86,7 @@
             </button>
 
             @if (selectedRepo?.full_name === repo.full_name) {
-              <div class="cr-repo-pulls" [id]="'repo-pulls-' + repo.full_name">
+              <div class="cr-repo-pulls" [id]="'repo-pulls-' + i">
                 @if (pullError) {
                   <app-inline-banner variant="error" [message]="pullError" />
                 }
