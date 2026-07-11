@@ -240,9 +240,12 @@ def finalize_scan_activity(
           ``run_id`` — a retry after a crash replaces, not duplicates, its rows.
         * Returns the serialised :class:`JobMatchResponse`, and sets the job
           COMPLETED with it — unless the job was cancelled mid-run, in which case
-          it returns ``{}`` and leaves the job untouched. A transient failure of
-          the cancellation check does not discard the saved result: it is treated
-          as not-cancelled so a successful scan still COMPLETEs.
+          it returns ``{}`` and leaves the job untouched.
+        * If the cancellation check itself fails, raises so Temporal retries
+          finalize (idempotent on ``run_id``) with a fresh read rather than
+          completing a possibly-cancelled job; the run row stays COMPLETED across
+          retries and, since ``mark_failed`` won't overwrite it, is never flipped
+          to FAILED if the retries exhaust into ``fail_scan``.
     """
     from job_matching_team.models import JobMatchResponse, RankedJob
     from job_matching_team.profile.model import JobSeekerProfile
@@ -289,20 +292,13 @@ def finalize_scan_activity(
         profile_snapshot=JobSeekerProfile.model_validate(profile),
     ).model_dump(mode="json")
 
-    # Results are already persisted; a transient job-store error on the cancel
-    # check must not discard a successful scan by bubbling up (which would route
-    # to fail_scan and flip the completed run to FAILED). Treat an unreadable
-    # cancel flag as not-cancelled and complete the job with its valid result.
-    try:
-        cancelled = is_job_cancelled(job_id)
-    except Exception:  # noqa: BLE001 - can't read cancel flag; the result is valid, complete it
-        activity.logger.warning(
-            "Cancellation check failed for scan %s; completing with saved result",
-            job_id,
-            exc_info=True,
-        )
-        cancelled = False
-    if cancelled:
+    # Results are already persisted (run COMPLETED). Only COMPLETE the job when
+    # we can confirm it wasn't cancelled: if the cancel read fails, let it raise
+    # so Temporal retries finalize with a fresh read (save_results is idempotent
+    # on run_id, so re-running is safe). This avoids completing a job the user
+    # cancelled; and because store.mark_failed won't overwrite a COMPLETED run,
+    # exhausting the retries into fail_scan can't flip the saved run to FAILED.
+    if is_job_cancelled(job_id):
         return {}
     update_job(job_id, status=JOB_STATUS_COMPLETED, result=payload)
     return payload
@@ -310,18 +306,26 @@ def finalize_scan_activity(
 
 @activity.defn(name="job_matching_fail_scan")
 def fail_scan_activity(job_id: str, run_id: str, error: str, store_ok: bool) -> None:
-    """Record a failed scan on both the run row and the job store (best effort).
+    """Record a failed scan on the run row (best effort) and the job store.
 
-    Invoked by the workflow when a pipeline phase exhausts its retries. Mirrors
-    the monolith's failure branch: mark the run FAILED (when persisted) and the
-    job FAILED (unless cancelled). All bookkeeping is guarded — a store/job-store
-    outage here must not re-raise into Temporal and re-run the non-idempotent
-    scan, so failures to record are swallowed.
+    Invoked by the workflow when a pipeline phase exhausts its retries. Marks the
+    run FAILED (when persisted) and the job FAILED (unless cancelled).
+
+    Re-running this activity only re-runs status flips — never the scan — so,
+    unlike the monolith, the authoritative *job-status* write is allowed to raise
+    on failure: that lets the bounded ``DEFAULT_RETRY_POLICY`` actually record
+    FAILED once a transient job-store outage clears, instead of silently leaving
+    the job RUNNING. A sustained outage exhausts the retries and is swallowed by
+    the workflow's inner ``except ActivityError``. The run-row ``mark_failed`` is
+    secondary history and stays best-effort (also guarded by its
+    ``status <> completed`` check).
 
     Postconditions:
-        * The run row is FAILED when ``store_ok`` and reachable; the job row is
-          FAILED unless it was cancelled or the job store is unreachable.
-        * Never raises.
+        * The run row is FAILED when ``store_ok``, reachable, and not already
+          completed; a mark_failed failure is swallowed (best-effort history).
+        * The job row is FAILED unless it was cancelled. If the job store can't
+          be reached, this raises so Temporal retries; on retry exhaustion the
+          workflow swallows it (bounded).
     """
     from job_matching_team.shared.job_store import (
         JOB_STATUS_FAILED,
@@ -334,18 +338,22 @@ def fail_scan_activity(job_id: str, run_id: str, error: str, store_ok: bool) -> 
             from job_matching_team.store import get_store
 
             get_store().mark_failed(run_id, error)
-        except Exception:  # noqa: BLE001 - failure bookkeeping is best-effort
+        except Exception:  # noqa: BLE001 - run-row history is best-effort
             activity.logger.warning("Failed to mark run %s failed", run_id, exc_info=True)
 
+    # Can't read the cancel flag -> still attempt to record FAILED (better than
+    # leaving it RUNNING). The update_job write is intentionally NOT guarded: if
+    # it fails, raising drives the bounded retry so a transient outage is
+    # eventually recorded rather than silently dropped.
     try:
-        if not is_job_cancelled(job_id):
-            update_job(job_id, status=JOB_STATUS_FAILED, error=error)
-    except Exception:  # noqa: BLE001 - job store unreachable; do not re-raise into Temporal
+        cancelled = is_job_cancelled(job_id)
+    except Exception:  # noqa: BLE001 - cancel flag unreadable; proceed to record FAILED
         activity.logger.warning(
-            "Could not record FAILED status for scan %s (job store unreachable)",
-            job_id,
-            exc_info=True,
+            "Cancellation check failed for scan %s; recording FAILED anyway", job_id, exc_info=True
         )
+        cancelled = False
+    if not cancelled:
+        update_job(job_id, status=JOB_STATUS_FAILED, error=error)
 
 
 @activity.defn(name="job_matching_run_scan")

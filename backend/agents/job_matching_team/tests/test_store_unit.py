@@ -114,6 +114,17 @@ def test_mark_failed_truncates(monkeypatch):
     assert len(params[1]) <= 2000
 
 
+def test_mark_failed_does_not_overwrite_completed(monkeypatch):
+    # Guard so a Temporal fail_scan firing after finalize already saved results
+    # can't flip a COMPLETED run (with its persisted rows) back to failed.
+    cur = FakeCursor()
+    _patch_conn(monkeypatch, cur)
+    JobMatchingStore().mark_failed("r1", "boom")
+    sql, params = cur.executed[0]
+    assert "status <> %s" in sql
+    assert params[-1] == "completed"
+
+
 def test_list_runs_maps_rows(monkeypatch):
     rows = [
         {

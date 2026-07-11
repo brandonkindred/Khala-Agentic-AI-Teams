@@ -221,17 +221,21 @@ class JobMatchingStore:
 
     @timed_query(store=_STORE, op="mark_failed")
     def mark_failed(self, run_id: str, error: str) -> None:
-        """Mark a run failed.
+        """Mark a run failed, unless it already completed.
 
         Postconditions:
             * The stored ``error`` is capped at 2000 characters so an unbounded
               exception dump cannot bloat the run row.
+            * A run already in ``completed`` state is left untouched (the
+              ``status <> completed`` guard): a Temporal ``fail_scan`` that fires
+              after ``finalize`` already saved results must not flip a completed
+              run — with its persisted ranked rows — back to ``failed``.
         """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE job_matching_runs SET status = %s, error = %s, completed_at = %s "
-                "WHERE run_id = %s",
-                (RUN_STATUS_FAILED, (error or "")[:2000], _now(), run_id),
+                "WHERE run_id = %s AND status <> %s",
+                (RUN_STATUS_FAILED, (error or "")[:2000], _now(), run_id, RUN_STATUS_COMPLETED),
             )
 
     @timed_query(store=_STORE, op="list_runs")

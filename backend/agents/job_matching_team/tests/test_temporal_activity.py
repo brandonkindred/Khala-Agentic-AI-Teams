@@ -20,6 +20,7 @@ from __future__ import annotations
 import inspect
 import uuid
 
+import pytest
 from temporalio.exceptions import ActivityError, RetryState
 from temporalio.testing import ActivityEnvironment
 
@@ -411,28 +412,29 @@ def test_finalize_cancelled_skips_completion(monkeypatch):
     assert job.statuses == []  # job COMPLETED skipped
 
 
-def test_finalize_completes_when_cancel_check_errors(monkeypatch):
-    # A transient job-store error on the cancellation check must not discard a
-    # successfully saved result: the scan still COMPLETEs with its payload.
+def test_finalize_reraises_when_cancel_check_errors(monkeypatch):
+    # A cancel-read failure must raise (so Temporal retries finalize with a fresh
+    # read) rather than completing a possibly-cancelled job. Results are still
+    # persisted before the check, and the job is NOT marked completed.
     job = _FakeJobStore(cancel_raises=True)
     store = _FakeStore()
     _patch_job_store(monkeypatch, job)
     monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
 
-    result = ActivityEnvironment().run(
-        finalize_scan_activity,
-        "job-1",
-        "run-1",
-        _one_ranked_dict(),
-        1,
-        ["fp1"],
-        _profile_dict(),
-        True,
-    )
+    with pytest.raises(RuntimeError):
+        ActivityEnvironment().run(
+            finalize_scan_activity,
+            "job-1",
+            "run-1",
+            _one_ranked_dict(),
+            1,
+            ["fp1"],
+            _profile_dict(),
+            True,
+        )
 
-    assert result["run_id"] == "run-1"
-    assert len(store.save_calls) == 1
-    assert job.statuses == ["completed"]  # completed despite the cancel-check error
+    assert len(store.save_calls) == 1  # results persisted before the cancel check
+    assert job.statuses == []  # not completed
 
 
 def test_finalize_store_ok_false_skips_save(monkeypatch):
@@ -554,20 +556,21 @@ def test_fail_swallows_mark_failed_error(monkeypatch):
     assert job.updates == [{"status": "failed", "error": "boom"}]
 
 
-def test_fail_swallows_job_store_outage(monkeypatch):
+def test_fail_reraises_when_job_status_unrecordable(monkeypatch):
+    # update_job(FAILED) failing must RAISE so Temporal's bounded retry can
+    # eventually record FAILED, instead of silently leaving the job RUNNING. An
+    # unreadable cancel flag is still swallowed (we proceed to record FAILED).
     store = _FakeStore()
     monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
 
-    def _down(job_id):
+    def _down(job_id, **fields):
         raise RuntimeError("job service unreachable")
 
     monkeypatch.setattr("job_matching_team.shared.job_store.is_job_cancelled", _down)
     monkeypatch.setattr("job_matching_team.shared.job_store.update_job", _down)
 
-    # is_job_cancelled itself raising (job service down) must be swallowed.
-    result = ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", False)
-
-    assert result is None  # no exception escaped
+    with pytest.raises(RuntimeError):
+        ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", False)
 
 
 # ===========================================================================
