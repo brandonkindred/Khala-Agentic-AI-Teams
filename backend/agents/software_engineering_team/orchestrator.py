@@ -635,6 +635,20 @@ def _fail_job(job_id: str, error: str, *, phase: str = "completed") -> None:
     update_job(job_id, status=JOB_STATUS_FAILED, error=error, phase=phase)
 
 
+def _mark_cancelled(job_id: str) -> None:
+    """Mark ``job_id`` CANCELLED — the terminal status both SE entry points write on cancellation.
+
+    Preconditions: ``job_id`` refers to a stored job.
+    Postconditions: the job is CANCELLED with the shared status text and ``completed`` phase.
+    """
+    update_job(
+        job_id,
+        status=JOB_STATUS_CANCELLED,
+        status_text="Job cancelled by user",
+        phase="completed",
+    )
+
+
 def run_orchestrator(
     job_id: str,
     repo_path: str | Path,
@@ -868,56 +882,14 @@ def run_orchestrator(
         plan_input = _build_coding_team_plan_input(
             adapter_result, str(path), existing_code_summary, resolved_questions_override
         )
-        from coding_team.orchestrator import run_coding_team_orchestrator
-        from software_engineering_team.coding_engine_provider import SECodeEngineProvider
-
-        base, span = PROGRESS_BAND_CODING
-        # get_llm deliberately NOT passed: the coding team's default getter wraps
-        # the LLM clients with reasoning-stream capture, whose periodic flush is
-        # the only thing that refreshes job activity DURING a multi-minute LLM
-        # call — passing the raw get_client here made every long implement call
-        # look like a stall to the UI's activity-based warning.
-        #
-        # Bind team/job_id attribution around the whole coding run so every LLM
-        # call it makes (sequential + via strands' asyncio.to_thread, which
-        # copies the context) is attributed to this SE job — that is what the
-        # cost tracker keys on. Without this the live path records no job cost.
-        with llm_attribution(team="software_engineering", job_id=job_id, phase="execution"):
-            run_coding_team_orchestrator(
-                job_id,
-                str(path),
-                plan_input,
-                update_job_fn=lambda **kw: update_job(job_id, **kw),
-                get_job_fn=lambda jid: get_job(jid),
-                progress_base=base,
-                progress_span=span,
-                engine_provider=SECodeEngineProvider(),
-            )
-        # Emit DORA lifecycle events (deployment/lead-time/change-failure) from
-        # the coding-team task graph the run persisted, and flush final cost.
-        _emit_coding_team_metrics(job_id)
-        # run_coding_team_orchestrator owns its terminal status on every exit path (completed /
-        # completed_with_failures / already_complete / failed / cancelled), so there is nothing
-        # to finalize here — writing COMPLETED would clobber a failure, a partial-success, or an
-        # already-complete result it already set. ``already_complete`` (the work was already
-        # done — no changes needed) is a terminal success and is left intact.
-        #
-        # Reconcile the SE failed_tasks list (and any LLM-pause status) from the persisted snapshot
-        # so partial failures are visible and retryable via /retry-failed, and a recurring LLM
-        # weekly-limit / connectivity failure pauses for recovery (see _finalize_from_coding_snapshot).
-        _finalize_from_coding_snapshot(job_id)
+        _run_coding_and_finalize(job_id, path, plan_input)
         return
 
     except (
         CancellationError
     ):  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.info("Orchestrator stopped due to job cancellation: %s", job_id)
-        update_job(
-            job_id,
-            status=JOB_STATUS_CANCELLED,
-            status_text="Job cancelled by user",
-            phase="completed",
-        )
+        _mark_cancelled(job_id)
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -1019,6 +991,51 @@ def _finalize_from_coding_snapshot(job_id: str) -> None:
         update_job(job_id, status=JOB_STATUS_PAUSED_LLM_CONNECTIVITY, error=error)
 
 
+def _run_coding_and_finalize(
+    job_id: str, path: Path, plan_input: Any, *, retry_failed: bool = False
+) -> None:
+    """Run the coding-team orchestrator for an SE job and reconcile SE status from its snapshot.
+
+    Shared by the main run (:func:`run_orchestrator`) and the retry path
+    (:func:`run_failed_tasks`); the only difference is ``retry_failed``.
+
+    ``get_llm`` is deliberately NOT passed: the coding team's default getter wraps the LLM clients
+    with reasoning-stream capture, whose periodic flush is the only thing that refreshes job activity
+    DURING a multi-minute LLM call — passing the raw ``get_client`` here made every long implement
+    call look like a stall to the UI's activity-based warning. LLM attribution is bound around the
+    whole coding run so every call it makes (sequential + via strands' ``asyncio.to_thread``, which
+    copies the context) is attributed to this SE job — what the cost tracker keys on.
+
+    ``run_coding_team_orchestrator`` owns its terminal status on every exit path (completed /
+    completed_with_failures / already_complete / failed / cancelled), so this does not finalize a
+    success status; it only emits DORA lifecycle metrics and reconciles the SE ``failed_tasks`` list
+    (and any LLM-pause status) from the persisted snapshot via
+    :func:`_finalize_from_coding_snapshot`, so partial failures stay visible and retryable.
+
+    Preconditions: ``path`` is the resolved work path; ``plan_input`` is a ``CodingTeamPlanInput``.
+    Postconditions: the coding-team orchestrator has run to a terminal status for ``job_id`` and the
+    SE ``failed_tasks`` / LLM-pause status reflect the persisted snapshot.
+    """
+    from coding_team.orchestrator import run_coding_team_orchestrator
+    from software_engineering_team.coding_engine_provider import SECodeEngineProvider
+
+    base, span = PROGRESS_BAND_CODING
+    with llm_attribution(team="software_engineering", job_id=job_id, phase="execution"):
+        run_coding_team_orchestrator(
+            job_id,
+            str(path),
+            plan_input,
+            update_job_fn=lambda **kw: update_job(job_id, **kw),
+            get_job_fn=lambda jid: get_job(jid),
+            progress_base=base,
+            progress_span=span,
+            engine_provider=SECodeEngineProvider(),
+            retry_failed=retry_failed,
+        )
+    _emit_coding_team_metrics(job_id)
+    _finalize_from_coding_snapshot(job_id)
+
+
 def run_failed_tasks(job_id: str) -> None:
     """Retry the FAILED tasks of a prior coding-team run.
 
@@ -1056,8 +1073,6 @@ def run_failed_tasks(job_id: str) -> None:
     logger.info("=== Retrying failed tasks for job %s (repo %s) ===", job_id, path)
 
     from coding_team.models import CodingTeamPlanInput
-    from coding_team.orchestrator import run_coding_team_orchestrator
-    from software_engineering_team.coding_engine_provider import SECodeEngineProvider
 
     # On the snapshot-resume path plan_input is barely used (repo_path + any HITL question folding);
     # a PlanningAdapterResult is not available on retry, so build a minimal input from the stored
@@ -1071,7 +1086,6 @@ def run_failed_tasks(job_id: str) -> None:
         resolved_questions=job_data.get("resolved_questions") or [],
     )
 
-    base, span = PROGRESS_BAND_CODING
     # current_activity from the failed run is stale by definition here; clear it so the retry does
     # not render the old run's frozen sub-bar. Clear failed_tasks too: the coding-team run only
     # writes task_graph_snapshot, never failed_tasks, so the persisted list the status endpoint and
@@ -1080,34 +1094,10 @@ def run_failed_tasks(job_id: str) -> None:
         job_id, status=JOB_STATUS_RUNNING, failed_tasks=[], error=None, current_activity=None
     )
     try:
-        # Bind team/job_id attribution around the whole coding run so every LLM call it makes is
-        # attributed to this SE job — that is what the cost tracker keys on (see the main run).
-        with llm_attribution(team="software_engineering", job_id=job_id, phase="execution"):
-            run_coding_team_orchestrator(
-                job_id,
-                str(path),
-                plan_input,
-                update_job_fn=lambda **kw: update_job(job_id, **kw),
-                get_job_fn=lambda jid: get_job(jid),
-                progress_base=base,
-                progress_span=span,
-                engine_provider=SECodeEngineProvider(),
-                retry_failed=True,
-            )
-        # Emit DORA lifecycle events from the persisted task graph and flush final cost.
-        _emit_coding_team_metrics(job_id)
-        # run_coding_team_orchestrator owns its success/partial terminal status; reconcile the SE
-        # failed_tasks list and any LLM-pause status from the persisted snapshot so the status and
-        # /retry-failed APIs reflect this run's failures (see _finalize_from_coding_snapshot).
-        _finalize_from_coding_snapshot(job_id)
+        _run_coding_and_finalize(job_id, path, plan_input, retry_failed=True)
     except CancellationError:
         logger.info("Retry orchestrator stopped due to job cancellation: %s", job_id)
-        update_job(
-            job_id,
-            status=JOB_STATUS_CANCELLED,
-            status_text="Job cancelled by user",
-            phase="completed",
-        )
+        _mark_cancelled(job_id)
     except Exception as e:
         logger.exception("Retry orchestrator failed")
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), phase="completed")
+        _fail_job(job_id, str(e))
