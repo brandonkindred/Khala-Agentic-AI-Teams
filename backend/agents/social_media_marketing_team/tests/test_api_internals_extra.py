@@ -289,3 +289,18 @@ def test_revise_endpoint_uses_dispatched_brand_summary(_mock, fake_jobs) -> None
         assert "DISPATCHED" in resp.json()["message"]
     finally:
         monkeypatch.undo()
+
+
+# ---------------------------------------------------------------------------
+# _update_job guard when the job manager failed to initialize
+# ---------------------------------------------------------------------------
+
+
+def test_update_job_no_op_when_manager_uninitialized(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """A failed module-init (`_job_manager is None`) degrades one update, not the thread."""
+    monkeypatch.setattr(api_main, "_job_manager", None)
+    with caplog.at_level("ERROR"):
+        api_main._update_job("job-x", status="running")  # must not raise
+    assert any("Job manager not initialized" in r.message for r in caplog.records)

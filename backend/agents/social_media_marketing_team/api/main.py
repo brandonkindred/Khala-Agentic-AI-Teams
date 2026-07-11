@@ -126,6 +126,19 @@ def _now() -> str:
 
 
 def _update_job(job_id: str, **fields) -> None:
+    """Patch a job row via the job service.
+
+    Preconditions:
+        - ``job_id`` is a known job id.
+    Postconditions:
+        - Applies ``fields`` to the job when the job manager initialized; when
+          module-level init failed (``_job_manager is None``) this logs an error
+          and returns without raising, so a misconfigured store degrades a single
+          update rather than crashing the caller's thread.
+    """
+    if _job_manager is None:
+        logger.error("Job manager not initialized; cannot update job %s", job_id)
+        return
     _job_manager.update_job(job_id, **fields)
 
 
@@ -472,7 +485,7 @@ def ingest_performance(job_id: str, payload: PerformanceIngestRequest) -> Perfor
     job = _job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    observations = job.get("performance_observations", [])
+    observations = list(job.get("performance_observations", []))
     observations.extend([obs.model_dump() for obs in payload.observations])
     _job_manager.update_job(job_id, performance_observations=observations, last_updated_at=_now())
 
@@ -706,13 +719,22 @@ def get_latest_trends() -> TrendLatestResponse:
 
 
 def _bank_503(exc: Exception) -> HTTPException:
-    """Translate bank-layer errors into an explicit 503 at the CRUD boundary."""
+    """Translate bank-layer errors into an explicit 503 at the CRUD boundary.
+
+    The raw exception (type + message, which may carry connection strings, paths,
+    or other internal detail) is logged server-side only; the client sees a fixed,
+    non-sensitive message so the 503 body never discloses internal configuration.
+
+    Preconditions:
+        - Called from a bank-CRUD ``except`` handler for ``exc``.
+    Postconditions:
+        - Returns a 503 ``HTTPException`` with a static detail; logs ``exc`` with a
+          traceback for operators.
+    """
+    logger.warning("Winning posts bank layer unavailable", exc_info=exc)
     return HTTPException(
         status_code=503,
-        detail=(
-            "Winning posts bank unavailable "
-            f"(is POSTGRES_HOST configured?): {type(exc).__name__}: {exc}"
-        ),
+        detail="Winning posts bank unavailable (is POSTGRES_HOST configured?). Please retry shortly.",
     )
 
 
