@@ -59,17 +59,30 @@ class _Recorder:
         self.results = results
         self.raise_for = raise_for or {}
 
-    async def execute_activity(self, fn, **kwargs):
+    async def execute_activity(self, fn, *args, **kwargs):
         name = _act_name(fn)
-        self.calls.append((name, kwargs))
+        # Mirror the real ``workflow.execute_activity(activity, *args, **kwargs)``
+        # signature. This workflow always passes activity inputs via the
+        # ``args=[...]`` keyword (so positional ``args`` is empty and the keyword
+        # value below wins), but capturing positional args keeps the mock
+        # faithful and lets ``kwargs_for(...)["args"]`` read them either way.
+        # Note: unregistered names intentionally return ``None`` — void
+        # activities like ``mark_failed``/``report_progress`` are not seeded with
+        # a result and legitimately return ``None``/a bool.
+        self.calls.append((name, {"args": args, **kwargs}))
         if name in self.raise_for:
             raise self.raise_for[name]
         return self.results.get(name)
 
-    def start_activity(self, fn, **kwargs):
+    def start_activity(self, fn, *args, **kwargs):
         name = _act_name(fn)
-        self.calls.append((name, kwargs))
-        return _Handle(self.results.get(name))
+        self.calls.append((name, {"args": args, **kwargs}))
+        # start_activity is only used for real, always-seeded activities (the
+        # scripts branch), so a missing result is a test-setup bug — surface it
+        # loudly instead of resolving to a silent ``None`` handle.
+        if name not in self.results:
+            raise KeyError(f"Unknown activity started (not seeded in results): {name}")
+        return _Handle(self.results[name])
 
     def names(self) -> list[str]:
         return [name for name, _ in self.calls]
