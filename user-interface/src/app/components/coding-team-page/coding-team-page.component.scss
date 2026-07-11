@@ -602,6 +602,25 @@
   color: var(--kh-text-tertiary);
 }
 
+.github-label-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin: 0 0 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.375rem;
+  background: var(--kh-surface-subtle, rgba(0, 0, 0, 0.04));
+  color: var(--kh-text-secondary);
+  font-size: 0.8125rem;
+
+  mat-icon {
+    font-size: 1rem;
+    width: 1rem;
+    height: 1rem;
+    color: var(--kh-text-tertiary);
+  }
+}
+
 .thinking-panel {
   margin-top: 0.75rem;
 

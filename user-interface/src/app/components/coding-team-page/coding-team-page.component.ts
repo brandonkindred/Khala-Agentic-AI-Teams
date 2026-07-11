@@ -138,6 +138,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   // GitHub integration state
   githubConfigured = false;
   isLoadingConfig = true;
+  // The operator's optional "Default label filter" from the integration config. It is a
+  // GLOBAL filter: applied (explicitly and visibly, see the issue-list header) to every
+  // repo's issue listing, so the dashboard setting actually takes effect rather than only
+  // ever reaching the backend's no-target fallback path (which the repo-scoped UI never uses).
+  defaultLabel = '';
 
   // Repository list — every repo the configured PAT can access. The PAT's own
   // authorization configuration is the source of truth; nothing is configured in Khala.
@@ -285,6 +290,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       .subscribe({
       next: (cfg) => {
         this.githubConfigured = cfg.enabled && cfg.token_configured;
+        this.defaultLabel = cfg.default_label ?? '';
         this.isLoadingConfig = false;
         if (this.githubConfigured) {
           this.startRunsPolling();
@@ -376,7 +382,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     // two lists never drift.
     this.refreshTrigger$.next();
     this.integrationsApi
-      .getGitHubIssues({ owner: repo.owner, repo: repo.name })
+      // Apply the operator's global default-label filter (blank → undefined → unfiltered).
+      .getGitHubIssues({ owner: repo.owner, repo: repo.name, label: this.defaultLabel || undefined })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
       next: (issues) => {

@@ -196,12 +196,27 @@ describe('CodingTeamPageComponent', () => {
     expect(banner?.textContent).toContain('bad credentials');
   });
 
-  it('loads the expanded repo\'s issues, scoped by owner/repo', async () => {
+  it('loads the expanded repo\'s issues, scoped by owner/repo and the configured default label', async () => {
     await setup();
+    showView('github');
     expandFirstRepo();
-    expect(integrationsSpy.getGitHubIssues).toHaveBeenCalledWith({ owner: 'acme', repo: 'widgets' });
+    // The CONFIGURED mock carries default_label 'ai', applied as a global filter.
+    expect(integrationsSpy.getGitHubIssues).toHaveBeenCalledWith({ owner: 'acme', repo: 'widgets', label: 'ai' });
     expect(component.issuesLoaded).toBe(true);
     expect(component.issues.length).toBe(3);
+    // The active filter is surfaced so an empty repo is explained, not silent.
+    const filter = fixture.nativeElement.querySelector('.github-label-filter');
+    expect(filter?.textContent).toContain('ai');
+  });
+
+  it('omits the label param when no default label is configured', async () => {
+    integrationsSpy.getGitHubConfig.mockReturnValue(
+      of({ enabled: true, token_configured: true, default_label: '' }),
+    );
+    await setup();
+    expandFirstRepo();
+    expect(integrationsSpy.getGitHubIssues).toHaveBeenCalledWith({ owner: 'acme', repo: 'widgets', label: undefined });
+    expect(fixture.nativeElement.querySelector('.github-label-filter')).toBeNull();
   });
 
   it('collapsing the expanded repo clears its issue state', async () => {

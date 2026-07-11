@@ -110,8 +110,11 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   // load and updated live by the per-job pollers below.
   reviews = new Map<number, PrReviewRecord[]>();
 
-  // PR numbers whose Start Review request is in flight (disables the button).
-  starting = new Set<number>();
+  // Reviews whose Start Review request is in flight (disables the button). Keyed by
+  // `owner/repo#number`, NOT bare PR number: PR numbers collide across repositories, so a
+  // bare-number key would let an in-flight start in one repo block the same-numbered PR in
+  // another (and is why this set does NOT need clearing on repo switch).
+  starting = new Set<string>();
 
   // "Latest wins" guards so a slow response from a superseded repo load can't overwrite
   // a newer one (rapid collapse/re-expand of the same repo, or a fast repo switch).
@@ -199,9 +202,11 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Drop everything keyed by PR number when the expanded repo changes — PR numbers
-   * collide across repositories, so records, errors, and in-flight "starting" markers
-   * from one repo must never render under another's rows.
+   * Drop everything keyed by bare PR number when the expanded repo changes — PR numbers
+   * collide across repositories, so records and errors from one repo must never render
+   * under another's rows. (`starting` is NOT cleared here: it is keyed by `owner/repo#number`,
+   * so it can't collide across repos, and clearing it would drop the in-flight double-submit
+   * guard for a review still starting in the repo the user switches back to.)
    *
    * Pollers are disposed too, not left running: a poller mutates its record object,
    * but this clears the `reviews` map those records live in, so a surviving poller
@@ -218,7 +223,6 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     this.pullError = null;
     this.reviews = new Map();
     this.reviewErrors.clear();
-    this.starting.clear();
   }
 
   /** Load the expanded repo's open pull requests, then hydrate their review history. */
@@ -362,18 +366,30 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     this.expandedPrNumber = this.expandedPrNumber === pull.number ? null : pull.number;
   }
 
+  /** Repo-scoped key for the in-flight `starting` set (PR numbers collide across repos). */
+  private startKey(repo: GitHubRepoItem, prNumber: number): string {
+    return `${repo.owner.toLowerCase()}/${repo.name.toLowerCase()}#${prNumber}`;
+  }
+
+  /** True while a Start Review request for this PR in the expanded repo is in flight. */
+  isStarting(pull: GitHubPullRequestItem): boolean {
+    return !!this.selectedRepo && this.starting.has(this.startKey(this.selectedRepo, pull.number));
+  }
+
   /** Start a code review on a PR in the expanded repo, recording it and polling it live. */
   startReview(pull: GitHubPullRequestItem): void {
     const repo = this.selectedRepo;
-    if (!repo || this.starting.has(pull.number)) return;
-    this.starting.add(pull.number);
+    if (!repo) return;
+    const key = this.startKey(repo, pull.number);
+    if (this.starting.has(key)) return;
+    this.starting.add(key);
     this.reviewErrors.delete(pull.number);
     this.integrationsApi
       .runGitHubReviewPr({ pr_number: pull.number, owner: repo.owner, repo: repo.name })
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (resp: RunPrReviewResponse) => {
-          this.starting.delete(pull.number);
+          this.starting.delete(key);
           const record: PrReviewRecord = {
             jobId: resp.job_id,
             prNumber: pull.number,
@@ -383,18 +399,19 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
             status: resp.status,
             prUrl: resp.pr_url,
           };
-          // Show the record only when the user is still on the same repo; the poller
-          // keeps the object live either way, and a later hydrate re-attaches it.
+          // Only record AND poll while the user is still on the repo the review targeted.
+          // If they switched away, don't spin an orphan poller for an off-screen record —
+          // the hydrate on return re-fetches this run's history and attaches a fresh poller.
           if (this.selectedRepo?.full_name === repo.full_name) {
             const list = this.reviews.get(pull.number) ?? [];
             list.unshift(record); // newest-first
             this.reviews.set(pull.number, list);
+            this.startPolling(record);
           }
-          this.startPolling(record);
           this.cdr.markForCheck();
         },
         error: (err: unknown) => {
-          this.starting.delete(pull.number);
+          this.starting.delete(key);
           // Only surface the error while the user is still on the repo the review targeted;
           // reviewErrors is keyed by bare PR number, so an unguarded set would render this
           // failure under another repo's identically-numbered PR after a switch.

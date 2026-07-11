@@ -134,6 +134,13 @@
                   @if (issueError) {
                     <app-inline-banner variant="error" [message]="issueError" />
                   }
+                  @if (defaultLabel) {
+                    <p class="github-label-filter">
+                      <mat-icon aria-hidden="true">filter_list</mat-icon>
+                      Showing only issues labelled <strong>{{ defaultLabel }}</strong> — set the
+                      default label filter in Integrations → GitHub.
+                    </p>
+                  }
                   @if (loadingIssues) {
                     <div class="github-section--loading">
                       <mat-spinner diameter="20"></mat-spinner>

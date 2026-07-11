@@ -13,6 +13,7 @@ import type {
   GitHubConfigResponse,
   GitHubPullRequestItem,
   GitHubRepoItem,
+  RunPrReviewResponse,
 } from '../../models/integrations.model';
 
 function makePulls(count: number): GitHubPullRequestItem[] {
@@ -423,9 +424,12 @@ describe('CodeReviewPanelComponent', () => {
 
   it('ignores a second startReview while one is already starting', async () => {
     await setup();
-    component.starting.add(1);
+    const slow = new Subject<never>();
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
     component.startReview(component.pulls[0]);
-    expect(integrationsSpy.runGitHubReviewPr).not.toHaveBeenCalled();
+    component.startReview(component.pulls[0]); // second call ignored while the first is in flight
+    expect(integrationsSpy.runGitHubReviewPr).toHaveBeenCalledTimes(1);
+    expect(component.isStarting(component.pulls[0])).toBe(true);
   });
 
   it('surfaces a start-review error per PR without touching the list-load banner', async () => {
@@ -437,7 +441,21 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.reviewErrorFor(1)).toBe('no such PR');
     expect(component.reviewErrorFor(2)).toBeNull();
     expect(component.pullError).toBeNull(); // list-load banner untouched
-    expect(component.starting.has(1)).toBe(false);
+    expect(component.isStarting(component.pulls[0])).toBe(false);
+  });
+
+  it('an in-flight start on one repo does not block the same-numbered PR in another repo', async () => {
+    await setup(); // acme/widgets expanded, PR #1 present
+    const slow = new Subject<never>();
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
+    component.startReview(component.pulls[0]); // start acme/widgets PR #1 (in flight)
+    // Switch to another repo that also has a PR #1.
+    const other: GitHubRepoItem = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
+    component.repos = [REPO, other];
+    component.toggleRepo(other);
+    fixture.detectChanges();
+    // `starting` is keyed by owner/repo#number, so other/thing PR #1 is NOT considered starting.
+    expect(component.isStarting(component.pulls[0])).toBe(false);
   });
 
   it('falls back to err.message when a start-review error has no detail', async () => {
@@ -461,6 +479,24 @@ describe('CodeReviewPanelComponent', () => {
     // unguarded set would render this failure under other/thing's PR #1.
     slow.error({ error: { detail: 'clone failed' } });
     expect(component.reviewErrorFor(1)).toBeNull();
+  });
+
+  it('does not spin a poller for a review that resolves after a switch-away', async () => {
+    await setup(); // acme/widgets expanded, PR #1 present
+    const slow = new Subject<RunPrReviewResponse>();
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
+    apiSpy.getJobStatus.mockClear();
+    component.startReview(component.pulls[0]); // start acme/widgets PR #1 (pending)
+    // Switch to another repo before the start resolves.
+    const other: GitHubRepoItem = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
+    component.repos = [REPO, other];
+    component.toggleRepo(other);
+    // The start now resolves while the user is on another repo — no record is shown and no
+    // orphan poller must be attached (startPolling is inside the same-repo guard).
+    slow.next({ job_id: 'jX', pr_number: 1, pr_url: 'u', status: 'pending', message: '' });
+    slow.complete();
+    vi.advanceTimersByTime(20000);
+    expect(apiSpy.getJobStatus).not.toHaveBeenCalledWith('jX');
   });
 
   it('falls back to a default message when a start-review error has no detail or message', async () => {

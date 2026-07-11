@@ -175,9 +175,9 @@
                       mat-flat-button
                       color="primary"
                       (click)="startReview(pull)"
-                      [disabled]="starting.has(pull.number)"
+                      [disabled]="isStarting(pull)"
                     >
-                      @if (starting.has(pull.number)) {
+                      @if (isStarting(pull)) {
                         <mat-spinner diameter="18"></mat-spinner>
                         Starting…
                       } @else {

@@ -37,6 +37,12 @@ SCHEMA: TeamSchema = TeamSchema(
         # The page lists reviews per (repo, PR), newest first.
         """CREATE INDEX IF NOT EXISTS idx_code_review_runs_pr
             ON code_review_runs(owner, repo, pr_number, created_at DESC)""",
+        # ``list_reviews`` matches owner/repo case-insensitively (GitHub treats them so, and
+        # rows may carry operator-typed casing while lookups use the canonical GET /user/repos
+        # casing). A functional index on the lowered columns keeps that query sargable — the
+        # plain (owner, repo, …) index above can't serve a ``lower(owner) = lower(%s)`` predicate.
+        """CREATE INDEX IF NOT EXISTS idx_code_review_runs_pr_ci
+            ON code_review_runs(lower(owner), lower(repo), pr_number, created_at DESC)""",
     ],
     table_names=["code_review_runs"],
 )

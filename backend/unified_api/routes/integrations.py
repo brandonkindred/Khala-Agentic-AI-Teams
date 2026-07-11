@@ -1193,7 +1193,9 @@ _GITHUB_HTTP_TIMEOUT = 15.0
 # names are ASCII alphanumerics plus ``.``, ``_``, ``-``. Validating against this
 # (rather than blocklisting a few bad characters) is what keeps a caller-supplied
 # value from rewriting the GitHub API request path or escaping the workspace root.
-_REPO_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# ``\Z`` (not ``$``) so the anchor can't match before a trailing newline — a value like
+# "name\n" must be rejected even if it ever reached here un-stripped.
+_REPO_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
 
 
 def _parse_dependency_concurrency(raw: str | None) -> int:
@@ -1926,7 +1928,14 @@ async def list_github_issues(
         # Exclude pull requests (the issues endpoint returns both), and drop any entry
         # without an integer ``number`` — a malformed payload must not KeyError → 500 when
         # ``number`` is read below (for the dependency fetch and the issue view-model).
-        raw_issues = [raw for raw in raw_pages if "pull_request" not in raw and isinstance(raw.get("number"), int)]
+        # ``bool`` is an ``int`` subclass, so exclude it: a ``number: true`` must not read as 1.
+        raw_issues = [
+            raw
+            for raw in raw_pages
+            if "pull_request" not in raw
+            and isinstance(raw.get("number"), int)
+            and not isinstance(raw.get("number"), bool)
+        ]
 
         # Enrich each issue with its blocked_by dependencies. Fan out under a bounded
         # semaphore so a large page is not an N+1 storm of serial round-trips.
@@ -2187,13 +2196,18 @@ def _redact_url_userinfo(url: str) -> str:
     """
     try:
         parsed = urllib.parse.urlparse(url)
+        # ``.hostname`` never raises, but ``.port`` validates lazily and raises ValueError on
+        # a malformed/out-of-range port — read both inside the guard so a bad remote returns
+        # "<redacted>" rather than letting this safety helper itself raise.
+        hostname = parsed.hostname
+        port = parsed.port
     except ValueError:
         return "<redacted>"
-    if not parsed.hostname:
+    if not hostname:
         # No recognizable authority (e.g. an ssh ``git@host:owner/repo`` scp-like remote):
         # drop anything before an ``@`` defensively rather than echo possible credentials.
         return url.split("@", 1)[-1] if "@" in url else url
-    netloc = parsed.hostname + (f":{parsed.port}" if parsed.port else "")
+    netloc = hostname + (f":{port}" if port else "")
     return urllib.parse.urlunparse(parsed._replace(netloc=netloc))
 
 

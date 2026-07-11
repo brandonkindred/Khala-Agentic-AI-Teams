@@ -1155,6 +1155,10 @@ def test_redact_url_userinfo_strips_embedded_credentials():
     assert _redact_url_userinfo("https://github.com/acme/widget.git") == "https://github.com/acme/widget.git"
     # An scp-like ssh remote (no URL authority) drops anything before the last '@'.
     assert _redact_url_userinfo("git@github.com:acme/widget.git") == "github.com:acme/widget.git"
+    # A malformed/out-of-range port must NOT make the helper raise (urlparse defers port
+    # validation to attribute access) — it degrades to "<redacted>" instead of leaking or crashing.
+    assert _redact_url_userinfo("https://user:tok@github.com:99999999/acme/widget.git") == "<redacted>"
+    assert _redact_url_userinfo("https://user:tok@github.com:notaport/acme/widget.git") == "<redacted>"
 
 
 # ---------------------------------------------------------------------------
