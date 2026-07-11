@@ -1130,6 +1130,13 @@ describe('CodingTeamPageComponent', () => {
     });
 
     it('lists runs from every repository the PAT can access, keyed per repo', async () => {
+      // Both repos are accessible to the current PAT, so both runs are shown.
+      integrationsSpy.getGitHubRepos.mockReturnValue(
+        of([
+          { ...REPO, full_name: 'acme/other-repo', owner: 'acme', name: 'other-repo' },
+          { ...REPO, full_name: 'someone-else/widgets', owner: 'someone-else', name: 'widgets' },
+        ]),
+      );
       apiSpy.listJobs.mockReturnValue(
         of([
           ghRun({ github_context: { owner: 'acme', repo: 'other-repo', issue_number: 2 } }),
@@ -1144,6 +1151,24 @@ describe('CodingTeamPageComponent', () => {
       expect(component.activeIssueKeys).toEqual(
         new Set(['acme/other-repo#2', 'someone-else/widgets#2']),
       );
+    });
+
+    it('drops runs for repositories not in the accessible-repo list', async () => {
+      // The default accessible repo is acme/widgets (REPO). The second run is for a repo the
+      // current PAT can no longer reach — e.g. a run from a previous token in shared job
+      // storage. /jobs is not PAT-scoped, so the panel must filter it out.
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({ github_context: { owner: 'acme', repo: 'widgets', issue_number: 2 } }),
+          ghRun({ job_id: 'stale', status: 'completed', github_context: { owner: 'gone', repo: 'repo', issue_number: 9 } }),
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      // Only the accessible-repo run survives; the run for the unreachable repo is hidden.
+      expect(component.runs.length).toBe(1);
+      expect(component.runs[0].github_context?.repo).toBe('widgets');
+      expect(component.activeIssueKeys.has('gone/repo#9')).toBe(false);
     });
 
     it('lowercases the repo identity so chips match case-insensitively', async () => {

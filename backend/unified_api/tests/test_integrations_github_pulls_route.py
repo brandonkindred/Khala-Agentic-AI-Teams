@@ -358,12 +358,21 @@ _REVIEWS = "/api/integrations/github/reviews"
 
 
 class _FakeReviewsClient:
-    """Async-client double whose only verb is GET (the reviews proxy reads)."""
+    """Async-client double for the reviews route.
 
-    def __init__(self, *, result=None, exc=None):
+    The route makes two GETs: first the PAT repo-access probe (GET /repos/{owner}/{repo}),
+    then the coding-team ``/reviews`` proxy read. This double answers the probe with
+    ``repo_access_status`` (200 = accessible by default) and does NOT record it, so the
+    recorded ``calls`` reflect only the proxy request the tests assert on. The configured
+    ``result``/``exc`` apply solely to the proxy read.
+    """
+
+    def __init__(self, *, result=None, exc=None, repo_access_status=200):
         self._result = result
         self._exc = exc
+        self._repo_access_status = repo_access_status
         self.calls = []
+        self.repo_checks = []
 
     async def __aenter__(self):
         return self
@@ -371,7 +380,10 @@ class _FakeReviewsClient:
     async def __aexit__(self, *exc_info):
         return False
 
-    async def get(self, url, params=None):
+    async def get(self, url, params=None, headers=None):
+        if "/repos/" in url:
+            self.repo_checks.append(url)
+            return _FakeResp(self._repo_access_status, json_data={"full_name": "acme/widget"})
         self.calls.append((url, params))
         if self._exc is not None:
             raise self._exc
@@ -421,6 +433,35 @@ def test_reviews_success_injects_owner_repo(mock_cfg, mock_cred, monkeypatch):
     assert params["repo"] == "widget"
     assert params["pr_number"] == 7
     assert params["limit"] == 500
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_reviews_404_when_pat_cannot_reach_repo(mock_cfg, mock_cred, monkeypatch):
+    """A repo the PAT can't reach (GitHub 404 on the access probe) yields a 404 and
+    NEVER queries the coding-team review history — so persisted review summaries can't
+    leak for repos outside the token's access boundary (the history store is not itself
+    PAT-scoped)."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(result=_FakeResp(200, json_data=[]), repo_access_status=404)
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REVIEWS, params={"owner": "secret", "repo": "repo", "pr_number": 3})
+    assert resp.status_code == 404
+    assert fake.repo_checks  # the PAT access probe ran
+    assert fake.calls == []  # the review-history lookup was skipped
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_reviews_401_when_token_invalid(mock_cfg, mock_cred, monkeypatch):
+    """An invalid/expired PAT (GitHub 401 on the access probe) surfaces as 401 and the
+    history lookup is skipped."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(result=_FakeResp(200, json_data=[]), repo_access_status=401)
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REVIEWS)
+    assert resp.status_code == 401
+    assert fake.calls == []
 
 
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))

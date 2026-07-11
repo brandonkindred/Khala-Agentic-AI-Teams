@@ -334,6 +334,9 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.repos = repos;
         this.reposLoaded = true;
         this.loadingRepos = false;
+        // A runs poll that already applied an unfiltered snapshot before this list arrived
+        // re-filters on its next tick (repos auto-loads on init, so the window is brief); we
+        // deliberately do NOT re-apply here to avoid racing the first poll's auto-select.
       },
       error: (err: unknown) => {
         this.repoError = extractErrorDetail(err, 'Failed to load repositories.');
@@ -670,16 +673,29 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Fold a fresh `/jobs` snapshot into the Runs panel.
    *
    * Preconditions: the poll only starts once configured (enabled + token).
-   * Postconditions: `runs` holds every issue-bearing run across all repositories the PAT can access
-   * (running + terminal) and `runningRuns`/`recentRuns` hold its non-terminal/terminal partitions;
-   * `activeIssueKeys` holds the non-terminal subset's "owner/repo#number" keys, plus the selected
-   * run's key only while that run is absent from this snapshot and not yet observed terminal (so a
-   * snapshot that lags a just-started run can't wipe its chip, while a run the snapshot already
+   * Postconditions: `runs` holds every issue-bearing run for a repository the PAT can currently
+   * access (running + terminal) and `runningRuns`/`recentRuns` hold its non-terminal/terminal
+   * partitions; `activeIssueKeys` holds the non-terminal subset's "owner/repo#number" keys, plus the
+   * selected run's key only while that run is absent from this snapshot and not yet observed terminal
+   * (so a snapshot that lags a just-started run can't wipe its chip, while a run the snapshot already
    * reports terminal is trusted and dropped). On the first load only, a run is auto-selected when
    * none is selected.
    */
   private applyRuns(jobs: CodingTeamJobListItem[]): void {
-    const mine = jobs.filter((j) => j.github_context?.issue_number != null);
+    let mine = jobs.filter((j) => j.github_context?.issue_number != null);
+    // The coding-team `/jobs` endpoint is NOT PAT-scoped — it returns every stored issue-bearing
+    // run, including runs from a previous token/config or shared job storage. Once the accessible-repo
+    // list has loaded (it auto-loads on init alongside the first poll), drop runs whose repository is
+    // not in it, so the panel never surfaces — or offers retries for — repos the current token can no
+    // longer reach. Before the list loads, show everything rather than blanking the panel.
+    if (this.reposLoaded) {
+      const accessible = new Set(this.repos.map((r) => r.full_name.toLowerCase()));
+      mine = mine.filter((j) => {
+        const owner = j.github_context?.owner;
+        const repo = j.github_context?.repo;
+        return owner != null && repo != null && accessible.has(`${owner}/${repo}`.toLowerCase());
+      });
+    }
     this.runs = mine;
     this.runningRuns = mine.filter((j) => !isCodingTeamTerminalStatus(j.status));
     this.recentRuns = mine.filter((j) => isCodingTeamTerminalStatus(j.status));

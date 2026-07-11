@@ -1752,6 +1752,47 @@ def _github_api_headers(token: str) -> dict[str, str]:
     }
 
 
+async def _assert_pat_can_reach_repo(owner: str, repo: str, token: str) -> None:
+    """Raise unless the stored PAT can actually reach ``owner``/``repo`` on GitHub.
+
+    The issue- and PR-listing routes are gated implicitly: their own GitHub list call
+    404s for a repository the token can't see, so a caller can only read issues/pulls
+    for repos the PAT reaches. The review-history route reads only Khala's local
+    ``code_review_runs`` table, so without this probe any enabled caller could request an
+    arbitrary repository name and read persisted review summaries/errors for repos the
+    token can't access. This restores the invariant that the PAT's own authorization —
+    not a Khala-side allowlist — is the sole source of repository access, for the
+    history-only route too.
+
+    Preconditions:
+        - ``owner``/``repo`` are already validated (see :func:`_validate_repo_component`).
+        - ``token`` is the resolved PAT.
+    Postconditions:
+        - Returns ``None`` when ``GET /repos/{owner}/{repo}`` returns 200. Raises
+          ``HTTPException`` otherwise: 404 when the PAT can't see the repository (GitHub
+          returns 404 for both missing and inaccessible repos — the correct fail-closed
+          signal, and identical to the issue/PR routes' not-found response), 401 for an
+          invalid/expired token, 502 for any other upstream status, and 504/502 for a
+          timeout/transport error. No ``httpx`` error escapes unhandled.
+    """
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}"
+    headers = _github_api_headers(token)
+    try:
+        async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
+            resp = await client.get(url, headers=headers)
+    except httpx.TimeoutException as e:
+        raise HTTPException(status_code=504, detail="GitHub API timed out verifying repository access.") from e
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach GitHub to verify repository access: {e}") from e
+    if resp.status_code == 200:
+        return
+    if resp.status_code == 401:
+        raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail=f"Repository {owner}/{repo} not found.")
+    raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code} verifying repository access.")
+
+
 async def _collect_github_pages(
     client: httpx.AsyncClient,
     base_url: str,
@@ -2614,17 +2655,29 @@ async def list_github_reviews(
 
     Preconditions:
         - GitHub integration is enabled with a stored PAT; the target repository is
-          the ``owner``/``repo`` query pair or the configured default.
+          the ``owner``/``repo`` query pair or the configured default, and the PAT can
+          actually reach it (verified against GitHub — see below).
         - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
         - ``limit`` is in ``[1, 2000]`` (validated by FastAPI).
     Postconditions:
         - Returns up to ``limit`` review runs (optionally filtered to
           ``pr_number``), newest-first. Every failure path raises
           ``HTTPException``; no ``httpx`` error escapes unhandled.
+        - Unlike the issue/PR routes (implicitly gated by their own GitHub list call),
+          this reads Khala's local ``code_review_runs`` table, so it first verifies the
+          PAT can reach the target repository (``_assert_pat_can_reach_repo``): a repo
+          the token can't access yields the same 404 as the issue/PR routes and NO
+          history is returned, so stored review summaries can't leak across the PAT's
+          access boundary.
     """
-    _cfg, _token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, owner, repo)
+    _cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, owner, repo)
 
     coding_team_url = _require_coding_team_url()
+
+    # History lives in Khala's own store, not GitHub, so gate it on the PAT actually
+    # reaching the repo — the issue/PR routes get this gate for free from their GitHub
+    # list call; this history-only route must ask explicitly.
+    await _assert_pat_can_reach_repo(owner, repo, token)
 
     params: dict[str, Any] = {"owner": owner, "repo": repo, "limit": limit}
     if pr_number is not None:
