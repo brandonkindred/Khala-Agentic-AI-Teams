@@ -17,10 +17,10 @@ only JSON-native values cross the activity boundary — the shared data converte
 has no pydantic support, so each activity reconstructs its models
 (``Model.model_validate``) and returns ``.model_dump(mode="json")``.
 
-The legacy monolithic :func:`run_scan_activity` is retained (and still
-registered — see ``temporal/__init__.py``) purely so any workflow history
-recorded before this decomposition can still resolve the activity while it
-drains; the current workflow no longer schedules it.
+The legacy monolithic :func:`run_scan_activity` is retained because workflows
+started before this decomposition still schedule it: the workflow gates the new
+phase sequence behind ``workflow.patched`` and replays those older histories on
+the single-activity path so their replay stays deterministic until they drain.
 """
 
 from __future__ import annotations
@@ -56,6 +56,13 @@ _SCAN_TIMEOUT = timedelta(minutes=30)
 _RANK_TIMEOUT = timedelta(minutes=30)
 _FINALIZE_TIMEOUT = timedelta(minutes=2)
 _FAIL_TIMEOUT = timedelta(minutes=2)
+
+# Temporal patch id gating the decomposed phase sequence. Workflows started
+# before this change recorded a single ``job_matching_run_scan`` command first;
+# they must keep replaying that monolithic path (``workflow.patched`` returns
+# False for them) or the new phase commands would trip Temporal's determinism
+# check. New executions record the marker and take the decomposed path.
+_DECOMPOSED_PHASES_PATCH = "job-matching-decomposed-phases"
 
 
 @activity.defn(name="job_matching_prepare_scan")
@@ -358,13 +365,13 @@ def fail_scan_activity(job_id: str, run_id: str, error: str, store_ok: bool) -> 
 
 @activity.defn(name="job_matching_run_scan")
 def run_scan_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
-    """Legacy single-activity scan — retained only for in-flight history drain-out.
+    """Legacy single-activity scan — the ``workflow.patched`` replay path.
 
     Superseded by the decomposed prepare -> build_queries -> scan -> rank ->
-    finalize activities that :class:`JobMatchingWorkflow` now schedules. It is
-    kept registered so a workflow history recorded before the decomposition can
-    still resolve ``job_matching_run_scan`` while it drains; new workflows never
-    schedule it.
+    finalize activities that :class:`JobMatchingWorkflow` schedules for new runs.
+    Workflows started before the decomposition still schedule this activity (the
+    workflow's ``workflow.patched`` legacy branch) so their recorded histories
+    replay deterministically until they drain.
 
     Runs one scan on the Temporal worker, keeping the job store in sync.
     Reconstructs the request + orchestrator inside the activity because neither
@@ -458,26 +465,44 @@ class JobMatchingWorkflow:
               a deterministic failure exhausts the attempts and is recorded FAILED
               via ``fail_scan``. End state matches the monolith (job + run FAILED,
               no retry storm); only the path differs.
+            * Workflows started before the decomposition replay the single
+              ``run_scan_activity`` path (gated by ``workflow.patched``) so their
+              histories stay deterministic; new runs take the decomposed phases.
         """
+        if not workflow.patched(_DECOMPOSED_PHASES_PATCH):
+            # Pre-decomposition history: its first recorded command is a single
+            # job_matching_run_scan. Replay that exact monolithic path (same
+            # activity type, timeout, and retry policy as the original workflow)
+            # so Temporal's determinism check passes while the history drains.
+            return await workflow.execute_activity(
+                run_scan_activity,
+                args=[job_id, request],
+                start_to_close_timeout=timedelta(minutes=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
         # Own the run id here (deterministic across replay) and thread it through
         # prepare/finalize/fail so an activity retry re-uses the same id and its
         # idempotent store writes replace rather than duplicate/orphan rows.
         run_id = str(workflow.uuid4())
-        prep = await workflow.execute_activity(
-            prepare_scan_activity,
-            args=[job_id, request, run_id],
-            start_to_close_timeout=_PREPARE_TIMEOUT,
-            retry_policy=DEFAULT_RETRY_POLICY,
-        )
-        status = prep.get("status")
-        if status == "already_completed":
-            return prep.get("result") or {}
-        if status == "cancelled":
-            return {}
-
-        profile = prep["profile"]
-        store_ok = prep["store_ok"]
+        # Default until prepare reports it, so a prepare-phase failure (which
+        # never returns store_ok) still routes to fail_scan with a safe value.
+        store_ok = True
         try:
+            prep = await workflow.execute_activity(
+                prepare_scan_activity,
+                args=[job_id, request, run_id],
+                start_to_close_timeout=_PREPARE_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+            status = prep.get("status")
+            if status == "already_completed":
+                return prep.get("result") or {}
+            if status == "cancelled":
+                return {}
+
+            profile = prep["profile"]
+            store_ok = prep["store_ok"]
             queries = await workflow.execute_activity(
                 build_queries_activity,
                 args=[profile, prep["max_queries"], job_id],

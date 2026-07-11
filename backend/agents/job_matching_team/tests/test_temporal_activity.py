@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import inspect
 import uuid
+from datetime import timedelta
 
 import pytest
 from temporalio.exceptions import ActivityError, RetryState
@@ -633,6 +634,7 @@ class _WorkflowStub:
             },
             wf.finalize_scan_activity: {"run_id": _FIXED_RUN_ID, "final": True},
             wf.fail_scan_activity: None,
+            wf.run_scan_activity: {"legacy": True},
         }
 
     async def __call__(self, activity_fn, *, args, start_to_close_timeout, retry_policy):
@@ -655,18 +657,21 @@ class _WorkflowStub:
         return self
 
 
-def _patch_workflow(monkeypatch, stub) -> None:
+def _patch_workflow(monkeypatch, stub, *, patched=True) -> None:
     """Patch the workflow's Temporal touchpoints for bare-``asyncio.run`` tests.
 
-    ``workflow.uuid4`` and ``workflow.logger`` both need a live workflow context,
+    ``workflow.uuid4``/``logger``/``patched`` all need a live workflow context,
     which ``asyncio.run`` of the run coroutine does not provide, so we pin the id
-    to a fixed value and route the logger to a plain stdlib logger.
+    to a fixed value, route the logger to a plain stdlib logger, and force the
+    decomposed-phases patch on (pass ``patched=False`` to exercise the legacy
+    replay branch).
     """
     import logging
 
     monkeypatch.setattr(wf.workflow, "execute_activity", stub)
     monkeypatch.setattr(wf.workflow, "uuid4", lambda: uuid.UUID(_FIXED_RUN_ID))
     monkeypatch.setattr(wf.workflow, "logger", logging.getLogger("job_matching.wf.test"))
+    monkeypatch.setattr(wf.workflow, "patched", lambda patch_id: patched)
 
 
 def _run_workflow(job_id="job-1", request=None):
@@ -767,10 +772,10 @@ def test_workflow_fail_scan_error_does_not_fail_workflow(monkeypatch):
     assert stub.calls[-1]["fn"] is wf.fail_scan_activity  # attempted, then swallowed
 
 
-def test_workflow_never_schedules_legacy_run_scan_activity(monkeypatch):
-    # The decomposed workflow must NEVER schedule the legacy monolith — it stays
-    # registered only for in-flight-history drain-out. Guard against a future
-    # edit reintroducing it alongside the phase activities (duplicate scans).
+def test_workflow_new_run_never_schedules_legacy_activity(monkeypatch):
+    # A NEW run (patched on) must schedule only the decomposed phases and never
+    # the legacy monolith — guard against a future edit reintroducing it
+    # alongside the phase activities (duplicate scans).
     stub = _WorkflowStub()
     _patch_workflow(monkeypatch, stub)
 
@@ -788,6 +793,41 @@ def test_workflow_failure_path_never_schedules_legacy_activity(monkeypatch):
     _run_workflow()
 
     assert wf.run_scan_activity not in [c["fn"] for c in stub.calls]
+
+
+def test_workflow_legacy_history_replays_monolith(monkeypatch):
+    # Pre-decomposition histories (workflow.patched False) must replay the single
+    # run_scan_activity command so their recorded histories stay deterministic —
+    # not the new phase sequence.
+    stub = _WorkflowStub()
+    _patch_workflow(monkeypatch, stub, patched=False)
+
+    result = _run_workflow()
+
+    assert result == {"legacy": True}
+    assert [c["fn"] for c in stub.calls] == [wf.run_scan_activity]
+    # Same args/timeout/retry as the original monolithic workflow.
+    assert stub.calls[0]["args"] == ["job-1", {"top_n": 2}]
+    assert stub.calls[0]["timeout"] == timedelta(minutes=30)
+    assert stub.calls[0]["retry"].maximum_attempts == 3
+
+
+def test_workflow_prepare_failure_records_fail(monkeypatch):
+    # A prepare-phase failure (after it may have set the job RUNNING) must route
+    # to fail_scan, not fail the workflow — otherwise the job is stuck RUNNING.
+    stub = _WorkflowStub(fail_on=wf.prepare_scan_activity)
+    _patch_workflow(monkeypatch, stub)
+
+    result = _run_workflow()
+
+    assert result == {}
+    assert [c["fn"] for c in stub.calls] == [
+        wf.prepare_scan_activity,
+        wf.fail_scan_activity,
+    ]
+    fail_call = stub.calls[-1]
+    assert fail_call["args"][:2] == ["job-1", _FIXED_RUN_ID]
+    assert fail_call["args"][3] is True  # store_ok defaults to True when prepare fails
 
 
 # ===========================================================================

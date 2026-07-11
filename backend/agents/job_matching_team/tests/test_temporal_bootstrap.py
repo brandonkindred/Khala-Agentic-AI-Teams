@@ -93,8 +93,8 @@ def test_activities_registered_include_all_phases_and_legacy():
         "fail_scan_activity",
         "run_scan_activity",
     }
-    # Legacy monolith stays registered last for drain-out; the workflow no
-    # longer schedules it.
+    # Legacy monolith stays registered last; the workflow still schedules it on
+    # its workflow.patched legacy branch to replay pre-decomposition histories.
     assert ACTIVITIES[-1].__name__ == "run_scan_activity"
 
 

@@ -27,9 +27,10 @@ from job_matching_team.temporal.workflows import (
 
 WORKFLOWS = [JobMatchingWorkflow]
 # The scan pipeline is decomposed into per-phase activities that the workflow
-# schedules in order. ``run_scan_activity`` (the pre-decomposition monolith) is
-# kept registered LAST purely for in-flight-history drain-out — the current
-# workflow never schedules it.
+# schedules in order for new runs. ``run_scan_activity`` (the pre-decomposition
+# monolith) stays registered because the workflow still schedules it on the
+# ``workflow.patched`` legacy branch, so histories started before the
+# decomposition replay deterministically until they drain.
 ACTIVITIES = [
     prepare_scan_activity,
     build_queries_activity,
