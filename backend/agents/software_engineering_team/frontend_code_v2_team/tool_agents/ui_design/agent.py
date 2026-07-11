@@ -2,23 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import logging
-from typing import List
+from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
-from strands import Agent
-
-from llm_service import get_strands_model
-from llm_service.strands_model import resolve_strands_model
-
-from ...models import (
-    ToolAgentInput,
-    ToolAgentOutput,
-    ToolAgentPhaseInput,
-    ToolAgentPhaseOutput,
-)
-
-logger = logging.getLogger(__name__)
+from ...models import ToolAgentPhaseInput
+from .._plan_base import PlanGeneratorToolAgent
 
 UI_DESIGNER_PLAN_PROMPT = """You are a UI / Visual Designer Agent. Your job is to define the visual system, layout, typography, color, spacing, component states. You ensure it looks like the design, not "close enough, ship it."
 
@@ -60,76 +47,34 @@ Respond with valid JSON only. No explanatory text outside JSON.
 """
 
 
-class UiDesignToolAgent:
+class UiDesignToolAgent(PlanGeneratorToolAgent):
     """UI Design tool agent: visual system, layout, typography, component specs."""
 
-    def __init__(self, llm=None) -> None:
-        self._model = resolve_strands_model(llm, get_strands_model_fn=get_strands_model)
-        self.llm = llm  # kept for backward compat checks
+    log_label = "UI Design"
+    execute_summary = "UI Design execute — no changes applied."
+    review_summary = "UI Design review stub."
+    problem_solve_summary = "UI Design problem-solving stub."
+    deliver_summary = "UI Design deliver."
 
-    def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        return self.execute(inp)
+    no_model_recommendations = [
+        "Consider layout and component structure.",
+        "Define design tokens: colors, typography, spacing.",
+        "Establish motion guidelines for transitions and feedback.",
+    ]
+    no_model_summary = "UI Design planning stub (no LLM)."
+    llm_error_recommendations = ["Consider layout and component structure."]
+    llm_error_summary = "UI Design planning failed (LLM error)."
+    empty_recommendations = ["Consider layout and component structure."]
+    default_summary = "UI Design planning complete."
+    field_labels = (
+        ("component_specs", "Component Specs"),
+        ("design_tokens", "Design Tokens"),
+        ("motion_guidelines", "Motion Guidelines"),
+        ("high_fidelity_summary", "Layout"),
+    )
 
-    def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        logger.info("UI Design: microtask %s (execute stub)", inp.microtask.id)
-        return ToolAgentOutput(summary="UI Design execute — no changes applied.")
-
-    def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Generate UI design artifacts: component specs, design tokens, motion guidelines."""
-        if not self._model:
-            return ToolAgentPhaseOutput(
-                recommendations=[
-                    "Consider layout and component structure.",
-                    "Define design tokens: colors, typography, spacing.",
-                    "Establish motion guidelines for transitions and feedback.",
-                ],
-                summary="UI Design planning stub (no LLM).",
-            )
-        prompt = UI_DESIGNER_PLAN_PROMPT.format(
+    def _build_plan_prompt(self, inp: ToolAgentPhaseInput) -> str:
+        return UI_DESIGNER_PLAN_PROMPT.format(
             task_description=inp.task_description or "N/A",
             spec_content=inp.task_description or "",
         )
-        try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
-        except Exception as e:
-            logger.warning("UI Design plan LLM call failed: %s", e)
-            return ToolAgentPhaseOutput(
-                recommendations=["Consider layout and component structure."],
-                summary="UI Design planning failed (LLM error).",
-            )
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            start = raw.find("{")
-            end = raw.rfind("}") + 1
-            if start >= 0 and end > start:
-                try:
-                    data = json.loads(raw[start:end])
-                except json.JSONDecodeError:
-                    data = {}
-            else:
-                data = {}
-        recommendations: List[str] = []
-        if data.get("component_specs"):
-            recommendations.append(f"Component Specs: {data['component_specs']}")
-        if data.get("design_tokens"):
-            recommendations.append(f"Design Tokens: {data['design_tokens']}")
-        if data.get("motion_guidelines"):
-            recommendations.append(f"Motion Guidelines: {data['motion_guidelines']}")
-        if data.get("high_fidelity_summary"):
-            recommendations.append(f"Layout: {data['high_fidelity_summary']}")
-        return ToolAgentPhaseOutput(
-            recommendations=recommendations
-            if recommendations
-            else ["Consider layout and component structure."],
-            summary=data.get("summary", "UI Design planning complete."),
-        )
-
-    def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="UI Design review stub.")
-
-    def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="UI Design problem-solving stub.")
-
-    def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="UI Design deliver.")
