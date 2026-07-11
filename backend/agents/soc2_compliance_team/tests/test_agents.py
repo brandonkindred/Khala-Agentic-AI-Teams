@@ -400,6 +400,25 @@ def test_report_writer_returns_compliance_report_when_findings_exist() -> None:
     assert len(report.findings_by_tsc[TSCCategory.SECURITY.value]) == 1
 
 
+def test_report_writer_prompt_serializes_findings_as_json() -> None:
+    """The compliance-report prompt renders findings as real JSON (string enum
+    values), not Python enum reprs like ``<FindingSeverity.HIGH: 'high'>``."""
+    llm = _FakeLLM({"executive_summary": "s", "raw_markdown": "r"})
+    tsc_results = [
+        _audit_result(
+            TSCCategory.SECURITY,
+            findings_severities=[FindingSeverity.HIGH],
+            compliant=False,
+        )
+    ]
+    ReportWriterAgent().run(llm, "/repo", tsc_results)
+
+    prompt = llm.calls[0]["prompt"]
+    assert '"severity": "high"' in prompt
+    assert "<FindingSeverity" not in prompt
+    assert "<TSCCategory" not in prompt
+
+
 def test_report_writer_defaults_scope_on_empty_llm_response() -> None:
     llm = _FakeLLM({})
     tsc_results = [

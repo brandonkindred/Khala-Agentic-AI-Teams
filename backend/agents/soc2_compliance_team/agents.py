@@ -9,6 +9,7 @@ orchestrator and the Temporal activities both drive them via
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List
 
@@ -217,7 +218,10 @@ class ReportWriterAgent:
 
         findings_by_tsc: Dict[str, List[Dict[str, Any]]] = {}
         for r in tsc_results:
-            findings_by_tsc[r.category.value] = [f.model_dump() for f in r.findings]
+            # ``mode="json"`` so enum fields serialize to their string values
+            # (e.g. "high"), not enum reprs like ``<FindingSeverity.HIGH: 'high'>``,
+            # which is what the report-writer prompt renders as "JSON".
+            findings_by_tsc[r.category.value] = [f.model_dump(mode="json") for f in r.findings]
 
         if has_findings:
             report = self._produce_compliance_report(llm, repo_path, tsc_results, findings_by_tsc)
@@ -241,7 +245,7 @@ class ReportWriterAgent:
 {summaries}
 
 **Findings by category (JSON):**
-{findings_by_tsc}
+{json.dumps(findings_by_tsc, indent=2)}
 
 Write a single JSON object with:
 - "executive_summary": string (2–5 paragraphs: scope, overall posture, key risks, and high-level recommendation)

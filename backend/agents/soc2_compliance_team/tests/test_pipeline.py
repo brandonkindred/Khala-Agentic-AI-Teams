@@ -122,7 +122,10 @@ def test_audit_criterion_safe_isolates_failure(monkeypatch: pytest.MonkeyPatch) 
     # Fail-closed: an un-assessable criterion is non-compliant, not a pass.
     assert out.compliant is False
     assert "could not be completed" in out.summary.lower()
-    assert out.findings == []
+    # A synthetic finding makes the failure visible in structured results.
+    assert len(out.findings) == 1
+    assert out.findings[0].severity is FindingSeverity.HIGH
+    assert out.findings[0].category is TSCCategory.PRIVACY
 
 
 def test_audit_criterion_safe_surfaces_unknown_category() -> None:

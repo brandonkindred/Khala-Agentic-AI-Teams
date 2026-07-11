@@ -39,12 +39,14 @@ from .agents import (
     SecurityTSCAgent,
 )
 from .models import (
+    FindingSeverity,
     NextStepsDocument,
     RepoContext,
     SOC2AuditResult,
     SOC2ComplianceReport,
     TSCAuditResult,
     TSCCategory,
+    TSCFinding,
 )
 from .repo_loader import load_repo_context
 
@@ -136,10 +138,20 @@ def audit_criterion_safe(category: TSCCategory, context: RepoContext) -> TSCAudi
     except Exception as e:  # noqa: BLE001 - isolate a single criterion's runtime failure
         logger.exception("TSC audit failed for %s", category.value)
         # Fail-closed: an un-assessable criterion is non-compliant, not a pass.
+        # Carry a synthetic finding so the failure is visible in the structured
+        # report (``findings_by_tsc``), not only in the free-text summary.
         return TSCAuditResult(
             category=category,
             summary=f"Audit for {category.value} could not be completed: {e}",
-            findings=[],
+            findings=[
+                TSCFinding(
+                    severity=FindingSeverity.HIGH,
+                    category=category,
+                    title=f"{category.value} audit could not be completed",
+                    description=f"The audit for this criterion failed to run: {e}",
+                    recommendation="Re-run the SOC2 audit for this criterion.",
+                )
+            ],
             compliant=False,
         )
 
