@@ -19,7 +19,7 @@ survives a worker/process restart.
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
@@ -28,15 +28,16 @@ with workflow.unsafe.imports_passed_through():
     from nutrition_meal_planning_team.temporal.constants import TASK_QUEUE
 
 # Meal planning is the longest path (nutrition plan → LLM meal generation →
-# guardrail record); the nutrition-plan/regenerate paths are calculator +
-# single-narrator calls.
+# guardrail record). The nutrition-plan and regenerate paths are both just
+# calculator + single-narrator calls, so they share NUTRITION_PLAN_TIMEOUT.
 MEAL_PLAN_TIMEOUT = timedelta(hours=2)
 NUTRITION_PLAN_TIMEOUT = timedelta(minutes=30)
 
 # A background thread heartbeats every ``HEARTBEAT_INTERVAL_S`` while an activity
-# runs, so a dead/hung worker is detected within ``HEARTBEAT_TIMEOUT`` instead of
-# only at ``start_to_close_timeout`` (up to 2h). Matches how the blogging/coding
-# teams keep their long activities live.
+# runs. ``HEARTBEAT_TIMEOUT`` is Temporal's maximum allowed interval *between*
+# heartbeats: if the worker dies/hangs and stops heartbeating, Temporal fails the
+# activity within this window rather than waiting for ``start_to_close_timeout``
+# (up to 2h). Matches how the blogging/coding teams keep their long activities live.
 HEARTBEAT_INTERVAL_S = 30.0
 HEARTBEAT_TIMEOUT = timedelta(minutes=5)
 
@@ -51,7 +52,7 @@ HEARTBEAT_TIMEOUT = timedelta(minutes=5)
 NO_RETRY = RetryPolicy(maximum_attempts=1)
 
 
-def _run_activity(job_id: str, core, *core_args: Any) -> Dict[str, Any]:
+def _run_activity(job_id: str, core: Callable[..., None], *core_args: Any) -> Dict[str, Any]:
     """Shared activity body: heartbeat while the core runs; own the job-store
     failure contract.
 
@@ -83,7 +84,12 @@ def _run_activity(job_id: str, core, *core_args: Any) -> Dict[str, Any]:
         activity.logger.exception("Nutrition job %s failed", job_id)
         if is_job_cancelled(job_id):
             return {"job_id": job_id}
-        mark_job_failed(job_id, exc)
+        # Record FAILED best-effort; if the job-store write itself fails, log it
+        # but still re-raise the ORIGINAL error so the root cause surfaces.
+        try:
+            mark_job_failed(job_id, exc)
+        except Exception:
+            activity.logger.exception("Failed to record job failure for %s", job_id)
         raise
     return {"job_id": job_id}
 

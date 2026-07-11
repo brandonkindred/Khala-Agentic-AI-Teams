@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import List, Optional
+from typing import Any, Callable, List, Optional
 from uuid import uuid4
 
 from fastapi import Depends, HTTPException, Query
@@ -333,7 +333,9 @@ def _temporal_enabled() -> bool:
     return is_temporal_enabled()
 
 
-def _dispatch_job_run(job_id: str, arg, *, starter: str, thread_target) -> str:
+def _dispatch_job_run(
+    job_id: str, arg: Any, *, starter: str, thread_target: Callable[..., None]
+) -> str:
     """Dispatch a job run via Temporal when enabled, else a daemon thread.
 
     Single implementation shared by the three per-endpoint wrappers below.

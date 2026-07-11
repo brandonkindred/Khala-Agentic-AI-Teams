@@ -202,3 +202,21 @@ def test_activity_heartbeats_during_core_run(monkeypatch):
     assert entered["beat"] is activity.heartbeat
     assert entered["interval"] == wf.HEARTBEAT_INTERVAL_S
     assert get_job("job-hb")["status"] == JOB_STATUS_COMPLETED
+
+
+def test_activity_reraises_original_error_when_mark_job_failed_raises(monkeypatch):
+    """If recording the failure itself raises (e.g. job store down), the ORIGINAL
+    pipeline error must still propagate — not be masked by the bookkeeping error."""
+
+    def _core_boom(*_a, **_k):
+        raise RuntimeError("original pipeline error")
+
+    def _mark_boom(_job_id, _exc):
+        raise RuntimeError("job store unavailable")
+
+    monkeypatch.setattr(pipeline, "run_meal_plan_core", _core_boom)
+    monkeypatch.setattr(pipeline, "mark_job_failed", _mark_boom)
+    create_job("job-mm")
+
+    with pytest.raises(RuntimeError, match="original pipeline error"):
+        wf.run_meal_plan_activity("job-mm", {"client_id": "c"})
