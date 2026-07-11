@@ -2,22 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import logging
+from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
-from strands import Agent
-
-from llm_service import get_strands_model
-from llm_service.strands_model import resolve_strands_model
-
-from ...models import (
-    ToolAgentInput,
-    ToolAgentOutput,
-    ToolAgentPhaseInput,
-    ToolAgentPhaseOutput,
-)
-
-logger = logging.getLogger(__name__)
+from ...models import ToolAgentPhaseInput
+from .._plan_base import PlanGeneratorToolAgent
 
 MAX_SPEC_CHARS = 6_000
 
@@ -64,84 +52,40 @@ Respond with valid JSON only. No explanatory text outside JSON.
 """
 
 
-class ArchitectureToolAgent:
+class ArchitectureToolAgent(PlanGeneratorToolAgent):
     """Architecture tool agent: generates architecture artifacts in plan phase."""
 
-    def __init__(self, llm=None) -> None:
-        self._model = resolve_strands_model(llm, get_strands_model_fn=get_strands_model)
-        self.llm = llm  # kept for backward compat checks
+    log_label = "Architecture"
+    execute_summary = "Architecture execute — no changes applied."
+    review_summary = "Architecture review (no issues to report)."
+    problem_solve_summary = "Architecture problem-solving (no fixes needed)."
+    deliver_summary = "Architecture deliver."
 
-    def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        return self.execute(inp)
+    no_model_recommendations = [
+        "Define folder structure with feature-based organization.",
+        "Use lazy-loaded routes for code splitting.",
+        "Separate server state (API data) from UI state (forms, modals).",
+        "Implement global error boundary and HTTP interceptor.",
+        "Create typed API client with loading/error states.",
+    ]
+    no_model_summary = "Architecture planning (no LLM)."
+    llm_error_recommendations = ["Architecture planning failed (LLM error)."]
+    llm_error_summary = "Architecture planning failed."
+    empty_recommendations = ["Architecture artifacts generated."]
+    default_summary = "Architecture artifacts generated."
+    empty_summary_override = "Architecture planning complete."
+    field_labels = (
+        ("folder_structure", "Folder structure"),
+        ("routing_strategy", "Routing"),
+        ("state_management", "State management"),
+        ("error_handling", "Error handling"),
+        ("api_client_patterns", "API patterns"),
+    )
 
-    def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        logger.info("Architecture: microtask %s (execute stub)", inp.microtask.id)
-        return ToolAgentOutput(summary="Architecture execute — no changes applied.")
-
-    def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Generate architecture artifacts: folder structure, routing, state management, error handling, API patterns."""
-        if not self._model:
-            return ToolAgentPhaseOutput(
-                recommendations=[
-                    "Define folder structure with feature-based organization.",
-                    "Use lazy-loaded routes for code splitting.",
-                    "Separate server state (API data) from UI state (forms, modals).",
-                    "Implement global error boundary and HTTP interceptor.",
-                    "Create typed API client with loading/error states.",
-                ],
-                summary="Architecture planning (no LLM).",
-            )
+    def _build_plan_prompt(self, inp: ToolAgentPhaseInput) -> str:
         spec_excerpt = (inp.spec_context or "")[:MAX_SPEC_CHARS]
         task_desc = inp.task_description or inp.task_title or "Frontend application"
-        prompt = FRONTEND_ARCHITECT_PROMPT.format(
+        return FRONTEND_ARCHITECT_PROMPT.format(
             task_description=task_desc,
             spec_content=spec_excerpt if spec_excerpt.strip() else "(no spec provided)",
         )
-        try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
-        except Exception as e:
-            logger.warning("Architecture plan LLM call failed: %s", e)
-            return ToolAgentPhaseOutput(
-                recommendations=["Architecture planning failed (LLM error)."],
-                summary="Architecture planning failed.",
-            )
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            import re
-
-            match = re.search(r"\{[\s\S]*\}", raw)
-            if match:
-                try:
-                    data = json.loads(match.group())
-                except json.JSONDecodeError:
-                    data = {}
-            else:
-                data = {}
-        recommendations = []
-        if data.get("folder_structure"):
-            recommendations.append(f"Folder structure: {data['folder_structure']}")
-        if data.get("routing_strategy"):
-            recommendations.append(f"Routing: {data['routing_strategy']}")
-        if data.get("state_management"):
-            recommendations.append(f"State management: {data['state_management']}")
-        if data.get("error_handling"):
-            recommendations.append(f"Error handling: {data['error_handling']}")
-        if data.get("api_client_patterns"):
-            recommendations.append(f"API patterns: {data['api_client_patterns']}")
-        summary = data.get("summary", "Architecture artifacts generated.")
-        return ToolAgentPhaseOutput(
-            recommendations=recommendations
-            if recommendations
-            else ["Architecture artifacts generated."],
-            summary=summary if summary else "Architecture planning complete.",
-        )
-
-    def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="Architecture review (no issues to report).")
-
-    def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="Architecture problem-solving (no fixes needed).")
-
-    def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="Architecture deliver.")

@@ -568,6 +568,40 @@ def extract_json_object(
     )
 
 
+def agent_call_json(
+    agent: Any, prompt: str, required_keys: Optional[Collection[str]] = None
+) -> Dict[str, Any]:
+    """Call a Strands-style ``agent(prompt)`` and parse its reply as a JSON object.
+
+    Strict ``json.loads`` is tried first (after stripping a single leading/trailing
+    ```` ``` ```` fence); on failure the shared salvage recovery
+    (:func:`extract_json_object`) extracts an object from prose- or think-block-
+    wrapped output, anchored on ``required_keys`` when given. This is the resilient
+    replacement for the ``json.loads(str(agent(prompt)).strip())`` idiom that
+    crashed whenever a model wrapped its JSON in a fence or prose.
+
+    Preconditions:
+        - ``agent`` is callable as ``agent(prompt) -> object`` whose ``str()`` is
+          the model's textual reply; ``prompt`` is a non-empty str.
+        - ``required_keys`` is ``None`` or the anchor keys this call site expects
+          in the payload (e.g. ``{"edits"}``); a salvaged object is accepted only
+          if it carries at least one, so a usage/format echo cannot win.
+    Postconditions:
+        - Returns the parsed object. Raises ``json.JSONDecodeError`` only when no
+          object can be recovered — preserving a caller's re-prompt/fail signal.
+    """
+    raw = str(agent(prompt)).strip()
+    fenced = re.sub(r"^```(?:json)?\s*", "", raw)
+    fenced = re.sub(r"\s*```$", "", fenced)
+    try:
+        return json.loads(fenced)
+    except json.JSONDecodeError:
+        recovered = extract_json_object(raw, required_keys=required_keys)
+        if recovered is not None:
+            return recovered
+        raise
+
+
 # Extensions we treat as file paths (backend + frontend)
 _PATH_EXTENSIONS = (
     ".py",
