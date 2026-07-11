@@ -145,6 +145,38 @@ class AISystemsBuildWorkflow:
             )
             return
 
+        try:
+            await self._run_pipeline(job_id, project_name, spec_path, constraints, output_dir)
+        except Exception as exc:
+            # A phase/book-end activity exhausted its retries (or raised a
+            # non-retryable error such as a malformed resumed DTO) after begin_run
+            # already marked the job RUNNING. Only a ``success == False`` DTO path
+            # calls finalize on its own, so without this funnel the job-store record
+            # would hang in RUNNING while the workflow fails in Temporal. Mark it
+            # FAILED, then re-raise so Temporal still records the workflow failure.
+            # asyncio.CancelledError (workflow cancellation) subclasses BaseException
+            # and is intentionally NOT caught here, so cancellation propagates. If
+            # finalize itself fails, that error propagates instead — the workflow
+            # still fails; it is never silently swallowed.
+            await self._finalize(job_id, f"Build failed: {exc}")
+            raise
+
+    async def _run_pipeline(
+        self,
+        job_id: str,
+        project_name: str,
+        spec_path: str,
+        constraints: Dict[str, Any],
+        output_dir: Optional[str],
+    ) -> None:
+        """Run the per-phase pipeline: begin -> phases -> finalize.
+
+        Extracted so ``run`` can wrap the whole sequence in one failure funnel: an
+        activity that exhausts its retries (or raises a non-retryable error) is
+        turned into a terminal FAILED job by ``run`` instead of leaving the job
+        stuck in RUNNING. Phases that return a ``success == False`` DTO still
+        finalize and return here directly.
+        """
         resume = await workflow.execute_activity(
             _activities.begin_run_activity,
             args=[job_id],

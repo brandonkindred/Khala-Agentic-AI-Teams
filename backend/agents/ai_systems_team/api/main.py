@@ -385,11 +385,24 @@ def restart_build_job(job_id: str) -> AISystemJobResponse:
 @app.get(
     "/blueprints",
     summary="List generated blueprints",
-    description="List all generated AI system blueprints (in-memory).",
+    description="List generated AI system blueprints (in-memory cache plus completed jobs).",
 )
 def list_blueprints() -> Dict[str, List[str]]:
-    """List all generated blueprint project names."""
-    return {"blueprints": orchestrator.list_blueprints()}
+    """List all generated blueprint project names.
+
+    Unions the in-memory orchestrator cache (populated by thread-mode runs) with
+    completed jobs in the durable job store, so Temporal builds — which complete via
+    the per-phase workflow without touching the in-memory cache — are also listed.
+    """
+    names = set(orchestrator.list_blueprints())
+    for job in list_jobs():
+        if (
+            job.get("status") == JOB_STATUS_COMPLETED
+            and job.get("blueprint")
+            and job.get("project_name")
+        ):
+            names.add(job["project_name"])
+    return {"blueprints": sorted(names)}
 
 
 @app.get(
@@ -399,13 +412,29 @@ def list_blueprints() -> Dict[str, List[str]]:
     description="Get a previously generated blueprint by project name.",
 )
 def get_blueprint(project_name: str) -> AgentBlueprint:
-    """Get a blueprint by project name."""
+    """Get a blueprint by project name.
+
+    Prefers the in-memory orchestrator cache, then falls back to the durable job
+    store: Temporal builds finish in the per-phase workflow without populating the
+    cache, so the completed blueprint only lives on the job record (which also
+    survives a restart). The most recent completed job for the name wins.
+    """
     blueprint = orchestrator.get_blueprint(project_name)
+    if blueprint:
+        return blueprint
 
-    if not blueprint:
-        raise HTTPException(status_code=404, detail=f"Blueprint '{project_name}' not found")
+    match = None
+    for job in list_jobs():
+        if (
+            job.get("project_name") == project_name
+            and job.get("status") == JOB_STATUS_COMPLETED
+            and job.get("blueprint")
+        ):
+            match = job
+    if match is not None:
+        return AgentBlueprint(**match["blueprint"])
 
-    return blueprint
+    raise HTTPException(status_code=404, detail=f"Blueprint '{project_name}' not found")
 
 
 @app.get("/health", summary="Health check")

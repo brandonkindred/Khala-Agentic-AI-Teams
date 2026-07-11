@@ -600,12 +600,14 @@ def test_start_worker_thread_spawns_thread(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_workflow(monkeypatch, results, patched=True):
+def _run_workflow(monkeypatch, results, patched=True, raise_on=None):
     """Drive AISystemsBuildWorkflow.run with a stubbed execute_activity.
 
     ``results`` maps activity function name -> DTO returned by that activity;
-    unspecified activities default to ``{"success": True}``. Returns the ordered
-    activity names scheduled and the ``error`` passed to finalize (if any).
+    unspecified activities default to ``{"success": True}``. ``raise_on`` names an
+    activity that should raise (simulating exhausted Temporal retries); the run is
+    then asserted to re-raise. Returns the ordered activity names scheduled and the
+    ``error`` passed to finalize (if any).
     """
     from ai_systems_team.temporal import workflows as wf
 
@@ -615,13 +617,21 @@ def _run_workflow(monkeypatch, results, patched=True):
     async def fake_execute(activity, args=None, **kwargs):
         name = getattr(activity, "__name__", str(activity))
         calls.append(name)
+        if raise_on and name == raise_on:
+            raise RuntimeError(f"{name} boom")
         if name == "finalize_build_activity":
             captured["finalize_error"] = (args or [None, None])[1]
         return results.get(name, {"success": True})
 
     monkeypatch.setattr(wf.workflow, "execute_activity", fake_execute)
     monkeypatch.setattr(wf.workflow, "patched", lambda _id: patched)
-    asyncio.run(wf.AISystemsBuildWorkflow().run("j1", "proj", "/spec.md", {}, "/out"))
+
+    coro = wf.AISystemsBuildWorkflow().run("j1", "proj", "/spec.md", {}, "/out")
+    if raise_on:
+        with pytest.raises(RuntimeError, match=f"{raise_on} boom"):
+            asyncio.run(coro)
+    else:
+        asyncio.run(coro)
     return calls, captured
 
 
@@ -711,6 +721,33 @@ def test_workflow_unpatched_replay_runs_legacy_monolith(monkeypatch) -> None:
     """Pre-decomposition histories replay the single-activity path deterministically."""
     calls, _ = _run_workflow(monkeypatch, {"run_build_activity": None}, patched=False)
     assert calls == ["run_build_activity"]
+
+
+def test_workflow_finalizes_when_phase_activity_raises(monkeypatch) -> None:
+    """An activity that exhausts its retries (raises) is funneled to finalize-as-failed.
+
+    Without the funnel the exception would bubble out of run() and leave the job
+    stuck in RUNNING (only ``success == False`` DTOs finalize on their own).
+    """
+    calls, captured = _run_workflow(
+        monkeypatch, {"begin_run_activity": {}}, raise_on="architecture_activity"
+    )
+    # begin -> spec_intake -> architecture (raises) -> finalize (marks failed).
+    assert calls == [
+        "begin_run_activity",
+        "spec_intake_activity",
+        "architecture_activity",
+        "finalize_build_activity",
+    ]
+    assert captured["finalize_error"].startswith("Build failed:")
+    assert "architecture_activity boom" in captured["finalize_error"]
+
+
+def test_workflow_finalizes_when_begin_run_raises(monkeypatch) -> None:
+    """begin_run exhausting retries after marking the job running still finalizes."""
+    calls, captured = _run_workflow(monkeypatch, {}, raise_on="begin_run_activity")
+    assert calls == ["begin_run_activity", "finalize_build_activity"]
+    assert "Build failed:" in captured["finalize_error"]
 
 
 def test_finalize_retry_and_timeouts_configured() -> None:

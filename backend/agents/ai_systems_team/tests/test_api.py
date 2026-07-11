@@ -117,3 +117,46 @@ def test_start_build_returns_job_id():
 def test_get_blueprint_not_found():
     resp = client.get("/blueprints/nonexistent")
     assert resp.status_code == 404
+
+
+def test_get_blueprint_falls_back_to_job_store():
+    """A Temporal build (not in the in-memory cache) is served from the job store."""
+    jobs = [
+        {
+            "status": "completed",
+            "project_name": "temporal_proj",
+            "blueprint": {"project_name": "temporal_proj", "version": "1.0.0"},
+        }
+    ]
+    with patch("ai_systems_team.api.main.list_jobs", return_value=jobs):
+        resp = client.get("/blueprints/temporal_proj")
+    assert resp.status_code == 200
+    assert resp.json()["project_name"] == "temporal_proj"
+
+
+def test_get_blueprint_job_store_no_match_still_404():
+    """A completed job for a different project name doesn't satisfy the lookup."""
+    jobs = [
+        {"status": "completed", "project_name": "other", "blueprint": {"project_name": "other"}}
+    ]
+    with patch("ai_systems_team.api.main.list_jobs", return_value=jobs):
+        resp = client.get("/blueprints/temporal_proj_missing")
+    assert resp.status_code == 404
+
+
+def test_list_blueprints_includes_job_store_completed():
+    """/blueprints unions the in-memory cache with completed jobs in the job store."""
+    jobs = [
+        {
+            "status": "completed",
+            "project_name": "ts_proj",
+            "blueprint": {"project_name": "ts_proj"},
+        },
+        {"status": "running", "project_name": "not_done", "blueprint": None},
+    ]
+    with patch("ai_systems_team.api.main.list_jobs", return_value=jobs):
+        resp = client.get("/blueprints")
+    assert resp.status_code == 200
+    names = resp.json()["blueprints"]
+    assert "ts_proj" in names
+    assert "not_done" not in names
