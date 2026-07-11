@@ -362,6 +362,11 @@ class AccessibilityAuditOrchestrator:
             f"{retest_result.findings_still_open} still open."
         )
 
+        # Persist the retested state so a later report/retest request — possibly in a
+        # different process (the Temporal worker vs the API) or after a restart —
+        # reloads the updated findings instead of the stale pre-retest snapshot.
+        await self._persist_audit(result)
+
         return result
 
     def get_audit_status(self, audit_id: str) -> Dict[str, Any]:

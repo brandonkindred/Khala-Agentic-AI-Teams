@@ -14,6 +14,7 @@ from accessibility_audit_team.models import (
     IntakeResult,
     Phase,
     ReportPackagingResult,
+    RetestResult,
     VerificationResult,
     WCAGLevel,
 )
@@ -150,6 +151,36 @@ async def test_audit_timeout():
 
     assert result.success is False
     assert "timed out" in result.failure_reason
+
+
+# ---------------------------------------------------------------------------
+# Retest
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_run_retest_persists_updated_state(monkeypatch, sample_findings):
+    """run_retest saves the retested audit back to the store so a later
+    report/retest request (possibly cross-process, or after a restart) reloads
+    the updated findings instead of the stale pre-retest snapshot."""
+    orchestrator = AccessibilityAuditOrchestrator()
+    orchestrator._audits["audit_rt"] = AccessibilityAuditResult(
+        audit_id="audit_rt", final_findings=sample_findings
+    )
+    persist = AsyncMock()
+    monkeypatch.setattr(orchestrator, "_persist_audit", persist)
+
+    with patch(
+        "accessibility_audit_team.orchestrator.run_retest_phase",
+        new_callable=AsyncMock,
+        return_value=RetestResult(
+            success=True, findings_retested=3, findings_closed=1, findings_still_open=2
+        ),
+    ):
+        result = await orchestrator.run_retest("audit_rt", None)
+
+    persist.assert_awaited()
+    assert Phase.RETEST in result.completed_phases
 
 
 # ---------------------------------------------------------------------------

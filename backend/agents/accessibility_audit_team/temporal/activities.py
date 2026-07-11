@@ -251,11 +251,15 @@ async def retest_activity(job_id: str, audit_id: str, finding_ids: List[str]) ->
     Postconditions:
         - ``run_retest_job`` owns the job-store lifecycle (running -> terminal) and
           propagates infrastructure failures so Temporal retries. Returns a status
-          dict once the retest reaches a terminal state.
+          dict once the retest reaches a terminal state. Runs under a background
+          heartbeat so a genuinely long retest keeps the activity alive within the
+          workflow's ``heartbeat_timeout`` instead of being timed out mid-run.
     """
     from accessibility_audit_team.audit_execution import run_retest_job
+    from shared_concurrency import BackgroundHeartbeat
 
-    await run_retest_job(job_id, audit_id, finding_ids)
+    with BackgroundHeartbeat(activity.heartbeat, _HEARTBEAT_INTERVAL_S, copy_context=True):
+        await run_retest_job(job_id, audit_id, finding_ids)
     return {"status": "done", "audit_id": audit_id}
 
 
