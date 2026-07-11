@@ -86,7 +86,7 @@ def test_export_contract():
     )
 
     assert WORKFLOWS == [PaAssistantWorkflow]
-    assert TASK_QUEUE == "personal_assistant-queue"
+    assert TASK_QUEUE == "personal-assistant"
     assert WORKFLOW_ID_PREFIX_ASSISTANT == "pa-assistant-"
 
     expected_activities = {
@@ -159,9 +159,11 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
     }
 
 
-def test_registered_in_shared_registry():
-    """The team is wired into the shared worker registry so
-    ``start_all_team_workers`` can host it too."""
+def test_not_registered_in_shared_registry():
+    """PA is intentionally NOT in the shared registry: ``start_all_team_workers``
+    polls ``f"{team}-queue"`` (personal_assistant-queue), which differs from PA's
+    fixed ``personal-assistant`` queue and would split-brain the worker. PA boots
+    via its own docker-compose hook on the correct queue instead."""
     from shared_temporal.teams_registry import TEAM_TEMPORAL_MODULES
 
-    assert TEAM_TEMPORAL_MODULES["personal_assistant"] == "personal_assistant_team.temporal"
+    assert "personal_assistant" not in TEAM_TEMPORAL_MODULES

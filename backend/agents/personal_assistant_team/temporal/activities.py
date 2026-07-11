@@ -72,10 +72,16 @@ def _run_specialist(
     Postconditions:
         - Returns ``AgentAction.model_dump()`` for the handler's result, or the
           ``{"cancelled": True}`` sentinel if the job was cancelled first.
+        - A non-``LLMNotConfiguredError`` handler exception is caught and turned
+          into an ``orchestrator:error`` ``AgentAction`` (success=False) so the
+          job still completes with a degraded response — matching the thread
+          path (``handle_request``) instead of failing the whole job.
         - Advances the job to progress 30 with ``status_text`` when it runs.
     """
+    from llm_service import LLMNotConfiguredError
+
     from ..core import get_orchestrator
-    from ..orchestrator.models import Intent, OrchestratorRequest
+    from ..orchestrator.models import AgentAction, Intent, OrchestratorRequest
     from ..shared.pa_job_store import is_job_cancelled, update_job
 
     if is_job_cancelled(job_id):
@@ -84,7 +90,20 @@ def _run_specialist(
     orchestrator = get_orchestrator()
     request = OrchestratorRequest(user_id=user_id, message=message, context=context or {})
     handler = getattr(orchestrator, method_name)
-    action = handler(request, Intent(**intent))
+    try:
+        action = handler(request, Intent(**intent))
+    except LLMNotConfiguredError:
+        # A missing provider is a configuration failure: fail the run so the UI
+        # routes the operator to /llm-config (same as handle_request).
+        raise
+    except Exception as e:
+        # A specialist backend hiccup is handled exactly as the thread path's
+        # handle_request handles it — record an error action and let the job
+        # continue to a degraded response rather than failing it outright.
+        logger.error("Specialist %s failed: %s", method_name, e)
+        action = AgentAction(
+            agent="orchestrator", action="error", result={"error": str(e)}, success=False
+        )
     return action.model_dump()
 
 
@@ -262,21 +281,29 @@ def handle_general_activity(
 
 
 @activity.defn(name="pa_check_profile_updates")
-def check_profile_updates_activity(job_id: str, user_id: str, message: str) -> List[Dict[str, Any]]:
+def check_profile_updates_activity(
+    job_id: str, user_id: str, message: str
+) -> Optional[List[Dict[str, Any]]]:
     """Extract and apply high-confidence profile preferences from the message.
 
     Preconditions:
         - ``job_id`` refers to a job already created in the PA job store.
 
     Postconditions:
-        - Applies any high-confidence preferences (side effect on the profile
-          store) and returns the list of applied preference dicts.
-        - Advances the job to progress 70.
+        - Returns ``None`` (a cancellation signal the workflow short-circuits on)
+          WITHOUT running the extraction LLM call, applying preferences, or
+          touching progress, when the job was cancelled first.
+        - Otherwise applies any high-confidence preferences (side effect on the
+          profile store), returns the applied list, and advances progress to 70.
     """
     from ..core import get_orchestrator
     from ..orchestrator.models import OrchestratorRequest
-    from ..shared.pa_job_store import update_job
+    from ..shared.pa_job_store import is_job_cancelled, update_job
 
+    # Honor a cancellation that landed after the specialist step: don't run the
+    # (billed) extraction LLM call or mutate the profile store.
+    if is_job_cancelled(job_id):
+        return None
     update_job(job_id, status_text="Checking for profile updates...", progress=70)
     request = OrchestratorRequest(user_id=user_id, message=message, context={})
     return get_orchestrator()._check_for_profile_updates(request)
@@ -298,14 +325,19 @@ def generate_response_activity(
           ``AgentAction`` dicts; ``results`` maps an intent key to its result.
 
     Postconditions:
-        - Returns ``OrchestratorResponse.model_dump()``.
-        - Advances the job to progress 85.
+        - Returns the ``{"cancelled": True}`` sentinel (the workflow then skips
+          finalize) WITHOUT running the response LLM call, when the job was
+          cancelled first.
+        - Otherwise returns ``OrchestratorResponse.model_dump()`` and advances
+          the job to progress 85.
         - Re-raises ``LLMNotConfiguredError`` (missing provider fails the run).
     """
     from ..core import get_orchestrator
     from ..orchestrator.models import AgentAction, Intent, OrchestratorRequest
-    from ..shared.pa_job_store import update_job
+    from ..shared.pa_job_store import is_job_cancelled, update_job
 
+    if is_job_cancelled(job_id):
+        return dict(_CANCELLED)
     update_job(job_id, status_text="Generating response...", progress=85)
     request = OrchestratorRequest(user_id=user_id, message=message, context={})
     action_objs = [AgentAction(**a) for a in actions]

@@ -163,13 +163,15 @@ class PaAssistantWorkflow:
             # This step makes an LLM call AND mutates the profile store, so it is
             # non-idempotent — cap it at one attempt like the other LLM steps
             # rather than retrying (which would re-bill the LLM and re-apply
-            # preferences).
-            await workflow.execute_activity(
+            # preferences). It returns None if the job was cancelled meanwhile.
+            profile_result = await workflow.execute_activity(
                 _activities.check_profile_updates_activity,
                 args=[job_id, user_id, message],
                 start_to_close_timeout=STEP_TIMEOUT,
                 retry_policy=LLM_RETRY,
             )
+            if profile_result is None:
+                return {"cancelled": True}
 
             response = await workflow.execute_activity(
                 _activities.generate_response_activity,
@@ -177,6 +179,8 @@ class PaAssistantWorkflow:
                 start_to_close_timeout=STEP_TIMEOUT,
                 retry_policy=LLM_RETRY,
             )
+            if response.get("cancelled"):
+                return response
 
             await workflow.execute_activity(
                 _activities.finalize_success_activity,

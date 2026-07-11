@@ -21,7 +21,7 @@ def test_start_assistant_workflow_delegates_to_shared_bridge(monkeypatch):
     assert captured["workflow_run"] is PaAssistantWorkflow.run
     assert captured["args"] == ("job-42", "user-9", "check my inbox", {"k": "v"})
     assert captured["workflow_id"] == "pa-assistant-job-42"
-    assert captured["task_queue"] == "personal_assistant-queue"
+    assert captured["task_queue"] == "personal-assistant"
 
 
 def test_start_assistant_workflow_defaults_context_to_empty_dict(monkeypatch):

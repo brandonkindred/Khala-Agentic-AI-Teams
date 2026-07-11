@@ -149,6 +149,56 @@ def test_cancelled_at_specialist(monkeypatch):
     assert calls == [acts.classify_intent_activity, acts.handle_email_activity]
 
 
+def test_cancelled_at_profile_updates(monkeypatch):
+    # check_profile_updates returns None (cancelled) -> workflow stops before
+    # generating a response or finalizing.
+    calls: list = []
+    _script(
+        monkeypatch,
+        {
+            acts.classify_intent_activity: {"primary": "email", "confidence": 1.0, "entities": {}},
+            acts.handle_email_activity: {"agent": "email", "action": "r", "result": {}},
+            acts.check_profile_updates_activity: None,
+        },
+        calls=calls,
+    )
+
+    result = _run()
+
+    assert result == {"cancelled": True}
+    assert calls == [
+        acts.classify_intent_activity,
+        acts.handle_email_activity,
+        acts.check_profile_updates_activity,
+    ]
+
+
+def test_cancelled_at_generate_response(monkeypatch):
+    # generate_response returns the cancelled sentinel -> workflow returns it and
+    # skips finalize.
+    calls: list = []
+    _script(
+        monkeypatch,
+        {
+            acts.classify_intent_activity: {"primary": "email", "confidence": 1.0, "entities": {}},
+            acts.handle_email_activity: {"agent": "email", "action": "r", "result": {}},
+            acts.check_profile_updates_activity: [],
+            acts.generate_response_activity: {"cancelled": True},
+        },
+        calls=calls,
+    )
+
+    result = _run()
+
+    assert result == {"cancelled": True}
+    assert calls == [
+        acts.classify_intent_activity,
+        acts.handle_email_activity,
+        acts.check_profile_updates_activity,
+        acts.generate_response_activity,
+    ]
+
+
 def test_failure_marks_job_and_reraises(monkeypatch):
     class _FakeActivityError(Exception):
         cause = None

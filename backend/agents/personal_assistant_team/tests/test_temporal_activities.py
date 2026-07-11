@@ -148,6 +148,38 @@ def test_specialist_activity_cancelled_short_circuits(orchestrator, job_client):
     assert job_client.get_job("job-1")["status"] == "cancelled"
 
 
+def test_specialist_activity_backend_error_becomes_error_action(job_client, monkeypatch):
+    # A non-LLM specialist failure yields a degraded orchestrator:error action so
+    # the job still completes, matching the thread path — not a failed job.
+    class _Boom:
+        def _handle_email(self, request, intent):
+            raise RuntimeError("calendar backend down")
+
+    monkeypatch.setattr("personal_assistant_team.core.get_orchestrator", lambda: _Boom())
+    _new_job(job_client)
+
+    result = acts.handle_email_activity("job-1", "u1", "read inbox", {}, _intent("email"))
+
+    assert result["agent"] == "orchestrator"
+    assert result["action"] == "error"
+    assert result["success"] is False
+    assert "calendar backend down" in result["result"]["error"]
+
+
+def test_specialist_activity_reraises_llm_not_configured(job_client, monkeypatch):
+    from llm_service import LLMNotConfiguredError
+
+    class _NoLLM:
+        def _handle_email(self, request, intent):
+            raise LLMNotConfiguredError("no provider configured")
+
+    monkeypatch.setattr("personal_assistant_team.core.get_orchestrator", lambda: _NoLLM())
+    _new_job(job_client)
+
+    with pytest.raises(LLMNotConfiguredError):
+        acts.handle_email_activity("job-1", "u1", "read inbox", {}, _intent("email"))
+
+
 # --------------------------------------------------------------------------- #
 # profile-updates / response / finalize / fail
 # --------------------------------------------------------------------------- #
@@ -161,6 +193,15 @@ def test_check_profile_updates_activity(orchestrator, job_client):
     assert job_client.get_job("job-1")["progress"] == 70
 
 
+def test_check_profile_updates_activity_cancelled(orchestrator, job_client):
+    # A cancel after the specialist step must skip the extraction LLM call and
+    # the profile mutation, and signal cancellation to the workflow (None).
+    _new_job(job_client, status="cancelled")
+    assert acts.check_profile_updates_activity("job-1", "u1", "I love oat milk") is None
+    assert orchestrator.calls == []
+    assert job_client.get_job("job-1").get("progress") != 70
+
+
 def test_generate_response_activity(orchestrator, job_client):
     _new_job(job_client)
     action = AgentAction(agent="email", action="read", result={"ok": True}).model_dump()
@@ -172,6 +213,17 @@ def test_generate_response_activity(orchestrator, job_client):
     assert result["actions_taken"] == ["email:read"]
     assert result["follow_up_suggestions"] == ["what next?"]
     assert job_client.get_job("job-1")["progress"] == 85
+
+
+def test_generate_response_activity_cancelled(orchestrator, job_client):
+    # A cancel before response generation skips the response LLM call and signals
+    # cancellation so the workflow skips finalize.
+    _new_job(job_client, status="cancelled")
+    result = acts.generate_response_activity(
+        "job-1", "u1", "read inbox", _intent("email"), [], {}
+    )
+    assert result == {"cancelled": True}
+    assert orchestrator.calls == []
 
 
 def test_finalize_success_activity(job_client, monkeypatch):
