@@ -69,10 +69,11 @@ class Soc2AuditWorkflow:
               workflow itself fails.
         """
         try:
-            # load_repo_activity returns only the resolved repo *path* (a short
-            # string), not the loaded context — the uncapped code corpus is
-            # re-loaded inside each audit activity so it never enters workflow
-            # history. Every downstream activity gets that path.
+            # load_repo_activity loads the repo once, persists it to a snapshot
+            # keyed by job_id, and returns only the resolved repo *path* (a short
+            # string) — the uncapped code corpus never enters workflow history.
+            # Each audit reads that same snapshot by job_id (consistent state);
+            # the resolved path is only used for the report's scope label.
             resolved_path = await workflow.execute_activity(
                 _activities.load_repo_activity,
                 args=[job_id, repo_path],
@@ -84,7 +85,7 @@ class Soc2AuditWorkflow:
                 *[
                     workflow.execute_activity(
                         _activities.audit_criterion_activity,
-                        args=[job_id, criterion, resolved_path],
+                        args=[job_id, criterion],
                         start_to_close_timeout=AUDIT_TIMEOUT,
                         retry_policy=LLM_RETRY_POLICY,
                     )
