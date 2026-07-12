@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import LLMNotConfiguredError
@@ -58,14 +59,30 @@ class PersonalAssistantOrchestrator:
         self.doc_generator = DocGeneratorAgent(llm, self.profile_store)
 
         self._user_profile_agents: Dict[str, UserProfileAgent] = {}
+        # Guards the check-then-set below. This orchestrator instance is shared
+        # (via core.get_orchestrator) between the FastAPI thread-mode dispatch
+        # pool and the Temporal activity executor's own ThreadPoolExecutor, so
+        # two concurrent callers for the same user_id can race on this dict
+        # without a lock.
+        self._profile_agents_lock = threading.Lock()
 
     def _get_profile_agent(self, user_id: str) -> UserProfileAgent:
-        """Get or create a UserProfileAgent for a user."""
-        if user_id not in self._user_profile_agents:
-            self._user_profile_agents[user_id] = UserProfileAgent(
-                self.llm, user_id, self.profile_store
-            )
-        return self._user_profile_agents[user_id]
+        """Get or create a UserProfileAgent for a user.
+
+        Preconditions:
+            - ``user_id`` is a non-empty string.
+
+        Postconditions:
+            - Returns the same cached ``UserProfileAgent`` for a given
+              ``user_id`` across all callers (thread-mode and Temporal
+              activities), constructing it at most once.
+        """
+        with self._profile_agents_lock:
+            if user_id not in self._user_profile_agents:
+                self._user_profile_agents[user_id] = UserProfileAgent(
+                    self.llm, user_id, self.profile_store
+                )
+            return self._user_profile_agents[user_id]
 
     def classify_intent(self, message: str) -> Intent:
         """

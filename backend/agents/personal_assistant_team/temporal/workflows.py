@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import CancelledError
 
 with workflow.unsafe.imports_passed_through():
     from personal_assistant_team.temporal import activities as _activities
@@ -34,6 +34,13 @@ with workflow.unsafe.imports_passed_through():
 # no marker in their history, so ``patched`` returns False for them and they
 # replay the legacy branch deterministically; new executions run the decomposed
 # flow. Never rename this id.
+#
+# Removal criterion: once no open workflow histories predate the decomposition
+# deploy (i.e. every in-flight pre-decomposition run has drained), replace this
+# whole `if not workflow.patched(...)` block with
+# ``workflow.deprecate_patch("pa-decomposed-activities")`` for one release,
+# then delete the marker entirely along with ``run_assistant_activity`` and
+# the ``LEGACY_TIMEOUT``/``LEGACY_RETRY`` constants below.
 _DECOMPOSED_PATCH = "pa-decomposed-activities"
 
 # Per-step timeout. Each step is at most one LLM round-trip; 30 min is generous.
@@ -79,17 +86,22 @@ _SPECIALIST_ACTIVITIES = {
 }
 
 
-def _error_message(exc: ActivityError) -> str:
-    """Best-effort human-readable message from a failed activity.
+def _error_message(exc: BaseException) -> str:
+    """Best-effort human-readable message from a failed workflow step.
 
     Preconditions:
-        - ``exc`` is a Temporal ``ActivityError`` raised by ``execute_activity``.
+        - ``exc`` is the exception caught by ``PaAssistantWorkflow.run``'s
+          top-level handler: typically a Temporal ``ActivityError`` (which
+          carries a ``.cause`` naming the underlying activity failure), but
+          may be any other exception raised directly in workflow-body code.
 
     Postconditions:
-        - Returns ``str(exc.cause)`` when a cause is present (the underlying
-          failure), otherwise ``str(exc)``. Never raises.
+        - Returns ``str(exc.cause)`` when ``exc`` exposes a non-``None``
+          ``cause`` attribute (the ``ActivityError`` case), otherwise
+          ``str(exc)``. Never raises.
     """
-    return str(exc.cause) if exc.cause is not None else str(exc)
+    cause = getattr(exc, "cause", None)
+    return str(cause) if cause is not None else str(exc)
 
 
 @workflow.defn(name="PaAssistantWorkflow")
@@ -103,7 +115,7 @@ class PaAssistantWorkflow:
         user_id: str,
         message: str,
         context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    ) -> Optional[Dict[str, Any]]:
         """Run one assistant job end to end.
 
         Preconditions:
@@ -119,6 +131,9 @@ class PaAssistantWorkflow:
               without marking the job failed (the cancel guard already set the
               row to CANCELLED).
             - On a genuine activity failure, marks the job FAILED and re-raises.
+            - On the legacy-drain branch (see ``_DECOMPOSED_PATCH``), returns
+              ``None`` — ``run_assistant_activity`` has no return payload,
+              matching the pre-decomposition workflow's return value exactly.
         """
         context = context or {}
 
@@ -156,17 +171,35 @@ class PaAssistantWorkflow:
             if action.get("cancelled"):
                 return action
 
-            results = {result_key: action.get("result", {})}
+            if action.get("agent") == "orchestrator" and action.get("action") == "error":
+                # _run_specialist caught a non-LLM handler exception and
+                # synthesized a degraded action. Thread mode's handle_request
+                # never populates `results` for the equivalent exception path
+                # (the assignment lives inside the try, after the now-unreached
+                # success line) — match that here rather than feeding an error
+                # dict into the response-generation prompt under the
+                # specialist's key.
+                results: Dict[str, Any] = {}
+            else:
+                results = {result_key: action.get("result", {})}
 
-            # Apply high-confidence profile preferences before generating the
-            # response, so the response reflects them (matches the thread path).
-            # This step makes an LLM call AND mutates the profile store, so it is
-            # non-idempotent — cap it at one attempt like the other LLM steps
-            # rather than retrying (which would re-bill the LLM and re-apply
-            # preferences). It returns None if the job was cancelled meanwhile.
+            # Apply high-confidence profile preferences. This step makes an LLM
+            # call AND mutates the profile store, so it is non-idempotent — cap
+            # it at one attempt like the other LLM steps rather than retrying
+            # (which would re-bill the LLM and re-apply preferences). It
+            # returns None if the job was cancelled meanwhile.
+            #
+            # Kept sequential (not run concurrently with the specialist step
+            # above) even though neither activity's input depends on the
+            # other's output: both activities write their own progress
+            # percentage via update_job, and running them concurrently would
+            # make those writes race, letting the job's reported progress
+            # visibly jump backwards depending on which activity's write lands
+            # last. The extra Temporal round-trip this costs is bounded and
+            # acceptable; a confusing progress readout is not worth avoiding it.
             profile_result = await workflow.execute_activity(
                 _activities.check_profile_updates_activity,
-                args=[job_id, user_id, message],
+                args=[job_id, user_id, message, context],
                 start_to_close_timeout=STEP_TIMEOUT,
                 retry_policy=LLM_RETRY,
             )
@@ -175,7 +208,7 @@ class PaAssistantWorkflow:
 
             response = await workflow.execute_activity(
                 _activities.generate_response_activity,
-                args=[job_id, user_id, message, intent, [action], results],
+                args=[job_id, user_id, message, intent, [action], results, profile_result, context],
                 start_to_close_timeout=STEP_TIMEOUT,
                 retry_policy=LLM_RETRY,
             )
@@ -190,10 +223,20 @@ class PaAssistantWorkflow:
             )
             return response
 
-        except ActivityError as exc:
-            # A missing LLM provider or any specialist error lands here: record
-            # the failure on the job row, then re-raise so the workflow itself
-            # fails (rather than silently "completing").
+        except CancelledError:
+            # Native Temporal-level workflow cancellation (distinct from the PA
+            # job-store's own is_job_cancelled flag, which activities poll
+            # directly) must propagate and actually cancel the workflow, not be
+            # treated as an application failure.
+            raise
+        except Exception as exc:
+            # A missing LLM provider, a specialist error, or any other failure
+            # inside the decomposed flow (including a genuine workflow-body
+            # bug, not just an ActivityError) lands here: record the failure on
+            # the job row, then re-raise so the workflow itself fails (rather
+            # than silently "completing", or — for a non-ActivityError bug —
+            # leaving the job stuck at its last RUNNING state forever because
+            # fail_job_activity was never called).
             await workflow.execute_activity(
                 _activities.fail_job_activity,
                 args=[job_id, _error_message(exc)],

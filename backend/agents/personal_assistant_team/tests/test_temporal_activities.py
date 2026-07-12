@@ -31,11 +31,11 @@ class _FakeOrchestrator:
         return Intent(primary="email", confidence=0.9, entities={"x": 1})
 
     def _check_for_profile_updates(self, request) -> list:
-        self.calls.append(("profile_updates", request.user_id))
+        self.calls.append(("profile_updates", request.user_id, request.context))
         return [{"pref": "coffee"}]
 
     def _generate_response(self, request, intent, actions, results) -> OrchestratorResponse:
-        self.calls.append(("generate", request.user_id, intent.primary, results))
+        self.calls.append(("generate", request.user_id, intent.primary, results, request.context))
         return OrchestratorResponse(
             message="all done",
             intent=intent,
@@ -180,6 +180,22 @@ def test_specialist_activity_reraises_llm_not_configured(job_client, monkeypatch
         acts.handle_email_activity("job-1", "u1", "read inbox", {}, _intent("email"))
 
 
+def test_specialist_activity_malformed_intent_raises_loudly(orchestrator, job_client):
+    # Intent(**intent) reconstruction is a contract check, not specialist work:
+    # a malformed intent dict (missing the required `primary` field) must fail
+    # loudly, NOT be caught and downgraded into a degraded orchestrator:error
+    # action the way a genuine handler exception is.
+    import pydantic
+
+    _new_job(job_client)
+
+    with pytest.raises(pydantic.ValidationError):
+        acts.handle_email_activity("job-1", "u1", "read inbox", {}, {"confidence": 0.9})
+
+    # The handler itself must never have been invoked.
+    assert orchestrator.calls == []
+
+
 # --------------------------------------------------------------------------- #
 # profile-updates / response / finalize / fail
 # --------------------------------------------------------------------------- #
@@ -187,10 +203,21 @@ def test_specialist_activity_reraises_llm_not_configured(job_client, monkeypatch
 
 def test_check_profile_updates_activity(orchestrator, job_client):
     _new_job(job_client)
-    result = acts.check_profile_updates_activity("job-1", "u1", "I love oat milk")
+    result = acts.check_profile_updates_activity("job-1", "u1", "I love oat milk", {"tz": "UTC"})
 
     assert result == [{"pref": "coffee"}]
     assert job_client.get_job("job-1")["progress"] == 70
+    # The caller-supplied context is threaded through to the orchestrator
+    # request, matching every other activity in this module (not hardcoded
+    # to {}).
+    assert ("profile_updates", "u1", {"tz": "UTC"}) in orchestrator.calls
+
+
+def test_check_profile_updates_activity_defaults_context_to_empty_dict(orchestrator, job_client):
+    _new_job(job_client)
+    acts.check_profile_updates_activity("job-1", "u1", "I love oat milk")
+
+    assert ("profile_updates", "u1", {}) in orchestrator.calls
 
 
 def test_check_profile_updates_activity_cancelled(orchestrator, job_client):
@@ -206,22 +233,49 @@ def test_generate_response_activity(orchestrator, job_client):
     _new_job(job_client)
     action = AgentAction(agent="email", action="read", result={"ok": True}).model_dump()
     result = acts.generate_response_activity(
-        "job-1", "u1", "read inbox", _intent("email"), [action], {"email": {"ok": True}}
+        "job-1",
+        "u1",
+        "read inbox",
+        _intent("email"),
+        [action],
+        {"email": {"ok": True}},
+        [{"pref": "coffee"}],
+        {"tz": "UTC"},
     )
 
     assert result["message"] == "all done"
     assert result["actions_taken"] == ["email:read"]
     assert result["follow_up_suggestions"] == ["what next?"]
-    assert job_client.get_job("job-1")["progress"] == 85
+    # profile_updates from the (concurrent-in-time, sequential-in-code)
+    # profile-update step is merged into the response — matches the thread
+    # path's `response.profile_updates = profile_updates` assignment.
+    assert result["profile_updates"] == [{"pref": "coffee"}]
+    assert ("generate", "u1", "email", {"email": {"ok": True}}, {"tz": "UTC"}) in orchestrator.calls
+    job = job_client.get_job("job-1")
+    # The intermediate "Request completed" write (matching the thread path's
+    # _update call right after _generate_response returns) lands at the end
+    # of this activity, ahead of finalize_success_activity's final write.
+    assert job["progress"] == 100
+    assert job["status_text"] == "Request completed"
+
+
+def test_generate_response_activity_defaults_profile_updates_to_empty_list(
+    orchestrator, job_client
+):
+    _new_job(job_client)
+    action = AgentAction(agent="email", action="read", result={"ok": True}).model_dump()
+    result = acts.generate_response_activity(
+        "job-1", "u1", "read inbox", _intent("email"), [action], {"email": {"ok": True}}
+    )
+
+    assert result["profile_updates"] == []
 
 
 def test_generate_response_activity_cancelled(orchestrator, job_client):
     # A cancel before response generation skips the response LLM call and signals
     # cancellation so the workflow skips finalize.
     _new_job(job_client, status="cancelled")
-    result = acts.generate_response_activity(
-        "job-1", "u1", "read inbox", _intent("email"), [], {}
-    )
+    result = acts.generate_response_activity("job-1", "u1", "read inbox", _intent("email"), [], {})
     assert result == {"cancelled": True}
     assert orchestrator.calls == []
 

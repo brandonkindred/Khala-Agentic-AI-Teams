@@ -16,12 +16,15 @@ them during workflow registration — a top-level ``os.getenv`` here would trip 
 sandbox. (Dropping the ``TEMPORAL_TASK_QUEUE_PA`` override is safe: docker-compose
 never set it, so the effective queue is unchanged.)
 
-The team is intentionally NOT registered in
-``shared_temporal.teams_registry.TEAM_TEMPORAL_MODULES``: its
-``start_all_team_workers`` would poll ``f"{team}-queue"`` = ``personal_assistant-queue``,
-a DIFFERENT queue from this one, causing a split-brain. PA boots its worker via
-its own docker-compose hook (``TEAM_TEMPORAL_WORKER_MODULE`` /
-``TEAM_TEMPORAL_WORKER_FUNC``) on this queue instead.
+The team IS registered in ``shared_temporal.teams_registry.TEAM_TEMPORAL_MODULES``:
+``start_all_team_workers`` reads this module's own ``TASK_QUEUE`` export (falling
+back to ``f"{team}-queue"`` only when a team doesn't define one), so it correctly
+polls ``"personal-assistant"`` rather than deriving a mismatched queue name. PA's
+primary boot path remains its own docker-compose hook
+(``TEAM_TEMPORAL_WORKER_MODULE`` / ``TEAM_TEMPORAL_WORKER_FUNC``); the registry
+entry lets ``start_all_team_workers`` also host PA's worker (e.g. in a
+consolidated process) on the SAME queue, safely, since ``start_team_worker`` is
+idempotent per team name.
 """
 
 TASK_QUEUE = "personal-assistant"

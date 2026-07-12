@@ -159,11 +159,33 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
     }
 
 
-def test_not_registered_in_shared_registry():
-    """PA is intentionally NOT in the shared registry: ``start_all_team_workers``
-    polls ``f"{team}-queue"`` (personal_assistant-queue), which differs from PA's
-    fixed ``personal-assistant`` queue and would split-brain the worker. PA boots
-    via its own docker-compose hook on the correct queue instead."""
+def test_registered_in_shared_registry():
+    """PA is registered in the shared registry. ``start_all_team_workers``
+    reads each team's own ``TASK_QUEUE`` export (falling back to
+    ``f"{team}-queue"`` only when absent), so it correctly derives PA's fixed
+    ``personal-assistant`` queue instead of a mismatched ``personal_assistant-queue``
+    — no split-brain risk. PA's primary boot path remains its own
+    docker-compose hook; this registry entry just makes ``start_all_team_workers``
+    safe to also call for PA (idempotent per team name)."""
     from shared_temporal.teams_registry import TEAM_TEMPORAL_MODULES
 
-    assert "personal_assistant" not in TEAM_TEMPORAL_MODULES
+    assert TEAM_TEMPORAL_MODULES["personal_assistant"] == "personal_assistant_team.temporal"
+
+
+def test_shared_registry_derives_pa_task_queue_from_module_export(monkeypatch):
+    """``start_all_team_workers`` must use PA's own ``TASK_QUEUE`` ("personal-assistant"),
+    not the generic ``f"{team}-queue"`` convention, or the worker it starts would poll
+    a queue nothing dispatches to."""
+    from shared_temporal import teams_registry
+
+    captured: dict = {}
+
+    def _fake_start(team, workflows, activities, *, task_queue):
+        captured[team] = task_queue
+        return True
+
+    monkeypatch.setattr(teams_registry, "start_team_worker", _fake_start)
+
+    teams_registry.start_all_team_workers(only=["personal_assistant"])
+
+    assert captured["personal_assistant"] == "personal-assistant"

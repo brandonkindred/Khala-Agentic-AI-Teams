@@ -77,12 +77,45 @@ def test_happy_path_email(monkeypatch):
         acts.generate_response_activity,
         acts.finalize_success_activity,
     ]
-    # The specialist result is threaded into response generation under its key.
+    # The specialist result is threaded into response generation under its key,
+    # and the profile-update result + context are threaded in too.
     gen_args = arg_log[acts.generate_response_activity]
     assert gen_args[4] == [
         {"agent": "email", "action": "read", "result": {"n": 1}, "success": True}
     ]
     assert gen_args[5] == {"email": {"n": 1}}
+    assert gen_args[6] == [{"pref": "x"}]
+    assert gen_args[7] == {}
+
+
+def test_specialist_error_action_leaves_results_empty(monkeypatch):
+    # When the specialist activity's own try/except caught a non-LLM handler
+    # exception and returned a degraded orchestrator:error action, `results`
+    # must NOT be populated with that error under the specialist's key —
+    # matching thread-mode's handle_request, which never assigns
+    # results[intent.primary] on the equivalent exception path.
+    arg_log: dict = {}
+    _script(
+        monkeypatch,
+        {
+            acts.classify_intent_activity: {"primary": "email", "confidence": 0.9, "entities": {}},
+            acts.handle_email_activity: {
+                "agent": "orchestrator",
+                "action": "error",
+                "result": {"error": "backend down"},
+                "success": False,
+            },
+            acts.check_profile_updates_activity: [],
+            acts.generate_response_activity: {"message": "ok"},
+            acts.finalize_success_activity: None,
+        },
+        arg_log=arg_log,
+    )
+
+    _run()
+
+    gen_args = arg_log[acts.generate_response_activity]
+    assert gen_args[5] == {}
 
 
 _BRANCHES = [
@@ -200,16 +233,13 @@ def test_cancelled_at_generate_response(monkeypatch):
 
 
 def test_failure_marks_job_and_reraises(monkeypatch):
-    class _FakeActivityError(Exception):
-        cause = None
-
-    # Make the workflow's ``except ActivityError`` catch our fake failure.
-    monkeypatch.setattr(wf, "ActivityError", _FakeActivityError)
-
+    # The broadened `except Exception` catches any workflow-step failure, not
+    # just a Temporal ActivityError — including a plain bug in workflow-body
+    # code, since ActivityError itself is just an Exception subclass.
     calls: list = []
 
     def _raise(_args):
-        raise _FakeActivityError("classify blew up")
+        raise RuntimeError("classify blew up")
 
     _script(
         monkeypatch,
@@ -220,10 +250,32 @@ def test_failure_marks_job_and_reraises(monkeypatch):
         calls=calls,
     )
 
-    with pytest.raises(_FakeActivityError):
+    with pytest.raises(RuntimeError, match="classify blew up"):
         _run()
 
     assert calls == [acts.classify_intent_activity, acts.fail_job_activity]
+
+
+def test_native_cancellation_propagates_without_failing_job(monkeypatch):
+    # Native Temporal-level workflow cancellation (temporalio's CancelledError,
+    # which — unlike asyncio.CancelledError — subclasses Exception) must
+    # propagate untouched: it is NOT an application failure, so
+    # fail_job_activity must never be called for it.
+    calls: list = []
+
+    def _raise(_args):
+        raise wf.CancelledError("workflow cancelled")
+
+    _script(
+        monkeypatch,
+        {acts.classify_intent_activity: _raise},
+        calls=calls,
+    )
+
+    with pytest.raises(wf.CancelledError):
+        _run()
+
+    assert calls == [acts.classify_intent_activity]
 
 
 def test_legacy_unpatched_execution_runs_single_activity(monkeypatch):
@@ -252,3 +304,9 @@ def test_error_message_prefers_cause():
 
     assert wf._error_message(_Err("outer", "inner cause")) == "inner cause"
     assert wf._error_message(_Err("outer", None)) == "outer"
+
+
+def test_error_message_falls_back_for_exception_without_cause_attribute():
+    # A plain workflow-body bug (not an ActivityError) has no `.cause`
+    # attribute at all — getattr's default must handle that gracefully.
+    assert wf._error_message(RuntimeError("plain bug")) == "plain bug"

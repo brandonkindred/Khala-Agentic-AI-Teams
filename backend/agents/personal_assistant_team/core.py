@@ -4,8 +4,14 @@ This module owns the process-wide :class:`PersonalAssistantOrchestrator`
 singleton. It is deliberately kept free of any FastAPI import
 (``personal_assistant_team.api.main``) so the Temporal worker — which imports
 the per-step activities — can build the orchestrator without pulling in the
-HTTP layer. This mirrors ``market_research_team.pipeline`` (a neutral module
-the worker imports instead of the app).
+HTTP layer, the same neutral-module shape used by ``market_research_team.pipeline``.
+
+The lazy double-checked-locking singleton below is the same pattern already
+used by ``accessibility_audit_team`` and ``branding_team`` to solve the same
+problem: sharing one stateful, per-request-caching orchestrator between a
+thread-mode HTTP handler and Temporal activities, which run in a separate
+``ThreadPoolExecutor`` and can't hold a live object reference across the
+Temporal activity boundary.
 
 Both runtime modes share the same orchestrator instance:
 

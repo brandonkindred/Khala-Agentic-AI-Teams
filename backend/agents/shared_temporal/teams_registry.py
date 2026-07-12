@@ -4,6 +4,12 @@ Each entry maps a team slug to the dotted path of its ``temporal`` package,
 which must export ``WORKFLOWS`` and ``ACTIVITIES``. ``start_all_team_workers``
 imports each lazily and spins up one worker per team on its own task queue
 so failures are isolated.
+
+Each team's task queue is its own module's ``TASK_QUEUE`` constant when
+present (falling back to ``f"{team}-queue"`` otherwise) — this lets a team
+pin a fixed/legacy queue name (e.g. for a workflow.patched drain, or to match
+a pre-existing external queue) and still register normally here, instead of
+special-casing itself out of this registry.
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ TEAM_TEMPORAL_MODULES: dict[str, str] = {
     # Already-Temporal teams are registered via their own startup hooks; this
     # registry covers teams migrated by the shared_temporal rollout.
     "market_research": "market_research_team.temporal",
+    "personal_assistant": "personal_assistant_team.temporal",
     "accessibility_audit": "accessibility_audit_team.temporal",
     "branding": "branding_team.temporal",
     "investment": "investment_team.temporal",
@@ -70,7 +77,7 @@ def start_all_team_workers(only: Iterable[str] | None = None) -> dict[str, bool]
                 team,
                 workflows=workflows,
                 activities=activities,
-                task_queue=f"{team}-queue",
+                task_queue=getattr(mod, "TASK_QUEUE", f"{team}-queue"),
             )
             results[team] = started
         except Exception as e:

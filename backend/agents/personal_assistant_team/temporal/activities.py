@@ -72,10 +72,13 @@ def _run_specialist(
     Postconditions:
         - Returns ``AgentAction.model_dump()`` for the handler's result, or the
           ``{"cancelled": True}`` sentinel if the job was cancelled first.
-        - A non-``LLMNotConfiguredError`` handler exception is caught and turned
-          into an ``orchestrator:error`` ``AgentAction`` (success=False) so the
-          job still completes with a degraded response — matching the thread
-          path (``handle_request``) instead of failing the whole job.
+        - A non-``LLMNotConfiguredError`` exception from the handler CALL ITSELF
+          is caught and turned into an ``orchestrator:error`` ``AgentAction``
+          (success=False) so the job still completes with a degraded response —
+          matching the thread path (``handle_request``) instead of failing the
+          whole job. A malformed ``intent`` dict (a postcondition violation of
+          ``classify_intent_activity``) is NOT part of that handled surface: it
+          fails loudly instead of being misreported as a specialist error.
         - Advances the job to progress 30 with ``status_text`` when it runs.
     """
     from llm_service import LLMNotConfiguredError
@@ -90,8 +93,12 @@ def _run_specialist(
     orchestrator = get_orchestrator()
     request = OrchestratorRequest(user_id=user_id, message=message, context=context or {})
     handler = getattr(orchestrator, method_name)
+    # Reconstructing Intent is a contract check, not specialist work: a bad
+    # ``intent`` dict must raise loudly rather than be caught below and
+    # misreported as a specialist backend hiccup.
+    typed_intent = Intent(**intent)
     try:
-        action = handler(request, Intent(**intent))
+        action = handler(request, typed_intent)
     except LLMNotConfiguredError:
         # A missing provider is a configuration failure: fail the run so the UI
         # routes the operator to /llm-config (same as handle_request).
@@ -158,7 +165,21 @@ def handle_email_activity(
     context: Optional[Dict[str, Any]],
     intent: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Run the email specialist. See :func:`_run_specialist` for the contract."""
+    """Run the email specialist.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the PA job store.
+        - ``intent`` is a serialized ``Intent`` (``Intent.model_dump()``).
+
+    Postconditions:
+        - Returns ``AgentAction.model_dump()`` for the email agent's result,
+          or the ``{"cancelled": True}`` sentinel if the job was cancelled
+          first, or a degraded ``orchestrator:error`` action on a non-LLM
+          handler exception — see :func:`_run_specialist` for the full
+          contract shared by all specialist activities.
+        - Advances the job to progress 30 with status_text "Handling email
+          request...".
+    """
     return _run_specialist(
         job_id, user_id, message, context, intent, "_handle_email", _SPECIALIST_STATUS["email"]
     )
@@ -172,7 +193,21 @@ def handle_calendar_activity(
     context: Optional[Dict[str, Any]],
     intent: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Run the calendar specialist. See :func:`_run_specialist` for the contract."""
+    """Run the calendar specialist.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the PA job store.
+        - ``intent`` is a serialized ``Intent`` (``Intent.model_dump()``).
+
+    Postconditions:
+        - Returns ``AgentAction.model_dump()`` for the calendar agent's
+          result, or the ``{"cancelled": True}`` sentinel if the job was
+          cancelled first, or a degraded ``orchestrator:error`` action on a
+          non-LLM handler exception — see :func:`_run_specialist` for the
+          full contract shared by all specialist activities.
+        - Advances the job to progress 30 with status_text "Checking your
+          calendar...".
+    """
     return _run_specialist(
         job_id,
         user_id,
@@ -192,7 +227,21 @@ def handle_tasks_activity(
     context: Optional[Dict[str, Any]],
     intent: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Run the tasks specialist. See :func:`_run_specialist` for the contract."""
+    """Run the tasks specialist.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the PA job store.
+        - ``intent`` is a serialized ``Intent`` (``Intent.model_dump()``).
+
+    Postconditions:
+        - Returns ``AgentAction.model_dump()`` for the tasks agent's result,
+          or the ``{"cancelled": True}`` sentinel if the job was cancelled
+          first, or a degraded ``orchestrator:error`` action on a non-LLM
+          handler exception — see :func:`_run_specialist` for the full
+          contract shared by all specialist activities.
+        - Advances the job to progress 30 with status_text "Managing your
+          tasks...".
+    """
     return _run_specialist(
         job_id, user_id, message, context, intent, "_handle_tasks", _SPECIALIST_STATUS["tasks"]
     )
@@ -206,7 +255,21 @@ def handle_deals_activity(
     context: Optional[Dict[str, Any]],
     intent: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Run the deal-finder specialist. See :func:`_run_specialist` for the contract."""
+    """Run the deal-finder specialist.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the PA job store.
+        - ``intent`` is a serialized ``Intent`` (``Intent.model_dump()``).
+
+    Postconditions:
+        - Returns ``AgentAction.model_dump()`` for the deal-finder agent's
+          result, or the ``{"cancelled": True}`` sentinel if the job was
+          cancelled first, or a degraded ``orchestrator:error`` action on a
+          non-LLM handler exception — see :func:`_run_specialist` for the
+          full contract shared by all specialist activities.
+        - Advances the job to progress 30 with status_text "Searching for
+          deals...".
+    """
     return _run_specialist(
         job_id, user_id, message, context, intent, "_handle_deals", _SPECIALIST_STATUS["deals"]
     )
@@ -220,7 +283,21 @@ def handle_reservations_activity(
     context: Optional[Dict[str, Any]],
     intent: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Run the reservation specialist. See :func:`_run_specialist` for the contract."""
+    """Run the reservation specialist.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the PA job store.
+        - ``intent`` is a serialized ``Intent`` (``Intent.model_dump()``).
+
+    Postconditions:
+        - Returns ``AgentAction.model_dump()`` for the reservation agent's
+          result, or the ``{"cancelled": True}`` sentinel if the job was
+          cancelled first, or a degraded ``orchestrator:error`` action on a
+          non-LLM handler exception — see :func:`_run_specialist` for the
+          full contract shared by all specialist activities.
+        - Advances the job to progress 30 with status_text "Processing
+          reservation request...".
+    """
     return _run_specialist(
         job_id,
         user_id,
@@ -240,7 +317,21 @@ def handle_documentation_activity(
     context: Optional[Dict[str, Any]],
     intent: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Run the documentation specialist. See :func:`_run_specialist` for the contract."""
+    """Run the documentation specialist.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the PA job store.
+        - ``intent`` is a serialized ``Intent`` (``Intent.model_dump()``).
+
+    Postconditions:
+        - Returns ``AgentAction.model_dump()`` for the documentation agent's
+          result, or the ``{"cancelled": True}`` sentinel if the job was
+          cancelled first, or a degraded ``orchestrator:error`` action on a
+          non-LLM handler exception — see :func:`_run_specialist` for the
+          full contract shared by all specialist activities.
+        - Advances the job to progress 30 with status_text "Generating
+          documentation...".
+    """
     return _run_specialist(
         job_id,
         user_id,
@@ -260,7 +351,21 @@ def handle_profile_activity(
     context: Optional[Dict[str, Any]],
     intent: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Run the profile specialist. See :func:`_run_specialist` for the contract."""
+    """Run the profile specialist.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the PA job store.
+        - ``intent`` is a serialized ``Intent`` (``Intent.model_dump()``).
+
+    Postconditions:
+        - Returns ``AgentAction.model_dump()`` for the profile agent's
+          result, or the ``{"cancelled": True}`` sentinel if the job was
+          cancelled first, or a degraded ``orchestrator:error`` action on a
+          non-LLM handler exception — see :func:`_run_specialist` for the
+          full contract shared by all specialist activities.
+        - Advances the job to progress 30 with status_text "Updating your
+          profile...".
+    """
     return _run_specialist(
         job_id, user_id, message, context, intent, "_handle_profile", _SPECIALIST_STATUS["profile"]
     )
@@ -274,7 +379,21 @@ def handle_general_activity(
     context: Optional[Dict[str, Any]],
     intent: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Run the general/fallback handler. See :func:`_run_specialist` for the contract."""
+    """Run the general/fallback handler.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the PA job store.
+        - ``intent`` is a serialized ``Intent`` (``Intent.model_dump()``).
+
+    Postconditions:
+        - Returns ``AgentAction.model_dump()`` for the general handler's
+          result, or the ``{"cancelled": True}`` sentinel if the job was
+          cancelled first, or a degraded ``orchestrator:error`` action on a
+          non-LLM handler exception — see :func:`_run_specialist` for the
+          full contract shared by all specialist activities.
+        - Advances the job to progress 30 with status_text "Processing your
+          request...".
+    """
     return _run_specialist(
         job_id, user_id, message, context, intent, "_handle_general", _SPECIALIST_STATUS["general"]
     )
@@ -282,7 +401,10 @@ def handle_general_activity(
 
 @activity.defn(name="pa_check_profile_updates")
 def check_profile_updates_activity(
-    job_id: str, user_id: str, message: str
+    job_id: str,
+    user_id: str,
+    message: str,
+    context: Optional[Dict[str, Any]] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """Extract and apply high-confidence profile preferences from the message.
 
@@ -305,7 +427,7 @@ def check_profile_updates_activity(
     if is_job_cancelled(job_id):
         return None
     update_job(job_id, status_text="Checking for profile updates...", progress=70)
-    request = OrchestratorRequest(user_id=user_id, message=message, context={})
+    request = OrchestratorRequest(user_id=user_id, message=message, context=context or {})
     return get_orchestrator()._check_for_profile_updates(request)
 
 
@@ -317,19 +439,28 @@ def generate_response_activity(
     intent: Dict[str, Any],
     actions: List[Dict[str, Any]],
     results: Dict[str, Any],
+    profile_updates: Optional[List[Dict[str, Any]]] = None,
+    context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Generate the natural-language response from the specialist actions.
 
     Preconditions:
         - ``intent`` is a serialized ``Intent``; ``actions`` are serialized
-          ``AgentAction`` dicts; ``results`` maps an intent key to its result.
+          ``AgentAction`` dicts; ``results`` maps an intent key to its result;
+          ``profile_updates`` is the list returned by
+          ``check_profile_updates_activity`` (or ``None``/empty if none).
 
     Postconditions:
         - Returns the ``{"cancelled": True}`` sentinel (the workflow then skips
           finalize) WITHOUT running the response LLM call, when the job was
           cancelled first.
-        - Otherwise returns ``OrchestratorResponse.model_dump()`` and advances
-          the job to progress 85.
+        - Otherwise returns ``OrchestratorResponse.model_dump()`` with
+          ``profile_updates`` set to the given list (matching the thread
+          path's ``response.profile_updates = profile_updates`` assignment),
+          advances the job to progress 100 with status_text "Request
+          completed" (the same intermediate state the thread path reports
+          right after generating the response, before the final COMPLETED
+          write in ``finalize_success_activity``).
         - Re-raises ``LLMNotConfiguredError`` (missing provider fails the run).
     """
     from ..core import get_orchestrator
@@ -339,11 +470,13 @@ def generate_response_activity(
     if is_job_cancelled(job_id):
         return dict(_CANCELLED)
     update_job(job_id, status_text="Generating response...", progress=85)
-    request = OrchestratorRequest(user_id=user_id, message=message, context={})
+    request = OrchestratorRequest(user_id=user_id, message=message, context=context or {})
     action_objs = [AgentAction(**a) for a in actions]
     response = get_orchestrator()._generate_response(
         request, Intent(**intent), action_objs, results
     )
+    response.profile_updates = profile_updates or []
+    update_job(job_id, status_text="Request completed", progress=100)
     return response.model_dump()
 
 
@@ -367,16 +500,18 @@ def finalize_success_activity(
     """
     from ..models import AssistantResponse
     from ..shared.pa_job_store import (
+        PA_JOB_STATUS_CANCELLED,
         PA_JOB_STATUS_COMPLETED,
         get_job,
-        is_job_cancelled,
         update_job,
     )
 
-    # Do not complete a job the user cancelled after the last cancel-checked step.
-    if is_job_cancelled(job_id):
-        return
+    # Single read: derive both the cancel-guard and the already-completed
+    # check from one job-store snapshot instead of two separate reads
+    # (is_job_cancelled makes its own internal get_job call).
     existing = get_job(job_id)
+    if existing is not None and existing.get("status") == PA_JOB_STATUS_CANCELLED:
+        return
     already_completed = existing is not None and existing.get("status") == PA_JOB_STATUS_COMPLETED
 
     assistant_response = AssistantResponse(
