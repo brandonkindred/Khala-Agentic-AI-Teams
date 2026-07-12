@@ -82,6 +82,17 @@ SAMPLE_CONSISTENCY_JSON = json.dumps(
 
 
 @pytest.fixture(autouse=True)
+def _isolated_transcript_store(monkeypatch, tmp_path):
+    """Point the per-job transcript store at a per-test temp dir.
+
+    The Temporal ingest/ux_one activities persist/load transcripts under
+    ``$AGENT_CACHE/market_research_team/transcripts``; isolating ``AGENT_CACHE``
+    per test keeps those writes out of the CWD and free of cross-test bleed.
+    """
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
 def _patched_market_research_job_client(monkeypatch, fake_job_client):
     """Route the team's job_store ``_client`` factory through the in-memory fake.
 

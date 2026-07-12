@@ -147,7 +147,10 @@ class MarketResearchWorkflow:
             retry_policy=LLM_RETRY,
         )
 
-        loaded = await workflow.execute_activity(
+        # Ingest persists transcripts to the shared per-job store and returns
+        # only lightweight refs ({"index", "source"}); the transcript bodies
+        # never enter workflow history (ux_one loads each from the store).
+        refs = await workflow.execute_activity(
             _act.ingest_activity,
             args=[job_id, request],
             start_to_close_timeout=_INGEST_TIMEOUT,
@@ -162,12 +165,12 @@ class MarketResearchWorkflow:
             *[
                 workflow.execute_activity(
                     _act.ux_one_activity,
-                    args=[ctx, source, text],
+                    args=[ctx, ref],
                     start_to_close_timeout=_STAGE_TIMEOUT,
                     heartbeat_timeout=_HEARTBEAT_TIMEOUT,
                     retry_policy=LLM_RETRY,
                 )
-                for source, text in loaded
+                for ref in refs
             ],
             return_exceptions=True,
         )
@@ -180,8 +183,8 @@ class MarketResearchWorkflow:
         # run rather than silently emitting an "insufficient evidence / collect
         # more interviews" result from zero insights (which would misrepresent a
         # run that had data but couldn't analyze it).
-        if active and loaded and not insights:
-            raise RuntimeError(f"All {len(loaded)} transcript analyses failed")
+        if active and refs and not insights:
+            raise RuntimeError(f"All {len(refs)} transcript analyses failed")
 
         # Psychology and (split mode) consistency run concurrently after UX.
         psych_coro = workflow.execute_activity(

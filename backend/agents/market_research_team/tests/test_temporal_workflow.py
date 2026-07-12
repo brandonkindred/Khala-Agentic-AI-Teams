@@ -102,7 +102,11 @@ def _default_results(*, ctx_stopped=False, progress=True):
             "request": _REQUEST_UNIFIED,
         },
         "market_research_report_progress": progress,
-        "market_research_ingest": [["s1", "t1"], ["s2", "t2"]],
+        # ingest returns lightweight refs (bodies live in the per-job store).
+        "market_research_ingest": [
+            {"index": 0, "source": "s1"},
+            {"index": 1, "source": "s2"},
+        ],
         "market_research_ux_one": dict(_UX_INSIGHT),
         "market_research_psychology": [
             {"signal": "a", "confidence": 0.5, "evidence": []},

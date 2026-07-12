@@ -70,6 +70,11 @@ The pipeline runs the same DAG in two modes from one shared per-stage seam
   `ux_one` activity per transcript and the psychology/consistency/viability/
   scripts specialist stages, each visible in the Temporal UI. Job-store status
   is owned by prepare (RUNNING), finalize (COMPLETED), and mark-failed (FAILED).
+  To keep (potentially large) transcript bodies out of Temporal workflow
+  history, `ingest` persists them to a per-job transcript store on the shared
+  `AGENT_CACHE` volume (`shared/transcript_store.py`) and passes only
+  lightweight refs through the workflow; each `ux_one` loads its own transcript
+  from the store, which finalize/mark-failed clear at the end of the run.
 
 Both modes share the specialist agents in `agents.py`, so they produce the same
 `TeamOutput`.

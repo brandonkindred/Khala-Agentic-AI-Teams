@@ -22,6 +22,10 @@ from market_research_team.shared.job_store import (
     get_job,
     update_job,
 )
+from market_research_team.shared.transcript_store import (
+    load_transcript,
+    save_transcripts,
+)
 from market_research_team.temporal import activities as act
 from market_research_team.temporal.phase_models import MarketResearchRunContext
 
@@ -99,13 +103,19 @@ def test_prepare_stops_on_clean_terminal_without_running_write() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ingest_returns_source_text_pairs() -> None:
+def test_ingest_persists_transcripts_and_returns_refs() -> None:
     create_job("job-i", request=_REQUEST)
     update_job("job-i", status=JOB_STATUS_RUNNING)
 
-    loaded = act.ingest_activity("job-i", _REQUEST)
+    refs = act.ingest_activity("job-i", _REQUEST)
 
-    assert loaded == [["inline_transcript_1", "Users want confidence before building features."]]
+    # Only lightweight refs cross the workflow boundary...
+    assert refs == [{"index": 0, "source": "inline_transcript_1"}]
+    # ...while the transcript body is persisted to the per-job store.
+    assert load_transcript("job-i", 0) == (
+        "inline_transcript_1",
+        "Users want confidence before building features.",
+    )
 
 
 def test_ingest_returns_empty_when_job_terminal() -> None:
@@ -120,11 +130,12 @@ def test_ingest_returns_empty_when_job_terminal() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ux_one_returns_insight_dict() -> None:
+def test_ux_one_loads_from_store_and_returns_insight() -> None:
     create_job("job-ux", request=_REQUEST)
     update_job("job-ux", status=JOB_STATUS_RUNNING)
+    save_transcripts("job-ux", [("src", "a transcript about pain")])
 
-    insight = act.ux_one_activity(_ctx("job-ux"), "src", "a transcript about pain")
+    insight = act.ux_one_activity(_ctx("job-ux"), {"index": 0, "source": "src"})
 
     assert insight["source"] == "src"
     assert "user_jobs" in insight
@@ -135,7 +146,7 @@ def test_ux_one_raises_non_retryably_when_terminal() -> None:
     update_job("job-uxc", status=JOB_STATUS_CANCELLED)
 
     with pytest.raises(ApplicationError) as exc:
-        act.ux_one_activity(_ctx("job-uxc"), "src", "text")
+        act.ux_one_activity(_ctx("job-uxc"), {"index": 0, "source": "src"})
     assert exc.value.non_retryable is True
 
 
@@ -144,6 +155,7 @@ def test_ux_one_reraises_generic_agent_failure(monkeypatch) -> None:
     to retry (it is NOT swallowed)."""
     create_job("job-uxe", request=_REQUEST)
     update_job("job-uxe", status=JOB_STATUS_RUNNING)
+    save_transcripts("job-uxe", [("src", "text")])
 
     def _boom(self, source, transcript):
         raise RuntimeError("agent exploded")
@@ -153,7 +165,7 @@ def test_ux_one_reraises_generic_agent_failure(monkeypatch) -> None:
     )
 
     with pytest.raises(RuntimeError, match="agent exploded"):
-        act.ux_one_activity(_ctx("job-uxe"), "src", "text")
+        act.ux_one_activity(_ctx("job-uxe"), {"index": 0, "source": "src"})
 
 
 def test_psychology_returns_signals_and_skips_when_terminal() -> None:
@@ -244,14 +256,18 @@ def test_report_progress_active_vs_terminal() -> None:
     assert act.report_progress_activity("job-pr", "viability", 75) is False
 
 
-def test_mark_failed_writes_failed_and_noops_when_terminal() -> None:
+def test_mark_failed_writes_failed_and_clears_transcripts() -> None:
     create_job("job-mf", request=_REQUEST)
     update_job("job-mf", status=JOB_STATUS_RUNNING)
+    save_transcripts("job-mf", [("src", "body")])
 
     act.mark_failed_activity("job-mf", "boom")
     job = get_job("job-mf")
     assert job["status"] == JOB_STATUS_FAILED
     assert job["error"] == "boom"
+    # Failure paths that never reach finalize still clean up the store.
+    with pytest.raises(FileNotFoundError):
+        load_transcript("job-mf", 0)
 
     # Already cancelled → mark_failed is a no-op (never clobbers a cancel).
     create_job("job-mf2", request=_REQUEST)
@@ -292,6 +308,7 @@ def _finalize_inputs():
 def test_finalize_assembles_and_writes_completed() -> None:
     create_job("job-fin", request=_REQUEST)
     update_job("job-fin", status=JOB_STATUS_RUNNING)
+    save_transcripts("job-fin", [("src", "body")])
     insights, signals, recommendation, scripts = _finalize_inputs()
 
     out = act.finalize_activity(
@@ -303,6 +320,9 @@ def test_finalize_assembles_and_writes_completed() -> None:
     assert job["status"] == JOB_STATUS_COMPLETED
     assert job["result"]["status"] == "ready_for_execution"
     assert job["result"]["proposed_research_scripts"] == ["a script"]
+    # finalize is last in the DAG → the per-job transcript store is cleaned up.
+    with pytest.raises(FileNotFoundError):
+        load_transcript("job-fin", 0)
 
 
 def test_finalize_human_decision_branch_when_not_approved() -> None:

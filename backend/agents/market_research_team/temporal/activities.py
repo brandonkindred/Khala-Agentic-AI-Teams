@@ -277,8 +277,8 @@ def prepare_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
 
 
 @activity.defn(name="market_research_ingest")
-def ingest_activity(job_id: str, request: dict[str, Any]) -> list[list[str]]:
-    """Load transcript text (inline + folder) for the run. Single-shot, pure I/O.
+def ingest_activity(job_id: str, request: dict[str, Any]) -> list[dict[str, Any]]:
+    """Load transcripts, persist them to the per-job store, return references.
 
     Preconditions:
         - ``request`` is the FULL serialized request (transcripts included) — the
@@ -286,16 +286,22 @@ def ingest_activity(job_id: str, request: dict[str, Any]) -> list[list[str]]:
 
     Postconditions:
         - Job terminal/missing → returns ``[]`` (finalize surfaces the state).
-        - Otherwise returns ``[[source, text], ...]`` (tuples serialize as lists).
+        - Otherwise persists each loaded transcript to the shared per-job
+          transcript store and returns lightweight refs
+          (``[{"index": i, "source": source}, ...]``). The transcript *bodies*
+          are deliberately NOT serialized through Temporal workflow history —
+          each ``ux_one`` loads its own transcript from the store — so large or
+          folder-based corpora can't bloat history or hit payload limits.
     """
     from market_research_team.models import RunMarketResearchRequest
     from market_research_team.pipeline import build_mission
+    from market_research_team.shared.transcript_store import save_transcripts
 
     if _job_stopped(job_id):
         return []
     mission = build_mission(RunMarketResearchRequest(**request))
     loaded = _orch().ingest(mission)
-    return [[source, text] for source, text in loaded]
+    return save_transcripts(job_id, loaded)
 
 
 @activity.defn(name="market_research_report_progress")
@@ -328,19 +334,26 @@ def mark_failed_activity(job_id: str, error: str) -> None:
     retry policy.
 
     Postconditions:
-        - Job missing or already terminal → no-op (a cancel/interrupt/earlier
-          terminal state is never clobbered).
+        - Job missing or already terminal → status left untouched (a
+          cancel/interrupt/earlier terminal state is never clobbered).
         - Otherwise the row ends FAILED with ``error`` recorded.
+        - Always clears the job's persisted transcripts (best-effort) — this is
+          the terminal cleanup for failure paths that never reach finalize
+          (e.g. the workflow's catch-all after an all-UX-failed error).
     """
     from market_research_team.shared.job_store import JOB_STATUS_FAILED, update_job
+    from market_research_team.shared.transcript_store import clear_transcripts
 
-    if _job_stopped(job_id):
-        activity.logger.info(
-            "Market research job %s missing/terminal at mark-failed; leaving status untouched",
-            job_id,
-        )
-        return
-    update_job(job_id, status=JOB_STATUS_FAILED, error=error)
+    try:
+        if _job_stopped(job_id):
+            activity.logger.info(
+                "Market research job %s missing/terminal at mark-failed; leaving status untouched",
+                job_id,
+            )
+            return
+        update_job(job_id, status=JOB_STATUS_FAILED, error=error)
+    finally:
+        clear_transcripts(job_id)
 
 
 @activity.defn(name="market_research_finalize")
@@ -366,6 +379,9 @@ def finalize_activity(
           masked as success.
         - Otherwise assembles the ``TeamOutput`` (human-review branch + min-2
           signals) and writes COMPLETED with ``result`` attached.
+        - Always clears the job's persisted transcripts (best-effort) once it
+          runs — finalize is last in the DAG, so every ``ux_one`` has already
+          loaded what it needs.
     """
     from market_research_team.models import (
         InterviewInsight,
@@ -377,6 +393,7 @@ def finalize_activity(
         JOB_STATUS_FAILED,
         update_job,
     )
+    from market_research_team.shared.transcript_store import clear_transcripts
 
     sctx = MarketResearchRunContext.model_validate(ctx)
     job_id = sctx.job_id
@@ -400,27 +417,33 @@ def finalize_activity(
             return {"job_id": job_id}
         return None
 
-    early = _terminal_short_circuit()
-    if early is not None:
-        return early
+    try:
+        early = _terminal_short_circuit()
+        if early is not None:
+            return early
 
-    mission, human_review = _mission_and_review(sctx)
-    output = _orch().assemble(
-        mission,
-        human_review,
-        [InterviewInsight.model_validate(i) for i in insights],
-        [MarketSignal.model_validate(s) for s in signals],
-        ViabilityRecommendation.model_validate(recommendation),
-        list(scripts),
-    )
+        mission, human_review = _mission_and_review(sctx)
+        output = _orch().assemble(
+            mission,
+            human_review,
+            [InterviewInsight.model_validate(i) for i in insights],
+            [MarketSignal.model_validate(s) for s in signals],
+            ViabilityRecommendation.model_validate(recommendation),
+            list(scripts),
+        )
 
-    # A cancel can land while we assembled the output; don't clobber it.
-    early = _terminal_short_circuit()
-    if early is not None:
-        return early
+        # A cancel can land while we assembled the output; don't clobber it.
+        early = _terminal_short_circuit()
+        if early is not None:
+            return early
 
-    update_job(job_id, status=JOB_STATUS_COMPLETED, result=output.model_dump())
-    return {"job_id": job_id}
+        update_job(job_id, status=JOB_STATUS_COMPLETED, result=output.model_dump())
+        return {"job_id": job_id}
+    finally:
+        # finalize is last in the DAG — the persisted transcripts are no longer
+        # needed once it runs, on any outcome (COMPLETED, clean-terminal, or the
+        # FAILED/missing re-raise). Never raises, so it can't mask the outcome.
+        clear_transcripts(job_id)
 
 
 # ---------------------------------------------------------------------------
@@ -429,33 +452,39 @@ def finalize_activity(
 
 
 @activity.defn(name="market_research_ux_one")
-def ux_one_activity(ctx: dict[str, Any], source: str, transcript: str) -> dict[str, Any]:
+def ux_one_activity(ctx: dict[str, Any], ref: dict[str, Any]) -> dict[str, Any]:
     """Extract one interview's ``InterviewInsight``. Per-transcript fan-out unit.
 
     Preconditions:
-        - ``ctx`` is the ``market_research_prepare`` carrier; ``(source,
-          transcript)`` is one loaded interview.
+        - ``ctx`` is the ``market_research_prepare`` carrier; ``ref`` is one of
+          ``market_research_ingest``'s references (``{"index": i, "source": …}``).
+          The transcript *body* is loaded from the per-job store — it never
+          crosses the workflow boundary as an input.
 
     Postconditions:
         - Job terminal/missing → raises a non-retryable ``ApplicationError`` so a
           cancel stops further LLM spend within the fan-out (the workflow's
           ``gather`` drops the item without retrying it).
-        - Otherwise returns the insight dumped to a JSON dict; on failure logs
-          and re-raises for Temporal's retry policy.
+        - Otherwise loads the transcript from the store, returns the insight
+          dumped to a JSON dict; on failure logs and re-raises for Temporal's
+          retry policy.
     """
+    from market_research_team.shared.transcript_store import load_transcript
+
     sctx = MarketResearchRunContext.model_validate(ctx)
     if _job_stopped(sctx.job_id):
         raise ApplicationError(
             f"Market research job {sctx.job_id} is terminal; skipping ux_one", non_retryable=True
         )
     try:
+        source, transcript = load_transcript(sctx.job_id, ref["index"])
         with _beating():
             insight = _orch().ux_one(source, transcript)
         return insight.model_dump(mode="json")
     except ApplicationError:
         raise
     except Exception:
-        activity.logger.exception("market_research_ux_one failed source=%s", source)
+        activity.logger.exception("market_research_ux_one failed ref=%s", ref)
         raise
 
 
