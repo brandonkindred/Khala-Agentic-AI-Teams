@@ -12,6 +12,11 @@ Public API:
     )
 """
 
+from shared_temporal.activity_utils import (
+    is_cancelled,
+    is_last_attempt,
+    raise_if_cancelled,
+)
 from shared_temporal.checkpoints import (
     load_checkpoint,
     save_checkpoint,
@@ -49,8 +54,11 @@ __all__ = [
     "get_temporal_client",
     "get_temporal_loop",
     "get_temporal_namespace",
+    "is_cancelled",
+    "is_last_attempt",
     "is_temporal_enabled",
     "load_checkpoint",
+    "raise_if_cancelled",
     "run_team_job",
     "save_checkpoint",
     "set_temporal_client",

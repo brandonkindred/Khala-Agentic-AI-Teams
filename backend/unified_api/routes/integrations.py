@@ -22,6 +22,7 @@ import functools
 import json
 import logging
 import os
+import re
 import subprocess
 import urllib.error
 import urllib.parse
@@ -708,7 +709,7 @@ async def github_events(request: Request) -> Any:
     # and ``dispatch_github_event`` trusts payload fields (``author_association``,
     # ``repository``) to authorize and scope it. Without a configured signing secret we
     # cannot authenticate the sender, so an unsigned request could forge a collaborator
-    # ``issue_comment`` for the configured repo and spend review budget. Refuse review-
+    # ``issue_comment`` for any repo the PAT can reach and spend review budget. Refuse review-
     # triggering events when no secret is configured — ``ping`` is allowed above so an
     # operator can still verify webhook delivery before setting the secret.
     if not secret:
@@ -1172,13 +1173,33 @@ _GITHUB_ISSUES_PER_PAGE = 100
 # Safety bound against a pathological repo or a redirect loop in the Link header.
 # 100 issues/page * 50 pages = 5000 open issues, far beyond any realistic repo.
 _GITHUB_MAX_ISSUE_PAGES = 50
-# Open pull requests paginate the same way; bound the follow identically.
+# Open pull requests paginate the same way; bound the follow identically. GitHub's
+# pulls endpoint shares the issues endpoint's 100-item page ceiling, but PRs get their
+# own constant so the two page sizes can be tuned independently without one silently
+# changing the other.
+_GITHUB_PRS_PER_PAGE = 100
 _GITHUB_MAX_PR_PAGES = 50
+# The PAT's accessible-repository list (GET /user/repos) paginates the same way.
+# 100 repos/page * 20 pages = 2000 repositories, far beyond any realistic PAT grant.
+_GITHUB_REPOS_PER_PAGE = 100
+_GITHUB_MAX_REPO_PAGES = 20
 # Per-issue blocked_by dependencies also paginate; bound the follow so a pathological
 # issue can't fan into an unbounded number of requests. 100/page * 10 pages = 1000
 # dependencies on a single issue, far beyond any realistic case.
 _GITHUB_DEPENDENCY_PER_PAGE = 100
 _GITHUB_MAX_DEPENDENCY_PAGES = 10
+# Per-request timeout (seconds) for direct GitHub REST calls (repos/issues/pulls
+# listing). One constant so the latency budget is tuned in a single place; the
+# coding-team-service calls use their own longer timeouts (those are a different
+# upstream with different latency characteristics).
+_GITHUB_HTTP_TIMEOUT = 15.0
+# Allowlist for a single owner/repo path component: GitHub logins and repository
+# names are ASCII alphanumerics plus ``.``, ``_``, ``-``. Validating against this
+# (rather than blocklisting a few bad characters) is what keeps a caller-supplied
+# value from rewriting the GitHub API request path or escaping the workspace root.
+# ``\Z`` (not ``$``) so the anchor can't match before a trailing newline — a value like
+# "name\n" must be rejected even if it ever reached here un-stripped.
+_REPO_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
 
 
 def _parse_dependency_concurrency(raw: str | None) -> int:
@@ -1203,6 +1224,9 @@ _GITHUB_DEPENDENCY_CONCURRENCY = _parse_dependency_concurrency(os.environ.get("G
 class GitHubConfigResponse(BaseModel):
     enabled: bool
     token_configured: bool
+    # Legacy optional default repository. Repository access itself is defined by the
+    # PAT's own authorization configuration — the pickers list every accessible repo
+    # via GET /github/repos and pass an explicit owner/repo per request.
     owner: str
     repo: str
     default_label: str
@@ -1228,11 +1252,33 @@ class GitHubConfigResponse(BaseModel):
 class GitHubConfigUpdate(BaseModel):
     enabled: bool = True
     token: str = Field(default="", description="Personal Access Token; empty preserves existing")
-    owner: str = ""
-    repo: str = ""
+    owner: str = Field(default="", description="Optional default repository owner; access comes from the PAT itself")
+    repo: str = Field(default="", description="Optional default repository name; access comes from the PAT itself")
     default_label: str = ""
     repo_path: str = Field(default="", description="Operator override for local checkout path")
     webhook_secret: str = Field(default="", description="GitHub webhook signing secret; empty preserves existing")
+
+
+class GitHubRepoItem(BaseModel):
+    """One repository the configured PAT can access (GET /github/repos).
+
+    The list mirrors GitHub's ``GET /user/repos`` for the stored token: for a
+    fine-grained PAT that is exactly the repositories granted to the token; for a
+    classic PAT it is every repository the token's owner can access.
+    """
+
+    owner: str
+    name: str
+    full_name: str
+    private: bool = False
+    archived: bool = False
+    html_url: str = ""
+    description: str = ""
+    default_branch: str = ""
+    # GitHub's open_issues_count includes open pull requests — an at-a-glance hint
+    # for the pickers, not the exact open-issue total.
+    open_issues_count: int = 0
+    pushed_at: str = ""
 
 
 class GitHubDependencyRef(BaseModel):
@@ -1259,6 +1305,10 @@ class GitHubIssueItem(BaseModel):
 class RunGitHubIssueRequest(BaseModel):
     issue_number: int
     base_branch: str | None = None
+    # Target repository. Blank falls back to the legacy configured default owner/repo;
+    # the PAT's own authorization decides whether the repository is actually reachable.
+    owner: str = ""
+    repo: str = ""
 
 
 class RunGitHubIssueResponse(BaseModel):
@@ -1285,6 +1335,10 @@ class GitHubPullRequestItem(BaseModel):
 class RunPrReviewRequest(BaseModel):
     pr_number: int
     base_branch: str | None = None
+    # Target repository. Blank falls back to the legacy configured default owner/repo;
+    # the PAT's own authorization decides whether the repository is actually reachable.
+    owner: str = ""
+    repo: str = ""
 
 
 class RunPrReviewResponse(BaseModel):
@@ -1549,18 +1603,22 @@ def _build_issue_item(raw: dict[str, Any], raw_deps: list[dict[str, Any]]) -> Gi
     )
 
 
-def _resolve_github_target(token_override: str | None = None) -> tuple[dict[str, Any], str, str, str]:
-    """Validate GitHub integration config and return (cfg, token, owner, repo).
+def _resolve_github_access(token_override: str | None = None) -> tuple[dict[str, Any], str]:
+    """Validate the GitHub integration is usable and return (cfg, token).
+
+    Repository access is defined by the PAT itself (the repositories its GitHub
+    authorization configuration grants), so this deliberately does NOT require an
+    owner/repo — it is the shared prerequisite check for every GitHub route,
+    including the repo-discovery listing that has no single target repository.
 
     Preconditions:
-        - The GitHub integration is enabled with a configured owner/repo.
         - When ``token_override`` is ``None``, a stored PAT must be available (read
           from the credential store here). When supplied, the caller has already
           resolved a PAT (e.g. the GitHub webhook path, which reads the credential
           once and reuses it for both the PR-comment reaction and the review start).
     Postconditions:
-        - Returns the config dict plus the resolved token/owner/repo. A missing
-          prerequisite raises ``HTTPException(400)``.
+        - Returns the JSON-only config dict plus the resolved token. A disabled
+          integration or missing PAT raises ``HTTPException(400)``.
         - When ``token_override`` is ``None`` and no token is found, an unreachable
           Postgres credential store raises ``HTTPException(503)`` instead of 400, so a
           transient DB outage is never reported as "PAT not configured". The 400-vs-503
@@ -1572,14 +1630,14 @@ def _resolve_github_target(token_override: str | None = None) -> tuple[dict[str,
           between the read and the probe.
         - When ``token_override`` is supplied, the credential-store read is skipped
           entirely (the store is not re-touched) and ``token_override`` is returned
-          verbatim; only the JSON-only settings (enabled/owner/repo) are validated.
-          This is the ONE validation path shared by every GitHub route — manual UI
-          triggers and the webhook trigger cannot silently drift from each other.
+          verbatim; only the JSON-only ``enabled`` setting is validated.
           Blocking I/O — async callers offload via ``asyncio.to_thread``.
     """
-    # JSON-only settings (no credential read) are always checked first.
+    # JSON-only settings (no credential read) are always checked first. .get()
+    # defensively: a malformed/legacy config record missing the key must read as
+    # disabled, never as a KeyError → opaque 500.
     cfg = get_github_config_meta()
-    if not cfg["enabled"]:
+    if not cfg.get("enabled"):
         raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
     # A pre-resolved PAT is always a non-empty string; both ``None`` and ``""`` mean "no
     # override, read from the store" — an empty string is never a valid token to forward,
@@ -1606,11 +1664,82 @@ def _resolve_github_target(token_override: str | None = None) -> tuple[dict[str,
                     ),
                 )
             raise HTTPException(status_code=400, detail="GitHub PAT not configured.")
-    owner = cfg["owner"]
-    repo = cfg["repo"]
-    if not owner or not repo:
-        raise HTTPException(status_code=400, detail="GitHub owner/repo not configured.")
-    return cfg, token, owner, repo
+    return cfg, token
+
+
+def _validate_repo_component(label: str, value: str | None) -> str:
+    """Normalize and validate a caller-supplied ``owner``/``repo`` component.
+
+    Preconditions: ``label`` is ``"owner"`` or ``"repo"`` (used in the error detail);
+        ``value`` is the raw caller-supplied string or ``None``.
+    Postconditions: returns the stripped value (``""`` when absent/blank). Raises
+        ``HTTPException(400)`` for any non-blank value outside GitHub's owner/repo
+        character set (ASCII alphanumerics plus ``.``, ``_``, ``-``), or equal to
+        ``".."``/``"."``. This is an allowlist, not a blocklist: it rejects not only
+        path separators, null bytes, and whitespace but also URL metacharacters
+        (``?`` ``#`` ``%`` ``@`` ``:`` …) that would otherwise rewrite the GitHub API
+        request target once concatenated into the request path, and traversal
+        segments that would escape the workspace root — no real GitHub owner/repo
+        contains any of these.
+    """
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if value in ("..", ".") or not _REPO_COMPONENT_RE.match(value):
+        raise HTTPException(status_code=400, detail=f"invalid GitHub {label}: {value!r}")
+    return value
+
+
+def _resolve_github_target(
+    token_override: str | None = None,
+    owner: str | None = None,
+    repo: str | None = None,
+) -> tuple[dict[str, Any], str, str, str]:
+    """Validate GitHub integration config and return (cfg, token, owner, repo).
+
+    This is the ONE validation path shared by every repository-scoped GitHub route —
+    manual UI triggers and the webhook trigger cannot silently drift from each other.
+
+    Preconditions:
+        - The GitHub integration is enabled; the PAT prerequisite is exactly
+          :func:`_resolve_github_access`'s (``token_override`` is forwarded verbatim).
+          ``token_override`` exists for the webhook caller in
+          ``github_events_handler.py``, which has already resolved the PAT and passes
+          it through; every in-module route handler calls with ``token_override=None``
+          and lets this function resolve the token.
+        - ``owner``/``repo`` are the caller-requested target repository, or
+          ``None``/blank to fall back to the configured default owner/repo (the
+          legacy single-repo settings, kept as an optional default).
+    Postconditions:
+        - Returns the config dict plus the resolved token/owner/repo. The target is
+          the request-supplied owner/repo when both are present (validated via
+          :func:`_validate_repo_component`); supplying only one of the two raises
+          ``HTTPException(400)``, as does having neither a request target nor a
+          configured default. Which repositories the token can actually reach is
+          decided by GitHub when the target is used — the PAT's own authorization
+          configuration is the sole access list, never a Khala-side allowlist.
+          Blocking I/O — async callers offload via ``asyncio.to_thread``.
+    """
+    cfg, token = _resolve_github_access(token_override)
+    req_owner = _validate_repo_component("owner", owner)
+    req_repo = _validate_repo_component("repo", repo)
+    if req_owner and req_repo:
+        return cfg, token, req_owner, req_repo
+    if req_owner or req_repo:
+        raise HTTPException(status_code=400, detail="GitHub owner and repo must be provided together.")
+    # The configured default is operator-set, but a corrupted/misconfigured value would
+    # otherwise flow unchecked into URL segments and filesystem paths — run it through the
+    # SAME validation as a request-supplied target so the fallback can't traverse or build
+    # a malformed GitHub URL. .get() defensively: a malformed/legacy record missing a key
+    # surfaces as this clean 400, never a KeyError → opaque 500 (matching _repo_path_override).
+    cfg_owner = _validate_repo_component("owner", cfg.get("owner", ""))
+    cfg_repo = _validate_repo_component("repo", cfg.get("repo", ""))
+    if not cfg_owner or not cfg_repo:
+        raise HTTPException(
+            status_code=400,
+            detail="GitHub owner/repo not specified — pass owner/repo or configure a default repository.",
+        )
+    return cfg, token, cfg_owner, cfg_repo
 
 
 def _github_api_headers(token: str) -> dict[str, str]:
@@ -1623,21 +1752,63 @@ def _github_api_headers(token: str) -> dict[str, str]:
     }
 
 
+async def _assert_pat_can_reach_repo(owner: str, repo: str, token: str) -> None:
+    """Raise unless the stored PAT can actually reach ``owner``/``repo`` on GitHub.
+
+    The issue- and PR-listing routes are gated implicitly: their own GitHub list call
+    404s for a repository the token can't see, so a caller can only read issues/pulls
+    for repos the PAT reaches. The review-history route reads only Khala's local
+    ``code_review_runs`` table, so without this probe any enabled caller could request an
+    arbitrary repository name and read persisted review summaries/errors for repos the
+    token can't access. This restores the invariant that the PAT's own authorization —
+    not a Khala-side allowlist — is the sole source of repository access, for the
+    history-only route too.
+
+    Preconditions:
+        - ``owner``/``repo`` are already validated (see :func:`_validate_repo_component`).
+        - ``token`` is the resolved PAT.
+    Postconditions:
+        - Returns ``None`` when ``GET /repos/{owner}/{repo}`` returns 200. Raises
+          ``HTTPException`` otherwise: 404 when the PAT can't see the repository (GitHub
+          returns 404 for both missing and inaccessible repos — the correct fail-closed
+          signal, and identical to the issue/PR routes' not-found response), 401 for an
+          invalid/expired token, 502 for any other upstream status, and 504/502 for a
+          timeout/transport error. No ``httpx`` error escapes unhandled.
+    """
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}"
+    headers = _github_api_headers(token)
+    try:
+        async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
+            resp = await client.get(url, headers=headers)
+    except httpx.TimeoutException as e:
+        raise HTTPException(status_code=504, detail="GitHub API timed out verifying repository access.") from e
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach GitHub to verify repository access: {e}") from e
+    if resp.status_code == 200:
+        return
+    if resp.status_code == 401:
+        raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail=f"Repository {owner}/{repo} not found.")
+    raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code} verifying repository access.")
+
+
 async def _collect_github_pages(
     client: httpx.AsyncClient,
     base_url: str,
     headers: dict[str, str],
     params: dict[str, Any],
     max_pages: int,
-    owner: str,
-    repo: str,
+    not_found_message: str,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Fetch every page of a GitHub list endpoint, mapping HTTP errors to HTTPException.
 
     Postconditions:
         - Returns ``(raw_items, has_more)`` where ``has_more`` is True iff the page
           cap (rather than the end of the list) stopped pagination. 401/404/non-200
-          responses raise ``HTTPException`` (401/404/502). Shared by the issue- and
+          responses raise ``HTTPException`` (401/404/502) — ``not_found_message`` is the
+          caller-supplied 404 message (a repository-scoped listing names the repo; the
+          account-scoped repo listing names the token). Shared by the repo-, issue- and
           PR-listing routes so their pagination and error mapping cannot drift.
     """
     raw: list[dict[str, Any]] = []
@@ -1648,25 +1819,126 @@ async def _collect_github_pages(
             if resp.status_code == 401:
                 raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
             if resp.status_code == 404:
-                raise HTTPException(status_code=404, detail=f"Repository {owner}/{repo} not found.")
+                raise HTTPException(status_code=404, detail=not_found_message)
             if resp.status_code != 200:
                 raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code}.")
-            raw.extend(resp.json())
+            # A 200 whose body isn't JSON (an HTML error page from a proxy/outage) would
+            # otherwise raise inside resp.json() and escape as an unhandled 500. Map it to a
+            # 502 like any other upstream failure. json.JSONDecodeError is a ValueError
+            # subclass, so catching ValueError covers httpx's decode error too.
+            try:
+                page = resp.json()
+            except ValueError as e:
+                raise HTTPException(status_code=502, detail="GitHub API returned a non-JSON response.") from e
+            # A list endpoint always returns a JSON array on 200; a non-list body is
+            # malformed, so treat it as an upstream error rather than iterating a dict's keys.
+            # Log the actual shape (e.g. a ``{"message": ...}`` error object served with a 200)
+            # so the 502 is diagnosable without reproducing the upstream response.
+            if not isinstance(page, list):
+                logger.warning(
+                    "GitHub list endpoint %s returned a 200 with a non-list body (%s); mapping to 502",
+                    base_url,
+                    type(page).__name__,
+                )
+                raise HTTPException(status_code=502, detail="GitHub API returned an unexpected response shape.")
+            raw.extend(page)
             has_more = bool(resp.links.get("next", {}).get("url"))
     return raw, has_more
 
 
+def _build_github_repo_item(raw: dict[str, Any]) -> GitHubRepoItem:
+    """Map a raw GitHub repository payload onto the picker's repo model.
+
+    Preconditions: ``raw`` is a repository object from ``GET /user/repos`` (carries at
+        least ``name``; a missing/malformed field degrades to its model default).
+    Postconditions: returns a fully-populated item; ``owner`` comes from
+        ``owner.login`` and ``full_name`` falls back to ``owner/name`` when absent.
+    """
+    owner = str((raw.get("owner") or {}).get("login") or "")
+    name = str(raw.get("name") or "")
+    issues_count = raw.get("open_issues_count")
+    return GitHubRepoItem(
+        owner=owner,
+        name=name,
+        full_name=str(raw.get("full_name") or f"{owner}/{name}"),
+        private=bool(raw.get("private", False)),
+        archived=bool(raw.get("archived", False)),
+        html_url=str(raw.get("html_url") or ""),
+        description=str(raw.get("description") or ""),
+        default_branch=str(raw.get("default_branch") or ""),
+        open_issues_count=issues_count if isinstance(issues_count, int) and not isinstance(issues_count, bool) else 0,
+        pushed_at=str(raw.get("pushed_at") or ""),
+    )
+
+
+@router.get("/github/repos", response_model=list[GitHubRepoItem])
+async def list_github_repos() -> list[GitHubRepoItem]:
+    """List every repository the stored PAT can access.
+
+    Backed by GitHub's ``GET /user/repos`` for the stored token, so the token's own
+    authorization configuration (fine-grained repo grants, or a classic PAT's account
+    access) is the single source of truth — no repository list is configured in Khala.
+    Follows GitHub's ``Link``-header pagination so the pickers see the complete set.
+
+    Preconditions:
+        - The GitHub integration is enabled and a PAT is stored; each missing
+          prerequisite raises ``HTTPException(400)`` (503 when the credential store is
+          unreachable). No owner/repo configuration is required.
+    Postconditions:
+        - Returns the accessible repositories most-recently-pushed first (GitHub's
+          ``sort=pushed`` default order), bounded by ``_GITHUB_MAX_REPO_PAGES`` pages of
+          ``_GITHUB_REPOS_PER_PAGE`` items. Hitting that bound logs a warning and
+          returns the repositories gathered so far rather than failing. Items without a
+          resolvable name are dropped.
+    """
+    _cfg, token = await asyncio.to_thread(_resolve_github_access)
+
+    params: dict[str, Any] = {"per_page": _GITHUB_REPOS_PER_PAGE, "sort": "pushed"}
+    headers = _github_api_headers(token)
+    base_url = f"{_GITHUB_API_BASE}/user/repos"
+
+    async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
+        raw_repos, has_more = await _collect_github_pages(
+            client,
+            base_url,
+            headers,
+            params,
+            _GITHUB_MAX_REPO_PAGES,
+            not_found_message="GitHub did not recognize the stored token's account.",
+        )
+    # Keep exactly the items with a usable string name (GitHub always sends one);
+    # anything else can't be addressed as owner/name by the downstream routes.
+    items = [
+        _build_github_repo_item(raw)
+        for raw in raw_repos
+        if isinstance(raw, dict) and isinstance(raw.get("name"), str) and raw["name"]
+    ]
+
+    if has_more:
+        logger.warning(
+            "list_github_repos hit the %d-page cap; returning the first %d repositories only",
+            _GITHUB_MAX_REPO_PAGES,
+            len(items),
+        )
+    return items
+
+
 @router.get("/github/issues", response_model=list[GitHubIssueItem])
-async def list_github_issues(label: str | None = Query(default=None)) -> list[GitHubIssueItem]:
-    """List every open issue from the configured GitHub repository.
+async def list_github_issues(
+    label: str | None = Query(default=None),
+    owner: str | None = Query(default=None),
+    repo: str | None = Query(default=None),
+) -> list[GitHubIssueItem]:
+    """List every open issue from a GitHub repository the PAT can access.
 
     Follows GitHub's ``Link``-header pagination so the panel shows the complete set
     of open issues rather than only the first page. Each returned issue is enriched
     with its ``blocked_by`` issue dependencies so the picker can flag blocked issues.
 
     Preconditions:
-        - The GitHub integration is enabled and a PAT, owner and repo are configured;
-          each missing prerequisite raises ``HTTPException(400)``.
+        - The GitHub integration is enabled and a PAT is stored; the target repository
+          is the ``owner``/``repo`` query pair, falling back to the configured default
+          — each missing prerequisite raises ``HTTPException(400)``.
     Postconditions:
         - Returns every open issue (pull requests excluded) across all result pages,
           in GitHub's response order, bounded by ``_GITHUB_MAX_ISSUE_PAGES`` pages of
@@ -1679,21 +1951,43 @@ async def list_github_issues(label: str | None = Query(default=None)) -> list[Gi
           issue and never fails the list. This adds roughly one extra request wave per
           ``GITHUB_DEPENDENCY_CONCURRENCY`` issues to the response latency.
     """
-    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target)
+    # Whether the caller named a specific repository (vs. falling back to the configured
+    # default) — captured before _resolve_github_target overwrites owner/repo below.
+    explicit_target = bool((owner or "").strip() and (repo or "").strip())
+    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, owner, repo)
 
     params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_ISSUES_PER_PAGE}
-    use_label = label or cfg["default_label"]
+    # The configured ``default_label`` is scoped to the legacy default repo. Applying it to
+    # an explicitly-targeted repo would silently hide every issue that repo never tagged, so
+    # the config fallback label applies ONLY when no specific repo was requested. An explicit
+    # ``?label=`` always wins. .get() defensively: a config saved before this field existed
+    # must not KeyError → 500.
+    use_label = label or (None if explicit_target else cfg.get("default_label"))
     if use_label:
         params["labels"] = use_label
     headers = _github_api_headers(token)
     base_url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
         raw_pages, has_more = await _collect_github_pages(
-            client, base_url, headers, params, _GITHUB_MAX_ISSUE_PAGES, owner, repo
+            client,
+            base_url,
+            headers,
+            params,
+            _GITHUB_MAX_ISSUE_PAGES,
+            not_found_message=f"Repository {owner}/{repo} not found.",
         )
-        # Exclude pull requests (the issues endpoint returns both).
-        raw_issues = [raw for raw in raw_pages if "pull_request" not in raw]
+        # Exclude pull requests (the issues endpoint returns both), and drop any entry
+        # without an integer ``number`` — a malformed payload must not KeyError → 500 when
+        # ``number`` is read below (for the dependency fetch and the issue view-model).
+        # ``bool`` is an ``int`` subclass, so exclude it: a ``number: true`` must not read as 1.
+        raw_issues = [
+            raw
+            for raw in raw_pages
+            if "pull_request" not in raw
+            and isinstance(raw.get("number"), int)
+            and not isinstance(raw.get("number"), bool)
+        ]
 
         # Enrich each issue with its blocked_by dependencies. Fan out under a bounded
         # semaphore so a large page is not an N+1 storm of serial round-trips.
@@ -1740,29 +2034,38 @@ def _build_pull_request_item(raw: dict[str, Any]) -> GitHubPullRequestItem:
 
 
 @router.get("/github/pulls", response_model=list[GitHubPullRequestItem])
-async def list_github_pulls() -> list[GitHubPullRequestItem]:
-    """List every open pull request from the configured GitHub repository.
+async def list_github_pulls(
+    owner: str | None = Query(default=None),
+    repo: str | None = Query(default=None),
+) -> list[GitHubPullRequestItem]:
+    """List every open pull request from a GitHub repository the PAT can access.
 
     Follows GitHub's ``Link``-header pagination so the panel shows the complete set
     of open PRs rather than only the first page.
 
     Preconditions:
-        - The GitHub integration is enabled and a PAT, owner and repo are configured;
-          each missing prerequisite raises ``HTTPException(400)``.
+        - The GitHub integration is enabled and a PAT is stored; the target repository
+          is the ``owner``/``repo`` query pair, falling back to the configured default
+          — each missing prerequisite raises ``HTTPException(400)``.
     Postconditions:
         - Returns every open pull request in GitHub's response order, bounded by
-          ``_GITHUB_MAX_PR_PAGES`` pages of 100 items. Hitting that bound logs a
-          warning and returns the PRs gathered so far rather than failing.
+          ``_GITHUB_MAX_PR_PAGES`` pages of ``_GITHUB_PRS_PER_PAGE`` items. Hitting that
+          bound logs a warning and returns the PRs gathered so far rather than failing.
     """
-    _cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target)
+    _cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, owner, repo)
 
-    params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_ISSUES_PER_PAGE}
+    params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_PRS_PER_PAGE}
     headers = _github_api_headers(token)
     base_url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
         raw_pulls, has_more = await _collect_github_pages(
-            client, base_url, headers, params, _GITHUB_MAX_PR_PAGES, owner, repo
+            client,
+            base_url,
+            headers,
+            params,
+            _GITHUB_MAX_PR_PAGES,
+            not_found_message=f"Repository {owner}/{repo} not found.",
         )
     items = [_build_pull_request_item(raw) for raw in raw_pulls]
 
@@ -1777,10 +2080,36 @@ async def list_github_pulls() -> list[GitHubPullRequestItem]:
     return items
 
 
-def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> str:
+def _repo_path_override(cfg: dict[str, Any], owner: str, repo: str) -> str:
+    """Return the operator's pinned checkout path when it applies to this target.
+
+    Preconditions: ``cfg`` is a :func:`get_github_config_meta` dict; ``owner``/``repo``
+        are the resolved target repository.
+    Postconditions: returns the ``repo_path`` override only when one is set AND the
+        target matches the configured default owner/repo (case-insensitively, as GitHub
+        treats them); ``""`` otherwise. The override predates PAT-wide repository
+        access and pins a single local checkout, so it must never be applied to a
+        *different* repository the PAT can now reach — that checkout's remote wouldn't
+        match and every run against it would fail.
+    """
+    override = cfg.get("repo_path", "").strip()
+    if not override:
+        return ""
+    # Strip the stored values before comparing: the resolved target was stripped by
+    # _validate_repo_component, so an un-stripped stored default (e.g. " acme ") would
+    # otherwise never match and the pinned checkout would be silently ignored.
+    cfg_owner = str(cfg.get("owner", "")).strip()
+    cfg_repo = str(cfg.get("repo", "")).strip()
+    if cfg_owner.casefold() == owner.casefold() and cfg_repo.casefold() == repo.casefold():
+        return override
+    return ""
+
+
+def _resolve_repo_path(cfg: dict[str, Any], owner: str, repo: str, issue_number: int | None = None) -> str:
     """Resolve the local checkout path for the coding team.
 
-    Priority: config override > SE_WORKSPACE_DIR env > WORKSPACE_ROOT env > AGENT_CACHE fallback.
+    Priority: config override (default repo only) > SE_WORKSPACE_DIR env >
+    WORKSPACE_ROOT env > AGENT_CACHE fallback.
     The ``AGENT_CACHE`` fallback defaults to the relative ``.agent_cache`` (a
     repo-wide convention), so when neither ``AGENT_CACHE`` nor a workspace-root
     env var is set the path is resolved against the process working directory;
@@ -1795,24 +2124,25 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
     is neither per-issue-namespaced nor auto-cleaned.
 
     Preconditions:
-        - ``cfg`` carries non-empty ``owner`` and ``repo`` (the run routes
-          validate this before calling).
+        - ``owner`` and ``repo`` are the non-empty target repository (the run
+          routes resolve this via ``_resolve_github_target`` before calling).
         - ``issue_number`` is a positive issue number or ``None`` (the PR-review
           path passes ``None`` and gets the repo-level path; it never clones).
     Postconditions:
-        - Returns the override verbatim when set. The override is trusted
-          operator configuration and is intentionally NOT traversal-sanitized
-          (unlike the auto-derived ``owner``/``repo`` below) and not auto-cleaned;
-          if that config source ever accepts untrusted input it must be
-          sanitized by the caller.
+        - Returns the override verbatim when set and applicable to this target
+          (see :func:`_repo_path_override`). The override is trusted operator
+          configuration and is intentionally NOT traversal-sanitized (unlike the
+          auto-derived ``owner``/``repo`` below) and not auto-cleaned; if that
+          config source ever accepts untrusted input it must be sanitized by the
+          caller.
         - Otherwise returns an absolute derived path; with ``issue_number`` set
           the path ends in ``issue-{issue_number}`` and two distinct issue
           numbers map to two distinct paths.
-        - Raises ``HTTPException(400)`` when ``owner``/``repo`` carry a path
-          separator, ``..`` segment, or null byte, or when ``issue_number`` is
-          non-positive — defense-in-depth so this path builder can't be coerced
-          into escaping the workspace root or building a degenerate ``issue-0``
-          segment even if a caller skipped validation.
+        - Raises ``HTTPException(400)`` when ``owner``/``repo`` are missing or
+          carry a path separator, ``..`` segment, or null byte, or when
+          ``issue_number`` is non-positive — defense-in-depth so this path
+          builder can't be coerced into escaping the workspace root or building
+          a degenerate ``issue-0`` segment even if a caller skipped validation.
 
     Note:
         The auto-derived layout differs by source: a workspace-root env var gives
@@ -1822,24 +2152,29 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
         ``github_workspaces``; a dedicated workspace root is not), and
         ``ephemeral_workspace_roots`` mirrors both shapes for the cleanup guard.
     """
-    override = cfg.get("repo_path", "").strip()
+    override = _repo_path_override(cfg, owner, repo)
     if override:
         return override
 
     # Enforce the documented precondition explicitly: owner/repo must be present
     # and non-empty before they become path components. A caller that bypassed
-    # upstream validation would otherwise hit a raw KeyError → 500; surface a
+    # upstream validation would otherwise build a degenerate path; surface a
     # clean 400 instead.
-    for label in ("owner", "repo"):
-        if not cfg.get(label):
+    for label, value in (("owner", owner), ("repo", repo)):
+        if not value:
             raise HTTPException(status_code=400, detail=f"missing GitHub {label}")
 
-    # Defense-in-depth: owner/repo become path components below, so reject any
-    # value that could traverse out of the workspace (a real GitHub owner/repo
-    # never contains these).
-    for label, value in (("owner", cfg["owner"]), ("repo", cfg["repo"])):
-        if "/" in value or "\\" in value or "\x00" in value or value in ("..", ".") or value.strip() != value:
+    # Defense-in-depth: owner/repo become path components below, so reject any value
+    # that could traverse out of the workspace or was otherwise never a legal component.
+    # Delegate the character-class rules to the ONE validation predicate (same 400 detail)
+    # so this filesystem-path layer can never disagree with the request boundary on what is
+    # acceptable. The routes resolve owner/repo through _validate_repo_component (which
+    # strips) before reaching here, so a value that isn't already its own stripped form
+    # means a caller bypassed that boundary — reject it rather than silently normalize.
+    for label, value in (("owner", owner), ("repo", repo)):
+        if value != value.strip():
             raise HTTPException(status_code=400, detail=f"invalid GitHub {label}: {value!r}")
+        _validate_repo_component(label, value)
 
     # Enforce the documented precondition: a non-positive issue_number would yield
     # a degenerate ``issue-0`` / ``issue--1`` segment (and never names a real
@@ -1855,13 +2190,13 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
     for env_var in ("SE_WORKSPACE_DIR", "WORKSPACE_ROOT"):
         val = os.environ.get(env_var, "").strip()
         if val:
-            base = Path(val) / f"{cfg['owner']}_{cfg['repo']}"
+            base = Path(val) / f"{owner}_{repo}"
             target = base / issue_segment if issue_segment else base
             return str(target.resolve())
 
     # Shared AGENT_CACHE resolver (single source of truth) so the derived path
     # and the cleanup safety root in ephemeral_workspace_roots never diverge.
-    base = Path(agent_cache_dir()) / "github_workspaces" / cfg["owner"] / cfg["repo"]
+    base = Path(agent_cache_dir()) / "github_workspaces" / owner / repo
     target = base / issue_segment if issue_segment else base
     return str(target.resolve())
 
@@ -1899,6 +2234,33 @@ def _scrub_git_secret(text: str, token: str) -> str:
     """
     encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     return text.replace(token, "***").replace(encoded, "***")
+
+
+def _redact_url_userinfo(url: str) -> str:
+    """Strip any ``user:pass@`` userinfo from a URL so it is safe to surface in errors.
+
+    Preconditions: ``url`` is a string (need not be a valid URL).
+    Postconditions: returns the URL with its userinfo (``user[:pass]@``) removed. An
+        operator-pinned checkout's remote may embed credentials this service does not
+        control (and ``_scrub_git_secret`` only knows the *PAT*, not those), so echoing
+        the raw remote in a mismatch error could leak them. On a parse failure returns
+        ``"<redacted>"`` rather than risk leaking an unparseable-but-credentialed URL.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+        # ``.hostname`` never raises, but ``.port`` validates lazily and raises ValueError on
+        # a malformed/out-of-range port — read both inside the guard so a bad remote returns
+        # "<redacted>" rather than letting this safety helper itself raise.
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return "<redacted>"
+    if not hostname:
+        # No recognizable authority (e.g. an ssh ``git@host:owner/repo`` scp-like remote):
+        # drop anything before an ``@`` defensively rather than echo possible credentials.
+        return url.split("@", 1)[-1] if "@" in url else url
+    netloc = hostname + (f":{port}" if port else "")
+    return urllib.parse.urlunparse(parsed._replace(netloc=netloc))
 
 
 def _remote_matches(remote_url: str, owner: str, repo: str) -> bool:
@@ -1975,9 +2337,10 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
                 )
                 url_out = url_check.stdout.strip()
                 if url_check.returncode != 0 or not _remote_matches(url_out, owner, repo):
+                    # Redact any embedded credentials before surfacing the remote in the error.
                     return (
                         f"existing checkout at {repo_path} does not match {owner}/{repo} "
-                        f"(remote origin: {url_out[:120]})"
+                        f"(remote origin: {_redact_url_userinfo(url_out)[:120]})"
                     )
 
                 result = subprocess.run(
@@ -2037,12 +2400,29 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
         lock_file.close()
 
 
+def _require_coding_team_url() -> str:
+    """Return the configured coding-team service URL or raise a 503.
+
+    Preconditions: none.
+    Postconditions: returns the stripped ``CODING_TEAM_SERVICE_URL`` when set to a
+        non-blank value; raises ``HTTPException(503)`` otherwise. Single source for
+        the "downstream configured?" check shared by the three coding-team routes so
+        their failure mode cannot drift.
+    """
+    coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
+    if not coding_team_url:
+        raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
+    return coding_team_url
+
+
 @router.post("/github/run-issue", response_model=RunGitHubIssueResponse)
 async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueResponse:
     """Start the coding team on a specific GitHub issue.
 
     Preconditions:
-        - GitHub integration is enabled with a stored PAT and a configured owner/repo.
+        - GitHub integration is enabled with a stored PAT. The target repository comes
+          from the request body (``owner``/``repo``); if omitted it falls back to the
+          optional configured default, and a target reachable by the PAT is required.
         - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
     Postconditions:
         - On success returns a ``RunGitHubIssueResponse`` describing the started job.
@@ -2053,23 +2433,21 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
           header, drops the response, and the UI can only report an opaque
           "0 Unknown Error" — useless for diagnosis.
     """
-    # Centralized validation (enabled + PAT + owner/repo), which also maps an
+    # Centralized validation (enabled + PAT + target repo), which also maps an
     # unreachable credential store to a 503 rather than a misleading "not configured".
-    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target)
+    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, body.owner, body.repo)
 
     # Validate the downstream is configured before the (slow) clone, so a
     # misconfiguration fails fast instead of after a multi-second checkout.
-    coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
-    if not coding_team_url:
-        raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
+    coding_team_url = _require_coding_team_url()
 
     # Namespace the checkout per-issue (unless the operator pins an explicit
-    # repo_path) so two issues of the same repo get isolated clones and can run
-    # concurrently. The per-issue clone is platform-owned and ephemeral, so ask
-    # the coding team to delete it once the work is safely published to a PR; an
-    # operator-managed override is never auto-cleaned.
-    repo_path = _resolve_repo_path(cfg, issue_number=body.issue_number)
-    cleanup_checkout_on_success = not cfg.get("repo_path", "").strip()
+    # repo_path for this target repo) so two issues of the same repo get isolated
+    # clones and can run concurrently. The per-issue clone is platform-owned and
+    # ephemeral, so ask the coding team to delete it once the work is safely
+    # published to a PR; an operator-managed override is never auto-cleaned.
+    repo_path = _resolve_repo_path(cfg, owner, repo, issue_number=body.issue_number)
+    cleanup_checkout_on_success = not _repo_path_override(cfg, owner, repo)
 
     loop = asyncio.get_running_loop()
     clone_err = await loop.run_in_executor(
@@ -2147,8 +2525,8 @@ async def _start_pr_review(
     base_branch: str | None,
     *,
     token: str | None = None,
-    expected_owner: str | None = None,
-    expected_repo: str | None = None,
+    owner: str | None = None,
+    repo: str | None = None,
 ) -> RunPrReviewResponse:
     """Resolve the GitHub target and start a PR review on the coding-team service.
 
@@ -2162,59 +2540,35 @@ async def _start_pr_review(
     touches the checkout.
 
     Preconditions:
-        - GitHub integration is enabled with a configured owner/repo, and either a
-          stored PAT is available or ``token`` was supplied by the caller.
+        - GitHub integration is enabled, and either a stored PAT is available or
+          ``token`` was supplied by the caller.
         - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
         - ``token``, when supplied, is a GitHub PAT the caller already resolved (the
           webhook path passes this so a single credential-store read serves the whole
           request); when ``None`` the PAT is read via ``_resolve_github_target``.
-        - ``expected_owner``/``expected_repo``, when supplied, are the repository the
-          caller already validated (the webhook path validated the comment's repo
-          against the configured owner/repo at dispatch time).
+        - ``owner``/``repo``, when supplied, are the target repository (the UI route
+          forwards the request body's target; the webhook path forwards the commented
+          PR's repository). Blank/``None`` falls back to the configured default
+          owner/repo. Whether the PAT can actually reach the target is GitHub's
+          decision when the review runs — the token's authorization configuration is
+          the sole access list.
     Postconditions:
         - On success returns a ``RunPrReviewResponse`` describing the started review
           job. Every failure path raises ``HTTPException`` with an explanatory detail;
           no ``httpx`` error escapes as an unhandled exception.
-        - When ``expected_owner``/``expected_repo`` are supplied and the currently
-          configured owner/repo no longer match them (the operator repointed the
-          integration between webhook validation and this worker running), raises
-          ``HTTPException(409)`` and starts no review — so an ``@khala review`` on one
-          repo can never launch a review of the same PR number against a *different*,
-          newly configured repo (comparison is case-insensitive, as GitHub treats
-          owner/repo).
     """
     # Single validation path (shared with every other GitHub route via
     # _resolve_github_target) — token, when pre-resolved by the caller (webhook path),
     # is forwarded as an override so the credential store is never re-touched; otherwise
     # it's read here, with the same 503-vs-400 reachability handling as the UI route.
-    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, token)
+    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, token, owner, repo)
 
-    # Revalidate against the repository the caller matched. A webhook delivery is queued
-    # and processed on a worker thread; if the configured owner/repo changed in between,
-    # the resolved owner/repo above would point at the *new* repo while ``pr_number`` came
-    # from a comment on the *old* one. Refuse rather than review the wrong repository.
-    if (
-        expected_owner is not None
-        and expected_repo is not None
-        and (owner.casefold() != expected_owner.casefold() or repo.casefold() != expected_repo.casefold())
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Configured repository changed since the review was requested "
-                f"(expected {expected_owner}/{expected_repo}, now {owner}/{repo}); "
-                "skipping this stale review request."
-            ),
-        )
-
-    coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
-    if not coding_team_url:
-        raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
+    coding_team_url = _require_coding_team_url()
 
     payload: dict[str, Any] = {
         "owner": owner,
         "repo": repo,
-        "repo_path": _resolve_repo_path(cfg),
+        "repo_path": _resolve_repo_path(cfg, owner, repo),
         "pr_number": pr_number,
         "github_token": token,
     }
@@ -2274,41 +2628,56 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
     Thin wrapper over :func:`_start_pr_review` (the shared review-start path also used by
     the ``@khala review`` PR-comment webhook).
 
-    Preconditions: ``body`` carries a ``pr_number`` and optional ``base_branch``; see
-        :func:`_start_pr_review` for the full GitHub-target precondition.
+    Preconditions: ``body`` carries a ``pr_number``, optional ``base_branch``, and an
+        optional target ``owner``/``repo``; see :func:`_start_pr_review` for the full
+        GitHub-target precondition.
     Postconditions: returns exactly what :func:`_start_pr_review` returns/raises for
-        ``(body.pr_number, body.base_branch)`` with no pre-resolved token (the PAT is
-        read fresh here) — this route delegates its whole contract to that function.
+        ``(body.pr_number, body.base_branch, body.owner, body.repo)`` with no
+        pre-resolved token (the PAT is read fresh here) — this route delegates its
+        whole contract to that function.
     """
-    return await _start_pr_review(body.pr_number, body.base_branch)
+    return await _start_pr_review(body.pr_number, body.base_branch, owner=body.owner, repo=body.repo)
 
 
 @router.get("/github/reviews", response_model=list[CodeReviewRunItem])
 async def list_github_reviews(
     pr_number: int | None = Query(default=None),
     limit: int = Query(default=500, ge=1, le=2000),
+    owner: str | None = Query(default=None),
+    repo: str | None = Query(default=None),
 ) -> list[CodeReviewRunItem]:
-    """List persisted code-review runs for the configured repository.
+    """List persisted code-review runs for a repository the PAT can access.
 
     Powers the Code Review page's per-PR review history: row status badges and
-    the expanded reviews table. Owner/repo are injected from the GitHub config
-    (the frontend never sends them), then the request is forwarded to the
-    coding-team service which owns the ``code_review_runs`` table.
+    the expanded reviews table. The target repository is the ``owner``/``repo``
+    query pair (falling back to the configured default), then the request is
+    forwarded to the coding-team service which owns the ``code_review_runs`` table.
 
     Preconditions:
-        - GitHub integration is enabled with a configured owner/repo.
+        - GitHub integration is enabled with a stored PAT; the target repository is
+          the ``owner``/``repo`` query pair or the configured default, and the PAT can
+          actually reach it (verified against GitHub — see below).
         - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
         - ``limit`` is in ``[1, 2000]`` (validated by FastAPI).
     Postconditions:
         - Returns up to ``limit`` review runs (optionally filtered to
           ``pr_number``), newest-first. Every failure path raises
           ``HTTPException``; no ``httpx`` error escapes unhandled.
+        - Unlike the issue/PR routes (implicitly gated by their own GitHub list call),
+          this reads Khala's local ``code_review_runs`` table, so it first verifies the
+          PAT can reach the target repository (``_assert_pat_can_reach_repo``): a repo
+          the token can't access yields the same 404 as the issue/PR routes and NO
+          history is returned, so stored review summaries can't leak across the PAT's
+          access boundary.
     """
-    _cfg, _token, owner, repo = await asyncio.to_thread(_resolve_github_target)
+    _cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, owner, repo)
 
-    coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
-    if not coding_team_url:
-        raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
+    coding_team_url = _require_coding_team_url()
+
+    # History lives in Khala's own store, not GitHub, so gate it on the PAT actually
+    # reaching the repo — the issue/PR routes get this gate for free from their GitHub
+    # list call; this history-only route must ask explicitly.
+    await _assert_pat_can_reach_repo(owner, repo, token)
 
     params: dict[str, Any] = {"owner": owner, "repo": repo, "limit": limit}
     if pr_number is not None:
@@ -2340,7 +2709,11 @@ async def list_github_reviews(
         except Exception:
             upstream_detail = resp.text
         logger.warning("github reviews: coding team service returned %s: %s", resp.status_code, upstream_detail)
-        raise HTTPException(status_code=resp.status_code, detail="Failed to retrieve review history.")
+        # Mirror the run-issue/review-pr routes: surface a bounded copy of the upstream
+        # detail for 4xx (client-actionable), but a generic message for 5xx (which can
+        # carry a stack trace), always preserving the upstream status code.
+        client_detail = str(upstream_detail)[:500] if resp.status_code < 500 else "Failed to retrieve review history."
+        raise HTTPException(status_code=resp.status_code, detail=client_detail)
 
     try:
         data = resp.json()

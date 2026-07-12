@@ -12,6 +12,8 @@ import type {
   CodeReviewRunItem,
   GitHubConfigResponse,
   GitHubPullRequestItem,
+  GitHubRepoItem,
+  RunPrReviewResponse,
 } from '../../models/integrations.model';
 
 function makePulls(count: number): GitHubPullRequestItem[] {
@@ -33,25 +35,37 @@ function record(over: Partial<PrReviewRecord> = {}): PrReviewRecord {
   return {
     jobId: 'j1',
     prNumber: 1,
+    owner: 'acme',
+    repo: 'widgets',
     startedAt: Date.parse('2026-01-01T00:00:00Z'),
     status: 'running',
     ...over,
   };
 }
 
+/** The repo the fake PAT can access; the panel lists repos and loads PRs per repo. */
+const REPO: GitHubRepoItem = {
+  owner: 'acme',
+  name: 'widgets',
+  full_name: 'acme/widgets',
+  private: false,
+  archived: false,
+  html_url: 'https://github.com/acme/widgets',
+  description: 'Widget factory',
+  default_branch: 'main',
+  open_issues_count: 3,
+  pushed_at: '2026-06-09T10:00:00Z',
+};
+
 const CONFIGURED: GitHubConfigResponse = {
   enabled: true,
   token_configured: true,
-  owner: 'acme',
-  repo: 'widgets',
   default_label: 'ai',
 };
 
 const UNCONFIGURED: GitHubConfigResponse = {
   enabled: false,
   token_configured: false,
-  owner: '',
-  repo: '',
   default_label: '',
 };
 
@@ -64,6 +78,7 @@ describe('CodeReviewPanelComponent', () => {
   };
   let integrationsSpy: {
     getGitHubConfig: ReturnType<typeof vi.fn>;
+    getGitHubRepos: ReturnType<typeof vi.fn>;
     getGitHubPullRequests: ReturnType<typeof vi.fn>;
     runGitHubReviewPr: ReturnType<typeof vi.fn>;
     getGitHubReviewHistory: ReturnType<typeof vi.fn>;
@@ -84,6 +99,12 @@ describe('CodeReviewPanelComponent', () => {
     fixture = TestBed.createComponent(CodeReviewPanelComponent);
     component = fixture.componentInstance;
     fixture.detectChanges();
+    // PRs are per-repo now: expand the first accessible repo (when any) so its open
+    // PRs load, matching what most tests exercised before repo-scoped browsing.
+    if (component.repos.length > 0) {
+      component.toggleRepo(component.repos[0]);
+      fixture.detectChanges();
+    }
   }
 
   beforeEach(() => {
@@ -94,6 +115,7 @@ describe('CodeReviewPanelComponent', () => {
     };
     integrationsSpy = {
       getGitHubConfig: vi.fn().mockReturnValue(of(CONFIGURED)),
+      getGitHubRepos: vi.fn().mockReturnValue(of([REPO])),
       getGitHubPullRequests: vi.fn().mockReturnValue(of(makePulls(3))),
       runGitHubReviewPr: vi.fn().mockReturnValue(
         of({ job_id: 'j1', pr_number: 1, pr_url: 'https://example.com/pull/1', status: 'pending', message: '' }),
@@ -111,20 +133,55 @@ describe('CodeReviewPanelComponent', () => {
   // Config + list loading
   // -------------------------------------------------------------------------
 
-  it('should create and load pull requests + review history when configured', async () => {
+  it('should create, list the accessible repos, and load the expanded repo\'s PRs + history', async () => {
     await setup();
     expect(component.githubConfigured).toBe(true);
-    expect(integrationsSpy.getGitHubPullRequests).toHaveBeenCalled();
-    expect(integrationsSpy.getGitHubReviewHistory).toHaveBeenCalled();
+    expect(integrationsSpy.getGitHubRepos).toHaveBeenCalled();
+    expect(component.repos.length).toBe(1);
+    // The expanded repo scopes both the PR list and the review history.
+    expect(integrationsSpy.getGitHubPullRequests).toHaveBeenCalledWith({ owner: 'acme', repo: 'widgets' });
+    expect(integrationsSpy.getGitHubReviewHistory).toHaveBeenCalledWith({ owner: 'acme', repo: 'widgets' });
     expect(component.pulls.length).toBe(3);
     expect(component.pullsLoaded).toBe(true);
   });
 
-  it('does not load pull requests when GitHub is unconfigured', async () => {
+  it('renders the repo-list error banner in the DOM', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(
+      throwError(() => ({ error: { detail: 'bad credentials' } })),
+    );
+    await setup();
+    fixture.detectChanges();
+    const banner = fixture.nativeElement.querySelector('app-inline-banner[variant="error"]');
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain('bad credentials');
+  });
+
+  it('does not load repos when GitHub is unconfigured', async () => {
     integrationsSpy.getGitHubConfig.mockReturnValue(of(UNCONFIGURED));
     await setup();
     expect(component.githubConfigured).toBe(false);
+    expect(integrationsSpy.getGitHubRepos).not.toHaveBeenCalled();
     expect(integrationsSpy.getGitHubPullRequests).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a repo-list load error', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(
+      throwError(() => ({ error: { detail: 'bad credentials' } })),
+    );
+    await setup();
+    expect(component.repoError).toBe('bad credentials');
+    expect(component.loadingRepos).toBe(false);
+    expect(integrationsSpy.getGitHubPullRequests).not.toHaveBeenCalled();
+  });
+
+  it('collapsing the expanded repo drops all repo-scoped state', async () => {
+    await setup();
+    component.reviews.set(1, [record()]);
+    component.toggleRepo(component.repos[0]); // collapse
+    expect(component.selectedRepo).toBeNull();
+    expect(component.pulls.length).toBe(0);
+    expect(component.pullsLoaded).toBe(false);
+    expect(component.reviews.size).toBe(0);
   });
 
   it('treats a config check error as unconfigured', async () => {
@@ -143,6 +200,37 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.loadingPulls).toBe(false);
   });
 
+  it('ignores a concurrent loadRepos while one is already in flight', async () => {
+    await setup();
+    const slow = new Subject<GitHubRepoItem[]>();
+    integrationsSpy.getGitHubRepos.mockClear();
+    integrationsSpy.getGitHubRepos.mockReturnValue(slow.asObservable());
+    component.loadRepos();
+    component.loadRepos(); // guarded no-op — a second fetch must not be issued
+    expect(integrationsSpy.getGitHubRepos).toHaveBeenCalledTimes(1);
+    slow.next([REPO]);
+    slow.complete();
+    expect(component.loadingRepos).toBe(false);
+  });
+
+  it('discards a PR-list response that lands after the user switched repos', async () => {
+    await setup();
+    component.toggleRepo(component.repos[0]); // collapse so pulls start from an empty baseline
+    const slow = new Subject<GitHubPullRequestItem[]>();
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(slow.asObservable());
+    component.selectedRepo = REPO;
+    component.loadPulls();
+    // Switch to another repo while acme/widgets' PRs are on the wire.
+    component.selectedRepo = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
+    slow.next(makePulls(2));
+    slow.complete();
+    // The stale response must not render under the other repo's row, and the loading flag
+    // must still be cleared (never stuck true after a switch-away).
+    expect(component.pulls.length).toBe(0);
+    expect(component.pullsLoaded).toBe(false);
+    expect(component.loadingPulls).toBe(false);
+  });
+
   it('paginates the PR list client-side', async () => {
     integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(25)));
     await setup();
@@ -150,6 +238,33 @@ describe('CodeReviewPanelComponent', () => {
     component.onPageChange({ pageIndex: 1, pageSize: 10, length: 25 });
     expect(component.pageIndex).toBe(1);
     expect(component.pagedPulls[0].number).toBe(11);
+  });
+
+  it('handles pagination edge cases: page-size change, out-of-bounds page, empty list', async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(25)));
+    await setup();
+    // Changing the page size re-slices the visible window from the new index.
+    component.onPageChange({ pageIndex: 0, pageSize: 25, length: 25 });
+    expect(component.pagedPulls.length).toBe(25);
+    // A page index beyond the available items yields an empty slice, not a crash.
+    component.onPageChange({ pageIndex: 9, pageSize: 10, length: 25 });
+    expect(component.pagedPulls).toEqual([]);
+    // An empty PR list always pages to an empty slice.
+    component.pulls = [];
+    component.onPageChange({ pageIndex: 0, pageSize: 10, length: 0 });
+    expect(component.pagedPulls).toEqual([]);
+  });
+
+  it('renders the PR-list error banner inside the expanded repo panel', async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(
+      throwError(() => ({ error: { detail: 'rate limited' } })),
+    );
+    await setup();
+    fixture.detectChanges();
+    const panel = fixture.nativeElement.querySelector('.cr-repo-pulls');
+    const banner = panel?.querySelector('app-inline-banner[variant="error"]');
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain('rate limited');
   });
 
   // -------------------------------------------------------------------------
@@ -275,7 +390,8 @@ describe('CodeReviewPanelComponent', () => {
       }),
     );
     component.startReview(component.pulls[0]);
-    expect(integrationsSpy.runGitHubReviewPr).toHaveBeenCalledWith({ pr_number: 1 });
+    // The expanded repo is the review target — repository access comes from the PAT.
+    expect(integrationsSpy.runGitHubReviewPr).toHaveBeenCalledWith({ pr_number: 1, owner: 'acme', repo: 'widgets' });
     expect(component.reviewsFor(1).length).toBe(1);
     expect(component.reviewsFor(1)[0].jobId).toBe('j1');
 
@@ -308,9 +424,12 @@ describe('CodeReviewPanelComponent', () => {
 
   it('ignores a second startReview while one is already starting', async () => {
     await setup();
-    component.starting.add(1);
+    const slow = new Subject<never>();
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
     component.startReview(component.pulls[0]);
-    expect(integrationsSpy.runGitHubReviewPr).not.toHaveBeenCalled();
+    component.startReview(component.pulls[0]); // second call ignored while the first is in flight
+    expect(integrationsSpy.runGitHubReviewPr).toHaveBeenCalledTimes(1);
+    expect(component.isStarting(component.pulls[0])).toBe(true);
   });
 
   it('surfaces a start-review error per PR without touching the list-load banner', async () => {
@@ -322,7 +441,21 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.reviewErrorFor(1)).toBe('no such PR');
     expect(component.reviewErrorFor(2)).toBeNull();
     expect(component.pullError).toBeNull(); // list-load banner untouched
-    expect(component.starting.has(1)).toBe(false);
+    expect(component.isStarting(component.pulls[0])).toBe(false);
+  });
+
+  it('an in-flight start on one repo does not block the same-numbered PR in another repo', async () => {
+    await setup(); // acme/widgets expanded, PR #1 present
+    const slow = new Subject<never>();
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
+    component.startReview(component.pulls[0]); // start acme/widgets PR #1 (in flight)
+    // Switch to another repo that also has a PR #1.
+    const other: GitHubRepoItem = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
+    component.repos = [REPO, other];
+    component.toggleRepo(other);
+    fixture.detectChanges();
+    // `starting` is keyed by owner/repo#number, so other/thing PR #1 is NOT considered starting.
+    expect(component.isStarting(component.pulls[0])).toBe(false);
   });
 
   it('falls back to err.message when a start-review error has no detail', async () => {
@@ -330,6 +463,40 @@ describe('CodeReviewPanelComponent', () => {
     await setup();
     component.startReview(component.pulls[0]);
     expect(component.reviewErrorFor(1)).toBe('Network down');
+  });
+
+  it('does not surface a start-review failure from a switched-away repo under the new repo', async () => {
+    await setup(); // acme/widgets expanded, PRs loaded (PR #1 present)
+    const slow = new Subject<never>();
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
+    component.startReview(component.pulls[0]); // start on acme/widgets PR #1 (request pending)
+    // Switch to a different repo that also has a PR #1 before the start resolves.
+    const other: GitHubRepoItem = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
+    component.repos = [REPO, other];
+    component.toggleRepo(other);
+    fixture.detectChanges();
+    // acme/widgets' start now fails — reviewErrors is keyed by bare PR number, so an
+    // unguarded set would render this failure under other/thing's PR #1.
+    slow.error({ error: { detail: 'clone failed' } });
+    expect(component.reviewErrorFor(1)).toBeNull();
+  });
+
+  it('does not spin a poller for a review that resolves after a switch-away', async () => {
+    await setup(); // acme/widgets expanded, PR #1 present
+    const slow = new Subject<RunPrReviewResponse>();
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
+    apiSpy.getJobStatus.mockClear();
+    component.startReview(component.pulls[0]); // start acme/widgets PR #1 (pending)
+    // Switch to another repo before the start resolves.
+    const other: GitHubRepoItem = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
+    component.repos = [REPO, other];
+    component.toggleRepo(other);
+    // The start now resolves while the user is on another repo — no record is shown and no
+    // orphan poller must be attached (startPolling is inside the same-repo guard).
+    slow.next({ job_id: 'jX', pr_number: 1, pr_url: 'u', status: 'pending', message: '' });
+    slow.complete();
+    vi.advanceTimersByTime(20000);
+    expect(apiSpy.getJobStatus).not.toHaveBeenCalledWith('jX');
   });
 
   it('falls back to a default message when a start-review error has no detail or message', async () => {

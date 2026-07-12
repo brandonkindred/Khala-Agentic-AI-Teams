@@ -8,7 +8,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from job_service_client import (
     JOB_STATUS_CANCELLED,
@@ -53,8 +53,9 @@ def create_job(
         "output_dir": output_dir,
         "progress": 0,
         "current_phase": None,
-        "completed_phases": [],
-        "phase_results": {},
+        # Phase completion lives on the checkpointed ``blueprint`` snapshot
+        # (``blueprint.completed_phases``), the single source of truth read by
+        # ``get_build_status`` — there is no separate top-level completed-phases field.
         "blueprint": None,
         "error": None,
         "created_at": now,
@@ -79,6 +80,99 @@ def update_job(
 ) -> None:
     """Update job fields. Merges kwargs into existing job data."""
     _client(cache_dir).update_job(job_id, **kwargs)
+
+
+def make_job_updater(
+    job_id: str,
+    cache_dir: Path = DEFAULT_CACHE_DIR,
+) -> Callable[..., None]:
+    """Build the progress callback the phase functions call during a run.
+
+    A single source of truth for the ``job_updater`` shape shared by thread mode
+    (``api.main._run_build_background``) and every Temporal phase activity, so the
+    two runtimes write identical job-store progress fields.
+
+    Preconditions:
+        - ``job_id`` identifies a created job record (updates on a missing job are
+          a no-op at the client layer).
+    Postconditions:
+        - Returns a callable ``job_updater(current_phase=?, progress=?,
+          status_text=?, blueprint_snapshot=?)`` that writes only the supplied
+          fields (``blueprint_snapshot`` maps to the job's ``blueprint`` field) and
+          is a no-op when called with no arguments.
+    """
+
+    def job_updater(
+        current_phase: Optional[str] = None,
+        progress: Optional[int] = None,
+        status_text: Optional[str] = None,
+        blueprint_snapshot: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        updates: Dict[str, Any] = {}
+        if current_phase is not None:
+            updates["current_phase"] = current_phase
+        if progress is not None:
+            updates["progress"] = progress
+        if status_text is not None:
+            updates["status_text"] = status_text
+        if blueprint_snapshot is not None:
+            updates["blueprint"] = blueprint_snapshot
+        if updates:
+            update_job(job_id, cache_dir=cache_dir, **updates)
+
+    return job_updater
+
+
+def record_phase_result(
+    job_id: str,
+    phase_name: str,
+    result: Dict[str, Any],
+    cache_dir: Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Merge a completed phase's result into the job's stored blueprint snapshot.
+
+    This is the Temporal per-phase checkpoint: after each phase activity succeeds
+    it records its serialized result here so (a) a resumed workflow can skip the
+    phase and reuse the result, and (b) the job-store ``blueprint`` field mirrors
+    the incremental blueprint the thread-mode orchestrator writes via its
+    ``_checkpoint`` callback.
+
+    Preconditions:
+        - ``phase_name`` is a valid ``Phase`` value.
+        - ``result`` is the phase model serialized with ``model_dump(mode="json")``.
+    Postconditions:
+        - No-op when the job does not exist. Otherwise the stored blueprint gains
+          ``result`` under ``phase_name``, ``phase_name`` is appended to
+          ``completed_phases`` (idempotently), and ``current_phase`` is set to it.
+          The write is schema-validated through ``AgentBlueprint`` so a malformed
+          result surfaces here rather than at status-read time.
+    """
+    from ..models import AgentBlueprint
+
+    data = get_job(job_id, cache_dir=cache_dir)
+    if not data:
+        return
+
+    stored = data.get("blueprint")
+    if isinstance(stored, dict):
+        bp_dict: Dict[str, Any] = dict(stored)
+    else:
+        bp_dict = {
+            "project_name": data.get("project_name") or "",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    bp_dict[phase_name] = result
+    bp_dict["current_phase"] = phase_name
+    completed = list(bp_dict.get("completed_phases") or [])
+    if phase_name not in completed:
+        completed.append(phase_name)
+    bp_dict["completed_phases"] = completed
+
+    # Validate/normalize through the model so the persisted snapshot always matches
+    # AgentBlueprint's schema (version default, enum coercion for phase strings).
+    blueprint = AgentBlueprint(**bp_dict)
+    update_job(job_id, cache_dir=cache_dir, blueprint=blueprint.model_dump(mode="json"))
 
 
 def list_jobs(
@@ -144,42 +238,6 @@ def mark_job_failed(
     update_job(job_id, cache_dir=cache_dir, status=JOB_STATUS_FAILED, error=error)
 
 
-def update_phase_progress(
-    job_id: str,
-    current_phase: str,
-    progress: int,
-    cache_dir: Path = DEFAULT_CACHE_DIR,
-) -> None:
-    """Update job with current phase progress."""
-    update_job(
-        job_id,
-        cache_dir=cache_dir,
-        current_phase=current_phase,
-        progress=progress,
-    )
-
-
-def add_completed_phase(
-    job_id: str,
-    phase: str,
-    phase_result: Optional[Dict[str, Any]] = None,
-    cache_dir: Path = DEFAULT_CACHE_DIR,
-) -> None:
-    """Add a phase to the completed phases list."""
-    data = get_job(job_id, cache_dir=cache_dir)
-    if not data:
-        return
-    completed = list(data.get("completed_phases", []))
-    if phase not in completed:
-        completed.append(phase)
-    updates: Dict[str, Any] = {"completed_phases": completed}
-    if phase_result is not None:
-        phase_results = dict(data.get("phase_results", {}))
-        phase_results[phase] = phase_result
-        updates["phase_results"] = phase_results
-    update_job(job_id, cache_dir=cache_dir, **updates)
-
-
 def reset_job(
     job_id: str,
     cache_dir: Path = DEFAULT_CACHE_DIR,
@@ -194,8 +252,6 @@ def reset_job(
         status=JOB_STATUS_PENDING,
         progress=0,
         current_phase=None,
-        completed_phases=[],
-        phase_results={},
         blueprint=None,
         error=None,
         status_text=None,

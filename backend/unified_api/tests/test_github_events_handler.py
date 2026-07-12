@@ -272,11 +272,11 @@ def test_dispatch_forgets_delivery_when_submit_dropped():
 # ---------------------------------------------------------------------------
 
 
-def _process(owner="acme", repo="widget", cfg=("acme", "widget"), start="started"):
+def _process(owner="acme", repo="widget", enabled=True, start="started"):
     """Run process_review_request with its collaborators patched; return the mock bundle."""
     mocks = {
         "tok": patch(f"{_H}._resolve_github_token", return_value="ghp_tok"),
-        "cfg": patch(f"{_H}._configured_owner_repo", return_value=cfg),
+        "enabled": patch(f"{_H}._integration_enabled", return_value=enabled),
         "start": patch(f"{_H}._start_review", return_value=start),
         "react": patch(f"{_H}._add_comment_reaction"),
         "forget": patch(f"{_H}._forget_delivery"),
@@ -317,22 +317,25 @@ def test_process_review_request_signals_failure_and_forgets_delivery():
     m["forget"].assert_called_once_with("d-1")
 
 
-def test_process_review_request_ignores_repo_mismatch_and_forgets_delivery():
-    # Comment on acme/widget but configured repo is acme/other → no review, and the
-    # delivery is forgotten so a redelivery after a config fix is not swallowed.
-    m = _process(cfg=("acme", "other"))
+def test_process_review_request_reviews_any_repo_the_pat_can_reach():
+    # There is no Khala-side repository allowlist: the payload's repo is the target,
+    # whatever repository the PAT's own authorization configuration grants. A repo the
+    # token cannot actually reach fails the review start downstream (signalled 😕).
+    m = _process(owner="other", repo="thing")
+    m["start"].assert_called_once_with("other", "thing", 42, "ghp_tok")
+    m["react"].assert_called_once_with("other", "thing", 999, "ghp_tok", content="eyes")
+    m["forget"].assert_not_called()
+
+
+def test_process_review_request_ignores_when_integration_disabled():
+    m = _process(enabled=False)
     m["start"].assert_not_called()
     m["react"].assert_not_called()
     m["forget"].assert_called_once_with("d-1")
 
 
-def test_process_review_request_repo_match_is_case_insensitive():
-    m = _process(owner="ACME", repo="Widget", cfg=("acme", "widget"))
-    m["start"].assert_called_once_with("acme", "widget", 42, "ghp_tok")
-
-
-def test_process_review_request_ignores_when_no_configured_repo():
-    m = _process(cfg=("", ""))
+def test_process_review_request_ignores_when_payload_repo_missing():
+    m = _process(owner="", repo="")
     m["start"].assert_not_called()
     m["forget"].assert_called_once_with("d-1")
 
@@ -416,28 +419,28 @@ def test_resolve_github_token_none_on_error():
         assert gh._resolve_github_token() is None
 
 
-def test_configured_owner_repo_empty_on_error():
+def test_integration_enabled_false_on_error():
     with patch("unified_api.integrations_store.get_github_config_meta", side_effect=RuntimeError("db down")):
-        assert gh._configured_owner_repo() == ("", "")
+        assert gh._integration_enabled() is False
 
 
 def test_start_review_invokes_shared_helper_with_token_and_returns_started():
     seen = {}
 
-    async def _fake_start(pr_number, base_branch, *, token=None, expected_owner=None, expected_repo=None):
-        seen["args"] = (pr_number, base_branch, token, expected_owner, expected_repo)
+    async def _fake_start(pr_number, base_branch, *, token=None, owner=None, repo=None):
+        seen["args"] = (pr_number, base_branch, token, owner, repo)
         return MagicMock(job_id="job-1")
 
     with patch("unified_api.routes.integrations._start_pr_review", _fake_start):
         assert gh._start_review("acme", "widget", 42, "ghp_tok") == "started"
     # The pre-resolved token is threaded through so the review path does not re-read it,
-    # and the validated owner/repo are passed as the expected target so a config change
-    # mid-flight cannot redirect the review to a different repo.
+    # and the commented PR's owner/repo are passed as the review target — the PAT's own
+    # authorization configuration decides whether that repository is reachable.
     assert seen["args"] == (42, None, "ghp_tok", "acme", "widget")
 
 
 def test_start_review_swallows_errors_and_returns_failed():
-    async def _boom(pr_number, base_branch, *, token=None, expected_owner=None, expected_repo=None):
+    async def _boom(pr_number, base_branch, *, token=None, owner=None, repo=None):
         raise RuntimeError("downstream down")
 
     with patch("unified_api.routes.integrations._start_pr_review", _boom):
@@ -450,7 +453,7 @@ def test_start_review_recognizes_already_running_409(caplog):
     a broken webhook to operators."""
     from fastapi import HTTPException
 
-    async def _dup(pr_number, base_branch, *, token=None, expected_owner=None, expected_repo=None):
+    async def _dup(pr_number, base_branch, *, token=None, owner=None, repo=None):
         raise HTTPException(status_code=409, detail="review job abc already running for acme/widget#42")
 
     with patch("unified_api.routes.integrations._start_pr_review", _dup), caplog.at_level("INFO"):
@@ -458,28 +461,27 @@ def test_start_review_recognizes_already_running_409(caplog):
     assert not any(r.levelname == "ERROR" for r in caplog.records)
 
 
-def test_start_review_treats_stale_config_409_as_failed():
-    """The stale-config 409 (configured repo changed mid-flight) is NOT 'already
-    running' — it must map to 'failed' so the commenter gets the 😕 signal and the
-    delivery is forgotten for redelivery."""
+def test_start_review_treats_other_409_as_failed():
+    """A 409 that is not the duplicate guard's 'already running' must map to 'failed'
+    so the commenter gets the 😕 signal and the delivery is forgotten for redelivery."""
     from fastapi import HTTPException
 
-    async def _stale(pr_number, base_branch, *, token=None, expected_owner=None, expected_repo=None):
-        raise HTTPException(status_code=409, detail="Configured repository changed since the review was requested")
+    async def _conflict(pr_number, base_branch, *, token=None, owner=None, repo=None):
+        raise HTTPException(status_code=409, detail="some other conflict starting the review")
 
-    with patch("unified_api.routes.integrations._start_pr_review", _stale):
+    with patch("unified_api.routes.integrations._start_pr_review", _conflict):
         assert gh._start_review("acme", "widget", 42, "ghp_tok") == "failed"
 
 
-def test_configured_owner_repo_reads_meta():
+def test_integration_enabled_reads_meta():
     with patch(
         "unified_api.integrations_store.get_github_config_meta",
         return_value={"enabled": True, "owner": "acme", "repo": "widget"},
     ):
-        assert gh._configured_owner_repo() == ("acme", "widget")
+        assert gh._integration_enabled() is True
 
 
-def test_configured_owner_repo_empty_when_disabled():
+def test_integration_enabled_false_when_disabled():
     """A disabled integration reports as unconfigured even with owner/repo/PAT still
     saved from before it was turned off — the webhook must not treat a disabled
     integration as a valid review target."""
@@ -487,7 +489,7 @@ def test_configured_owner_repo_empty_when_disabled():
         "unified_api.integrations_store.get_github_config_meta",
         return_value={"enabled": False, "owner": "acme", "repo": "widget"},
     ):
-        assert gh._configured_owner_repo() == ("", "")
+        assert gh._integration_enabled() is False
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +539,7 @@ def test_dispatch_never_raises_when_executor_is_shut_down():
     real_executor.shutdown(wait=True)
     with (
         patch(f"{_H}._get_dispatch_executor", return_value=real_executor),
-        patch(f"{_H}._configured_owner_repo", return_value=("acme", "widget")),
+        patch(f"{_H}._integration_enabled", return_value=True),
         patch(f"{_H}.process_review_request") as proc,
     ):
         gh.dispatch_github_event("issue_comment", _comment_payload())  # must not raise

@@ -31,6 +31,7 @@ from ..shared.job_store import (
     create_job,
     get_job,
     list_jobs,
+    make_job_updater,
     mark_job_completed,
     mark_job_failed,
     mark_job_running,
@@ -73,30 +74,17 @@ def _run_build_background(
     output_dir: Optional[str],
     resume_blueprint: Optional[Any] = None,
 ) -> None:
-    """Background thread function for running AI system generation workflow."""
+    """Background thread function for running AI system generation workflow.
+
+    Thread-mode counterpart to ``AISystemsBuildWorkflow``: it shares the same
+    ``make_job_updater`` progress callback so both runtimes write identical
+    job-store fields. The Temporal path runs each phase as its own activity
+    instead (see ``temporal/workflows.py``).
+    """
     try:
         mark_job_running(job_id)
 
-        def job_updater(
-            current_phase: Optional[str] = None,
-            progress: Optional[int] = None,
-            status_text: Optional[str] = None,
-            blueprint_snapshot: Optional[Dict[str, Any]] = None,
-        ) -> None:
-            """Callback to update job status during workflow execution."""
-            updates: Dict[str, Any] = {}
-
-            if current_phase is not None:
-                updates["current_phase"] = current_phase
-            if progress is not None:
-                updates["progress"] = progress
-            if status_text is not None:
-                updates["status_text"] = status_text
-            if blueprint_snapshot is not None:
-                updates["blueprint"] = blueprint_snapshot
-
-            if updates:
-                update_job(job_id, **updates)
+        job_updater = make_job_updater(job_id)
 
         blueprint = orchestrator.run_workflow(
             project_name=project_name,
@@ -188,9 +176,17 @@ def get_build_status(job_id: str) -> AISystemStatusResponse:
     if not data:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
+    # The checkpointed blueprint snapshot is the single source of truth for phase
+    # completion — both the thread-mode orchestrator and the Temporal per-phase
+    # activities maintain ``blueprint.completed_phases`` (checkpointed after each
+    # phase), so read live progress straight from it.
+    stored_bp = data.get("blueprint")
+
     blueprint = None
-    if data.get("status") == JOB_STATUS_COMPLETED and data.get("blueprint"):
-        blueprint = AgentBlueprint(**data["blueprint"])
+    if data.get("status") == JOB_STATUS_COMPLETED and stored_bp:
+        blueprint = AgentBlueprint(**stored_bp)
+
+    completed_phases = stored_bp.get("completed_phases", []) if isinstance(stored_bp, dict) else []
 
     return AISystemStatusResponse(
         job_id=job_id,
@@ -198,7 +194,7 @@ def get_build_status(job_id: str) -> AISystemStatusResponse:
         project_name=data.get("project_name"),
         current_phase=data.get("current_phase"),
         progress=data.get("progress", 0),
-        completed_phases=data.get("completed_phases", []),
+        completed_phases=completed_phases,
         error=data.get("error"),
         blueprint=blueprint,
     )
@@ -314,8 +310,9 @@ def resume_build_job(job_id: str) -> AISystemJobResponse:
         from ai_systems_team.temporal.start_workflow import start_build_workflow
 
         if is_temporal_enabled():
-            # Temporal re-runs the activity; resume_blueprint is passed via job store
-            update_job(job_id, resume_blueprint=stored_bp)
+            # The workflow's ``begin`` activity reads the checkpointed blueprint
+            # (completed_phases + per-phase results) straight from the job store and
+            # skips the phases already done, so no separate resume payload is needed.
             start_build_workflow(
                 job_id, project_name, spec_path, data.get("constraints", {}), data.get("output_dir")
             )
@@ -388,11 +385,24 @@ def restart_build_job(job_id: str) -> AISystemJobResponse:
 @app.get(
     "/blueprints",
     summary="List generated blueprints",
-    description="List all generated AI system blueprints (in-memory).",
+    description="List generated AI system blueprints (in-memory cache plus completed jobs).",
 )
 def list_blueprints() -> Dict[str, List[str]]:
-    """List all generated blueprint project names."""
-    return {"blueprints": orchestrator.list_blueprints()}
+    """List all generated blueprint project names.
+
+    Unions the in-memory orchestrator cache (populated by thread-mode runs) with
+    completed jobs in the durable job store, so Temporal builds — which complete via
+    the per-phase workflow without touching the in-memory cache — are also listed.
+    """
+    names = set(orchestrator.list_blueprints())
+    for job in list_jobs():
+        if (
+            job.get("status") == JOB_STATUS_COMPLETED
+            and job.get("blueprint")
+            and job.get("project_name")
+        ):
+            names.add(job["project_name"])
+    return {"blueprints": sorted(names)}
 
 
 @app.get(
@@ -402,13 +412,29 @@ def list_blueprints() -> Dict[str, List[str]]:
     description="Get a previously generated blueprint by project name.",
 )
 def get_blueprint(project_name: str) -> AgentBlueprint:
-    """Get a blueprint by project name."""
+    """Get a blueprint by project name.
+
+    Prefers the in-memory orchestrator cache, then falls back to the durable job
+    store: Temporal builds finish in the per-phase workflow without populating the
+    cache, so the completed blueprint only lives on the job record (which also
+    survives a restart). The most recent completed job for the name wins.
+    """
     blueprint = orchestrator.get_blueprint(project_name)
+    if blueprint:
+        return blueprint
 
-    if not blueprint:
-        raise HTTPException(status_code=404, detail=f"Blueprint '{project_name}' not found")
+    match = None
+    for job in list_jobs():
+        if (
+            job.get("project_name") == project_name
+            and job.get("status") == JOB_STATUS_COMPLETED
+            and job.get("blueprint")
+        ):
+            match = job
+    if match is not None:
+        return AgentBlueprint(**match["blueprint"])
 
-    return blueprint
+    raise HTTPException(status_code=404, detail=f"Blueprint '{project_name}' not found")
 
 
 @app.get("/health", summary="Health check")
