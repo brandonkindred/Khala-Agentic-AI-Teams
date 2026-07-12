@@ -19,6 +19,7 @@ from code_review_agent.architecture_consistency_pass import (
     _ARCH_DOC_ABS_CHARS,
     _build_prompt,
     _coerce_finding,
+    _is_changed_file,
     _parse_findings,
     _validate_finding_line,
     _validate_findings,
@@ -29,7 +30,7 @@ from code_review_agent.false_positive_filter import CodebaseIndex
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
 
 from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.shared.models import SystemArchitecture
+from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
 
 # Unique anchor in this pass's user prompt (never the system prompt -- a
 # DummyLLMClient subclass must branch on the user prompt only, matching the
@@ -76,6 +77,46 @@ def test_build_prompt_falls_back_to_overview_with_no_document() -> None:
     index = CodebaseIndex.from_input(_input(architecture=arch))
     prompt = _build_prompt(index, arch, max_inline_chars=100_000, max_arch_doc_chars=100_000)
     assert "Overview-only architecture." in prompt
+
+
+def test_build_prompt_includes_components_and_decisions_alongside_document() -> None:
+    """Regression test: components/decisions must reach this once-per-submission
+    pass's prompt even when a full architecture_document is also present --
+    previously the prompt only ever inlined architecture_document-or-overview,
+    so an explicit component boundary or ADR was invisible to the one place
+    that can verify it against the whole repository."""
+    arch = SystemArchitecture(
+        overview="Layered service architecture.",
+        architecture_document="# Arch\nGeneral overview doc.",
+        components=[
+            ArchitectureComponent(
+                name="billing-service", type="backend", description="Owns all billing writes."
+            )
+        ],
+        decisions=[
+            {"title": "ADR-003", "decision": "All billing writes go through billing-service."}
+        ],
+    )
+    index = CodebaseIndex.from_input(_input(architecture=arch))
+    prompt = _build_prompt(index, arch, max_inline_chars=100_000, max_arch_doc_chars=100_000)
+    assert "General overview doc." in prompt
+    assert "billing-service" in prompt
+    assert "Owns all billing writes." in prompt
+    assert "ADR-003" in prompt
+    assert "All billing writes go through billing-service." in prompt
+
+
+def test_build_prompt_includes_components_and_decisions_with_no_document() -> None:
+    """Components/decisions reach the prompt even with no architecture_document
+    and no overview (the early-return guard must not skip the pass either --
+    see test_returns_non_empty_when_only_components_or_decisions_present)."""
+    arch = SystemArchitecture(
+        overview="",
+        components=[ArchitectureComponent(name="auth-service", type="backend")],
+    )
+    index = CodebaseIndex.from_input(_input(architecture=arch))
+    prompt = _build_prompt(index, arch, max_inline_chars=100_000, max_arch_doc_chars=100_000)
+    assert "auth-service" in prompt
 
 
 def test_build_prompt_caps_architecture_document_and_notes_truncation() -> None:
@@ -144,6 +185,59 @@ def test_validate_findings_nulls_only_out_of_range_lines() -> None:
     assert validated[1].line is None
     # The rest of the finding is untouched -- only the hallucinated line is dropped.
     assert validated[1].description == "d2"
+
+
+class _FakeReader:
+    """A minimal duck-typed RepoReader over an in-memory {path: content} map."""
+
+    def __init__(self, files: Dict[str, str]):
+        self._files = files
+
+    def list_files(self):
+        return list(self._files)
+
+    def read_file(self, path: str):
+        return self._files.get((path or "").strip())
+
+
+def test_is_changed_file_true_only_for_submission_files() -> None:
+    index = CodebaseIndex(
+        files={"app/main.py": "code"},
+        repo_reader=_FakeReader({"app/existing_helper.py": "helper code"}),
+    )
+    assert _is_changed_file(index, "app/main.py") is True
+    # A file reachable only via repo_reader (already exists, not part of this
+    # change) is NOT a changed file, even though read_file/resolve_path can see it.
+    assert _is_changed_file(index, "app/existing_helper.py") is False
+    assert _is_changed_file(index, "") is False
+    assert _is_changed_file(index, CodebaseIndex.EXISTING_CODEBASE_PATH) is False
+
+
+def test_validate_findings_blanks_file_path_anchored_outside_the_diff() -> None:
+    """Regression test: a cross-codebase-redundancy finding that cites the
+    EXISTING file it found the duplicate in (rather than the changed file that
+    should be fixed) cannot become a useful PR comment -- that file is not part
+    of the diff. The finding is kept, but degraded to a submission-wide one."""
+    index = CodebaseIndex(
+        files={"app/new_queue.py": "code"},
+        repo_reader=_FakeReader({"app/existing_queue.py": "class Queue: ...\n"}),
+    )
+    outside_diff = CodeReviewIssue(
+        category="refactor",
+        description="duplicates app/existing_queue.py's Queue",
+        file_path="app/existing_queue.py",
+        line=1,
+    )
+    inside_diff = CodeReviewIssue(
+        category="architecture", description="d1", file_path="app/new_queue.py", line=1
+    )
+    validated = _validate_findings(index, [outside_diff, inside_diff])
+    assert validated[0].file_path == ""
+    assert validated[0].line is None
+    assert validated[0].description == "duplicates app/existing_queue.py's Queue"  # kept
+    # A finding already anchored inside the diff is untouched by this check.
+    assert validated[1].file_path == "app/new_queue.py"
+    assert validated[1].line == 1
 
 
 def test_finds_and_returns_new_findings_drops_hallucinated_line() -> None:
@@ -261,6 +355,30 @@ def test_returns_empty_when_no_architecture_document_or_overview() -> None:
     arch = SystemArchitecture(overview="", architecture_document="")
     result = find_architecture_and_redundancy_issues(DummyLLMClient(), _input(architecture=arch))
     assert result == []
+
+
+def test_runs_when_only_components_present_with_no_overview_or_document() -> None:
+    """Regression test: the early-return guard must not skip the pass just
+    because overview/architecture_document are both blank -- components alone
+    (a normalized SystemArchitecture field) are enough to check against."""
+    arch = SystemArchitecture(
+        overview="",
+        architecture_document="",
+        components=[ArchitectureComponent(name="auth-service", type="backend")],
+    )
+    prompts: list = []
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    find_architecture_and_redundancy_issues(_FindingsClient(), _input(architecture=arch))
+    # The pass actually ran (the guard did not short-circuit before any LLM call).
+    assert len(prompts) == 1
+    assert "auth-service" in prompts[0]
 
 
 def test_returns_empty_when_no_architecture_at_all() -> None:

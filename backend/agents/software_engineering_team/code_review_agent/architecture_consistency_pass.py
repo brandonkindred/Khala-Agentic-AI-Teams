@@ -52,6 +52,7 @@ from software_engineering_team.shared.context_sizing import (
 )
 from software_engineering_team.shared.models import SystemArchitecture
 
+from .architecture_context import render_architecture_context
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line
@@ -82,17 +83,24 @@ def _build_prompt(
     """Render the single user prompt for this pass.
 
     Postconditions:
-        - Inlines the architecture document (falling back to ``overview`` when
-          no full document is set) up to ``max_arch_doc_chars``, then the
-          submission's changed files up to a combined ``max_inline_chars``
-          budget; any files/content beyond either budget are named as
-          reachable via the attached tools rather than silently dropped.
+        - Inlines the architecture document (folding in the rendered
+          ``overview``/``components``/``decisions`` alongside it, or in its
+          place when no full document is set) up to ``max_arch_doc_chars``,
+          then the submission's changed files up to a combined
+          ``max_inline_chars`` budget; any files/content beyond either budget
+          are named as reachable via the attached tools rather than silently
+          dropped.
     """
     parts: List[str] = []
 
-    arch_doc = (architecture.architecture_document or "").strip() or (
-        architecture.overview or ""
-    ).strip()
+    arch_doc = "\n\n".join(
+        p
+        for p in (
+            (architecture.architecture_document or "").strip(),
+            render_architecture_context(architecture),
+        )
+        if p
+    )
     inlined_doc = arch_doc[:max_arch_doc_chars]
     doc_fence = _code_fence_for(inlined_doc)
     parts.append("**Architecture document:**")
@@ -232,20 +240,47 @@ def _validate_finding_line(
     return line if 1 <= line <= total_lines else None
 
 
+def _is_changed_file(index: CodebaseIndex, file_path: str) -> bool:
+    """True when ``file_path`` is one of the submission's own changed files.
+
+    ``index.files`` is exactly the submitted diff (see ``CodebaseIndex``'s
+    invariants) -- it never includes ``repo_reader``-backed files (the rest of
+    the repository) or the ``<existing codebase>`` pseudo-path, both of which
+    ``resolve_path``/``read_file`` CAN reach for verification but which are not
+    part of this change.
+
+    Postconditions: returns ``False`` for an empty/blank path or one that
+    resolves only via ``repo_reader``/the existing-codebase excerpt; ``True``
+    iff ``file_path`` is a key of ``index.files``. Pure; never raises.
+    """
+    return bool(file_path) and file_path in index.files
+
+
 def _validate_findings(
     index: CodebaseIndex, findings: List[CodeReviewIssue]
 ) -> List[CodeReviewIssue]:
-    """Bounds-check each finding's cited line against its real file.
+    """Bounds-check each finding's file/line anchor against the real submission.
 
     Postconditions:
-        - Returns the findings in the same order, each with ``line`` replaced
-          by None wherever it does not fall within the cited file's actual
-          line range (a file-wide finding is still a valid, useful outcome).
-          Never drops a finding outright — only its potentially hallucinated
-          line anchor — and never raises.
+        - A finding whose ``file_path`` is not one of the submission's changed
+          files (e.g. the model anchored a cross-codebase-redundancy finding to
+          the existing file it cited as the duplicate, rather than to the
+          changed file that should be fixed) has its ``file_path``/``line``
+          blanked to ``""``/``None`` — a PR comment cannot attach to a file
+          outside the diff, so this degrades to a submission-wide finding
+          rather than pointing at the wrong location.
+        - Otherwise ``line`` is replaced by ``None`` wherever it does not fall
+          within the cited file's actual line range (a file-wide finding is
+          still a valid, useful outcome).
+        - Never drops a finding outright — only its potentially wrong/hallucinated
+          location anchor — and never raises.
     """
     validated: List[CodeReviewIssue] = []
     for finding in findings:
+        if finding.file_path and not _is_changed_file(index, finding.file_path):
+            finding = finding.model_copy(update={"file_path": "", "line": None})
+            validated.append(finding)
+            continue
         checked_line = _validate_finding_line(index, finding.file_path, finding.line)
         if checked_line != finding.line:
             finding = finding.model_copy(update={"line": checked_line})
@@ -277,10 +312,10 @@ def find_architecture_and_redundancy_issues(
     Postconditions:
         - Returns ``[]`` (no LLM call) when the pass is disabled via
           ``CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS``, when
-          ``input_data.architecture`` is absent or carries neither an
-          ``architecture_document`` nor an ``overview`` (nothing to check a
-          contradiction against), or when the submission has no readable
-          files.
+          ``input_data.architecture`` is absent or carries none of an
+          ``architecture_document``, ``overview``, ``components``, or
+          ``decisions`` (nothing to check a contradiction against), or when
+          the submission has no readable files.
         - Otherwise returns zero or more NEW ``CodeReviewIssue``s in category
           ``"architecture"`` or ``"refactor"`` only, each with its cited
           ``line`` bounds-checked against the real file (a hallucinated
@@ -296,7 +331,8 @@ def find_architecture_and_redundancy_issues(
         return []
     architecture = input_data.architecture
     if architecture is None or not (
-        (architecture.architecture_document or "").strip() or (architecture.overview or "").strip()
+        (architecture.architecture_document or "").strip()
+        or render_architecture_context(architecture).strip()
     ):
         return []
     try:

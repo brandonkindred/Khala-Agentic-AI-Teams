@@ -224,7 +224,8 @@ def build_code_review_prompt(*, project_kind: str, extra_verify_clause: str = ""
         (if non-empty) ends with ", " so it reads inline before "correctness...".
     Postconditions:
         Returns the prompt preserving the ``{requirements}``,
-        ``{acceptance_criteria}``, ``{code}`` slots.
+        ``{acceptance_criteria}``, ``{architecture_context}``, ``{spec_content}``,
+        ``{code}`` slots.
     """
     return (
         f"You are an expert Code Review Agent for a {project_kind} project.\n\n"
@@ -234,6 +235,8 @@ def build_code_review_prompt(*, project_kind: str, extra_verify_clause: str = ""
         + "requirements and acceptance criteria, testing coverage, and build/lint readiness.\n\n"
         + "**Requirements:**\n{requirements}\n\n"
         + "**Acceptance criteria:**\n{acceptance_criteria}\n\n"
+        + "**Architecture context:**\n{architecture_context}\n\n"
+        + "**Project specification excerpt:**\n{spec_content}\n\n"
         + "**Code to review:**\n{code}\n\n"
         + "**Output format (template – use exactly these section headers):**\n\n"
         + "## PASSED ##\ntrue\n## END PASSED ##\n"

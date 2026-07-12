@@ -96,7 +96,7 @@ def _build_config(
 def _noop_runners() -> Dict[str, Any]:
     """Stub runners that return no issues and never touch an LLM/agent."""
     return {
-        "llm_review_fn": lambda *, llm, task, files: [],
+        "llm_review_fn": lambda *, llm, task, files, **kw: [],
         "qa_agent_fn": lambda *, qa_agent, files, language, task_description, task_id, context="": [],
         "security_agent_fn": lambda *, security_agent, files, language, task_description, task_id, context="": [],
         "build_verify_fn": _build_verify_fn,
@@ -381,7 +381,7 @@ def test_microtask_code_review_agent_path_and_raise(tmp_path: Path) -> None:
         code_review_agent=cr_agent,
         detail_callback=details.append,
         language="python",
-        llm_review_fn=lambda *, llm, task, files: [
+        llm_review_fn=lambda *, llm, task, files, **kw: [
             ReviewIssue(source="code_review", severity="low", description="llm")
         ],
         qa_agent_fn=lambda **kw: [],
@@ -402,7 +402,7 @@ def test_microtask_code_review_agent_path_and_raise(tmp_path: Path) -> None:
         files={"x.py": "code"},
         code_review_agent=cr_agent,
         language="python",
-        llm_review_fn=lambda *, llm, task, files: [
+        llm_review_fn=lambda *, llm, task, files, **kw: [
             ReviewIssue(source="code_review", severity="low", description="llm")
         ],
         qa_agent_fn=lambda **kw: [],
@@ -434,7 +434,7 @@ def test_code_review_agent_receives_architecture_and_spec_content(tmp_path: Path
         review_context=ReviewContext(
             architecture=architecture, spec_content="the full project spec"
         ),
-        llm_review_fn=lambda *, llm, task, files: [],
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
         qa_agent_fn=lambda **kw: [],
         security_agent_fn=lambda **kw: [],
         build_verify_fn=_build_verify_fn,
@@ -453,7 +453,7 @@ def test_code_review_agent_receives_architecture_and_spec_content(tmp_path: Path
         files={"x.py": "code"},
         code_review_agent=cr_agent,
         language="python",
-        llm_review_fn=lambda *, llm, task, files: [],
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
         qa_agent_fn=lambda **kw: [],
         security_agent_fn=lambda **kw: [],
         build_verify_fn=_build_verify_fn,
@@ -479,7 +479,7 @@ def test_microtask_qa_and_security_with_detail_callback(tmp_path: Path) -> None:
         security_agent=MagicMock(),
         detail_callback=details.append,
         language="python",
-        llm_review_fn=lambda *, llm, task, files: [],
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
         qa_agent_fn=lambda *, qa_agent, files, language, task_description, task_id, context="": [
             ReviewIssue(source="qa", severity="low", description="bug")
         ],

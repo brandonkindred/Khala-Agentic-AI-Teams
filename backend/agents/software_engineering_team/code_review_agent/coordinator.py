@@ -88,9 +88,9 @@ from software_engineering_team.shared.context_sizing import (
     compute_code_review_spec_excerpt_chars,
     parse_env_int,
 )
-from software_engineering_team.shared.models import SystemArchitecture
 
 from .architecture_consistency_pass import find_architecture_and_redundancy_issues
+from .architecture_context import render_architecture_context as _render_architecture_context
 from .chunk_reviewer import ChunkReviewAgent
 from .chunking import (
     MIN_SPLIT_SEGMENT_CHARS,
@@ -239,51 +239,6 @@ def _not_reviewed_range_label(issue: CodeReviewIssue) -> str:
     if issue.start_line is not None and issue.line is not None:
         return f"{path} (lines {issue.start_line}-{issue.line})"
     return path
-
-
-def _render_architecture_context(architecture: SystemArchitecture) -> str:
-    """Render an architecture object into text for the per-chunk excerpt.
-
-    Folds in ``components`` (module/service responsibilities) and ``decisions``
-    (ADRs) alongside ``overview`` -- the concrete signal an architecture-
-    consistency check needs; ``overview`` prose alone rarely names a boundary
-    or a taken decision precisely enough to judge a contradiction. The full
-    ``architecture_document`` is deliberately NOT included here (it can be
-    arbitrarily large and this excerpt repeats in every chunk prompt); it is
-    reserved for the once-per-submission architecture-consistency pass, which
-    can afford it in a single call.
-
-    Postconditions:
-        - Returns the overview/components/decisions sections that have
-          content, joined by blank lines, in that order. Returns "" when
-          ``architecture`` carries none of the three. Never raises: a
-          malformed ``decisions`` entry (not a dict, or missing keys) is
-          rendered from whatever fields are present, or skipped if it is not
-          a dict at all.
-    """
-    parts: List[str] = []
-    if architecture.overview:
-        parts.append(architecture.overview)
-    if architecture.components:
-        comp_lines = []
-        for c in architecture.components:
-            label = f"- {c.name} ({c.type})" if c.type else f"- {c.name}"
-            if c.description:
-                label += f": {c.description}"
-            comp_lines.append(label)
-        if comp_lines:
-            parts.append("Components:\n" + "\n".join(comp_lines))
-    if architecture.decisions:
-        decision_lines = []
-        for d in architecture.decisions:
-            if not isinstance(d, dict):
-                continue
-            title = d.get("title") or d.get("id") or "Decision"
-            detail = d.get("decision") or d.get("description") or ""
-            decision_lines.append(f"- {title}: {detail}" if detail else f"- {title}")
-        if decision_lines:
-            parts.append("Architecture decisions:\n" + "\n".join(decision_lines))
-    return "\n\n".join(p for p in parts if p.strip())
 
 
 def _dedupe_issues(all_issues: List[CodeReviewIssue]) -> List[CodeReviewIssue]:

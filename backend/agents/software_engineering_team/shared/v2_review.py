@@ -197,8 +197,10 @@ def _code_review_step(
         - ``files`` maps file paths to their full source text. ``task_description`` is the
           description surfaced to the external agent (the caller scopes this to the task or a
           single microtask; the LLM fallback always reasons over the full ``task``, unaffected).
-        - ``llm_review_fn(llm=, task=, files=)`` is the per-team chunking/prompt/parse reviewer
-          (the test patch surface for ``Agent`` / ``resolve_text_mode_strands_model``).
+        - ``llm_review_fn(llm=, task=, files=, review_context=)`` is the per-team
+          chunking/prompt/parse reviewer (the test patch surface for ``Agent`` /
+          ``resolve_text_mode_strands_model``); it must accept ``review_context``
+          so the fallback reviewer sees the same context the external agent path does.
         - ``review_context`` bundles the caller's system architecture and project specification,
           when available; ``None`` means "nothing to add" so a caller that does not have this
           context yet keeps working unchanged.
@@ -215,7 +217,7 @@ def _code_review_step(
     """
     try:
         if code_review_agent is None:
-            return llm_review_fn(llm=llm, task=task, files=files)
+            return llm_review_fn(llm=llm, task=task, files=files, review_context=review_context)
         try:
             from code_review_agent.models import CodeReviewInput as _CRInput
 
@@ -253,7 +255,7 @@ def _code_review_step(
                 task_id,
                 exc,
             )
-            return llm_review_fn(llm=llm, task=task, files=files)
+            return llm_review_fn(llm=llm, task=task, files=files, review_context=review_context)
     except Exception as exc:
         logger.warning("[%s] Code review step failed outright: %s", task_id, exc)
         return [

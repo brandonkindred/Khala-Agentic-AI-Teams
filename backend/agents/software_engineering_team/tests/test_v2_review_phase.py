@@ -71,6 +71,44 @@ def test_run_llm_review_parses_issues(monkeypatch):
     assert len(issues) == 1
 
 
+def test_run_llm_review_forwards_review_context(monkeypatch):
+    """The LLM fallback reviewer (used when no external code_review_agent is
+    configured, or it fails) also sees architecture/spec_content -- previously
+    only the external agent path received this context, so a deployment
+    relying on the fallback never saw it despite callers passing review_context."""
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
+
+    prompts: list[str] = []
+
+    class _RecordingAgent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            prompts.append(prompt)
+            return "## PASSED ##\ntrue\n## END PASSED ##\n## ISSUES ##\n## END ISSUES ##\n## SUMMARY ##\nok\n## END SUMMARY ##\n"
+
+    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _RecordingAgent())
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    architecture = SystemArchitecture(overview="Layered service architecture.")
+    review_context = ReviewContext(
+        architecture=architecture, spec_content="All endpoints require auth."
+    )
+
+    _run_llm_review(
+        llm=DummyLLMClient(),
+        task=_task(),
+        files={"x.py": "code"},
+        review_context=review_context,
+    )
+    assert "Layered service architecture." in prompts[0]
+    assert "All endpoints require auth." in prompts[0]
+
+
 def test_run_llm_review_chunks_large_file_without_dropping_tail(monkeypatch):
     """A file larger than one prompt budget is reviewed in function-aware
     chunks, so its tail is seen by the reviewer instead of being truncated."""
