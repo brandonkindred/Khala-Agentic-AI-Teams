@@ -99,6 +99,10 @@ class AccessibilityAuditOrchestrator:
         # Store for in-progress audits (also persisted via artifact store)
         self._audits: Dict[str, AccessibilityAuditResult] = {}
 
+        # Per-audit_id locks serializing run_retest against the shared cached
+        # AccessibilityAuditResult instance in self._audits — see _get_retest_lock.
+        self._retest_locks: Dict[str, asyncio.Lock] = {}
+
     async def run_audit(
         self,
         audit_request: AuditRequest,
@@ -328,6 +332,31 @@ class AccessibilityAuditOrchestrator:
         """
         return await self._ensure_loaded(audit_id)
 
+    def _get_retest_lock(self, audit_id: str) -> asyncio.Lock:
+        """Return (creating if needed) the lock serializing ``run_retest`` calls
+        for one ``audit_id``.
+
+        ``_ensure_loaded`` caches and returns the SAME ``AccessibilityAuditResult``
+        instance for repeated calls with the same ``audit_id``; two concurrent
+        ``run_retest`` calls for that audit (e.g. a double-submitted retest request)
+        would otherwise mutate that shared object in place with no synchronization,
+        letting one call's write silently clobber the other's before either persists.
+
+        Preconditions:
+            - Called from the event loop this orchestrator instance's coroutines run
+              on.
+        Postconditions:
+            - Returns the same ``asyncio.Lock`` for repeated calls with the same
+              ``audit_id``. Safe without additional synchronization: the
+              check-then-create below has no ``await`` in it, and Python's event
+              loop is single-threaded, so no other coroutine can interleave here.
+        """
+        lock = self._retest_locks.get(audit_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._retest_locks[audit_id] = lock
+        return lock
+
     async def run_retest(
         self,
         audit_id: str,
@@ -343,54 +372,57 @@ class AccessibilityAuditOrchestrator:
         Returns:
             Updated AccessibilityAuditResult
         """
-        result = await self._ensure_loaded(audit_id)
-        if not result:
-            return AccessibilityAuditResult(
+        async with self._get_retest_lock(audit_id):
+            result = await self._ensure_loaded(audit_id)
+            if not result:
+                return AccessibilityAuditResult(
+                    audit_id=audit_id,
+                    success=False,
+                    failure_reason=f"Audit {audit_id} not found",
+                )
+
+            # Get findings to retest
+            if finding_ids:
+                findings_to_retest = [f for f in result.final_findings if f.id in finding_ids]
+            else:
+                findings_to_retest = result.final_findings
+
+            if not findings_to_retest:
+                result.summary = "No findings to retest"
+                await self._persist_audit(result)
+                return result
+
+            # Run retest phase
+            logger.info("Starting retest phase for audit %s", audit_id)
+            result.current_phase = Phase.RETEST
+
+            retest_result = await run_retest_phase(
                 audit_id=audit_id,
-                success=False,
-                failure_reason=f"Audit {audit_id} not found",
+                findings_to_retest=findings_to_retest,
+                llm_client=self.llm_client,
+                message_bus=self.message_bus,
             )
 
-        # Get findings to retest
-        if finding_ids:
-            findings_to_retest = [f for f in result.final_findings if f.id in finding_ids]
-        else:
-            findings_to_retest = result.final_findings
+            result.retest_result = retest_result
+            result.completed_phases.append(Phase.RETEST)
 
-        if not findings_to_retest:
-            result.summary = "No findings to retest"
+            # Update final findings
+            if retest_result.updated_findings:
+                finding_map = {f.id: f for f in retest_result.updated_findings}
+                result.final_findings = [finding_map.get(f.id, f) for f in result.final_findings]
+
+            result.summary = (
+                f"Retest complete. {retest_result.findings_closed} findings closed, "
+                f"{retest_result.findings_still_open} still open."
+            )
+
+            # Persist the retested state so a later report/retest request —
+            # possibly in a different process (the Temporal worker vs the API) or
+            # after a restart — reloads the updated findings instead of the stale
+            # pre-retest snapshot.
+            await self._persist_audit(result)
+
             return result
-
-        # Run retest phase
-        logger.info("Starting retest phase for audit %s", audit_id)
-        result.current_phase = Phase.RETEST
-
-        retest_result = await run_retest_phase(
-            audit_id=audit_id,
-            findings_to_retest=findings_to_retest,
-            llm_client=self.llm_client,
-            message_bus=self.message_bus,
-        )
-
-        result.retest_result = retest_result
-        result.completed_phases.append(Phase.RETEST)
-
-        # Update final findings
-        if retest_result.updated_findings:
-            finding_map = {f.id: f for f in retest_result.updated_findings}
-            result.final_findings = [finding_map.get(f.id, f) for f in result.final_findings]
-
-        result.summary = (
-            f"Retest complete. {retest_result.findings_closed} findings closed, "
-            f"{retest_result.findings_still_open} still open."
-        )
-
-        # Persist the retested state so a later report/retest request — possibly in a
-        # different process (the Temporal worker vs the API) or after a restart —
-        # reloads the updated findings instead of the stale pre-retest snapshot.
-        await self._persist_audit(result)
-
-        return result
 
     def get_audit_status(self, audit_id: str) -> Dict[str, Any]:
         """

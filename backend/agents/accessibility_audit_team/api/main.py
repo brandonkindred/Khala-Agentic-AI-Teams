@@ -318,15 +318,14 @@ async def get_audit_findings(
     Get findings for an audit with optional filters and pagination.
     """
     orchestrator = get_orchestrator()
+    # Existence check against the persisted audit state (via the artifact store), so a
+    # Temporal-executed audit that ran in a worker process is still found from the API
+    # process — the in-memory orchestrator cache alone would 404 every cross-process audit.
+    if await orchestrator.get_audit_state(audit_id) is None:
+        raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
 
     severity_filter = Severity(severity) if severity else None
     findings = orchestrator.get_findings(audit_id, severity_filter, state)
-
-    if not findings:
-        # Check if audit exists
-        status = orchestrator.get_audit_status(audit_id)
-        if status.get("status") == "not_found":
-            raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
 
     total = len(findings)
 
@@ -364,11 +363,13 @@ async def get_audit_report(audit_id: str) -> Dict[str, Any]:
     Get the final report for a completed audit.
     """
     orchestrator = get_orchestrator()
-    status = orchestrator.get_audit_status(audit_id)
-
-    if status.get("status") == "not_found":
+    # Existence check against the persisted audit state (via the artifact store), so a
+    # Temporal-executed audit that ran in a worker process is still found from the API
+    # process — the in-memory orchestrator cache alone would 404 every cross-process audit.
+    if await orchestrator.get_audit_state(audit_id) is None:
         raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
 
+    status = orchestrator.get_audit_status(audit_id)
     if status.get("status") != "complete":
         raise HTTPException(
             status_code=400,
@@ -493,9 +494,10 @@ async def export_backlog(
     from ..phases.report_packaging import export_final_report
 
     orchestrator = get_orchestrator()
-    status = orchestrator.get_audit_status(audit_id)
-
-    if status.get("status") == "not_found":
+    # Existence check against the persisted audit state (via the artifact store), so a
+    # Temporal-executed audit that ran in a worker process is still found from the API
+    # process — the in-memory orchestrator cache alone would 404 every cross-process audit.
+    if await orchestrator.get_audit_state(audit_id) is None:
         raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
 
     findings = orchestrator.get_findings(audit_id)
@@ -560,9 +562,10 @@ async def generate_audit_case_study(
     )
 
     orchestrator = get_orchestrator()
-    status = orchestrator.get_audit_status(audit_id)
-
-    if status.get("status") == "not_found":
+    # Existence check against the persisted audit state (via the artifact store), so a
+    # Temporal-executed audit that ran in a worker process is still found from the API
+    # process — the in-memory orchestrator cache alone would 404 every cross-process audit.
+    if await orchestrator.get_audit_state(audit_id) is None:
         raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
 
     findings = orchestrator.get_findings(audit_id)

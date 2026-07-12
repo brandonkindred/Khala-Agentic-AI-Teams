@@ -36,3 +36,12 @@ ACTIVITY_RUN_PIPELINE = "accessibility_audit_run_pipeline"
 #: executions record it and take the per-phase path; a history recorded before the
 #: decomposition has no marker and replays the single legacy activity.
 PER_PHASE_PATCH = "accessibility-audit-per-phase-activities"
+
+#: Overall wall-clock ceiling applied when the caller doesn't request an explicit
+#: ``timebox_hours``. The legacy single-activity path had an implicit cap via its
+#: 2-hour ``start_to_close_timeout``; per-phase decomposition replaced that with
+#: independent per-phase timeouts, which sum to more than this and have no
+#: aggregate bound, so an unspecified timebox must still resolve to *some* overall
+#: cap rather than running unbounded. An explicit ``0``/negative value from the
+#: caller is unaffected — that remains a deliberate "run unbounded" request.
+DEFAULT_TIMEBOX_HOURS = 4

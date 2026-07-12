@@ -19,6 +19,7 @@ import asyncio
 import importlib
 import sys
 import unittest.mock as mock
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -388,6 +389,77 @@ def test_workflow_timebox_completes_when_within_budget(monkeypatch):
     assert calls[-1] == "finalize_activity"
 
 
+def test_workflow_applies_default_timebox_when_unset(monkeypatch):
+    """A request that never specifies ``timebox_hours`` still gets an overall
+    wall-clock cap (``DEFAULT_TIMEBOX_HOURS``) rather than running unbounded —
+    the per-phase timeouts alone have no aggregate bound."""
+    from accessibility_audit_team.temporal import workflows as wf
+
+    captured: dict = {}
+
+    async def fake_sleep(duration):
+        captured["sleep_duration"] = duration
+        await asyncio.sleep(3600)  # timer never actually fires within the test
+
+    async def fake_execute(activity, *args, **kwargs):
+        return {"status": "PASS", "audit_id": "a1"}
+
+    monkeypatch.setattr(wf.workflow, "execute_activity", fake_execute)
+    monkeypatch.setattr(wf.workflow, "patched", lambda _id: True)
+    monkeypatch.setattr(wf.workflow, "sleep", fake_sleep)
+
+    payload = {"job_id": "j1", "audit_id": "a1", "request": {"tech_stack": {}}}
+    out = asyncio.run(wf.AccessibilityAuditWorkflow().run(payload))
+    assert out == {"status": "PASS", "audit_id": "a1"}
+    assert captured["sleep_duration"] == timedelta(hours=wf.DEFAULT_TIMEBOX_HOURS)
+
+
+def test_workflow_explicit_zero_timebox_remains_unbounded(monkeypatch):
+    """An explicit ``0`` is a deliberate "run unbounded" request and must NOT be
+    replaced by ``DEFAULT_TIMEBOX_HOURS`` — no timer race is set up at all."""
+    from accessibility_audit_team.temporal import workflows as wf
+
+    sleep_called = mock.Mock()
+
+    async def fake_sleep(duration):
+        sleep_called(duration)
+        await asyncio.sleep(3600)
+
+    async def fake_execute(activity, *args, **kwargs):
+        return {"status": "PASS", "audit_id": "a1"}
+
+    monkeypatch.setattr(wf.workflow, "execute_activity", fake_execute)
+    monkeypatch.setattr(wf.workflow, "patched", lambda _id: True)
+    monkeypatch.setattr(wf.workflow, "sleep", fake_sleep)
+
+    payload = {"job_id": "j1", "audit_id": "a1", "request": {"timebox_hours": 0, "tech_stack": {}}}
+    out = asyncio.run(wf.AccessibilityAuditWorkflow().run(payload))
+    assert out == {"status": "PASS", "audit_id": "a1"}
+    sleep_called.assert_not_called()
+
+
+def test_workflow_intake_and_finalize_pass_heartbeat_timeout(monkeypatch):
+    """intake/finalize now heartbeat (Fix 2), so their activities must be scheduled
+    with a ``heartbeat_timeout`` like the long LLM/scan phases, or a live heartbeat
+    with no matching timeout is silently ineffective."""
+    from accessibility_audit_team.temporal import workflows as wf
+
+    captured: dict = {}
+
+    async def fake_execute(activity, *args, **kwargs):
+        name = getattr(activity, "__name__", str(activity))
+        captured[name] = kwargs
+        return {"status": "PASS", "audit_id": "a1"}
+
+    monkeypatch.setattr(wf.workflow, "execute_activity", fake_execute)
+    monkeypatch.setattr(wf.workflow, "patched", lambda _id: True)
+    payload = {"job_id": "j1", "audit_id": "a1", "request": {"tech_stack": {}}}
+    asyncio.run(wf.AccessibilityAuditWorkflow().run(payload))
+
+    assert captured["intake_activity"].get("heartbeat_timeout") == wf.HEARTBEAT_TIMEOUT
+    assert captured["finalize_activity"].get("heartbeat_timeout") == wf.HEARTBEAT_TIMEOUT
+
+
 def test_mark_timed_out_activity_delegates(monkeypatch):
     from accessibility_audit_team import audit_execution as ax
     from accessibility_audit_team.temporal import activities as acts
@@ -613,14 +685,16 @@ def test_create_audit_request_validates_url_scheme():
         CreateAuditRequest(web_urls=["ftp://bad.example"])
 
 
-def test_create_audit_request_rejects_nonpositive_timebox():
-    """timebox_hours must be >= 1 when set, so 0/negative can't reach the workflow."""
+def test_create_audit_request_accepts_zero_and_negative_timebox():
+    """No lower-bound constraint: 0/negative is accepted and treated as
+    "unbounded" downstream (parity with the orchestrator's falsy check and the
+    workflow's timebox guard) rather than rejected — a legacy Temporal history
+    recorded before a stricter bound was ever considered may carry
+    ``timebox_hours=0``, and replaying it must not raise a validation error."""
     from accessibility_audit_team.audit_execution import CreateAuditRequest
 
-    with pytest.raises(ValueError):
-        CreateAuditRequest(timebox_hours=0)
-    with pytest.raises(ValueError):
-        CreateAuditRequest(timebox_hours=-3)
+    assert CreateAuditRequest(timebox_hours=0).timebox_hours == 0
+    assert CreateAuditRequest(timebox_hours=-3).timebox_hours == -3
     assert CreateAuditRequest(timebox_hours=2).timebox_hours == 2
     assert CreateAuditRequest().timebox_hours is None
 
@@ -816,6 +890,195 @@ def test_run_audit_job_runs_when_no_existing_job_row(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _is_last_attempt / _is_job_terminal — the retry/terminal-write guard helpers
+# ---------------------------------------------------------------------------
+
+
+def test_is_last_attempt_true_outside_activity_context():
+    """Direct/thread use (no Temporal activity context) treats the call as the
+    last attempt — there's no retry mechanism to defer to."""
+    from accessibility_audit_team.temporal import activities as acts
+
+    assert acts._is_last_attempt() is True
+
+
+def test_is_last_attempt_false_when_retries_unlimited(monkeypatch):
+    from accessibility_audit_team.temporal import activities as acts
+
+    info = SimpleNamespace(retry_policy=SimpleNamespace(maximum_attempts=0), attempt=5)
+    monkeypatch.setattr(acts.activity, "info", lambda: info)
+    assert acts._is_last_attempt() is False
+
+
+def test_is_last_attempt_false_when_retry_policy_missing(monkeypatch):
+    from accessibility_audit_team.temporal import activities as acts
+
+    info = SimpleNamespace(retry_policy=None, attempt=1)
+    monkeypatch.setattr(acts.activity, "info", lambda: info)
+    assert acts._is_last_attempt() is False
+
+
+def test_is_last_attempt_true_on_final_scheduled_attempt(monkeypatch):
+    from accessibility_audit_team.temporal import activities as acts
+
+    info = SimpleNamespace(retry_policy=SimpleNamespace(maximum_attempts=3), attempt=3)
+    monkeypatch.setattr(acts.activity, "info", lambda: info)
+    assert acts._is_last_attempt() is True
+
+
+def test_is_last_attempt_false_before_final_scheduled_attempt(monkeypatch):
+    from accessibility_audit_team.temporal import activities as acts
+
+    info = SimpleNamespace(retry_policy=SimpleNamespace(maximum_attempts=3), attempt=1)
+    monkeypatch.setattr(acts.activity, "info", lambda: info)
+    assert acts._is_last_attempt() is False
+
+
+def test_is_job_terminal_true_for_completed():
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    manager = mock.Mock()
+    manager.get_job.return_value = {"status": ax.JOB_STATUS_COMPLETED}
+    assert acts._is_job_terminal(manager, "j1") is True
+
+
+def test_is_job_terminal_true_for_failed():
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    manager = mock.Mock()
+    manager.get_job.return_value = {"status": ax.JOB_STATUS_FAILED}
+    assert acts._is_job_terminal(manager, "j1") is True
+
+
+def test_is_job_terminal_false_for_running():
+    from accessibility_audit_team.temporal import activities as acts
+
+    manager = mock.Mock()
+    manager.get_job.return_value = {"status": "running"}
+    assert acts._is_job_terminal(manager, "j1") is False
+
+
+def test_is_job_terminal_false_when_job_missing():
+    from accessibility_audit_team.temporal import activities as acts
+
+    manager = mock.Mock()
+    manager.get_job.return_value = None
+    assert acts._is_job_terminal(manager, "j1") is False
+
+
+# ---------------------------------------------------------------------------
+# _run_phase — terminal-write guard and exception handling (direct, no
+# activity wrapper)
+# ---------------------------------------------------------------------------
+
+
+def test_run_phase_skips_terminal_write_when_job_already_terminal_on_fail(monkeypatch):
+    """A logical phase failure's terminal write is skipped when a concurrent path
+    (e.g. a timebox timeout racing an abandoned activity) already marked the job
+    terminal — but the returned status still reflects this attempt's own outcome."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_COMPLETED}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+
+    out = asyncio.run(
+        acts._run_phase("j1", "a1", "discovery", 40, lambda: _phase_fail_async("boom"))
+    )
+    assert out == {"status": "FAIL", "audit_id": "a1", "error": "boom"}
+    failed_writes = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert not failed_writes
+
+
+def test_run_phase_writes_terminal_fail_when_job_not_yet_terminal(monkeypatch):
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+
+    out = asyncio.run(
+        acts._run_phase("j1", "a1", "discovery", 40, lambda: _phase_fail_async("boom"))
+    )
+    assert out == {"status": "FAIL", "audit_id": "a1", "error": "boom"}
+    failed_writes = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed_writes and failed_writes[0].kwargs.get("error") == "boom"
+
+
+def test_run_phase_marks_failed_on_last_attempt_exception(monkeypatch):
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+
+    async def step():
+        raise RuntimeError("infra boom")
+
+    with pytest.raises(RuntimeError, match="infra boom"):
+        asyncio.run(acts._run_phase("j1", "a1", "discovery", 40, step))
+
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed and failed[0].kwargs.get("error") == "infra boom"
+
+
+def test_run_phase_does_not_mark_failed_when_not_last_attempt(monkeypatch):
+    """Temporal will retry a non-final attempt, so the job is left non-terminal
+    (RUNNING) rather than marked FAILED prematurely."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: False)
+
+    async def step():
+        raise RuntimeError("infra boom")
+
+    with pytest.raises(RuntimeError, match="infra boom"):
+        asyncio.run(acts._run_phase("j1", "a1", "discovery", 40, step))
+
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert not failed
+
+
+def test_run_phase_exception_on_last_attempt_skips_write_when_already_terminal(monkeypatch):
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_COMPLETED}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+
+    async def step():
+        raise RuntimeError("infra boom")
+
+    with pytest.raises(RuntimeError, match="infra boom"):
+        asyncio.run(acts._run_phase("j1", "a1", "discovery", 40, step))
+
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert not failed
+
+
+# ---------------------------------------------------------------------------
 # Per-phase activities (the annotation layer over the shared step helpers)
 # ---------------------------------------------------------------------------
 
@@ -846,6 +1109,24 @@ def test_intake_activity_pass_writes_running(monkeypatch):
     assert running and running[0].kwargs["current_phase"] == "intake"
 
 
+def _phase_fail_result(reason: str) -> SimpleNamespace:
+    """A ``failure_reason``-set phase result, shaped for ``_run_phase``'s FAIL
+    branch (which also reads ``completed_phases``/``total_findings``/``model_dump``
+    to write the full partial result, not just the error string)."""
+    return SimpleNamespace(
+        failure_reason=reason,
+        total_findings=0,
+        completed_phases=[],
+        model_dump=lambda: {"audit_id": "a1", "success": False},
+    )
+
+
+async def _phase_fail_async(reason: str) -> SimpleNamespace:
+    """Async wrapper around :func:`_phase_fail_result` for use as a ``step``
+    callable's return value in direct ``_run_phase`` tests."""
+    return _phase_fail_result(reason)
+
+
 def test_intake_activity_fail_marks_job_failed(monkeypatch):
     from accessibility_audit_team import audit_execution as ax
     from accessibility_audit_team.temporal import activities as acts
@@ -854,7 +1135,7 @@ def test_intake_activity_fail_marks_job_failed(monkeypatch):
     monkeypatch.setattr(
         ax,
         "run_intake_step",
-        mock.AsyncMock(return_value=SimpleNamespace(failure_reason="unauditable target")),
+        mock.AsyncMock(return_value=_phase_fail_result("unauditable target")),
     )
 
     out = asyncio.run(acts.intake_activity("j1", "a1", {}))
@@ -863,6 +1144,8 @@ def test_intake_activity_fail_marks_job_failed(monkeypatch):
         c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
     ]
     assert failed and "unauditable target" in failed[0].kwargs.get("error")
+    assert failed[0].kwargs.get("progress") == 100
+    assert failed[0].kwargs.get("result") == {"audit_id": "a1", "success": False}
 
 
 def test_intake_activity_rebuild_failure_propagates(monkeypatch):
@@ -963,6 +1246,50 @@ def test_finalize_activity_marks_failed_when_unsuccessful(monkeypatch):
         c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
     ]
     assert failed and failed[0].kwargs.get("error") == "boom"
+
+
+def test_finalize_activity_propagates_exception_and_marks_failed_on_last_attempt(monkeypatch):
+    """An infra failure while assembling the result propagates (so Temporal
+    retries) and, on the last scheduled attempt, marks the job FAILED first
+    rather than leaving it stranded RUNNING forever."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = _patch_activity_jobmanager(monkeypatch)
+    jm.get_job.return_value = None
+    monkeypatch.setattr(
+        ax, "finalize_audit_step", mock.AsyncMock(side_effect=RuntimeError("store down"))
+    )
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+
+    with pytest.raises(RuntimeError, match="store down"):
+        asyncio.run(acts.finalize_activity("j1", "a1"))
+
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed and failed[0].kwargs.get("error") == "store down"
+
+
+def test_finalize_activity_skips_terminal_write_when_already_terminal(monkeypatch):
+    """A concurrent path (e.g. a timebox timeout) already marked the job terminal
+    while this attempt was in flight — the terminal write is skipped so it can't
+    clobber that status, but the returned status still reflects this attempt."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = _patch_activity_jobmanager(monkeypatch)
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_FAILED}
+    monkeypatch.setattr(
+        ax, "finalize_audit_step", mock.AsyncMock(return_value=_finalized_result(True))
+    )
+
+    out = asyncio.run(acts.finalize_activity("j1", "a1"))
+    assert out == {"status": "PASS", "audit_id": "a1"}
+    completed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_COMPLETED
+    ]
+    assert not completed
 
 
 def test_retest_activity_delegates_to_run_retest_job(monkeypatch):
@@ -1143,3 +1470,80 @@ def test_retest_fails_fast_on_dispatch_error(monkeypatch):
         c for c in jm.update_job.call_args_list if c.kwargs.get("status") == main.JOB_STATUS_FAILED
     ]
     assert failed
+
+
+# ---------------------------------------------------------------------------
+# Cache-only read endpoints (findings/report/export/case-study) — existence
+# check against the persisted audit state, not just the in-memory cache
+# ---------------------------------------------------------------------------
+
+
+def _patch_orchestrator_for_reads(monkeypatch, *, audit_found=True):
+    """Mock ``main.get_orchestrator`` for the findings/report/export/case-study
+    endpoint tests. ``audit_found`` controls what ``get_audit_state`` resolves to
+    (a sentinel when True, ``None`` when False -> 404). Returns the orchestrator
+    mock so callers can further configure/assert on it."""
+    from accessibility_audit_team.api import main
+
+    orch = mock.Mock()
+    orch.get_audit_state = mock.AsyncMock(return_value=object() if audit_found else None)
+    monkeypatch.setattr(main, "get_orchestrator", lambda: orch)
+    return orch
+
+
+def test_get_audit_findings_404_when_audit_missing(monkeypatch):
+    orch = _patch_orchestrator_for_reads(monkeypatch, audit_found=False)
+    orch.get_findings = mock.Mock(return_value=[])
+
+    resp = client.get("/audit/nope/findings")
+
+    assert resp.status_code == 404
+    orch.get_findings.assert_not_called()
+
+
+def test_get_audit_findings_found_cross_process_returns_empty_list(monkeypatch):
+    """A Temporal-executed audit whose findings live only in the artifact store
+    (not this API process's in-memory orchestrator cache) must resolve via
+    ``get_audit_state`` rather than false-404ing — the prior reactive check,
+    which only inspected the (empty, uncached) in-memory findings list, would
+    404 here even though the audit exists."""
+    orch = _patch_orchestrator_for_reads(monkeypatch, audit_found=True)
+    orch.get_findings = mock.Mock(return_value=[])
+
+    resp = client.get("/audit/a1/findings")
+
+    assert resp.status_code == 200
+    assert resp.json()["findings"] == []
+
+
+def test_get_audit_report_404_when_audit_missing(monkeypatch):
+    _patch_orchestrator_for_reads(monkeypatch, audit_found=False)
+
+    resp = client.get("/audit/nope/report")
+
+    assert resp.status_code == 404
+
+
+def test_get_audit_report_400_when_not_complete(monkeypatch):
+    orch = _patch_orchestrator_for_reads(monkeypatch, audit_found=True)
+    orch.get_audit_status = mock.Mock(return_value={"status": "in_progress"})
+
+    resp = client.get("/audit/a1/report")
+
+    assert resp.status_code == 400
+
+
+def test_export_backlog_404_when_audit_missing(monkeypatch):
+    _patch_orchestrator_for_reads(monkeypatch, audit_found=False)
+
+    resp = client.post("/audit/nope/export")
+
+    assert resp.status_code == 404
+
+
+def test_generate_case_study_404_when_audit_missing(monkeypatch):
+    _patch_orchestrator_for_reads(monkeypatch, audit_found=False)
+
+    resp = client.post("/audit/nope/case-study", json={})
+
+    assert resp.status_code == 404

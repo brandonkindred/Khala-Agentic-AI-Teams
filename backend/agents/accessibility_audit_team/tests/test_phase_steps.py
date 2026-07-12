@@ -207,6 +207,49 @@ def test_run_report_packaging_step_raises_when_state_missing(monkeypatch):
         asyncio.run(ax.run_report_packaging_step("j1", "a1"))
 
 
+def test_run_discovery_step_is_idempotent_on_phase(monkeypatch, sample_audit_plan, sample_findings):
+    """A Temporal at-least-once retry reloading a result whose completed_phases
+    already contains DISCOVERY (the completion ack to the server was lost, so the
+    activity re-runs after it already succeeded and persisted) must not duplicate
+    the entry."""
+    _seed(
+        monkeypatch,
+        AccessibilityAuditResult(
+            audit_id="a1",
+            intake_result=IntakeResult(success=True, audit_plan=sample_audit_plan),
+            discovery_result=DiscoveryResult(success=True, draft_findings=sample_findings),
+            completed_phases=[Phase.INTAKE, Phase.DISCOVERY],
+        ),
+    )
+    monkeypatch.setattr(
+        ax,
+        "run_discovery_phase",
+        mock.AsyncMock(return_value=DiscoveryResult(success=True, draft_findings=sample_findings)),
+    )
+    result = asyncio.run(ax.run_discovery_step("j1", "a1"))
+    assert result.completed_phases.count(Phase.DISCOVERY) == 1
+
+
+def test_run_discovery_step_raises_when_persist_fails(monkeypatch, sample_audit_plan):
+    """Persistence is load-bearing for a per-phase Temporal step (the only channel
+    the next activity has to this state): a store write failure must fail this
+    activity loudly rather than silently reporting PASS with unsaved state."""
+    _seed(
+        monkeypatch,
+        AccessibilityAuditResult(
+            audit_id="a1", intake_result=IntakeResult(success=True, audit_plan=sample_audit_plan)
+        ),
+    )
+    monkeypatch.setattr(
+        ax,
+        "run_discovery_phase",
+        mock.AsyncMock(return_value=DiscoveryResult(success=True)),
+    )
+    monkeypatch.setattr(ax, "persist_audit_state", mock.AsyncMock(return_value=False))
+    with pytest.raises(RuntimeError, match="failed to persist audit state"):
+        asyncio.run(ax.run_discovery_step("j1", "a1"))
+
+
 def test_run_discovery_step_failure(monkeypatch, sample_audit_plan):
     _seed(
         monkeypatch,
@@ -248,6 +291,60 @@ def test_run_verification_step_raises_when_state_missing(monkeypatch):
         asyncio.run(ax.run_verification_step("j1", "a1", {}))
 
 
+def test_run_verification_step_is_idempotent_on_phase(monkeypatch, sample_findings):
+    """Same idempotency contract as discovery: a retry reloading state that
+    already has VERIFICATION recorded must not duplicate the entry."""
+    _seed(
+        monkeypatch,
+        AccessibilityAuditResult(
+            audit_id="a1",
+            discovery_result=DiscoveryResult(success=True, draft_findings=sample_findings),
+            verification_result=VerificationResult(success=True, verified_findings=sample_findings),
+            completed_phases=[Phase.INTAKE, Phase.DISCOVERY, Phase.VERIFICATION],
+        ),
+    )
+    monkeypatch.setattr(
+        ax,
+        "run_verification_phase",
+        mock.AsyncMock(
+            return_value=VerificationResult(success=True, verified_findings=sample_findings)
+        ),
+    )
+    result = asyncio.run(ax.run_verification_step("j1", "a1", {}))
+    assert result.completed_phases.count(Phase.VERIFICATION) == 1
+
+
+def test_run_verification_step_raises_when_persist_fails(monkeypatch, sample_findings):
+    _seed(
+        monkeypatch,
+        AccessibilityAuditResult(
+            audit_id="a1",
+            discovery_result=DiscoveryResult(success=True, draft_findings=sample_findings),
+        ),
+    )
+    monkeypatch.setattr(
+        ax,
+        "run_verification_phase",
+        mock.AsyncMock(
+            return_value=VerificationResult(success=True, verified_findings=sample_findings)
+        ),
+    )
+    monkeypatch.setattr(ax, "persist_audit_state", mock.AsyncMock(return_value=False))
+    with pytest.raises(RuntimeError, match="failed to persist audit state"):
+        asyncio.run(ax.run_verification_step("j1", "a1", {}))
+
+
+def test_run_intake_step_raises_when_persist_fails(monkeypatch, sample_audit_plan):
+    monkeypatch.setattr(
+        ax,
+        "run_intake_phase",
+        mock.AsyncMock(return_value=IntakeResult(success=True, audit_plan=sample_audit_plan)),
+    )
+    monkeypatch.setattr(ax, "persist_audit_state", mock.AsyncMock(return_value=False))
+    with pytest.raises(RuntimeError, match="failed to persist audit state"):
+        asyncio.run(ax.run_intake_step("j1", "a1", ax.CreateAuditRequest(web_urls=[])))
+
+
 def test_run_report_packaging_step_failure(monkeypatch, sample_findings):
     _seed(
         monkeypatch,
@@ -265,6 +362,27 @@ def test_run_report_packaging_step_failure(monkeypatch, sample_findings):
     result = asyncio.run(ax.run_report_packaging_step("j1", "a1"))
     assert result.failure_reason == "report boom"
     assert Phase.REPORT_PACKAGING not in result.completed_phases
+
+
+def test_run_report_packaging_step_raises_when_persist_fails(monkeypatch, sample_findings):
+    _seed(
+        monkeypatch,
+        AccessibilityAuditResult(
+            audit_id="a1",
+            intake_result=IntakeResult(success=True),
+            verification_result=VerificationResult(success=True, verified_findings=sample_findings),
+        ),
+    )
+    monkeypatch.setattr(
+        ax,
+        "run_report_packaging_phase",
+        mock.AsyncMock(
+            return_value=ReportPackagingResult(success=True, final_backlog=sample_findings)
+        ),
+    )
+    monkeypatch.setattr(ax, "persist_audit_state", mock.AsyncMock(return_value=False))
+    with pytest.raises(RuntimeError, match="failed to persist audit state"):
+        asyncio.run(ax.run_report_packaging_step("j1", "a1"))
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +425,21 @@ def test_finalize_audit_step_raises_when_report_unsuccessful(monkeypatch):
         asyncio.run(ax.finalize_audit_step("j1", "a1"))
 
 
+def test_finalize_audit_step_raises_when_persist_fails(monkeypatch, sample_findings):
+    _seed(
+        monkeypatch,
+        AccessibilityAuditResult(
+            audit_id="a1",
+            report_packaging_result=ReportPackagingResult(
+                success=True, final_backlog=sample_findings
+            ),
+        ),
+    )
+    monkeypatch.setattr(ax, "persist_audit_state", mock.AsyncMock(return_value=False))
+    with pytest.raises(RuntimeError, match="failed to persist audit state"):
+        asyncio.run(ax.finalize_audit_step("j1", "a1"))
+
+
 # ---------------------------------------------------------------------------
 # persist_audit_state / load_audit_state round-trip (real filesystem backend)
 # ---------------------------------------------------------------------------
@@ -315,7 +448,7 @@ def test_finalize_audit_step_raises_when_report_unsuccessful(monkeypatch):
 def test_persist_and_load_audit_state_round_trip():
     """The store (redirected to a tmp dir by the autouse fixture) round-trips a result."""
     result = AccessibilityAuditResult(audit_id="rt_unique", success=True, total_findings=2)
-    asyncio.run(ax.persist_audit_state(result))
+    assert asyncio.run(ax.persist_audit_state(result)) is True
     loaded = asyncio.run(ax.load_audit_state("rt_unique"))
     assert loaded is not None
     assert loaded.audit_id == "rt_unique"
@@ -363,7 +496,11 @@ def test_mark_audit_timed_out_without_persisted_state(monkeypatch):
 
 
 def test_persist_and_load_swallow_store_errors(monkeypatch):
-    """A store failure is logged and swallowed by both helpers (best-effort recovery)."""
+    """A store failure is logged and swallowed (never raised) by both helpers
+    (best-effort recovery); ``persist_audit_state`` reports the failure to its
+    caller via a ``False`` return rather than an exception, so a caller for whom
+    the write is load-bearing (a per-phase step) can check it and fail loudly
+    itself."""
     import accessibility_audit_team.artifact_store as store_mod
 
     def _boom():
@@ -371,5 +508,5 @@ def test_persist_and_load_swallow_store_errors(monkeypatch):
 
     monkeypatch.setattr(store_mod, "get_artifact_store", _boom)
     # Neither raises despite the store being unavailable.
-    asyncio.run(ax.persist_audit_state(AccessibilityAuditResult(audit_id="a1")))
+    assert asyncio.run(ax.persist_audit_state(AccessibilityAuditResult(audit_id="a1"))) is False
     assert asyncio.run(ax.load_audit_state("a1")) is None

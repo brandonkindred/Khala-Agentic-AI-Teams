@@ -26,7 +26,11 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from accessibility_audit_team.temporal import activities as _activities
-    from accessibility_audit_team.temporal.constants import PER_PHASE_PATCH, TASK_QUEUE
+    from accessibility_audit_team.temporal.constants import (
+        DEFAULT_TIMEBOX_HOURS,
+        PER_PHASE_PATCH,
+        TASK_QUEUE,
+    )
 
 # --- Per-phase timeouts -----------------------------------------------------
 #: Cheap/deterministic phases (intake, finalize).
@@ -107,15 +111,18 @@ class AccessibilityAuditWorkflow:
                 retry_policy=_AUDIT_RETRY_POLICY,
             )
 
-        # Enforce the caller's ``timebox_hours`` as an overall wall-clock budget
-        # (parity with thread mode's ``asyncio.wait_for``). Without it the per-phase
-        # timeouts sum to more than a short timebox, so a ``timebox_hours=1`` audit
-        # could overrun the caller's requested budget.
-        # A missing, zero, or negative timebox means "no wall-clock bound" (0/negative
-        # is nonsensical as a budget; the API rejects <1, so this is defense in depth
-        # and, notably, avoids treating an explicit 0 as an immediate timeout).
+        # Enforce an overall wall-clock budget (parity with thread mode's
+        # ``asyncio.wait_for`` and the legacy single-activity path's implicit 2-hour
+        # cap). Without it the per-phase timeouts sum to more than a short timebox
+        # — or, when unset, to no aggregate bound at all — so either a
+        # ``timebox_hours=1`` audit could overrun its budget, or an audit that never
+        # specifies one could run unbounded. A missing timebox falls back to
+        # ``DEFAULT_TIMEBOX_HOURS`` rather than "no bound"; an explicit zero or
+        # negative value is a deliberate "run unbounded" request and is honored as-is.
         timebox_hours = request.get("timebox_hours")
-        if timebox_hours is None or timebox_hours <= 0:
+        if timebox_hours is None:
+            timebox_hours = DEFAULT_TIMEBOX_HOURS
+        if timebox_hours <= 0:
             return await self._run_phases(job_id, audit_id, request)
 
         phases = asyncio.ensure_future(self._run_phases(job_id, audit_id, request))
@@ -152,6 +159,7 @@ class AccessibilityAuditWorkflow:
             args=[job_id, audit_id, request],
             task_queue=TASK_QUEUE,
             start_to_close_timeout=QUICK_TIMEOUT,
+            heartbeat_timeout=HEARTBEAT_TIMEOUT,
             retry_policy=_PHASE_RETRY_POLICY,
         )
         if intake.get("status") == "FAIL":
@@ -198,6 +206,7 @@ class AccessibilityAuditWorkflow:
             args=[job_id, audit_id],
             task_queue=TASK_QUEUE,
             start_to_close_timeout=QUICK_TIMEOUT,
+            heartbeat_timeout=HEARTBEAT_TIMEOUT,
             retry_policy=_PHASE_RETRY_POLICY,
         )
 

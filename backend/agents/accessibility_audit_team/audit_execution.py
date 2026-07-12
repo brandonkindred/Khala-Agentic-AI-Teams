@@ -109,9 +109,12 @@ class CreateAuditRequest(BaseModel):
         description="Mobile apps: [{platform, name, version, build}]",
     )
     critical_journeys: List[str] = Field(default_factory=list, description="Critical user journeys")
-    timebox_hours: Optional[int] = Field(
-        default=None, ge=1, description="Maximum hours for the audit (>= 1 when set)"
-    )
+    # No lower-bound constraint: 0/negative is treated as "unbounded" (parity with
+    # orchestrator.run_audit's falsy check and the workflow's timebox guard) rather
+    # than rejected — legacy Temporal histories recorded before a stricter bound was
+    # ever considered may carry ``timebox_hours=0``, and replaying them must not
+    # raise a validation error.
+    timebox_hours: Optional[int] = Field(default=None, description="Maximum hours for the audit")
     auth_required: bool = Field(default=False)
     max_pages: Optional[int] = Field(default=None)
     sampling_strategy: str = Field(default="journey_based")
@@ -278,7 +281,7 @@ def _build_llm_client() -> object:
     return Agent(model=get_strands_model("accessibility_audit"))
 
 
-async def persist_audit_state(result: AccessibilityAuditResult) -> None:
+async def persist_audit_state(result: AccessibilityAuditResult) -> bool:
     """Persist an audit's accumulated state to the artifact store for crash recovery.
 
     Shared by the orchestrator (thread mode) and the per-phase steps so both write
@@ -288,9 +291,14 @@ async def persist_audit_state(result: AccessibilityAuditResult) -> None:
         - ``result.audit_id`` is the non-empty API-supplied audit id (the stable
           store key threaded by the workflow — never the plan's derived id).
     Postconditions:
-        - The JSON dump of ``result`` is stored under ``audit_state_{audit_id}``.
-          A store failure is logged and swallowed (persistence is best-effort
-          crash-recovery, not the durable job record).
+        - Returns ``True`` when the JSON dump of ``result`` was durably stored under
+          ``audit_state_{audit_id}``. Returns ``False`` (after logging a warning)
+          when the store write failed — the write is never re-raised here, because
+          in thread mode a failed snapshot is only a best-effort crash-recovery
+          nicety (the same in-process object keeps driving the run regardless). A
+          caller for whom this write is load-bearing (a per-phase Temporal step
+          whose only channel to the next activity/process IS this persisted state)
+          must check the return value and fail loudly on ``False`` itself.
     """
     try:
         from .artifact_store import (
@@ -311,8 +319,10 @@ async def persist_audit_state(result: AccessibilityAuditResult) -> None:
             retention_policy=RetentionPolicy.STANDARD,
         )
         await store.backend.store(ref, content, metadata)
+        return True
     except Exception as e:
         logger.warning("Failed to persist audit state: %s", e)
+        return False
 
 
 async def load_audit_state(audit_id: str) -> Optional[AccessibilityAuditResult]:
@@ -418,7 +428,12 @@ async def run_intake_step(
     # workflow's threaded key can always reload this state.
     result.intake_result = intake_result
     result.completed_phases.append(Phase.INTAKE)
-    await persist_audit_state(result)
+    if not await persist_audit_state(result):
+        # Persistence is load-bearing here (the only channel the next phase's
+        # activity/process has to this state): fail the CURRENT activity loudly so
+        # Temporal retries intake itself, rather than silently reporting PASS and
+        # leaving discovery to raise on a precondition that was never actually saved.
+        raise RuntimeError(f"intake step: failed to persist audit state for {audit_id}")
     return result
 
 
@@ -452,8 +467,15 @@ async def run_discovery_step(job_id: str, audit_id: str) -> AccessibilityAuditRe
         return result
 
     result.discovery_result = discovery_result
-    result.completed_phases.append(Phase.DISCOVERY)
-    await persist_audit_state(result)
+    # Guard against duplicate entries the way run_report_packaging_step/
+    # finalize_audit_result already do: Temporal's at-least-once activity execution
+    # can retry this step after it already succeeded and persisted (e.g. the
+    # completion ack to the server was lost), reloading a result whose
+    # completed_phases already contains DISCOVERY.
+    if Phase.DISCOVERY not in result.completed_phases:
+        result.completed_phases.append(Phase.DISCOVERY)
+    if not await persist_audit_state(result):
+        raise RuntimeError(f"discovery step: failed to persist audit state for {audit_id}")
     return result
 
 
@@ -491,8 +513,12 @@ async def run_verification_step(
         return result
 
     result.verification_result = verification_result
-    result.completed_phases.append(Phase.VERIFICATION)
-    await persist_audit_state(result)
+    # See run_discovery_step for why this membership guard matters (idempotency
+    # under a Temporal activity retry that follows an already-persisted success).
+    if Phase.VERIFICATION not in result.completed_phases:
+        result.completed_phases.append(Phase.VERIFICATION)
+    if not await persist_audit_state(result):
+        raise RuntimeError(f"verification step: failed to persist audit state for {audit_id}")
     return result
 
 
@@ -532,7 +558,8 @@ async def run_report_packaging_step(job_id: str, audit_id: str) -> Accessibility
     result.report_packaging_result = report_result
     if Phase.REPORT_PACKAGING not in result.completed_phases:
         result.completed_phases.append(Phase.REPORT_PACKAGING)
-    await persist_audit_state(result)
+    if not await persist_audit_state(result):
+        raise RuntimeError(f"report packaging step: failed to persist audit state for {audit_id}")
     return result
 
 
@@ -558,7 +585,8 @@ async def finalize_audit_step(job_id: str, audit_id: str) -> AccessibilityAuditR
         raise RuntimeError(f"finalize step: report-packaging did not succeed for {audit_id}")
 
     finalize_audit_result(result, result.report_packaging_result)
-    await persist_audit_state(result)
+    if not await persist_audit_state(result):
+        raise RuntimeError(f"finalize step: failed to persist audit state for {audit_id}")
     return result
 
 
@@ -587,7 +615,15 @@ async def mark_audit_timed_out(job_id: str, audit_id: str, timebox_hours: int) -
         result.success = False
         result.failure_reason = reason
         await persist_audit_state(result)
-    get_job_manager().update_job(job_id, status=JOB_STATUS_FAILED, error=reason)
+    get_job_manager().update_job(
+        job_id,
+        status=JOB_STATUS_FAILED,
+        error=reason,
+        progress=100,
+        completed_phases=completed,
+        findings_count=result.total_findings if result is not None else 0,
+        result=result.model_dump() if result is not None else None,
+    )
 
 
 async def run_retest_job(job_id: str, audit_id: str, finding_ids: List[str]) -> None:

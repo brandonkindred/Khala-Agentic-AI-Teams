@@ -1,5 +1,6 @@
 """Tests for the AccessibilityAuditOrchestrator."""
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -181,6 +182,71 @@ async def test_run_retest_persists_updated_state(monkeypatch, sample_findings):
 
     persist.assert_awaited()
     assert Phase.RETEST in result.completed_phases
+
+
+@pytest.mark.anyio
+async def test_run_retest_no_findings_persists_state(monkeypatch, sample_findings):
+    """The "nothing to retest" early-return branch must still persist the updated
+    summary — otherwise the note never survives a restart/reload, unlike every
+    other branch of run_retest."""
+    orchestrator = AccessibilityAuditOrchestrator()
+    orchestrator._audits["audit_rt"] = AccessibilityAuditResult(
+        audit_id="audit_rt", final_findings=sample_findings
+    )
+    persist = AsyncMock()
+    monkeypatch.setattr(orchestrator, "_persist_audit", persist)
+
+    result = await orchestrator.run_retest("audit_rt", ["does-not-exist"])
+
+    assert result.summary == "No findings to retest"
+    persist.assert_awaited_once()
+
+
+def test_get_retest_lock_returns_same_lock_for_same_audit_id():
+    orchestrator = AccessibilityAuditOrchestrator()
+    lock1 = orchestrator._get_retest_lock("audit_x")
+    lock2 = orchestrator._get_retest_lock("audit_x")
+    lock3 = orchestrator._get_retest_lock("audit_y")
+    assert lock1 is lock2
+    assert lock1 is not lock3
+
+
+@pytest.mark.anyio
+async def test_run_retest_serializes_concurrent_calls_for_same_audit(monkeypatch, sample_findings):
+    """Two concurrent run_retest calls for the same audit_id must not interleave:
+    ``_ensure_loaded`` caches and returns the SAME AccessibilityAuditResult
+    instance for both, so without the lock the second call could mutate it out
+    from under the first before either persists."""
+    orchestrator = AccessibilityAuditOrchestrator()
+    orchestrator._audits["audit_rt"] = AccessibilityAuditResult(
+        audit_id="audit_rt", final_findings=sample_findings
+    )
+    monkeypatch.setattr(orchestrator, "_persist_audit", AsyncMock())
+
+    entered = []
+    release_first = asyncio.Event()
+
+    async def _fake_retest_phase(**kwargs):
+        entered.append(1)
+        if len(entered) == 1:
+            await release_first.wait()
+        return RetestResult(
+            success=True, findings_retested=1, findings_closed=1, findings_still_open=0
+        )
+
+    with patch(
+        "accessibility_audit_team.orchestrator.run_retest_phase",
+        side_effect=_fake_retest_phase,
+    ):
+        first = asyncio.ensure_future(orchestrator.run_retest("audit_rt", None))
+        await asyncio.sleep(0.05)  # let the first call acquire the lock and enter the phase
+        second = asyncio.ensure_future(orchestrator.run_retest("audit_rt", None))
+        await asyncio.sleep(0.05)  # the second must be blocked on the lock, not the phase
+        assert entered == [1]
+
+        release_first.set()
+        await asyncio.gather(first, second)
+    assert entered == [1, 1]
 
 
 # ---------------------------------------------------------------------------

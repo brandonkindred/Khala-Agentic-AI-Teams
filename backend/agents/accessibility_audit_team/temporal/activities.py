@@ -61,6 +61,49 @@ _VERIFICATION_PROGRESS = 60
 _REPORT_PROGRESS = 80
 
 
+def _is_last_attempt() -> bool:
+    """True when this is the final Temporal retry attempt (or no activity context).
+
+    Preconditions:
+        - Called from within an activity body (or directly, e.g. in tests).
+    Postconditions:
+        - Returns True when the current attempt is the last one Temporal will make
+          for the scheduled retry policy (so the caller should mark the job terminal
+          now rather than wait for a retry that will never come), or when called
+          outside an activity context (direct/thread use).
+        - Returns False when the scheduled policy allows unlimited retries
+          (``maximum_attempts <= 0``) — there is no "last attempt" to gate on, so the
+          caller keeps deferring to Temporal.
+    """
+    try:
+        info = activity.info()
+    except RuntimeError:
+        return True
+    policy = info.retry_policy
+    max_attempts = policy.maximum_attempts if policy is not None else 0
+    if max_attempts <= 0:
+        return False
+    return info.attempt >= max_attempts
+
+
+def _is_job_terminal(manager: Any, job_id: str) -> bool:
+    """True if the job has already reached a terminal (``completed``/``failed``) status.
+
+    Used to guard a phase activity's job-store write against overwriting a terminal
+    status a concurrent path (e.g. a timebox timeout) already set while this
+    activity was in flight or being cancelled — Temporal activity cancellation is
+    cooperative (delivered via heartbeat), so an abandoned activity can otherwise
+    keep running and complete after the job is already terminal.
+    """
+    from accessibility_audit_team.audit_execution import JOB_STATUS_COMPLETED, JOB_STATUS_FAILED
+
+    existing = manager.get_job(job_id)
+    return existing is not None and existing.get("status") in (
+        JOB_STATUS_COMPLETED,
+        JOB_STATUS_FAILED,
+    )
+
+
 async def _run_phase(
     job_id: str,
     audit_id: str,
@@ -78,13 +121,20 @@ async def _run_phase(
           ``AccessibilityAuditResult``).
     Postconditions:
         - Writes ``RUNNING``/``current_phase``/``progress`` before running the step.
-        - On a *logical* phase failure (``result.failure_reason`` set) marks the job
-          FAILED and returns ``{"status": "FAIL", ...}`` so the workflow short-circuits.
+        - On a *logical* phase failure (``result.failure_reason`` set), the terminal
+          job-store write (with the phase's full partial result) is skipped if a
+          concurrent path already marked the job terminal (e.g. a timebox timeout
+          racing an abandoned, still-running activity); the returned status dict
+          always reflects this attempt's own outcome regardless of that guard.
+          Returns ``{"status": "FAIL", ...}`` so the workflow short-circuits.
         - On success returns ``{"status": "PASS", "audit_id": audit_id}``.
-        - An infrastructure exception from ``step`` (or the progress write) propagates
-          so Temporal retries — it is NOT swallowed into a FAIL/terminal state.
+        - An exception RAISED by ``step`` (an infrastructure/plumbing failure, as
+          opposed to a returned ``failure_reason``) propagates so Temporal retries;
+          on the LAST scheduled attempt it also marks the job FAILED first (guarded
+          against clobbering an already-terminal status) so the job is never left
+          stranded non-terminal once Temporal gives up retrying.
         - When ``heartbeat`` is set the step runs under a background heartbeat so a
-          long phase keeps the activity alive.
+          long phase keeps the activity alive and cancellation is deliverable.
     """
     from accessibility_audit_team.audit_execution import (
         JOB_STATUS_FAILED,
@@ -97,21 +147,33 @@ async def _run_phase(
         job_id, status=JOB_STATUS_RUNNING, current_phase=phase_name, progress=progress
     )
 
-    if heartbeat:
-        from shared_concurrency import BackgroundHeartbeat
+    try:
+        if heartbeat:
+            from shared_concurrency import BackgroundHeartbeat
 
-        with BackgroundHeartbeat(activity.heartbeat, _HEARTBEAT_INTERVAL_S, copy_context=True):
+            with BackgroundHeartbeat(activity.heartbeat, _HEARTBEAT_INTERVAL_S, copy_context=True):
+                result = await step()
+        else:
             result = await step()
-    else:
-        result = await step()
+    except Exception as exc:
+        if _is_last_attempt() and not _is_job_terminal(manager, job_id):
+            manager.update_job(
+                job_id, status=JOB_STATUS_FAILED, current_phase=phase_name, error=str(exc)
+            )
+        raise
 
     if result.failure_reason:
-        manager.update_job(
-            job_id,
-            status=JOB_STATUS_FAILED,
-            current_phase=phase_name,
-            error=result.failure_reason,
-        )
+        if not _is_job_terminal(manager, job_id):
+            manager.update_job(
+                job_id,
+                status=JOB_STATUS_FAILED,
+                current_phase=phase_name,
+                progress=100,
+                completed_phases=[p.value for p in result.completed_phases],
+                findings_count=result.total_findings,
+                result=result.model_dump(),
+                error=result.failure_reason,
+            )
         return {"status": "FAIL", "audit_id": audit_id, "error": result.failure_reason}
     return {"status": "PASS", "audit_id": audit_id}
 
@@ -139,6 +201,7 @@ async def intake_activity(
         "intake",
         _INTAKE_PROGRESS,
         lambda: run_intake_step(job_id, audit_id, request),
+        heartbeat=True,
     )
 
 
@@ -218,9 +281,14 @@ async def finalize_activity(job_id: str, audit_id: str) -> Dict[str, Any]:
         - Report packaging has persisted state under ``audit_id``.
     Postconditions:
         - Marks the job ``completed`` (severity counts + full result dump) at 100%,
-          or ``failed`` if the finalized result is unsuccessful. Idempotent: a
-          Temporal retry re-writes the same terminal state. Returns a status dict.
-          A store failure propagates so Temporal retries.
+          or ``failed`` if the finalized result is unsuccessful. The terminal write
+          is skipped if a concurrent path already marked the job terminal (e.g. a
+          timebox timeout racing an abandoned, still-running activity). Idempotent
+          otherwise: a Temporal retry re-writes the same terminal state. Returns a
+          status dict that always reflects this attempt's own outcome.
+        - An exception raised while assembling the result propagates so Temporal
+          retries; on the last scheduled attempt it also marks the job FAILED first
+          (guarded against clobbering an already-terminal status).
     """
     from accessibility_audit_team.audit_execution import (
         JOB_STATUS_COMPLETED,
@@ -228,18 +296,30 @@ async def finalize_activity(job_id: str, audit_id: str) -> Dict[str, Any]:
         finalize_audit_step,
         get_job_manager,
     )
+    from shared_concurrency import BackgroundHeartbeat
 
-    result = await finalize_audit_step(job_id, audit_id)
-    get_job_manager().update_job(
-        job_id,
-        status=JOB_STATUS_COMPLETED if result.success else JOB_STATUS_FAILED,
-        progress=100,
-        current_phase=result.current_phase.value,
-        completed_phases=[p.value for p in result.completed_phases],
-        findings_count=result.total_findings,
-        result=result.model_dump(),
-        error=None if result.success else result.failure_reason,
-    )
+    manager = get_job_manager()
+    try:
+        with BackgroundHeartbeat(activity.heartbeat, _HEARTBEAT_INTERVAL_S, copy_context=True):
+            result = await finalize_audit_step(job_id, audit_id)
+    except Exception as exc:
+        if _is_last_attempt() and not _is_job_terminal(manager, job_id):
+            manager.update_job(
+                job_id, status=JOB_STATUS_FAILED, current_phase="finalize", error=str(exc)
+            )
+        raise
+
+    if not _is_job_terminal(manager, job_id):
+        manager.update_job(
+            job_id,
+            status=JOB_STATUS_COMPLETED if result.success else JOB_STATUS_FAILED,
+            progress=100,
+            current_phase=result.current_phase.value,
+            completed_phases=[p.value for p in result.completed_phases],
+            findings_count=result.total_findings,
+            result=result.model_dump(),
+            error=None if result.success else result.failure_reason,
+        )
     return {"status": "PASS" if result.success else "FAIL", "audit_id": audit_id}
 
 
