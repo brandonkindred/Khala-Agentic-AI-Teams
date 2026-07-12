@@ -105,6 +105,26 @@ def test_activity_short_circuits_when_cancelled():
     mock_update.assert_not_called()
 
 
+def test_activity_skips_completed_write_when_cancelled_mid_run():
+    """Cancelled during the run: RUNNING is set, but COMPLETED is skipped."""
+    from deepthought.temporal import run_pipeline_activity
+
+    mock_orch = MagicMock()
+    mock_orch.process_message.return_value = _sample_response()
+
+    # Not cancelled at entry (first call), cancelled by the post-run check (second).
+    with (
+        patch("deepthought.orchestrator.DeepthoughtOrchestrator", return_value=mock_orch),
+        patch("deepthought.shared.job_store.is_job_cancelled", side_effect=[False, True]),
+        patch("deepthought.shared.job_store.update_job") as mock_update,
+    ):
+        result = run_pipeline_activity("job-3b", {"message": "q"})
+
+    assert result["answer"] == "42"
+    statuses = [c.kwargs.get("status") for c in mock_update.call_args_list]
+    assert statuses == ["running"]  # RUNNING set, COMPLETED skipped
+
+
 def test_activity_signature_takes_job_id_and_request():
     """Regression guard: the workflow passes (job_id, request)."""
     from deepthought.temporal import run_pipeline_activity
@@ -117,7 +137,21 @@ def test_pattern_a_exports_present():
     import deepthought.temporal as dt
 
     assert dt.WORKFLOWS == [dt.DeepthoughtWorkflow]
-    assert dt.ACTIVITIES == [dt.run_pipeline_activity]
+    # The pipeline is decomposed into one activity per LLM boundary plus the
+    # job-store transition activities; the legacy whole-pipeline activity is kept
+    # for workflow.patched replay of in-flight histories.
+    assert dt.ACTIVITIES == [
+        dt.classify_strategy_activity,
+        dt.analyse_activity,
+        dt.force_direct_answer_activity,
+        dt.deliberate_activity,
+        dt.synthesise_activity,
+        dt.start_job_activity,
+        dt.is_cancelled_activity,
+        dt.finalize_job_activity,
+        dt.run_pipeline_activity,
+    ]
+    assert dt.run_pipeline_activity in dt.ACTIVITIES
     assert dt.TASK_QUEUE == "deepthought-queue"
     assert dt.WORKFLOW_ID_PREFIX == "deepthought-"
 
@@ -257,3 +291,276 @@ def test_ask_falls_back_to_thread_when_temporal_disabled():
     assert resp.status_code == 200
     assert resp.json()["status"] == "pending"
     mock_thread.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# temporal/activities.py — per-LLM-boundary activities (decomposed pipeline)
+# --------------------------------------------------------------------------- #
+
+
+class _FakeLLM:
+    """Offline LLM stub: canned JSON for analysis, canned text for the rest."""
+
+    def __init__(self, *, json_return: dict | None = None, text_return: str = "TXT") -> None:
+        self._json = json_return or {}
+        self._text = text_return
+
+    def complete_json(self, *_a, **_k) -> dict:
+        return self._json
+
+    def complete(self, *_a, **_k) -> str:
+        return self._text
+
+
+def _spec(**overrides):
+    from deepthought.models import AgentSpec
+
+    base = dict(
+        agent_id="id-1",
+        name="specialist",
+        role_description="role",
+        focus_question="fq",
+        depth=1,
+        parent_id="parent",
+    )
+    base.update(overrides)
+    return AgentSpec(**base)
+
+
+def _run_activity(fn, *args):
+    from temporalio.testing import ActivityEnvironment
+
+    return ActivityEnvironment().run(fn, *args)
+
+
+def test_build_llm_exposes_complete_and_complete_json(monkeypatch):
+    """Regression guard: ``_build_llm`` returns a real ``LLMClient``, not a bare
+    ``strands.Agent`` (whose public surface is ``__call__``, not ``complete``/
+    ``complete_json`` — every reasoning activity calling those would previously
+    silently raise ``AttributeError``, swallowed by the callee's own broad
+    ``except Exception`` fallback). ``LLM_PROVIDER=dummy`` exercises the real
+    (unmocked) path without touching Postgres.
+    """
+    from deepthought.temporal import activities
+
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    llm = activities._build_llm()
+    assert callable(llm.complete)
+    assert callable(llm.complete_json)
+    assert isinstance(llm.complete("hello", objective="test"), str)
+    assert isinstance(llm.complete_json("hello", objective="test"), dict)
+
+
+def test_classify_strategy_activity_returns_value():
+    """The activity resolves the strategy via the orchestrator and returns its value."""
+    from deepthought.models import DecompositionStrategy
+    from deepthought.temporal import activities
+
+    captured: dict = {}
+
+    class _FakeOrchestrator:
+        def __init__(self, *, llm=None):
+            captured["llm"] = llm
+
+        def _resolve_strategy(self, _req):
+            return DecompositionStrategy.BY_CONCERN
+
+    sentinel_llm = object()
+    with (
+        patch("deepthought.orchestrator.DeepthoughtOrchestrator", _FakeOrchestrator),
+        patch.object(activities, "_build_llm", return_value=sentinel_llm),
+    ):
+        out = _run_activity(activities.classify_strategy_activity, {"message": "q"})
+
+    assert out == "by_concern"
+    # The cached (shared) client is threaded into the orchestrator rather than
+    # letting it build its own.
+    assert captured["llm"] is sentinel_llm
+
+
+def test_analyse_activity_direct_answer():
+    from deepthought.temporal import activities
+    from deepthought.temporal.phase_models import AnalysePayload
+
+    fake = _FakeLLM(
+        json_return={
+            "summary": "s",
+            "can_answer_directly": True,
+            "direct_answer": "the answer",
+            "confidence": 0.8,
+        }
+    )
+    payload = AnalysePayload(
+        spec=_spec(), original_query="q", decomposition_strategy="auto", max_depth=3
+    ).model_dump(mode="json")
+
+    with patch.object(activities, "_build_llm", return_value=fake):
+        out = _run_activity(activities.analyse_activity, payload)
+
+    assert out["can_answer_directly"] is True
+    assert out["direct_answer"] == "the answer"
+
+
+def test_analyse_activity_injects_knowledge_summary():
+    """The bounded, pre-rendered summary is injected into the analysis system prompt."""
+    from deepthought.temporal import activities
+    from deepthought.temporal.phase_models import AnalysePayload
+
+    captured: dict = {}
+
+    class _CapturingLLM(_FakeLLM):
+        def complete_json(self, user, *a, **k):
+            captured["system"] = k.get("system_prompt", "")
+            return {"can_answer_directly": True, "direct_answer": "ok", "confidence": 0.5}
+
+    payload = AnalysePayload(
+        spec=_spec(),
+        original_query="q",
+        decomposition_strategy="auto",
+        knowledge_summary="- [prior] an earlier finding worth reusing",
+        max_depth=3,
+    ).model_dump(mode="json")
+
+    with patch.object(activities, "_build_llm", return_value=_CapturingLLM()):
+        out = _run_activity(activities.analyse_activity, payload)
+
+    assert out["can_answer_directly"] is True
+    # The workflow-rendered summary reaches the prompt verbatim — no per-node KB
+    # is shipped to the activity.
+    assert "an earlier finding worth reusing" in captured["system"]
+
+
+def test_analyse_activity_decomposition():
+    from deepthought.temporal import activities
+    from deepthought.temporal.phase_models import AnalysePayload
+
+    fake = _FakeLLM(
+        json_return={
+            "can_answer_directly": False,
+            "skill_requirements": [
+                {"name": "n", "description": "d", "focus_question": "fq2", "reasoning": "r"}
+            ],
+        }
+    )
+    payload = AnalysePayload(
+        spec=_spec(depth=0), original_query="q", decomposition_strategy="auto", max_depth=3
+    ).model_dump(mode="json")
+
+    with patch.object(activities, "_build_llm", return_value=fake):
+        out = _run_activity(activities.analyse_activity, payload)
+
+    assert out["can_answer_directly"] is False
+    assert len(out["skill_requirements"]) == 1
+
+
+def test_force_direct_answer_activity_returns_text():
+    from deepthought.temporal import activities
+    from deepthought.temporal.phase_models import ForceDirectAnswerPayload
+
+    payload = ForceDirectAnswerPayload(spec=_spec(), original_query="q").model_dump(mode="json")
+    with patch.object(activities, "_build_llm", return_value=_FakeLLM(text_return="forced")):
+        out = _run_activity(activities.force_direct_answer_activity, payload)
+
+    assert out == "forced"
+
+
+def test_deliberate_activity_returns_notes():
+    from deepthought.temporal import activities
+    from deepthought.temporal.phase_models import ChildSummary, DeliberatePayload
+
+    children = [
+        ChildSummary(agent_name="a", focus_question="qa", answer="aa", confidence=0.7),
+        ChildSummary(agent_name="b", focus_question="qb", answer="bb", confidence=0.6),
+    ]
+    payload = DeliberatePayload(spec=_spec(), original_query="q", children=children).model_dump(
+        mode="json"
+    )
+    with patch.object(activities, "_build_llm", return_value=_FakeLLM(text_return="notes")):
+        out = _run_activity(activities.deliberate_activity, payload)
+
+    assert out == "notes"
+
+
+def test_synthesise_activity_returns_answer():
+    from deepthought.temporal import activities
+    from deepthought.temporal.phase_models import ChildSummary, SynthesisePayload
+
+    children = [ChildSummary(agent_name="a", focus_question="qa", answer="aa", confidence=0.7)]
+    payload = SynthesisePayload(
+        spec=_spec(), original_query="q", deliberation_notes="notes", children=children
+    ).model_dump(mode="json")
+    with patch.object(activities, "_build_llm", return_value=_FakeLLM(text_return="final")):
+        out = _run_activity(activities.synthesise_activity, payload)
+
+    assert out == "final"
+
+
+def test_start_job_activity_flips_running():
+    from deepthought.temporal import activities
+
+    with (
+        patch("deepthought.shared.job_store.is_job_cancelled", return_value=False),
+        patch("deepthought.shared.job_store.update_job") as mock_update,
+    ):
+        assert _run_activity(activities.start_job_activity, "job-1") is True
+
+    assert mock_update.call_args.kwargs["status"] == "running"
+
+
+def test_start_job_activity_short_circuits_when_cancelled():
+    from deepthought.temporal import activities
+
+    with (
+        patch("deepthought.shared.job_store.is_job_cancelled", return_value=True),
+        patch("deepthought.shared.job_store.update_job") as mock_update,
+    ):
+        assert _run_activity(activities.start_job_activity, "job-1") is False
+
+    mock_update.assert_not_called()
+
+
+def test_is_cancelled_activity_reports_job_store():
+    from deepthought.temporal import activities
+
+    with patch("deepthought.shared.job_store.is_job_cancelled", return_value=True):
+        assert _run_activity(activities.is_cancelled_activity, "job-1") is True
+    with patch("deepthought.shared.job_store.is_job_cancelled", return_value=False):
+        assert _run_activity(activities.is_cancelled_activity, "job-1") is False
+
+
+def test_finalize_job_activity_writes_completed():
+    from deepthought.temporal import activities
+
+    with (
+        patch("deepthought.shared.job_store.is_job_cancelled", return_value=False),
+        patch("deepthought.shared.job_store.update_job") as mock_update,
+    ):
+        _run_activity(activities.finalize_job_activity, "job-1", {"answer": "A"}, True, "")
+
+    assert mock_update.call_args.kwargs["status"] == "completed"
+    assert mock_update.call_args.kwargs["result"] == {"answer": "A"}
+
+
+def test_finalize_job_activity_writes_failed():
+    from deepthought.temporal import activities
+
+    with (
+        patch("deepthought.shared.job_store.is_job_cancelled", return_value=False),
+        patch("deepthought.shared.job_store.update_job") as mock_update,
+    ):
+        _run_activity(activities.finalize_job_activity, "job-1", {}, False, "boom")
+
+    assert mock_update.call_args.kwargs["status"] == "failed"
+    assert mock_update.call_args.kwargs["error"] == "boom"
+
+
+def test_finalize_job_activity_skips_when_cancelled():
+    from deepthought.temporal import activities
+
+    with (
+        patch("deepthought.shared.job_store.is_job_cancelled", return_value=True),
+        patch("deepthought.shared.job_store.update_job") as mock_update,
+    ):
+        _run_activity(activities.finalize_job_activity, "job-1", {"answer": "A"}, True, "")
+
+    mock_update.assert_not_called()
