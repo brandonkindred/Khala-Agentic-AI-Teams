@@ -13,24 +13,14 @@ import threading
 
 from deepthought.models import KnowledgeEntry
 
+# The similarity primitives now live in ``deepthought.reasoning`` so the
+# deterministic Temporal workflow can reuse the exact same dedup logic.
+from deepthought.reasoning import SIMILARITY_THRESHOLD as _SIMILARITY_THRESHOLD
+from deepthought.reasoning import find_similar_entries, render_knowledge_summary
+
 logger = logging.getLogger(__name__)
 
-# Similarity threshold for fuzzy question matching (0-1).  Two focus
-# questions with a normalised overlap above this are considered duplicates.
-_SIMILARITY_THRESHOLD = 0.70
-
-
-def _normalise(text: str) -> set[str]:
-    """Cheap bag-of-words normalisation for similarity checks."""
-    return {w.lower().strip("?.,!;:") for w in text.split() if len(w) > 2}
-
-
-def _similarity(a: str, b: str) -> float:
-    """Jaccard similarity between two strings."""
-    sa, sb = _normalise(a), _normalise(b)
-    if not sa or not sb:
-        return 0.0
-    return len(sa & sb) / len(sa | sb)
+__all__ = ["SharedKnowledgeBase"]
 
 
 class SharedKnowledgeBase:
@@ -64,9 +54,7 @@ class SharedKnowledgeBase:
     ) -> list[KnowledgeEntry]:
         """Return entries whose focus_question is similar to *question*."""
         with self._lock:
-            return [
-                e for e in self._entries if _similarity(e.focus_question, question) >= threshold
-            ]
+            return find_similar_entries(self._entries, question, threshold)
 
     def find_by_tags(self, tags: list[str]) -> list[KnowledgeEntry]:
         """Return entries sharing at least one tag."""
@@ -82,20 +70,7 @@ class SharedKnowledgeBase:
     def summary_for_prompt(self, max_chars: int = 4000) -> str:
         """Render a concise text summary of all findings for prompt injection."""
         with self._lock:
-            if not self._entries:
-                return "(No prior findings.)"
-            parts: list[str] = []
-            total = 0
-            for e in self._entries:
-                line = f"- [{e.agent_name}] {e.finding[:200]}"
-                if total + len(line) > max_chars:
-                    parts.append(
-                        f"... and {len(self._entries) - len(parts)} more entries (truncated)"
-                    )
-                    break
-                parts.append(line)
-                total += len(line)
-            return "\n".join(parts)
+            return render_knowledge_summary(self._entries, max_chars)
 
     def cache_key(self, question: str) -> str:
         """Deterministic hash for a focus question (for result caching)."""
