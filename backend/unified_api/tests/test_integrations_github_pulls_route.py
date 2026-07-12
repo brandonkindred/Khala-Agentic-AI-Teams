@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+
 _backend = Path(__file__).resolve().parent.parent.parent
 if str(_backend) not in sys.path:
     sys.path.insert(0, str(_backend))
@@ -136,6 +138,51 @@ def test_pulls_400_when_owner_repo_missing(mock_cfg, mock_cred):
     resp = client.get(_PULLS)
     assert resp.status_code == 400
     assert "owner/repo" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# GET /github/pulls — per-request repository targeting (owner/repo query params)
+# ---------------------------------------------------------------------------
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_pulls_owner_repo_query_overrides_configured_default(mock_cfg, mock_cred):
+    """An explicit owner/repo pair targets that repository — the configured default is
+    only a fallback; the PAT's own authorization decides what is actually reachable."""
+    fake = _FakePullsClient([_FakePullsResp(200, [_pull(1)])])
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_PULLS, params={"owner": "other", "repo": "thing"})
+    assert resp.status_code == 200
+    assert fake.calls[0][0].endswith("/repos/other/thing/pulls")
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "owner": "", "repo": ""})
+def test_pulls_owner_repo_query_works_without_configured_default(mock_cfg, mock_cred):
+    fake = _FakePullsClient([_FakePullsResp(200, [_pull(1)])])
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_PULLS, params={"owner": "other", "repo": "thing"})
+    assert resp.status_code == 200
+    assert fake.calls[0][0].endswith("/repos/other/thing/pulls")
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_pulls_repo_without_owner_is_400(mock_cfg, mock_cred):
+    resp = client.get(_PULLS, params={"repo": "thing"})
+    assert resp.status_code == 400
+    assert "together" in resp.json()["detail"]
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_pulls_owner_without_repo_is_400(mock_cfg, mock_cred):
+    """The symmetric case of test_pulls_repo_without_owner_is_400: a partial pair (owner
+    only) must be rejected, not silently fall back to the configured default."""
+    resp = client.get(_PULLS, params={"owner": "other"})
+    assert resp.status_code == 400
+    assert "together" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -265,8 +312,6 @@ def test_review_success_does_not_clone(mock_cfg, mock_cred, mock_path, monkeypat
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_review_504_on_timeout(mock_cfg, mock_cred, mock_path, monkeypatch):
-    import httpx
-
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(exc=httpx.ReadTimeout("timed out"))
     with patch(f"{_M}._ensure_repo_clone"), patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -277,8 +322,6 @@ def test_review_504_on_timeout(mock_cfg, mock_cred, mock_path, monkeypatch):
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_review_502_on_unreachable(mock_cfg, mock_cred, mock_path, monkeypatch):
-    import httpx
-
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(exc=httpx.ConnectError("refused"))
     with patch(f"{_M}._ensure_repo_clone"), patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -315,12 +358,21 @@ _REVIEWS = "/api/integrations/github/reviews"
 
 
 class _FakeReviewsClient:
-    """Async-client double whose only verb is GET (the reviews proxy reads)."""
+    """Async-client double for the reviews route.
 
-    def __init__(self, *, result=None, exc=None):
+    The route makes two GETs: first the PAT repo-access probe (GET /repos/{owner}/{repo}),
+    then the coding-team ``/reviews`` proxy read. This double answers the probe with
+    ``repo_access_status`` (200 = accessible by default) and does NOT record it, so the
+    recorded ``calls`` reflect only the proxy request the tests assert on. The configured
+    ``result``/``exc`` apply solely to the proxy read.
+    """
+
+    def __init__(self, *, result=None, exc=None, repo_access_status=200):
         self._result = result
         self._exc = exc
+        self._repo_access_status = repo_access_status
         self.calls = []
+        self.repo_checks = []
 
     async def __aenter__(self):
         return self
@@ -328,7 +380,10 @@ class _FakeReviewsClient:
     async def __aexit__(self, *exc_info):
         return False
 
-    async def get(self, url, params=None):
+    async def get(self, url, params=None, headers=None):
+        if "/repos/" in url:
+            self.repo_checks.append(url)
+            return _FakeResp(self._repo_access_status, json_data={"full_name": "acme/widget"})
         self.calls.append((url, params))
         if self._exc is not None:
             raise self._exc
@@ -382,6 +437,60 @@ def test_reviews_success_injects_owner_repo(mock_cfg, mock_cred, monkeypatch):
 
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_reviews_404_when_pat_cannot_reach_repo(mock_cfg, mock_cred, monkeypatch):
+    """A repo the PAT can't reach (GitHub 404 on the access probe) yields a 404 and
+    NEVER queries the coding-team review history — so persisted review summaries can't
+    leak for repos outside the token's access boundary (the history store is not itself
+    PAT-scoped)."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(result=_FakeResp(200, json_data=[]), repo_access_status=404)
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REVIEWS, params={"owner": "secret", "repo": "repo", "pr_number": 3})
+    assert resp.status_code == 404
+    assert fake.repo_checks  # the PAT access probe ran
+    assert fake.calls == []  # the review-history lookup was skipped
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_reviews_401_when_token_invalid(mock_cfg, mock_cred, monkeypatch):
+    """An invalid/expired PAT (GitHub 401 on the access probe) surfaces as 401 and the
+    history lookup is skipped."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(result=_FakeResp(200, json_data=[]), repo_access_status=401)
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REVIEWS)
+    assert resp.status_code == 401
+    assert fake.calls == []
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_reviews_owner_repo_query_overrides_configured_default(mock_cfg, mock_cred, monkeypatch):
+    """GET /github/reviews accepts owner/repo query params and forwards them to the coding
+    team service, overriding the configured default (acme/widget)."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(result=_FakeResp(200, json_data=[]))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REVIEWS, params={"owner": "other", "repo": "thing", "pr_number": 3})
+    assert resp.status_code == 200
+    _url, params = fake.calls[0]
+    assert params["owner"] == "other"
+    assert params["repo"] == "thing"
+    assert params["pr_number"] == 3
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_reviews_owner_without_repo_is_400(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    resp = client.get(_REVIEWS, params={"owner": "other"})
+    assert resp.status_code == 400
+    assert "together" in resp.json()["detail"]
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_omits_pr_number_when_absent(mock_cfg, mock_cred, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeReviewsClient(result=_FakeResp(200, json_data=[]))
@@ -416,8 +525,6 @@ def test_reviews_rejects_out_of_range_limit(mock_cfg, mock_cred, monkeypatch):
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_504_on_timeout(mock_cfg, mock_cred, monkeypatch):
-    import httpx
-
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeReviewsClient(exc=httpx.ReadTimeout("slow"))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -427,8 +534,6 @@ def test_reviews_504_on_timeout(mock_cfg, mock_cred, monkeypatch):
 @patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_502_on_connect_error(mock_cfg, mock_cred, monkeypatch):
-    import httpx
-
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeReviewsClient(exc=httpx.ConnectError("nope"))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):

@@ -45,9 +45,7 @@ def test_list_winning_posts_503_when_import_fails(
     assert resp.status_code == 503
 
 
-def test_get_winning_post_503_when_import_fails(
-    fake_jobs, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_get_winning_post_503_when_import_fails(fake_jobs, monkeypatch: pytest.MonkeyPatch) -> None:
     _install_bad_import(monkeypatch)
     client = TestClient(app)
     resp = client.get("/social-marketing/winning-posts/abc")
@@ -167,9 +165,7 @@ def test_trend_agent_logs_when_synthesis_throws(monkeypatch: pytest.MonkeyPatch,
     class _SearchOK:
         def search(self, *a, **k):
             return [
-                CandidateResult(
-                    title="t", url="https://e.test", snippet="s", source="x", rank=1
-                )
+                CandidateResult(title="t", url="https://e.test", snippet="s", source="x", rank=1)
             ]
 
     agent = TrendDiscoveryAgent(llm_client=DummyLLMClient(), web_search=_SearchOK())

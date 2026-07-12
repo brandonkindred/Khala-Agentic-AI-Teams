@@ -24,7 +24,9 @@ class _Resp:
     def raise_for_status(self):
         if self.status_code >= 400:
             req = httpx.Request("GET", "http://example.test")
-            raise httpx.HTTPStatusError("error", request=req, response=httpx.Response(self.status_code, request=req))
+            raise httpx.HTTPStatusError(
+                "error", request=req, response=httpx.Response(self.status_code, request=req)
+            )
 
 
 class _Client:

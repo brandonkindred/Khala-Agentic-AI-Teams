@@ -62,7 +62,7 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
       updateMediumConfig: vi.fn().mockReturnValue(of({ enabled: true, oauth_provider: 'google', session_configured: true })),
       mediumBrowserLoginSession: vi.fn().mockReturnValue(of({ enabled: true, oauth_provider: 'google', session_configured: true })),
       getSlackOAuthUrl: vi.fn().mockReturnValue(of({ url: 'https://slack.com/oauth' })),
-      getGitHubConfig: vi.fn().mockReturnValue(of({ enabled: false, token_configured: false, owner: '', repo: '', default_label: '' })),
+      getGitHubConfig: vi.fn().mockReturnValue(of({ enabled: false, token_configured: false, default_label: '' })),
       getTradingViewConfig: vi.fn().mockReturnValue(of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false })),
       updateTradingViewConfig: vi.fn().mockReturnValue(of({ enabled: true, mcp_server_url: 'https://tv/mcp', tool_name: 'get_ohlcv', auth_token_configured: true })),
       deleteTradingViewConfig: vi.fn().mockReturnValue(of({ enabled: false, mcp_server_url: '', tool_name: '', auth_token_configured: false })),
