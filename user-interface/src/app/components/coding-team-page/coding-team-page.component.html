@@ -73,135 +73,206 @@
         <h2>
           <mat-icon aria-hidden="true">bug_report</mat-icon>
           GitHub Issues
-          <span class="github-section__repo">{{ githubOwner }}/{{ githubRepo }}</span>
+          <span class="github-section__repo">all repositories the token can access</span>
         </h2>
         <button
           mat-flat-button
           color="primary"
-          (click)="loadIssues()"
-          [disabled]="loadingIssues"
+          (click)="loadRepos()"
+          [disabled]="loadingRepos"
         >
           <mat-icon aria-hidden="true">refresh</mat-icon>
-          @if (loadingIssues) { Loading… } @else if (issuesLoaded) { Refresh } @else { Load issues }
+          @if (loadingRepos) { Loading… } @else if (reposLoaded) { Refresh } @else { Load repositories }
         </button>
       </div>
 
-      @if (issueError) {
-        <app-inline-banner variant="error" [message]="issueError" />
+      @if (repoError) {
+        <app-inline-banner variant="error" [message]="repoError" />
       }
 
-      @if (issuesLoaded) {
-        @if (issues.length === 0) {
+      @if (loadingRepos) {
+        <div class="github-section--loading">
+          <mat-spinner diameter="24"></mat-spinner>
+          <span>Loading repositories…</span>
+        </div>
+      }
+
+      @if (reposLoaded) {
+        @if (repos.length === 0) {
           <div class="github-empty">
-            <mat-icon>check_circle_outline</mat-icon>
-            <span>No open issues found.</span>
+            <mat-icon>folder_off</mat-icon>
+            <span>The personal access token has no repository access.</span>
           </div>
         } @else {
-          <div class="github-issues-list">
-            @for (vm of pagedIssueVms; track vm.number) {
+          <div class="github-repos-list">
+            @for (repo of repos; track repo.full_name; let i = $index) {
               <button
-                class="github-issue-row"
+                class="github-repo-row"
                 type="button"
-                [class.github-issue-row--selected]="selectedIssue?.number === vm.number"
-                [attr.aria-expanded]="selectedIssue?.number === vm.number"
-                [attr.aria-selected]="selectedIssue?.number === vm.number"
-                [attr.aria-controls]="'confirm-panel-' + vm.number"
-                (click)="selectIssue(vm.issue)"
+                [class.github-repo-row--expanded]="selectedRepo?.full_name === repo.full_name"
+                [attr.aria-expanded]="selectedRepo?.full_name === repo.full_name"
+                [attr.aria-controls]="'repo-issues-' + i"
+                (click)="toggleRepo(repo)"
               >
-                <span class="github-issue-row__number">#{{ vm.number }}</span>
-                <span class="github-issue-row__title" [matTooltip]="vm.title">{{ vm.title }}</span>
-                @if (vm.inProgress) {
-                  <span
-                    class="github-label-chip github-label-chip--active"
-                    matTooltip="The coding team is already working on this issue"
-                  >
-                    <mat-icon aria-hidden="true">engineering</mat-icon>
-                    In progress
-                  </span>
+                <mat-icon aria-hidden="true">{{ repo.private ? 'lock' : 'public' }}</mat-icon>
+                <span class="github-repo-row__name" [matTooltip]="repo.description">{{ repo.full_name }}</span>
+                @if (repo.archived) {
+                  <span class="github-label-chip">archived</span>
                 }
-                <span class="github-issue-row__labels">
-                  @for (label of vm.labels; track label) {
-                    <span class="github-label-chip">{{ label }}</span>
-                  }
-                </span>
-                @if (vm.hasDeps) {
-                  <span
-                    class="github-issue-row__deps"
-                    role="img"
-                    [class.github-issue-row__deps--blocked]="vm.blocked"
-                    [class.github-issue-row__deps--met]="!vm.blocked"
-                    [matTooltip]="vm.depsTooltip"
-                    [attr.aria-label]="vm.depsTooltip"
-                  >
-                    <mat-icon aria-hidden="true">{{ vm.blocked ? 'block' : 'account_tree' }}</mat-icon>
-                    @if (vm.blocked) {
-                      <span class="github-issue-row__deps-count">{{ vm.openDepsCount }}</span>
-                    }
-                  </span>
-                }
-                <mat-icon class="github-issue-row__arrow" aria-hidden="true">chevron_right</mat-icon>
+                <span
+                  class="github-repo-row__issues"
+                  matTooltip="Open issues and pull requests reported by GitHub"
+                >{{ repo.open_issues_count }} open</span>
+                <mat-icon class="github-repo-row__arrow" aria-hidden="true">
+                  {{ selectedRepo?.full_name === repo.full_name ? 'expand_less' : 'chevron_right' }}
+                </mat-icon>
               </button>
 
-              <!-- Inline confirmation — expands under the selected row; the list stays visible. -->
-              @if (selectedIssue?.number === vm.number) {
-                <div class="github-confirm-panel" [id]="'confirm-panel-' + vm.number">
-                  <h3>Start AI coding on this issue?</h3>
-                  <div class="github-confirm-panel__issue">
-                    <span class="issue-number">#{{ vm.number }}</span>
-                    <span class="issue-title">{{ vm.title }}</span>
-                  </div>
-                  @if (vm.issue.body_preview) {
-                    <p class="github-confirm-panel__preview">{{ vm.issue.body_preview }}</p>
+              <!-- Issues for the expanded repository -->
+              @if (selectedRepo?.full_name === repo.full_name) {
+                <div class="github-repo-issues" [id]="'repo-issues-' + i">
+                  @if (issueError) {
+                    <app-inline-banner variant="error" [message]="issueError" />
                   }
-                  @if (vm.blocked) {
-                    <app-inline-banner variant="warning" icon="block">
-                      <div banner-message>
-                        <strong>Blocked by open dependencies</strong>
-                        <p>
-                          This issue depends on {{ selectedIssueOpenDepsText }}, which are still open.
-                          The coding team will attempt the run, but GitHub may reject it until those
-                          issues are closed.
-                        </p>
-                      </div>
-                    </app-inline-banner>
-                  }
-                  <p class="github-confirm-panel__hint">
-                    The coding team will analyze the issue, write code, run quality gates, and open a draft PR when satisfied.
-                  </p>
-                  <div class="github-confirm-panel__actions">
-                    <button
-                      mat-flat-button
-                      color="primary"
-                      (click)="confirmAndRun()"
-                      [disabled]="runningIssue"
-                    >
-                      @if (runningIssue) {
-                        <mat-spinner diameter="18"></mat-spinner>
-                        Starting…
+                  @if (defaultLabel) {
+                    <p class="github-label-filter">
+                      <mat-icon aria-hidden="true">filter_list</mat-icon>
+                      @if (labelFilterActive) {
+                        <span>Showing only issues labelled <strong>{{ defaultLabel }}</strong>.</span>
+                        <button type="button" class="github-label-filter__toggle" (click)="toggleLabelFilter()">
+                          Show all issues
+                        </button>
                       } @else {
-                        <ng-container>
-                          <mat-icon aria-hidden="true">play_arrow</mat-icon>
-                          Confirm &amp; Start
-                        </ng-container>
+                        <span>Showing all issues (default label filter off).</span>
+                        <button type="button" class="github-label-filter__toggle" (click)="toggleLabelFilter()">
+                          Filter by “{{ defaultLabel }}”
+                        </button>
                       }
-                    </button>
-                    <button mat-stroked-button (click)="cancelSelection()">Cancel</button>
-                  </div>
+                    </p>
+                  }
+                  @if (loadingIssues) {
+                    <div class="github-section--loading">
+                      <mat-spinner diameter="20"></mat-spinner>
+                      <span>Loading issues…</span>
+                    </div>
+                  }
+                  @if (issuesLoaded) {
+                    @if (issues.length === 0) {
+                      <div class="github-empty">
+                        <mat-icon>check_circle_outline</mat-icon>
+                        <span>No open issues found.</span>
+                      </div>
+                    } @else {
+                      <div class="github-issues-list">
+                        @for (vm of pagedIssueVms; track vm.number) {
+                          <button
+                            class="github-issue-row"
+                            type="button"
+                            [class.github-issue-row--selected]="selectedIssue?.number === vm.number"
+                            [attr.aria-expanded]="selectedIssue?.number === vm.number"
+                            [attr.aria-controls]="'confirm-panel-' + vm.number"
+                            (click)="selectIssue(vm.issue)"
+                          >
+                            <span class="github-issue-row__number">#{{ vm.number }}</span>
+                            <span class="github-issue-row__title" [matTooltip]="vm.title">{{ vm.title }}</span>
+                            @if (vm.inProgress) {
+                              <span
+                                class="github-label-chip github-label-chip--active"
+                                matTooltip="The coding team is already working on this issue"
+                              >
+                                <mat-icon aria-hidden="true">engineering</mat-icon>
+                                In progress
+                              </span>
+                            }
+                            <span class="github-issue-row__labels">
+                              @for (label of vm.labels; track label) {
+                                <span class="github-label-chip">{{ label }}</span>
+                              }
+                            </span>
+                            @if (vm.hasDeps) {
+                              <span
+                                class="github-issue-row__deps"
+                                role="img"
+                                [class.github-issue-row__deps--blocked]="vm.blocked"
+                                [class.github-issue-row__deps--met]="!vm.blocked"
+                                [matTooltip]="vm.depsTooltip"
+                                [attr.aria-label]="vm.depsTooltip"
+                              >
+                                <mat-icon aria-hidden="true">{{ vm.blocked ? 'block' : 'account_tree' }}</mat-icon>
+                                @if (vm.blocked) {
+                                  <span class="github-issue-row__deps-count">{{ vm.openDepsCount }}</span>
+                                }
+                              </span>
+                            }
+                            <mat-icon class="github-issue-row__arrow" aria-hidden="true">chevron_right</mat-icon>
+                          </button>
+
+                          <!-- Inline confirmation — expands under the selected row; the list stays visible. -->
+                          @if (selectedIssue?.number === vm.number) {
+                            <div class="github-confirm-panel" [id]="'confirm-panel-' + vm.number">
+                              <h3>Start AI coding on this issue?</h3>
+                              <div class="github-confirm-panel__issue">
+                                <span class="issue-number">{{ repo.full_name }}#{{ vm.number }}</span>
+                                <span class="issue-title">{{ vm.title }}</span>
+                              </div>
+                              @if (vm.issue.body_preview) {
+                                <p class="github-confirm-panel__preview">{{ vm.issue.body_preview }}</p>
+                              }
+                              @if (vm.blocked) {
+                                <app-inline-banner variant="warning" icon="block">
+                                  <div banner-message>
+                                    <strong>Blocked by open dependencies</strong>
+                                    <p>
+                                      This issue depends on {{ selectedIssueOpenDepsText }}, which are still open.
+                                      The coding team will attempt the run, but GitHub may reject it until those
+                                      issues are closed.
+                                    </p>
+                                  </div>
+                                </app-inline-banner>
+                              }
+                              <p class="github-confirm-panel__hint">
+                                The coding team will analyze the issue, write code, run quality gates, and open a draft PR when satisfied.
+                              </p>
+                              <div class="github-confirm-panel__actions">
+                                <button
+                                  mat-flat-button
+                                  color="primary"
+                                  (click)="confirmAndRun()"
+                                  [disabled]="runningIssue"
+                                >
+                                  @if (runningIssue) {
+                                    <mat-spinner diameter="18"></mat-spinner>
+                                    Starting…
+                                  } @else {
+                                    <ng-container>
+                                      <mat-icon aria-hidden="true">play_arrow</mat-icon>
+                                      Confirm &amp; Start
+                                    </ng-container>
+                                  }
+                                </button>
+                                <button mat-stroked-button (click)="cancelSelection()">Cancel</button>
+                              </div>
+                            </div>
+                          }
+                        }
+                      </div>
+                      @if (issues.length > paginatorThreshold) {
+                        <mat-paginator
+                          class="github-issues-paginator"
+                          [length]="issues.length"
+                          [pageSize]="pageSize"
+                          [pageIndex]="pageIndex"
+                          [pageSizeOptions]="PAGE_SIZE_OPTIONS"
+                          showFirstLastButtons
+                          (page)="onPageChange($event)"
+                        ></mat-paginator>
+                      }
+                    }
+                  }
                 </div>
               }
             }
           </div>
-          @if (issues.length > paginatorThreshold) {
-            <mat-paginator
-              class="github-issues-paginator"
-              [length]="issues.length"
-              [pageSize]="pageSize"
-              [pageIndex]="pageIndex"
-              [pageSizeOptions]="PAGE_SIZE_OPTIONS"
-              showFirstLastButtons
-              (page)="onPageChange($event)"
-            ></mat-paginator>
-          }
         }
       }
     </section>
@@ -279,7 +350,7 @@
         (click)="toggleRun(vm.run)"
       >
         <div class="coding-run-item__top">
-          <span class="coding-run-item__issue">#{{ vm.issueNumber }}</span>
+          <span class="coding-run-item__issue">{{ vm.repoLabel }}#{{ vm.issueNumber }}</span>
           @if (vm.waiting) {
             <span class="kh-badge kh-badge--warning">needs answers</span>
           } @else {
@@ -305,9 +376,9 @@
             <h3>
               Working on issue
               @if (selectedIssueUrl) {
-                <a [href]="selectedIssueUrl" target="_blank" rel="noopener noreferrer">#{{ jobStatus.github_context?.issue_number ?? selectedRunNumber }}</a>
+                <a [href]="selectedIssueUrl" target="_blank" rel="noopener noreferrer">{{ selectedRunOwner && selectedRunRepo ? selectedRunOwner + '/' + selectedRunRepo : '' }}#{{ jobStatus.github_context?.issue_number ?? selectedRunNumber }}</a>
               } @else {
-                #{{ jobStatus.github_context?.issue_number ?? selectedRunNumber }}
+                {{ selectedRunOwner && selectedRunRepo ? selectedRunOwner + '/' + selectedRunRepo : '' }}#{{ jobStatus.github_context?.issue_number ?? selectedRunNumber }}
               }
             </h3>
             @if (jobStatus.waiting_for_answers) {
