@@ -19,7 +19,6 @@ performs, so ``/status/{job_id}`` polling is identical across runtimes.
 from __future__ import annotations
 
 import logging
-import threading
 from typing import Any
 
 from temporalio import activity
@@ -38,52 +37,25 @@ from deepthought.temporal.constants import (
 
 logger = logging.getLogger(__name__)
 
-# Process-wide singleton for the resolved deepthought model, guarded by a lock so
-# concurrent cold-start activity threads resolve it exactly once (plain
-# ``lru_cache`` does not hold its lock across the wrapped call, so N concurrent
-# misses would each hit Postgres).
-_model_lock = threading.Lock()
-_model_singleton: Any = None
-
-
-def _cached_model() -> Any:  # pragma: no cover - real provider wiring; patched/bypassed in tests
-    """Resolve the deepthought strands model once per worker process (thread-safe).
-
-    ``get_strands_model`` re-resolves the Postgres provider list on every call, and
-    a decomposed run issues one activity per LLM boundary (up to ~150 per run), so
-    the resolution is memoised behind a double-checked lock. The returned model /
-    ``FailoverLLMClient`` is the piece that is *designed* to be shared (it remembers
-    which providers are rate-limited, exactly as thread mode shares one model across
-    a run's parallel nodes). Provider-config changes are picked up on worker restart.
-    """
-    global _model_singleton
-    if _model_singleton is None:
-        with _model_lock:
-            if _model_singleton is None:
-                from llm_service import get_strands_model
-
-                _model_singleton = get_strands_model("deepthought")
-    return _model_singleton
-
 
 def _build_llm() -> (
     Any
 ):  # pragma: no cover - real provider wiring (mirrors DeepthoughtOrchestrator.__init__); patched out in tests
-    """Build a FRESH strands ``Agent`` (wrapping the shared cached model) per activity.
+    """Return the ``LLMClient`` every reasoning activity calls ``complete``/``complete_json`` on.
 
-    Only the expensive model resolution is cached (:func:`_cached_model`); each
-    activity gets its own ``Agent`` so no per-``Agent`` completion state can leak
-    across the concurrent jobs sharing a worker. Sharing the one model across those
-    per-activity Agents is safe: ``strands.Agent.__init__`` only stores the model
-    reference (``self.model = model``) and reads ``model.stateful`` — it does not
-    mutate the model (any middleware it adds goes on the agent, not the model). Thread
-    mode likewise drives one shared model concurrently across a run's parallel nodes.
+    ``get_client(agent_key)`` — not a ``strands.Agent`` wrapping
+    ``get_strands_model`` — is the interface ``DeepthoughtAgent`` actually uses
+    (``strands.Agent``'s public surface is ``__call__``, not ``complete``/
+    ``complete_json``; wrapping one here previously meant every real completion
+    raised ``AttributeError``, silently swallowed by the broad ``except
+    Exception`` in ``_analyse``/``_force_direct_answer``/``_deliberate``/
+    ``_synthesise``, which fell through to their hard-coded fallback text).
+    ``get_client`` caches internally per provider/model/key, so no additional
+    memoisation is needed here despite the ~150 calls a decomposed run makes.
     """
-    from strands import Agent
+    from llm_service import get_client
 
-    from deepthought.prompts import CLASSIFY_QUESTION_SYSTEM_PROMPT
-
-    return Agent(model=_cached_model(), system_prompt=CLASSIFY_QUESTION_SYSTEM_PROMPT)
+    return get_client("deepthought")
 
 
 # --------------------------------------------------------------------------- #

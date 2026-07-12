@@ -42,14 +42,18 @@ class DeepthoughtOrchestrator:
         if llm is not None:
             self._llm = llm
         else:
-            from strands import Agent
+            # ``get_client`` returns an ``LLMClient`` exposing ``complete``/
+            # ``complete_json`` — the interface every call site in this module and
+            # in ``DeepthoughtAgent`` actually uses. (A ``strands.Agent`` wrapping
+            # ``get_strands_model`` does NOT expose those methods — its public
+            # surface is ``__call__`` — so building one here was a latent bug:
+            # every real completion silently raised ``AttributeError``, was
+            # swallowed by the broad ``except Exception`` in ``_analyse``/
+            # ``_force_direct_answer``/``_deliberate``/``_synthesise``, and fell
+            # through to their hard-coded fallback text.)
+            from llm_service import get_client
 
-            from llm_service import get_strands_model
-
-            self._llm = Agent(
-                model=get_strands_model("deepthought"),
-                system_prompt=CLASSIFY_QUESTION_SYSTEM_PROMPT,
-            )
+            self._llm = get_client("deepthought")
 
         self._agent_budget = agent_budget
         self._result_cache = result_cache if result_cache is not None else _global_result_cache

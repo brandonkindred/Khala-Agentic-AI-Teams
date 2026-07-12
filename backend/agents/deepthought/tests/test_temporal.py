@@ -333,6 +333,24 @@ def _run_activity(fn, *args):
     return ActivityEnvironment().run(fn, *args)
 
 
+def test_build_llm_exposes_complete_and_complete_json(monkeypatch):
+    """Regression guard: ``_build_llm`` returns a real ``LLMClient``, not a bare
+    ``strands.Agent`` (whose public surface is ``__call__``, not ``complete``/
+    ``complete_json`` — every reasoning activity calling those would previously
+    silently raise ``AttributeError``, swallowed by the callee's own broad
+    ``except Exception`` fallback). ``LLM_PROVIDER=dummy`` exercises the real
+    (unmocked) path without touching Postgres.
+    """
+    from deepthought.temporal import activities
+
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    llm = activities._build_llm()
+    assert callable(llm.complete)
+    assert callable(llm.complete_json)
+    assert isinstance(llm.complete("hello", objective="test"), str)
+    assert isinstance(llm.complete_json("hello", objective="test"), dict)
+
+
 def test_classify_strategy_activity_returns_value():
     """The activity resolves the strategy via the orchestrator and returns its value."""
     from deepthought.models import DecompositionStrategy
