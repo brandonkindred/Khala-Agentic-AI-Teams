@@ -169,18 +169,27 @@ Temporal namespace.
 ### TEMPORAL_TASK_QUEUE
 Temporal task queue name.
 
-### Investment team Temporal queues (no env var)
+### Investment team Temporal queues
 The investment team runs three Temporal queues, all booted from
 `investment_team.temporal.worker.start_investment_temporal_worker_thread` (each on
 a distinct team key, since `start_team_worker` is idempotent per team key):
 
 - `investment-queue` — the ad hoc single-backtest `InvestmentBacktestWorkflow`
   and the long-running `PaperTradingWorkflow` (cancel via a `stop` signal).
+  Tuned by `INVESTMENT_MAX_CONCURRENT_ACTIVITIES` (default `8`, floor `1`,
+  garbage/unparseable → default) — a live paper-trading session can hold a
+  worker thread for hours (up to `max_hours`), so this queue defaults above
+  the shared framework's 4-thread cap to avoid a handful of concurrent
+  sessions silently starving backtest dispatch.
 - `strategy-lab-queue` — the fine-grained Strategy Lab batch/cycle workflows
   (tuned by `STRATEGY_LAB_MAX_CONCURRENT_ACTIVITIES`).
 - `investment-advisory-queue` — the interactive proposal / validation / promotion
   / committee-memo / advisor-session workflows, dispatched execute-and-wait so a
-  multi-hour backtest activity can't head-of-line-block a quick request.
+  multi-hour backtest activity can't head-of-line-block a quick request. Each
+  call runs under a fresh, randomly-suffixed workflow id (never a bare
+  `{op}-{key}`) so two calls for the same logical operation — e.g. two chat
+  messages in the same advisor session — can never collide on a live
+  workflow id.
 
 The paper-trading (`/strategy-lab/paper-trade`, `/stop`) and orchestrator/advisor
 endpoints (`/proposals/*`, `/strategies/*`, `/promotions/decide`, `/memos`,

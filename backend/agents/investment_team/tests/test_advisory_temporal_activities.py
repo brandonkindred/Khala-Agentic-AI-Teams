@@ -91,6 +91,32 @@ def test_advisor_complete_activity_incomplete_session_raises(monkeypatch) -> Non
         advisor_complete_activity({"session_id": "adv-1"})
 
 
+def test_advisor_complete_activity_maps_build_ips_value_error(monkeypatch) -> None:
+    """build_ips can raise ValueError for reasons other than missing fields
+    (e.g. an invalid enum coercion on corrupted persisted data); it must map to
+    a typed, non-retryable ApplicationError instead of propagating raw."""
+    from temporalio.exceptions import ApplicationError
+
+    from investment_team.agents import FinancialAdvisorAgent
+    from investment_team.api import main as api_main
+    from investment_team.temporal.advisory import advisor_complete_activity
+
+    session = FinancialAdvisorAgent().start_session("adv-1", "u1")
+    monkeypatch.setattr(api_main, "_advisor_sessions", {"adv-1": session})
+    monkeypatch.setattr(api_main, "_advisor_agent", api_main._advisor_agent)
+    monkeypatch.setattr(FinancialAdvisorAgent, "missing_fields", staticmethod(lambda collected: []))
+
+    def _boom(self, session):
+        raise ValueError("invalid risk_tolerance value")
+
+    monkeypatch.setattr(FinancialAdvisorAgent, "build_ips", _boom)
+
+    with pytest.raises(ApplicationError, match="invalid risk_tolerance") as ei:
+        advisor_complete_activity({"session_id": "adv-1"})
+    assert ei.value.type == "ValueError"
+    assert ei.value.non_retryable is True
+
+
 def test_advisor_complete_activity_builds_ips(monkeypatch) -> None:
     from investment_team.agents import FinancialAdvisorAgent
     from investment_team.api import main as api_main

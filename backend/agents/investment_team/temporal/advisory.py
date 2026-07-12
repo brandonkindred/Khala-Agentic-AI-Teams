@@ -439,7 +439,14 @@ def advisor_complete_activity(payload: dict[str, Any]) -> dict[str, Any]:
             type="MissingFields",
             non_retryable=True,
         )
-    ips = _advisor_agent.build_ips(session)
+    try:
+        ips = _advisor_agent.build_ips(session)
+    except ValueError as exc:
+        # missing_fields already guards the common case; build_ips can still
+        # raise for other reasons (e.g. an invalid enum coercion on corrupted
+        # persisted data) — map it to a typed, non-retryable failure so it
+        # translates to a clean 4xx instead of an opaque 500.
+        raise ApplicationError(str(exc), type="ValueError", non_retryable=True) from exc
     with _lock:
         _profiles[session.user_id] = ips
         session.status = AdvisorSessionStatus.COMPLETED
@@ -474,7 +481,14 @@ async def _run_single_activity(fn: Any, payload: dict[str, Any]) -> dict[str, An
 class CreateProposalWorkflow:
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Durably create a portfolio proposal."""
+        """Durably create a portfolio proposal.
+
+        Preconditions:
+            ``payload`` satisfies :func:`create_proposal_activity`'s preconditions.
+        Postconditions:
+            Returns ``create_proposal_activity``'s result. Propagates its
+            ``ApplicationError`` on failure (no Temporal-level retry).
+        """
         return await _run_single_activity(create_proposal_activity, payload)
 
 
@@ -482,7 +496,14 @@ class CreateProposalWorkflow:
 class ValidateProposalWorkflow:
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Durably validate a proposal against an IPS."""
+        """Durably validate a proposal against an IPS.
+
+        Preconditions:
+            ``payload`` satisfies :func:`validate_proposal_activity`'s preconditions.
+        Postconditions:
+            Returns ``validate_proposal_activity``'s result. Propagates its
+            ``ApplicationError`` on failure (no Temporal-level retry).
+        """
         return await _run_single_activity(validate_proposal_activity, payload)
 
 
@@ -490,7 +511,14 @@ class ValidateProposalWorkflow:
 class CreateStrategyWorkflow:
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Durably persist a strategy spec."""
+        """Durably persist a strategy spec.
+
+        Preconditions:
+            ``payload`` satisfies :func:`create_strategy_activity`'s preconditions.
+        Postconditions:
+            Returns ``create_strategy_activity``'s result. Propagates its
+            failure on error (no Temporal-level retry).
+        """
         return await _run_single_activity(create_strategy_activity, payload)
 
 
@@ -498,7 +526,14 @@ class CreateStrategyWorkflow:
 class ValidateStrategyWorkflow:
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Durably run strategy validation checks."""
+        """Durably run strategy validation checks.
+
+        Preconditions:
+            ``payload`` satisfies :func:`validate_strategy_activity`'s preconditions.
+        Postconditions:
+            Returns ``validate_strategy_activity``'s result. Propagates its
+            ``ApplicationError`` on failure (no Temporal-level retry).
+        """
         return await _run_single_activity(validate_strategy_activity, payload)
 
 
@@ -506,7 +541,14 @@ class ValidateStrategyWorkflow:
 class PromotionDecisionWorkflow:
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Durably run the promotion-gate decision."""
+        """Durably run the promotion-gate decision.
+
+        Preconditions:
+            ``payload`` satisfies :func:`promotion_decision_activity`'s preconditions.
+        Postconditions:
+            Returns ``promotion_decision_activity``'s result. Propagates its
+            ``ApplicationError`` on failure (no Temporal-level retry).
+        """
         return await _run_single_activity(promotion_decision_activity, payload)
 
 
@@ -514,7 +556,13 @@ class PromotionDecisionWorkflow:
 class CommitteeMemoWorkflow:
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Durably draft a committee memo."""
+        """Durably draft a committee memo.
+
+        Preconditions:
+            ``payload`` satisfies :func:`committee_memo_activity`'s preconditions.
+        Postconditions:
+            Returns ``committee_memo_activity``'s result (no Temporal-level retry).
+        """
         return await _run_single_activity(committee_memo_activity, payload)
 
 
@@ -522,7 +570,13 @@ class CommitteeMemoWorkflow:
 class AdvisorStartWorkflow:
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Durably start an advisor session."""
+        """Durably start an advisor session.
+
+        Preconditions:
+            ``payload`` satisfies :func:`advisor_start_activity`'s preconditions.
+        Postconditions:
+            Returns ``advisor_start_activity``'s result (no Temporal-level retry).
+        """
         return await _run_single_activity(advisor_start_activity, payload)
 
 
@@ -530,7 +584,14 @@ class AdvisorStartWorkflow:
 class AdvisorMessageWorkflow:
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Durably advance an advisor session with a user message."""
+        """Durably advance an advisor session with a user message.
+
+        Preconditions:
+            ``payload`` satisfies :func:`advisor_message_activity`'s preconditions.
+        Postconditions:
+            Returns ``advisor_message_activity``'s result. Propagates its
+            ``ApplicationError`` on failure (no Temporal-level retry).
+        """
         return await _run_single_activity(advisor_message_activity, payload)
 
 
@@ -538,7 +599,14 @@ class AdvisorMessageWorkflow:
 class AdvisorCompleteWorkflow:
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Durably finalize an advisor session into an IPS."""
+        """Durably finalize an advisor session into an IPS.
+
+        Preconditions:
+            ``payload`` satisfies :func:`advisor_complete_activity`'s preconditions.
+        Postconditions:
+            Returns ``advisor_complete_activity``'s result. Propagates its
+            ``ApplicationError`` on failure (no Temporal-level retry).
+        """
         return await _run_single_activity(advisor_complete_activity, payload)
 
 

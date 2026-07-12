@@ -10,6 +10,7 @@ store: the API handlers own their own run/job bookkeeping (active-run registry,
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 from investment_team.temporal import (
@@ -130,18 +131,25 @@ def execute_advisory_workflow(op: str, payload: dict[str, Any], *, key: str) -> 
     Preconditions:
         - ``op`` is one of :data:`_ADVISORY_OPS`.
         - ``payload`` satisfies the corresponding activity's preconditions.
-        - ``key`` is a stable id for this logical operation (proposal/strategy/
-          session id, or a request-derived key) used to build a deterministic
-          workflow id.
+        - ``key`` is a caller-supplied label for this logical operation
+          (proposal/strategy/session id, or a request-derived key) used only for
+          the workflow id's human-readable prefix — it is NOT relied on for
+          uniqueness (see below).
         - Temporal is enabled and the advisory worker is running.
 
     Postconditions:
         - Runs ``Investment<Op>Workflow`` on ``investment-advisory-queue`` under
-          id ``investment-adv-{op}-{key}`` and returns its result dict. Raises
-          ``ValueError`` for an unknown ``op``; propagates the workflow's failure
-          (e.g. a wrapped ``ApplicationError``) on error.
+          id ``investment-adv-{op}-{key}-{uuid8}`` — a fresh random suffix is
+          appended on every call so two calls for the same ``(op, key)`` (e.g.
+          two chat messages in the same advisor session, or a client retry)
+          never collide on a live workflow id and raise
+          ``WorkflowAlreadyStartedError``; ``execute_workflow_sync`` documents
+          this uniqueness requirement. Raises ``ValueError`` for an unknown
+          ``op``; propagates the workflow's failure (e.g. a wrapped
+          ``ApplicationError``) on error.
     """
     from investment_team.temporal.advisory import (
+        _ADVISORY_TIMEOUT,
         ADVISORY_TASK_QUEUE,
         ADVISORY_WORKFLOW_ID_PREFIX,
         AdvisorCompleteWorkflow,
@@ -170,10 +178,16 @@ def execute_advisory_workflow(op: str, payload: dict[str, Any], *, key: str) -> 
     workflow_cls = workflows.get(op)
     if workflow_cls is None:
         raise ValueError(f"unknown advisory op: {op}")
-    workflow_id = f"{ADVISORY_WORKFLOW_ID_PREFIX}{op}-{key}"
+    workflow_id = f"{ADVISORY_WORKFLOW_ID_PREFIX}{op}-{key}-{uuid.uuid4().hex[:8]}"
+    # The activity's own start_to_close_timeout already bounds a single attempt
+    # (_ADVISORY_RETRY caps retries at 1); give the execute-and-wait call a
+    # modest buffer above that ceiling rather than the shared 300s default, so
+    # a genuinely hung worker fails this interactive call well under 5 minutes.
+    execute_timeout_s = _ADVISORY_TIMEOUT.total_seconds() + 60.0
     return execute_workflow_sync(
         workflow_cls.run,
         payload,
         workflow_id=workflow_id,
         task_queue=ADVISORY_TASK_QUEUE,
+        execute_timeout_s=execute_timeout_s,
     )

@@ -126,17 +126,46 @@ def test_execute_advisory_workflow_builds_id_and_dispatches(monkeypatch) -> None
 
     captured = {}
 
-    def _fake_exec(run, payload, *, workflow_id, task_queue):
-        captured.update(payload=payload, workflow_id=workflow_id, task_queue=task_queue)
+    def _fake_exec(run, payload, *, workflow_id, task_queue, execute_timeout_s=None):
+        captured.update(
+            payload=payload,
+            workflow_id=workflow_id,
+            task_queue=task_queue,
+            execute_timeout_s=execute_timeout_s,
+        )
         return {"ok": 1}
 
     monkeypatch.setattr(shared_temporal, "execute_workflow_sync", _fake_exec)
 
     result = sw.execute_advisory_workflow("promotion_decision", {"a": 1}, key="s1")
     assert result == {"ok": 1}
-    assert captured["workflow_id"] == "investment-adv-promotion_decision-s1"
+    # A random suffix is appended so two calls for the same (op, key) never
+    # collide on a live workflow id (see test below).
+    assert captured["workflow_id"].startswith("investment-adv-promotion_decision-s1-")
     assert captured["task_queue"] == "investment-advisory-queue"
     assert captured["payload"] == {"a": 1}
+    assert captured["execute_timeout_s"] == pytest.approx(180.0)
+
+
+def test_execute_advisory_workflow_mints_unique_id_per_call(monkeypatch) -> None:
+    """Two calls for the same (op, key) — e.g. two chat messages in the same
+    advisor session — must not collide on a live Temporal workflow id."""
+    import shared_temporal
+    from investment_team.temporal import start_workflow as sw
+
+    ids = []
+
+    def _fake_exec(run, payload, *, workflow_id, task_queue, execute_timeout_s=None):
+        ids.append(workflow_id)
+        return {"ok": 1}
+
+    monkeypatch.setattr(shared_temporal, "execute_workflow_sync", _fake_exec)
+
+    sw.execute_advisory_workflow("advisor_message", {}, key="session-1")
+    sw.execute_advisory_workflow("advisor_message", {}, key="session-1")
+
+    assert len(ids) == 2
+    assert ids[0] != ids[1]
 
 
 def test_execute_advisory_workflow_unknown_op_raises() -> None:
@@ -199,3 +228,135 @@ def test_worker_boots_all_three_queues(monkeypatch) -> None:
     queues = {q for _, q in started}
     assert {"investment", "investment_advisory"} <= teams
     assert {"investment-queue", "investment-advisory-queue"} <= queues
+
+
+def test_investment_queue_worker_uses_tuned_concurrency(monkeypatch) -> None:
+    """The investment-queue worker (backtest + paper-trading) must not default
+    to the shared framework's 4-thread cap — a paper-trading session can hold a
+    slot for hours."""
+    from investment_team.strategy_lab.temporal import worker as sl_worker
+    from investment_team.temporal import worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(sl_worker, "start_strategy_lab_temporal_worker_thread", lambda: True)
+    calls = {}
+
+    def _fake_start(team, wfs, acts, *, task_queue, max_concurrent_activities=4):
+        calls[team] = max_concurrent_activities
+        return True
+
+    monkeypatch.setattr(worker_mod, "start_team_worker", _fake_start)
+
+    worker_mod.start_investment_temporal_worker_thread()
+
+    assert calls["investment"] > 4
+
+
+@pytest.mark.parametrize(
+    "env_value, expected",
+    [
+        (None, 8),
+        ("16", 16),
+        ("0", 1),
+        ("-5", 1),
+        ("not-a-number", 8),
+    ],
+)
+def test_max_concurrent_activities_env_parsing(monkeypatch, env_value, expected) -> None:
+    from investment_team.temporal import worker as worker_mod
+
+    if env_value is None:
+        monkeypatch.delenv("INVESTMENT_MAX_CONCURRENT_ACTIVITIES", raising=False)
+    else:
+        monkeypatch.setenv("INVESTMENT_MAX_CONCURRENT_ACTIVITIES", env_value)
+
+    assert worker_mod._max_concurrent_activities() == expected
+
+
+# ---------------------------------------------------------------------------
+# _execute_advisory / _translate_advisory_failure — error → HTTPException mapping
+# ---------------------------------------------------------------------------
+
+
+def test_execute_advisory_translates_application_error_by_type(monkeypatch) -> None:
+    from temporalio.client import WorkflowFailureError
+    from temporalio.exceptions import ActivityError, ApplicationError
+
+    import shared_temporal
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+
+    def _raise(*a, **kw):
+        app_err = ApplicationError("Proposal prop-1 not found", type="NotFound", non_retryable=True)
+        act_err = ActivityError(
+            "activity failed",
+            scheduled_event_id=1,
+            started_event_id=1,
+            identity="",
+            activity_type="",
+            activity_id="",
+            retry_state=None,
+        )
+        act_err.__cause__ = app_err
+        raise WorkflowFailureError(cause=act_err)
+
+    monkeypatch.setattr("investment_team.temporal.start_workflow.execute_advisory_workflow", _raise)
+
+    with pytest.raises(HTTPException) as ei:
+        REAL_EXECUTE_ADVISORY("validate_proposal", {}, key="prop-1")
+    assert ei.value.status_code == 404
+    assert "not found" in ei.value.detail
+
+
+@pytest.mark.parametrize(
+    "app_error_type, expected_status",
+    [
+        ("NotFound", 404),
+        ("MissingFields", 400),
+        ("NoValidation", 400),
+        ("ValueError", 400),
+        ("SomethingUnmapped", 500),
+    ],
+)
+def test_translate_advisory_failure_maps_application_error_types(
+    app_error_type, expected_status
+) -> None:
+    from temporalio.exceptions import ApplicationError
+
+    from investment_team.api import main as api_main
+
+    result = api_main._translate_advisory_failure(
+        ApplicationError("boom", type=app_error_type, non_retryable=True)
+    )
+    assert result.status_code == expected_status
+    assert result.detail == "boom"
+
+
+def test_translate_advisory_failure_maps_workflow_already_started(monkeypatch) -> None:
+    from temporalio.exceptions import WorkflowAlreadyStartedError
+
+    from investment_team.api import main as api_main
+
+    err = WorkflowAlreadyStartedError("wf-1", "SomeWorkflow", run_id="r1")
+    result = api_main._translate_advisory_failure(err)
+    assert result.status_code == 409
+
+
+def test_translate_advisory_failure_defaults_to_502_for_unknown_error() -> None:
+    from investment_team.api import main as api_main
+
+    result = api_main._translate_advisory_failure(RuntimeError("client not connected"))
+    assert result.status_code == 502
+
+
+def test_execute_advisory_passes_through_503_when_disabled_without_translation(
+    monkeypatch,
+) -> None:
+    """_require_temporal's HTTPException(503) must not be re-wrapped by the
+    generic translator."""
+    import shared_temporal
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    with pytest.raises(HTTPException) as ei:
+        REAL_EXECUTE_ADVISORY("committee_memo", {}, key="k")
+    assert ei.value.status_code == 503

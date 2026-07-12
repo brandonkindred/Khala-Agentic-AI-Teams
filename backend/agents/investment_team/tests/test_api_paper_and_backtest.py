@@ -484,11 +484,14 @@ def test_stop_idempotent_for_terminal_session_does_not_signal(
     assert signalled == []  # terminal session → no signal sent
 
 
-def test_stop_swallows_closed_workflow_signal_error(
+def test_stop_swallows_closed_workflow_rpc_error(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
-    """A race where the workflow closes before the signal lands must not 500 the
-    idempotent stop route."""
+    """A race where the workflow closes before the signal lands (a real
+    temporalio RPCError with status=NOT_FOUND) must not 500 the idempotent stop
+    route — it's treated as an already-finished session."""
+    from temporalio.service import RPCError, RPCStatusCode
+
     from investment_team.api import main as api_main
     from investment_team.models import PaperTradingStatus, StrategySpec
 
@@ -507,13 +510,48 @@ def test_stop_swallows_closed_workflow_signal_error(
     )
 
     def _boom(session_id):
-        raise RuntimeError("cannot signal a closed workflow execution")
+        raise RPCError("workflow execution already completed", RPCStatusCode.NOT_FOUND, b"")
 
     monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _boom)
 
     resp = api_client.post("/strategy-lab/paper-trade/pt-race/stop")
 
-    assert resp.status_code == 200  # not a 500
+    assert resp.status_code == 200  # not a 500 (nor a 502)
+    assert "already finished" in resp.json()["message"]
+
+
+def test_stop_surfaces_genuine_signal_delivery_failure(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A genuine delivery failure (client not connected, RPC timeout, any other
+    RPC error) must NOT be swallowed as a false success on a live-trading kill
+    switch — it must surface as a real error."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, StrategySpec
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    api_main._paper_trading_sessions["pt-race"] = _live_session(
+        "pt-race", strategy, PaperTradingStatus.LIVE
+    )
+
+    def _boom(session_id):
+        raise RuntimeError("Temporal client not available; is the team's worker running?")
+
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _boom)
+
+    resp = api_client.post("/strategy-lab/paper-trade/pt-race/stop")
+
+    assert resp.status_code == 502
+    assert "pt-race" in resp.json()["detail"]
 
 
 def test_run_paper_trading_marks_failed_when_dispatch_raises_http(
@@ -562,6 +600,139 @@ def test_run_paper_trading_wraps_runtime_dispatch_error_as_503(
         PaperTradingSession.parse_persisted(s) for s in api_main._paper_trading_sessions.values()
     ]
     assert sessions and all(s.status == PaperTradingStatus.FAILED for s in sessions)
+
+
+def test_run_paper_trading_dispatch_failure_attempts_best_effort_stop_signal(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A dispatch-ack timeout doesn't prove the workflow never started (the sync
+    bridge's wait only bounds our own wait) — the route must best-effort signal
+    the deterministic workflow id to stop it if it did start server-side, so it
+    can't be orphaned unstoppable."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    def _boom(session_id, payload):
+        raise RuntimeError("ack timeout")
+
+    monkeypatch.setattr(api_main, "_start_paper_trading", _boom)
+    signalled: List[str] = []
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", lambda sid: signalled.append(sid))
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 503
+    assert len(signalled) == 1  # best-effort stop attempted for the session_id minted
+
+
+def test_run_paper_trading_dispatch_failure_swallows_signal_error(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The best-effort stop-signal attempt must itself never break the
+    dispatch-failure response — a workflow that never started has nothing to
+    signal, so a signal failure here is expected and harmless."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    monkeypatch.setattr(
+        api_main, "_start_paper_trading", lambda sid, payload: (_ for _ in ()).throw(RuntimeError())
+    )
+
+    def _signal_boom(session_id):
+        raise RuntimeError("Temporal client not available")
+
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _signal_boom)
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 503  # the original dispatch failure, not the signal failure
+    sessions = [
+        PaperTradingSession.parse_persisted(s) for s in api_main._paper_trading_sessions.values()
+    ]
+    assert sessions and all(s.status == PaperTradingStatus.FAILED for s in sessions)
+
+
+def test_max_hours_rejects_absurd_values(api_client) -> None:
+    """An unbounded max_hours would overflow timedelta construction inside
+    workflow code; the field must reject values above the documented cap."""
+    from investment_team.api import main as api_main
+
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    resp = api_client.post(
+        "/strategy-lab/paper-trade",
+        json={"lab_record_id": "lab-w", "max_hours": 1e12},
+    )
+
+    assert resp.status_code == 422
+
+
+def test_fail_paper_trading_session_is_idempotent_on_completed(monkeypatch) -> None:
+    """Must not clobber a session that already reached a real terminal outcome
+    concurrently (e.g. the workflow actually completed while the dispatch-error
+    handler was deciding to mark it failed)."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus, StrategySpec
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    completed = _live_session("pt-done", strategy, PaperTradingStatus.COMPLETED)
+    completed.error = None
+    store = {"pt-done": completed}
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", store)
+
+    api_main._fail_paper_trading_session("pt-done", "should not apply")
+
+    result = PaperTradingSession.parse_persisted(store["pt-done"])
+    assert result.status == PaperTradingStatus.COMPLETED
+    assert result.error is None
+
+
+def test_fail_paper_trading_session_marks_active_session_failed(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus, StrategySpec
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    live = _live_session("pt-live2", strategy, PaperTradingStatus.LIVE)
+    store = {"pt-live2": live}
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", store)
+
+    api_main._fail_paper_trading_session("pt-live2", "dispatch failed")
+
+    result = PaperTradingSession.parse_persisted(store["pt-live2"])
+    assert result.status == PaperTradingStatus.FAILED
+    assert result.error == "dispatch failed"
+
+
+def test_fail_paper_trading_session_handles_unparseable_data(monkeypatch) -> None:
+    """A malformed persisted record must not raise — the documented "Never
+    raises" postcondition must actually hold."""
+    from investment_team.api import main as api_main
+
+    store = {"pt-bad": {"not": "a valid session shape"}}
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", store)
+
+    api_main._fail_paper_trading_session("pt-bad", "irrelevant")  # must not raise
 
 
 # ---------------------------------------------------------------------------

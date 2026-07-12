@@ -1863,13 +1863,64 @@ def _execute_advisory(op: str, payload: Dict[str, Any], *, key: str) -> Dict[str
           logical operation.
     Postconditions:
         - Returns the workflow's result dict. Raises ``HTTPException(503)`` when
-          Temporal is disabled/unavailable; propagates the workflow failure
-          otherwise.
+          Temporal is disabled/unavailable; on any other workflow failure,
+          raises the ``HTTPException`` :func:`_translate_advisory_failure` maps
+          it to (never an opaque unhandled exception).
     """
     _require_temporal()
     from investment_team.temporal.start_workflow import execute_advisory_workflow
 
-    return execute_advisory_workflow(op, payload, key=key)
+    try:
+        return execute_advisory_workflow(op, payload, key=key)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _translate_advisory_failure(exc) from exc
+
+
+# Maps an ApplicationError's ``type`` (set by the advisory activities, e.g.
+# ``ApplicationError(..., type="NotFound")``) to the HTTP status the pre-Temporal
+# synchronous routes used to raise directly for the same condition.
+_ADVISORY_ERROR_TYPE_STATUS: Dict[str, int] = {
+    "NotFound": 404,
+    "MissingFields": 400,
+    "NoValidation": 400,
+    "ValueError": 400,
+}
+
+
+def _translate_advisory_failure(exc: Exception) -> HTTPException:
+    """Translate an advisory-workflow failure into the ``HTTPException`` a route documents.
+
+    Preconditions:
+        - ``exc`` is whatever ``execute_advisory_workflow``/``execute_workflow_sync``
+          raised on a non-503 failure — typically a ``temporalio.client.
+          WorkflowFailureError`` wrapping an ``ApplicationError``, but may also be
+          a ``WorkflowAlreadyStartedError`` or a transport-level error (client not
+          connected, RPC timeout).
+    Postconditions:
+        - Returns (does not raise) an ``HTTPException``: the mapped 404/400 for a
+          well-known ``ApplicationError`` type (found by walking ``exc``'s cause
+          chain), 409 for a workflow-id collision, or 502 for anything else — so
+          a route caller never sees an opaque unhandled 500 with no detail.
+    """
+    from temporalio.exceptions import ApplicationError as _AppErr
+    from temporalio.exceptions import WorkflowAlreadyStartedError
+
+    cause: Optional[BaseException] = exc
+    seen: set = set()
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, _AppErr):
+            status = _ADVISORY_ERROR_TYPE_STATUS.get(cause.type or "", 500)
+            return HTTPException(status_code=status, detail=cause.message)
+        if isinstance(cause, WorkflowAlreadyStartedError):
+            return HTTPException(
+                status_code=409,
+                detail="A request for this operation is already in progress; retry shortly.",
+            )
+        cause = cause.__cause__
+    return HTTPException(status_code=502, detail=f"Advisory workflow dispatch failed: {exc}")
 
 
 def _get_run_state(run_id: str) -> Optional[Dict[str, Any]]:
@@ -3202,7 +3253,12 @@ class RunPaperTradingRequest(BaseModel):
     max_hours: float = Field(
         default=72.0,
         gt=0.0,
-        description="Wall-clock safety guard — session terminates after this many hours regardless of fill count.",
+        le=8_760.0,
+        description=(
+            "Wall-clock safety guard — session terminates after this many hours "
+            "regardless of fill count. Capped at 8760h (1 year); an unbounded value "
+            "would overflow the workflow's activity timeout computation."
+        ),
     )
     warmup_bars: int = Field(
         default=500,
@@ -3423,6 +3479,18 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             },
         )
     except Exception as exc:
+        # The dispatch RPC's ack-wait can time out even though the workflow
+        # genuinely started server-side (the sync bridge's wait only bounds our
+        # own wait, not the underlying start call) — so before declaring the
+        # session failed, best-effort signal the deterministic workflow id to
+        # stop it if it did start. A workflow that never started simply has no
+        # handle to signal, so this is a harmless no-op in the common case; it
+        # only matters for the ambiguous-timeout case, where it prevents an
+        # orphaned, unstoppable live session.
+        try:
+            _signal_paper_trading_stop(session_id)
+        except Exception:
+            pass
         _fail_paper_trading_session(
             session_id, "Failed to start the paper-trading workflow (Temporal unavailable)."
         )
@@ -3476,19 +3544,35 @@ _ACTIVE_PT_STATES = {
 
 
 def _fail_paper_trading_session(session_id: str, error: str) -> None:
-    """Mark a paper-trading session ``failed`` (best-effort).
+    """Mark a paper-trading session ``failed`` (best-effort, idempotent).
 
     Preconditions:
         - ``session_id`` may or may not exist in ``_paper_trading_sessions``.
     Postconditions:
-        - If the session exists, its status is ``FAILED`` with ``error`` and a
-          ``completed_at`` stamp; otherwise a no-op. Never raises.
+        - If the session exists and is not already ``COMPLETED``/``FAILED``, its
+          status is set to ``FAILED`` with ``error`` and a ``completed_at``
+          stamp. A missing session, an already-terminal session, and
+          unparseable persisted data are all left as no-ops. Never raises.
     """
     with _lock:
         raw = _paper_trading_sessions.get(session_id)
         if raw is None:
             return
-        session = PaperTradingSession.parse_persisted(raw)
+        try:
+            session = PaperTradingSession.parse_persisted(raw)
+        except Exception:
+            logger.warning(
+                "Could not parse persisted paper-trading session %s while marking "
+                "it failed; leaving it untouched.",
+                session_id,
+                exc_info=True,
+            )
+            return
+        if session.status in (PaperTradingStatus.COMPLETED, PaperTradingStatus.FAILED):
+            # Don't clobber a real terminal outcome that landed concurrently
+            # (e.g. the workflow actually completed while this caller was
+            # deciding to mark it failed).
+            return
         session.status = PaperTradingStatus.FAILED
         session.error = error
         session.completed_at = datetime.now(tz=timezone.utc).isoformat()
@@ -3665,29 +3749,51 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
     # ``PaperTradingWorkflow`` activity, which trips the session's StopController
     # so the live loop ends at the next bar (replacing the old in-process poke).
     # A race where the workflow closes between our read and the signal must not
-    # 500 the (idempotent) stop route, so swallow a closed/not-found signal error
-    # — but let a 503 (Temporal disabled) surface as before.
+    # 500 the (idempotent) stop route — but only the genuine "already closed"
+    # case is swallowed; a real delivery failure (client not connected, RPC
+    # timeout, any other RPC error) must surface, not be silently reported as a
+    # successful stop on a live-trading kill switch.
     try:
         _signal_paper_trading_stop(session_id)
     except HTTPException:
         raise
-    except Exception:
-        logger.warning(
-            "Stop signal for paper-trading session %s failed (workflow likely already "
-            "closed); returning current session.",
-            session_id,
-            exc_info=True,
-        )
-        return PaperTradingResponse(
-            session=session,
-            message="Stop requested. Poll the session to see the final state.",
-        )
+    except Exception as exc:
+        from temporalio.service import RPCError, RPCStatusCode
 
-    session.user_stop_requested_at = datetime.now(tz=timezone.utc).isoformat()
+        if isinstance(exc, RPCError) and exc.status == RPCStatusCode.NOT_FOUND:
+            logger.info(
+                "Stop signal for paper-trading session %s found no running workflow "
+                "(already closed); treating as already-stopped.",
+                session_id,
+            )
+            return PaperTradingResponse(
+                session=session,
+                message="Session already finished; nothing to stop.",
+            )
+        logger.exception("Stop signal for paper-trading session %s failed to deliver", session_id)
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Failed to deliver the stop signal for session '{session_id}'; "
+                "the session may still be running. Retry."
+            ),
+        ) from exc
+
+    # Merge the stop timestamp onto whatever the CURRENT persisted state is
+    # (re-read under lock right before writing) rather than the pre-signal
+    # snapshot taken above — the signal call is a real, non-trivial network RPC,
+    # and the background worker can independently reach a terminal state (real
+    # trades/status=COMPLETED) in that window; overwriting with the stale
+    # snapshot would silently discard that result.
     with _lock:
-        _paper_trading_sessions[session_id] = session
+        fresh_raw = _paper_trading_sessions.get(session_id)
+        fresh_session = (
+            PaperTradingSession.parse_persisted(fresh_raw) if fresh_raw is not None else session
+        )
+        fresh_session.user_stop_requested_at = datetime.now(tz=timezone.utc).isoformat()
+        _paper_trading_sessions[session_id] = fresh_session
     return PaperTradingResponse(
-        session=session,
+        session=fresh_session,
         message="Stop requested. Poll the session to see the final state.",
     )
 

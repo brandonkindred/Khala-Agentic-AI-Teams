@@ -118,6 +118,82 @@ def test_stop_signal_cancels_and_persists_terminal_state(monkeypatch) -> None:
     assert compensation == [("mark_paper_trading_stopped_activity", ["pt-1"])]
 
 
+def test_stop_while_genuinely_running_reconciles_before_compensating(monkeypatch) -> None:
+    """The genuinely-mid-run race (not cancel-before-start): the activity is
+    actively running when stop() arrives. Prove the fix's core mechanism —
+    awaiting the real activity's outcome before running the compensation
+    activity — by asserting that ordering directly, so the compensation is a
+    true no-op once the real activity has already written its terminal state
+    (verified separately at the activity level: mark_paper_trading_stopped_
+    activity no-ops on an already-terminal session)."""
+    from temporalio import workflow as tl_workflow
+
+    from investment_team.temporal.paper_trading import PaperTradingWorkflow
+
+    order: list[str] = []
+
+    # Unlike the cancel-before-start case (raise_on_await=True), a genuinely
+    # running activity's own cooperative shutdown returns its real result
+    # (mirroring `_run_live_paper_trading_background` writing the session's
+    # actual terminal state) rather than raising CancelledError.
+    class _RunningHandle(_Handle):
+        def __await__(self):
+            async def _c() -> dict:
+                order.append("handle_awaited")
+                return {"session_id": "pt-1", "status": "failed"}
+
+            return _c().__await__()
+
+    handle = _RunningHandle(done=False)
+    monkeypatch.setattr(tl_workflow, "start_activity", lambda fn, *, args, **kw: handle)
+    _patch_wait_condition(monkeypatch)
+
+    async def _fake_exec(fn, *, args, **kw):
+        order.append("compensation_called")
+        return {"session_id": "pt-1", "status": "failed"}
+
+    monkeypatch.setattr(tl_workflow, "execute_activity", _fake_exec)
+
+    wf = PaperTradingWorkflow()
+    wf.stop()
+    result = asyncio.run(wf.run({"session_id": "pt-1"}))
+
+    assert result == {"session_id": "pt-1", "status": "stopped"}
+    assert handle.cancelled is True
+    # The real activity's outcome must be reconciled BEFORE the compensation
+    # activity runs — this is what makes the compensation a true no-op for a
+    # genuinely-running session instead of racing/overwriting it.
+    assert order == ["handle_awaited", "compensation_called"]
+
+
+def test_stop_compensation_failure_does_not_fail_whole_workflow(monkeypatch) -> None:
+    """A persistent compensation-activity failure must not fail the whole
+    workflow after the real handle has already been reconciled — the primary
+    goal (stopping the activity) already succeeded by that point."""
+    from temporalio import workflow as tl_workflow
+
+    from investment_team.temporal.paper_trading import PaperTradingWorkflow
+
+    handle = _Handle(done=False, raise_on_await=True)
+    monkeypatch.setattr(tl_workflow, "start_activity", lambda fn, *, args, **kw: handle)
+    _patch_wait_condition(monkeypatch)
+
+    async def _boom(fn, *, args, **kw):
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(tl_workflow, "execute_activity", _boom)
+    monkeypatch.setattr(
+        tl_workflow, "logger", type("L", (), {"warning": staticmethod(lambda *a, **k: None)})()
+    )
+
+    wf = PaperTradingWorkflow()
+    wf.stop()
+
+    result = asyncio.run(wf.run({"session_id": "pt-1"}))
+
+    assert result == {"session_id": "pt-1", "status": "stopped"}
+
+
 def test_stop_before_start_is_safe() -> None:
     from investment_team.temporal.paper_trading import PaperTradingWorkflow
 

@@ -84,6 +84,7 @@ def run_paper_trading_activity(payload: dict[str, Any]) -> dict[str, Any]:
     """
     from investment_team.api.main import (
         RunPaperTradingRequest,
+        _fail_paper_trading_session,
         _live_paper_stop_controllers,
         _lock,
         _paper_trading_sessions,
@@ -99,17 +100,34 @@ def run_paper_trading_activity(payload: dict[str, Any]) -> dict[str, Any]:
     use_live = bool(payload.get("use_live"))
     req_data = dict(payload.get("request") or {})
 
-    raw_record = _strategy_lab_records.get(lab_record_id)
-    if raw_record is None:
-        raise ApplicationError(
-            f"Strategy lab record '{lab_record_id}' not found",
-            type="NotFound",
-            non_retryable=True,
+    # Fire-and-forget dispatch + maximum_attempts=1 means nothing else will ever
+    # mark this session terminal if this preamble fails (e.g. a concurrent
+    # delete of the lab record racing the dispatch, or a malformed persisted
+    # record) — without this guard the session would sit stuck non-terminal
+    # until the next process-restart orphan sweep.
+    try:
+        raw_record = _strategy_lab_records.get(lab_record_id)
+        if raw_record is None:
+            raise ApplicationError(
+                f"Strategy lab record '{lab_record_id}' not found",
+                type="NotFound",
+                non_retryable=True,
+            )
+        lab_record = StrategyLabRecord.parse_persisted(raw_record)
+        strategy = lab_record.strategy
+        backtest_record = lab_record.backtest
+        strategy_code = lab_record.strategy_code or getattr(strategy, "strategy_code", None)
+    except Exception as exc:
+        _fail_paper_trading_session(
+            session_id, f"Failed to prepare the paper-trading session: {exc}"
         )
-    lab_record = StrategyLabRecord.parse_persisted(raw_record)
-    strategy = lab_record.strategy
-    backtest_record = lab_record.backtest
-    strategy_code = lab_record.strategy_code or getattr(strategy, "strategy_code", None)
+        if isinstance(exc, ApplicationError):
+            raise
+        raise ApplicationError(
+            f"Failed to prepare paper-trading session '{session_id}': {exc}",
+            type=type(exc).__name__,
+            non_retryable=True,
+        ) from exc
 
     def _beat() -> None:
         # Best-effort: outside a real activity context (e.g. a direct-call unit
@@ -225,11 +243,16 @@ class PaperTradingWorkflow:
 
         Postconditions:
             - Returns the activity result (``{"session_id", "status"}``). On a
-              ``stop`` signal before the activity completes, cancels it, ensures a
-              terminal session state is persisted (via
-              :func:`mark_paper_trading_stopped_activity` — needed when the
-              activity was cancelled before it ever wrote the session), and
-              returns ``{"session_id", "status": "stopped"}``.
+              ``stop`` signal before the activity completes, cancels it and
+              *waits for that cancellation to be reconciled* (the activity's own
+              cooperative shutdown — via the heartbeat tripping the session's
+              ``StopController`` — writes the session's real terminal state, same
+              as a natural completion) before running
+              :func:`mark_paper_trading_stopped_activity` as a backstop. Because
+              the backstop runs only after the real activity has already had its
+              chance to write a terminal record, it is a true no-op except in the
+              narrow cancel-before-start race it exists for (the activity never
+              ran at all). Returns ``{"session_id", "status": "stopped"}``.
         """
         session_id = payload.get("session_id")
         max_hours = float(payload.get("max_hours") or _DEFAULT_MAX_HOURS)
@@ -249,20 +272,34 @@ class PaperTradingWorkflow:
         if self._stop_requested and not self._handle.done():
             self._status = "stopped"
             self._handle.cancel()
-            # Persist a terminal state on the normal control-flow path (not inside
-            # an except handler, so we never await after a CancelledError). This
-            # covers the cancel-before-start window where the activity itself never
-            # ran; it is idempotent when the activity already wrote the session.
-            await workflow.execute_activity(
-                mark_paper_trading_stopped_activity,
-                args=[session_id],
-                start_to_close_timeout=_STOP_COMPENSATION_TIMEOUT,
-                retry_policy=_STOP_COMPENSATION_RETRY,
-            )
+            # ``WAIT_CANCELLATION_COMPLETED`` means this await blocks until the
+            # activity itself finishes (gracefully, via the heartbeat-driven
+            # StopController, or because it never started at all) — i.e. until
+            # any real terminal write it was going to make has already landed.
             try:
                 await self._handle
             except asyncio.CancelledError:
                 pass
+            # Backstop, run only now that the real activity has been fully
+            # reconciled above: idempotent no-op when it already wrote a
+            # terminal session; only mutates state for the cancel-before-start
+            # race (the activity was cancelled before it ever ran). Best-effort
+            # — a persistent compensation failure must not fail the whole
+            # workflow after the primary goal (stopping the activity) already
+            # succeeded.
+            try:
+                await workflow.execute_activity(
+                    mark_paper_trading_stopped_activity,
+                    args=[session_id],
+                    start_to_close_timeout=_STOP_COMPENSATION_TIMEOUT,
+                    retry_policy=_STOP_COMPENSATION_RETRY,
+                )
+            except Exception:
+                workflow.logger.warning(
+                    "mark_paper_trading_stopped_activity failed for session %s; "
+                    "session may remain non-terminal until the orphan sweep.",
+                    session_id,
+                )
             return {"session_id": session_id, "status": "stopped"}
 
         result = await self._handle

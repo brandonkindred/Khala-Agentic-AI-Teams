@@ -95,10 +95,63 @@ def test_missing_lab_record_raises_application_error(monkeypatch) -> None:
     from investment_team.temporal.paper_trading import run_paper_trading_activity
 
     monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    # The preamble guard marks the session failed before re-raising; with no
+    # session_id "pt-x" in the store, that's a harmless no-op.
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", {})
     with pytest.raises(ApplicationError, match="not found"):
         run_paper_trading_activity(
             {"session_id": "pt-x", "lab_record_id": "missing", "use_live": False, "request": {}}
         )
+
+
+def test_missing_lab_record_marks_session_failed(monkeypatch) -> None:
+    """The preamble guard marks an existing session failed before re-raising."""
+    from temporalio.exceptions import ApplicationError
+
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus
+    from investment_team.temporal.paper_trading import run_paper_trading_activity
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    stub = _StubSession(PaperTradingStatus.OPENING)
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", {"pt-x": {"status": "opening"}})
+    monkeypatch.setattr(
+        inv_models.PaperTradingSession, "parse_persisted", staticmethod(lambda raw: stub)
+    )
+
+    with pytest.raises(ApplicationError, match="not found"):
+        run_paper_trading_activity(
+            {"session_id": "pt-x", "lab_record_id": "missing", "use_live": False, "request": {}}
+        )
+
+    assert stub.status == PaperTradingStatus.FAILED
+
+
+def test_preamble_wraps_non_application_error(monkeypatch) -> None:
+    """A non-ApplicationError preamble failure (e.g. a malformed persisted
+    record) must be wrapped into a typed, non-retryable ApplicationError
+    instead of propagating an untyped exception out of the activity."""
+    from temporalio.exceptions import ApplicationError
+
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal.paper_trading import run_paper_trading_activity
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {"lab-1": {"id": "lab-1"}})
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", {})
+
+    def _boom(raw):
+        raise ValueError("corrupted record")
+
+    monkeypatch.setattr(inv_models.StrategyLabRecord, "parse_persisted", staticmethod(_boom))
+
+    with pytest.raises(ApplicationError, match="corrupted record") as ei:
+        run_paper_trading_activity(
+            {"session_id": "pt-y", "lab_record_id": "lab-1", "use_live": False, "request": {}}
+        )
+    assert ei.value.type == "ValueError"
+    assert ei.value.non_retryable is True
 
 
 def test_cancellation_trips_stop_controller(monkeypatch) -> None:
