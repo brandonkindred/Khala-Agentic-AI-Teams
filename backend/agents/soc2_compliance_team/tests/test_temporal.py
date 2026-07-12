@@ -211,18 +211,26 @@ def test_mark_failed_activity_writes_failed(monkeypatch: pytest.MonkeyPatch) -> 
     assert deleted == ["job-1"]
 
 
-def test_mark_failed_activity_swallows_job_store_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mark_failed_activity_reraises_job_store_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A job-store failure must re-raise (after snapshot cleanup) so Temporal
+    retries this activity per MARK_FAILED_RETRY_POLICY instead of silently
+    leaving the job non-terminal — the workflow's own except-around-
+    execute_activity guarantees the original audit failure still wins even if
+    retries are exhausted."""
     from soc2_compliance_team import context_snapshot
     from soc2_compliance_team.temporal import activities as amod
 
-    monkeypatch.setattr(context_snapshot, "delete_snapshot", lambda jid: None)
+    deleted: List[str] = []
+    monkeypatch.setattr(context_snapshot, "delete_snapshot", lambda jid: deleted.append(jid))
 
     def _boom(job_id, **fields):
         raise RuntimeError("job store down")
 
     monkeypatch.setattr("soc2_compliance_team.api.main._update_job", _boom)
-    # Must not raise — terminal write is best-effort.
-    ActivityEnvironment().run(amod.mark_failed_activity, "job-1", "kaboom")
+    with pytest.raises(RuntimeError, match="job store down"):
+        ActivityEnvironment().run(amod.mark_failed_activity, "job-1", "kaboom")
+    # Snapshot cleanup still ran before the re-raise.
+    assert deleted == ["job-1"]
 
 
 # ---------------------------------------------------------------------------

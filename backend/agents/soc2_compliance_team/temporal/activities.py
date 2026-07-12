@@ -130,8 +130,13 @@ def mark_failed_activity(job_id: str, error: str) -> None:
         - ``job_id`` is an existing job; ``error`` is a human-readable message.
     Postconditions:
         - Job status is set to ``failed`` with ``error`` recorded and the context
-          snapshot is dropped. Never raises on a job-store error (best-effort
-          terminal write).
+          snapshot is dropped. A job-store error is logged and re-raised (after
+          snapshot cleanup) so Temporal retries this activity per
+          ``MARK_FAILED_RETRY_POLICY`` instead of silently leaving the job
+          non-terminal; the workflow's own except-around-execute_activity (see
+          ``workflows.py``) already guarantees the *original* audit failure is
+          the one that ultimately propagates even if this activity's retries are
+          exhausted.
     """
     from soc2_compliance_team import context_snapshot
     from soc2_compliance_team.api.main import _update_job
@@ -141,3 +146,4 @@ def mark_failed_activity(job_id: str, error: str) -> None:
         _update_job(job_id, status="failed", current_stage="Failed", error=error)
     except Exception:
         logger.exception("SOC2 mark_failed activity could not update job %s", job_id)
+        raise
