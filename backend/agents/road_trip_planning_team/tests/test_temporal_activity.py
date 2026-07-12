@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import typing
 
 import pytest
 from temporalio.testing import ActivityEnvironment
 
+import shared_concurrency
 from road_trip_planning_team import pipeline as rtp_pipeline
 from road_trip_planning_team.models import (
     LogisticsPlan,
@@ -149,8 +151,6 @@ def test_recommend_activities_activity_returns_list_of_dicts(monkeypatch, sample
 
     monkeypatch.setattr(rtp_pipeline, "recommend_activities", _fake)
 
-    import shared_concurrency
-
     heartbeat_calls: list[tuple] = []
 
     class _FakeBackgroundHeartbeat:
@@ -236,10 +236,12 @@ def test_workflow_run_signature_takes_job_id_and_request():
     sig = inspect.signature(wf.RoadTripWorkflow.run)
     params = list(sig.parameters.values())
     assert [p.name for p in params] == ["self", "job_id", "request"]
-    # ``from __future__ import annotations`` stringizes annotations, so
-    # inspect.signature returns their string forms rather than the resolved types.
-    assert params[1].annotation == "str"
-    assert params[2].annotation == "dict[str, Any]"
+    # ``from __future__ import annotations`` stringizes annotations; resolve
+    # them via get_type_hints() rather than comparing string forms, which
+    # would be fragile to reformatting or typing-module changes.
+    hints = typing.get_type_hints(wf.RoadTripWorkflow.run)
+    assert hints["job_id"] is str
+    assert hints["request"] == dict[str, typing.Any]
 
 
 def test_workflow_dispatches_begin_five_steps_persist(monkeypatch, sample_trip_body):
@@ -302,7 +304,13 @@ def test_workflow_dispatches_begin_five_steps_persist(monkeypatch, sample_trip_b
     # deeper idempotent-write retry.
     assert by_name["begin_road_trip_job_activity"]["retry"] is wf._BOOKKEEPING_RETRY
     assert by_name["persist_itinerary_activity"]["retry"] is wf._BOOKKEEPING_RETRY
-    for step in ("profile_travelers_activity", "plan_route_activity", "compose_itinerary_activity"):
+    for step in (
+        "profile_travelers_activity",
+        "plan_route_activity",
+        "recommend_activities_activity",
+        "plan_logistics_activity",
+        "compose_itinerary_activity",
+    ):
         assert by_name[step]["retry"] is wf._LLM_RETRY
 
     # Only the per-stop recommend loop carries a heartbeat timeout.

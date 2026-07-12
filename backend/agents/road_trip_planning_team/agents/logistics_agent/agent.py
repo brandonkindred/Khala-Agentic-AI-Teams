@@ -55,7 +55,18 @@ class LogisticsAgent:
         group_profile: TravelerGroupProfile,
         trip: TripRequest,
     ) -> LogisticsPlan:
-        """Generate logistics plan for the road trip."""
+        """Generate logistics plan for the road trip.
+
+        Preconditions:
+            - ``route`` is the ``RoutePlan`` from ``plan_route``; ``group_profile``
+              the profile from ``profile_travelers``; ``trip`` the original request.
+
+        Postconditions:
+            - Returns a ``LogisticsPlan`` derived from the route's overnight stops.
+              Never raises: on LLM/parse/validation failure, returns a minimal
+              fallback with generic packing suggestions and travel tips rather
+              than propagating the error.
+        """
         overnight_stops = [s for s in route.ordered_stops if s.recommended_nights > 0]
         stops_summary = "\n".join(
             f"  - {s.location}: {s.recommended_nights} night(s), driving ~{s.estimated_driving_hours or '?'} hrs from {s.driving_from or 'previous stop'}"

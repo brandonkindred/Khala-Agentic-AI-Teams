@@ -82,7 +82,21 @@ class ItineraryComposerAgent:
         activities_per_stop: List[StopActivities],
         logistics: LogisticsPlan,
     ) -> TripItinerary:
-        """Compose the final itinerary from all specialist inputs."""
+        """Compose the final itinerary from all specialist inputs.
+
+        Preconditions:
+            - ``activities_per_stop`` is positionally aligned with
+              ``route.ordered_stops`` — index ``i`` in each list refers to the
+              same stop (the contract ``recommend_activities`` documents).
+            - ``group_profile``, ``route``, and ``logistics`` are the upstream
+              typed outputs; ``trip`` the original request.
+
+        Postconditions:
+            - Returns a ``TripItinerary`` whose ``days`` is non-empty whenever
+              ``route.ordered_stops`` is (see ``_ensure_nonempty_days``). Never
+              raises: on LLM/parse/validation failure, degrades to
+              ``_build_fallback_itinerary`` rather than propagating the error.
+        """
         # Build a compact summary of all inputs for the LLM. activities_per_stop
         # is positionally aligned with route.ordered_stops (ActivitiesExpertAgent
         # appends exactly one StopActivities per route stop, in order — see its

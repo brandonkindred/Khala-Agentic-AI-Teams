@@ -70,5 +70,5 @@ class TravelerProfilerAgent:
                 group_description="Group of travelers",
                 combined_interests=[i for t in trip.travelers for i in t.interests],
                 combined_needs=[n for t in trip.travelers for n in t.needs],
-                age_groups_present=list({t.age_group for t in trip.travelers}),
+                age_groups_present=sorted({t.age_group for t in trip.travelers}),
             )
