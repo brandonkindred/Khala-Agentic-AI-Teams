@@ -207,6 +207,19 @@ class JobMatchingStore:
               copy of its rows once it finally finishes, since *its own*
               attempt number is always 1 regardless of what else has since
               happened to the run.
+            * Serialized against any concurrent call for the same ``run_id`` by
+              a transaction-scoped Postgres advisory lock
+              (``pg_advisory_xact_lock``), acquired before the delete-then-
+              insert sequence and released automatically on commit/rollback.
+              Without it, two overlapping saves for the same run (e.g. a
+              zombie attempt's worker still running concurrently with its own
+              retry) run as two independent transactions under READ COMMITTED
+              with no other serialization between them, and — since there is
+              no unique constraint on ``(run_id, rank)`` to fall back on —
+              their DELETEs and INSERTs could interleave (delete/delete/
+              insert/insert) and leave duplicate rows for the same run. The
+              lock makes the second caller simply wait for the first to
+              finish, then proceed against its already-committed state.
             * The run's ``seen_fingerprints`` holds the de-duplicated set of
               ``scanned_fingerprints`` (falling back to the ranked postings'
               fingerprints when not supplied).
@@ -216,6 +229,9 @@ class JobMatchingStore:
         seen = sorted({fp for fp in scanned_fingerprints if fp})
         now = _now()
         with get_conn() as conn, conn.cursor() as cur:
+            # Serialize against any concurrent save_results for the same
+            # run_id (see docstring) before the delete-then-insert sequence.
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s)::bigint)", (run_id,))
             # Idempotent re-save: drop any rows a prior (crashed-then-retried, or
             # merely slow and since-abandoned) attempt wrote for this run before
             # re-inserting the current set.

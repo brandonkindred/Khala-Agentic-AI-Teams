@@ -109,6 +109,25 @@ def test_save_results_deletes_prior_rows_unconditionally(monkeypatch):
     assert sorted(seen_json.obj) == ["a", "b", "c"]
 
 
+def test_save_results_acquires_advisory_lock_before_delete(monkeypatch):
+    # Concurrent saves for the same run_id (e.g. a zombie finalize attempt's
+    # worker still running concurrently with its own retry) must serialize via
+    # a transaction-scoped advisory lock before the delete-then-insert
+    # sequence, since there's no unique constraint on (run_id, rank) to fall
+    # back on and an unconditional DELETE alone doesn't prevent interleaving.
+    cur = FakeCursor()
+    _patch_conn(monkeypatch, cur)
+    JobMatchingStore().save_results("r1", [_ranked("A")], total_found=1)
+    executed = [s for s, _ in cur.executed]
+    lock_idx = next(i for i, s in enumerate(executed) if "pg_advisory_xact_lock" in s)
+    delete_idx = next(
+        i for i, s in enumerate(executed) if "DELETE FROM job_matching_ranked_jobs" in s
+    )
+    assert lock_idx < delete_idx
+    lock_params = next(p for s, p in cur.executed if "pg_advisory_xact_lock" in s)
+    assert lock_params == ("r1",)
+
+
 def test_save_results_defaults_scanned_fingerprints_to_ranked(monkeypatch):
     # Omitting scanned_fingerprints falls back to the ranked postings' own
     # fingerprints (store.py default path).
