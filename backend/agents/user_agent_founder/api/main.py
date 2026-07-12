@@ -902,7 +902,24 @@ def list_jobs(running_only: bool = False) -> FounderJobListResponse:
 
 @app.post("/job/{job_id}/cancel")
 def cancel_job(job_id: str) -> dict[str, str]:
-    """Cancel a running founder workflow job."""
+    """Cancel a running founder workflow job.
+
+    Preconditions:
+        - ``job_id`` refers to a job in a cancellable status (see
+          ``_cancellable_statuses()``); a missing or non-cancellable job raises
+          ``HTTPException`` (404/400) before any write.
+    Postconditions:
+        - The central job is marked CANCELLED and the founder run row "failed"
+          (both carrying the "Cancelled by user" error) — this pair of writes
+          always happens and is what the response reflects.
+        - Best-effort, additive: when Temporal is enabled, also signals the
+          in-flight ``UserAgentFounderWorkflow`` to stop at its next
+          cancellation check. This signal is never required for the cancel to
+          succeed — any failure to deliver it (worker down, RPC timeout) is
+          caught and logged at DEBUG, never raised or reflected in the
+          response, since the two writes above are already the durable record
+          of the cancellation.
+    """
     from user_agent_founder.shared import job_store
 
     try:

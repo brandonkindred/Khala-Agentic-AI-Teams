@@ -77,7 +77,7 @@ def _http_client() -> Any:
     return get_pooled_client()
 
 
-def _beating() -> Any:
+def _beating(extra_beat: Any = None) -> Any:
     """Background heartbeat keeping a long, LLM-calling activity alive.
 
     Preconditions:
@@ -85,19 +85,47 @@ def _beating() -> Any:
           the calling thread's context so the beater can reach the Temporal
           activity handle; beat errors outside an activity context — e.g. unit
           tests — are swallowed by the beater).
+        - ``extra_beat``, if given, is a zero-arg callable invoked on the same
+          beat alongside the Temporal activity heartbeat — folds a second
+          liveness signal (e.g. the job-service heartbeat) into this one
+          background thread instead of nesting a second independent beater.
     Postconditions:
         - Returns an unstarted ``BackgroundHeartbeat`` context manager; entering
           it starts the daemon beater, exiting stops and joins it.
     """
     from shared_concurrency import BackgroundHeartbeat
 
+    def _beat() -> None:
+        activity.heartbeat()
+        if extra_beat is not None:
+            extra_beat()
+
     return BackgroundHeartbeat(
-        activity.heartbeat,
+        _beat,
         _HEARTBEAT_INTERVAL_S,
         name="user-agent-founder-heartbeat",
         copy_context=True,
         join_timeout=5.0,
     )
+
+
+def _is_first_attempt() -> bool:
+    """Whether the current activity execution is Temporal's first attempt.
+
+    Preconditions:
+        - Called from inside a running activity body.
+    Postconditions:
+        - Returns ``True`` iff this is the first attempt of this specific
+          scheduled activity task (``activity.info().attempt == 1``) — the
+          Temporal-native signal for "am I being retried", unaffected by
+          domain state persisted by this or any other activity. Prefer this
+          over comparing persisted run/job status for retry-dedup: status can
+          already be in the "consumed" shape for reasons unrelated to a
+          Temporal retry (a sibling activity's unconditional write, or a
+          genuinely new workflow execution after ``/resume``), which is a
+          real footgun a status comparison does not protect against.
+    """
+    return activity.info().attempt == 1
 
 
 def _record_started_job_id(store: Any, run_id: str, phase: str, job_id: str) -> None:
@@ -125,6 +153,36 @@ def _record_started_job_id(store: Any, run_id: str, phase: str, job_id: str) -> 
                 time.sleep(_PERSIST_BACKOFF_S)
     assert last_exc is not None
     raise last_exc
+
+
+def _job_terminal_status(run_id: str) -> str | None:
+    """Return the central job's status if it is already terminal, else ``None``.
+
+    The single source of "is this run already done" for every activity that
+    must never clobber a terminal state (a user cancel, an unrelated failure,
+    or its own prior successful write) — replaces three independently
+    hand-rolled ``job_store.get_job(...)`` + status-tuple comparisons with one
+    call and one canonical terminal set.
+
+    Preconditions:
+        - ``run_id`` is a founder-run id (the central job row may or may not
+          exist).
+    Postconditions:
+        - Returns the job's status string when it is CANCELLED, COMPLETED, or
+          FAILED; returns ``None`` otherwise (including when the job row is
+          missing — a missing job is not itself a terminal-state guard, callers
+          needing that distinction check separately).
+    """
+    from user_agent_founder.shared import job_store
+
+    job = job_store.get_job(run_id)
+    status = job.get("status") if job is not None else None
+    terminal = (
+        job_store.JOB_STATUS_CANCELLED,
+        job_store.JOB_STATUS_COMPLETED,
+        job_store.JOB_STATUS_FAILED,
+    )
+    return status if status in terminal else None
 
 
 # ---------------------------------------------------------------------------
@@ -223,23 +281,26 @@ def begin_run_activity(run_id: str) -> dict[str, Any]:
           poll intervals + attempt/answer-retry ceilings (read here so the
           deterministic workflow never touches the environment).
         - Resume breadcrumbs (``spec_content``/``repo_path`` already set) are
-          gated on the central job not already being RUNNING, so a Temporal
-          retry of this activity (it runs under ``IO_RETRY``) does not duplicate
-          them — the job only reaches RUNNING via this same activity.
+          gated on ``activity.info().attempt == 1`` (see :func:`_is_first_attempt`)
+          so a Temporal retry of this activity (it runs under ``IO_RETRY``) does
+          not duplicate them. Deliberately NOT gated on the central job's status:
+          both ``/start`` and ``/resume`` set the job to RUNNING *before*
+          dispatching the workflow, so on every real invocation — not just
+          retries — the job would already read RUNNING, permanently suppressing
+          the breadcrumbs; ``attempt`` is scoped to this specific scheduled
+          activity task and is unaffected by that ordering.
     """
     from user_agent_founder import orchestrator
-    from user_agent_founder.shared import job_store
 
     store, run = _require_run(run_id, "begin_run")
     adapter = _adapter_for(run)
 
-    job = job_store.get_job(run_id)
-    already_running = job is not None and job.get("status") == job_store.JOB_STATUS_RUNNING
+    first_attempt = _is_first_attempt()
     orchestrator._sync_job_status(run_id, "running", phase="starting")
 
-    # Preserve the thread path's resume chat breadcrumbs — gated so a retry
-    # (job already RUNNING from a prior attempt) doesn't duplicate them.
-    if not already_running:
+    # Preserve the thread path's resume chat breadcrumbs — gated so a Temporal
+    # retry of this exact activity task doesn't duplicate them.
+    if first_attempt:
         if run.spec_content:
             store.add_chat_message(
                 run_id, "system", "Resuming with existing spec.", "status_update"
@@ -276,14 +337,16 @@ def generate_spec_activity(run_id: str) -> dict[str, Any]:
         - Missing run → non-retryable ``ApplicationError``.
         - Spec already present → returns ``{"chars", "skipped": True}`` without a
           second LLM call (crash/retry idempotency).
-        - Otherwise the spec is generated via the shared
-          ``_generate_spec_with_heartbeat`` (job-service heartbeated so the
-          stale-job monitor doesn't reap a long generation) wrapped in
-          ``_beating()`` (Temporal-activity heartbeated, matching
-          ``answer_questions_activity``, so a worker crash mid-generation is
-          detected at the workflow's heartbeat_timeout instead of only at the
-          full start_to_close ceiling), persisted to ``spec_content``, and a
-          chat breadcrumb is recorded.
+        - Otherwise the spec is generated via ``agent.generate_spec()`` under a
+          single ``_beating()`` thread that beats BOTH the Temporal activity
+          heartbeat and the job-service heartbeat (so the stale-job monitor
+          doesn't reap a long generation) — one background thread servicing both
+          liveness signals, rather than nesting this activity's Temporal
+          heartbeat around ``orchestrator._generate_spec_with_heartbeat``'s own
+          independent job-heartbeat thread (which stays thread-mode-only; the
+          core ``agent.generate_spec()`` LLM call is identical either way, so
+          this doesn't affect Temporal/thread-mode behavior-equivalence).
+          Persisted to ``spec_content``, and a chat breadcrumb is recorded.
     """
     from user_agent_founder import orchestrator
 
@@ -298,8 +361,8 @@ def generate_spec_activity(run_id: str) -> dict[str, Any]:
     orchestrator._sync_job_status(run_id, "running", phase="generating_spec")
     store.add_chat_message(run_id, "system", "Generating product specification...", "status_update")
 
-    with _beating():
-        spec_content = orchestrator._generate_spec_with_heartbeat(agent, run_id)
+    with _beating(extra_beat=lambda: orchestrator._heartbeat(run_id)):
+        spec_content = agent.generate_spec()
     store.update_run(run_id, spec_content=spec_content)
     store.add_chat_message(
         run_id,
@@ -442,10 +505,16 @@ def poll_phase_activity(run_id: str, phase: str, job_id: str) -> dict[str, Any]:
           "unknown" fallback the pre-decomposition orchestrator produced. On a
           terminal ``completed`` analysis poll the analysis→build handoff
           ``repo_path`` is persisted (idempotent) and the run's success
-          breadcrumb is written exactly once (gated on the status transition,
-          not on ``repo_path``, since a repo-less target's path is ``None``
-          before and after) so a retried poll of an already-completed target
-          doesn't duplicate it.
+          breadcrumb is written exactly once, gated on
+          ``activity.info().attempt == 1`` (see :func:`_is_first_attempt`) —
+          NOT on ``run.status``: a repo-less target's ``repo_path`` is ``None``
+          both before and after (so equality against it is unusable — see
+          ``AgenticTeamAdapter``, whose ``poll_analysis`` is a no-op
+          pass-through), and ``run.status`` can already have moved on from
+          ``polling_<phase>`` for a reason unrelated to THIS poll's own retry
+          (e.g. an intervening question-answering round leaves it at
+          ``answering_<phase>_questions``, which would wrongly suppress a
+          genuinely-first completion breadcrumb).
     """
     from user_agent_founder import orchestrator
 
@@ -467,16 +536,8 @@ def poll_phase_activity(run_id: str, phase: str, job_id: str) -> dict[str, Any]:
     repo_path = status_data.get("repo_path")
 
     if phase == "analysis" and status == "completed" and not poll_error:
-        # First-completion detection can't use repo_path equality (a repo-less
-        # target's repo_path is None both before AND after — see
-        # AgenticTeamAdapter, whose poll_analysis is a no-op pass-through). Use
-        # the status transition instead: run.status is "polling_analysis" until
-        # this exact branch fires for the first time, then never again — so a
-        # Temporal retry re-polling an already-completed target sees a status
-        # that's already moved past it and skips the duplicate breadcrumb.
-        first_completion = run.status == f"polling_{phase}"
-        store.update_run(run_id, repo_path=repo_path, status="analysis_complete")
-        if first_completion:
+        store.update_run(run_id, repo_path=repo_path)
+        if _is_first_attempt():
             store.add_chat_message(
                 run_id, "system", "Analysis complete. Starting target-team build.", "status_update"
             )
@@ -560,33 +621,31 @@ def finalize_run_activity(run_id: str) -> dict[str, Any]:
         - ``run_id`` refers to an existing run whose build phase completed.
     Postconditions:
         - Missing run → non-retryable ``ApplicationError``.
-        - Central job already CANCELLED or FAILED → no-op, returns
-          ``{"run_id": run_id}`` without writing COMPLETED — mirrors
-          ``mark_failed_activity``'s "never clobber a terminal state" guard, for
-          the case where a cancel (or an unrelated failure) landed between the
-          build phase completing and this activity running.
+        - Central job already terminal (CANCELLED, COMPLETED, or FAILED, via
+          :func:`_job_terminal_status`) → no-op, returns ``{"run_id": run_id}``
+          without writing COMPLETED again. CANCELLED/FAILED covers a cancel (or
+          an unrelated failure) landing between the build phase completing and
+          this activity running — mirrors ``mark_failed_activity``'s "never
+          clobber a terminal state" guard. COMPLETED covers a Temporal retry of
+          this activity's own prior successful write — a clean no-op instead of
+          a harmless-but-redundant re-write.
         - Otherwise the run row + central job are marked COMPLETED and a success
-          breadcrumb is recorded; returns ``{"run_id": run_id}``. The breadcrumb
-          is gated on the run not already being COMPLETED so a Temporal retry
-          (which re-reads status == "completed") does not add a duplicate row.
+          breadcrumb is recorded exactly once; returns ``{"run_id": run_id}``.
     """
     from user_agent_founder import orchestrator
-    from user_agent_founder.shared import job_store
 
-    store, run = _require_run(run_id, "finalize")
+    store, _run = _require_run(run_id, "finalize")
 
-    job = job_store.get_job(run_id)
-    job_status = job.get("status") if job is not None else None
-    if job_status in (job_store.JOB_STATUS_CANCELLED, job_store.JOB_STATUS_FAILED):
+    terminal = _job_terminal_status(run_id)
+    if terminal is not None:
         activity.logger.info(
             "Founder run %s already terminal (%s) at finalize; not overwriting with COMPLETED",
             run_id,
-            job_status,
+            terminal,
         )
         return {"run_id": run_id}
 
-    if run.status != "completed":
-        store.add_chat_message(run_id, "system", "Build completed successfully.", "status_update")
+    store.add_chat_message(run_id, "system", "Build completed successfully.", "status_update")
     store.update_run(run_id, status="completed")
     orchestrator._sync_job_status(run_id, "completed", phase="completed")
     return {"run_id": run_id}
@@ -602,11 +661,12 @@ def mark_failed_activity(run_id: str, error: str) -> dict[str, Any]:
     Preconditions:
         - ``error`` is the stringified fatal error.
     Postconditions:
-        - Central job already in ANY terminal state → no-op, returns
-          ``{"marked": False}``. This both preserves a user CANCELLED (never
-          clobbered) and makes the activity idempotent: on a Temporal retry after
-          the first attempt already wrote FAILED, the job is terminal so it does
-          not re-write the status or add a duplicate failure breadcrumb.
+        - Central job already in ANY terminal state (via :func:`_job_terminal_status`)
+          → no-op, returns ``{"marked": False}``. This both preserves a user
+          CANCELLED (never clobbered) and makes the activity idempotent: on a
+          Temporal retry after the first attempt already wrote FAILED, the job
+          is terminal so it does not re-write the status or add a duplicate
+          failure breadcrumb.
         - Otherwise the run row + central job end FAILED with ``error`` recorded
           verbatim as both the run's ``error`` column and the chat breadcrumb —
           unprefixed, matching ``orchestrator._run_phase``'s original phase-
@@ -619,20 +679,14 @@ def mark_failed_activity(run_id: str, error: str) -> dict[str, Any]:
           the common case). Returns ``{"marked": True}``.
     """
     from user_agent_founder import orchestrator
-    from user_agent_founder.shared import job_store
     from user_agent_founder.store import get_founder_store
 
-    job = job_store.get_job(run_id)
-    status = job.get("status") if job is not None else None
-    if status in (
-        job_store.JOB_STATUS_CANCELLED,
-        job_store.JOB_STATUS_COMPLETED,
-        job_store.JOB_STATUS_FAILED,
-    ):
+    terminal = _job_terminal_status(run_id)
+    if terminal is not None:
         activity.logger.info(
             "Founder run %s already terminal (%s) at mark-failed; leaving status untouched",
             run_id,
-            status,
+            terminal,
         )
         return {"marked": False}
 

@@ -48,8 +48,13 @@ def _run(**over):
     return types.SimpleNamespace(**base)
 
 
-def _install(monkeypatch, *, run, adapter=None, job=None):
-    """Patch the activities' lazy dependencies; return the wired mocks."""
+def _install(monkeypatch, *, run, adapter=None, job=None, attempt=1):
+    """Patch the activities' lazy dependencies; return the wired mocks.
+
+    ``attempt`` fakes ``activity.info().attempt`` (Temporal's real activity
+    context isn't available in a plain function call) — defaults to 1 (first
+    attempt); pass 2+ to simulate a Temporal-level retry of the same activity.
+    """
     store_mock = MagicMock(name="store")
     store_mock.get_run.return_value = run
     monkeypatch.setattr(store, "get_founder_store", lambda: store_mock)
@@ -69,6 +74,7 @@ def _install(monkeypatch, *, run, adapter=None, job=None):
     monkeypatch.setattr(orchestrator, "_sync_job_status", MagicMock(name="_sync_job_status"))
     monkeypatch.setattr(orchestrator, "_heartbeat", MagicMock(name="_heartbeat"))
     monkeypatch.setattr(job_store, "get_job", lambda _jid: job)
+    monkeypatch.setattr(acts.activity, "info", lambda: types.SimpleNamespace(attempt=attempt))
 
     return types.SimpleNamespace(store=store_mock, agent=agent_mock, adapter=adapter)
 
@@ -94,6 +100,31 @@ def test_heartbeat_interval_derives_from_shared_timeout():
     """The beat cadence must stay comfortably inside HEARTBEAT_TIMEOUT_S so a
     progressing activity always outpaces its own heartbeat_timeout."""
     assert acts._HEARTBEAT_INTERVAL_S <= acts.HEARTBEAT_TIMEOUT_S / 3.0
+
+
+def test_beating_beat_folds_extra_beat_into_the_same_tick(monkeypatch):
+    """_beating()'s beat closure must call both the Temporal activity heartbeat
+    and, when given, extra_beat on every tick — one background thread servicing
+    both liveness signals instead of a second nested heartbeat thread."""
+    heartbeat_mock = MagicMock()
+    monkeypatch.setattr(acts.activity, "heartbeat", heartbeat_mock)
+    extra_beat = MagicMock()
+
+    acts._beating(extra_beat=extra_beat)._beat()
+
+    heartbeat_mock.assert_called_once()
+    extra_beat.assert_called_once()
+
+
+def test_beating_beat_without_extra_beat(monkeypatch):
+    """extra_beat is optional — omitting it still beats the Temporal activity
+    heartbeat without error."""
+    heartbeat_mock = MagicMock()
+    monkeypatch.setattr(acts.activity, "heartbeat", heartbeat_mock)
+
+    acts._beating()._beat()
+
+    heartbeat_mock.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -141,10 +172,10 @@ def test_begin_run_missing_row_is_non_retryable(monkeypatch):
 
 
 def test_begin_run_retry_skips_duplicate_resume_breadcrumbs(monkeypatch):
-    """Idempotency: a Temporal retry of begin_run (job already RUNNING from the
-    first attempt) must not re-add the resume breadcrumbs."""
+    """Idempotency: a Temporal retry of begin_run (activity.info().attempt > 1)
+    must not re-add the resume breadcrumbs."""
     run = _run(spec_content="SPEC", repo_path="/repo")
-    m = _install(monkeypatch, run=run, job={"status": job_store.JOB_STATUS_RUNNING})
+    m = _install(monkeypatch, run=run, attempt=2)
 
     acts.begin_run_activity("r1")
 
@@ -158,9 +189,7 @@ def test_begin_run_retry_skips_duplicate_resume_breadcrumbs(monkeypatch):
 
 def test_generate_spec_persists_and_returns_chars(monkeypatch):
     m = _install(monkeypatch, run=_run())
-    monkeypatch.setattr(
-        orchestrator, "_generate_spec_with_heartbeat", lambda _agent, _rid: "SPEC-CONTENT"
-    )
+    m.agent.generate_spec.return_value = "SPEC-CONTENT"
     out = acts.generate_spec_activity("r1")
 
     assert out == {"chars": len("SPEC-CONTENT"), "skipped": False}
@@ -168,13 +197,9 @@ def test_generate_spec_persists_and_returns_chars(monkeypatch):
 
 
 def test_generate_spec_skips_when_already_present(monkeypatch):
-    _install(monkeypatch, run=_run(spec_content="EXISTING"))
+    m = _install(monkeypatch, run=_run(spec_content="EXISTING"))
     # Guard: the LLM path must not run when a spec already exists.
-    monkeypatch.setattr(
-        orchestrator,
-        "_generate_spec_with_heartbeat",
-        MagicMock(side_effect=AssertionError("must not regenerate")),
-    )
+    m.agent.generate_spec.side_effect = AssertionError("must not regenerate")
     out = acts.generate_spec_activity("r1")
     assert out == {"chars": len("EXISTING"), "skipped": True}
 
@@ -187,23 +212,32 @@ def test_generate_spec_missing_row_is_non_retryable(monkeypatch):
 
 
 def test_generate_spec_heartbeats_across_the_llm_call(monkeypatch):
-    """generate_spec_activity must wrap the LLM call in _beating() — like
-    answer_questions_activity — so a worker crash mid-generation is detected at
-    the workflow's heartbeat_timeout instead of only the full start_to_close."""
-    _install(monkeypatch, run=_run())
-    monkeypatch.setattr(
-        orchestrator, "_generate_spec_with_heartbeat", lambda _agent, _rid: "SPEC-CONTENT"
-    )
+    """generate_spec_activity must wrap the LLM call in a single _beating() that
+    also folds in the job-service heartbeat via ``extra_beat`` — one background
+    thread servicing both liveness signals, not a nested second heartbeat
+    thread — so a worker crash mid-generation is detected at the workflow's
+    heartbeat_timeout instead of only the full start_to_close."""
+    m = _install(monkeypatch, run=_run())
+    m.agent.generate_spec.return_value = "SPEC-CONTENT"
     entered = []
     beater = MagicMock()
     beater.__enter__ = MagicMock(side_effect=lambda: entered.append("enter"))
     beater.__exit__ = MagicMock(return_value=False)
-    monkeypatch.setattr(acts, "_beating", lambda: beater)
+    captured = {}
+
+    def _fake_beating(extra_beat=None):
+        captured["extra_beat"] = extra_beat
+        return beater
+
+    monkeypatch.setattr(acts, "_beating", _fake_beating)
 
     acts.generate_spec_activity("r1")
 
     assert entered == ["enter"]
     beater.__exit__.assert_called_once()
+    # extra_beat folds the job-service heartbeat into this same thread.
+    captured["extra_beat"]()
+    orchestrator._heartbeat.assert_called_once_with("r1")
 
 
 def test_agent_uses_persona_prompts_when_present(monkeypatch):
@@ -214,8 +248,8 @@ def test_agent_uses_persona_prompts_when_present(monkeypatch):
         store, "get_persona_store", lambda: types.SimpleNamespace(get_persona=lambda _pid: persona)
     )
     factory = MagicMock(return_value=MagicMock(name="agent"))
+    factory.return_value.generate_spec.return_value = "SPEC"
     monkeypatch.setattr(agent_module, "FounderAgent", factory)
-    monkeypatch.setattr(orchestrator, "_generate_spec_with_heartbeat", lambda _a, _r: "SPEC")
 
     acts.generate_spec_activity("r1")
 
@@ -403,7 +437,7 @@ def test_poll_phase_analysis_completed_persists_repo_path(monkeypatch):
     adapter.poll_analysis.return_value = {"status": "completed", "repo_path": "/repo"}
     m = _install(
         monkeypatch,
-        run=_run(spec_content="SPEC", status="polling_analysis"),
+        run=_run(spec_content="SPEC"),
         adapter=adapter,
     )
 
@@ -412,9 +446,9 @@ def test_poll_phase_analysis_completed_persists_repo_path(monkeypatch):
     assert out["status"] == "completed"
     assert out["repo_path"] == "/repo"
     assert out["waiting"] is False
-    m.store.update_run.assert_any_call("r1", repo_path="/repo", status="analysis_complete")
+    m.store.update_run.assert_any_call("r1", repo_path="/repo")
     orchestrator._heartbeat.assert_called_once_with("r1")
-    # First completion (run.status was still polling_analysis) fires the breadcrumb.
+    # First attempt (activity.info().attempt == 1) fires the breadcrumb.
     assert any(
         "Analysis complete" in (c.args[2] if len(c.args) > 2 else "")
         for c in m.store.add_chat_message.call_args_list
@@ -422,15 +456,16 @@ def test_poll_phase_analysis_completed_persists_repo_path(monkeypatch):
 
 
 def test_poll_phase_analysis_completed_no_duplicate_breadcrumb_on_retry(monkeypatch):
-    """Idempotency: a retried poll of an already-completed target (run.status has
-    already moved past polling_analysis) must not add a second breadcrumb —
-    covers the repo-less-target case where repo_path is None both times."""
+    """Idempotency: a Temporal retry of poll_phase (activity.info().attempt > 1)
+    of an already-completed target must not add a second breadcrumb — covers the
+    repo-less-target case where repo_path is None both times."""
     adapter = MagicMock(name="adapter")
     adapter.poll_analysis.return_value = {"status": "completed", "repo_path": None}
     m = _install(
         monkeypatch,
-        run=_run(spec_content="SPEC", status="analysis_complete"),
+        run=_run(spec_content="SPEC"),
         adapter=adapter,
+        attempt=2,
     )
 
     acts.poll_phase_activity("r1", "analysis", "aj-1")
@@ -534,16 +569,17 @@ def test_finalize_writes_completed(monkeypatch):
     orchestrator._sync_job_status.assert_any_call("r1", "completed", phase="completed")
 
 
-def test_finalize_skips_breadcrumb_when_already_completed(monkeypatch):
-    """Retry idempotency: a finalize retry (run already 'completed') must not add a
-    duplicate 'Build completed' breadcrumb, though the status write stays idempotent."""
-    m = _install(monkeypatch, run=_run(status="completed"))
-    acts.finalize_run_activity("r1")
+def test_finalize_no_ops_when_job_already_completed(monkeypatch):
+    """Idempotency: a Temporal retry of finalize (the job is already COMPLETED
+    from the first attempt's write) must not re-write COMPLETED or add a
+    duplicate 'Build completed' breadcrumb."""
+    m = _install(monkeypatch, run=_run(), job={"status": job_store.JOB_STATUS_COMPLETED})
+    out = acts.finalize_run_activity("r1")
 
-    assert not any(
-        "Build completed" in (c.args[2] if len(c.args) > 2 else "")
-        for c in m.store.add_chat_message.call_args_list
-    )
+    assert out == {"run_id": "r1"}
+    m.store.update_run.assert_not_called()
+    m.store.add_chat_message.assert_not_called()
+    orchestrator._sync_job_status.assert_not_called()
 
 
 def test_finalize_no_ops_when_job_cancelled(monkeypatch):
