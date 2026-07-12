@@ -25,6 +25,7 @@ from coding_team.job_store import (
 )
 from coding_team.models import (
     CodingTeamPlanInput,
+    JobStatus,
     StackSpec,
     Task,
     TaskStatus,
@@ -590,7 +591,7 @@ def run_coding_team_orchestrator(
             # job went terminal (failed/cancelled/completed) must keep that status, not be relabeled.
             if not hitl.is_terminal(_get_job(job_id) or {}):
                 _update(
-                    status="failed",
+                    status=JobStatus.FAILED.value,
                     phase="completed",
                     status_text="Design did not converge: open questions were never resolved",
                     error="Tech Lead exceeded the open-question round cap",
@@ -604,7 +605,7 @@ def run_coding_team_orchestrator(
             evidence = str(out.get("completion_evidence") or "").strip()
             logger.info("Job %s: Tech Lead judged the work already complete: %s", job_id, evidence)
             _update(
-                status="already_complete",
+                status=JobStatus.ALREADY_COMPLETE.value,
                 phase="completed",
                 status_text="Work already complete; no changes needed",
                 already_complete=True,
@@ -652,7 +653,7 @@ def run_coding_team_orchestrator(
     except Exception as exc:  # noqa: BLE001 - fail the job cleanly with the unsupported stack
         logger.error("Failed to build coding-team implementation workers: %s", exc)
         _update(
-            status="failed",
+            status=JobStatus.FAILED.value,
             phase="completed",
             status_text="Could not build coding-team implementation workers",
             error=str(exc),
@@ -664,7 +665,7 @@ def run_coding_team_orchestrator(
     # No progress write here: _persist_graph above already published the band value
     # derived from the graph, which on a resume reflects previously merged tasks —
     # an unconditional base write would regress the bar (e.g. 52 → 10 → 52).
-    _update(phase=phase, status_text=status_text, status="running")
+    _update(phase=phase, status_text=status_text, status=JobStatus.RUNNING.value)
 
     # Run the swarm: coordinator (Tech Lead) + v2 implementation workers.
     swarm = CodingTeamSwarm(
@@ -731,7 +732,7 @@ def run_coding_team_orchestrator(
     # a stale mid-review activity entry.
     if already_complete:
         _update(
-            status="already_complete",
+            status=JobStatus.ALREADY_COMPLETE.value,
             phase="completed",
             status_text="Work already complete; no changes needed",
             already_complete=True,
@@ -741,7 +742,9 @@ def run_coding_team_orchestrator(
         )
         return
     _update(
-        status="completed_with_failures" if failed_count else "completed",
+        status=(
+            JobStatus.COMPLETED_WITH_FAILURES.value if failed_count else JobStatus.COMPLETED.value
+        ),
         phase="completed",
         status_text=f"Completed: {merged_count} merged, {failed_count} failed",
         progress=100,
@@ -858,7 +861,7 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
             # (or between phases) is honored immediately rather than reported "failed" if
             # prepare() happens to error, or made to wait out a setup it will just discard.
             if check_cancel and check_cancel():
-                _update(status="cancelled", status_text="Cancelled by user")
+                _update(status=JobStatus.CANCELLED.value, status_text="Cancelled by user")
                 return
 
             try:
@@ -866,7 +869,7 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
             except Exception as exc:  # noqa: BLE001 - a broken worktree setup fails the job, not the process
                 logger.exception("Failed to prepare implementation-worker git worktrees")
                 _update(
-                    status="failed",
+                    status=JobStatus.FAILED.value,
                     phase="completed",
                     status_text="Could not prepare implementation-worker git worktrees",
                     error=str(exc),
@@ -876,7 +879,7 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
 
             for round_num in range(max_rounds):
                 if check_cancel and check_cancel():
-                    _update(status="cancelled", status_text="Cancelled by user")
+                    _update(status=JobStatus.CANCELLED.value, status_text="Cancelled by user")
                     return
 
                 # Refresh the repo context when merged work has landed since the last read. The
