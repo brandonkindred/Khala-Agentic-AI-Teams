@@ -86,7 +86,7 @@ class _ActivityRecorder:
 
     async def execute_activity(self, fn, *args, **kw):
         a = kw.get("args")
-        self.calls.append((fn, a, kw.get("retry_policy")))
+        self.calls.append((fn, a, kw.get("retry_policy"), kw.get("heartbeat_timeout")))
         if fn is acts.begin_run_activity:
             if self.begin_exc is not None:
                 raise self.begin_exc
@@ -115,16 +115,19 @@ class _ActivityRecorder:
         raise AssertionError(f"unexpected activity: {fn}")
 
     def names(self):
-        return [f.__name__ for (f, _a, _r) in self.calls]
+        return [f.__name__ for (f, _a, _r, _h) in self.calls]
 
     def count(self, fn):
-        return sum(1 for (f, _a, _r) in self.calls if f is fn)
+        return sum(1 for (f, _a, _r, _h) in self.calls if f is fn)
 
     def args_for(self, fn):
-        return [a for (f, a, _r) in self.calls if f is fn]
+        return [a for (f, a, _r, _h) in self.calls if f is fn]
 
     def retry_for(self, fn):
-        return [r for (f, _a, r) in self.calls if f is fn]
+        return [r for (f, _a, r, _h) in self.calls if f is fn]
+
+    def heartbeat_for(self, fn):
+        return [h for (f, _a, _r, h) in self.calls if f is fn]
 
 
 def _prepare(monkeypatch, inst, rec):
@@ -253,6 +256,21 @@ def test_target_failed_marks_failed(monkeypatch):
     assert rec.count(acts.mark_failed_activity) == 1
 
 
+def test_target_failed_with_none_error_falls_back_to_unknown(monkeypatch):
+    """poll_phase_activity's dict always carries the 'error' key (None when the
+    target omitted it) — r.get('error', 'unknown') would never fall back, so the
+    workflow must use r.get('error') or 'unknown' to avoid showing 'None'."""
+    rec = _ActivityRecorder(
+        snap=_snap(), analysis_polls=[{"status": "failed", "waiting": False, "error": None}]
+    )
+    inst = wf.UserAgentFounderWorkflow()
+    _prepare(monkeypatch, inst, rec)
+    with pytest.raises(wf._PhaseFailed) as ei:
+        asyncio.run(inst.run("r1"))
+    assert "unknown" in str(ei.value)
+    assert "None" not in str(ei.value)
+
+
 def test_target_cancelled_marks_failed(monkeypatch):
     rec = _ActivityRecorder(
         snap=_snap(), analysis_polls=[{"status": "cancelled", "waiting": False}]
@@ -349,6 +367,51 @@ def test_cancel_mid_poll_loop_short_circuits(monkeypatch):
     assert inst.progress()["cancel_requested"] is True
 
 
+def test_cancel_after_analysis_completes_stops_build(monkeypatch):
+    """A cancel observed exactly when the analysis poll reports 'completed' must
+    stop the build phase from being entered — _run_phase's own cancel checks
+    never see a cancellation delivered on its own terminal poll, since it
+    returns immediately on status=='completed' with no further check."""
+    completed_then_cancel = {**_completed("/repo"), "_cancel": True}
+    rec = _ActivityRecorder(
+        snap=_snap(), analysis_polls=[completed_then_cancel], build_polls=[_completed()]
+    )
+    inst, out = _run(monkeypatch, rec)
+
+    assert out == {"run_id": "r1", "cancelled": True}
+    # enter_phase ran once for analysis; build is never entered.
+    assert rec.count(acts.enter_phase_activity) == 1
+    assert rec.args_for(acts.enter_phase_activity)[0][1] == "analysis"
+    assert rec.count(acts.finalize_run_activity) == 0
+    assert rec.count(acts.mark_failed_activity) == 0
+
+
+def test_cancel_after_build_completes_stops_finalize(monkeypatch):
+    """A cancel observed exactly when the build poll reports 'completed' must
+    stop finalize_run_activity from overwriting the terminal cancel state the
+    API route already recorded."""
+    completed_then_cancel = {**_completed(), "_cancel": True}
+    rec = _ActivityRecorder(snap=_snap(skip_analysis=True), build_polls=[completed_then_cancel])
+    inst, out = _run(monkeypatch, rec)
+
+    assert out == {"run_id": "r1", "cancelled": True}
+    assert rec.count(acts.finalize_run_activity) == 0
+    assert rec.count(acts.mark_failed_activity) == 0
+
+
+def test_cancel_before_answering_stops_answer_activity(monkeypatch):
+    """A cancel observed right after a poll reports 'waiting' must stop the
+    autonomous-answer round from running against an already-cancelled target."""
+    waiting_then_cancel = {**_waiting("q1"), "_cancel": True}
+    rec = _ActivityRecorder(
+        snap=_snap(), analysis_polls=[waiting_then_cancel], build_polls=[_completed()]
+    )
+    inst, out = _run(monkeypatch, rec)
+
+    assert out == {"run_id": "r1", "cancelled": True}
+    assert rec.count(acts.answer_questions_activity) == 0
+
+
 # ---------------------------------------------------------------------------
 # Signal / query handlers + retry policies
 # ---------------------------------------------------------------------------
@@ -377,3 +440,23 @@ def test_activities_use_expected_retry_policies(monkeypatch):
     # Answering is not idempotent → a single attempt (no auto-retry).
     assert rec.retry_for(acts.answer_questions_activity) == [wf.ANSWER_RETRY]
     assert rec.retry_for(acts.finalize_run_activity) == [wf.IO_RETRY]
+
+
+def test_spec_and_answer_activities_carry_a_heartbeat_timeout(monkeypatch):
+    """Both long, LLM-calling activities (spec generation, answering) must be
+    scheduled with a heartbeat_timeout so a worker crash is detected well before
+    the full start_to_close ceiling — and both derive from the SAME
+    activities.HEARTBEAT_TIMEOUT_S so the two ends of the contract can't drift."""
+    rec = _ActivityRecorder(
+        snap=_snap(),
+        analysis_polls=[_waiting(), _completed("/repo")],
+        build_polls=[_completed()],
+    )
+    _run(monkeypatch, rec)
+
+    assert rec.heartbeat_for(acts.generate_spec_activity) == [wf._SPEC_HEARTBEAT_TIMEOUT]
+    assert rec.heartbeat_for(acts.answer_questions_activity) == [wf._ANSWER_HEARTBEAT_TIMEOUT]
+    assert wf._SPEC_HEARTBEAT_TIMEOUT == wf._ANSWER_HEARTBEAT_TIMEOUT
+    # begin_run/enter_phase/poll_phase/finalize are cheap IO steps — no heartbeat.
+    assert rec.heartbeat_for(acts.begin_run_activity) == [None]
+    assert rec.heartbeat_for(acts.enter_phase_activity) == [None, None]

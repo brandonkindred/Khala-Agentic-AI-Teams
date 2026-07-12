@@ -38,26 +38,23 @@ Job-store status ownership (retry-safe contract, mirroring ``sales_team``):
 
 from __future__ import annotations
 
-import atexit
-import threading
 import time
 from typing import Any
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-# Process-wide HTTP client shared across activity invocations. The founder poll
-# loop can fire hundreds of target-team calls per run (every poll/answer tick);
-# httpx.Client is documented thread-safe for concurrent requests and reuses its
-# connection pool, so one shared client avoids the construct/teardown churn of a
-# fresh client per activity. Lazily created (double-checked locking) and closed
-# via atexit so the connection pool is torn down cleanly on worker shutdown.
-_HTTP_LOCK = threading.Lock()
-_HTTP_CLIENT: Any = None
-
-# Heartbeat cadence for long answer activities; comfortably inside the workflow's
-# answer heartbeat_timeout so a progressing batch always outpaces the timeout.
-_HEARTBEAT_INTERVAL_S = 30.0
+# Heartbeat timeout every long, self-heartbeating activity (spec generation,
+# answer batches) is scheduled with, and the single source the beat interval
+# below derives from — see :func:`_beating`. Owned here (not in workflows.py) so
+# the "interval must stay well under timeout" safety margin can't drift across
+# files: workflows.py imports this constant for its heartbeat_timeout kwargs
+# instead of hardcoding its own value.
+HEARTBEAT_TIMEOUT_S = 180.0
+# Beat cadence: comfortably inside HEARTBEAT_TIMEOUT_S (clamped to at most a
+# third of it) so a progressing activity always outpaces the timeout regardless
+# of how HEARTBEAT_TIMEOUT_S is tuned.
+_HEARTBEAT_INTERVAL_S = min(30.0, HEARTBEAT_TIMEOUT_S / 3.0)
 # In-activity retry budget for persisting a just-started target job id (see
 # _record_started_job_id) — absorbs a transient store blip so the activity does
 # not fail and re-submit a duplicate target job on Temporal retry.
@@ -66,30 +63,22 @@ _PERSIST_BACKOFF_S = 0.2
 
 
 def _http_client() -> Any:
-    """Return the process-wide shared ``httpx.Client``.
+    """Return the process-wide pooled ``httpx.Client`` for target-team calls.
 
     Preconditions:
         - None.
     Postconditions:
-        - Returns a live ``httpx.Client`` (created on first use under a lock so
-          concurrent activity threads share one instance); never ``None``. The
-          client is registered with ``atexit`` so its pool is closed on worker
-          shutdown.
+        - Returns the shared, connection-pooled client from ``shared_http``
+          (already thread-safe, env-tunable keepalive, atexit-registered
+          teardown) — never constructs a private client for this team.
     """
-    global _HTTP_CLIENT
-    if _HTTP_CLIENT is None:
-        import httpx
+    from shared_http import get_pooled_client
 
-        with _HTTP_LOCK:
-            if _HTTP_CLIENT is None:
-                client = httpx.Client()
-                atexit.register(client.close)
-                _HTTP_CLIENT = client
-    return _HTTP_CLIENT
+    return get_pooled_client()
 
 
 def _beating() -> Any:
-    """Background heartbeat keeping a long answer activity alive across LLM calls.
+    """Background heartbeat keeping a long, LLM-calling activity alive.
 
     Preconditions:
         - Called from inside a running activity body (the constructor snapshots
@@ -105,7 +94,7 @@ def _beating() -> Any:
     return BackgroundHeartbeat(
         activity.heartbeat,
         _HEARTBEAT_INTERVAL_S,
-        name="user-agent-founder-answer-hb",
+        name="user-agent-founder-heartbeat",
         copy_context=True,
         join_timeout=5.0,
     )
@@ -233,20 +222,32 @@ def begin_run_activity(run_id: str) -> dict[str, Any]:
           persisted ``repo_path``, display/label metadata, and the env-derived
           poll intervals + attempt/answer-retry ceilings (read here so the
           deterministic workflow never touches the environment).
+        - Resume breadcrumbs (``spec_content``/``repo_path`` already set) are
+          gated on the central job not already being RUNNING, so a Temporal
+          retry of this activity (it runs under ``IO_RETRY``) does not duplicate
+          them — the job only reaches RUNNING via this same activity.
     """
     from user_agent_founder import orchestrator
+    from user_agent_founder.shared import job_store
 
     store, run = _require_run(run_id, "begin_run")
     adapter = _adapter_for(run)
+
+    job = job_store.get_job(run_id)
+    already_running = job is not None and job.get("status") == job_store.JOB_STATUS_RUNNING
     orchestrator._sync_job_status(run_id, "running", phase="starting")
 
-    # Preserve the thread path's resume chat breadcrumbs.
-    if run.spec_content:
-        store.add_chat_message(run_id, "system", "Resuming with existing spec.", "status_update")
-    if run.repo_path:
-        store.add_chat_message(
-            run_id, "system", "Resuming with existing analysis output.", "status_update"
-        )
+    # Preserve the thread path's resume chat breadcrumbs — gated so a retry
+    # (job already RUNNING from a prior attempt) doesn't duplicate them.
+    if not already_running:
+        if run.spec_content:
+            store.add_chat_message(
+                run_id, "system", "Resuming with existing spec.", "status_update"
+            )
+        if run.repo_path:
+            store.add_chat_message(
+                run_id, "system", "Resuming with existing analysis output.", "status_update"
+            )
 
     return {
         "skip_spec": bool(run.spec_content),
@@ -276,9 +277,13 @@ def generate_spec_activity(run_id: str) -> dict[str, Any]:
         - Spec already present → returns ``{"chars", "skipped": True}`` without a
           second LLM call (crash/retry idempotency).
         - Otherwise the spec is generated via the shared
-          ``_generate_spec_with_heartbeat`` (job heartbeated so the stale-job
-          monitor doesn't reap a long generation), persisted to
-          ``spec_content``, and a chat breadcrumb is recorded.
+          ``_generate_spec_with_heartbeat`` (job-service heartbeated so the
+          stale-job monitor doesn't reap a long generation) wrapped in
+          ``_beating()`` (Temporal-activity heartbeated, matching
+          ``answer_questions_activity``, so a worker crash mid-generation is
+          detected at the workflow's heartbeat_timeout instead of only at the
+          full start_to_close ceiling), persisted to ``spec_content``, and a
+          chat breadcrumb is recorded.
     """
     from user_agent_founder import orchestrator
 
@@ -293,7 +298,8 @@ def generate_spec_activity(run_id: str) -> dict[str, Any]:
     orchestrator._sync_job_status(run_id, "running", phase="generating_spec")
     store.add_chat_message(run_id, "system", "Generating product specification...", "status_update")
 
-    spec_content = orchestrator._generate_spec_with_heartbeat(agent, run_id)
+    with _beating():
+        spec_content = orchestrator._generate_spec_with_heartbeat(agent, run_id)
     store.update_run(run_id, spec_content=spec_content)
     store.add_chat_message(
         run_id,
@@ -333,13 +339,22 @@ def enter_phase_activity(run_id: str, phase: str, existing_job_id: str | None) -
           holds a job id): transitions the run to ``polling_<phase>`` with error
           cleared + the job phase synced, records a resume breadcrumb, and returns
           ``{"job_id": <that id>}`` without contacting the target.
-        - Fresh path: ``StartFailed`` → non-retryable ``ApplicationError`` so the
-          workflow's catch-all marks the run FAILED without burning retries on a
-          deterministic failure; otherwise the target job is started, its id is
-          persisted to the matching checkpoint column
-          (``analysis_job_id``/``se_job_id``), the run transitions to
-          ``polling_<phase>``, and ``{"job_id": ...}`` is returned.
+        - Fresh path: ``StartFailed`` (a definite target rejection) *or* an
+          ``httpx.HTTPError`` (an inconclusive transport failure — the target may
+          have already accepted the submit) → non-retryable ``ApplicationError``.
+          Both are treated as terminal rather than Temporal-retried: unlike
+          ``StartFailed``, a transport error gives no proof the submit didn't
+          land, so letting Temporal's automatic retry re-run this activity could
+          submit a second target job with no way to detect or reconcile the
+          duplicate. Failing the run instead requires a human-gated ``/resume``.
+          Otherwise the target job is started, its id is persisted to the
+          matching checkpoint column (``analysis_job_id``/``se_job_id``) via
+          :func:`_record_started_job_id` (itself non-retryable on exhaustion, for
+          the identical reason), the run transitions to ``polling_<phase>``, and
+          ``{"job_id": ...}`` is returned.
     """
+    import httpx
+
     from user_agent_founder import orchestrator
     from user_agent_founder.targets import StartFailed
 
@@ -383,11 +398,26 @@ def enter_phase_activity(run_id: str, phase: str, existing_job_id: str | None) -
             job_id = adapter.start_build(client, run.repo_path)
     except StartFailed as exc:
         raise ApplicationError(f"Failed to start {phase}: {exc}", non_retryable=True) from exc
+    except httpx.HTTPError as exc:
+        # Ambiguous: the request may have reached the target before the
+        # transport failed. Non-retryable so Temporal doesn't auto-resubmit;
+        # see the Postconditions above.
+        raise ApplicationError(
+            f"Transport error starting {phase}: {exc}", non_retryable=True
+        ) from exc
 
     # Persist the just-started id immediately (with retry): if this were lost to a
     # transient store error the activity would fail and a Temporal retry would
-    # submit a second target job.
-    _record_started_job_id(store, run_id, phase, job_id)
+    # submit a second target job. If even the retry budget is exhausted,
+    # _record_started_job_id's own re-raised exception is converted to
+    # non-retryable below for the same reason as the httpx.HTTPError case above.
+    try:
+        _record_started_job_id(store, run_id, phase, job_id)
+    except Exception as exc:
+        raise ApplicationError(
+            f"Failed to persist {phase} job id {job_id!r} after target submit: {exc}",
+            non_retryable=True,
+        ) from exc
     store.update_run(run_id, status=f"polling_{phase}", error=None)
     orchestrator._sync_job_status(run_id, "running", phase=f"polling_{phase}")
     store.add_chat_message(run_id, "system", f"{label} started (job: {job_id})", "status_update")
@@ -406,9 +436,16 @@ def poll_phase_activity(run_id: str, phase: str, job_id: str) -> dict[str, Any]:
         - Touches the job heartbeat (so the stale-job monitor doesn't reap a
           long-polling run) and returns the normalized single-poll verdict:
           ``{"status", "poll_error", "waiting", "pending_questions", "repo_path",
-          "error"}``. On a terminal ``completed`` analysis poll the analysis→build
-          handoff ``repo_path`` is persisted (idempotent) so the build phase can
-          read it from the run row.
+          "error"}``. ``error`` is always present in the dict (``None`` when the
+          target response omitted it) — callers must use ``r.get("error") or
+          "unknown"``, not ``r.get("error", "unknown")``, to get the same
+          "unknown" fallback the pre-decomposition orchestrator produced. On a
+          terminal ``completed`` analysis poll the analysis→build handoff
+          ``repo_path`` is persisted (idempotent) and the run's success
+          breadcrumb is written exactly once (gated on the status transition,
+          not on ``repo_path``, since a repo-less target's path is ``None``
+          before and after) so a retried poll of an already-completed target
+          doesn't duplicate it.
     """
     from user_agent_founder import orchestrator
 
@@ -430,10 +467,19 @@ def poll_phase_activity(run_id: str, phase: str, job_id: str) -> dict[str, Any]:
     repo_path = status_data.get("repo_path")
 
     if phase == "analysis" and status == "completed" and not poll_error:
-        store.update_run(run_id, repo_path=repo_path)
-        store.add_chat_message(
-            run_id, "system", "Analysis complete. Starting target-team build.", "status_update"
-        )
+        # First-completion detection can't use repo_path equality (a repo-less
+        # target's repo_path is None both before AND after — see
+        # AgenticTeamAdapter, whose poll_analysis is a no-op pass-through). Use
+        # the status transition instead: run.status is "polling_analysis" until
+        # this exact branch fires for the first time, then never again — so a
+        # Temporal retry re-polling an already-completed target sees a status
+        # that's already moved past it and skips the duplicate breadcrumb.
+        first_completion = run.status == f"polling_{phase}"
+        store.update_run(run_id, repo_path=repo_path, status="analysis_complete")
+        if first_completion:
+            store.add_chat_message(
+                run_id, "system", "Analysis complete. Starting target-team build.", "status_update"
+            )
 
     return {
         "status": status,
@@ -514,14 +560,31 @@ def finalize_run_activity(run_id: str) -> dict[str, Any]:
         - ``run_id`` refers to an existing run whose build phase completed.
     Postconditions:
         - Missing run → non-retryable ``ApplicationError``.
+        - Central job already CANCELLED or FAILED → no-op, returns
+          ``{"run_id": run_id}`` without writing COMPLETED — mirrors
+          ``mark_failed_activity``'s "never clobber a terminal state" guard, for
+          the case where a cancel (or an unrelated failure) landed between the
+          build phase completing and this activity running.
         - Otherwise the run row + central job are marked COMPLETED and a success
           breadcrumb is recorded; returns ``{"run_id": run_id}``. The breadcrumb
           is gated on the run not already being COMPLETED so a Temporal retry
           (which re-reads status == "completed") does not add a duplicate row.
     """
     from user_agent_founder import orchestrator
+    from user_agent_founder.shared import job_store
 
     store, run = _require_run(run_id, "finalize")
+
+    job = job_store.get_job(run_id)
+    job_status = job.get("status") if job is not None else None
+    if job_status in (job_store.JOB_STATUS_CANCELLED, job_store.JOB_STATUS_FAILED):
+        activity.logger.info(
+            "Founder run %s already terminal (%s) at finalize; not overwriting with COMPLETED",
+            run_id,
+            job_status,
+        )
+        return {"run_id": run_id}
+
     if run.status != "completed":
         store.add_chat_message(run_id, "system", "Build completed successfully.", "status_update")
     store.update_run(run_id, status="completed")
@@ -545,7 +608,15 @@ def mark_failed_activity(run_id: str, error: str) -> dict[str, Any]:
           the first attempt already wrote FAILED, the job is terminal so it does
           not re-write the status or add a duplicate failure breadcrumb.
         - Otherwise the run row + central job end FAILED with ``error`` recorded
-          and a breadcrumb added; returns ``{"marked": True}``.
+          verbatim as both the run's ``error`` column and the chat breadcrumb —
+          unprefixed, matching ``orchestrator._run_phase``'s original phase-
+          failure messages exactly (the pre-decomposition thread path's own
+          outer catch-all does prefix with "Workflow failed: ", but that path is
+          reserved for genuine crashes outside any phase; ``_PhaseFailed``
+          messages routed through here are already fully descriptive on their
+          own, e.g. "Product analysis failed: unknown", and prefixing them again
+          would only make the audit log diverge from thread mode's wording for
+          the common case). Returns ``{"marked": True}``.
     """
     from user_agent_founder import orchestrator
     from user_agent_founder.shared import job_store
@@ -568,5 +639,5 @@ def mark_failed_activity(run_id: str, error: str) -> dict[str, Any]:
     store = get_founder_store()
     store.update_run(run_id, status="failed", error=error)
     orchestrator._sync_job_status(run_id, "failed", error=error)
-    store.add_chat_message(run_id, "system", f"Workflow failed: {error}", "status_update")
+    store.add_chat_message(run_id, "system", error, "status_update")
     return {"marked": True}

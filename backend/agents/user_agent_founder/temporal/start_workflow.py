@@ -26,9 +26,13 @@ START_WORKFLOW_TIMEOUT = 30
 # first request after a cold start can race the connect call.
 CLIENT_READY_TIMEOUT_S = 10.0
 CLIENT_READY_POLL_S = 0.05
-# Cancellation is best-effort and user-facing: cap the client-ready wait so a
-# /cancel never blocks on the full CLIENT_READY_TIMEOUT_S when the worker is down.
+# Cancellation is best-effort and user-facing: cap BOTH legs of the round trip so
+# a /cancel never blocks on the defaults — the client-ready wait
+# (CLIENT_READY_TIMEOUT_S, 10s) and separately the signal RPC itself
+# (shared_temporal.runner.START_WORKFLOW_TIMEOUT_S, 30s) — when the worker is
+# down or the Temporal server is slow to answer.
 CANCEL_CLIENT_READY_TIMEOUT_S = 1.0
+CANCEL_SIGNAL_RPC_TIMEOUT_S = 3.0
 
 
 def _wait_for_client(timeout_s: float = CLIENT_READY_TIMEOUT_S) -> tuple[Any, Any]:
@@ -89,16 +93,22 @@ def cancel_founder_workflow(run_id: str) -> None:
           server / surfaces as a handled error the caller treats as best-effort).
     Postconditions:
         - The ``cancel`` signal is delivered to workflow id
-          ``f"{WORKFLOW_ID_PREFIX}{run_id}"`` (raises ``RuntimeError`` only if the
-          worker client never becomes available within
-          ``CANCEL_CLIENT_READY_TIMEOUT_S``).
+          ``f"{WORKFLOW_ID_PREFIX}{run_id}"`` (raises ``RuntimeError``/times out
+          if the worker client never becomes available within
+          ``CANCEL_CLIENT_READY_TIMEOUT_S``, or if the signal RPC itself doesn't
+          complete within ``CANCEL_SIGNAL_RPC_TIMEOUT_S``).
     """
     workflow_id = f"{WORKFLOW_ID_PREFIX}{run_id}"
-    # Best-effort signal: cap the client-ready wait so the /cancel handler stays
-    # snappy when Temporal is enabled but the worker client isn't up yet (the
-    # store already recorded the terminal cancel; this only stops an in-flight
-    # workflow). Without the cap this would block ~10s (CLIENT_READY_TIMEOUT_S).
+    # Best-effort signal: cap BOTH the client-ready wait and the signal RPC's own
+    # timeout so the /cancel handler stays snappy in both failure modes — the
+    # worker client isn't up yet, or it's up but the Temporal server itself is
+    # slow/unreachable (the store already recorded the terminal cancel; this only
+    # stops an in-flight workflow). Without these caps this could block up to
+    # CLIENT_READY_TIMEOUT_S (10s) plus the signal helper's own 30s RPC default.
     signal_workflow_sync(
-        workflow_id, "cancel", client_ready_timeout_s=CANCEL_CLIENT_READY_TIMEOUT_S
+        workflow_id,
+        "cancel",
+        client_ready_timeout_s=CANCEL_CLIENT_READY_TIMEOUT_S,
+        timeout_s=CANCEL_SIGNAL_RPC_TIMEOUT_S,
     )
     logger.info("Signalled cancel to UserAgentFounderWorkflow id=%s", workflow_id)

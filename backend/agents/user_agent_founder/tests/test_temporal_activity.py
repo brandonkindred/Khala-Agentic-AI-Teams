@@ -16,6 +16,7 @@ from __future__ import annotations
 import types
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from temporalio.exceptions import ApplicationError
 
@@ -73,6 +74,29 @@ def _install(monkeypatch, *, run, adapter=None, job=None):
 
 
 # ---------------------------------------------------------------------------
+# shared HTTP client / heartbeat wiring
+# ---------------------------------------------------------------------------
+
+
+def test_http_client_delegates_to_shared_pooled_client(monkeypatch):
+    """_http_client() must reuse the existing shared_http pool rather than
+    hand-rolling its own — a fresh sentinel per call proves no private client
+    is constructed in activities.py."""
+    import shared_http
+
+    sentinel = object()
+    monkeypatch.setattr(shared_http, "get_pooled_client", lambda: sentinel)
+
+    assert acts._http_client() is sentinel
+
+
+def test_heartbeat_interval_derives_from_shared_timeout():
+    """The beat cadence must stay comfortably inside HEARTBEAT_TIMEOUT_S so a
+    progressing activity always outpaces its own heartbeat_timeout."""
+    assert acts._HEARTBEAT_INTERVAL_S <= acts.HEARTBEAT_TIMEOUT_S / 3.0
+
+
+# ---------------------------------------------------------------------------
 # begin_run
 # ---------------------------------------------------------------------------
 
@@ -116,6 +140,17 @@ def test_begin_run_missing_row_is_non_retryable(monkeypatch):
     assert ei.value.non_retryable is True
 
 
+def test_begin_run_retry_skips_duplicate_resume_breadcrumbs(monkeypatch):
+    """Idempotency: a Temporal retry of begin_run (job already RUNNING from the
+    first attempt) must not re-add the resume breadcrumbs."""
+    run = _run(spec_content="SPEC", repo_path="/repo")
+    m = _install(monkeypatch, run=run, job={"status": job_store.JOB_STATUS_RUNNING})
+
+    acts.begin_run_activity("r1")
+
+    m.store.add_chat_message.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # generate_spec
 # ---------------------------------------------------------------------------
@@ -149,6 +184,26 @@ def test_generate_spec_missing_row_is_non_retryable(monkeypatch):
     with pytest.raises(ApplicationError) as ei:
         acts.generate_spec_activity("r1")
     assert ei.value.non_retryable is True
+
+
+def test_generate_spec_heartbeats_across_the_llm_call(monkeypatch):
+    """generate_spec_activity must wrap the LLM call in _beating() — like
+    answer_questions_activity — so a worker crash mid-generation is detected at
+    the workflow's heartbeat_timeout instead of only the full start_to_close."""
+    _install(monkeypatch, run=_run())
+    monkeypatch.setattr(
+        orchestrator, "_generate_spec_with_heartbeat", lambda _agent, _rid: "SPEC-CONTENT"
+    )
+    entered = []
+    beater = MagicMock()
+    beater.__enter__ = MagicMock(side_effect=lambda: entered.append("enter"))
+    beater.__exit__ = MagicMock(return_value=False)
+    monkeypatch.setattr(acts, "_beating", lambda: beater)
+
+    acts.generate_spec_activity("r1")
+
+    assert entered == ["enter"]
+    beater.__exit__.assert_called_once()
 
 
 def test_agent_uses_persona_prompts_when_present(monkeypatch):
@@ -300,6 +355,44 @@ def test_enter_phase_unknown_phase_is_non_retryable(monkeypatch):
     assert ei.value.non_retryable is True
 
 
+def test_enter_phase_transport_error_is_non_retryable(monkeypatch):
+    """A raw transport failure (not a StartFailed) during submit is ambiguous —
+    the target may have already accepted the request — so it must be converted
+    to non-retryable rather than left for Temporal to auto-retry (which would
+    risk a duplicate submit)."""
+    adapter = MagicMock(name="adapter")
+    adapter.display_name = "Software Engineering"
+    adapter.start_from_spec.side_effect = httpx.ReadTimeout("timed out")
+    _install(monkeypatch, run=_run(spec_content="SPEC"), adapter=adapter)
+
+    with pytest.raises(ApplicationError) as ei:
+        acts.enter_phase_activity("r1", "analysis", None)
+    assert ei.value.non_retryable is True
+    assert "Transport error starting analysis" in str(ei.value)
+
+
+def test_enter_phase_persist_exhaustion_is_non_retryable(monkeypatch):
+    """If _record_started_job_id exhausts its own retry budget, enter_phase_activity
+    must convert that to non-retryable too — otherwise Temporal's activity-level
+    retry re-runs the whole activity and re-submits to the target a second time."""
+    monkeypatch.setattr(acts.time, "sleep", lambda _s: None)
+    adapter = MagicMock(name="adapter")
+    adapter.display_name = "Software Engineering"
+    adapter.start_from_spec.return_value = "aj-1"
+    m = _install(monkeypatch, run=_run(spec_content="SPEC"), adapter=adapter)
+
+    def _update(_run_id, **kw):
+        if "analysis_job_id" in kw:
+            raise RuntimeError("store down")
+
+    m.store.update_run.side_effect = _update
+
+    with pytest.raises(ApplicationError) as ei:
+        acts.enter_phase_activity("r1", "analysis", None)
+    assert ei.value.non_retryable is True
+    assert "Failed to persist analysis job id" in str(ei.value)
+
+
 # ---------------------------------------------------------------------------
 # poll_phase
 # ---------------------------------------------------------------------------
@@ -308,15 +401,44 @@ def test_enter_phase_unknown_phase_is_non_retryable(monkeypatch):
 def test_poll_phase_analysis_completed_persists_repo_path(monkeypatch):
     adapter = MagicMock(name="adapter")
     adapter.poll_analysis.return_value = {"status": "completed", "repo_path": "/repo"}
-    m = _install(monkeypatch, run=_run(spec_content="SPEC"), adapter=adapter)
+    m = _install(
+        monkeypatch,
+        run=_run(spec_content="SPEC", status="polling_analysis"),
+        adapter=adapter,
+    )
 
     out = acts.poll_phase_activity("r1", "analysis", "aj-1")
 
     assert out["status"] == "completed"
     assert out["repo_path"] == "/repo"
     assert out["waiting"] is False
-    m.store.update_run.assert_any_call("r1", repo_path="/repo")
+    m.store.update_run.assert_any_call("r1", repo_path="/repo", status="analysis_complete")
     orchestrator._heartbeat.assert_called_once_with("r1")
+    # First completion (run.status was still polling_analysis) fires the breadcrumb.
+    assert any(
+        "Analysis complete" in (c.args[2] if len(c.args) > 2 else "")
+        for c in m.store.add_chat_message.call_args_list
+    )
+
+
+def test_poll_phase_analysis_completed_no_duplicate_breadcrumb_on_retry(monkeypatch):
+    """Idempotency: a retried poll of an already-completed target (run.status has
+    already moved past polling_analysis) must not add a second breadcrumb —
+    covers the repo-less-target case where repo_path is None both times."""
+    adapter = MagicMock(name="adapter")
+    adapter.poll_analysis.return_value = {"status": "completed", "repo_path": None}
+    m = _install(
+        monkeypatch,
+        run=_run(spec_content="SPEC", status="analysis_complete"),
+        adapter=adapter,
+    )
+
+    acts.poll_phase_activity("r1", "analysis", "aj-1")
+
+    assert not any(
+        "Analysis complete" in (c.args[2] if len(c.args) > 2 else "")
+        for c in m.store.add_chat_message.call_args_list
+    )
 
 
 def test_poll_phase_waiting_surfaces_questions(monkeypatch):
@@ -424,6 +546,28 @@ def test_finalize_skips_breadcrumb_when_already_completed(monkeypatch):
     )
 
 
+def test_finalize_no_ops_when_job_cancelled(monkeypatch):
+    """A cancel that lands between the build phase completing and finalize
+    running must not be clobbered by a COMPLETED write."""
+    m = _install(monkeypatch, run=_run(), job={"status": job_store.JOB_STATUS_CANCELLED})
+    out = acts.finalize_run_activity("r1")
+
+    assert out == {"run_id": "r1"}
+    for c in m.store.update_run.call_args_list:
+        assert c.kwargs.get("status") != "completed"
+    orchestrator._sync_job_status.assert_not_called()
+
+
+def test_finalize_no_ops_when_job_failed(monkeypatch):
+    m = _install(monkeypatch, run=_run(), job={"status": job_store.JOB_STATUS_FAILED})
+    out = acts.finalize_run_activity("r1")
+
+    assert out == {"run_id": "r1"}
+    for c in m.store.update_run.call_args_list:
+        assert c.kwargs.get("status") != "completed"
+    orchestrator._sync_job_status.assert_not_called()
+
+
 def test_mark_failed_writes_failed_when_not_cancelled(monkeypatch):
     m = _install(monkeypatch, run=_run(), job={"status": job_store.JOB_STATUS_RUNNING})
     out = acts.mark_failed_activity("r1", "kaboom")
@@ -431,6 +575,10 @@ def test_mark_failed_writes_failed_when_not_cancelled(monkeypatch):
     assert out == {"marked": True}
     m.store.update_run.assert_any_call("r1", status="failed", error="kaboom")
     orchestrator._sync_job_status.assert_any_call("r1", "failed", error="kaboom")
+    # The chat breadcrumb carries the error verbatim, matching
+    # orchestrator._run_phase's original unprefixed phase-failure messages —
+    # no "Workflow failed: " double-wrap.
+    m.store.add_chat_message.assert_any_call("r1", "system", "kaboom", "status_update")
 
 
 def test_mark_failed_no_ops_when_cancelled(monkeypatch):

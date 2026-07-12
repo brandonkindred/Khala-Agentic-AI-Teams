@@ -137,14 +137,16 @@ def test_start_workflow_waits_for_client_then_raises(monkeypatch):
 
 
 def test_cancel_founder_workflow_signals_the_workflow(monkeypatch):
-    """The cancel helper delivers the ``cancel`` signal to the founder workflow id."""
+    """The cancel helper delivers the ``cancel`` signal to the founder workflow id,
+    capping BOTH the client-ready wait and the signal RPC's own timeout so a
+    /cancel can never block on either default (10s / 30s)."""
     from user_agent_founder.temporal import WORKFLOW_ID_PREFIX
     from user_agent_founder.temporal import start_workflow as sw
 
     captured: dict = {}
 
-    def _fake_signal(workflow_id, signal_name, *args, **_kw):
-        captured.update(workflow_id=workflow_id, signal_name=signal_name, args=args)
+    def _fake_signal(workflow_id, signal_name, *args, **kw):
+        captured.update(workflow_id=workflow_id, signal_name=signal_name, args=args, **kw)
 
     monkeypatch.setattr(sw, "signal_workflow_sync", _fake_signal)
 
@@ -152,6 +154,8 @@ def test_cancel_founder_workflow_signals_the_workflow(monkeypatch):
 
     assert captured["workflow_id"] == f"{WORKFLOW_ID_PREFIX}run-abc"
     assert captured["signal_name"] == "cancel"
+    assert captured["client_ready_timeout_s"] == sw.CANCEL_CLIENT_READY_TIMEOUT_S
+    assert captured["timeout_s"] == sw.CANCEL_SIGNAL_RPC_TIMEOUT_S
 
 
 def test_start_founder_workflow_dispatches_with_prefixed_id(monkeypatch):

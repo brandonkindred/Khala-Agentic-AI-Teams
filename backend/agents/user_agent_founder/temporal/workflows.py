@@ -64,12 +64,17 @@ ANSWER_RETRY = RetryPolicy(maximum_attempts=1)
 # Per-attempt execution timeouts (queue wait excluded — start_to_close, never
 # schedule_to_close, so a saturated worker never starves a queued bookkeeping write).
 _IO_TIMEOUT = timedelta(minutes=2)
+# Both spec generation and answering are long, self-heartbeating LLM calls (see
+# activities._beating()); their heartbeat_timeout derives from the SAME
+# activities.HEARTBEAT_TIMEOUT_S the beat interval derives from, so the two ends
+# of the heartbeat contract can never drift apart across files.
 _SPEC_TIMEOUT = timedelta(minutes=20)
+_SPEC_HEARTBEAT_TIMEOUT = timedelta(seconds=_act.HEARTBEAT_TIMEOUT_S)
 # Answering runs single-attempt (not idempotent); a generous start_to_close plus a
 # heartbeat lets a large/slow question batch run to completion while a genuine hang
 # still fails fast at the heartbeat_timeout instead of holding a slot for the ceiling.
 _ANSWER_TIMEOUT = timedelta(minutes=30)
-_ANSWER_HEARTBEAT_TIMEOUT = timedelta(minutes=3)
+_ANSWER_HEARTBEAT_TIMEOUT = timedelta(seconds=_act.HEARTBEAT_TIMEOUT_S)
 _FINALIZE_TIMEOUT = timedelta(minutes=5)
 
 
@@ -171,7 +176,11 @@ class UserAgentFounderWorkflow:
             if not snap["skip_spec"]:
                 self._phase = "generating_spec"
                 await self._exec(
-                    _act.generate_spec_activity, run_id, retry=LLM_RETRY, timeout=_SPEC_TIMEOUT
+                    _act.generate_spec_activity,
+                    run_id,
+                    retry=LLM_RETRY,
+                    timeout=_SPEC_TIMEOUT,
+                    heartbeat=_SPEC_HEARTBEAT_TIMEOUT,
                 )
             self._raise_if_cancelled()
 
@@ -183,6 +192,11 @@ class UserAgentFounderWorkflow:
                     snap["analysis_poll_interval"],
                     "Product analysis",
                 )
+            # Between phases: a cancel that lands right as analysis completes must
+            # stop the build phase from submitting a fresh (expensive) target job
+            # — _run_phase's own cancel checks only run inside ITS poll loop, after
+            # enter_phase_activity has already been scheduled.
+            self._raise_if_cancelled()
 
             await self._run_phase(
                 run_id,
@@ -191,6 +205,10 @@ class UserAgentFounderWorkflow:
                 snap["build_poll_interval"],
                 f"{snap['adapter_display_name']} build",
             )
+            # Same reasoning as above: a cancel landing right as the build phase
+            # completes must stop finalize_run_activity from writing COMPLETED
+            # over the terminal cancel state the API route already recorded.
+            self._raise_if_cancelled()
 
             self._phase = "finalizing"
             await self._exec(
@@ -265,6 +283,10 @@ class UserAgentFounderWorkflow:
 
             status = r.get("status", "")
             if r.get("waiting"):
+                # A cancel landing right after this poll must stop the (expensive,
+                # LLM-driven) autonomous-answer round from running against a
+                # target the user already told the system to stop working on.
+                self._raise_if_cancelled()
                 pending = r.get("pending_questions") or []
                 qset = frozenset(q.get("id", "") for q in pending)
                 prior = failed_question_sets.get(qset, 0)
@@ -289,7 +311,11 @@ class UserAgentFounderWorkflow:
             if status == "completed":
                 return r.get("repo_path")
             if status == "failed":
-                raise _PhaseFailed(f"{label} failed: {r.get('error', 'unknown')}")
+                # poll_phase_activity's dict always carries the "error" key (None
+                # when the target omitted it), so r.get('error', 'unknown') would
+                # never fall back — `or` handles both "key absent" and "present
+                # but falsy" the same way dict.get's default alone cannot.
+                raise _PhaseFailed(f"{label} failed: {r.get('error') or 'unknown'}")
             if status == "cancelled":
                 raise _PhaseFailed(f"{label} was cancelled")
 
