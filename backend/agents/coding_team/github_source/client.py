@@ -116,6 +116,13 @@ class GitHubAPIError(RuntimeError):
     """Raised on any unrecoverable GitHub API failure."""
 
     def __init__(self, status: int, body: str = "") -> None:
+        """Carry the failing HTTP status and response body alongside the exception message.
+
+        Postconditions:
+            - Sets ``self.status`` and ``self.body`` to the given values and calls
+              ``RuntimeError.__init__`` with ``f"GitHub API {status}: {body}"``, so the
+              exception's ``str()`` is diagnosable even where only the message is logged.
+        """
         self.status = status
         self.body = body
         super().__init__(f"GitHub API {status}: {body}")
@@ -130,6 +137,15 @@ class NotAnIssueError(GitHubAPIError):
     """
 
     def __init__(self, number: int) -> None:
+        """Record the pull-request number that was requested as an issue.
+
+        Preconditions:
+            - ``number`` is the issue/PR number `get_issue` was called with.
+        Postconditions:
+            - Sets ``self.number`` and initializes the ``GitHubAPIError`` base with
+              status ``0`` (no real HTTP status applies) and a message identifying
+              ``number`` as a pull request, not an issue.
+        """
         self.number = number
         super().__init__(0, f"#{number} is a pull request, not an issue")
 
@@ -256,6 +272,17 @@ class GitHubClient:
         max_retries: int = DEFAULT_MAX_RETRIES,
         sleep: Any = time.sleep,
     ) -> None:
+        """Build a client authenticated with ``token`` against ``base_url`` (or the default API host).
+
+        Preconditions:
+            - ``token`` is a non-empty GitHub token (PAT or installation token).
+        Postconditions:
+            - ``base_url`` defaults to ``GITHUB_API_URL`` when unset, else
+              :data:`DEFAULT_BASE_URL`, with any trailing slash stripped.
+              ``max_retries`` is floored at 1 so a retry loop always attempts at
+              least once. ``sleep`` is injectable (tests pass a no-op) so retry/backoff
+              delays never actually block. Raises ``ValueError`` when ``token`` is empty.
+        """
         if not token:
             raise ValueError("GitHubClient requires a token")
         self._token = token
@@ -355,6 +382,12 @@ class GitHubClient:
     # ----- public methods ----------------------------------------------------
 
     def get_repo(self, owner: str, repo: str) -> Repo:
+        """Fetch repository metadata (``GET /repos/{owner}/{repo}``).
+
+        Postconditions:
+            - Returns a ``Repo`` carrying ``default_branch`` (falling back to ``"main"``
+              when GitHub's payload omits it). Raises ``GitHubAPIError`` on any non-2xx.
+        """
         r = self._check(self._request("GET", f"/repos/{owner}/{repo}"))
         return Repo(default_branch=r.json().get("default_branch") or "main")
 
@@ -375,6 +408,17 @@ class GitHubClient:
         repo: str,
         label: Optional[str] = None,
     ) -> Iterator[Issue]:
+        """Yield every open issue, optionally filtered by ``label``, following ``Link`` pagination.
+
+        Preconditions:
+            - ``label``, when given, is a valid label name on ``owner/repo``.
+        Postconditions:
+            - Yields one ``Issue`` per open issue in GitHub's response order; pull
+              requests (payloads carrying a ``pull_request`` key) are silently skipped,
+              since GitHub's issues endpoint returns both. Bounded by
+              :data:`MAX_ISSUES_TRAVERSED`: traversal stops (with a warning logged)
+              once that many issues have been seen, rather than paginating unbounded.
+        """
         path = f"/repos/{owner}/{repo}/issues"
         params: dict[str, Any] = {"state": "open", "per_page": 100}
         if label:
@@ -398,6 +442,17 @@ class GitHubClient:
             url = _parse_next_link(response.headers.get("Link"))
 
     def get_issue(self, owner: str, repo: str, number: int) -> Issue:
+        """Fetch a single issue (``GET /repos/{owner}/{repo}/issues/{number}``).
+
+        Preconditions:
+            - ``number`` names an existing issue or pull request (GitHub serves both
+              through this endpoint).
+        Postconditions:
+            - Returns the ``Issue`` when ``number`` is a genuine issue. Raises
+              ``NotAnIssueError`` when the payload carries a ``pull_request`` key (the
+              number names a pull request instead), and ``GitHubAPIError`` on any
+              other non-2xx.
+        """
         r = self._check(self._request("GET", f"/repos/{owner}/{repo}/issues/{number}"))
         payload = r.json()
         if "pull_request" in payload:
@@ -405,6 +460,18 @@ class GitHubClient:
         return _issue_from_payload(payload)
 
     def list_sub_issues(self, owner: str, repo: str, number: int) -> list[SubIssue]:
+        """List an issue's sub-issues, following ``Link`` pagination.
+
+        Preconditions:
+            - ``number`` names an existing issue.
+        Postconditions:
+            - Returns every sub-issue of ``number`` in GitHub's response order.
+              Returns ``[]`` when the endpoint 404s (the repository has sub-issues
+              disabled, or ``number`` has none) rather than raising, so callers (e.g.
+              the dependency resolver) can treat "no sub-issues" and "feature
+              unavailable" the same way. Raises ``GitHubAPIError`` on any other
+              non-2xx.
+        """
         path = f"/repos/{owner}/{repo}/issues/{number}/sub_issues"
         params: dict[str, Any] = {"per_page": 100}
         url: Optional[str] = path
@@ -490,6 +557,16 @@ class GitHubClient:
         )
 
     def find_existing_pr(self, owner: str, repo: str, head: str) -> Optional[PullRequest]:
+        """Find an open pull request whose head branch is ``head``, if one exists.
+
+        Preconditions:
+            - ``head`` is a branch name on ``owner/repo`` (not the ``owner:branch``
+              qualified form — this method builds that qualifier itself).
+        Postconditions:
+            - Returns the first matching open ``PullRequest`` GitHub reports, or
+              ``None`` when none is open for ``head``. Used to reuse (rather than
+              duplicate) a draft PR across retried runs of the same feature branch.
+        """
         params = {"state": "open", "head": f"{owner}:{head}"}
         r = self._check(self._request("GET", f"/repos/{owner}/{repo}/pulls", params=params))
         items = r.json() or []
@@ -508,6 +585,17 @@ class GitHubClient:
         body: str,
         draft: bool = True,
     ) -> PullRequest:
+        """Open a pull request from ``head`` into ``base`` (``POST /repos/{owner}/{repo}/pulls``).
+
+        Preconditions:
+            - ``head`` and ``base`` are distinct existing branches on ``owner/repo``.
+        Postconditions:
+            - Returns the created ``PullRequest``. Opened as a draft by default
+              (``draft=True``) so a freshly-created PR does not trigger reviewers
+              or CI expectations before the caller is ready. Raises
+              ``GitHubAPIError`` on any non-2xx (e.g. no commits between the
+              branches, or a PR already open for ``head``).
+        """
         r = self._check(
             self._request(
                 "POST",
@@ -532,7 +620,14 @@ class GitHubClient:
         body: str,
     ) -> PullRequest:
         """Patch an existing PR's body. Used to keep a reused PR's description in sync with the
-        latest run (e.g. surfacing tasks that failed on a retry)."""
+        latest run (e.g. surfacing tasks that failed on a retry).
+
+        Preconditions:
+            - ``owner``/``repo``/``number`` identify an existing pull request.
+        Postconditions:
+            - Returns the updated ``PullRequest`` with ``body`` replaced. Raises
+              ``GitHubAPIError`` on any non-2xx.
+        """
         r = self._check(
             self._request(
                 "PATCH",
@@ -547,6 +642,8 @@ class GitHubClient:
     def list_open_pull_requests(self, owner: str, repo: str) -> Iterator[PullRequest]:
         """Yield every open pull request, following ``Link``-header pagination.
 
+        Preconditions:
+            - ``owner``/``repo`` name an existing repository.
         Postconditions:
             - Yields one ``PullRequest`` per open PR in GitHub's response order,
               bounded by ``MAX_ISSUES_TRAVERSED`` to cap an unbounded traversal.
@@ -570,7 +667,15 @@ class GitHubClient:
             url = _parse_next_link(response.headers.get("Link"))
 
     def get_pull_request(self, owner: str, repo: str, number: int) -> PullRequestDetail:
-        """Fetch full detail for one pull request, including its head commit SHA."""
+        """Fetch full detail for one pull request, including its head commit SHA.
+
+        Preconditions:
+            - ``number`` names an existing pull request.
+        Postconditions:
+            - Returns the full ``PullRequestDetail`` (including ``head_sha``, the
+              commit id an inline review must anchor to). Raises ``GitHubAPIError``
+              on any non-2xx.
+        """
         r = self._check(self._request("GET", f"/repos/{owner}/{repo}/pulls/{number}"))
         return _pr_detail_from_payload(r.json())
 
@@ -787,6 +892,13 @@ class GitHubClient:
     # ----- lifecycle ---------------------------------------------------------
 
     def close(self) -> None:
+        """Close the underlying HTTP connection pool.
+
+        Postconditions:
+            - The wrapped ``httpx.Client`` is closed; the ``GitHubClient`` must not
+              be used for further requests afterward. Also invoked by ``__exit__``
+              when the client is used as a context manager.
+        """
         self._client.close()
 
     def __enter__(self) -> "GitHubClient":
