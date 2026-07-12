@@ -81,6 +81,13 @@ def prepare_scan_activity(job_id: str, request: dict[str, Any], run_id: str) -> 
     ``ON CONFLICT DO NOTHING`` this makes prepare idempotent — a retry neither
     duplicates the run row nor orphans a half-created one.
 
+    ``load_job_seeker_profile`` reads the seeker's stored profile and need not be
+    deterministic across attempts: Temporal records an activity's result and does
+    not re-invoke it on workflow replay, so the profile is captured exactly once
+    per successful attempt. Only a retry that precedes the first success re-reads
+    — safely, since it picks up the current profile before any downstream phase
+    has consumed the prior read.
+
     Preconditions:
         * ``job_id`` refers to a job row already created by ``POST /scan``.
         * ``request`` is the JSON dump of a :class:`JobMatchRequest`.
@@ -276,7 +283,7 @@ def finalize_scan_activity(
             )
         except Exception:  # noqa: BLE001 - persistence failure must not lose the response
             activity.logger.warning("Failed to save results for run %s", run_id, exc_info=True)
-            # Don't leave the run stuck RUNNING; record the persistence failure.
+            # Best-effort record the persistence failure on the run row.
             # INTENTIONAL run-FAILED + job-COMPLETED split (do not "fix"): the run
             # row is FAILED because its results couldn't be persisted, yet the job
             # still COMPLETEs below with the in-memory payload. This mirrors the
@@ -286,7 +293,17 @@ def finalize_scan_activity(
             # persistence vs. API job outcome), so the mismatch is expected.
             try:
                 store.mark_failed(run_id, "persisting results failed")
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 - run store fully unreachable
+                # mark_failed ALSO failed: the run store is entirely down, not
+                # just the save. The run row therefore stays in its prior
+                # (RUNNING) state while the job still COMPLETEs with the payload
+                # below — the same accepted trade-off taken to its limit, with
+                # response preservation still winning over run-row accuracy. We
+                # deliberately swallow rather than re-raise: re-raising would fail
+                # finalize and, on retry exhaustion, mark the JOB failed too,
+                # discarding the computed response. The stale RUNNING run is a
+                # recoverable secondary record (a re-run or the run's own
+                # lifecycle supersedes it), never lost data.
                 activity.logger.warning(
                     "Failed to mark run %s failed after save error", run_id, exc_info=True
                 )
