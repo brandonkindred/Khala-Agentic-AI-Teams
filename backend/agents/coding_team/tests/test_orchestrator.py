@@ -3503,6 +3503,23 @@ def test_render_context_file_returns_none_on_read_error(tmp_path, monkeypatch):
     assert orch_mod._render_context_file(f, tmp_path) is None
 
 
+def test_render_context_file_logs_debug_on_read_error(tmp_path, monkeypatch, caplog):
+    """A read failure is logged at DEBUG with exc_info, not silently swallowed."""
+    f = tmp_path / "a.py"
+    f.write_text("A = 1")
+
+    def _boom(self, *a, **k):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    with caplog.at_level(logging.DEBUG, logger=orch_mod.logger.name):
+        assert orch_mod._render_context_file(f, tmp_path) is None
+
+    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any(str(f) in r.getMessage() for r in debug_records)
+    assert any(r.exc_info for r in debug_records)
+
+
 def test_enumerate_context_files_survives_walk_error(tmp_path, monkeypatch):
     """An os.walk failure is best-effort: it yields no files rather than raising."""
     monkeypatch.setattr(
@@ -3517,6 +3534,18 @@ def test_repo_context_cache_skips_unstattable_file(tmp_path, monkeypatch):
     cache = orch_mod._RepoContextCache()
     assert cache.read(tmp_path) == "No files found"  # ghost stat raises → skipped
     assert cache._entries == {}
+
+
+def test_repo_context_cache_logs_debug_on_stat_error(tmp_path, monkeypatch, caplog):
+    """A stat failure between walk and stat is logged at DEBUG with exc_info."""
+    monkeypatch.setattr(orch_mod, "_enumerate_context_files", lambda p: [tmp_path / "ghost.py"])
+    cache = orch_mod._RepoContextCache()
+    with caplog.at_level(logging.DEBUG, logger=orch_mod.logger.name):
+        assert cache.read(tmp_path) == "No files found"
+
+    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("ghost.py" in r.getMessage() for r in debug_records)
+    assert any(r.exc_info for r in debug_records)
 
 
 def test_repo_context_cache_skips_unrenderable_file(tmp_path, monkeypatch):

@@ -322,6 +322,7 @@ def _render_context_file(f: Path, repo_path: Path) -> Optional[str]:
     try:
         content = f.read_text(encoding="utf-8", errors="replace")
     except Exception:
+        logger.debug("failed to read context file %s", f, exc_info=True)
         return None
     rel = str(f.relative_to(repo_path))
     return f"--- {rel} ---\n{content}\n"
@@ -406,6 +407,7 @@ class _RepoContextCache:
             except Exception:
                 # A file that vanished or cannot be stat-ed between walk and stat is skipped, exactly
                 # as _render_context_file would drop an unreadable file; it also leaves the cache.
+                logger.debug("failed to stat context file %s", f, exc_info=True)
                 continue
             cached = self._entries.get(f)
             if cached is not None and cached[:2] == key:
