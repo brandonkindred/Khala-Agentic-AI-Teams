@@ -132,8 +132,16 @@ class AccessibilityAuditWorkflow:
             timer.cancel()
             return phases.result()
 
-        # Timebox expired first: abandon the in-flight phase (its heartbeat delivers
-        # the activity cancellation) and mark the job failed with the timeout reason.
+        # Timebox expired first: abandon the in-flight phase and mark the job failed
+        # with the timeout reason immediately, without waiting for the cancellation
+        # request to actually reach and stop the phase's own LLM/scan work (a long
+        # wait here would defeat the point of a short timebox). A cancelled activity
+        # is not guaranteed to stop promptly — cooperative cancellation into a
+        # long-running phase's own work is not (yet) implemented, so the phase can
+        # keep running after this point and reach its own persist call later. That
+        # late write does not clobber the terminal state written below: every
+        # per-phase step's own persist (see audit_execution._persist_unless_job_terminal)
+        # checks whether the job is already terminal first and skips the write if so.
         phases.cancel()
         return await workflow.execute_activity(
             _activities.mark_timed_out_activity,

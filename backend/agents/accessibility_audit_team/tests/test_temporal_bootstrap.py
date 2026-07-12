@@ -1013,6 +1013,50 @@ def test_run_phase_writes_terminal_fail_when_job_not_yet_terminal(monkeypatch):
     assert failed_writes and failed_writes[0].kwargs.get("error") == "boom"
 
 
+def test_run_phase_skips_initial_running_write_when_job_already_terminal(monkeypatch):
+    """A retry of this activity that fires after a previous attempt's terminal
+    write actually landed (but the client lost the ack, so Temporal thinks it
+    needs to retry) must not clobber that terminal status back to RUNNING before
+    re-running the phase — the initial progress write is guarded exactly like the
+    terminal writes are."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_FAILED}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+
+    async def step():
+        return SimpleNamespace(failure_reason="")
+
+    out = asyncio.run(acts._run_phase("j1", "a1", "discovery", 40, step))
+
+    assert out == {"status": "PASS", "audit_id": "a1"}
+    running_writes = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_RUNNING
+    ]
+    assert not running_writes
+
+
+def test_run_phase_writes_initial_running_when_job_not_terminal(monkeypatch):
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+
+    async def step():
+        return SimpleNamespace(failure_reason="")
+
+    asyncio.run(acts._run_phase("j1", "a1", "discovery", 40, step))
+
+    running_writes = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_RUNNING
+    ]
+    assert running_writes and running_writes[0].kwargs.get("current_phase") == "discovery"
+
+
 def test_run_phase_marks_failed_on_last_attempt_exception(monkeypatch):
     from accessibility_audit_team import audit_execution as ax
     from accessibility_audit_team.temporal import activities as acts

@@ -30,12 +30,22 @@ from accessibility_audit_team.models import (
 def _isolate_steps(monkeypatch, tmp_path):
     """Stub the LLM client (no strands dependency) and redirect the artifact store to
     a per-test tmp dir, so the steps run the *real* ``persist_audit_state`` without a
-    repo-dir side effect. ``load_audit_state`` is stubbed per-test via ``_seed``."""
+    repo-dir side effect. ``load_audit_state`` is stubbed per-test via ``_seed``.
+
+    ``get_job_manager`` is stubbed with a Mock whose ``get_job`` returns ``None`` by
+    default (no real job-service network call, and "job not found" reads as
+    "not terminal" to ``_persist_unless_job_terminal`` — the same as today's
+    behavior of always persisting). Tests exercising the terminal-skip guard itself
+    override ``jm.get_job.return_value`` locally.
+    """
     import accessibility_audit_team.artifact_store as store_mod
 
     monkeypatch.setattr(ax, "_build_llm_client", lambda: object())
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
     monkeypatch.setattr(store_mod, "_artifact_store", None)  # rebuild against tmp path
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +217,29 @@ def test_run_report_packaging_step_raises_when_state_missing(monkeypatch):
         asyncio.run(ax.run_report_packaging_step("j1", "a1"))
 
 
+def test_run_report_packaging_step_skips_rerun_when_already_complete(monkeypatch, sample_findings):
+    seeded = AccessibilityAuditResult(
+        audit_id="a1",
+        intake_result=IntakeResult(success=True),
+        verification_result=VerificationResult(success=True, verified_findings=sample_findings),
+        report_packaging_result=ReportPackagingResult(success=True, final_backlog=sample_findings),
+        completed_phases=[
+            Phase.INTAKE,
+            Phase.DISCOVERY,
+            Phase.VERIFICATION,
+            Phase.REPORT_PACKAGING,
+        ],
+    )
+    _seed(monkeypatch, seeded)
+    phase_fn = mock.AsyncMock()
+    monkeypatch.setattr(ax, "run_report_packaging_phase", phase_fn)
+
+    result = asyncio.run(ax.run_report_packaging_step("j1", "a1"))
+
+    phase_fn.assert_not_called()
+    assert result is seeded
+
+
 def test_run_discovery_step_is_idempotent_on_phase(monkeypatch, sample_audit_plan, sample_findings):
     """A Temporal at-least-once retry reloading a result whose completed_phases
     already contains DISCOVERY (the completion ack to the server was lost, so the
@@ -228,6 +261,28 @@ def test_run_discovery_step_is_idempotent_on_phase(monkeypatch, sample_audit_pla
     )
     result = asyncio.run(ax.run_discovery_step("j1", "a1"))
     assert result.completed_phases.count(Phase.DISCOVERY) == 1
+
+
+def test_run_discovery_step_skips_rerun_when_already_complete(
+    monkeypatch, sample_audit_plan, sample_findings
+):
+    """The scans/LLM calls are nondeterministic and can create side-effecting
+    artifacts, so a retry after DISCOVERY is already recorded complete must not
+    re-run them at all — not just avoid duplicating the completed_phases entry."""
+    seeded = AccessibilityAuditResult(
+        audit_id="a1",
+        intake_result=IntakeResult(success=True, audit_plan=sample_audit_plan),
+        discovery_result=DiscoveryResult(success=True, draft_findings=sample_findings),
+        completed_phases=[Phase.INTAKE, Phase.DISCOVERY],
+    )
+    _seed(monkeypatch, seeded)
+    phase_fn = mock.AsyncMock()
+    monkeypatch.setattr(ax, "run_discovery_phase", phase_fn)
+
+    result = asyncio.run(ax.run_discovery_step("j1", "a1"))
+
+    phase_fn.assert_not_called()
+    assert result is seeded
 
 
 def test_run_discovery_step_raises_when_persist_fails(monkeypatch, sample_audit_plan):
@@ -312,6 +367,23 @@ def test_run_verification_step_is_idempotent_on_phase(monkeypatch, sample_findin
     )
     result = asyncio.run(ax.run_verification_step("j1", "a1", {}))
     assert result.completed_phases.count(Phase.VERIFICATION) == 1
+
+
+def test_run_verification_step_skips_rerun_when_already_complete(monkeypatch, sample_findings):
+    seeded = AccessibilityAuditResult(
+        audit_id="a1",
+        discovery_result=DiscoveryResult(success=True, draft_findings=sample_findings),
+        verification_result=VerificationResult(success=True, verified_findings=sample_findings),
+        completed_phases=[Phase.INTAKE, Phase.DISCOVERY, Phase.VERIFICATION],
+    )
+    _seed(monkeypatch, seeded)
+    phase_fn = mock.AsyncMock()
+    monkeypatch.setattr(ax, "run_verification_phase", phase_fn)
+
+    result = asyncio.run(ax.run_verification_step("j1", "a1", {}))
+
+    phase_fn.assert_not_called()
+    assert result is seeded
 
 
 def test_run_verification_step_raises_when_persist_fails(monkeypatch, sample_findings):
@@ -438,6 +510,85 @@ def test_finalize_audit_step_raises_when_persist_fails(monkeypatch, sample_findi
     monkeypatch.setattr(ax, "persist_audit_state", mock.AsyncMock(return_value=False))
     with pytest.raises(RuntimeError, match="failed to persist audit state"):
         asyncio.run(ax.finalize_audit_step("j1", "a1"))
+
+
+# ---------------------------------------------------------------------------
+# _persist_unless_job_terminal — guards a step's own persist against clobbering
+# a job a concurrent path (e.g. a timebox timeout) already marked terminal
+# ---------------------------------------------------------------------------
+
+
+def test_persist_unless_job_terminal_persists_when_job_not_terminal(monkeypatch):
+    persist = mock.AsyncMock(return_value=True)
+    monkeypatch.setattr(ax, "persist_audit_state", persist)
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_RUNNING}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    result = AccessibilityAuditResult(audit_id="a1")
+
+    ok = asyncio.run(ax._persist_unless_job_terminal("j1", result))
+
+    assert ok is True
+    persist.assert_awaited_once_with(result)
+
+
+@pytest.mark.parametrize("terminal_status", ["completed", "failed"])
+def test_persist_unless_job_terminal_skips_when_job_terminal(monkeypatch, terminal_status):
+    """A concurrent path (e.g. mark_timed_out_activity) already decided this job's
+    outcome — the skip must report success (True), not a persistence failure, so
+    the caller doesn't spuriously raise RuntimeError over an abandoned write."""
+    persist = mock.AsyncMock(return_value=True)
+    monkeypatch.setattr(ax, "persist_audit_state", persist)
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": terminal_status}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    result = AccessibilityAuditResult(audit_id="a1")
+
+    ok = asyncio.run(ax._persist_unless_job_terminal("j1", result))
+
+    assert ok is True
+    persist.assert_not_awaited()
+
+
+def test_persist_unless_job_terminal_persists_when_job_missing(monkeypatch):
+    """No job row (e.g. called outside the normal job lifecycle) is not terminal —
+    the persist still goes through."""
+    persist = mock.AsyncMock(return_value=True)
+    monkeypatch.setattr(ax, "persist_audit_state", persist)
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    result = AccessibilityAuditResult(audit_id="a1")
+
+    ok = asyncio.run(ax._persist_unless_job_terminal("j1", result))
+
+    assert ok is True
+    persist.assert_awaited_once_with(result)
+
+
+def test_run_discovery_step_skips_persist_when_job_already_terminal(monkeypatch, sample_audit_plan):
+    """A cancelled-but-still-running discovery step (e.g. abandoned after a
+    timebox timeout already marked the job FAILED) must not clobber the
+    already-decided terminal audit_state with its own late write."""
+    _seed(
+        monkeypatch,
+        AccessibilityAuditResult(
+            audit_id="a1", intake_result=IntakeResult(success=True, audit_plan=sample_audit_plan)
+        ),
+    )
+    monkeypatch.setattr(
+        ax, "run_discovery_phase", mock.AsyncMock(return_value=DiscoveryResult(success=True))
+    )
+    persist = mock.AsyncMock(return_value=True)
+    monkeypatch.setattr(ax, "persist_audit_state", persist)
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_FAILED}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+
+    result = asyncio.run(ax.run_discovery_step("j1", "a1"))
+
+    persist.assert_not_awaited()
+    assert Phase.DISCOVERY in result.completed_phases  # in-memory result still assembled
 
 
 # ---------------------------------------------------------------------------

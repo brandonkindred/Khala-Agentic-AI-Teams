@@ -154,7 +154,13 @@ async def _run_phase(
           returning the awaitable phase step (which returns an
           ``AccessibilityAuditResult``).
     Postconditions:
-        - Writes ``RUNNING``/``current_phase``/``progress`` before running the step.
+        - Writes ``RUNNING``/``current_phase``/``progress`` before running the step,
+          UNLESS the job has already reached a terminal status (guarded the same
+          way the terminal writes below are) — otherwise a retry of this activity
+          that fires after a previous attempt's terminal write actually landed
+          (but the client lost the ack, so Temporal thinks it needs to retry)
+          would clobber that terminal status back to RUNNING before re-running
+          the phase.
         - On a *logical* phase failure (``result.failure_reason`` set), the terminal
           job-store write (with the phase's full partial result) is skipped if a
           concurrent path already marked the job terminal (e.g. a timebox timeout
@@ -179,9 +185,10 @@ async def _run_phase(
     )
 
     manager = get_job_manager()
-    manager.update_job(
-        job_id, status=JOB_STATUS_RUNNING, current_phase=phase_name, progress=progress
-    )
+    if not _is_job_terminal(manager, job_id):
+        manager.update_job(
+            job_id, status=JOB_STATUS_RUNNING, current_phase=phase_name, progress=progress
+        )
 
     try:
         if heartbeat:

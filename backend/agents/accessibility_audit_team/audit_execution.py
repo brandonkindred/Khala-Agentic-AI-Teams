@@ -325,6 +325,43 @@ async def persist_audit_state(result: AccessibilityAuditResult) -> bool:
         return False
 
 
+async def _persist_unless_job_terminal(job_id: str, result: AccessibilityAuditResult) -> bool:
+    """Persist ``result`` unless ``job_id`` has already reached a terminal status.
+
+    Guards a per-phase step's OWN persist against an abandoned/still-running step
+    clobbering audit_state after a concurrent path already decided the job's
+    outcome — e.g. a timebox timeout: the workflow cancels the in-flight phase and
+    immediately runs ``mark_timed_out_activity`` (which marks the job FAILED), but
+    because cancellation into a long-running LLM/scan phase's own work is not
+    (yet) fully cooperative, the phase can keep running and reach this persist
+    call afterward. Without this guard, that late write would silently overwrite
+    the terminal "failed" audit_state with the abandoned phase's own (partial or
+    even successful) result — so a client polling job status would see ``failed``
+    while ``/audit/{id}/report`` (or any other ``get_audit_state`` reader) sees an
+    in-progress or more-advanced state.
+
+    Preconditions:
+        - ``job_id`` refers to an existing job row; ``result.audit_id`` is the
+          persistence key.
+    Postconditions:
+        - Returns ``True`` when either (a) the persist succeeded, or (b) the job
+          was already terminal and the persist was intentionally skipped (this is
+          NOT a failure — the job's outcome was already legitimately decided by a
+          concurrent path). Returns ``False`` only on a genuine store-write
+          failure, so callers keep failing loudly on that.
+    """
+    existing = get_job_manager().get_job(job_id)
+    if existing is not None and existing.get("status") in (JOB_STATUS_COMPLETED, JOB_STATUS_FAILED):
+        logger.warning(
+            "Skipping persist for audit %s: job %s is already terminal (status=%s)",
+            result.audit_id,
+            job_id,
+            existing.get("status"),
+        )
+        return True
+    return await persist_audit_state(result)
+
+
 async def load_audit_state(audit_id: str) -> Optional[AccessibilityAuditResult]:
     """Load an audit's accumulated state from the artifact store.
 
@@ -419,7 +456,7 @@ async def run_intake_step(
     if not intake_result.success:
         result.success = False
         result.failure_reason = intake_result.error or "Intake failed"
-        await persist_audit_state(result)
+        await _persist_unless_job_terminal(job_id, result)
         return result
 
     # Keep the API-supplied ``audit_id`` as the canonical store key. In practice the
@@ -428,7 +465,7 @@ async def run_intake_step(
     # workflow's threaded key can always reload this state.
     result.intake_result = intake_result
     result.completed_phases.append(Phase.INTAKE)
-    if not await persist_audit_state(result):
+    if not await _persist_unless_job_terminal(job_id, result):
         # Persistence is load-bearing here (the only channel the next phase's
         # activity/process has to this state): fail the CURRENT activity loudly so
         # Temporal retries intake itself, rather than silently reporting PASS and
@@ -445,6 +482,12 @@ async def run_discovery_step(job_id: str, audit_id: str) -> AccessibilityAuditRe
     Postconditions:
         - Returns the audit result with the discovery result attached (``DISCOVERY``
           recorded) on success, or ``success=False`` on a logical discovery failure.
+        - If discovery was already recorded complete (an at-least-once Temporal
+          retry after the prior attempt's persist succeeded but its completion ack
+          was lost), the already-persisted result is returned as-is WITHOUT
+          re-running the scans/LLM calls — that work is nondeterministic and can
+          create side-effecting artifacts, so a retry re-running it could silently
+          change the audit's findings.
         - Raises ``RuntimeError`` if the persisted intake state / audit plan is
           missing (an infrastructure/plumbing failure, surfaced for Temporal retry).
     """
@@ -452,6 +495,12 @@ async def run_discovery_step(job_id: str, audit_id: str) -> AccessibilityAuditRe
     result = await load_audit_state(audit_id)
     if result is None or result.intake_result is None or result.intake_result.audit_plan is None:
         raise RuntimeError(f"discovery step: intake state/audit plan missing for {audit_id}")
+
+    if Phase.DISCOVERY in result.completed_phases:
+        logger.info(
+            "Discovery step for job %s audit %s already complete; skipping re-run", job_id, audit_id
+        )
+        return result
 
     result.current_phase = Phase.DISCOVERY
     discovery_result = await run_discovery_phase(
@@ -463,7 +512,7 @@ async def run_discovery_step(job_id: str, audit_id: str) -> AccessibilityAuditRe
     if not discovery_result.success:
         result.success = False
         result.failure_reason = discovery_result.error or "Discovery failed"
-        await persist_audit_state(result)
+        await _persist_unless_job_terminal(job_id, result)
         return result
 
     result.discovery_result = discovery_result
@@ -474,7 +523,7 @@ async def run_discovery_step(job_id: str, audit_id: str) -> AccessibilityAuditRe
     # completed_phases already contains DISCOVERY.
     if Phase.DISCOVERY not in result.completed_phases:
         result.completed_phases.append(Phase.DISCOVERY)
-    if not await persist_audit_state(result):
+    if not await _persist_unless_job_terminal(job_id, result):
         raise RuntimeError(f"discovery step: failed to persist audit state for {audit_id}")
     return result
 
@@ -490,12 +539,24 @@ async def run_verification_step(
         - Returns the audit result with the verification result attached
           (``VERIFICATION`` recorded) on success, or ``success=False`` on a logical
           verification failure.
+        - If verification was already recorded complete (an at-least-once Temporal
+          retry after the prior attempt's persist succeeded but its completion ack
+          was lost), the already-persisted result is returned as-is WITHOUT
+          re-running verification — see :func:`run_discovery_step` for why.
         - Raises ``RuntimeError`` if the persisted discovery state is missing.
     """
     logger.info("Verification step for job %s audit %s", job_id, audit_id)
     result = await load_audit_state(audit_id)
     if result is None or result.discovery_result is None:
         raise RuntimeError(f"verification step: discovery state missing for {audit_id}")
+
+    if Phase.VERIFICATION in result.completed_phases:
+        logger.info(
+            "Verification step for job %s audit %s already complete; skipping re-run",
+            job_id,
+            audit_id,
+        )
+        return result
 
     result.current_phase = Phase.VERIFICATION
     verification_result = await run_verification_phase(
@@ -509,7 +570,7 @@ async def run_verification_step(
     if not verification_result.success:
         result.success = False
         result.failure_reason = verification_result.error or "Verification failed"
-        await persist_audit_state(result)
+        await _persist_unless_job_terminal(job_id, result)
         return result
 
     result.verification_result = verification_result
@@ -517,7 +578,7 @@ async def run_verification_step(
     # under a Temporal activity retry that follows an already-persisted success).
     if Phase.VERIFICATION not in result.completed_phases:
         result.completed_phases.append(Phase.VERIFICATION)
-    if not await persist_audit_state(result):
+    if not await _persist_unless_job_terminal(job_id, result):
         raise RuntimeError(f"verification step: failed to persist audit state for {audit_id}")
     return result
 
@@ -532,12 +593,24 @@ async def run_report_packaging_step(job_id: str, audit_id: str) -> Accessibility
           (``REPORT_PACKAGING`` recorded) on success, or ``success=False`` on a
           logical report-packaging failure. Final assembly (severity counts /
           summary / ``success``) is deferred to :func:`finalize_audit_step`.
+        - If report packaging was already recorded complete (an at-least-once
+          Temporal retry after the prior attempt's persist succeeded but its
+          completion ack was lost), the already-persisted result is returned
+          as-is WITHOUT re-running it — see :func:`run_discovery_step` for why.
         - Raises ``RuntimeError`` if the persisted verification state is missing.
     """
     logger.info("Report-packaging step for job %s audit %s", job_id, audit_id)
     result = await load_audit_state(audit_id)
     if result is None or result.verification_result is None:
         raise RuntimeError(f"report packaging step: verification state missing for {audit_id}")
+
+    if Phase.REPORT_PACKAGING in result.completed_phases:
+        logger.info(
+            "Report-packaging step for job %s audit %s already complete; skipping re-run",
+            job_id,
+            audit_id,
+        )
+        return result
 
     coverage_matrix = result.intake_result.coverage_matrix if result.intake_result else None
     result.current_phase = Phase.REPORT_PACKAGING
@@ -552,13 +625,13 @@ async def run_report_packaging_step(job_id: str, audit_id: str) -> Accessibility
     if not report_result.success:
         result.success = False
         result.failure_reason = report_result.error or "Report packaging failed"
-        await persist_audit_state(result)
+        await _persist_unless_job_terminal(job_id, result)
         return result
 
     result.report_packaging_result = report_result
     if Phase.REPORT_PACKAGING not in result.completed_phases:
         result.completed_phases.append(Phase.REPORT_PACKAGING)
-    if not await persist_audit_state(result):
+    if not await _persist_unless_job_terminal(job_id, result):
         raise RuntimeError(f"report packaging step: failed to persist audit state for {audit_id}")
     return result
 
@@ -585,7 +658,7 @@ async def finalize_audit_step(job_id: str, audit_id: str) -> AccessibilityAuditR
         raise RuntimeError(f"finalize step: report-packaging did not succeed for {audit_id}")
 
     finalize_audit_result(result, result.report_packaging_result)
-    if not await persist_audit_state(result):
+    if not await _persist_unless_job_terminal(job_id, result):
         raise RuntimeError(f"finalize step: failed to persist audit state for {audit_id}")
     return result
 
