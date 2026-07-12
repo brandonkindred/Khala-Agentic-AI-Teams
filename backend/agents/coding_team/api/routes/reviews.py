@@ -146,7 +146,15 @@ def post_create_review_issues(
     except _main.ReviewNotFoundError as e:
         raise HTTPException(status_code=404, detail=f"no review found for job {job_id}") from e
     except _main.RepoMismatchError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
+        # Log the detailed mismatch server-side (owner/repo), but keep the actual
+        # repository name off the client-facing response — the caller already knows
+        # what repo they asked for, and echoing back which repo a job_id belongs to
+        # would let a caller enumerate job_ids to learn repository names.
+        logger.warning("repo mismatch for job %s: %s", job_id, e)
+        raise HTTPException(
+            status_code=409,
+            detail="The requested repository does not match the reviewed repository.",
+        ) from e
     except GitHubAPIError as e:
         raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
     return CreateReviewIssuesResponse.model_validate(data)

@@ -11,6 +11,7 @@ import contextlib
 import logging
 import os
 import threading
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, NamedTuple, Optional
@@ -1314,17 +1315,29 @@ class RepoMismatchError(ValueError):
 
 # Per-job locks serializing ``create_review_issues`` within this process, so two
 # concurrent requests for the same review (two browser tabs, a double-click)
-# cannot both load a proposal as unfiled and open duplicate GitHub issues. The
-# guarded registry hands out one lock per job id. Cross-worker races are bounded
-# by the per-proposal ``issue_url`` idempotency check (a request that lands after
-# another worker persisted the url still skips it), which is why the load happens
-# inside the lock — a second same-process request re-reads the just-persisted url.
-_ISSUE_CREATION_LOCKS: Dict[str, threading.Lock] = {}
+# cannot both load a proposal as unfiled and open duplicate GitHub issues. A
+# WeakValueDictionary so a job's lock is evicted automatically once no request is
+# using it, instead of accumulating one entry per job for the life of the process.
+# Cross-worker races are bounded by the per-proposal ``issue_url`` idempotency
+# check (a request that lands after another worker persisted the url still skips
+# it), which is why the load happens inside the lock — a second same-process
+# request re-reads the just-persisted url.
+_ISSUE_CREATION_LOCKS: "weakref.WeakValueDictionary[str, threading.Lock]" = (
+    weakref.WeakValueDictionary()
+)
 _ISSUE_CREATION_LOCKS_GUARD = threading.Lock()
 
 
 def _issue_creation_lock(job_id: str) -> threading.Lock:
-    """Return the process-wide lock serializing issue creation for ``job_id``."""
+    """Return the process-wide lock serializing issue creation for ``job_id``.
+
+    Preconditions: ``_ISSUE_CREATION_LOCKS_GUARD`` protects the get-or-create
+        check against a race between two callers for the same ``job_id``.
+    Postconditions: returns the SAME ``Lock`` object to every caller currently
+        holding (or waiting on) it for this ``job_id``; once no caller references
+        it, the ``WeakValueDictionary`` entry is garbage-collected, so the
+        registry never grows past the number of jobs with in-flight requests.
+    """
     with _ISSUE_CREATION_LOCKS_GUARD:
         lock = _ISSUE_CREATION_LOCKS.get(job_id)
         if lock is None:
@@ -1336,9 +1349,14 @@ def _issue_creation_lock(job_id: str) -> threading.Lock:
 class _ReviewIssueContext(NamedTuple):
     """A completed review's coordinates plus its (mutable) pending proposals.
 
-    ``summary`` is a shallow copy of the review summary whose
-    ``pending_issue_proposals`` entry IS ``proposals`` (the same list objects), so
-    mutating a proposal dict updates both and persisting ``summary`` records it.
+    ``_proposals_copy`` breaks aliasing with the ORIGINAL stored proposal list
+    (so mutating a proposal here never corrupts a copy of the summary held
+    elsewhere), but every ``_ReviewIssueContext`` builder then assigns its result
+    back onto the NEW ``summary["pending_issue_proposals"]`` — establishing a
+    fresh alias deliberately, scoped to this context. So within one context,
+    ``summary["pending_issue_proposals"] is proposals`` holds: mutating a dict in
+    ``proposals`` (e.g. setting ``issue_url``) is visible through ``summary`` too,
+    and persisting ``summary`` records it.
     """
 
     owner: str
@@ -1406,6 +1424,10 @@ def _load_review_issue_context(job_id: str) -> Optional[_ReviewIssueContext]:
         return _ReviewIssueContext(
             owner=str(row.get("owner") or ""),
             repo=str(row.get("repo") or ""),
+            # pr_number is NOT NULL in code_review_runs and record_review_start
+            # always inserts a real int, so `is None` here cannot happen from a
+            # legitimately-written row; the fallback is unreachable defense, not
+            # a real "unknown PR" case.
             pr_number=int(pr_number) if pr_number is not None else 0,
             pr_url=str(row.get("pr_url") or ""),
             status=str(row.get("status") or "completed"),
@@ -1496,17 +1518,21 @@ def create_review_issues(
                 f"not the requested {expected_owner}/{expected_repo}"
             )
 
-        by_id = {str(p.get("id")): p for p in ctx.proposals}
-        requested = [pid for pid in proposal_ids if pid in by_id]
+        # A proposal's id always comes from proposal_from_finding's f"p{index}"
+        # (never None); the `is not None` filter is defense-in-depth against a
+        # malformed stored record so a missing id can never collide under the
+        # shared string key "None".
+        by_id = {str(p.get("id")): p for p in ctx.proposals if p.get("id") is not None}
+        needed = [pid for pid in proposal_ids if pid in by_id and not by_id[pid].get("issue_url")]
         created: List[Dict[str, Any]] = []
         changed = False
         try:
             # Only open the client when there is genuinely something to file (a
             # requested proposal that has not already been filed), so a redundant
             # or all-unknown request makes no GitHub call.
-            if any(not by_id[pid].get("issue_url") for pid in requested):
+            if needed:
                 with _main.GitHubClient(token=token) as client:
-                    for pid in requested:
+                    for pid in needed:
                         proposal = by_id[pid]
                         if proposal.get("issue_url"):
                             continue  # already filed — idempotent, never duplicate
@@ -1516,10 +1542,11 @@ def create_review_issues(
                         # The finding text is LLM output over the reviewed code and
                         # can echo a secret from it, exactly like the PR comments —
                         # scrub both title and body before anything reaches GitHub.
+                        scrubbed_title = scrub_token_from_text(title)
                         issue = client.create_issue(
                             ctx.owner,
                             ctx.repo,
-                            title=scrub_token_from_text(title),
+                            title=scrubbed_title,
                             body=scrub_token_from_text(body),
                         )
                         proposal["issue_number"] = issue.number
@@ -1530,7 +1557,9 @@ def create_review_issues(
                                 "proposal_id": pid,
                                 "issue_number": issue.number,
                                 "issue_url": issue.html_url,
-                                "title": title,
+                                # The scrubbed title, matching what was actually filed —
+                                # never the raw one, which can still carry a secret.
+                                "title": scrubbed_title,
                             }
                         )
         finally:

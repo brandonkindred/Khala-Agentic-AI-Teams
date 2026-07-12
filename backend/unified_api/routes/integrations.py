@@ -2795,9 +2795,7 @@ async def create_github_review_issues(job_id: str, body: CreateReviewIssuesBody)
     if not owner or not repo:
         raise HTTPException(status_code=400, detail="GitHub owner and repo are required.")
 
-    coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
-    if not coding_team_url:
-        raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
+    coding_team_url = _require_coding_team_url()
 
     payload: dict[str, Any] = {
         "proposal_ids": body.proposal_ids,

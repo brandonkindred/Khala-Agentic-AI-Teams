@@ -2699,6 +2699,29 @@ class TestPreExistingFindings:
         stored = review_app["jobs"].get_job(job_id)["review_summary"]["pending_issue_proposals"]
         assert {p["id"]: bool(p["issue_url"]) for p in stored} == {"p0": True, "p1": False}
 
+    def test_create_issues_scrubs_title_in_response(self, review_app) -> None:
+        """The returned ``created[].title`` must match what was actually filed on
+        GitHub (scrubbed), never the raw finding text — a leaked token in the
+        response would defeat the whole point of scrubbing it before the API call."""
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=2,
+                    description="leaked https://user:secrettoken@github.com/o/r.git in stderr",
+                    pre_existing=True,
+                )
+            ],
+        )
+        resp = review_app["client"].post(
+            f"/reviews/{job['job_id']}/issues", json={"proposal_ids": ["p0"]}
+        )
+        assert resp.status_code == 200
+        title = resp.json()["created"][0]["title"]
+        assert "secrettoken" not in title
+        assert "https://***@" in title
+
     def test_create_issues_is_idempotent(self, review_app) -> None:
         gh = review_app["github"]["client"]
         job = _run_review_with(
