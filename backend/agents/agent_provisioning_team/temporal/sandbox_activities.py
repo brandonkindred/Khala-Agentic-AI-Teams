@@ -38,15 +38,25 @@ async def sandbox_acquire_activity(agent_id: str) -> Dict[str, Any]:
         * ``agent_id`` is a non-empty string with a manifest in the registry.
         * Runs as an async activity on the worker loop (Invariant A).
     Postconditions:
-        * Returns ``SandboxHandle.model_dump(mode="json")`` for the (now WARM,
-          or ERROR on failure) sandbox. ``UnknownAgentError`` /
-          ``DockerUnavailableError`` propagate so Temporal surfaces them.
+        * Returns ``SandboxHandle.model_dump(mode="json")`` for a WARM sandbox.
+          ``UnknownAgentError`` / ``DockerUnavailableError`` propagate so
+          Temporal surfaces them (both are in ``non_retryable_error_types``).
+          ``Lifecycle.acquire()`` itself never raises for a transient failure
+          during provisioning — it catches internally and returns a
+          non-raising ERROR-status handle, so that its own direct/thread-mode
+          callers always get a handle back. This activity re-raises on that
+          ERROR status specifically so ``SANDBOX_ACQUIRE_RETRY_POLICY``
+          actually retries those transient failures instead of the workflow
+          silently "succeeding" with an ERROR result on the first attempt.
     """
     from agent_provisioning_team.sandbox import get_lifecycle
+    from agent_provisioning_team.sandbox.state import SandboxStatus
 
     assert agent_id, "agent_id must be non-empty"
     activity.heartbeat("sandbox_acquire")
     handle = await get_lifecycle().acquire(agent_id)
+    if handle.status == SandboxStatus.ERROR:
+        raise RuntimeError(handle.error or f"Sandbox acquire failed for {agent_id}")
     return handle.model_dump(mode="json")
 
 

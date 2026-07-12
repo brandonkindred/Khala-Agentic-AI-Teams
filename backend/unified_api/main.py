@@ -155,6 +155,40 @@ async def _check_team_health(team_key: str, service_url: str) -> str:
         return "unhealthy"
 
 
+async def _start_sandbox_reaper_with_retry() -> None:
+    """Start the durable ``SandboxReaperWorkflow``, retrying with backoff.
+
+    ``start_sandbox_reaper_workflow`` can fail transiently right at boot (the
+    Agent Provisioning Temporal worker's daemon thread may still be connecting
+    its client). Run as a background task rather than a single blocking
+    lifespan step, so a lost race doesn't leave the reaper permanently unstarted
+    and doesn't serialize app startup behind the Temporal client becoming ready.
+
+    Preconditions:
+        * Called only when ``sandbox_temporal_enabled()`` is true.
+    Postconditions:
+        * Returns once the reaper workflow is confirmed started (or already
+          running). Retries indefinitely with exponential backoff (capped at
+          60s) on any other failure; propagates ``asyncio.CancelledError``
+          untouched so app shutdown can cancel this task cleanly.
+    """
+    from agent_provisioning_team.temporal.sandbox_dispatch import start_sandbox_reaper_workflow
+
+    delay = 2.0
+    while True:
+        try:
+            # start_workflow_sync blocks briefly on client-ready; keep it off the loop.
+            await asyncio.to_thread(start_sandbox_reaper_workflow)
+            logger.info("Started Agent Console sandbox idle reaper (Temporal workflow)")
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("SandboxReaperWorkflow failed to start; retrying in %.0fs", delay, exc_info=True)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60.0)
+
+
 async def _health_check_loop() -> None:
     """Periodically probe all registered teams' health endpoints.
 
@@ -451,19 +485,17 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     # 4. Start the Agent Console sandbox idle reaper. When Temporal is enabled it
     #    runs as a durable, single-instance SandboxReaperWorkflow (survives
     #    restarts); otherwise it's an in-process asyncio task (thread mode). The
-    #    task handle stays None in Temporal mode so shutdown doesn't try to cancel
-    #    a workflow that is meant to keep running.
+    #    Temporal branch is a background retry loop, not a single blocking
+    #    attempt: the worker's client can legitimately still be connecting at
+    #    this point (see shared_temporal.runner._await_client), and a lost race
+    #    here must not mean the reaper never starts for the life of the process.
     sandbox_reaper_task: asyncio.Task | None = None
     try:
-        from agent_provisioning_team.temporal.sandbox_dispatch import (
-            sandbox_temporal_enabled,
-            start_sandbox_reaper_workflow,
-        )
+        from agent_provisioning_team.temporal.sandbox_dispatch import sandbox_temporal_enabled
 
         if sandbox_temporal_enabled():
-            # start_workflow_sync blocks briefly on client-ready; keep it off the loop.
-            await asyncio.to_thread(start_sandbox_reaper_workflow)
-            logger.info("Started Agent Console sandbox idle reaper (Temporal workflow)")
+            sandbox_reaper_task = asyncio.create_task(_start_sandbox_reaper_with_retry())
+            logger.info("Starting Agent Console sandbox idle reaper (Temporal workflow)")
         else:
             from agent_provisioning_team.sandbox import run_idle_reaper
 

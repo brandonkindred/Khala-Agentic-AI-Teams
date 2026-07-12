@@ -143,14 +143,20 @@ class Lifecycle:
         self._state_file = state_file or state_file_path()
         self._state: dict[str, SandboxState] = state_mod.load(self._state_file)
         self._locks: dict[str, asyncio.Lock] = {}
-        # Thread-safety invariant: every read/iteration of ``_state`` and every
-        # ``_persist()`` is serialized by this lock. Needed once acquire/teardown/
-        # reap run on the Temporal worker's event loop (a different OS thread)
-        # while status/note_activity/list_active/metrics stay on the API loop.
-        # The per-agent ``asyncio.Lock``s above guard the long docker critical
-        # sections; this lock only wraps the brief synchronous dict-write/persist
-        # bursts (never held across an ``await``). RLock so ``_persist()`` can be
-        # called from inside a critical section that already holds it.
+        # Thread-safety invariant: every read/write of ``_state`` and the
+        # observability counters below is serialized by this lock. Needed once
+        # acquire/teardown/reap run on the Temporal worker's event loop (a
+        # different OS thread) while status/note_activity/list_active/metrics
+        # stay on the API loop. The per-agent ``asyncio.Lock``s above guard the
+        # long docker critical sections; this lock only ever wraps brief
+        # synchronous reads/writes and is NEVER held across an ``await`` —
+        # holding a ``threading.RLock`` across an ``await`` would let unrelated
+        # coroutines on the same OS thread "reenter" it (RLock reentrancy is
+        # thread-identity-based, not coroutine-based) and block the *entire*
+        # event loop for as long as the lock is held elsewhere. ``_persist()``
+        # snapshots under this lock and does its actual disk write outside it,
+        # via ``asyncio.to_thread``. RLock so a locked block can call another
+        # method that also takes the lock without deadlocking itself.
         self._state_lock = threading.RLock()
         # Observability counters (issue #302). In-process only — reset on restart.
         self._boot_ms_samples: deque[int] = deque(maxlen=_BOOT_MS_WINDOW)
@@ -172,7 +178,8 @@ class Lifecycle:
         team = await _resolve_team(agent_id)
         lock = self._locks.setdefault(agent_id, asyncio.Lock())
         async with lock:
-            existing = self._state.get(agent_id)
+            with self._state_lock:
+                existing = self._state.get(agent_id)
             if existing and existing.status == SandboxStatus.WARM and existing.container_id:
                 try:
                     still_running = await provisioner_mod.is_running(existing.container_id)
@@ -184,12 +191,12 @@ class Lifecycle:
                     )
                     with self._state_lock:
                         existing.last_used_at = now()
-                        self._persist()
+                    await self._persist()
                     return SandboxHandle.from_state(existing)
                 if still_running:
                     with self._state_lock:
                         existing.last_used_at = now()
-                        self._persist()
+                    await self._persist()
                     return SandboxHandle.from_state(existing)
                 logger.info(
                     "Sandbox for %s marked WARM but container %s is gone; re-provisioning",
@@ -223,13 +230,14 @@ class Lifecycle:
                     agent_id=agent_id, container_name=container_name, team=team
                 )
                 host_port = await provisioner_mod.inspect_host_port(container_id)
-                st.container_id = container_id
-                st.host_port = host_port
+                with self._state_lock:
+                    st.container_id = container_id
+                    st.host_port = host_port
                 await self._wait_healthy(host_port)
                 with self._state_lock:
                     st.status = SandboxStatus.WARM
                     st.last_used_at = now()
-                    self._persist()
+                await self._persist()
                 boot_ms = int((time.perf_counter() - cold_start) * 1000)
                 logger.info(
                     "%s agent_id=%s team=%s image=%s boot_ms=%d",
@@ -239,14 +247,15 @@ class Lifecycle:
                     sandbox_image(),
                     boot_ms,
                 )
-                self._boot_ms_samples.append(boot_ms)
+                with self._state_lock:
+                    self._boot_ms_samples.append(boot_ms)
                 return SandboxHandle.from_state(st, boot_ms=boot_ms)
             except Exception as exc:
                 logger.exception("Sandbox provisioning failed for %s", agent_id)
                 with self._state_lock:
                     st.status = SandboxStatus.ERROR
                     st.error = str(exc)
-                    self._persist()
+                await self._persist()
                 return SandboxHandle.from_state(st)
 
     async def status(self, agent_id: str) -> SandboxHandle:
@@ -260,7 +269,8 @@ class Lifecycle:
         if ``agent_id`` has no entry in the registry and we have no prior tracked
         state for it — mirrors :meth:`acquire`'s contract.
         """
-        st = self._state.get(agent_id)
+        with self._state_lock:
+            st = self._state.get(agent_id)
         if st is None:
             team = await _resolve_team(agent_id)
             return SandboxHandle(
@@ -276,7 +286,7 @@ class Lifecycle:
         ):
             with self._state_lock:
                 st.status = SandboxStatus.COLD
-                self._persist()
+            await self._persist()
         return SandboxHandle.from_state(st)
 
     async def teardown(self, agent_id: str) -> None:
@@ -289,7 +299,8 @@ class Lifecycle:
         """
         lock = self._locks.setdefault(agent_id, asyncio.Lock())
         async with lock:
-            st = self._state.get(agent_id)
+            with self._state_lock:
+                st = self._state.get(agent_id)
             if st is None:
                 return
             logger.info("Tearing down sandbox for %s", agent_id)
@@ -301,7 +312,7 @@ class Lifecycle:
             provisioner_mod.cleanup_secrets_file(st.container_name)
             with self._state_lock:
                 self._state.pop(agent_id, None)
-                self._persist()
+            await self._persist()
 
     async def list_active(self) -> list[SandboxHandle]:
         """Return a handle for every sandbox currently tracked in state."""
@@ -311,12 +322,12 @@ class Lifecycle:
 
     async def note_activity(self, agent_id: str) -> None:
         """Bump ``last_used_at`` for ``agent_id``. Called after a successful invoke."""
-        st = self._state.get(agent_id)
-        if st is None:
-            return
         with self._state_lock:
+            st = self._state.get(agent_id)
+            if st is None:
+                return
             st.last_used_at = now()
-            self._persist()
+        await self._persist()
 
     async def metrics(self) -> SandboxMetrics:
         """Return a live snapshot of the sandbox pool (issue #302).
@@ -326,13 +337,17 @@ class Lifecycle:
         """
         with self._state_lock:
             snapshot = list(self._state.values())
+            boot_samples = list(self._boot_ms_samples)
+            reaper_last_tick_at = self._reaper_last_tick_at
+            reaper_interval_s = self._reaper_interval_s
+            torn_down_total = self._torn_down_total
+            torn_down_last_tick = self._torn_down_last_tick
         current = now()
 
         by_team: Counter[str] = Counter(st.team for st in snapshot)
         by_status: Counter[str] = Counter(st.status.value for st in snapshot)
 
         ages = [int((current - st.created_at).total_seconds()) for st in snapshot]
-        boot_samples = list(self._boot_ms_samples)
 
         return SandboxMetrics(
             resident=len(snapshot),
@@ -340,11 +355,11 @@ class Lifecycle:
             by_status=dict(by_status),
             ages_seconds=_age_stats(ages),
             reaper=ReaperStats(
-                last_tick_at=self._reaper_last_tick_at,
-                interval_s=self._reaper_interval_s,
+                last_tick_at=reaper_last_tick_at,
+                interval_s=reaper_interval_s,
                 threshold_s=idle_teardown_seconds(),
-                torn_down_total=self._torn_down_total,
-                torn_down_last_tick=self._torn_down_last_tick,
+                torn_down_total=torn_down_total,
+                torn_down_last_tick=torn_down_last_tick,
             ),
             boot_ms=_boot_ms_stats(boot_samples),
         )
@@ -400,9 +415,10 @@ class Lifecycle:
             torn_down.append(agent_id)
         # Stamp the tick even when nothing was torn down — operators need to
         # see the reaper is alive, not just that it found work.
-        self._reaper_last_tick_at = current
-        self._torn_down_last_tick = len(torn_down)
-        self._torn_down_total += len(torn_down)
+        with self._state_lock:
+            self._reaper_last_tick_at = current
+            self._torn_down_last_tick = len(torn_down)
+            self._torn_down_total += len(torn_down)
         return torn_down
 
     # ------------------------------------------------------------------
@@ -430,12 +446,37 @@ class Lifecycle:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 1.5, 5.0)
 
-    def _persist(self) -> None:
+    async def _persist(self) -> None:
+        """Snapshot ``_state`` under the lock, then persist off the event loop.
+
+        Preconditions:
+            * Callers must NOT already hold ``self._state_lock`` (this method
+              acquires it itself, briefly, and releases it before the ``await``).
+        Postconditions:
+            * ``self._state_file`` reflects the ``_state`` snapshot taken at
+              call time (or a very-slightly-newer one, if a concurrent mutation
+              lands between the snapshot and the write — self-healing, since the
+              next successful ``_persist()`` call always reflects then-current
+              state). Never raises; an ``OSError`` writing the file is logged
+              and swallowed, matching the prior synchronous behavior.
+
+        Invariants:
+            * The lock is held only for the synchronous ``dict(self._state)``
+              snapshot, never across the ``await``. A ``threading.RLock``'s
+              reentrancy is thread-identity-based, not coroutine-based, so
+              holding it across an ``await`` would let an unrelated coroutine
+              resumed on the same OS thread silently "reenter" it, and would
+              block that thread's *entire* event loop — not just this
+              coroutine — for as long as the disk write takes. Running the
+              write via ``asyncio.to_thread`` keeps it off this event loop
+              entirely.
+        """
         with self._state_lock:
-            try:
-                state_mod.save(self._state_file, self._state)
-            except OSError as exc:
-                logger.warning("Could not persist sandbox state: %s", exc)
+            snapshot = dict(self._state)
+        try:
+            await asyncio.to_thread(state_mod.save, self._state_file, snapshot)
+        except OSError as exc:
+            logger.warning("Could not persist sandbox state: %s", exc)
 
 
 # Module-level free-function wrappers over a process-wide singleton — Phase 3

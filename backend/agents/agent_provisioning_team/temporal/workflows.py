@@ -273,6 +273,7 @@ class AgentDeprovisioningWorkflow:
             * Returns the ``DeprovisionResponse.model_dump()`` produced by
               ``deprovision_activity``.
         """
+        assert agent_id, "agent_id must be non-empty"
         return await workflow.execute_activity(
             _activities.deprovision_activity,
             args=[agent_id, force],

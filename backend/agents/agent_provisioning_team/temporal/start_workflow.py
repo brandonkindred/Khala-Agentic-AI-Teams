@@ -7,7 +7,11 @@ import logging
 import uuid
 from typing import Any, Optional
 
-from agent_provisioning_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
+from agent_provisioning_team.temporal.constants import (
+    DEPROVISION_CLIENT_TIMEOUT_S,
+    TASK_QUEUE,
+    WORKFLOW_ID_PREFIX,
+)
 from agent_provisioning_team.temporal.workflows import (
     AgentDeprovisioningWorkflow,
     AgentProvisioningWorkflowV2,
@@ -89,6 +93,7 @@ def run_deprovision_workflow(agent_id: str, force: bool = False) -> dict[str, An
         force,
         workflow_id=workflow_id,
         task_queue=TASK_QUEUE,
+        execute_timeout_s=DEPROVISION_CLIENT_TIMEOUT_S,
     )
     logger.info("Ran AgentDeprovisioningWorkflow id=%s", workflow_id)
     return result

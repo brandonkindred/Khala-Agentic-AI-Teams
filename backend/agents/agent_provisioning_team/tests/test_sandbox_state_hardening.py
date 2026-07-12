@@ -8,6 +8,7 @@ snapshot + unique-temp-file fix and the ``Lifecycle`` ``threading.RLock``.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from pathlib import Path
 
@@ -69,7 +70,13 @@ def test_persist_and_mutation_are_thread_safe(tmp_path: Path) -> None:
     """A writer thread persisting while a mutator thread inserts/pops must not
     raise ``RuntimeError: dictionary changed size during iteration`` or corrupt
     the file. Regression guard for the two-thread state access the Temporal
-    migration introduces."""
+    migration introduces.
+
+    ``_persist()`` is ``async`` (it offloads the actual disk write via
+    ``asyncio.to_thread``), so the writer thread needs its own running event
+    loop to drive it — mirroring how it's really invoked (from within an async
+    ``Lifecycle`` method on either the API loop or the Temporal worker loop).
+    """
     lc = Lifecycle(state_file=tmp_path / "state.json")
     lc._state.update(_seed(40))
 
@@ -77,9 +84,12 @@ def test_persist_and_mutation_are_thread_safe(tmp_path: Path) -> None:
     stop = threading.Event()
 
     def writer() -> None:
-        try:
+        async def _run() -> None:
             for _ in range(400):
-                lc._persist()
+                await lc._persist()
+
+        try:
+            asyncio.run(_run())
         except BaseException as exc:  # noqa: BLE001
             errors.append(exc)
         finally:
@@ -107,3 +117,41 @@ def test_persist_and_mutation_are_thread_safe(tmp_path: Path) -> None:
     # File is still valid JSON that loads back to the seeded agents.
     loaded = state_mod.load(tmp_path / "state.json")
     assert all(f"agent-{i}" in loaded for i in range(40))
+
+
+def test_boot_ms_samples_append_and_read_are_thread_safe(tmp_path: Path) -> None:
+    """A writer thread appending to ``_boot_ms_samples`` (what ``acquire()``
+    does after a successful cold start) concurrently with a reader thread doing
+    ``list(self._boot_ms_samples)`` (what ``metrics()`` does) must not raise
+    ``RuntimeError: deque mutated during iteration``. Both sides go through
+    ``_state_lock`` now, closing the gap where these ran unlocked."""
+    lc = Lifecycle(state_file=tmp_path / "state.json")
+
+    errors: list[BaseException] = []
+    stop = threading.Event()
+
+    def appender() -> None:
+        try:
+            for i in range(5000):
+                with lc._state_lock:
+                    lc._boot_ms_samples.append(i)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            stop.set()
+
+    def reader() -> None:
+        try:
+            while not stop.is_set():
+                with lc._state_lock:
+                    list(lc._boot_ms_samples)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=appender), threading.Thread(target=reader)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert errors == []

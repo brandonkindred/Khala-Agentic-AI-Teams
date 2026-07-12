@@ -879,7 +879,7 @@ async def test_lifecycle_persist_swallows_oserror(tmp_path: Path, monkeypatch) -
         raise OSError("disk full")
 
     with patch.object(lc_mod.state_mod, "save", side_effect=fail_save):
-        lc._persist()
+        await lc._persist()
 
 
 # ---------------------------------------------------------------------------

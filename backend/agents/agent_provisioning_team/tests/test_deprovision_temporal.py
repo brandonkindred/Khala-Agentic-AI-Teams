@@ -74,6 +74,14 @@ async def test_deprovision_workflow_returns_activity_result() -> None:
     assert captured["args"] == ["a", True]
 
 
+@pytest.mark.asyncio
+async def test_deprovision_workflow_rejects_blank_agent_id() -> None:
+    from agent_provisioning_team.temporal import workflows as wf
+
+    with pytest.raises(AssertionError):
+        await wf.AgentDeprovisioningWorkflow().run("")
+
+
 # ---------------------------------------------------------------------------
 # run_deprovision_workflow dispatch
 # ---------------------------------------------------------------------------
@@ -124,6 +132,28 @@ def test_run_deprovision_workflow_ids_are_unique() -> None:
     assert ids[0] != ids[1]
 
 
+def test_run_deprovision_workflow_uses_client_timeout_exceeding_phase_timeout() -> None:
+    """The client wait must exceed AgentDeprovisioningWorkflow's
+    schedule_to_close_timeout (PHASE_TIMEOUT, 20 minutes — which already caps
+    the total time across DEFAULT_RETRY_POLICY's retries), or a legitimately
+    slow-but-successful deprovision is mistaken for a hung one."""
+    from agent_provisioning_team.temporal import start_workflow as sw
+    from agent_provisioning_team.temporal.constants import DEPROVISION_CLIENT_TIMEOUT_S
+    from agent_provisioning_team.temporal.workflows import PHASE_TIMEOUT
+
+    captured: dict = {}
+
+    def fake_execute(workflow_run, *args, workflow_id, task_queue, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    with patch.object(sw, "execute_workflow_sync", side_effect=fake_execute):
+        sw.run_deprovision_workflow("a")
+
+    assert captured["execute_timeout_s"] == DEPROVISION_CLIENT_TIMEOUT_S
+    assert DEPROVISION_CLIENT_TIMEOUT_S > PHASE_TIMEOUT.total_seconds()
+
+
 # ---------------------------------------------------------------------------
 # deprovision_agent endpoint branch
 # ---------------------------------------------------------------------------
@@ -164,6 +194,27 @@ def test_deprovision_agent_uses_temporal_when_enabled() -> None:
     fake_starter.assert_called_once_with("a", False)
     assert isinstance(resp, DeprovisionResponse)
     assert resp.success is True
+
+
+def test_deprovision_agent_degrades_gracefully_on_workflow_failure() -> None:
+    """deprovision_agent must always return a DeprovisionResponse, never raise
+    — matching the pre-Temporal contract of orchestrator.deprovision (which
+    never raises either). An infrastructure-level failure of the Temporal
+    dispatch (client not ready, execute-and-wait timeout, workflow failure)
+    is reported as success=False with the failure in `error`, not as an
+    unhandled 500."""
+    from agent_provisioning_team.api import main
+
+    fake_starter = MagicMock(side_effect=RuntimeError("Temporal client not available"))
+
+    with patch.object(main, "_deprovision_starter", return_value=fake_starter):
+        resp = main.deprovision_agent("a", force=True)
+
+    fake_starter.assert_called_once_with("a", True)
+    assert isinstance(resp, DeprovisionResponse)
+    assert resp.agent_id == "a"
+    assert resp.success is False
+    assert "Temporal client not available" in resp.error
 
 
 def test_deprovision_agent_falls_back_to_orchestrator() -> None:

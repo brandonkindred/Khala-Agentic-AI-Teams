@@ -98,6 +98,20 @@ def test_provision_thread_fallback_returns_true_for_true() -> None:
         assert api_main._provision_thread_fallback() is True
 
 
+def test_provision_thread_fallback_delegates_to_shared_predicate() -> None:
+    """_provision_thread_fallback() must consult the single shared escape-hatch
+    check (agent_provisioning_team.temporal.client.provision_thread_fallback_enabled)
+    rather than its own copy of the PROVISION_THREAD_FALLBACK parsing — the same
+    function sandbox_dispatch.sandbox_temporal_enabled() uses, so the two can
+    never independently drift on which spellings disable Temporal."""
+    with patch(
+        "agent_provisioning_team.temporal.client.provision_thread_fallback_enabled",
+        return_value=True,
+    ) as mock_fallback:
+        assert api_main._provision_thread_fallback() is True
+    mock_fallback.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # /provision/status/{job_id}
 # ---------------------------------------------------------------------------

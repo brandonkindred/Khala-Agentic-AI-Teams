@@ -67,8 +67,17 @@ COMPENSATE_TIMEOUT_S = float(os.getenv("COMPENSATE_TIMEOUT_S", "15"))
 
 
 def _provision_thread_fallback() -> bool:
-    """Escape hatch: force the legacy thread path even when TEMPORAL_ADDRESS is set."""
-    return os.getenv("PROVISION_THREAD_FALLBACK", "").strip().lower() in ("1", "true", "yes")
+    """Escape hatch: force the legacy thread path even when TEMPORAL_ADDRESS is set.
+
+    Delegates to the shared, single-source-of-truth check in
+    ``temporal.client.provision_thread_fallback_enabled`` — also used by
+    ``sandbox_dispatch.sandbox_temporal_enabled`` — so provisioning, deprovision,
+    and the sandbox lifecycle can never independently drift on which env-var
+    spellings disable Temporal.
+    """
+    from agent_provisioning_team.temporal.client import provision_thread_fallback_enabled
+
+    return provision_thread_fallback_enabled()
 
 
 def _temporal_starter():
@@ -584,13 +593,31 @@ def deprovision_agent(
     """Deprovision an agent and remove all resources.
 
     Runs as a durable ``AgentDeprovisioningWorkflow`` when Temporal is enabled
-    (execute-and-wait, so the response is unchanged), and falls back to the
-    in-process ``orchestrator.deprovision`` call otherwise. This handler is a
-    sync ``def`` — FastAPI runs it in its threadpool — so the blocking
-    execute-and-wait dispatch does not stall the event loop."""
+    (execute-and-wait, so the response shape is unchanged), and falls back to
+    the in-process ``orchestrator.deprovision`` call otherwise. This handler is
+    a sync ``def`` — FastAPI runs it in its threadpool — so the blocking
+    execute-and-wait dispatch does not stall the event loop.
+
+    Postconditions:
+        * Always returns a ``DeprovisionResponse`` — never raises. Matches the
+          pre-Temporal contract of ``orchestrator.deprovision`` (which never
+          raises either): an infrastructure-level failure of the Temporal
+          dispatch itself (client not ready, timeout, workflow failure) is
+          reported as ``success=False`` with the failure in ``error``, not as
+          an unhandled 500.
+    """
     starter = _deprovision_starter()
     if starter is not None:
-        return DeprovisionResponse.model_validate(starter(agent_id, force))
+        try:
+            return DeprovisionResponse.model_validate(starter(agent_id, force))
+        except Exception as exc:
+            logger.exception("Durable deprovision failed for agent=%s", agent_id)
+            return DeprovisionResponse(
+                agent_id=agent_id,
+                success=False,
+                details={},
+                error=f"Deprovision workflow failed: {exc}",
+            )
     return orchestrator.deprovision(agent_id, force=force)
 
 

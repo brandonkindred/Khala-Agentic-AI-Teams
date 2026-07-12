@@ -65,6 +65,7 @@ class SandboxAcquireWorkflow:
         Postconditions:
             * Returns ``SandboxHandle.model_dump(mode="json")``.
         """
+        assert agent_id, "agent_id must be non-empty"
         return await workflow.execute_activity(
             _sb.sandbox_acquire_activity,
             args=[agent_id],
@@ -87,6 +88,7 @@ class SandboxTeardownWorkflow:
         Postconditions:
             * The sandbox is stopped and evicted, or the activity raises.
         """
+        assert agent_id, "agent_id must be non-empty"
         await workflow.execute_activity(
             _sb.sandbox_teardown_activity,
             args=[agent_id],
@@ -114,13 +116,23 @@ class SandboxReaperWorkflow:
             * ``interval_s`` is a positive integer number of seconds.
         Postconditions:
             * Exactly one reap activity runs per iteration; the workflow restarts
-              itself via ``continue_as_new`` so history stays bounded.
+              itself via ``continue_as_new`` so history stays bounded. A reap tick
+              that fails even after ``SANDBOX_RETRY_POLICY``'s retries is logged
+              and swallowed — the reaper always reaches ``continue_as_new`` so a
+              single bad tick (e.g. Docker briefly unreachable) can never
+              permanently kill this single-instance workflow.
         """
+        assert interval_s > 0, "interval_s must be positive"
         await workflow.sleep(timedelta(seconds=interval_s))
-        await workflow.execute_activity(
-            _sb.sandbox_reap_activity,
-            task_queue=TASK_QUEUE,
-            start_to_close_timeout=timedelta(seconds=SANDBOX_REAP_TIMEOUT_S),
-            retry_policy=SANDBOX_RETRY_POLICY,
-        )
+        try:
+            await workflow.execute_activity(
+                _sb.sandbox_reap_activity,
+                task_queue=TASK_QUEUE,
+                start_to_close_timeout=timedelta(seconds=SANDBOX_REAP_TIMEOUT_S),
+                retry_policy=SANDBOX_RETRY_POLICY,
+            )
+        except Exception:
+            workflow.logger.exception(
+                "Sandbox idle-reap tick failed after retries; will try again next interval"
+            )
         workflow.continue_as_new(interval_s)
