@@ -133,10 +133,8 @@ class _FakeStore:
             raise RuntimeError("seen query failed")
         return set(self._seen)
 
-    def save_results(self, run_id, ranked, *, total_found, scanned_fingerprints, is_retry=False):
-        self.save_calls.append(
-            (run_id, list(ranked), total_found, list(scanned_fingerprints), is_retry)
-        )
+    def save_results(self, run_id, ranked, *, total_found, scanned_fingerprints):
+        self.save_calls.append((run_id, list(ranked), total_found, list(scanned_fingerprints)))
         if self._save_raises:
             raise RuntimeError("save failed")
 
@@ -965,10 +963,12 @@ def test_workflow_prepare_failure_records_fail(monkeypatch):
     ]
     fail_call = stub.calls[-1]
     assert fail_call["args"][:2] == ["job-1", _FIXED_RUN_ID]
-    # store_ok defaults to False: every unguarded exception path inside
-    # prepare_scan_activity precedes its create_run call, so a run row was
-    # never created for fail_scan to (incorrectly) attempt mark_failed against.
-    assert fail_call["args"][3] is False
+    # store_ok defaults to True: prepare's store calls are safe no-ops against a
+    # run_id with no backing row, so attempting them costs nothing if prepare
+    # failed before create_run, while skipping them would strand a row that DOES
+    # exist because prepare succeeded but its result never reached the workflow
+    # (a worker crash/timeout, not a code exception).
+    assert fail_call["args"][3] is True
 
 
 # ===========================================================================

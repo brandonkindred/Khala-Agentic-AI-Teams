@@ -372,7 +372,6 @@ def finalize_scan_activity(
                 ranked,
                 total_found=total_found,
                 scanned_fingerprints=scanned_fingerprints,
-                is_retry=activity.info().attempt > 1,
             ),
             "Failed to save results for run %s",
             run_id,
@@ -434,9 +433,12 @@ def fail_scan_activity(job_id: str, run_id: str, error: str, store_ok: bool) -> 
         * ``job_id`` refers to a job row already created by ``POST /scan``.
         * ``run_id`` is the workflow-owned run identifier from
           :func:`prepare_scan_activity`.
-        * ``store_ok`` reflects whether the run row is known to exist (False on
-          a prepare-phase failure, since prepare's only unguarded exception
-          paths all precede ``create_run``).
+        * ``store_ok`` defaults True at the workflow level even when prepare
+          never returned a value (its store calls are safe no-ops against a
+          run_id with no backing row, so attempting them costs nothing when no
+          row exists, while skipping them would strand a row that *does* exist
+          from a since-abandoned prepare attempt whose success was never
+          delivered back to the workflow).
     Postconditions:
         * If ``store_ok`` and rebuilding the run's response fails (run store
           unreachable, or the run is completed but its ``profile_snapshot`` is
@@ -651,13 +653,18 @@ class JobMatchingWorkflow:
         # idempotent store writes replace rather than duplicate/orphan rows.
         run_id = str(workflow.uuid4())
         # Default until prepare reports it, for a prepare-phase failure that
-        # never returns store_ok. False is not a guess: every unguarded
-        # exception path inside prepare_scan_activity (job lookup, request
-        # validation, the RUNNING transition, profile load) runs before its
-        # store.create_run call, so if prepare itself failed, no run row was
-        # ever created and fail_scan must not attempt store.mark_failed against
-        # a run_id with no backing row.
-        store_ok = False
+        # never returns store_ok. True, not False: a code-level exception in
+        # prepare_scan_activity always precedes its store.create_run call, but
+        # Temporal can also time out / lose an attempt to a worker crash AFTER
+        # create_run has already committed the run row — an infrastructure
+        # failure, not a code path, that can strike at any point regardless of
+        # what the code does. store.mark_failed / store.get_run_response are
+        # both safe no-ops against a run_id with no backing row, so defaulting
+        # True costs nothing when no row exists, while defaulting False would
+        # leave a row that *does* exist (created by a since-abandoned attempt)
+        # permanently stuck RUNNING, since fail_scan would never even attempt
+        # to touch it.
+        store_ok = True
         try:
             prep = await workflow.execute_activity(
                 prepare_scan_activity,

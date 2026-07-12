@@ -145,6 +145,13 @@ class JobMatchingStore:
               attempt — a Temporal activity retry that observed a changed profile
               persists the profile it actually used. ``status`` and
               ``created_at`` are left untouched on the update.
+            * The update only applies while the run is still ``running``
+              (``WHERE status = 'running'``): without heartbeating, a "timed
+              out" attempt's worker keeps executing in the background and can
+              still commit after a later attempt has already run and completed
+              the run, so a late, stale ``create_run`` call from that abandoned
+              attempt must not overwrite an already-completed run's snapshot
+              with data that no longer matches its persisted ranked results.
         """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -154,7 +161,8 @@ class JobMatchingStore:
                 "ON CONFLICT (run_id) DO UPDATE SET "
                 "profile_snapshot = EXCLUDED.profile_snapshot, "
                 "request_json = EXCLUDED.request_json, "
-                "top_n = EXCLUDED.top_n",
+                "top_n = EXCLUDED.top_n "
+                "WHERE job_matching_runs.status = %s",
                 (
                     run_id,
                     RUN_STATUS_RUNNING,
@@ -162,6 +170,7 @@ class JobMatchingStore:
                     Json(request.model_dump(mode="json")),
                     request.top_n,
                     _now(),
+                    RUN_STATUS_RUNNING,
                 ),
             )
 
@@ -173,7 +182,6 @@ class JobMatchingStore:
         *,
         total_found: int,
         scanned_fingerprints: Optional[List[str]] = None,
-        is_retry: bool = False,
     ) -> None:
         """Persist ranked rows and mark the run completed.
 
@@ -183,23 +191,22 @@ class JobMatchingStore:
             scanned_fingerprints: Fingerprints of *every* posting scanned this
                 run (not just the returned top-N). Persisted on the run row so
                 ``exclude_seen`` can suppress lower-ranked roles already seen.
-            is_retry: True when the caller knows this call is a Temporal activity
-                retry (e.g. ``activity.info().attempt > 1``), not a first
-                attempt. Only then are prior rows for this run deleted before
-                re-inserting — skipping that delete on the (overwhelming
-                majority) first-attempt path saves a DB round-trip that would
-                otherwise match zero rows, since a fresh ``run_id`` can't yet
-                have any ranked rows.
 
         Postconditions:
             * The run's ``status`` is ``completed`` with ``total_found`` /
               ``total_ranked`` populated and ``completed_at`` set.
             * Exactly one ``job_matching_ranked_jobs`` row exists per entry in
               ``ranked`` (rank starts at 1, in list order).
-            * Idempotent on ``run_id`` when ``is_retry``: any ranked rows from a
-              prior call for the same run are deleted first, so a Temporal
-              ``finalize`` activity that re-runs on retry replaces its rows
-              instead of duplicating them.
+            * Idempotent on ``run_id``: any ranked rows from a prior call for the
+              same run are deleted first, unconditionally — not gated on an
+              attempt/retry count. Without heartbeating, a "timed out" attempt's
+              worker keeps executing in the background and can still commit
+              after a later attempt already saved and completed the run; an
+              attempt-number-based skip (e.g. "only delete when attempt > 1")
+              would let that late, abandoned first attempt append a duplicate
+              copy of its rows once it finally finishes, since *its own*
+              attempt number is always 1 regardless of what else has since
+              happened to the run.
             * The run's ``seen_fingerprints`` holds the de-duplicated set of
               ``scanned_fingerprints`` (falling back to the ranked postings'
               fingerprints when not supplied).
@@ -209,11 +216,10 @@ class JobMatchingStore:
         seen = sorted({fp for fp in scanned_fingerprints if fp})
         now = _now()
         with get_conn() as conn, conn.cursor() as cur:
-            if is_retry:
-                # Idempotent re-save: drop any rows a prior (crashed-then-retried)
-                # attempt wrote for this run before re-inserting the current set.
-                # Skipped on a first attempt, where no such rows can exist yet.
-                cur.execute("DELETE FROM job_matching_ranked_jobs WHERE run_id = %s", (run_id,))
+            # Idempotent re-save: drop any rows a prior (crashed-then-retried, or
+            # merely slow and since-abandoned) attempt wrote for this run before
+            # re-inserting the current set.
+            cur.execute("DELETE FROM job_matching_ranked_jobs WHERE run_id = %s", (run_id,))
             for idx, rj in enumerate(ranked, start=1):
                 cur.execute(
                     "INSERT INTO job_matching_ranked_jobs "
