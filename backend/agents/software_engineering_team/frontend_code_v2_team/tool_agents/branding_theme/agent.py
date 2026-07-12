@@ -2,23 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import logging
-from typing import List
+from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
-from strands import Agent
-
-from llm_service import get_strands_model
-from llm_service.strands_model import resolve_strands_model
-
-from ...models import (
-    ToolAgentInput,
-    ToolAgentOutput,
-    ToolAgentPhaseInput,
-    ToolAgentPhaseOutput,
-)
-
-logger = logging.getLogger(__name__)
+from ...models import ToolAgentPhaseInput
+from .._plan_base import PlanGeneratorToolAgent
 
 DESIGN_SYSTEM_PLAN_PROMPT = """You are an expert Design System & UI Engineering Agent. Your job is to translate design into a reusable component library plan. You prevent copy-pasted UI entropy.
 
@@ -60,76 +47,34 @@ Respond with valid JSON only. No explanatory text outside JSON.
 """
 
 
-class BrandingThemeToolAgent:
+class BrandingThemeToolAgent(PlanGeneratorToolAgent):
     """Branding/Theme tool agent: design system, tokens, component library planning."""
 
-    def __init__(self, llm=None) -> None:
-        self._model = resolve_strands_model(llm, get_strands_model_fn=get_strands_model)
-        self.llm = llm  # kept for backward compat checks
+    log_label = "Branding/Theme"
+    execute_summary = "Branding/Theme execute — no changes applied."
+    review_summary = "Branding/Theme review stub."
+    problem_solve_summary = "Branding/Theme problem-solving stub."
+    deliver_summary = "Branding/Theme deliver."
 
-    def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        return self.execute(inp)
+    no_model_recommendations = [
+        "Consider design tokens and theme compliance.",
+        "Plan component library structure: shared vs app-specific.",
+        "Bake accessibility into component patterns.",
+    ]
+    no_model_summary = "Branding/Theme planning stub (no LLM)."
+    llm_error_recommendations = ["Consider design tokens and theme compliance."]
+    llm_error_summary = "Branding/Theme planning failed (LLM error)."
+    empty_recommendations = ["Consider design tokens and theme compliance."]
+    default_summary = "Branding/Theme planning complete."
+    field_labels = (
+        ("component_library_plan", "Component Library"),
+        ("token_implementation_plan", "Token Implementation"),
+        ("a11y_in_components", "A11y in Components"),
+        ("documentation_plan", "Documentation"),
+    )
 
-    def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        logger.info("Branding/Theme: microtask %s (execute stub)", inp.microtask.id)
-        return ToolAgentOutput(summary="Branding/Theme execute — no changes applied.")
-
-    def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Generate design system artifacts: component library, tokens, a11y, documentation."""
-        if not self._model:
-            return ToolAgentPhaseOutput(
-                recommendations=[
-                    "Consider design tokens and theme compliance.",
-                    "Plan component library structure: shared vs app-specific.",
-                    "Bake accessibility into component patterns.",
-                ],
-                summary="Branding/Theme planning stub (no LLM).",
-            )
-        prompt = DESIGN_SYSTEM_PLAN_PROMPT.format(
+    def _build_plan_prompt(self, inp: ToolAgentPhaseInput) -> str:
+        return DESIGN_SYSTEM_PLAN_PROMPT.format(
             task_description=inp.task_description or "N/A",
             spec_content=(inp.task_description or "")[:5000],
         )
-        try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
-        except Exception as e:
-            logger.warning("Branding/Theme plan LLM call failed: %s", e)
-            return ToolAgentPhaseOutput(
-                recommendations=["Consider design tokens and theme compliance."],
-                summary="Branding/Theme planning failed (LLM error).",
-            )
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            start = raw.find("{")
-            end = raw.rfind("}") + 1
-            if start >= 0 and end > start:
-                try:
-                    data = json.loads(raw[start:end])
-                except json.JSONDecodeError:
-                    data = {}
-            else:
-                data = {}
-        recommendations: List[str] = []
-        if data.get("component_library_plan"):
-            recommendations.append(f"Component Library: {data['component_library_plan']}")
-        if data.get("token_implementation_plan"):
-            recommendations.append(f"Token Implementation: {data['token_implementation_plan']}")
-        if data.get("a11y_in_components"):
-            recommendations.append(f"A11y in Components: {data['a11y_in_components']}")
-        if data.get("documentation_plan"):
-            recommendations.append(f"Documentation: {data['documentation_plan']}")
-        return ToolAgentPhaseOutput(
-            recommendations=recommendations
-            if recommendations
-            else ["Consider design tokens and theme compliance."],
-            summary=data.get("summary", "Branding/Theme planning complete."),
-        )
-
-    def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="Branding/Theme review stub.")
-
-    def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="Branding/Theme problem-solving stub.")
-
-    def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="Branding/Theme deliver.")

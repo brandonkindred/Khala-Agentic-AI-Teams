@@ -38,19 +38,74 @@
       <h2>
         <mat-icon>rate_review</mat-icon>
         Open Pull Requests
-        <span class="cr-section__repo">{{ githubOwner }}/{{ githubRepo }}</span>
+        <span class="cr-section__repo">all repositories the token can access</span>
       </h2>
-      <button mat-flat-button color="primary" (click)="loadPulls()" [disabled]="loadingPulls">
+      <button mat-flat-button color="primary" (click)="loadRepos()" [disabled]="loadingRepos">
         <mat-icon>refresh</mat-icon>
-        @if (loadingPulls) { Loading… } @else if (pullsLoaded) { Refresh } @else { Load pull requests }
+        @if (loadingRepos) { Loading… } @else if (reposLoaded) { Refresh } @else { Load repositories }
       </button>
     </div>
 
-    @if (pullError) {
-      <app-inline-banner variant="error" [message]="pullError" />
+    @if (repoError) {
+      <app-inline-banner variant="error" [message]="repoError" />
     }
 
-    <!-- PR list (always visible); each row expands inline -->
+    @if (loadingRepos) {
+      <div class="cr-section--loading">
+        <mat-spinner diameter="24"></mat-spinner>
+        <span>Loading repositories…</span>
+      </div>
+    }
+
+    <!-- Repo list; expanding a repo loads its open PRs -->
+    @if (reposLoaded) {
+      @if (repos.length === 0) {
+        <div class="cr-empty">
+          <mat-icon>folder_off</mat-icon>
+          <span>The personal access token has no repository access.</span>
+        </div>
+      } @else {
+        <div class="cr-repos-list">
+          @for (repo of repos; track repo.full_name; let i = $index) {
+            <button
+              class="cr-repo-row"
+              type="button"
+              [class.cr-repo-row--expanded]="selectedRepo?.full_name === repo.full_name"
+              [attr.aria-expanded]="selectedRepo?.full_name === repo.full_name"
+              [attr.aria-controls]="'repo-pulls-' + i"
+              (click)="toggleRepo(repo)"
+            >
+              <mat-icon aria-hidden="true">{{ repo.private ? 'lock' : 'public' }}</mat-icon>
+              <span class="cr-repo-row__name" [matTooltip]="repo.description">{{ repo.full_name }}</span>
+              @if (repo.archived) {
+                <span class="cr-chip">archived</span>
+              }
+              <mat-icon class="cr-repo-row__arrow" aria-hidden="true">
+                {{ selectedRepo?.full_name === repo.full_name ? 'expand_less' : 'chevron_right' }}
+              </mat-icon>
+            </button>
+
+            @if (selectedRepo?.full_name === repo.full_name) {
+              <div class="cr-repo-pulls" [id]="'repo-pulls-' + i">
+                @if (pullError) {
+                  <app-inline-banner variant="error" [message]="pullError" />
+                }
+                @if (loadingPulls) {
+                  <div class="cr-section--loading">
+                    <mat-spinner diameter="20"></mat-spinner>
+                    <span>Loading pull requests…</span>
+                  </div>
+                }
+                <ng-container [ngTemplateOutlet]="pullsPanel"></ng-container>
+              </div>
+            }
+          }
+        </div>
+      }
+    }
+
+    <!-- The expanded repo's PR list; each row expands inline -->
+    <ng-template #pullsPanel>
     @if (pullsLoaded) {
       @if (pulls.length === 0) {
         <div class="cr-empty">
@@ -120,9 +175,9 @@
                       mat-flat-button
                       color="primary"
                       (click)="startReview(pull)"
-                      [disabled]="starting.has(pull.number)"
+                      [disabled]="isStarting(pull)"
                     >
-                      @if (starting.has(pull.number)) {
+                      @if (isStarting(pull)) {
                         <mat-spinner diameter="18"></mat-spinner>
                         Starting…
                       } @else {
@@ -213,5 +268,6 @@
         }
       }
     }
+    </ng-template>
   </section>
 }

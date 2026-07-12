@@ -101,9 +101,7 @@ def test_app_lifespan_registers_schema_runs_scheduler_and_closes_pool(
 # ---------------------------------------------------------------------------
 
 
-def test_delete_marketing_job_race_returns_404(
-    monkeypatch: pytest.MonkeyPatch, fake_jobs
-) -> None:
+def test_delete_marketing_job_race_returns_404(monkeypatch: pytest.MonkeyPatch, fake_jobs) -> None:
     """get_job sees the job, but delete_job races and returns False -> 404."""
     fake_jobs.create_job(
         "race-1",
@@ -119,16 +117,13 @@ def test_delete_marketing_job_race_returns_404(
 
 
 # ---------------------------------------------------------------------------
-# Resume / restart happy paths — _dispatch_job is called with the wrong
-# arity, so the route raises TypeError and the request fails with 500.
-# This is current production behaviour and we lock it in to ensure the
-# resume/restart endpoints' validate->update->dispatch sequence is exercised.
+# Resume / restart happy paths — each re-fetches the brand and dispatches with
+# the full (job_id, request, brand_ctx) signature, exercising the
+# validate->update->dispatch sequence.
 # ---------------------------------------------------------------------------
 
 
-def test_resume_happy_path_dispatches(
-    monkeypatch: pytest.MonkeyPatch, fake_jobs
-) -> None:
+def test_resume_happy_path_dispatches(monkeypatch: pytest.MonkeyPatch, fake_jobs) -> None:
     payload = {
         "client_id": "c",
         "brand_id": "b",
@@ -146,12 +141,16 @@ def test_resume_happy_path_dispatches(
     captured: dict[str, Any] = {}
 
     def _fake_dispatch(*args, **kwargs):
-        # Production signature requires brand_ctx; observed call site has only
-        # 2 positional args. Accept both to remain robust to either path.
+        # Resume re-fetches the brand and passes brand_ctx as the 3rd positional
+        # arg (job_id, request, brand_ctx).
         captured["args"] = args
         captured["kwargs"] = kwargs
         return "OK"
 
+    brand_ctx = _MOCK_BRAND_CTX
+    monkeypatch.setattr(
+        api_main, "_fetch_and_validate_brand", lambda client_id, brand_id: brand_ctx
+    )
     monkeypatch.setattr(api_main, "_dispatch_job", _fake_dispatch)
 
     client = TestClient(app)
@@ -160,11 +159,10 @@ def test_resume_happy_path_dispatches(
     job = fake_jobs.get_job("res-ok")
     assert job["status"] == "running"
     assert captured["args"][0] == "res-ok"
+    assert captured["args"][2] is brand_ctx
 
 
-def test_restart_happy_path_dispatches(
-    monkeypatch: pytest.MonkeyPatch, fake_jobs
-) -> None:
+def test_restart_happy_path_dispatches(monkeypatch: pytest.MonkeyPatch, fake_jobs) -> None:
     payload = {
         "client_id": "c",
         "brand_id": "b",
@@ -186,6 +184,10 @@ def test_restart_happy_path_dispatches(
         captured["kwargs"] = kwargs
         return "OK"
 
+    brand_ctx = _MOCK_BRAND_CTX
+    monkeypatch.setattr(
+        api_main, "_fetch_and_validate_brand", lambda client_id, brand_id: brand_ctx
+    )
     monkeypatch.setattr(api_main, "_dispatch_job", _fake_dispatch)
 
     client = TestClient(app)
@@ -194,6 +196,7 @@ def test_restart_happy_path_dispatches(
     job = fake_jobs.get_job("rst-ok")
     assert job["status"] == "pending"
     assert job["progress"] == 0
+    assert captured["args"][2] is brand_ctx
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +260,9 @@ def test_ingest_performance_result_is_non_dict(fake_jobs, fake_bank) -> None:
     "social_media_marketing_team.api.main._fetch_and_validate_brand",
     return_value=_MOCK_BRAND_CTX,
 )
-def test_revise_endpoint_uses_dispatched_brand_summary(_mock, fake_jobs) -> None:
+def test_revise_endpoint_uses_dispatched_brand_summary(
+    _mock, fake_jobs, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Cover the revise endpoint when dispatch is mocked (no inline thread)."""
     payload = {
         "client_id": "c",
@@ -274,17 +279,27 @@ def test_revise_endpoint_uses_dispatched_brand_summary(_mock, fake_jobs) -> None
         request_payload=payload,
     )
 
-    import pytest as _pt
+    # Use the injected ``monkeypatch`` fixture so pytest handles teardown/cleanup.
+    monkeypatch.setattr(api_main, "_dispatch_job", lambda *a, **k: "DISPATCHED")
+    client = TestClient(app)
+    resp = client.post(
+        "/social-marketing/revise/rev-mock",
+        json={"feedback": "make it pop", "approved_for_testing": True},
+    )
+    assert resp.status_code == 200
+    assert "DISPATCHED" in resp.json()["message"]
 
-    monkeypatch = _pt.MonkeyPatch()
-    try:
-        monkeypatch.setattr(api_main, "_dispatch_job", lambda *a, **k: "DISPATCHED")
-        client = TestClient(app)
-        resp = client.post(
-            "/social-marketing/revise/rev-mock",
-            json={"feedback": "make it pop", "approved_for_testing": True},
-        )
-        assert resp.status_code == 200
-        assert "DISPATCHED" in resp.json()["message"]
-    finally:
-        monkeypatch.undo()
+
+# ---------------------------------------------------------------------------
+# _update_job guard when the job manager failed to initialize
+# ---------------------------------------------------------------------------
+
+
+def test_update_job_no_op_when_manager_uninitialized(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """A failed module-init (`_job_manager is None`) degrades one update, not the thread."""
+    monkeypatch.setattr(api_main, "_job_manager", None)
+    with caplog.at_level("ERROR"):
+        api_main._update_job("job-x", status="running")  # must not raise
+    assert any("Job manager not initialized" in r.message for r in caplog.records)

@@ -895,8 +895,10 @@ verifies each delivery's `X-Hub-Signature-256` HMAC against this secret and reje
 over this env var. When neither is set, the receiver fails closed: a `ping` still succeeds (so you can
 verify webhook delivery during setup), but every review-triggering event is refused with `403` until a
 secret is configured — an unsigned request must never be able to start a paid review. Only
-`issue_comment` events from OWNER/MEMBER/COLLABORATOR authors on the configured `owner/repo` trigger a
-review.
+`issue_comment` events from OWNER/MEMBER/COLLABORATOR authors trigger a review; the commented PR's
+own repository is the review target, and whether the stored PAT can act on that repository is
+GitHub's decision (the token's authorization configuration is the sole access list — there is no
+Khala-side repository allowlist).
 
 ### GITHUB_WEBHOOK_DEDUP_TTL_S / GITHUB_WEBHOOK_DEDUP_MAX_ENTRIES
 Tune the webhook receiver's in-process, per-worker de-duplication of GitHub redeliveries (same
