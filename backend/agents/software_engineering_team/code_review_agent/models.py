@@ -270,7 +270,10 @@ class CodeReviewIssue(BaseModel):
     )
     category: str = Field(
         default="general",
-        description="Category: naming, structure, logic, spec-compliance, standards, integration, testing",
+        description=(
+            "Category: naming, structure, logic, spec-compliance, standards, integration, "
+            "testing, architecture, refactor, maintainability"
+        ),
     )
     file_path: str = Field(
         default="",

@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from unittest.mock import MagicMock
 
 from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.shared.models import SystemArchitecture
 from software_engineering_team.shared.v2_models import ReviewIssue
 from software_engineering_team.shared.v2_review import (
     ReviewConfig,
@@ -409,6 +410,56 @@ def test_microtask_code_review_agent_path_and_raise(tmp_path: Path) -> None:
         build_verify_fn=_build_verify_fn,
     )
     assert any(i.description == "llm" for i in result2.issues)
+
+
+def test_code_review_agent_receives_architecture_and_spec_content(tmp_path: Path) -> None:
+    """``architecture``/``spec_content`` passed to ``run_microtask_review`` reach the
+    ``CodeReviewInput`` built for the external code-review agent, and default to
+    ``None``/``""`` when omitted (backward compatible with existing callers)."""
+    config = _build_config()
+    architecture = SystemArchitecture(overview="layered architecture")
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        code_review_agent=cr_agent,
+        language="python",
+        architecture=architecture,
+        spec_content="the full project spec",
+        llm_review_fn=lambda *, llm, task, files: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+    )
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.architecture is architecture
+    assert cr_input.spec_content == "the full project spec"
+
+    cr_agent.run.reset_mock()
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        code_review_agent=cr_agent,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+    )
+    cr_input_default = cr_agent.run.call_args.args[0]
+    assert cr_input_default.architecture is None
+    assert cr_input_default.spec_content == ""
 
 
 def test_microtask_qa_and_security_with_detail_callback(tmp_path: Path) -> None:

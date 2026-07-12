@@ -397,6 +397,7 @@ def run_gated_execution_impl(
     planning_result: Any,
     repo_path: Path,
     architecture: Optional[SystemArchitecture] = None,
+    spec_content: str = "",
     existing_code: str = "",
     tool_runners: Optional[Dict[Any, Any]] = None,
     progress_callback: Optional[Callable[[int, int, int, str, str, str], None]] = None,
@@ -426,6 +427,10 @@ def run_gated_execution_impl(
         ``gate_config.models`` exposes ``MicrotaskStatus``, ``ExecutionResult``,
         ``ToolAgentInput``, ``ToolAgentKind``, ``ReviewResult``,
         ``MicrotaskReviewFailedError`` and ``MicrotaskReviewConfig``.
+        ``gate_config.run_code_review_gate`` accepts ``architecture``/``spec_content``
+        keyword arguments (the per-team adapter forwards them into its code-review
+        call); both default to ``None``/``""`` here so a caller without them yet is
+        unaffected.
     Postconditions:
         Returns an ``ExecutionResult``; each microtask ends COMPLETED, SKIPPED,
         FAILED or REVIEW_FAILED. When a microtask's review fails and
@@ -590,6 +595,8 @@ def run_gated_execution_impl(
                 repo_path=repo_path,
                 files=microtask_files,
                 deps=deps,
+                architecture=architecture,
+                spec_content=spec_content,
                 detail_callback=lambda d: _detail_cb(d, current_idx, "code_review"),
             )
 
@@ -660,6 +667,8 @@ def run_gated_execution_impl(
                     repo_path=repo_path,
                     files=microtask_files,
                     deps=deps,
+                    architecture=architecture,
+                    spec_content=spec_content,
                     detail_callback=lambda d: _detail_cb(d, current_idx, "code_review"),
                 )
 

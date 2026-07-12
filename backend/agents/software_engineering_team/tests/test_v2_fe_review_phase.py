@@ -650,6 +650,54 @@ def test_fe_run_review_passes_files_dict_unmodified(monkeypatch, tmp_path: Path)
     assert captured["code"] == ""
 
 
+def test_fe_run_review_forwards_architecture_and_spec_content(monkeypatch, tmp_path: Path):
+    """``run_review``'s ``architecture``/``spec_content`` reach the code-review
+    agent's input, and default to ``None``/``""`` when omitted."""
+    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+    from software_engineering_team.shared.models import SystemArchitecture
+
+    monkeypatch.setattr(
+        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
+    )
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    captured: dict = {}
+
+    def _capture(inp, **kw):
+        captured["architecture"] = inp.architecture
+        captured["spec_content"] = inp.spec_content
+        return MagicMock(issues=[])
+
+    cr_agent = MagicMock()
+    cr_agent.run.side_effect = _capture
+    architecture = SystemArchitecture(overview="layered architecture")
+
+    run_review(
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.ts": "code"}),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        architecture=architecture,
+        spec_content="the full project spec",
+    )
+    assert captured["architecture"] is architecture
+    assert captured["spec_content"] == "the full project spec"
+
+    cr_agent.run.reset_mock(side_effect=True)
+    cr_agent.run.side_effect = _capture
+    run_review(
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.ts": "code"}),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+    )
+    assert captured["architecture"] is None
+    assert captured["spec_content"] == ""
+
+
 def test_fe_run_review_code_review_agent_raises_falls_back_to_llm(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review

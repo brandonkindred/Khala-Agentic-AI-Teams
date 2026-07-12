@@ -104,6 +104,47 @@ def test_run_code_review_phase_threads_detail_callback(monkeypatch, tmp_path: Pa
     assert any(d.startswith("Code review 40%:") for d in details), details
 
 
+def test_run_code_review_phase_forwards_architecture_and_spec_content(tmp_path: Path) -> None:
+    """``run_code_review_phase``'s ``architecture``/``spec_content`` reach the
+    ``CodeReviewInput`` built for the external code-review agent."""
+    from software_engineering_team.backend_code_v2_team.models import Microtask
+    from software_engineering_team.backend_code_v2_team.phases.review import run_code_review_phase
+    from software_engineering_team.shared.models import SystemArchitecture, Task, TaskType
+
+    task = Task(
+        id="t1",
+        type=TaskType.BACKEND,
+        title="T",
+        description="desc",
+        requirements="reqs",
+        assignee="backend",
+        acceptance_criteria=["AC"],
+    )
+    microtask = Microtask(id="m1", title="M", description="md")
+    architecture = SystemArchitecture(overview="layered architecture")
+
+    captured: dict = {}
+
+    class _CapturingAgent:
+        def run(self, inp: Any) -> Any:
+            captured["architecture"] = inp.architecture
+            captured["spec_content"] = inp.spec_content
+            return MagicMock(issues=[])
+
+    run_code_review_phase(
+        llm=MagicMock(),
+        task=task,
+        microtask=microtask,
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        code_review_agent=_CapturingAgent(),
+        architecture=architecture,
+        spec_content="the full project spec",
+    )
+    assert captured["architecture"] is architecture
+    assert captured["spec_content"] == "the full project spec"
+
+
 def test_bridge_passes_kwarg_to_var_keyword_run() -> None:
     """A forward-compatible wrapper (`def run(self, inp, **kwargs)`) forwards the
     kwarg, so the bridge must pass it — silently dropping progress for such an

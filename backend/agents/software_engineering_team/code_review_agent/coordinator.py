@@ -5,8 +5,11 @@ Pipeline: input → (path, content) blocks → bounded ``FileSegment``s →
 recovery and the map-phase cache (``mapping``) → false-positive verification
 (each genuine finding is re-checked against the *whole* submission, since a
 chunk reviewer saw only a slice, and confirmed false positives are dropped — see
-``false_positive_filter``) → deterministic merge (dedupe, severity gate, safety
-nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
+``false_positive_filter``) → architecture-consistency / cross-codebase-redundancy
+pass (a single additive, whole-repository check for architecture contradictions
+and duplicated capabilities the per-chunk view cannot see — see
+``architecture_consistency_pass``) → deterministic merge (dedupe, severity gate,
+safety nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
 code regardless of input size, and no input file is ever silently dropped:
 empty files are named by info findings, and a chunk that cannot be reviewed
 after recovery (retry, bisection, and a last-resort thinking-off retry) degrades
@@ -85,7 +88,9 @@ from software_engineering_team.shared.context_sizing import (
     compute_code_review_spec_excerpt_chars,
     parse_env_int,
 )
+from software_engineering_team.shared.models import SystemArchitecture
 
+from .architecture_consistency_pass import find_architecture_and_redundancy_issues
 from .chunk_reviewer import ChunkReviewAgent
 from .chunking import (
     MIN_SPLIT_SEGMENT_CHARS,
@@ -234,6 +239,51 @@ def _not_reviewed_range_label(issue: CodeReviewIssue) -> str:
     if issue.start_line is not None and issue.line is not None:
         return f"{path} (lines {issue.start_line}-{issue.line})"
     return path
+
+
+def _render_architecture_context(architecture: SystemArchitecture) -> str:
+    """Render an architecture object into text for the per-chunk excerpt.
+
+    Folds in ``components`` (module/service responsibilities) and ``decisions``
+    (ADRs) alongside ``overview`` -- the concrete signal an architecture-
+    consistency check needs; ``overview`` prose alone rarely names a boundary
+    or a taken decision precisely enough to judge a contradiction. The full
+    ``architecture_document`` is deliberately NOT included here (it can be
+    arbitrarily large and this excerpt repeats in every chunk prompt); it is
+    reserved for the once-per-submission architecture-consistency pass, which
+    can afford it in a single call.
+
+    Postconditions:
+        - Returns the overview/components/decisions sections that have
+          content, joined by blank lines, in that order. Returns "" when
+          ``architecture`` carries none of the three. Never raises: a
+          malformed ``decisions`` entry (not a dict, or missing keys) is
+          rendered from whatever fields are present, or skipped if it is not
+          a dict at all.
+    """
+    parts: List[str] = []
+    if architecture.overview:
+        parts.append(architecture.overview)
+    if architecture.components:
+        comp_lines = []
+        for c in architecture.components:
+            label = f"- {c.name} ({c.type})" if c.type else f"- {c.name}"
+            if c.description:
+                label += f": {c.description}"
+            comp_lines.append(label)
+        if comp_lines:
+            parts.append("Components:\n" + "\n".join(comp_lines))
+    if architecture.decisions:
+        decision_lines = []
+        for d in architecture.decisions:
+            if not isinstance(d, dict):
+                continue
+            title = d.get("title") or d.get("id") or "Decision"
+            detail = d.get("decision") or d.get("description") or ""
+            decision_lines.append(f"- {title}: {detail}" if detail else f"- {title}")
+        if decision_lines:
+            parts.append("Architecture decisions:\n" + "\n".join(decision_lines))
+    return "\n\n".join(p for p in parts if p.strip())
 
 
 def _dedupe_issues(all_issues: List[CodeReviewIssue]) -> List[CodeReviewIssue]:
@@ -458,7 +508,10 @@ def run_coordinator(
     arch_overview = ""
     if input_data.architecture:
         arch_overview = compact_text(
-            input_data.architecture.overview or "", max_arch, llm, "architecture overview"
+            _render_architecture_context(input_data.architecture),
+            max_arch,
+            llm,
+            "architecture overview",
         )[:max_arch]
     existing_codebase = compact_text(
         input_data.existing_codebase or "", max_existing, llm, "existing codebase"
@@ -539,6 +592,18 @@ def run_coordinator(
         verified = genuine_issues
     else:
         verified = filter_false_positives(llm, input_data, genuine_issues, repo_reader=repo_reader)
+
+    # Architecture-consistency / cross-codebase-redundancy pass: a separate, additive,
+    # once-per-submission check for two things the map phase structurally cannot see —
+    # whether the change contradicts the architecture document, and whether it duplicates a
+    # capability that already exists elsewhere in the repository. Runs after the false-positive
+    # filter (its findings are already tool-grounded, so they are not subjected to that filter
+    # again) and folds straight into the same dedupe/severity-gate/merge machinery below.
+    architecture_findings = find_architecture_and_redundancy_issues(
+        llm, input_data, repo_reader=repo_reader
+    )
+    if architecture_findings:
+        verified = [*verified, *architecture_findings]
 
     notify_review_progress(
         progress_callback, "finalizing", "deduplicating findings and applying approval rules", 0.95

@@ -18,7 +18,7 @@ from strands import Agent
 from llm_service import LLMClient
 from software_engineering_team.shared.agent_review import run_qa_agent, run_security_agent
 from software_engineering_team.shared.llm_review import run_llm_review
-from software_engineering_team.shared.models import Task
+from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.review_utils import (
     DOC_QUALITY_THRESHOLD,
     MANY_CHUNKS_WARN_THRESHOLD,
@@ -195,6 +195,8 @@ def run_review(
     linting_tool_agent: Any = None,
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     language: str = "python",
+    architecture: Optional[SystemArchitecture] = None,
+    spec_content: str = "",
 ) -> ReviewResult:
     """Execute the Review phase.
 
@@ -225,6 +227,8 @@ def run_review(
         qa_agent_fn=_run_qa_agent,
         security_agent_fn=_run_security_agent,
         build_verify_fn=_run_build_verification,
+        architecture=architecture,
+        spec_content=spec_content,
     )
 
 
@@ -243,6 +247,8 @@ def run_microtask_review(
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     language: str = "python",
+    architecture: Optional[SystemArchitecture] = None,
+    spec_content: str = "",
 ) -> ReviewResult:
     """Run full review on a single microtask's output files.
 
@@ -269,6 +275,8 @@ def run_microtask_review(
         qa_agent_fn=_run_qa_agent,
         security_agent_fn=_run_security_agent,
         build_verify_fn=_run_build_verification,
+        architecture=architecture,
+        spec_content=spec_content,
     )
 
 
@@ -284,6 +292,8 @@ def run_code_review_phase(
     linting_tool_agent: Any = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     language: str = "python",
+    architecture: Optional[SystemArchitecture] = None,
+    spec_content: str = "",
 ) -> PhaseReviewResult:
     """
     Run code review phase only: build verification + lint + code review.
@@ -370,6 +380,8 @@ def run_code_review_phase(
             task_id=task_id,
             task_description=f"Microtask: {microtask.description or microtask.title}",
             llm_review_fn=_run_llm_review,
+            architecture=architecture,
+            spec_content=spec_content,
             detail_callback=detail_callback,
         )
     )

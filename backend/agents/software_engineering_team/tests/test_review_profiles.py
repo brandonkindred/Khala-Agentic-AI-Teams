@@ -65,6 +65,34 @@ def test_summary_guidance_enforces_brevity_and_no_praise() -> None:
     assert 'return an empty string "" — do not write reassuring "meets the spec" prose' in prompt
 
 
+def test_code_review_criteria_covers_architecture_refactor_correctness_maintainability() -> None:
+    """The default CODE_REVIEW profile's checklist covers the four expanded review
+    angles: architecture consistency, refactoring opportunities, correctness/best
+    practices, and maintainability -- on top of everything it already checked."""
+    prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
+    assert "**Architecture Consistency**" in prompt
+    assert "**Refactoring Opportunities**" in prompt
+    assert "**Correctness & Best Practices**" in prompt
+    assert "**Maintainability**" in prompt
+
+
+def test_new_criteria_severity_guidance_caps_default_severity() -> None:
+    """Each new criterion's severity guidance defaults to medium/low/info and names
+    the narrow condition for escalation, so the new checks add feedback without
+    flooding the approval gate with noise."""
+    prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
+    assert "would actually break integration" in prompt
+    assert "not merely because a cleaner alternative exists" in prompt
+    assert "not for a design preference alone" in prompt
+
+
+def test_output_contract_accepts_new_categories() -> None:
+    """The JSON output contract's category enum accepts the three new axes this
+    expansion adds (architecture, refactor, maintainability)."""
+    prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
+    assert '"architecture" | "refactor" | "maintainability"' in prompt
+
+
 @pytest.mark.parametrize(
     ("profile", "anchor"),
     [

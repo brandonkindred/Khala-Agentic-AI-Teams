@@ -16,7 +16,7 @@ from strands import Agent
 from llm_service import LLMClient
 from software_engineering_team.shared.agent_review import run_qa_agent, run_security_agent
 from software_engineering_team.shared.llm_review import run_llm_review
-from software_engineering_team.shared.models import Task
+from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.review_utils import (
     DOC_QUALITY_THRESHOLD,
     MANY_CHUNKS_WARN_THRESHOLD,
@@ -187,6 +187,8 @@ def run_review(
     linting_tool_agent: Any = None,
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     language: str = "typescript",
+    architecture: Optional[SystemArchitecture] = None,
+    spec_content: str = "",
 ) -> ReviewResult:
     """Execute the Review phase.
 
@@ -214,6 +216,8 @@ def run_review(
         qa_agent_fn=_run_qa_agent,
         security_agent_fn=_run_security_agent,
         build_verify_fn=_run_build_verification,
+        architecture=architecture,
+        spec_content=spec_content,
     )
 
 
@@ -232,6 +236,8 @@ def run_microtask_review(
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     language: str = "typescript",
+    architecture: Optional[SystemArchitecture] = None,
+    spec_content: str = "",
 ) -> ReviewResult:
     """Run full review on a single microtask's output files.
 
@@ -258,6 +264,8 @@ def run_microtask_review(
         qa_agent_fn=_run_qa_agent,
         security_agent_fn=_run_security_agent,
         build_verify_fn=_run_build_verification,
+        architecture=architecture,
+        spec_content=spec_content,
     )
 
 

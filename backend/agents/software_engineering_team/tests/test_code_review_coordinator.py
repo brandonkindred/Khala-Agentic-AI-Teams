@@ -18,6 +18,7 @@ import pytest
 from code_review_agent.coordinator import (
     MIN_SPLIT_SEGMENT_CHARS,
     _issues_from_chunk_output,
+    _render_architecture_context,
     _segment_range_label,
     _validate_line,
     build_review_chunks,
@@ -275,6 +276,81 @@ def test_shared_context_compaction_is_memoized_across_runs() -> None:
     run_coordinator(client, _make_input())
     # Second run reuses the memoized compactions — no additional compaction calls.
     assert client.compaction_calls == first_run_calls
+
+
+def test_render_architecture_context_folds_in_components_and_decisions() -> None:
+    """The architecture excerpt built for the reviewer includes not just the
+    overview prose but component responsibilities and architecture decisions
+    (ADRs) -- the concrete signal an architecture-consistency check needs."""
+    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+
+    arch = SystemArchitecture(
+        overview="Layered service architecture.",
+        components=[
+            ArchitectureComponent(name="UserService", type="backend", description="Owns user CRUD")
+        ],
+        decisions=[{"title": "ADR-001", "decision": "Use Postgres for persistence"}],
+    )
+    rendered = _render_architecture_context(arch)
+    assert "Layered service architecture." in rendered
+    assert "UserService (backend): Owns user CRUD" in rendered
+    assert "ADR-001: Use Postgres for persistence" in rendered
+
+
+def test_render_architecture_context_handles_missing_and_malformed_fields() -> None:
+    """A bare overview renders with no Components/Decisions sections; a malformed
+    (non-dict) decision entry is skipped rather than raising.
+
+    ``decisions`` entries that reach a real ``SystemArchitecture`` are always
+    dicts (Pydantic validates ``List[Dict[str, Any]]`` at construction), so the
+    non-dict case is exercised via a duck-typed stand-in -- the function only
+    ever accesses ``.overview``/``.components``/``.decisions`` by attribute, so
+    it works on anything shaped like a ``SystemArchitecture``.
+    """
+    from types import SimpleNamespace
+
+    from software_engineering_team.shared.models import SystemArchitecture
+
+    bare = SystemArchitecture(overview="Just an overview.")
+    rendered_bare = _render_architecture_context(bare)
+    assert rendered_bare == "Just an overview."
+
+    malformed = SimpleNamespace(overview="ov", components=[], decisions=["not-a-dict"])
+    rendered_malformed = _render_architecture_context(malformed)
+    assert rendered_malformed == "ov"
+
+
+def test_chunk_prompt_includes_component_and_decision_text() -> None:
+    """End-to-end: a submission reviewed with a component/decision-bearing
+    architecture renders that content into the chunk reviewer's prompt."""
+    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+
+    class _PromptCapturingClient(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prompts: List[str] = []
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            self.prompts.append(prompt)
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    arch = SystemArchitecture(
+        overview="Layered service architecture.",
+        components=[
+            ArchitectureComponent(
+                name="PaymentService", type="backend", description="Owns payment processing"
+            )
+        ],
+        decisions=[{"title": "ADR-002", "decision": "All writes go through the repository layer"}],
+    )
+    client = _PromptCapturingClient()
+    run_coordinator(
+        client,
+        CodeReviewInput(files={"app/main.py": "def f():\n    return 1\n"}, architecture=arch),
+    )
+    assert client.prompts, "expected at least one chunk-review call"
+    assert any("PaymentService (backend): Owns payment processing" in p for p in client.prompts)
+    assert any("ADR-002: All writes go through the repository layer" in p for p in client.prompts)
 
 
 def test_run_coordinator_merges_issues_and_rejects_if_critical() -> None:

@@ -1,0 +1,319 @@
+"""Tests for the architecture-consistency / cross-codebase-redundancy pass.
+
+This pass is purely additive (it can only ADD findings on top of what the map
+phase and false-positive filter already produced) and fail-safe (any setup or
+LLM failure yields no additional findings, never an exception). Style mirrors
+``test_false_positive_filter.py``: the LLM seam is exercised with
+``DummyLLMClient`` subclasses that pattern-match on the user prompt (never the
+system prompt -- see that file's rationale) so one scripted client can serve
+both the chunk-review call and this pass's call in an end-to-end
+``run_coordinator`` run.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+import pytest
+from code_review_agent.architecture_consistency_pass import (
+    _ARCH_DOC_ABS_CHARS,
+    _build_prompt,
+    _coerce_finding,
+    _parse_findings,
+    find_architecture_and_redundancy_issues,
+)
+from code_review_agent.coordinator import run_coordinator
+from code_review_agent.false_positive_filter import CodebaseIndex
+from code_review_agent.models import CodeReviewInput
+
+from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.shared.models import SystemArchitecture
+
+# Unique anchor in this pass's user prompt (never the system prompt -- a
+# DummyLLMClient subclass must branch on the user prompt only, matching the
+# false-positive filter's established rationale for avoiding system-prompt
+# scanning cross-contamination).
+_ARCH_PASS_ANCHOR = '"findings" array as instructed'
+
+
+def _arch(
+    *,
+    overview: str = "Layered service architecture.",
+    architecture_document: str = "",
+) -> SystemArchitecture:
+    return SystemArchitecture(overview=overview, architecture_document=architecture_document)
+
+
+def _input(
+    files: Optional[Dict[str, str]] = None, architecture: Optional[SystemArchitecture] = None
+) -> CodeReviewInput:
+    return CodeReviewInput(
+        files=files if files is not None else {"app/main.py": "def bar():\n    return 1\n"},
+        task_description="wire up bar",
+        architecture=architecture,
+    )
+
+
+# --------------------------------------------------------------------------- helpers
+
+
+def test_build_prompt_includes_architecture_document_and_changed_files() -> None:
+    """The prompt inlines the architecture document, the file manifest, and each
+    changed file's content."""
+    arch = _arch(architecture_document="# Arch\nAll writes MUST go through the repository layer.")
+    index = CodebaseIndex.from_input(_input(architecture=arch))
+    prompt = _build_prompt(index, arch, max_inline_chars=100_000, max_arch_doc_chars=100_000)
+    assert "All writes MUST go through the repository layer." in prompt
+    assert "app/main.py" in prompt
+    assert "def bar():" in prompt
+
+
+def test_build_prompt_falls_back_to_overview_with_no_document() -> None:
+    """With no ``architecture_document``, the overview is inlined instead."""
+    arch = _arch(overview="Overview-only architecture.", architecture_document="")
+    index = CodebaseIndex.from_input(_input(architecture=arch))
+    prompt = _build_prompt(index, arch, max_inline_chars=100_000, max_arch_doc_chars=100_000)
+    assert "Overview-only architecture." in prompt
+
+
+def test_build_prompt_caps_architecture_document_and_notes_truncation() -> None:
+    """An oversized architecture document is capped, and the prompt says so."""
+    arch = _arch(architecture_document="X" * 10_000)
+    index = CodebaseIndex.from_input(_input(architecture=arch))
+    prompt = _build_prompt(index, arch, max_inline_chars=100_000, max_arch_doc_chars=100)
+    assert "X" * 100 in prompt
+    assert "X" * 101 not in prompt
+    assert "Only the first 100 characters of the architecture document are shown" in prompt
+
+
+def test_build_prompt_omits_files_beyond_inline_budget() -> None:
+    """Changed files beyond the inline budget are named as tool-reachable, not dropped."""
+    arch = _arch()
+    files = {"a.py": "x" * 50, "b.py": "y" * 50}
+    index = CodebaseIndex.from_input(_input(files=files, architecture=arch))
+    # Exactly enough budget for the first file's body; the second gets none.
+    prompt = _build_prompt(index, arch, max_inline_chars=50, max_arch_doc_chars=1000)
+    assert "a.py" in prompt  # inlined (fits the budget)
+    assert "more changed file(s) not shown above" in prompt
+    assert "list_files()" in prompt
+
+
+# --------------------------------------------------------------------------- parsing
+
+
+def test_coerce_finding_accepts_architecture_and_refactor_categories() -> None:
+    arch_finding = _coerce_finding(
+        {
+            "severity": "high",
+            "category": "architecture",
+            "file_path": "app/main.py",
+            "description": "bypasses the repository layer",
+            "suggestion": "use the repository",
+        }
+    )
+    assert arch_finding is not None
+    assert arch_finding.category == "architecture"
+    assert arch_finding.severity == "high"
+
+    refactor_finding = _coerce_finding(
+        {
+            "category": "refactor",
+            "description": "duplicates existing HttpClient wrapper",
+        }
+    )
+    assert refactor_finding is not None
+    assert refactor_finding.category == "refactor"
+    assert refactor_finding.severity == "medium"  # default when unrecognized/absent
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "not-a-dict",
+        {"category": "logic", "description": "wrong category for this pass"},
+        {"category": "architecture", "description": ""},
+        {"category": "", "description": "no category at all"},
+    ],
+)
+def test_coerce_finding_rejects_invalid_items(item: object) -> None:
+    assert _coerce_finding(item) is None
+
+
+def test_coerce_finding_coerces_line_and_unknown_severity() -> None:
+    finding = _coerce_finding(
+        {
+            "severity": "not-a-real-severity",
+            "category": "architecture",
+            "description": "d",
+            "line": "42",
+        }
+    )
+    assert finding is not None
+    assert finding.severity == "medium"
+    assert finding.line == 42
+
+
+def test_parse_findings_handles_off_contract_replies() -> None:
+    assert _parse_findings("not-a-dict") == []
+    assert _parse_findings({}) == []
+    assert _parse_findings({"findings": "not-a-list"}) == []
+    assert _parse_findings({"findings": []}) == []
+    parsed = _parse_findings(
+        {
+            "findings": [
+                {"category": "architecture", "description": "real"},
+                {"category": "bogus", "description": "dropped"},
+                "not-a-dict-either",
+            ]
+        }
+    )
+    assert len(parsed) == 1
+    assert parsed[0].description == "real"
+
+
+# --------------------------------------------------------------------------- gating / fail-safe
+
+
+def test_returns_empty_when_disabled_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS", "false")
+    result = find_architecture_and_redundancy_issues(DummyLLMClient(), _input(architecture=_arch()))
+    assert result == []
+
+
+def test_returns_empty_when_no_architecture_document_or_overview() -> None:
+    arch = SystemArchitecture(overview="", architecture_document="")
+    result = find_architecture_and_redundancy_issues(DummyLLMClient(), _input(architecture=arch))
+    assert result == []
+
+
+def test_returns_empty_when_no_architecture_at_all() -> None:
+    result = find_architecture_and_redundancy_issues(DummyLLMClient(), _input(architecture=None))
+    assert result == []
+
+
+def test_returns_empty_when_submission_has_no_readable_files() -> None:
+    result = find_architecture_and_redundancy_issues(
+        DummyLLMClient(), _input(files={"empty.py": "   "}, architecture=_arch())
+    )
+    assert result == []
+
+
+def test_fails_safe_on_llm_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any LLM/setup failure is swallowed -- this pass must never break the review."""
+
+    class _Raiser(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            raise RuntimeError("boom")
+
+    result = find_architecture_and_redundancy_issues(_Raiser(), _input(architecture=_arch()))
+    assert result == []
+
+
+def test_fails_safe_on_unparsable_reply() -> None:
+    class _Gibberish(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return "not even a dict-shaped reply"  # type: ignore[return-value]
+
+    result = find_architecture_and_redundancy_issues(_Gibberish(), _input(architecture=_arch()))
+    assert result == []
+
+
+# --------------------------------------------------------------------------- happy path
+
+
+def test_finds_and_returns_new_findings() -> None:
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                return {
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "description": "bypasses the repository layer",
+                            "suggestion": "use the repository",
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    result = find_architecture_and_redundancy_issues(
+        _FindingsClient(), _input(architecture=_arch())
+    )
+    assert len(result) == 1
+    assert result[0].category == "architecture"
+    assert result[0].description == "bypasses the repository layer"
+
+
+# --------------------------------------------------------------------------- coordinator integration
+
+
+def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
+    """The pass fires exactly once per submission, regardless of chunk count."""
+    calls = {"arch_pass": 0, "chunk_review": 0}
+
+    class _CountingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                calls["arch_pass"] += 1
+                return {"findings": []}
+            calls["chunk_review"] += 1
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    # Two files -> at least the map phase runs more than once; the false-positive
+    # filter is disabled by default (its own env toggle) so this isolates the count.
+    files = {"a.py": "def a():\n    return 1\n", "b.py": "def b():\n    return 2\n"}
+    run_coordinator(_CountingClient(), CodeReviewInput(files=files, architecture=_arch()))
+
+    assert calls["arch_pass"] == 1
+
+
+def test_coordinator_merges_architecture_findings_into_final_output() -> None:
+    """A finding from this pass reaches the coordinator's merged ``issues`` list,
+    dedupes/sizes alongside chunk findings, and does not spuriously block approval
+    (default severity keeps it out of the critical/high gate)."""
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                return {
+                    "findings": [
+                        {
+                            "severity": "medium",
+                            "category": "refactor",
+                            "file_path": "app/main.py",
+                            "description": "duplicates the existing HttpClient wrapper",
+                            "suggestion": "reuse shared.http_client.HttpClient",
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    result = run_coordinator(
+        _FindingsClient(),
+        CodeReviewInput(files={"app/main.py": "def bar():\n    return 1\n"}, architecture=_arch()),
+    )
+    assert result.approved  # a medium refactor finding never blocks approval alone
+    assert any(
+        i.category == "refactor" and "HttpClient wrapper" in i.description for i in result.issues
+    )
+
+
+def test_coordinator_skips_pass_with_no_architecture() -> None:
+    """No architecture on the input -> the pass contributes nothing (no extra
+    LLM call beyond the ordinary map-phase chunk review)."""
+
+    class _FailIfAskedClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            assert _ARCH_PASS_ANCHOR not in prompt, "architecture pass should not run"
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    result = run_coordinator(_FailIfAskedClient(), CodeReviewInput(code="def f():\n    return 1\n"))
+    assert result.approved
+
+
+def test_arch_doc_abs_chars_default_is_generous() -> None:
+    """Sanity check the default cap: generous relative to the per-chunk overview
+    excerpt cap, since this pass pays its cost once per submission, not per chunk."""
+    assert _ARCH_DOC_ABS_CHARS >= 20_000

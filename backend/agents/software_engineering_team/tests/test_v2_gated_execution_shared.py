@@ -100,6 +100,27 @@ def _fail_gate(source: str = "code_review"):
     return _gate
 
 
+class _CapturingGate:
+    """Records every call's kwargs, then returns queued outcomes (default: always pass).
+
+    Used to assert what the shared loop actually forwards into a gate — e.g. that
+    ``architecture``/``spec_content`` reach BOTH the initial code-review call and
+    the re-review call after a batch fix, not just one of them.
+    """
+
+    def __init__(self, outcomes: Optional[List[GateOutcome]] = None) -> None:
+        self._q = list(outcomes or [])
+        self.calls_kwargs: List[Dict[str, Any]] = []
+
+    def __call__(self, *, detail_callback=None, **kwargs: Any) -> GateOutcome:
+        self.calls_kwargs.append(kwargs)
+        if detail_callback is not None:
+            detail_callback("gate tick")
+        if self._q:
+            return self._q.pop(0)
+        return GateOutcome(passed=True)
+
+
 def _coder(**kwargs: Any) -> Dict[str, str]:
     return {"src/a.py": "print(1)\n"}
 
@@ -189,6 +210,8 @@ def _run(
     only_ids: Optional[List[str]] = None,
     progress=None,
     review_deps: Optional[ReviewDependencies] = None,
+    architecture: Optional[Any] = None,
+    spec_content: str = "",
 ):
     return run_gated_execution_impl(
         gate_config=gate_config,
@@ -196,6 +219,8 @@ def _run(
         task=_task(),
         planning_result=_planning(microtasks),
         repo_path=tmp_path,
+        architecture=architecture,
+        spec_content=spec_content,
         review_config=review_config,
         review_deps=review_deps,
         only_microtask_ids=only_ids,
@@ -346,6 +371,46 @@ def test_code_review_retry_then_pass(tmp_path):
 
     assert cr.calls == 2  # initial fail + one re-review after the batch fix
     assert mt.status == MS.COMPLETED
+
+
+def test_code_review_gate_receives_architecture_and_spec_content_on_every_call(tmp_path):
+    """``architecture``/``spec_content`` reach the code-review gate on the initial
+    call AND the re-review call after a batch fix.
+
+    Regression test for a confirmed bug: ``run_gated_execution_impl`` already had
+    ``architecture`` in scope (used for microtask coding) but never forwarded it
+    to either of its two ``gate_config.run_code_review_gate(...)`` call sites.
+    """
+    architecture = SimpleNamespace(overview="layered architecture")
+    cr = _CapturingGate([GateOutcome(passed=False, issues=[_issue()], summary="fixme")])
+    mt = _microtask()
+    _run(
+        _make_gate_config(code_review_gate=cr),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=2),
+        architecture=architecture,
+        spec_content="the full project spec",
+    )
+
+    assert len(cr.calls_kwargs) == 2  # initial call + one re-review after the batch fix
+    for call_kwargs in cr.calls_kwargs:
+        assert call_kwargs["architecture"] is architecture
+        assert call_kwargs["spec_content"] == "the full project spec"
+    assert mt.status == MS.COMPLETED
+
+
+def test_code_review_gate_defaults_architecture_and_spec_content(tmp_path):
+    """A caller that does not pass ``architecture``/``spec_content`` to ``_run``
+    (i.e. the existing default-free call shape) still reaches the gate with the
+    documented defaults (``None``/``""``), so existing callers are unaffected."""
+    cr = _CapturingGate()
+    mt = _microtask()
+    _run(_make_gate_config(code_review_gate=cr), [mt], tmp_path, review_config=_config())
+
+    assert cr.calls_kwargs
+    assert cr.calls_kwargs[0]["architecture"] is None
+    assert cr.calls_kwargs[0]["spec_content"] == ""
 
 
 def test_code_review_fail_stop_raises(tmp_path):

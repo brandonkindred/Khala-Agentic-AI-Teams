@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import Task
+from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.review_progress import (
     build_disk_repo_reader,
     call_code_review_agent,
@@ -188,6 +188,8 @@ def _code_review_step(
     task_id: str,
     task_description: str,
     llm_review_fn: Callable[..., List[ReviewIssue]],
+    architecture: Optional[SystemArchitecture] = None,
+    spec_content: str = "",
     detail_callback: Optional[Callable[[str], None]] = None,
 ) -> List[ReviewIssue]:
     """Independent code-review step: external agent (with LLM fallback), or LLM review alone.
@@ -198,6 +200,9 @@ def _code_review_step(
           single microtask; the LLM fallback always reasons over the full ``task``, unaffected).
         - ``llm_review_fn(llm=, task=, files=)`` is the per-team chunking/prompt/parse reviewer
           (the test patch surface for ``Agent`` / ``resolve_text_mode_strands_model``).
+        - ``architecture``/``spec_content`` are the caller's system architecture and project
+          specification, when available; both default to "nothing to add" (``None``/``""``) so a
+          caller that does not have them yet keeps working unchanged.
 
     Postconditions:
         - Never raises: an external ``code_review_agent`` failure logs a warning and falls back
@@ -223,6 +228,8 @@ def _code_review_step(
                 task_requirements=task.requirements or "",
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
                 language=language,
+                architecture=architecture,
+                spec_content=spec_content,
             )
             cr_result = call_code_review_agent(
                 code_review_agent,
@@ -460,12 +467,17 @@ def run_review(
     qa_agent_fn: Callable[..., List[ReviewIssue]],
     security_agent_fn: Callable[..., List[ReviewIssue]],
     build_verify_fn: Callable[..., Tuple[bool, str]],
+    architecture: Optional[SystemArchitecture] = None,
+    spec_content: str = "",
 ) -> ReviewResult:
     """Execute the shared Review phase over an execution result's files.
 
     Preconditions:
         - ``execution_result`` exposes ``.files: Dict[str, str]``.
         - The injected runners match the per-team wrapper signatures.
+        - ``architecture``/``spec_content`` are forwarded to the code-review step only; they
+          default to ``None``/``""`` so an existing caller that does not have them yet is
+          unaffected.
 
     Postconditions:
         - Returns a :class:`ReviewResult` whose ``passed`` reflects the team's
@@ -537,6 +549,8 @@ def run_review(
                     task_id=task_id,
                     task_description=task.description or "",
                     llm_review_fn=llm_review_fn,
+                    architecture=architecture,
+                    spec_content=spec_content,
                 ),
                 lambda: _qa_review_step(
                     qa_agent=qa_agent,
@@ -609,12 +623,17 @@ def run_microtask_review(
     qa_agent_fn: Callable[..., List[ReviewIssue]],
     security_agent_fn: Callable[..., List[ReviewIssue]],
     build_verify_fn: Callable[..., Tuple[bool, str]],
+    architecture: Optional[SystemArchitecture] = None,
+    spec_content: str = "",
 ) -> ReviewResult:
     """Run the shared full review on a single microtask's output files.
 
     Preconditions:
         - ``microtask`` exposes ``.id`` / ``.title`` / ``.description``.
         - The injected runners match the per-team wrapper signatures.
+        - ``architecture``/``spec_content`` are forwarded to the code-review step only; they
+          default to ``None``/``""`` so an existing caller that does not have them yet is
+          unaffected.
 
     Postconditions:
         - Returns a :class:`ReviewResult` scoped to ``files``; ``passed``
@@ -709,6 +728,8 @@ def run_microtask_review(
                     task_id=task_id,
                     task_description=microtask_desc,
                     llm_review_fn=llm_review_fn,
+                    architecture=architecture,
+                    spec_content=spec_content,
                     detail_callback=detail_callback,
                 ),
                 lambda: _qa_review_step(
