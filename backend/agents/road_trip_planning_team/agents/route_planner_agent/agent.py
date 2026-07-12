@@ -87,16 +87,25 @@ class RoutePlannerAgent:
             logger.warning("RoutePlannerAgent JSON parse/validation failed: %s", e)
             return self._fallback_route(trip, end)
 
+        # A stop with a blank location is unusable (nothing for the activities/
+        # composer steps to call the LLM or build a day for) — drop it before
+        # any of the checks below rather than let it ride through to the
+        # accepted route just because the *other* stops satisfy coverage.
+        stops = [s for s in stops if s.location and s.location.strip()]
+
         # The prompt asks the LLM to set recommended_nights=0 for the start/end
         # stops, but doesn't enforce it — an LLM response that omits the field
         # for an endpoint defaults to RouteStop's own default of 1, which
         # ActivitiesExpertAgent (skips endpoints only at recommended_nights==0)
         # and the composer would then treat as a real overnight stop, adding
-        # extra LLM calls and days for the origin/destination. Enforce the
-        # pass-through contract in code rather than relying on prompt compliance.
-        for stop in stops:
-            if stop.stop_type in ("start", "end"):
-                stop.recommended_nights = 0
+        # extra LLM calls and days for the origin/destination. Normalize by
+        # *position* (the first/last stop), not the stop_type label — the LLM
+        # can mislabel an interior stop's stop_type as "start"/"end" while the
+        # actual boundary stops are elsewhere in the list, and keying off the
+        # label would then wrongly zero out a real must-visit stop's nights.
+        if stops:
+            stops[0].recommended_nights = 0
+            stops[-1].recommended_nights = 0
 
         if not stops or not self._covers_required_stops(stops, trip, end):
             # Valid JSON that yields no usable stops (e.g. an empty object from a
@@ -218,14 +227,28 @@ class RoutePlannerAgent:
               destination, and ends at a pass-through end — never empty. The
               start/end carry ``recommended_nights=0`` so the activities and
               composer steps treat them as pass-through and don't turn them into
-              extra overnight days or LLM calls.
+              extra overnight days or LLM calls. Every stop after the start
+              carries ``driving_from`` set to the previous stop's location, so
+              the composer's fallback itinerary can show each leg's origin
+              instead of an unknown ``driving_from``.
         """
         stops = [RouteStop(location=trip.start_location, stop_type="start", recommended_nights=0)]
+        previous = trip.start_location
         for s in trip.required_stops:
             if not s or not s.strip():
                 continue  # matches _covers_required_stops's own blank-entry skip
-            stops.append(RouteStop(location=s, stop_type="destination", recommended_nights=1))
-        stops.append(RouteStop(location=end, stop_type="end", recommended_nights=0))
+            stops.append(
+                RouteStop(
+                    location=s,
+                    stop_type="destination",
+                    recommended_nights=1,
+                    driving_from=previous,
+                )
+            )
+            previous = s
+        stops.append(
+            RouteStop(location=end, stop_type="end", recommended_nights=0, driving_from=previous)
+        )
         return RoutePlan(
             ordered_stops=stops,
             # max(1, ...): a trip with no explicit duration and no required stops

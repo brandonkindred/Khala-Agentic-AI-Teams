@@ -77,6 +77,20 @@ def test_profile_travelers_falls_back_on_schema_invalid_json(sample_plan_request
     assert "hiking" in profile.combined_interests
 
 
+def test_profile_travelers_fallback_carries_needs_into_dedicated_fields():
+    # The fallback can't categorize a traveler's raw needs (dietary vs.
+    # accessibility vs. other) without the LLM, but must not silently drop
+    # them — ActivitiesExpertAgent's prompt reads food_requirements/
+    # accessibility_requirements directly, not combined_needs.
+    trip = TripRequest(
+        start_location="San Francisco, CA",
+        travelers=[{"name": "Alice", "needs": ["vegetarian", "wheelchair accessible"]}],
+    )
+    profile = rtp_pipeline.profile_travelers(trip, llm=_FakeLLM("not json"))
+    assert "vegetarian" in profile.food_requirements
+    assert "wheelchair accessible" in profile.accessibility_requirements
+
+
 def test_plan_route_parses_llm_json(sample_plan_request):
     # The LLM route must cover the start, the required stop (Yosemite), and the
     # end, or the coverage guard substitutes the fallback.
@@ -276,6 +290,61 @@ def test_plan_route_falls_back_when_round_trip_never_returns():
     assert route.route_summary == ""  # fallback route, not the LLM's "no return"
     locations = [s.location for s in route.ordered_stops]
     assert locations[-1] == "San Francisco, CA"
+
+
+def test_plan_route_normalizes_by_position_not_stop_type_label(sample_plan_request):
+    # The LLM might mislabel an interior stop's stop_type as "start"/"end"
+    # while the actual first/last positions are correct — normalization must
+    # key off position, not the label, or a real must-visit stop gets wrongly
+    # zeroed out and skipped as pass-through.
+    llm = _FakeLLM(
+        '{"ordered_stops": ['
+        '{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "end", "recommended_nights": 2},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+    by_location = {s.location: s for s in route.ordered_stops}
+    assert by_location["Yosemite"].recommended_nights == 2  # mislabeled "end", not zeroed
+    assert by_location["Los Angeles, CA"].recommended_nights == 0  # the true last stop
+
+
+def test_plan_route_filters_blank_location_stop_from_llm_response(sample_plan_request):
+    # A blank-location stop in an otherwise-valid LLM response must be
+    # dropped from the accepted route, not left in ordered_stops just because
+    # coverage still passes via the other stops.
+    llm = _FakeLLM(
+        '{"ordered_stops": ['
+        '{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "", "stop_type": "destination"},'
+        ' {"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+    locations = [s.location for s in route.ordered_stops]
+    assert "" not in locations
+    assert "Yosemite" in locations
+
+
+def test_fallback_route_threads_driving_from_between_stops():
+    # Each stop after the start must carry driving_from set to the previous
+    # stop's location, so the composer's fallback itinerary can show each
+    # leg's origin instead of an unknown driving_from.
+    trip = TripRequest(
+        start_location="San Francisco, CA",
+        required_stops=["Yosemite"],
+        end_location="Los Angeles, CA",
+        travelers=[{"name": "Alice"}],
+    )
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=_FakeLLM("x"))
+    by_location = {s.location: s for s in route.ordered_stops}
+    assert by_location["San Francisco, CA"].driving_from is None
+    assert by_location["Yosemite"].driving_from == "San Francisco, CA"
+    assert by_location["Los Angeles, CA"].driving_from == "Yosemite"
 
 
 def test_plan_route_normalizes_zero_suggested_total_days(sample_plan_request):
