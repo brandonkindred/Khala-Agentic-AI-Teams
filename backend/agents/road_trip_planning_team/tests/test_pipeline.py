@@ -223,6 +223,61 @@ def test_plan_route_ignores_blank_required_stop(sample_plan_request):
     assert route.route_summary == "coastal"  # accepted despite the blank entry
 
 
+def test_fallback_route_skips_blank_required_stops():
+    # A blank entry in required_stops must not become an empty-location
+    # destination stop in the fallback route — matching _covers_required_stops's
+    # own blank-entry skip, so downstream steps never see an empty location.
+    trip = TripRequest(
+        start_location="San Francisco, CA",
+        required_stops=["Yosemite", ""],
+        end_location="Los Angeles, CA",
+        travelers=[{"name": "Alice"}],
+    )
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=_FakeLLM("x"))
+    locations = [s.location for s in route.ordered_stops]
+    assert "" not in locations
+    assert "Yosemite" in locations
+
+
+def test_plan_route_falls_back_when_stops_are_in_wrong_order(sample_plan_request):
+    # A route containing every required location but not actually starting or
+    # ending at the right place (e.g. Yosemite listed first) must fall back —
+    # membership alone isn't enough; the route must be positionally bounded by
+    # the actual start and end.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "wrong order", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == ""  # fallback route, not the LLM's "wrong order"
+    locations = [s.location for s in route.ordered_stops]
+    assert locations[0] == "San Francisco, CA"
+    assert locations[-1] == "Los Angeles, CA"
+
+
+def test_plan_route_falls_back_when_round_trip_never_returns():
+    # A round trip (no explicit end_location -> back to start) whose route
+    # only visits the start once, with no return leg, must fall back — the
+    # end must positionally match the route's last stop, not just appear
+    # anywhere (which the single start-position occurrence would satisfy).
+    trip = TripRequest(
+        start_location="San Francisco, CA",
+        required_stops=["Yosemite"],
+        travelers=[{"name": "Alice"}],
+    )
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination"}],'
+        ' "route_summary": "no return", "suggested_total_days": 2}'
+    )
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == ""  # fallback route, not the LLM's "no return"
+    locations = [s.location for s in route.ordered_stops]
+    assert locations[-1] == "San Francisco, CA"
+
+
 def test_plan_route_normalizes_zero_suggested_total_days(sample_plan_request):
     # An LLM response with an explicit suggested_total_days: 0 must be
     # normalized to >= 1 — dict.get's default only applies when the key is
@@ -596,6 +651,37 @@ def test_compose_itinerary_fallback_includes_destination_for_one_way_pass_throug
     assert len(itinerary.days) == 1
     assert itinerary.days[0].location == "Denver, CO"
     assert itinerary.days[0].driving_from == "Chicago, IL"
+
+
+def test_compose_itinerary_fallback_preserves_final_leg(sample_plan_request):
+    # A normal one-way trip with a required stop (SF -> Yosemite -> LA) whose
+    # end stop is pass-through (recommended_nights=0, per RoutePlannerAgent's
+    # own endpoint normalization) must still surface LA as an arrival day in
+    # the composer's fallback rather than silently dropping the final leg
+    # after the last real overnight stop (Yosemite).
+    route = RoutePlan(
+        ordered_stops=[
+            RouteStop(location="San Francisco, CA", stop_type="start", recommended_nights=0),
+            RouteStop(location="Yosemite", stop_type="destination", recommended_nights=1),
+            RouteStop(location="Los Angeles, CA", stop_type="end", recommended_nights=0),
+        ],
+        suggested_total_days=2,
+    )
+    itinerary = rtp_pipeline.compose_itinerary(
+        sample_plan_request.trip,
+        TravelerGroupProfile(),
+        route,
+        [
+            StopActivities(location="San Francisco, CA"),
+            StopActivities(location="Yosemite"),
+            StopActivities(location="Los Angeles, CA"),
+        ],
+        LogisticsPlan(),
+        llm=_FakeLLM("nope"),
+    )
+    locations = [d.location for d in itinerary.days]
+    assert "Yosemite" in locations
+    assert locations[-1] == "Los Angeles, CA"
 
 
 # ---------------------------------------------------------------------------

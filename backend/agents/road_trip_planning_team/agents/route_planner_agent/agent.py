@@ -127,17 +127,25 @@ class RoutePlannerAgent:
         )
 
     def _covers_required_stops(self, stops: list[RouteStop], trip: TripRequest, end: str) -> bool:
-        """Return True if the start, every required stop, and the end are represented.
+        """Return True if the route is bounded by start/end and covers every required stop.
 
         Matching (see ``_locations_match``) tolerates the LLM naming a stop more
         or less verbosely than the request (e.g. a required ``"Yosemite"``
         matches a planned ``"Yosemite National Park"``), or a short caller
         abbreviation (e.g. ``"SF"`` matching ``"San Francisco, CA"``), without
         the false-positive risk of raw substring containment on short strings
-        (e.g. ``"LA"`` is a literal substring of ``"Atlanta, GA"``). Checking
-        the start/end too catches a route that covers every required stop but
-        truncates the actual origin or destination. Blank required-stop entries
-        are skipped rather than trivially "covered".
+        (e.g. ``"LA"`` is a literal substring of ``"Atlanta, GA"``). Blank
+        required-stop entries are skipped rather than trivially "covered".
+
+        The start and end are checked *positionally* — the start must match
+        the route's first stop and the end its last — rather than merely
+        appearing somewhere in the route. A pure membership check (matching
+        every required location anywhere in ``stops``) can't distinguish a
+        correctly-bounded route from one that includes the right locations in
+        the wrong order, or a round trip (``end == start``) that never
+        actually returns to the start. Required stops themselves may appear
+        in any order (the prompt allows it), so they're still checked by
+        membership.
 
         Preconditions:
             - ``stops`` is the parsed, non-empty route.
@@ -145,13 +153,23 @@ class RoutePlannerAgent:
               start location for a round trip).
 
         Postconditions:
-            - Returns True when the start, the end, and every non-blank required
-              stop are present (trivially True for start/end when there are no
-              required stops, since a route always has at least a start and an
-              end).
+            - Returns True when the first stop matches the start, the last
+              stop matches the end, and every non-blank required stop is
+              present anywhere in the route.
         """
         planned = [s.location.lower() for s in stops if s.location]
-        for req in [trip.start_location, *trip.required_stops, end]:
+        if not planned:
+            return False
+
+        start_r = (trip.start_location or "").strip().lower()
+        if start_r and not self._locations_match(start_r, planned[0]):
+            return False
+
+        end_r = (end or "").strip().lower()
+        if end_r and not self._locations_match(end_r, planned[-1]):
+            return False
+
+        for req in trip.required_stops:
             r = (req or "").strip().lower()
             if not r:
                 continue  # no location to verify against the planned route
@@ -204,6 +222,8 @@ class RoutePlannerAgent:
         """
         stops = [RouteStop(location=trip.start_location, stop_type="start", recommended_nights=0)]
         for s in trip.required_stops:
+            if not s or not s.strip():
+                continue  # matches _covers_required_stops's own blank-entry skip
             stops.append(RouteStop(location=s, stop_type="destination", recommended_nights=1))
         stops.append(RouteStop(location=end, stop_type="end", recommended_nights=0))
         return RoutePlan(

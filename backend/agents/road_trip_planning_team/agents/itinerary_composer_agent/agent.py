@@ -284,12 +284,36 @@ class ItineraryComposerAgent:
 
         Postconditions:
             - Returns a ``TripItinerary`` whose ``days`` is never empty — see
-              ``_ensure_nonempty_days``.
+              ``_ensure_nonempty_days``. A pass-through end stop (e.g. the
+              destination in a route where every stop is normalized to
+              ``recommended_nights=0``) still gets its own arrival day when it
+              follows real overnight stops, so the final leg of the trip is
+              never silently dropped.
         """
         days = []
         day_num = 1
         for stop in route.ordered_stops:
             if stop.recommended_nights == 0 and stop.stop_type in ("start", "end"):
+                if stop.stop_type == "end" and days and days[-1].location != stop.location:
+                    # A pass-through end stop that follows real overnight
+                    # stops is still the trip's actual destination — without
+                    # this, RoutePlannerAgent normalizing every end stop to
+                    # recommended_nights=0 means the final leg (e.g. the "LA"
+                    # in SF -> Yosemite -> LA) would be silently dropped from
+                    # the fallback itinerary even though route_summary still
+                    # lists it. (All-pass-through routes with no days yet are
+                    # handled by _ensure_nonempty_days below instead.)
+                    days.append(
+                        DayPlan(
+                            day_number=day_num,
+                            location=stop.location,
+                            driving_from=stop.driving_from,
+                            driving_distance_miles=stop.estimated_driving_miles,
+                            driving_time_hours=stop.estimated_driving_hours,
+                            day_summary=f"Arrive in {stop.location}",
+                        )
+                    )
+                    day_num += 1
                 continue
             for night in range(max(1, stop.recommended_nights)):
                 logistics_entry = next(
