@@ -50,6 +50,41 @@ def test_get_job_status_not_found():
     assert resp.status_code == 404
 
 
+def test_build_status_reports_completed_phases_from_blueprint():
+    """Mid-run progress: completed_phases comes from the checkpointed blueprint."""
+    data = {
+        "status": "running",
+        "project_name": "proj",
+        "current_phase": "architecture",
+        "progress": 35,
+        "completed_phases": [],  # top-level field stays empty; must not win
+        "blueprint": {
+            "project_name": "proj",
+            "completed_phases": ["spec_intake", "architecture"],
+        },
+    }
+    with patch("ai_systems_team.api.main.get_job", return_value=data):
+        resp = client.get("/build/status/j1")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["completed_phases"] == ["spec_intake", "architecture"]
+    assert body["current_phase"] == "architecture"
+
+
+def test_build_status_no_blueprint_reports_empty_completed_phases():
+    """Before the first phase checkpoints a blueprint, completed_phases is empty."""
+    data = {
+        "status": "running",
+        "project_name": "proj",
+        "progress": 5,
+        "blueprint": None,
+    }
+    with patch("ai_systems_team.api.main.get_job", return_value=data):
+        resp = client.get("/build/status/j2")
+    assert resp.status_code == 200
+    assert resp.json()["completed_phases"] == []
+
+
 def test_cancel_missing_job_returns_404():
     with patch("ai_systems_team.api.main.get_job", return_value={}):
         resp = client.post("/build/job/nonexistent/cancel")
@@ -82,3 +117,46 @@ def test_start_build_returns_job_id():
 def test_get_blueprint_not_found():
     resp = client.get("/blueprints/nonexistent")
     assert resp.status_code == 404
+
+
+def test_get_blueprint_falls_back_to_job_store():
+    """A Temporal build (not in the in-memory cache) is served from the job store."""
+    jobs = [
+        {
+            "status": "completed",
+            "project_name": "temporal_proj",
+            "blueprint": {"project_name": "temporal_proj", "version": "1.0.0"},
+        }
+    ]
+    with patch("ai_systems_team.api.main.list_jobs", return_value=jobs):
+        resp = client.get("/blueprints/temporal_proj")
+    assert resp.status_code == 200
+    assert resp.json()["project_name"] == "temporal_proj"
+
+
+def test_get_blueprint_job_store_no_match_still_404():
+    """A completed job for a different project name doesn't satisfy the lookup."""
+    jobs = [
+        {"status": "completed", "project_name": "other", "blueprint": {"project_name": "other"}}
+    ]
+    with patch("ai_systems_team.api.main.list_jobs", return_value=jobs):
+        resp = client.get("/blueprints/temporal_proj_missing")
+    assert resp.status_code == 404
+
+
+def test_list_blueprints_includes_job_store_completed():
+    """/blueprints unions the in-memory cache with completed jobs in the job store."""
+    jobs = [
+        {
+            "status": "completed",
+            "project_name": "ts_proj",
+            "blueprint": {"project_name": "ts_proj"},
+        },
+        {"status": "running", "project_name": "not_done", "blueprint": None},
+    ]
+    with patch("ai_systems_team.api.main.list_jobs", return_value=jobs):
+        resp = client.get("/blueprints")
+    assert resp.status_code == 200
+    names = resp.json()["blueprints"]
+    assert "ts_proj" in names
+    assert "not_done" not in names
