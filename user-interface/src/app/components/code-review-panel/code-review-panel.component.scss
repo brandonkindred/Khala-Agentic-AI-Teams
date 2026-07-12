@@ -68,6 +68,61 @@
 }
 
 // ---------------------------------------------------------------------------
+// Repository accordion — one row per repo the PAT can access
+// ---------------------------------------------------------------------------
+
+.cr-repos-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.cr-repo-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.1));
+  border-radius: 8px;
+  background: var(--mat-sys-surface-container-lowest, #fff);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+
+  &:hover {
+    background: var(--mat-sys-surface-container, #f3f3f3);
+  }
+
+  &--expanded {
+    border-color: var(--mat-sys-primary, #1a73e8);
+  }
+
+  &__name {
+    flex: 1 1 auto;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__arrow {
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.4));
+    flex: 0 0 auto;
+  }
+}
+
+// PR list nested under the expanded repository row.
+.cr-repo-pulls {
+  margin: 0.25rem 0 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.1));
+  border-radius: 8px;
+  background: var(--mat-sys-surface-container-low, #fafafa);
+}
+
+// ---------------------------------------------------------------------------
 // PR list
 // ---------------------------------------------------------------------------
 
