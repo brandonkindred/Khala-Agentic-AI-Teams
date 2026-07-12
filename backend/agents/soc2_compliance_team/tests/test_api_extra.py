@@ -117,6 +117,34 @@ def test_run_audit_job_failure_branch(
     assert "audit boom" in job["error"]
 
 
+def test_run_audit_job_marks_failed_when_orchestrator_returns_failed_result(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    """``SOC2AuditOrchestrator.run`` catches its own internal failures and
+    *returns* a ``status="failed"`` result rather than raising — the job's
+    terminal status must follow ``result.status``, not be hardcoded to
+    "completed" just because no exception propagated."""
+    from soc2_compliance_team.models import SOC2AuditResult
+
+    fake_job_client.create_job("j3", status="pending")
+
+    class _FailedOrch:
+        def run(self, repo_path):
+            return SOC2AuditResult(
+                status="failed", repo_path=str(repo_path), error="criteria audit timed out"
+            )
+
+    monkeypatch.setattr(api_main, "SOC2AuditOrchestrator", _FailedOrch)
+
+    api_main._run_audit_job("j3", "/some/repo")
+
+    job = fake_job_client.get_job("j3")
+    assert job["status"] == "failed"
+    assert job["current_stage"] == "Failed"
+    assert job["error"] == "criteria audit timed out"
+    assert job["result"]["status"] == "failed"
+
+
 # ---------------------------------------------------------------------------
 # _start_temporal_worker_backstop
 # ---------------------------------------------------------------------------

@@ -176,6 +176,21 @@ def mark_all_running_jobs_failed(reason: str) -> None:
 
 
 def _run_audit_job(job_id: str, repo_path: str) -> None:
+    """Run the thread-mode audit and persist its terminal job status.
+
+    Preconditions:
+        - ``job_id`` is an existing job; ``repo_path`` is a directory path.
+    Postconditions:
+        - The job's terminal status is taken from ``result.status`` ("completed"
+          or "failed" — the only two values ``SOC2AuditOrchestrator.run``
+          returns), not assumed to be "completed": the orchestrator itself
+          catches load/criteria/report failures and returns a
+          ``status="failed"`` result rather than raising, so a hardcoded
+          "completed" write here would silently mask that failure from
+          ``GET /soc2-audit/status/{job_id}``. An exception raised by the
+          orchestrator itself (a bug, not a modeled failure) is still caught
+          and marked failed separately.
+    """
     try:
         _update_job(job_id, status="running", current_stage="Loading repository")
         orchestrator = SOC2AuditOrchestrator()
@@ -183,8 +198,9 @@ def _run_audit_job(job_id: str, repo_path: str) -> None:
         result = orchestrator.run(repo_path)
         _update_job_terminal(
             job_id,
-            status="completed",
-            current_stage="Completed",
+            status=result.status,
+            current_stage="Completed" if result.status == "completed" else "Failed",
+            error=result.error,
             result=result.model_dump(),
         )
     except Exception as e:

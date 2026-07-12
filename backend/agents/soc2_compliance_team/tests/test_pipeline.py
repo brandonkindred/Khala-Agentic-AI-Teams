@@ -231,3 +231,32 @@ def test_assemble_result_has_findings_follows_report_not_tsc() -> None:
     # result is non-compliant — the two can never disagree now.
     assert out.has_findings is False
     assert out.next_steps_document is next_steps
+
+
+# ---------------------------------------------------------------------------
+# failed_result
+# ---------------------------------------------------------------------------
+
+
+def test_failed_result_has_findings_false_with_no_preserved_results() -> None:
+    out = pipeline.failed_result("/repo", "boom")
+    assert out.status == "failed"
+    assert out.tsc_results == []
+    assert out.has_findings is False
+
+
+def test_failed_result_derives_has_findings_from_preserved_tsc_results() -> None:
+    """A failure that occurs *after* the criteria audits already found a
+    material gap (e.g. report synthesis itself fails) must not report
+    itself as clean just because the failure path hardcodes has_findings."""
+    tsc = [_result(TSCCategory.SECURITY, compliant=False, severity=FindingSeverity.HIGH)]
+    out = pipeline.failed_result("/repo", "report synthesis boom", tsc_results=tsc)
+    assert out.status == "failed"
+    assert out.has_findings is True
+    assert out.tsc_results == tsc
+
+
+def test_failed_result_has_findings_false_when_preserved_results_are_clean() -> None:
+    tsc = [_result(TSCCategory.AVAILABILITY, compliant=True)]
+    out = pipeline.failed_result("/repo", "boom", tsc_results=tsc)
+    assert out.has_findings is False

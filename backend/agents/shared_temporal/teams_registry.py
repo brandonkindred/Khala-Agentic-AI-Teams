@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import importlib
 import logging
-from typing import Iterable
+from typing import Any, Iterable
 
 from shared_temporal.worker import start_team_worker
 
@@ -39,6 +39,21 @@ TEAM_TEMPORAL_MODULES: dict[str, str] = {
     # activities (see ``software_engineering_team/code_review_agent/temporal``).
     "code_review": "software_engineering_team.code_review_agent.temporal",
 }
+
+
+def _resolve_task_queue(team: str, mod: Any) -> str:
+    """The task queue to start ``team``'s worker on.
+
+    Prefers the team module's own ``resolve_task_queue()`` (an operator
+    override, e.g. SOC2's ``TEMPORAL_TASK_QUEUE_SOC2``) when it exports one, so
+    a worker started through this generic host still polls the same queue
+    ``start_workflow_sync`` dispatches to. Falls back to the registry's
+    default ``f"{team}-queue"`` convention for teams that don't customize it.
+    """
+    resolver = getattr(mod, "resolve_task_queue", None)
+    if callable(resolver):
+        return resolver()
+    return f"{team}-queue"
 
 
 def start_all_team_workers(only: Iterable[str] | None = None) -> dict[str, bool]:
@@ -71,7 +86,7 @@ def start_all_team_workers(only: Iterable[str] | None = None) -> dict[str, bool]
                 team,
                 workflows=workflows,
                 activities=activities,
-                task_queue=f"{team}-queue",
+                task_queue=_resolve_task_queue(team, mod),
             )
             results[team] = started
         except Exception as e:

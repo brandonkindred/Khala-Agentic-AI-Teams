@@ -119,16 +119,21 @@ def test_worker_start_is_no_op_when_temporal_disabled(monkeypatch):
 
 def test_worker_start_delegates_to_start_team_worker(monkeypatch):
     """When enabled, the no-arg func delegates to ``start_team_worker`` with the
-    team's own task queue and returns its result."""
+    team's own task queue, enough activity slots for the 5-way audit fan-out,
+    and returns its result."""
     from soc2_compliance_team.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
     from soc2_compliance_team.temporal import worker as worker_mod
 
     monkeypatch.setattr(worker_mod, "is_temporal_enabled", lambda: True)
     captured: dict = {}
 
-    def _fake_start(team, workflows, activities, *, task_queue):
+    def _fake_start(team, workflows, activities, *, task_queue, max_concurrent_activities):
         captured.update(
-            team=team, workflows=workflows, activities=activities, task_queue=task_queue
+            team=team,
+            workflows=workflows,
+            activities=activities,
+            task_queue=task_queue,
+            max_concurrent_activities=max_concurrent_activities,
         )
         return True
 
@@ -140,8 +145,11 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
         "workflows": WORKFLOWS,
         "activities": ACTIVITIES,
         "task_queue": TASK_QUEUE,
+        "max_concurrent_activities": worker_mod.MAX_CONCURRENT_ACTIVITIES,
     }
     assert TASK_QUEUE == "soc2_compliance-queue"
+    # Must cover all 5 concurrently fanned-out criterion activities.
+    assert worker_mod.MAX_CONCURRENT_ACTIVITIES >= 5
 
 
 def test_start_audit_workflow_delegates_to_shared_bridge(monkeypatch):

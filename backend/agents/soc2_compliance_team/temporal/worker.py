@@ -21,6 +21,15 @@ logger = logging.getLogger(__name__)
 # ``shared_temporal.teams_registry`` so double-starts are idempotent.
 TEAM_KEY = "soc2_compliance"
 
+# The workflow fans out all 5 TSC criteria (``soc2_audit_criterion``)
+# concurrently via ``asyncio.gather``. ``start_team_worker``'s default
+# ``max_concurrent_activities=4`` would leave one criterion queued behind the
+# other four for up to their full 30-minute start-to-close budget before it
+# even starts running — pushing it close to (or past) its 1-hour
+# schedule-to-close ceiling. 8 slots comfortably covers one job's 5-way
+# fan-out plus headroom for a concurrent job's load/report/mark-failed step.
+MAX_CONCURRENT_ACTIVITIES = 8
+
 
 def start_soc2_temporal_worker_thread() -> bool:
     """Start the SOC2 Temporal worker (no-op when disabled).
@@ -50,4 +59,5 @@ def start_soc2_temporal_worker_thread() -> bool:
         WORKFLOWS,
         ACTIVITIES,
         task_queue=resolve_task_queue(),
+        max_concurrent_activities=MAX_CONCURRENT_ACTIVITIES,
     )

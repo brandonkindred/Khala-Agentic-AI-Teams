@@ -219,13 +219,22 @@ def failed_result(
 
     Postconditions:
         - Returns ``SOC2AuditResult(status="failed", tsc_results=tsc_results or
-          [], has_findings=False, error=error)``.
+          [])``. ``has_findings`` is derived from ``tsc_results`` (true iff any
+          preserved result is non-compliant or carries a critical/high
+          finding), not hardcoded false — a failure that occurs after material
+          gaps were already discovered must not report itself as clean.
     """
+    results = tsc_results or []
+    has_findings = any(
+        not r.compliant
+        or any(f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH) for f in r.findings)
+        for r in results
+    )
     return SOC2AuditResult(
         status="failed",
         repo_path=str(repo_path),
-        tsc_results=tsc_results or [],
-        has_findings=False,
+        tsc_results=results,
+        has_findings=has_findings,
         error=error,
     )
 
