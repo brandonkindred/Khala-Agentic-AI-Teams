@@ -252,11 +252,11 @@ def test_generate_response_activity(orchestrator, job_client):
     assert result["profile_updates"] == [{"pref": "coffee"}]
     assert ("generate", "u1", "email", {"email": {"ok": True}}, {"tz": "UTC"}) in orchestrator.calls
     job = job_client.get_job("job-1")
-    # The intermediate "Request completed" write (matching the thread path's
-    # _update call right after _generate_response returns) lands at the end
-    # of this activity, ahead of finalize_success_activity's final write.
-    assert job["progress"] == 100
-    assert job["status_text"] == "Request completed"
+    # No trailing progress write here: finalize_success_activity's own
+    # COMPLETED/100 write follows immediately in the workflow, so an
+    # intermediate 100 write here would just be a redundant round-trip.
+    assert job["progress"] == 85
+    assert job["status_text"] == "Generating response..."
 
 
 def test_generate_response_activity_defaults_profile_updates_to_empty_list(
@@ -280,9 +280,28 @@ def test_generate_response_activity_cancelled(orchestrator, job_client):
     assert orchestrator.calls == []
 
 
+class _ImmediateThread:
+    """Fake ``threading.Thread`` that runs its target synchronously in ``start()``.
+
+    Lets tests assert on the fire-and-forget Slack notification's effects
+    without a real background thread's inherent race against the test's own
+    assertions, while still pinning down that the call used ``daemon=True``.
+    """
+
+    def __init__(self, *, target, args=(), kwargs=None, daemon=False):
+        assert daemon is True
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        self._target(*self._args, **self._kwargs)
+
+
 def test_finalize_success_activity(job_client, monkeypatch):
     _new_job(job_client)
     notified = {}
+    monkeypatch.setattr(acts.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(
         acts, "_notify_slack", lambda user_id, message, resp: notified.update(u=user_id)
     )
@@ -308,6 +327,7 @@ def test_finalize_success_activity(job_client, monkeypatch):
 
 def test_finalize_success_activity_defaults_missing_fields(job_client, monkeypatch):
     _new_job(job_client)
+    monkeypatch.setattr(acts.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(acts, "_notify_slack", lambda *a, **k: None)
     acts.finalize_success_activity("job-1", {}, "u1", "hi")
 
@@ -334,6 +354,7 @@ def test_finalize_success_activity_notifies_only_once_on_retry(job_client, monke
     # A retry (e.g. worker crash before Temporal recorded completion) must not
     # re-send the non-idempotent Slack notification.
     _new_job(job_client)
+    monkeypatch.setattr(acts.threading, "Thread", _ImmediateThread)
     notify_count = {"n": 0}
     monkeypatch.setattr(
         acts, "_notify_slack", lambda *a, **k: notify_count.update(n=notify_count["n"] + 1)
@@ -345,6 +366,42 @@ def test_finalize_success_activity_notifies_only_once_on_retry(job_client, monke
 
     assert job_client.get_job("job-1")["status"] == "completed"
     assert notify_count["n"] == 1
+
+
+def test_finalize_success_activity_notifies_on_a_daemon_thread(job_client, monkeypatch):
+    # Regression test for Slack delivery blocking the activity: the
+    # notification must be dispatched via threading.Thread(..., daemon=True)
+    # rather than called inline, so a slow/hanging Slack call can't hold this
+    # activity open past the point where the job is already COMPLETED.
+    _new_job(job_client)
+    started = {}
+
+    class _RecordingThread:
+        def __init__(self, *, target, args=(), kwargs=None, daemon=False):
+            started["target"] = target
+            started["args"] = args
+            started["daemon"] = daemon
+
+        def start(self):
+            started["started"] = True
+            # Deliberately does NOT invoke target — proves finalize_success_activity
+            # itself doesn't depend on synchronous completion of the notification.
+
+    monkeypatch.setattr(acts.threading, "Thread", _RecordingThread)
+    response = {"message": "done", "actions_taken": [], "data": {}, "follow_up_suggestions": []}
+
+    acts.finalize_success_activity("job-1", response, "u1", "hi")
+
+    assert started["target"] is acts._notify_slack
+    assert started["daemon"] is True
+    assert started["started"] is True
+    user_id, message, assistant_response = started["args"]
+    assert user_id == "u1"
+    assert message == "hi"
+    assert assistant_response.message == "done"
+    # The job row is already COMPLETED even though the notify thread was
+    # never actually run.
+    assert job_client.get_job("job-1")["status"] == "completed"
 
 
 def test_fail_job_activity(job_client):

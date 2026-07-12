@@ -166,12 +166,18 @@ def test_cancelled_at_classify(monkeypatch):
 
 
 def test_cancelled_at_specialist(monkeypatch):
+    # The specialist and profile-updates activities are scheduled concurrently
+    # (they share no data dependency), so check_profile_updates_activity still
+    # runs even though the specialist reports cancellation — its own cancel
+    # guard makes that a cheap no-op — and the workflow must still short-
+    # circuit on the specialist's cancellation once both complete.
     calls: list = []
     _script(
         monkeypatch,
         {
             acts.classify_intent_activity: {"primary": "email", "confidence": 1.0, "entities": {}},
             acts.handle_email_activity: {"cancelled": True},
+            acts.check_profile_updates_activity: [],
         },
         calls=calls,
     )
@@ -179,7 +185,10 @@ def test_cancelled_at_specialist(monkeypatch):
     result = _run()
 
     assert result == {"cancelled": True}
-    assert calls == [acts.classify_intent_activity, acts.handle_email_activity]
+    assert acts.classify_intent_activity in calls
+    assert acts.handle_email_activity in calls
+    assert acts.check_profile_updates_activity in calls
+    assert acts.generate_response_activity not in calls
 
 
 def test_cancelled_at_profile_updates(monkeypatch):
@@ -261,10 +270,12 @@ def test_native_cancellation_propagates_without_failing_job(monkeypatch):
     # which — unlike asyncio.CancelledError — subclasses Exception) must
     # propagate untouched: it is NOT an application failure, so
     # fail_job_activity must never be called for it.
+    from temporalio.exceptions import CancelledError
+
     calls: list = []
 
     def _raise(_args):
-        raise wf.CancelledError("workflow cancelled")
+        raise CancelledError("workflow cancelled")
 
     _script(
         monkeypatch,
@@ -272,9 +283,46 @@ def test_native_cancellation_propagates_without_failing_job(monkeypatch):
         calls=calls,
     )
 
-    with pytest.raises(wf.CancelledError):
+    with pytest.raises(CancelledError):
         _run()
 
+    assert calls == [acts.classify_intent_activity]
+
+
+def test_activity_error_wrapping_cancellation_propagates_without_failing_job(monkeypatch):
+    # A cancelled *activity* is what workflow.execute_activity actually raises
+    # in production: a temporalio ActivityError whose `.cause` is a
+    # CancelledError, NOT a bare CancelledError. A plain `except CancelledError`
+    # misses this entirely and would misroute it into fail_job_activity; only
+    # `is_cancelled_exception` (isinstance-or-unwrapped-cause) catches it.
+    from temporalio.exceptions import ActivityError, CancelledError
+
+    calls: list = []
+
+    def _raise(_args):
+        err = ActivityError(
+            "activity cancelled",
+            scheduled_event_id=1,
+            started_event_id=2,
+            identity="test",
+            activity_type="pa_classify_intent",
+            activity_id="1",
+            retry_state=None,
+        )
+        err.__cause__ = CancelledError("cancelled")
+        raise err
+
+    _script(
+        monkeypatch,
+        {acts.classify_intent_activity: _raise},
+        calls=calls,
+    )
+
+    with pytest.raises(ActivityError):
+        _run()
+
+    # fail_job_activity must NOT have run — this is a cancellation, not an
+    # application failure.
     assert calls == [acts.classify_intent_activity]
 
 
@@ -310,3 +358,27 @@ def test_error_message_falls_back_for_exception_without_cause_attribute():
     # A plain workflow-body bug (not an ActivityError) has no `.cause`
     # attribute at all — getattr's default must handle that gracefully.
     assert wf._error_message(RuntimeError("plain bug")) == "plain bug"
+
+
+def test_error_message_never_raises_on_broken_str():
+    # A third-party exception with a broken __str__ must not blow up
+    # _error_message itself — it runs inside an except handler, where a
+    # second exception would mask the one actually being reported.
+    class _Unprintable(Exception):
+        def __str__(self):
+            raise RuntimeError("cannot stringify")
+
+    assert wf._error_message(_Unprintable()) == "_Unprintable (error message unavailable)"
+
+
+def test_error_message_never_raises_on_broken_cause_str():
+    class _BrokenCause:
+        def __str__(self):
+            raise RuntimeError("cannot stringify cause")
+
+    class _Err(Exception):
+        def __init__(self, cause):
+            super().__init__("outer")
+            self.cause = cause
+
+    assert wf._error_message(_Err(_BrokenCause())) == "_BrokenCause (error message unavailable)"

@@ -111,6 +111,26 @@ def test_export_contract():
     assert len(ACTIVITIES) == len(expected_activities) == 14
 
 
+def test_specialist_routing_tables_stay_in_sync_across_modules():
+    """``workflows._SPECIALIST_ACTIVITIES`` (intent -> activity fn) and
+    ``activities._SPECIALIST_STATUS`` (intent -> progress text) are two
+    independent dicts keyed by the same set of intents, maintained by hand in
+    two different files. Nothing else enforces they stay in sync — a new
+    intent added to one without the other would silently drop either the
+    routing or the progress text. Guard the invariant directly."""
+    from personal_assistant_team.temporal import activities as acts
+    from personal_assistant_team.temporal import workflows as wf
+
+    assert set(wf._SPECIALIST_ACTIVITIES) == set(acts._SPECIALIST_STATUS)
+
+    # Each entry's activity fn also has the matching status text baked into
+    # its own docstring-mirrored progress write; cross-check that the
+    # workflow's routing target for each intent is a real activity exposed by
+    # the activities module (not a typo'd/removed name).
+    for intent, (activity_fn, _result_key) in wf._SPECIALIST_ACTIVITIES.items():
+        assert getattr(acts, f"handle_{intent}_activity") is activity_fn
+
+
 def test_worker_module_exposes_team_service_entrypoint():
     """team_service/entrypoint.py resolves ``TEAM_TEMPORAL_WORKER_FUNC`` on
     ``TEAM_TEMPORAL_WORKER_MODULE`` — keep that contract pinned so a rename
@@ -142,9 +162,13 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
     monkeypatch.setattr(worker_mod, "is_temporal_enabled", lambda: True)
     captured: dict = {}
 
-    def _fake_start(team, workflows, activities, *, task_queue):
+    def _fake_start(team, workflows, activities, *, task_queue, max_concurrent_activities=4):
         captured.update(
-            team=team, workflows=workflows, activities=activities, task_queue=task_queue
+            team=team,
+            workflows=workflows,
+            activities=activities,
+            task_queue=task_queue,
+            max_concurrent_activities=max_concurrent_activities,
         )
         return True
 
@@ -156,6 +180,10 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
         "workflows": WORKFLOWS,
         "activities": ACTIVITIES,
         "task_queue": TASK_QUEUE,
+        # Pins the pre-migration cap (the hand-rolled worker this replaced
+        # used max_workers=2 / max_concurrent_activities=2) rather than
+        # silently taking start_team_worker's default of 4.
+        "max_concurrent_activities": 2,
     }
 
 

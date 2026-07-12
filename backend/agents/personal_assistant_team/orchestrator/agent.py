@@ -76,13 +76,19 @@ class PersonalAssistantOrchestrator:
             - Returns the same cached ``UserProfileAgent`` for a given
               ``user_id`` across all callers (thread-mode and Temporal
               activities), constructing it at most once.
+
+        Double-checked locking (mirrors ``core.get_orchestrator``'s singleton):
+        the cache-hit path — the overwhelming majority of calls, once a user's
+        agent exists — never acquires the lock, only a dict read.
         """
-        with self._profile_agents_lock:
-            if user_id not in self._user_profile_agents:
-                self._user_profile_agents[user_id] = UserProfileAgent(
-                    self.llm, user_id, self.profile_store
-                )
-            return self._user_profile_agents[user_id]
+        agent = self._user_profile_agents.get(user_id)
+        if agent is None:
+            with self._profile_agents_lock:
+                agent = self._user_profile_agents.get(user_id)
+                if agent is None:
+                    agent = UserProfileAgent(self.llm, user_id, self.profile_store)
+                    self._user_profile_agents[user_id] = agent
+        return agent
 
     def classify_intent(self, message: str) -> Intent:
         """

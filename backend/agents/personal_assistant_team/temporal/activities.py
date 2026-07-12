@@ -26,6 +26,7 @@ activity body (mirrors ``market_research_team.temporal.workflows``).
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Dict, List, Optional
 
 from temporalio import activity
@@ -456,11 +457,12 @@ def generate_response_activity(
           cancelled first.
         - Otherwise returns ``OrchestratorResponse.model_dump()`` with
           ``profile_updates`` set to the given list (matching the thread
-          path's ``response.profile_updates = profile_updates`` assignment),
-          advances the job to progress 100 with status_text "Request
-          completed" (the same intermediate state the thread path reports
-          right after generating the response, before the final COMPLETED
-          write in ``finalize_success_activity``).
+          path's ``response.profile_updates = profile_updates`` assignment).
+          Leaves progress at 85 ("Generating response..."); the next write is
+          ``finalize_success_activity``'s own COMPLETED/100 write, which
+          follows immediately in the workflow — an intermediate
+          progress-100 write here would only be overwritten a moment later,
+          so it is skipped as a redundant job-store round-trip.
         - Re-raises ``LLMNotConfiguredError`` (missing provider fails the run).
     """
     from ..core import get_orchestrator
@@ -476,7 +478,6 @@ def generate_response_activity(
         request, Intent(**intent), action_objs, results
     )
     response.profile_updates = profile_updates or []
-    update_job(job_id, status_text="Request completed", progress=100)
     return response.model_dump()
 
 
@@ -496,7 +497,12 @@ def finalize_success_activity(
           cancel guard in ``api.main._run_assistant_job``).
         - Sends the Slack notification at most once: it is skipped when the job is
           already COMPLETED, so an activity retry (e.g. a worker crash before
-          Temporal recorded completion) cannot double-notify.
+          Temporal recorded completion) cannot double-notify. Delivery is fired
+          on a daemon thread (matching ``api.main._run_assistant_job``'s
+          equivalent notification) rather than awaited inline, so a slow or
+          hanging Slack call cannot hold this activity - and by extension one
+          of the worker's few activity-executor slots - open past the point
+          where the job is already durably marked COMPLETED.
     """
     from ..models import AssistantResponse
     from ..shared.pa_job_store import (
@@ -529,8 +535,14 @@ def finalize_success_activity(
         response=assistant_response.model_dump(),
     )
     # Slack delivery is not idempotent; only notify on the first completion.
+    # Fire-and-forget on a daemon thread so this activity isn't held open by
+    # Slack's network round-trip after the job is already durably COMPLETED.
     if not already_completed:
-        _notify_slack(user_id, message, assistant_response)
+        threading.Thread(
+            target=_notify_slack,
+            args=(user_id, message, assistant_response),
+            daemon=True,
+        ).start()
 
 
 @activity.defn(name="pa_fail_job")

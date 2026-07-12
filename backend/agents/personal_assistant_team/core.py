@@ -13,7 +13,7 @@ thread-mode HTTP handler and Temporal activities, which run in a separate
 ``ThreadPoolExecutor`` and can't hold a live object reference across the
 Temporal activity boundary.
 
-Both runtime modes share the same orchestrator instance:
+Both runtime modes share the same orchestrator instance *within one process*:
 
 - **Thread mode** — ``api.main`` binds its module-level ``orchestrator`` to
   :func:`get_orchestrator`.
@@ -22,6 +22,16 @@ Both runtime modes share the same orchestrator instance:
 
 Sharing one instance means one profile-agent cache, matching the pre-existing
 single-orchestrator behaviour.
+
+Caveat: "one shared instance" is a per-process guarantee, not a per-deployment
+one. ``team_service/entrypoint.py``'s ``TEAM_WORKERS`` spawns that many uvicorn
+*processes* for pa-service, each an independent Python interpreter with its own
+module state — so ``TEAM_WORKERS > 1`` means that many independent
+orchestrators (and profile-agent caches), not a single shared one across the
+deployment. ``docker/docker-compose.yml`` pins pa-service's ``TEAM_WORKERS`` to
+1 by default precisely so this module's guarantee holds; a deployment that
+overrides it to scale out accepts one profile-agent cache per process as a
+known, supported tradeoff, not a bug.
 """
 
 from __future__ import annotations
@@ -52,7 +62,10 @@ def get_orchestrator() -> "PersonalAssistantOrchestrator":
 
     Postconditions:
         - Returns a fully-constructed ``PersonalAssistantOrchestrator``.
-        - Every call returns the *same* instance (one shared profile cache).
+        - Every call returns the *same* instance within this process (one
+          shared profile cache) — see the module docstring's caveat on
+          ``TEAM_WORKERS`` for what that does and doesn't guarantee across a
+          multi-process deployment.
 
     Invariants:
         - The orchestrator is constructed at most once per process

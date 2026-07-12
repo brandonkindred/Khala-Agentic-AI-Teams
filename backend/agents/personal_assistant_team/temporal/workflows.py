@@ -1,11 +1,12 @@
 """Temporal workflow for the personal assistant team.
 
 ``PaAssistantWorkflow`` drives the whole team as a sequence of activities —
-classify intent, run the matching specialist, apply profile updates, generate
-the response, finalize — branching on the classified intent. Job-store
-bookkeeping lives in the activities (see ``activities.py``); the workflow only
-orchestrates and, on a genuine activity failure, records the failure and
-re-raises so the run surfaces as a failed workflow *and* a FAILED job row.
+classify intent, run the matching specialist concurrently with the
+profile-update extraction, generate the response, finalize — branching on the
+classified intent. Job-store bookkeeping lives in the activities (see
+``activities.py``); the workflow only orchestrates and, on a genuine activity
+failure, records the failure and re-raises so the run surfaces as a failed
+workflow *and* a FAILED job row.
 
 Kept separate from the package ``__init__`` and free of top-level
 ``os.getenv``/heavy imports so the temporalio workflow sandbox can re-import
@@ -15,12 +16,13 @@ through ``workflow.unsafe.imports_passed_through()``.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any, Dict, Optional
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import CancelledError
+from temporalio.exceptions import is_cancelled_exception
 
 with workflow.unsafe.imports_passed_through():
     from personal_assistant_team.temporal import activities as _activities
@@ -98,10 +100,17 @@ def _error_message(exc: BaseException) -> str:
     Postconditions:
         - Returns ``str(exc.cause)`` when ``exc`` exposes a non-``None``
           ``cause`` attribute (the ``ActivityError`` case), otherwise
-          ``str(exc)``. Never raises.
+          ``str(exc)``. Never raises, even if that ``str()`` call itself
+          raises (a badly-behaved ``__str__`` on a third-party exception
+          type) — this runs inside an ``except`` handler, so a second
+          exception here would replace the one already being reported.
     """
     cause = getattr(exc, "cause", None)
-    return str(cause) if cause is not None else str(exc)
+    target = cause if cause is not None else exc
+    try:
+        return str(target)
+    except Exception:
+        return f"{type(target).__name__} (error message unavailable)"
 
 
 @workflow.defn(name="PaAssistantWorkflow")
@@ -162,14 +171,35 @@ class PaAssistantWorkflow:
             specialist_activity, result_key = _SPECIALIST_ACTIVITIES.get(
                 primary, (_activities.handle_general_activity, "general")
             )
-            action = await workflow.execute_activity(
-                specialist_activity,
-                args=[job_id, user_id, message, context, intent],
-                start_to_close_timeout=STEP_TIMEOUT,
-                retry_policy=LLM_RETRY,
+            # The specialist handler and the profile-update extraction are
+            # each their own LLM call, and neither's input depends on the
+            # other's output, so they run concurrently rather than back to
+            # back — halving this stretch's wall-clock latency, which is paid
+            # on every single job. Both activities write their own progress
+            # percentage via update_job, so running them concurrently means
+            # those writes can land in either order and the job's reported
+            # progress can visibly jump backwards for a moment (e.g. 70 then
+            # 30). That is a cosmetic, self-correcting UX quirk — the next
+            # write always moves progress forward again — and is judged worth
+            # the real latency savings for every job.
+            action, profile_result = await asyncio.gather(
+                workflow.execute_activity(
+                    specialist_activity,
+                    args=[job_id, user_id, message, context, intent],
+                    start_to_close_timeout=STEP_TIMEOUT,
+                    retry_policy=LLM_RETRY,
+                ),
+                workflow.execute_activity(
+                    _activities.check_profile_updates_activity,
+                    args=[job_id, user_id, message, context],
+                    start_to_close_timeout=STEP_TIMEOUT,
+                    retry_policy=LLM_RETRY,
+                ),
             )
             if action.get("cancelled"):
                 return action
+            if profile_result is None:
+                return {"cancelled": True}
 
             if action.get("agent") == "orchestrator" and action.get("action") == "error":
                 # _run_specialist caught a non-LLM handler exception and
@@ -182,29 +212,6 @@ class PaAssistantWorkflow:
                 results: Dict[str, Any] = {}
             else:
                 results = {result_key: action.get("result", {})}
-
-            # Apply high-confidence profile preferences. This step makes an LLM
-            # call AND mutates the profile store, so it is non-idempotent — cap
-            # it at one attempt like the other LLM steps rather than retrying
-            # (which would re-bill the LLM and re-apply preferences). It
-            # returns None if the job was cancelled meanwhile.
-            #
-            # Kept sequential (not run concurrently with the specialist step
-            # above) even though neither activity's input depends on the
-            # other's output: both activities write their own progress
-            # percentage via update_job, and running them concurrently would
-            # make those writes race, letting the job's reported progress
-            # visibly jump backwards depending on which activity's write lands
-            # last. The extra Temporal round-trip this costs is bounded and
-            # acceptable; a confusing progress readout is not worth avoiding it.
-            profile_result = await workflow.execute_activity(
-                _activities.check_profile_updates_activity,
-                args=[job_id, user_id, message, context],
-                start_to_close_timeout=STEP_TIMEOUT,
-                retry_policy=LLM_RETRY,
-            )
-            if profile_result is None:
-                return {"cancelled": True}
 
             response = await workflow.execute_activity(
                 _activities.generate_response_activity,
@@ -223,13 +230,18 @@ class PaAssistantWorkflow:
             )
             return response
 
-        except CancelledError:
-            # Native Temporal-level workflow cancellation (distinct from the PA
-            # job-store's own is_job_cancelled flag, which activities poll
-            # directly) must propagate and actually cancel the workflow, not be
-            # treated as an application failure.
-            raise
         except Exception as exc:
+            if is_cancelled_exception(exc):
+                # Native Temporal-level workflow cancellation (distinct from the
+                # PA job-store's own is_job_cancelled flag, which activities
+                # poll directly) must propagate and actually cancel the
+                # workflow, not be treated as an application failure. A
+                # cancelled *activity* surfaces here as an ActivityError
+                # wrapping a CancelledError cause, not a bare CancelledError,
+                # so a plain `except CancelledError` (which only matches the
+                # bare case) would misclassify that as an application failure
+                # and incorrectly call fail_job_activity.
+                raise
             # A missing LLM provider, a specialist error, or any other failure
             # inside the decomposed flow (including a genuine workflow-body
             # bug, not just an ActivityError) lands here: record the failure on

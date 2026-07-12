@@ -42,4 +42,9 @@ def start_pa_temporal_worker_thread() -> bool:
         WORKFLOWS,
         ACTIVITIES,
         task_queue=TASK_QUEUE,
+        # Pins the pre-migration cap (the hand-rolled worker this replaced
+        # used `max_workers=2` / `max_concurrent_activities=2`). Explicit here
+        # rather than left to `start_team_worker`'s default of 4, which would
+        # silently double PA's concurrent-activity ceiling.
+        max_concurrent_activities=2,
     )

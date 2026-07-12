@@ -50,9 +50,18 @@ TEAM_TEMPORAL_MODULES: dict[str, str] = {
 def start_all_team_workers(only: Iterable[str] | None = None) -> dict[str, bool]:
     """Start a Temporal worker for every registered team.
 
-    Returns a map of team -> whether a worker thread was started. Teams
-    whose Temporal module fails to import are skipped with an error log
-    rather than blocking startup of the rest.
+    Preconditions:
+        - ``only``, if given, is an iterable of team slugs; slugs not present
+          in ``TEAM_TEMPORAL_MODULES`` are silently ignored (not an error).
+
+    Postconditions:
+        - Returns a map of team -> whether a worker thread was started, one
+          entry per team considered (all of ``TEAM_TEMPORAL_MODULES`` when
+          ``only`` is ``None``, else its intersection with ``only``).
+        - A team whose Temporal module fails to import, or exposes no/empty
+          ``WORKFLOWS``/``ACTIVITIES``, is skipped with an error/warning log
+          and mapped to ``False`` rather than raising and blocking startup of
+          the remaining teams.
     """
     results: dict[str, bool] = {}
     teams = TEAM_TEMPORAL_MODULES.items()
