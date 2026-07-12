@@ -17,6 +17,10 @@ from shared_repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
+from software_engineering_team.shared.team_lead_base import (
+    BaseTeamLead,
+    copy_development_result_fields,
+)
 from software_engineering_team.shared.text_utils import has_section_header, toml_has_section
 from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
 
@@ -530,41 +534,19 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
         return result
 
 
-class BackendCodeV2TeamLead:
+class BackendCodeV2TeamLead(BaseTeamLead):
     """
     Backend Tech Lead Agent: runs setup, verifies the repository, then executes
     the BackendDevelopmentAgent 5-phase workflow.
     """
 
     def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
-        # Per-repo incremental briefing cache, reused across the team lead's
-        # run_workflow calls (the coding-team worker reuses one team lead for all
-        # tasks in a job), so the N tasks of a job re-read only the files each
-        # merge touched instead of re-walking the whole repo N times.
-        self._repo_context_caches: Dict[Path, RepoContextCache] = {}
-
-    def _repo_context_cache_for(self, repo_path: Path) -> RepoContextCache:
-        """Return the incremental briefing cache for ``repo_path``, creating it lazily.
-
-        Preconditions: ``repo_path`` is a directory the development agent will scan.
-        Postconditions: returns a ``RepoContextCache`` configured with the backend
-          repo-briefing contract (extensions / exclude dirs / char budget); the same
-          instance is returned for the same resolved repo across calls. Raises
-          ``AssertionError`` if the precondition is violated (caller bug).
-        """
-        assert repo_path.is_dir(), "repo_path must be a directory"
-        key = repo_path.resolve()
-        cache = self._repo_context_caches.get(key)
-        if cache is None:
-            cache = RepoContextCache(
-                extensions=_BACKEND_REPO_EXTENSIONS,
-                exclude_dirs=_BACKEND_REPO_EXCLUDE_DIRS,
-                max_chars=_BACKEND_REPO_BRIEFING_MAX_CHARS,
-            )
-            self._repo_context_caches[key] = cache
-        return cache
+        super().__init__(
+            llm_client,
+            extensions=_BACKEND_REPO_EXTENSIONS,
+            exclude_dirs=_BACKEND_REPO_EXCLUDE_DIRS,
+            max_chars=_BACKEND_REPO_BRIEFING_MAX_CHARS,
+        )
 
     def run_workflow(
         self,
@@ -595,8 +577,8 @@ class BackendCodeV2TeamLead:
             if job_updater:
                 try:
                     job_updater(**kwargs)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("[%s] job_updater failed: %s", task_id, exc)
 
         # ── Setup phase (Backend Tech Lead) ─────────────────────────────
         result.current_phase = Phase.SETUP
@@ -661,17 +643,5 @@ class BackendCodeV2TeamLead:
             merge_to_development=merge_to_development,
             repo_context_cache=self._repo_context_cache_for(repo_path),
         )
-        result.success = inner.success
-        result.current_phase = inner.current_phase
-        result.iterations_used = inner.iterations_used
-        result.planning_result = inner.planning_result
-        result.execution_result = inner.execution_result
-        result.review_result = inner.review_result
-        result.problem_solving_result = inner.problem_solving_result
-        result.documentation_result = inner.documentation_result
-        result.deliver_result = inner.deliver_result
-        result.final_files = inner.final_files
-        result.summary = inner.summary
-        result.failure_reason = inner.failure_reason
-        result.needs_followup = inner.needs_followup
+        copy_development_result_fields(result, inner)
         return result
