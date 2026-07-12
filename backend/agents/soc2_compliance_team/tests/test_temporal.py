@@ -147,6 +147,31 @@ def test_audit_criterion_activity_rejects_bad_criterion(monkeypatch: pytest.Monk
         ActivityEnvironment().run(amod.audit_criterion_activity, "job-1", "bogus")
 
 
+def test_audit_criterion_activity_missing_snapshot_returns_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling criterion's failure can trigger ``mark_failed_activity`` to
+    delete the context snapshot while this activity is still queued/running
+    (``asyncio.gather`` doesn't cancel siblings). The activity must isolate
+    that into the same fail-closed placeholder as a runtime audit error,
+    rather than raising ``FileNotFoundError`` unhandled."""
+    from soc2_compliance_team import context_snapshot
+    from soc2_compliance_team.temporal import activities as amod
+
+    def _missing(jid: str) -> RepoContext:
+        raise FileNotFoundError(f"no snapshot for {jid}")
+
+    monkeypatch.setattr(context_snapshot, "load_snapshot", _missing)
+
+    out = ActivityEnvironment().run(
+        amod.audit_criterion_activity, "job-1", TSCCategory.AVAILABILITY.value
+    )
+
+    assert out["category"] == TSCCategory.AVAILABILITY.value
+    assert out["compliant"] is False
+    assert "could not be completed" in out["summary"].lower()
+
+
 # ---------------------------------------------------------------------------
 # write_report_activity
 # ---------------------------------------------------------------------------
@@ -204,11 +229,37 @@ def test_mark_failed_activity_writes_failed(monkeypatch: pytest.MonkeyPatch) -> 
     deleted: List[str] = []
     monkeypatch.setattr(context_snapshot, "delete_snapshot", lambda jid: deleted.append(jid))
 
-    ActivityEnvironment().run(amod.mark_failed_activity, "job-1", "kaboom")
+    ActivityEnvironment().run(amod.mark_failed_activity, "job-1", "/repo", "kaboom")
     assert calls[0]["status"] == "failed"
     assert calls[0]["error"] == "kaboom"
+    assert calls[0]["result"]["status"] == "failed"
+    assert calls[0]["result"]["repo_path"] == "/repo"
+    assert calls[0]["result"]["tsc_results"] == []
     # The context snapshot is cleaned up on failure too.
     assert deleted == ["job-1"]
+
+
+def test_mark_failed_activity_preserves_tsc_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When some criteria already completed before a later step failed (e.g.
+    report synthesis), their results are carried into the persisted failure
+    rather than discarded."""
+    from soc2_compliance_team import context_snapshot
+    from soc2_compliance_team.temporal import activities as amod
+
+    calls = _patch_update_job(monkeypatch)
+    monkeypatch.setattr(context_snapshot, "delete_snapshot", lambda jid: None)
+
+    tsc_dicts = [
+        TSCAuditResult(category=c, summary="s", findings=[], compliant=True).model_dump(mode="json")
+        for c in TSCCategory
+    ]
+
+    ActivityEnvironment().run(amod.mark_failed_activity, "job-1", "/repo", "kaboom", tsc_dicts)
+
+    result = calls[0]["result"]
+    assert result["status"] == "failed"
+    assert len(result["tsc_results"]) == len(tsc_dicts)
+    assert {r["category"] for r in result["tsc_results"]} == {c.value for c in TSCCategory}
 
 
 def test_mark_failed_activity_reraises_job_store_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -228,7 +279,7 @@ def test_mark_failed_activity_reraises_job_store_error(monkeypatch: pytest.Monke
 
     monkeypatch.setattr("soc2_compliance_team.api.main._update_job", _boom)
     with pytest.raises(RuntimeError, match="job store down"):
-        ActivityEnvironment().run(amod.mark_failed_activity, "job-1", "kaboom")
+        ActivityEnvironment().run(amod.mark_failed_activity, "job-1", "/repo", "kaboom")
     # Snapshot cleanup still ran before the re-raise.
     assert deleted == ["job-1"]
 

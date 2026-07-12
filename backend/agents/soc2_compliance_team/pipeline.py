@@ -111,6 +111,36 @@ def audit_criterion(category: TSCCategory, context: RepoContext) -> TSCAuditResu
     return _TSC_AGENTS[category].run(llm, context)
 
 
+def criterion_failure_result(category: TSCCategory, reason: str) -> TSCAuditResult:
+    """Build the fail-closed placeholder for a criterion that could not be audited.
+
+    Shared by :func:`audit_criterion_safe` (a runtime audit error) and the
+    Temporal activity layer (a missing/deleted context snapshot — see
+    ``temporal/activities.py::audit_criterion_activity``) so both failure
+    origins produce an identical, actionable placeholder instead of raising.
+
+    Postconditions:
+        - Returns a non-compliant ``TSCAuditResult`` for ``category`` carrying
+          a synthetic HIGH finding describing ``reason``, so the failure is
+          visible in the structured report (``findings_by_tsc``), not only in
+          free-text summary.
+    """
+    return TSCAuditResult(
+        category=category,
+        summary=f"Audit for {category.value} could not be completed: {reason}",
+        findings=[
+            TSCFinding(
+                severity=FindingSeverity.HIGH,
+                category=category,
+                title=f"{category.value} audit could not be completed",
+                description=f"The audit for this criterion failed to run: {reason}",
+                recommendation="Re-run the SOC2 audit for this criterion.",
+            )
+        ],
+        compliant=False,
+    )
+
+
 def audit_criterion_safe(category: TSCCategory, context: RepoContext) -> TSCAuditResult:
     """Audit one criterion, isolating *runtime* failures into a placeholder result.
 
@@ -137,23 +167,7 @@ def audit_criterion_safe(category: TSCCategory, context: RepoContext) -> TSCAudi
         return audit_criterion(category, context)
     except Exception as e:  # noqa: BLE001 - isolate a single criterion's runtime failure
         logger.exception("TSC audit failed for %s", category.value)
-        # Fail-closed: an un-assessable criterion is non-compliant, not a pass.
-        # Carry a synthetic finding so the failure is visible in the structured
-        # report (``findings_by_tsc``), not only in the free-text summary.
-        return TSCAuditResult(
-            category=category,
-            summary=f"Audit for {category.value} could not be completed: {e}",
-            findings=[
-                TSCFinding(
-                    severity=FindingSeverity.HIGH,
-                    category=category,
-                    title=f"{category.value} audit could not be completed",
-                    description=f"The audit for this criterion failed to run: {e}",
-                    recommendation="Re-run the SOC2 audit for this criterion.",
-                )
-            ],
-            compliant=False,
-        )
+        return criterion_failure_result(category, str(e))
 
 
 def run_all_criteria(context: RepoContext) -> List[TSCAuditResult]:
@@ -188,6 +202,32 @@ def write_report(
           otherwise the next-steps document. Performs exactly one LLM call.
     """
     return ReportWriterAgent().run(get_client(_AGENT_KEY), str(repo_path), tsc_results)
+
+
+def failed_result(
+    repo_path: str | Path,
+    error: str,
+    tsc_results: Optional[List[TSCAuditResult]] = None,
+) -> SOC2AuditResult:
+    """Build a ``status="failed"`` result, preserving any completed criterion audits.
+
+    Both drivers use this at every failure point (repo load, criteria fan-out,
+    report synthesis) so a failure *after* the criteria audits already
+    succeeded — e.g. the report-writer step itself fails — doesn't discard
+    real, already-paid-for ``TSCAuditResult`` objects; they're carried in
+    ``tsc_results`` instead of being silently dropped.
+
+    Postconditions:
+        - Returns ``SOC2AuditResult(status="failed", tsc_results=tsc_results or
+          [], has_findings=False, error=error)``.
+    """
+    return SOC2AuditResult(
+        status="failed",
+        repo_path=str(repo_path),
+        tsc_results=tsc_results or [],
+        has_findings=False,
+        error=error,
+    )
 
 
 def assemble_result(

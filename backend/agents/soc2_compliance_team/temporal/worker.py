@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 
 from shared_temporal import is_temporal_enabled, start_team_worker
-from soc2_compliance_team.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
+from soc2_compliance_team.temporal import ACTIVITIES, WORKFLOWS, resolve_task_queue
 
 logger = logging.getLogger(__name__)
 
@@ -28,15 +28,26 @@ def start_soc2_temporal_worker_thread() -> bool:
     Postconditions:
         - Returns ``True`` if a worker thread is running (or already running),
           ``False`` when Temporal is disabled (``TEMPORAL_ADDRESS`` unset).
+        - On a fresh start, also sweeps stale context snapshots (best-effort,
+          never raises) — a snapshot orphaned by the crash that took down a
+          prior worker is otherwise only cleaned up by an unrelated future
+          job's ``save_snapshot`` call; sweeping on boot closes that gap
+          promptly.
 
     Safe to call multiple times — the underlying ``start_team_worker`` is
     idempotent per team.
     """
     if not is_temporal_enabled():
         return False
+    try:
+        from soc2_compliance_team.context_snapshot import purge_stale_snapshots
+
+        purge_stale_snapshots()
+    except Exception:
+        logger.warning("Could not purge stale SOC2 context snapshots on worker boot", exc_info=True)
     return start_team_worker(
         TEAM_KEY,
         WORKFLOWS,
         ACTIVITIES,
-        task_queue=TASK_QUEUE,
+        task_queue=resolve_task_queue(),
     )

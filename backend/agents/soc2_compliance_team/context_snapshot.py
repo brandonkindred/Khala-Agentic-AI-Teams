@@ -66,13 +66,17 @@ def _snapshot_dir() -> Path:
     Postconditions:
         - Returns an existing, owner-only (``0700``) directory under
           ``AGENT_CACHE`` (namespaced by team) when that env var is set, else
-          under the system temp dir.
+          under the system temp dir. ``mode=`` sets permissions atomically at
+          creation time (no window where a freshly-created directory is
+          briefly more permissive); the follow-up ``chmod`` is a best-effort
+          defensive re-assertion for a directory that already existed with
+          different permissions (e.g. from before this hardening was added).
     """
     base = os.getenv("AGENT_CACHE", "").strip()
     root = (
         Path(base) / _TEAM / _SUBDIR if base else Path(tempfile.gettempdir()) / f"{_TEAM}_{_SUBDIR}"
     )
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(parents=True, mode=_DIR_MODE, exist_ok=True)
     try:
         root.chmod(_DIR_MODE)
     except OSError:
@@ -124,14 +128,23 @@ def save_snapshot(job_id: str, context: RepoContext) -> str:
         - ``context`` is the ``RepoContext`` loaded once for this job.
     Postconditions:
         - The snapshot is written owner-only (``0600``), overwriting any prior
-          one for ``job_id``; returns its path as a string. Opportunistically
+          one for ``job_id``; returns its path as a string. The file is
+          created via ``os.open`` with an explicit mode (permissions set
+          atomically at creation time — no window where a freshly-created
+          snapshot is briefly more permissive); the follow-up ``chmod`` is a
+          best-effort defensive re-assertion for a *pre-existing* file whose
+          permissions predate this hardening (``O_CREAT``'s mode argument is
+          only applied when the file doesn't already exist). Opportunistically
           purges snapshots older than :data:`_STALE_TTL_SECONDS` left behind by
           a prior crashed run.
     """
     directory = _snapshot_dir()
     _purge_stale_snapshots(directory)
     path = directory / f"{job_id}.json"
-    path.write_text(context.model_dump_json(), encoding="utf-8")
+    data = context.model_dump_json().encode("utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _FILE_MODE)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
     try:
         path.chmod(_FILE_MODE)
     except OSError:
@@ -162,3 +175,22 @@ def delete_snapshot(job_id: str) -> None:
         snapshot_path(job_id).unlink(missing_ok=True)
     except OSError:
         logger.warning("Could not delete SOC2 context snapshot for job %s", job_id, exc_info=True)
+
+
+def purge_stale_snapshots() -> None:
+    """Best-effort sweep of the snapshot directory for entries older than the TTL.
+
+    A snapshot orphaned by a crashed worker (one that never reached
+    ``write_report_activity``/``mark_failed_activity``, so
+    :func:`delete_snapshot` never ran) is normally only cleaned up
+    opportunistically by the *next* job's :func:`save_snapshot` call. Call
+    this on every Temporal worker boot too (see
+    ``temporal/worker.py::start_soc2_temporal_worker_thread``), so an orphan
+    left by the crash that took the worker down is cleaned up promptly on
+    restart rather than waiting for an unrelated future job.
+
+    Postconditions:
+        - Never raises (delegates to :func:`_purge_stale_snapshots`, itself
+          best-effort).
+    """
+    _purge_stale_snapshots(_snapshot_dir())

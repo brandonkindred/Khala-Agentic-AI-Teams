@@ -12,6 +12,8 @@ during workflow registration.
 
 from __future__ import annotations
 
+import os
+
 from soc2_compliance_team.temporal.activities import (
     audit_criterion_activity,
     load_repo_activity,
@@ -30,6 +32,25 @@ ACTIVITIES = [
 TASK_QUEUE = "soc2_compliance-queue"
 WORKFLOW_ID_PREFIX = "soc2-audit-"
 
+
+def resolve_task_queue() -> str:
+    """The SOC2 task queue name, honoring an optional operator override.
+
+    Defined here (not called here) so it stays a plain function definition at
+    import time — safe under the temporalio sandbox, which only forbids
+    *calling* restricted functions like ``os.getenv`` during workflow replay,
+    not defining a function that would call one if invoked. Callers
+    (``temporal/worker.py``, ``temporal/start_workflow.py``) call this lazily
+    at worker-boot / dispatch time, never from workflow code.
+
+    Postconditions:
+        - Returns ``TEMPORAL_TASK_QUEUE_SOC2`` (stripped) if set and non-empty,
+          else the default ``TASK_QUEUE``.
+    """
+    override = os.getenv("TEMPORAL_TASK_QUEUE_SOC2", "").strip()
+    return override or TASK_QUEUE
+
+
 __all__ = [
     "ACTIVITIES",
     "Soc2AuditWorkflow",
@@ -39,5 +60,6 @@ __all__ = [
     "audit_criterion_activity",
     "load_repo_activity",
     "mark_failed_activity",
+    "resolve_task_queue",
     "write_report_activity",
 ]

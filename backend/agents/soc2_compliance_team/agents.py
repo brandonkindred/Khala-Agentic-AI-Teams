@@ -204,9 +204,15 @@ class ReportWriterAgent:
         repo_path: str,
         tsc_results: List[TSCAuditResult],
     ) -> tuple[SOC2ComplianceReport | None, NextStepsDocument | None]:
-        """
-        Returns (compliance_report, next_steps_document).
-        Exactly one will be non-None: compliance_report if has_findings else next_steps_document.
+        """Synthesize the fan-in report from all TSC audit results.
+
+        Preconditions:
+            - ``tsc_results`` is the list of per-criterion audit results.
+        Postconditions:
+            - Returns ``(compliance_report, next_steps_document)`` with exactly
+              one element non-None: the compliance report when any result is
+              non-compliant or has a critical/high finding, otherwise the
+              next-steps document. Performs exactly one LLM call.
         """
         has_findings = any(
             not r.compliant

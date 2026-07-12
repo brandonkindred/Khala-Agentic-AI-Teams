@@ -11,13 +11,17 @@ reconstructed with ``model_validate``.
 The activities own the durable job-store bookkeeping (via the ``JobServiceClient``
 in :mod:`soc2_compliance_team.api.main`): ``load_repo_activity`` marks the job
 running, ``write_report_activity`` marks it completed with the result, and
-``mark_failed_activity`` marks it failed.
+``mark_failed_activity`` marks it failed. Terminal (completed/failed) writes go
+through ``_update_job_terminal`` so a later write can never silently clobber a
+job that's already reached a terminal status — e.g. a lost activity-completion
+ack causing Temporal to retry/fail an activity whose local job-store write
+already succeeded.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from temporalio import activity
 
@@ -70,18 +74,34 @@ def audit_criterion_activity(job_id: str, criterion: str) -> Dict[str, Any]:
 
     Preconditions:
         - ``criterion`` is a ``TSCCategory`` value string.
-        - A context snapshot for ``job_id`` exists (from
-          :func:`load_repo_activity`).
     Postconditions:
         - Returns a ``TSCAuditResult`` as a JSON-native dict. Per-criterion audit
           failures are isolated into a non-compliant placeholder (matching thread
-          mode), so this activity does not raise on an audit error.
+          mode), so this activity does not raise on an audit error. If the
+          context snapshot is missing — a sibling criterion's failure can
+          trigger ``mark_failed_activity`` to delete it while this activity is
+          still queued or running, since ``asyncio.gather`` in the workflow
+          doesn't cancel siblings when one fails — that is ALSO isolated into
+          the same kind of fail-closed placeholder rather than raising an
+          unhandled exception.
     """
     from soc2_compliance_team import context_snapshot, pipeline
     from soc2_compliance_team.models import TSCCategory
 
-    ctx = context_snapshot.load_snapshot(job_id)
-    result = pipeline.audit_criterion_safe(TSCCategory(criterion), ctx)
+    category = TSCCategory(criterion)
+    try:
+        ctx = context_snapshot.load_snapshot(job_id)
+    except OSError as e:
+        logger.warning(
+            "SOC2 context snapshot unavailable for job %s criterion %s "
+            "(the job is likely already failing)",
+            job_id,
+            criterion,
+        )
+        return pipeline.criterion_failure_result(
+            category, f"context snapshot unavailable: {e}"
+        ).model_dump(mode="json")
+    result = pipeline.audit_criterion_safe(category, ctx)
     return result.model_dump(mode="json")
 
 
@@ -96,11 +116,16 @@ def write_report_activity(
           from the per-criterion activities.
     Postconditions:
         - Writes the assembled ``SOC2AuditResult`` to the job store with status
-          ``completed`` and returns it as a JSON-native dict. Raises (after
-          logging) if report synthesis fails.
+          ``completed`` (via ``_update_job_terminal``, so this can't clobber a
+          job already marked ``failed`` by a concurrent
+          ``mark_failed_activity``) and returns it as a JSON-native dict.
+          Raises (after logging) if report synthesis fails — the workflow's
+          own except-block then calls ``mark_failed_activity`` with these
+          ``tsc_results`` preserved, rather than this activity persisting a
+          failure itself.
     """
     from soc2_compliance_team import context_snapshot, pipeline
-    from soc2_compliance_team.api.main import _update_job
+    from soc2_compliance_team.api.main import _update_job, _update_job_terminal
     from soc2_compliance_team.models import TSCAuditResult
 
     try:
@@ -108,7 +133,7 @@ def write_report_activity(
         results = [TSCAuditResult.model_validate(d) for d in tsc_results]
         compliance_report, next_steps_document = pipeline.write_report(repo_path, results)
         audit = pipeline.assemble_result(repo_path, results, compliance_report, next_steps_document)
-        _update_job(
+        _update_job_terminal(
             job_id,
             status="completed",
             current_stage="Completed",
@@ -123,27 +148,50 @@ def write_report_activity(
 
 
 @activity.defn(name="soc2_mark_failed")
-def mark_failed_activity(job_id: str, error: str) -> None:
+def mark_failed_activity(
+    job_id: str,
+    repo_path: str,
+    error: str,
+    tsc_results: Optional[List[Dict[str, Any]]] = None,
+) -> None:
     """Mark the job failed after a workflow-level failure.
 
     Preconditions:
         - ``job_id`` is an existing job; ``error`` is a human-readable message.
+        - ``tsc_results``, when provided, is the list of serialized
+          ``TSCAuditResult`` dicts from criterion activities that had already
+          completed before the failure (e.g. the report-writer step itself
+          failed) — preserved in the persisted failure result instead of being
+          discarded.
     Postconditions:
-        - Job status is set to ``failed`` with ``error`` recorded and the context
-          snapshot is dropped. A job-store error is logged and re-raised (after
-          snapshot cleanup) so Temporal retries this activity per
-          ``MARK_FAILED_RETRY_POLICY`` instead of silently leaving the job
-          non-terminal; the workflow's own except-around-execute_activity (see
-          ``workflows.py``) already guarantees the *original* audit failure is
-          the one that ultimately propagates even if this activity's retries are
-          exhausted.
+        - Job status is set to ``failed`` (via ``_update_job_terminal``, so an
+          already-``completed`` job — e.g. from a ``write_report_activity``
+          whose local write succeeded but whose Temporal completion ack was
+          lost — is never clobbered back to ``failed``) with ``error`` and,
+          when given, the preserved ``tsc_results`` recorded in ``result``.
+          The context snapshot is dropped. A job-store error is logged and
+          re-raised (after snapshot cleanup) so Temporal retries this
+          activity per ``MARK_FAILED_RETRY_POLICY`` instead of silently
+          leaving the job non-terminal; the workflow's own
+          except-around-execute_activity (see ``workflows.py``) already
+          guarantees the *original* audit failure is the one that ultimately
+          propagates even if this activity's retries are exhausted.
     """
-    from soc2_compliance_team import context_snapshot
-    from soc2_compliance_team.api.main import _update_job
+    from soc2_compliance_team import context_snapshot, pipeline
+    from soc2_compliance_team.api.main import _update_job_terminal
+    from soc2_compliance_team.models import TSCAuditResult
 
     context_snapshot.delete_snapshot(job_id)
+    results = [TSCAuditResult.model_validate(d) for d in tsc_results] if tsc_results else None
+    failed = pipeline.failed_result(repo_path, error, tsc_results=results)
     try:
-        _update_job(job_id, status="failed", current_stage="Failed", error=error)
+        _update_job_terminal(
+            job_id,
+            status="failed",
+            current_stage="Failed",
+            error=error,
+            result=failed.model_dump(),
+        )
     except Exception:
         logger.exception("SOC2 mark_failed activity could not update job %s", job_id)
         raise

@@ -10,12 +10,47 @@ the identical logic.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
+from typing import Callable, TypeVar
 
 from . import pipeline
 from .models import SOC2AuditResult
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+# Thread-mode has no Temporal `start_to_close_timeout` to bound a stalled LLM
+# call, so these mirror the equivalent Temporal-mode ceilings
+# (temporal/workflows.py's AUDIT_TIMEOUT / REPORT_TIMEOUT) rather than the
+# tighter 180s the deleted Strands graph used, which risked false timeouts on
+# legitimately long (e.g. thinking-mode) LLM calls.
+_CRITERIA_TIMEOUT_SECONDS = 30 * 60
+_REPORT_TIMEOUT_SECONDS = 30 * 60
+
+
+def _run_with_timeout(fn: Callable[[], T], timeout_seconds: float, timeout_message: str) -> T:
+    """Run ``fn()`` in a worker thread with a hard wall-clock deadline.
+
+    Postconditions:
+        - Returns ``fn()``'s result if it completes within ``timeout_seconds``.
+        - Raises ``TimeoutError(timeout_message)`` if it doesn't. Python has no
+          safe way to forcibly kill a running thread, so the underlying call
+          keeps running in the background and its result is discarded — this
+          bounds the CALLER's wait (unblocking the request), not the
+          in-flight LLM call itself (which is separately bounded by
+          ``llm_service``'s own per-request timeout).
+    """
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="soc2-pipeline-step")
+    future = pool.submit(fn)
+    try:
+        return future.result(timeout=timeout_seconds)
+    except FutureTimeoutError:
+        raise TimeoutError(timeout_message) from None
+    finally:
+        pool.shutdown(wait=False)
 
 
 class SOC2AuditOrchestrator:
@@ -39,7 +74,10 @@ class SOC2AuditOrchestrator:
         Postconditions:
             - Returns a ``SOC2AuditResult``: ``status="completed"`` with
               per-criterion results and a report/next-steps document on success,
-              or ``status="failed"`` with ``error`` set on failure.
+              or ``status="failed"`` with ``error`` set on failure. A failure
+              after the criteria audits already succeeded (report synthesis
+              failed or timed out) still carries those completed results
+              rather than discarding them.
         """
         repo_path = Path(repo_path).resolve()
         logger.info("SOC2 audit starting for repo: %s", repo_path)
@@ -48,28 +86,27 @@ class SOC2AuditOrchestrator:
             context = pipeline.load_context(repo_path)
         except Exception as e:
             logger.exception("Failed to load repo context")
-            return SOC2AuditResult(
-                status="failed",
-                repo_path=str(repo_path),
-                tsc_results=[],
-                has_findings=False,
-                error=str(e),
-            )
+            return pipeline.failed_result(repo_path, str(e))
 
         try:
-            tsc_results = pipeline.run_all_criteria(context)
-            compliance_report, next_steps_document = pipeline.write_report(
-                str(repo_path), tsc_results
+            tsc_results = _run_with_timeout(
+                lambda: pipeline.run_all_criteria(context),
+                _CRITERIA_TIMEOUT_SECONDS,
+                f"SOC2 criteria audit exceeded {_CRITERIA_TIMEOUT_SECONDS}s",
             )
         except Exception as e:
-            logger.exception("SOC2 audit pipeline failed")
-            return SOC2AuditResult(
-                status="failed",
-                repo_path=str(repo_path),
-                tsc_results=[],
-                has_findings=False,
-                error=str(e),
+            logger.exception("SOC2 criteria audit failed")
+            return pipeline.failed_result(repo_path, str(e))
+
+        try:
+            compliance_report, next_steps_document = _run_with_timeout(
+                lambda: pipeline.write_report(str(repo_path), tsc_results),
+                _REPORT_TIMEOUT_SECONDS,
+                f"SOC2 report synthesis exceeded {_REPORT_TIMEOUT_SECONDS}s",
             )
+        except Exception as e:
+            logger.exception("SOC2 report synthesis failed")
+            return pipeline.failed_result(repo_path, str(e), tsc_results=tsc_results)
 
         return pipeline.assemble_result(
             str(repo_path), tsc_results, compliance_report, next_steps_document

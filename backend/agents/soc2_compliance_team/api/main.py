@@ -125,6 +125,48 @@ def _update_job(job_id: str, **fields: Any) -> None:
     _job_manager.update_job(job_id, **fields)
 
 
+_TERMINAL_STATUSES = frozenset({"completed", "failed"})
+
+
+def _update_job_terminal(job_id: str, status: str, **fields: Any) -> None:
+    """Write a terminal job status, unless the job is already terminal.
+
+    Two independent paths can race to write a terminal status for the same
+    job: ``write_report_activity``'s ``completed`` write can land just before
+    a lost activity-completion ack causes Temporal to treat the activity as
+    failed (triggering ``mark_failed_activity``); or ``run_audit``'s
+    dispatch-failure ``failed`` write can land just before a workflow that
+    actually started server-side (despite a local dispatch timeout) later
+    completes. Whichever terminal status is written first must stick — a
+    later terminal write must not silently clobber it.
+
+    Preconditions:
+        - ``status`` is ``"completed"`` or ``"failed"``.
+    Postconditions:
+        - Updates the job to ``status`` with ``fields`` unless the job is
+          already ``completed``/``failed``, in which case this is a no-op
+          (logged). If the current status can't be determined (job-store read
+          error), falls back to writing anyway — this guard is a best-effort
+          mitigation, not a distributed lock, so it never blocks a genuine
+          terminal write it can't evaluate.
+    """
+    assert status in _TERMINAL_STATUSES, f"not a terminal status: {status}"
+    try:
+        job = _job_manager.get_job(job_id)
+    except Exception:
+        logger.warning("Could not read job %s to check terminal status", job_id, exc_info=True)
+        job = None
+    if job and job.get("status") in _TERMINAL_STATUSES:
+        logger.warning(
+            "Skipping terminal write status=%s for job %s: already %s",
+            status,
+            job_id,
+            job.get("status"),
+        )
+        return
+    _update_job(job_id, status=status, **fields)
+
+
 def mark_all_running_jobs_failed(reason: str) -> None:
     """Mark all pending or running SOC2 audit jobs as failed (e.g. on server shutdown)."""
     try:
@@ -139,7 +181,7 @@ def _run_audit_job(job_id: str, repo_path: str) -> None:
         orchestrator = SOC2AuditOrchestrator()
         _update_job(job_id, current_stage="Running TSC audits")
         result = orchestrator.run(repo_path)
-        _update_job(
+        _update_job_terminal(
             job_id,
             status="completed",
             current_stage="Completed",
@@ -147,7 +189,7 @@ def _run_audit_job(job_id: str, repo_path: str) -> None:
         )
     except Exception as e:
         logger.exception("Audit job %s failed", job_id)
-        _update_job(
+        _update_job_terminal(
             job_id,
             status="failed",
             error=str(e),
@@ -162,7 +204,23 @@ def _run_audit_job(job_id: str, repo_path: str) -> None:
     description="Starts a background audit of the repository at repo_path. Returns job_id to poll for status.",
 )
 def run_audit(request: RunAuditRequest) -> RunAuditResponse:
-    """Start a SOC2 compliance audit on the given repository path."""
+    """Start a SOC2 compliance audit on the given repository path.
+
+    Preconditions:
+        - ``request.repo_path`` refers to an existing local directory.
+    Postconditions:
+        - Creates a job row (``status="pending"``) and returns its ``job_id``
+          for polling via ``GET /soc2-audit/status/{job_id}``. Dispatches the
+          audit to Temporal when enabled, else to a background thread.
+        - Raises ``HTTPException(400)`` if ``repo_path`` isn't a directory.
+        - Raises ``HTTPException(503)`` if Temporal dispatch fails; the job is
+          marked ``failed`` on a best-effort basis (via
+          :func:`_update_job_terminal`, so this write can't silently clobber
+          a terminal status the workflow already wrote, and a workflow that
+          actually started despite the dispatch error can't later clobber
+          this ``failed`` write back to ``completed``) rather than left
+          orphaned in ``pending``.
+    """
     repo_path = Path(request.repo_path).expanduser().resolve()
     if not repo_path.is_dir():
         raise HTTPException(
@@ -191,7 +249,7 @@ def run_audit(request: RunAuditRequest) -> RunAuditResponse:
             # the 503 we owe the client.
             logger.exception("Failed to dispatch SOC2 audit workflow for job %s", job_id)
             try:
-                _update_job(job_id, status="failed", current_stage="Failed", error=str(e))
+                _update_job_terminal(job_id, status="failed", current_stage="Failed", error=str(e))
             except Exception:
                 logger.exception("Also failed to mark job %s failed after dispatch error", job_id)
             raise HTTPException(status_code=503, detail=f"Failed to start audit workflow: {e}")

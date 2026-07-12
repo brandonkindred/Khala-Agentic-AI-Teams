@@ -12,9 +12,9 @@ import logging
 
 from shared_temporal import start_workflow_sync
 from soc2_compliance_team.temporal import (
-    TASK_QUEUE,
     WORKFLOW_ID_PREFIX,
     Soc2AuditWorkflow,
+    resolve_task_queue,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,6 @@ def start_audit_workflow(job_id: str, repo_path: str) -> None:
         job_id,
         repo_path,
         workflow_id=workflow_id,
-        task_queue=TASK_QUEUE,
+        task_queue=resolve_task_queue(),
     )
     logger.info("Started Soc2AuditWorkflow id=%s", workflow_id)

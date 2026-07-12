@@ -14,46 +14,86 @@ Guards the two failure modes the shared wiring is designed to avoid:
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import sys
 import unittest.mock as mock
 
 
-def _purge(prefix: str) -> None:
-    for name in list(sys.modules):
-        if name == prefix or name.startswith(prefix + "."):
-            del sys.modules[name]
+@contextlib.contextmanager
+def _purged(prefix: str):
+    """Temporarily evict modules under ``prefix`` from ``sys.modules``, then
+    restore the exact pre-purge module objects — and the parent-package
+    attributes Python's import machinery points at them — afterward.
+
+    A bare delete-with-no-restore would leave the *reimported* copies in
+    ``sys.modules`` for the rest of the test session: any code importing
+    ``soc2_compliance_team.temporal`` (or a submodule) after this test would
+    get a second, distinct set of module/class objects — e.g. a second
+    ``Soc2AuditWorkflow`` class distinct from the one other test modules
+    already hold a reference to — which can produce confusing identity/type
+    mismatches in unrelated tests depending on collection or xdist ordering.
+
+    Restoring the ``sys.modules`` dict entries alone is not sufficient either:
+    importing a submodule also sets it as an attribute on its parent package
+    (``parent.child = submodule``), and a later ``import_module`` call on an
+    already-cached name short-circuits without re-running that assignment. So
+    a stale parent attribute set during this context (pointing at a module
+    object that ``sys.modules`` no longer considers current) can survive the
+    dict restore — e.g. breaking a later ``monkeypatch.setattr("a.b.c", ...)``
+    attribute-chain resolution, which walks parent attributes, not
+    ``sys.modules``, to get from ``a.b`` to ``c``.
+    """
+    saved = {
+        name: mod
+        for name, mod in sys.modules.items()
+        if name == prefix or name.startswith(prefix + ".")
+    }
+    for name in saved:
+        del sys.modules[name]
+    try:
+        yield
+    finally:
+        for name in list(sys.modules):
+            if name == prefix or name.startswith(prefix + "."):
+                del sys.modules[name]
+        sys.modules.update(saved)
+        for name, mod in saved.items():
+            parent_name, _, leaf = name.rpartition(".")
+            parent = sys.modules.get(parent_name)
+            if parent is not None:
+                setattr(parent, leaf, mod)
 
 
 def test_importing_temporal_package_does_not_call_start_team_worker():
     """Loading the package must NOT spin up a worker thread."""
     import shared_temporal
 
-    _purge("soc2_compliance_team.temporal")
-    with mock.patch.object(shared_temporal, "start_team_worker") as patched:
-        importlib.import_module("soc2_compliance_team.temporal")
-        importlib.import_module("soc2_compliance_team.temporal.workflows")
-        importlib.import_module("soc2_compliance_team.temporal.start_workflow")
-        assert patched.call_count == 0, (
-            f"Module-level start_team_worker bootstrap re-introduced "
-            f"(call count = {patched.call_count})."
-        )
+    with _purged("soc2_compliance_team.temporal"):
+        with mock.patch.object(shared_temporal, "start_team_worker") as patched:
+            importlib.import_module("soc2_compliance_team.temporal")
+            importlib.import_module("soc2_compliance_team.temporal.workflows")
+            importlib.import_module("soc2_compliance_team.temporal.start_workflow")
+            assert patched.call_count == 0, (
+                f"Module-level start_team_worker bootstrap re-introduced "
+                f"(call count = {patched.call_count})."
+            )
 
 
 def test_workflows_and_package_do_not_call_os_getenv_at_import_time():
     """The workflow module + package __init__ are replayed by the temporalio
     sandbox during workflow registration; neither may invoke ``os.getenv``."""
-    _purge("soc2_compliance_team.temporal")
     import os
 
-    importlib.import_module("soc2_compliance_team.temporal.activities")
-    importlib.import_module("soc2_compliance_team.temporal.workflows")
-    with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
-        importlib.import_module("soc2_compliance_team.temporal")
-        assert spy.call_count == 0, (
-            f"soc2_compliance_team.temporal.__init__ called os.getenv "
-            f"{spy.call_count} time(s) at import — this trips the temporalio sandbox."
-        )
+    with _purged("soc2_compliance_team.temporal"):
+        importlib.import_module("soc2_compliance_team.temporal.activities")
+        importlib.import_module("soc2_compliance_team.temporal.workflows")
+        with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
+            importlib.import_module("soc2_compliance_team.temporal")
+            assert spy.call_count == 0, (
+                f"soc2_compliance_team.temporal.__init__ called os.getenv "
+                f"{spy.call_count} time(s) at import — this trips the temporalio sandbox."
+            )
 
 
 def test_worker_module_exposes_team_service_entrypoint():

@@ -1,6 +1,40 @@
 import sys
 from pathlib import Path
+from typing import Any, Dict, List
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+class FakeLLM:
+    """Minimal LLM stand-in returning a canned JSON dict per call.
+
+    Shared by ``test_agents.py`` (the class-based TSC/report-writer agents)
+    and ``test_pipeline.py`` (the pipeline steps that wrap them) — both stub
+    the LLM the same way, so a single fake keeps their expectations of the
+    client contract (``complete_json``/``complete``/``get_max_context_tokens``)
+    from drifting apart.
+    """
+
+    def __init__(self, response: Dict[str, Any], ctx_tokens: int = 16384) -> None:
+        self._response = response
+        self._ctx_tokens = ctx_tokens
+        self.calls: List[Dict[str, Any]] = []
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float | None = None,
+        think: bool | None = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        self.calls.append({"prompt": prompt, "temperature": temperature, "think": think, **kwargs})
+        return self._response
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        return prompt[: kwargs.get("max_chars", 100)] if "max_chars" in kwargs else prompt
+
+    def get_max_context_tokens(self) -> int:
+        return self._ctx_tokens

@@ -8,7 +8,7 @@ patching ``pipeline.get_client`` so no model is invoked.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import pytest
 
@@ -23,20 +23,7 @@ from soc2_compliance_team.models import (
     TSCFinding,
 )
 
-
-class _FakeLLM:
-    """Minimal LLM stand-in returning a canned JSON dict per call."""
-
-    def __init__(self, response: Dict[str, Any]) -> None:
-        self._response = response
-        self.calls: List[Dict[str, Any]] = []
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        self.calls.append({"prompt": prompt, **kwargs})
-        return self._response
-
-    def get_max_context_tokens(self) -> int:
-        return 16384
+from .conftest import FakeLLM as _FakeLLM
 
 
 def _ctx() -> RepoContext:

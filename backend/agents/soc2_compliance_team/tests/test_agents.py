@@ -28,35 +28,11 @@ from soc2_compliance_team.models import (
     TSCCategory,
 )
 
+from .conftest import FakeLLM as _FakeLLM
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-class _FakeLLM:
-    """Minimal LLM stand-in capturing prompts and returning canned JSON."""
-
-    def __init__(self, response: Dict[str, Any], ctx_tokens: int = 16384) -> None:
-        self._response = response
-        self._ctx_tokens = ctx_tokens
-        self.calls: list[Dict[str, Any]] = []
-
-    def complete_json(
-        self,
-        prompt: str,
-        *,
-        temperature: float | None = None,
-        think: bool | None = None,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        self.calls.append({"prompt": prompt, "temperature": temperature, "think": think, **kwargs})
-        return self._response
-
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        return prompt[: kwargs.get("max_chars", 100)] if "max_chars" in kwargs else prompt
-
-    def get_max_context_tokens(self) -> int:
-        return self._ctx_tokens
 
 
 def _ctx(**overrides: Any) -> RepoContext:

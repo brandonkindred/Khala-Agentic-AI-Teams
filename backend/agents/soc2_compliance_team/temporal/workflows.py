@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -33,19 +33,31 @@ with workflow.unsafe.imports_passed_through():
 # ``strands`` / ``llm_service``, which the temporalio sandbox replays on registration.
 _TSC_CRITERIA = [c.value for c in TSCCategory]
 
-# Per-activity timeouts.
+# Per-activity execution timeouts (time once a worker starts running the
+# activity) and schedule-to-close timeouts (total time including queue wait,
+# so a scheduled-but-never-polled activity — e.g. the worker crashed
+# post-boot with nothing to restart it — still eventually fails the job
+# instead of hanging indefinitely).
 LOAD_TIMEOUT = timedelta(minutes=10)
+LOAD_SCHEDULE_TO_CLOSE_TIMEOUT = timedelta(minutes=20)
 AUDIT_TIMEOUT = timedelta(minutes=30)
+AUDIT_SCHEDULE_TO_CLOSE_TIMEOUT = timedelta(hours=1)
 REPORT_TIMEOUT = timedelta(minutes=30)
+REPORT_SCHEDULE_TO_CLOSE_TIMEOUT = timedelta(hours=1)
 MARK_FAILED_TIMEOUT = timedelta(minutes=1)
+MARK_FAILED_SCHEDULE_TO_CLOSE_TIMEOUT = timedelta(minutes=15)
 
 # Deterministic repo I/O may be retried; LLM steps are non-idempotent (retrying
-# duplicates cost), so they run once.
+# duplicates cost), so they run once. ValueError from a bad repo_path is
+# permanently fatal (identical on every retry), so it's excluded from the
+# retry — matches agent_provisioning_team's TOOL_RETRY_POLICY convention for
+# the same reason.
 LOAD_RETRY_POLICY = RetryPolicy(
     maximum_attempts=3,
     initial_interval=timedelta(seconds=5),
     maximum_interval=timedelta(seconds=30),
     backoff_coefficient=2.0,
+    non_retryable_error_types=["ValueError"],
 )
 LLM_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
 MARK_FAILED_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
@@ -65,9 +77,11 @@ class Soc2AuditWorkflow:
         Postconditions:
             - Returns the ``SOC2AuditResult`` as a JSON-native dict and leaves
               the job ``completed``. On any activity failure, marks the job
-              ``failed`` (via ``soc2_mark_failed``) and re-raises so the
-              workflow itself fails.
+              ``failed`` (via ``soc2_mark_failed``, preserving any criterion
+              results already completed before the failure) and re-raises so
+              the workflow itself fails.
         """
+        tsc_results: Optional[List[Dict[str, Any]]] = None
         try:
             # load_repo_activity loads the repo once, persists it to a snapshot
             # keyed by job_id, and returns only the resolved repo *path* (a short
@@ -78,25 +92,29 @@ class Soc2AuditWorkflow:
                 _activities.load_repo_activity,
                 args=[job_id, repo_path],
                 start_to_close_timeout=LOAD_TIMEOUT,
+                schedule_to_close_timeout=LOAD_SCHEDULE_TO_CLOSE_TIMEOUT,
                 retry_policy=LOAD_RETRY_POLICY,
             )
 
-            tsc_results = await asyncio.gather(
+            gathered = await asyncio.gather(
                 *[
                     workflow.execute_activity(
                         _activities.audit_criterion_activity,
                         args=[job_id, criterion],
                         start_to_close_timeout=AUDIT_TIMEOUT,
+                        schedule_to_close_timeout=AUDIT_SCHEDULE_TO_CLOSE_TIMEOUT,
                         retry_policy=LLM_RETRY_POLICY,
                     )
                     for criterion in _TSC_CRITERIA
                 ]
             )
+            tsc_results = list(gathered)
 
             return await workflow.execute_activity(
                 _activities.write_report_activity,
-                args=[job_id, resolved_path, list(tsc_results)],
+                args=[job_id, resolved_path, tsc_results],
                 start_to_close_timeout=REPORT_TIMEOUT,
+                schedule_to_close_timeout=REPORT_SCHEDULE_TO_CLOSE_TIMEOUT,
                 retry_policy=LLM_RETRY_POLICY,
             )
         except Exception as e:
@@ -106,8 +124,9 @@ class Soc2AuditWorkflow:
             try:
                 await workflow.execute_activity(
                     _activities.mark_failed_activity,
-                    args=[job_id, f"SOC2 audit failed: {e}"],
+                    args=[job_id, repo_path, f"SOC2 audit failed: {e}", tsc_results],
                     start_to_close_timeout=MARK_FAILED_TIMEOUT,
+                    schedule_to_close_timeout=MARK_FAILED_SCHEDULE_TO_CLOSE_TIMEOUT,
                     retry_policy=MARK_FAILED_RETRY_POLICY,
                 )
             except Exception:
