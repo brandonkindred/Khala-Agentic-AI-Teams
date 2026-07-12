@@ -2372,7 +2372,7 @@ def test_coordinator_threads_repo_reader_to_filter(monkeypatch) -> None:
 
     captured: Dict[str, Any] = {}
 
-    def _spy(llm, input_data, issues, repo_reader=None):
+    def _spy(llm, input_data, issues, repo_reader=None, index=None):
         captured["reader"] = repo_reader
         return issues
 
@@ -2384,3 +2384,47 @@ def test_coordinator_threads_repo_reader_to_filter(monkeypatch) -> None:
         repo_reader=reader,
     )
     assert captured["reader"] is reader
+
+
+def test_coordinator_builds_codebase_index_once_and_shares_it(monkeypatch) -> None:
+    """The submission is parsed into a ``CodebaseIndex`` exactly once per
+    ``run_coordinator`` call, and the same instance is forwarded to both the
+    false-positive filter and the architecture-consistency pass (rather than
+    each independently rebuilding it from the same input)."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent.false_positive_filter import CodebaseIndex
+
+    build_calls: list = []
+    original_from_input = CodebaseIndex.from_input
+
+    def _counting_from_input(*args, **kwargs):
+        result = original_from_input(*args, **kwargs)
+        build_calls.append(result)
+        return result
+
+    monkeypatch.setattr(
+        CodebaseIndex,
+        "from_input",
+        classmethod(lambda cls, *a, **kw: _counting_from_input(*a, **kw)),
+    )
+
+    received_indexes: list = []
+
+    def _filter_spy(llm, input_data, issues, repo_reader=None, index=None):
+        received_indexes.append(index)
+        return issues
+
+    def _arch_spy(llm, input_data, repo_reader=None, index=None):
+        received_indexes.append(index)
+        return []
+
+    monkeypatch.setattr(coord, "filter_false_positives", _filter_spy)
+    monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch_spy)
+
+    run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+
+    assert len(build_calls) == 1, "CodebaseIndex.from_input should be called exactly once"
+    assert received_indexes == [build_calls[0], build_calls[0]]

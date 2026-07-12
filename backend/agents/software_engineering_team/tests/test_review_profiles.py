@@ -202,7 +202,7 @@ def test_skip_false_positive_filter_bypasses_verifier(monkeypatch) -> None:
     the default runs it once."""
     calls: list[tuple] = []
 
-    def _spy(llm, input_data, issues, repo_reader=None):
+    def _spy(llm, input_data, issues, repo_reader=None, index=None):
         calls.append((llm, input_data, issues))
         return issues
 

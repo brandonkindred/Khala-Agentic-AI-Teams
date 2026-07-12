@@ -109,7 +109,12 @@ def test_run_code_review_phase_forwards_architecture_and_spec_content(tmp_path: 
     ``CodeReviewInput`` built for the external code-review agent."""
     from software_engineering_team.backend_code_v2_team.models import Microtask
     from software_engineering_team.backend_code_v2_team.phases.review import run_code_review_phase
-    from software_engineering_team.shared.models import SystemArchitecture, Task, TaskType
+    from software_engineering_team.shared.models import (
+        ReviewContext,
+        SystemArchitecture,
+        Task,
+        TaskType,
+    )
 
     task = Task(
         id="t1",
@@ -138,8 +143,9 @@ def test_run_code_review_phase_forwards_architecture_and_spec_content(tmp_path: 
         repo_path=tmp_path,
         files={"x.py": "code"},
         code_review_agent=_CapturingAgent(),
-        architecture=architecture,
-        spec_content="the full project spec",
+        review_context=ReviewContext(
+            architecture=architecture, spec_content="the full project spec"
+        ),
     )
     assert captured["architecture"] is architecture
     assert captured["spec_content"] == "the full project spec"

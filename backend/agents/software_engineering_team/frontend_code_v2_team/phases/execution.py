@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional
 from strands import Agent
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import SystemArchitecture, Task
+from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.phases.execution import (
     GatedExecutionConfig,
     GateOutcome,
@@ -151,8 +151,7 @@ def _code_review_gate(
     files: Dict[str, str],
     deps: ReviewDependencies,
     detail_callback: Callable[[str], None],
-    architecture: Optional[SystemArchitecture] = None,
-    spec_content: str = "",
+    review_context: Optional[ReviewContext] = None,
 ) -> GateOutcome:
     """Run the frontend code-review gate (build + lint + code review agents only)."""
     from .review import run_microtask_review
@@ -170,8 +169,7 @@ def _code_review_gate(
         linting_tool_agent=deps.linting_tool_agent,
         tool_agents=deps.tool_agents,
         detail_callback=detail_callback,
-        architecture=architecture,
-        spec_content=spec_content,
+        review_context=review_context,
     )
     return GateOutcome(passed=r.passed, issues=r.issues, summary=r.summary)
 

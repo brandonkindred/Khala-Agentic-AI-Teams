@@ -202,10 +202,62 @@ def _parse_findings(data: object) -> List[CodeReviewIssue]:
     return [parsed for item in raw if (parsed := _coerce_finding(item)) is not None]
 
 
+def _validate_finding_line(
+    index: CodebaseIndex, file_path: str, line: Optional[int]
+) -> Optional[int]:
+    """Validate a cited line number against the real file it names, or None.
+
+    Mirrors ``chunking._validate_line``'s guarantee for chunk-review findings:
+    a hallucinated citation can never anchor a finding to the wrong (or
+    nonexistent) line. This pass has no ``FileSegment`` to bound against (it
+    works over whole files), so it bounds against the resolved file's actual
+    line count instead.
+
+    Postconditions:
+        - Returns None when ``line`` is None, ``file_path`` does not resolve to
+          a readable file, or the file's content cannot be read (an
+          ``"Error: ..."`` sentinel from ``index.read_file``).
+        - Returns ``line`` unchanged when it falls within ``[1, total_lines]``
+          of the resolved file's content; otherwise returns None. Never raises.
+    """
+    if line is None:
+        return None
+    resolved = index.resolve_path(file_path)
+    if resolved is None:
+        return None
+    content = index.read_file(resolved)
+    if content.startswith("Error:"):
+        return None
+    total_lines = len(content.splitlines()) or 1
+    return line if 1 <= line <= total_lines else None
+
+
+def _validate_findings(
+    index: CodebaseIndex, findings: List[CodeReviewIssue]
+) -> List[CodeReviewIssue]:
+    """Bounds-check each finding's cited line against its real file.
+
+    Postconditions:
+        - Returns the findings in the same order, each with ``line`` replaced
+          by None wherever it does not fall within the cited file's actual
+          line range (a file-wide finding is still a valid, useful outcome).
+          Never drops a finding outright — only its potentially hallucinated
+          line anchor — and never raises.
+    """
+    validated: List[CodeReviewIssue] = []
+    for finding in findings:
+        checked_line = _validate_finding_line(index, finding.file_path, finding.line)
+        if checked_line != finding.line:
+            finding = finding.model_copy(update={"line": checked_line})
+        validated.append(finding)
+    return validated
+
+
 def find_architecture_and_redundancy_issues(
     llm: LLMClient,
     input_data: CodeReviewInput,
     repo_reader: Optional[RepoReader] = None,
+    index: Optional[CodebaseIndex] = None,
 ) -> List[CodeReviewIssue]:
     """Run the once-per-submission architecture/redundancy pass.
 
@@ -217,6 +269,10 @@ def find_architecture_and_redundancy_issues(
           ``repo_reader.RepoReader`` giving access to the rest of the
           repository beyond the diff (the same object the false-positive
           filter is given).
+        - ``index``, when given, must have been built from this same
+          ``input_data``/``repo_reader`` (the coordinator shares one index
+          across this pass and the false-positive filter rather than each
+          rebuilding it); ``None`` builds a fresh one.
 
     Postconditions:
         - Returns ``[]`` (no LLM call) when the pass is disabled via
@@ -226,8 +282,11 @@ def find_architecture_and_redundancy_issues(
           contradiction against), or when the submission has no readable
           files.
         - Otherwise returns zero or more NEW ``CodeReviewIssue``s in category
-          ``"architecture"`` or ``"refactor"`` only; never mutates or removes
-          any issue the caller already has.
+          ``"architecture"`` or ``"refactor"`` only, each with its cited
+          ``line`` bounds-checked against the real file (a hallucinated
+          out-of-range line is nulled to a file-wide finding, never trusted
+          verbatim); never mutates or removes any issue the caller already
+          has.
         - Never raises: any setup or LLM failure is logged at warning level
           and yields ``[]`` — this pass can only ever add findings, so a
           failure here must never affect the review already computed by the
@@ -241,7 +300,7 @@ def find_architecture_and_redundancy_issues(
     ):
         return []
     try:
-        return _run_pass(llm, input_data, architecture, repo_reader)
+        return _run_pass(llm, input_data, architecture, repo_reader, index)
     except Exception as exc:  # noqa: BLE001 - fail-safe: this pass must never break the review
         logger.warning(
             "ArchitectureConsistencyPass: failed (%s: %s); returning no additional findings",
@@ -256,17 +315,23 @@ def _run_pass(
     input_data: CodeReviewInput,
     architecture: SystemArchitecture,
     repo_reader: Optional[RepoReader],
+    index: Optional[CodebaseIndex] = None,
 ) -> List[CodeReviewIssue]:
     """Core of :func:`find_architecture_and_redundancy_issues`; may raise.
 
     Split out so its sole caller can wrap it in the fail-safe guard.
+
+    Preconditions:
+        - ``index``, when given, was built from this same ``input_data``/
+          ``repo_reader``.
 
     Postconditions:
         - Same contract as :func:`find_architecture_and_redundancy_issues`,
           minus the env-toggle/no-architecture-document early returns the
           caller already handled.
     """
-    index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
+    if index is None:
+        index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
     if not index.files:
         # No readable submission files: there is nothing to check for
         # architecture fit or redundancy against the architecture document.
@@ -286,6 +351,7 @@ def _run_pass(
     data = json.loads(raw)
     findings = _parse_findings(data)
     if findings:
+        findings = _validate_findings(index, findings)
         logger.info(
             "ArchitectureConsistencyPass: found %s new finding(s) (architecture/refactor)",
             len(findings),

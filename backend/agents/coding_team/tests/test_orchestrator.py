@@ -617,7 +617,7 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
     # No job service in unit tests — skip the persistence write.
@@ -1184,7 +1184,7 @@ def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, mon
         def run(self, **kw):
             pass
 
-    def _build_worker(agent_id, spec, llm_getter, engine_provider):
+    def _build_worker(agent_id, spec, llm_getter, engine_provider, **kwargs):
         captured_specs.append(spec.name)
         return StubWorker(agent_id)
 
@@ -1549,7 +1549,7 @@ def test_resume_from_snapshot_skips_planning(tmp_path, monkeypatch):
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
@@ -1613,7 +1613,7 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
@@ -1661,7 +1661,7 @@ def test_fresh_run_defaults_missing_task_id(tmp_path, monkeypatch):
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
@@ -1739,7 +1739,7 @@ def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
@@ -2127,7 +2127,7 @@ def test_whole_job_already_complete_when_all_resolved_without_changes(tmp_path, 
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
@@ -2177,7 +2177,7 @@ def test_not_already_complete_when_a_task_is_left_non_terminal(tmp_path, monkeyp
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
@@ -2364,7 +2364,7 @@ def test_orchestrator_does_not_stamp_activity_and_terminal_clears(tmp_path, monk
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _NoopSwarm)
 
@@ -2572,7 +2572,7 @@ def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeyp
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _MergingSwarm)
 
@@ -2621,7 +2621,7 @@ def test_orchestrator_resume_never_regresses_progress(tmp_path, monkeypatch):
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _NoopSwarm)
 

@@ -20,11 +20,13 @@ from code_review_agent.architecture_consistency_pass import (
     _build_prompt,
     _coerce_finding,
     _parse_findings,
+    _validate_finding_line,
+    _validate_findings,
     find_architecture_and_redundancy_issues,
 )
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import CodebaseIndex
-from code_review_agent.models import CodeReviewInput
+from code_review_agent.models import CodeReviewInput, CodeReviewIssue
 
 from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared.models import SystemArchitecture
@@ -96,6 +98,81 @@ def test_build_prompt_omits_files_beyond_inline_budget() -> None:
     assert "a.py" in prompt  # inlined (fits the budget)
     assert "more changed file(s) not shown above" in prompt
     assert "list_files()" in prompt
+
+
+def test_build_prompt_notes_mid_file_truncation() -> None:
+    """A file whose content is cut off mid-way by the shared inline budget gets
+    its own truncation notice, not just wholly-omitted files."""
+    arch = _arch()
+    files = {"a.py": "x" * 100}
+    index = CodebaseIndex.from_input(_input(files=files, architecture=arch))
+    prompt = _build_prompt(index, arch, max_inline_chars=30, max_arch_doc_chars=1000)
+    assert "Only the first 30 characters of `a.py` are shown above" in prompt
+
+
+# --------------------------------------------------------------------------- line bounds
+
+
+def test_validate_finding_line_keeps_in_range_line() -> None:
+    index = CodebaseIndex.from_input(_input(files={"a.py": "one\ntwo\nthree\n"}))
+    assert _validate_finding_line(index, "a.py", 2) == 2
+
+
+def test_validate_finding_line_drops_out_of_range_line() -> None:
+    index = CodebaseIndex.from_input(_input(files={"a.py": "one\ntwo\nthree\n"}))
+    assert _validate_finding_line(index, "a.py", 9999) is None
+
+
+def test_validate_finding_line_drops_when_file_unresolved() -> None:
+    index = CodebaseIndex.from_input(_input(files={"a.py": "one\ntwo\n"}))
+    assert _validate_finding_line(index, "does/not/exist.py", 1) is None
+
+
+def test_validate_finding_line_passes_through_none() -> None:
+    index = CodebaseIndex.from_input(_input(files={"a.py": "one\n"}))
+    assert _validate_finding_line(index, "a.py", None) is None
+
+
+def test_validate_findings_nulls_only_out_of_range_lines() -> None:
+    index = CodebaseIndex.from_input(_input(files={"a.py": "one\ntwo\nthree\n"}))
+    in_range = CodeReviewIssue(category="architecture", description="d1", file_path="a.py", line=2)
+    out_of_range = CodeReviewIssue(
+        category="refactor", description="d2", file_path="a.py", line=9999
+    )
+    validated = _validate_findings(index, [in_range, out_of_range])
+    assert validated[0].line == 2
+    assert validated[1].line is None
+    # The rest of the finding is untouched -- only the hallucinated line is dropped.
+    assert validated[1].description == "d2"
+
+
+def test_finds_and_returns_new_findings_drops_hallucinated_line() -> None:
+    """End-to-end: a finding citing a line beyond the real file's length has its
+    line anchor nulled rather than trusted verbatim."""
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                return {
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "line": 9999,
+                            "description": "bypasses the repository layer",
+                            "suggestion": "use the repository",
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    result = find_architecture_and_redundancy_issues(
+        _FindingsClient(),
+        _input(files={"app/main.py": "def bar():\n    return 1\n"}, architecture=_arch()),
+    )
+    assert len(result) == 1
+    assert result[0].line is None  # line 9999 doesn't exist in a 2-line file
 
 
 # --------------------------------------------------------------------------- parsing

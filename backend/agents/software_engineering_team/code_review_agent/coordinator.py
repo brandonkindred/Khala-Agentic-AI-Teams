@@ -106,7 +106,7 @@ from .chunking import (
     parse_code_into_file_blocks,
     split_block_into_segments,
 )
-from .false_positive_filter import filter_false_positives
+from .false_positive_filter import CodebaseIndex, filter_false_positives
 from .mapping import (
     _cached_review_chunk,
     _chunk_cache_key,
@@ -584,6 +584,10 @@ def run_coordinator(
         f"verifying {len(genuine_issues)} findings against the full codebase",
         0.92,
     )
+    # Built once and shared with the architecture-consistency pass below: both read the
+    # same submission/repo_reader, so a single index avoids parsing the submission twice.
+    shared_index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
+
     if input_data.skip_false_positive_filter:
         # The calling gate opted out of the whole-codebase re-check and stands
         # behind its per-chunk findings as-is (e.g. a gate whose findings must
@@ -591,7 +595,9 @@ def run_coordinator(
         # drop-false-positives step, so it can only ever keep more findings.
         verified = genuine_issues
     else:
-        verified = filter_false_positives(llm, input_data, genuine_issues, repo_reader=repo_reader)
+        verified = filter_false_positives(
+            llm, input_data, genuine_issues, repo_reader=repo_reader, index=shared_index
+        )
 
     # Architecture-consistency / cross-codebase-redundancy pass: a separate, additive,
     # once-per-submission check for two things the map phase structurally cannot see —
@@ -600,7 +606,7 @@ def run_coordinator(
     # filter (its findings are already tool-grounded, so they are not subjected to that filter
     # again) and folds straight into the same dedupe/severity-gate/merge machinery below.
     architecture_findings = find_architecture_and_redundancy_issues(
-        llm, input_data, repo_reader=repo_reader
+        llm, input_data, repo_reader=repo_reader, index=shared_index
     )
     if architecture_findings:
         verified = [*verified, *architecture_findings]

@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from unittest.mock import MagicMock
 
 from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.shared.models import SystemArchitecture
+from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
 from software_engineering_team.shared.v2_models import ReviewIssue
 from software_engineering_team.shared.v2_review import (
     ReviewConfig,
@@ -431,8 +431,9 @@ def test_code_review_agent_receives_architecture_and_spec_content(tmp_path: Path
         files={"x.py": "code"},
         code_review_agent=cr_agent,
         language="python",
-        architecture=architecture,
-        spec_content="the full project spec",
+        review_context=ReviewContext(
+            architecture=architecture, spec_content="the full project spec"
+        ),
         llm_review_fn=lambda *, llm, task, files: [],
         qa_agent_fn=lambda **kw: [],
         security_agent_fn=lambda **kw: [],

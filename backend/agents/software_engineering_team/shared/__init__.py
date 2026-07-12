@@ -3,6 +3,7 @@
 from .llm import DummyLLMClient, LLMClient, OllamaLLMClient
 from .models import (
     ProductRequirements,
+    ReviewContext,
     SystemArchitecture,
     Task,
     TaskAssignment,
@@ -16,6 +17,7 @@ __all__ = [
     "DummyLLMClient",
     "ProductRequirements",
     "SystemArchitecture",
+    "ReviewContext",
     "Task",
     "TaskAssignment",
     "TaskStatus",

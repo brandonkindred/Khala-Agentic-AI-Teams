@@ -694,7 +694,7 @@ def test_run_review_forwards_architecture_and_spec_content(monkeypatch, tmp_path
     agent's input, and default to ``None``/``""`` when omitted."""
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
-    from software_engineering_team.shared.models import SystemArchitecture
+    from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
 
     monkeypatch.setattr(
         review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
@@ -718,8 +718,9 @@ def test_run_review_forwards_architecture_and_spec_content(monkeypatch, tmp_path
         execution_result=_execution_result({"x.py": "code"}),
         repo_path=tmp_path,
         code_review_agent=cr_agent,
-        architecture=architecture,
-        spec_content="the full project spec",
+        review_context=ReviewContext(
+            architecture=architecture, spec_content="the full project spec"
+        ),
     )
     assert captured["architecture"] is architecture
     assert captured["spec_content"] == "the full project spec"

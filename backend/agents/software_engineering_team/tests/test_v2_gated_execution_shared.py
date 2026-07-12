@@ -33,6 +33,7 @@ import pytest
 
 from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.backend_code_v2_team import models as be_models
+from software_engineering_team.shared.models import SystemArchitecture
 from software_engineering_team.shared.phases.execution import (
     GatedExecutionConfig,
     GateOutcome,
@@ -381,7 +382,7 @@ def test_code_review_gate_receives_architecture_and_spec_content_on_every_call(t
     ``architecture`` in scope (used for microtask coding) but never forwarded it
     to either of its two ``gate_config.run_code_review_gate(...)`` call sites.
     """
-    architecture = SimpleNamespace(overview="layered architecture")
+    architecture = SystemArchitecture(overview="layered architecture")
     cr = _CapturingGate([GateOutcome(passed=False, issues=[_issue()], summary="fixme")])
     mt = _microtask()
     _run(
@@ -395,8 +396,8 @@ def test_code_review_gate_receives_architecture_and_spec_content_on_every_call(t
 
     assert len(cr.calls_kwargs) == 2  # initial call + one re-review after the batch fix
     for call_kwargs in cr.calls_kwargs:
-        assert call_kwargs["architecture"] is architecture
-        assert call_kwargs["spec_content"] == "the full project spec"
+        assert call_kwargs["review_context"].architecture == architecture
+        assert call_kwargs["review_context"].spec_content == "the full project spec"
     assert mt.status == MS.COMPLETED
 
 
@@ -409,8 +410,8 @@ def test_code_review_gate_defaults_architecture_and_spec_content(tmp_path):
     _run(_make_gate_config(code_review_gate=cr), [mt], tmp_path, review_config=_config())
 
     assert cr.calls_kwargs
-    assert cr.calls_kwargs[0]["architecture"] is None
-    assert cr.calls_kwargs[0]["spec_content"] == ""
+    assert cr.calls_kwargs[0]["review_context"].architecture is None
+    assert cr.calls_kwargs[0]["review_context"].spec_content == ""
 
 
 def test_code_review_fail_stop_raises(tmp_path):

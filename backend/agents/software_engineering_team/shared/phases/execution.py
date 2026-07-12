@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import SystemArchitecture, Task
+from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.repo_writer import UnsafeRepoPathError, write_repo_text_files
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
@@ -427,10 +427,11 @@ def run_gated_execution_impl(
         ``gate_config.models`` exposes ``MicrotaskStatus``, ``ExecutionResult``,
         ``ToolAgentInput``, ``ToolAgentKind``, ``ReviewResult``,
         ``MicrotaskReviewFailedError`` and ``MicrotaskReviewConfig``.
-        ``gate_config.run_code_review_gate`` accepts ``architecture``/``spec_content``
-        keyword arguments (the per-team adapter forwards them into its code-review
-        call); both default to ``None``/``""`` here so a caller without them yet is
-        unaffected.
+        ``gate_config.run_code_review_gate`` accepts a ``review_context`` keyword
+        argument (the per-team adapter forwards it into its code-review call); a
+        ``review_context`` is built here from ``architecture``/``spec_content``
+        (both default to ``None``/``""`` so a caller without them yet is
+        unaffected).
     Postconditions:
         Returns an ``ExecutionResult``; each microtask ends COMPLETED, SKIPPED,
         FAILED or REVIEW_FAILED. When a microtask's review fails and
@@ -446,6 +447,7 @@ def run_gated_execution_impl(
     config = review_config or models.MicrotaskReviewConfig()
     deps = review_deps or ReviewDependencies()
     runners = tool_runners or {}
+    review_context = ReviewContext(architecture=architecture, spec_content=spec_content)
 
     all_files: Dict[str, str] = {}
     microtasks = list(planning_result.microtasks)
@@ -595,8 +597,7 @@ def run_gated_execution_impl(
                 repo_path=repo_path,
                 files=microtask_files,
                 deps=deps,
-                architecture=architecture,
-                spec_content=spec_content,
+                review_context=review_context,
                 detail_callback=lambda d: _detail_cb(d, current_idx, "code_review"),
             )
 
@@ -667,8 +668,7 @@ def run_gated_execution_impl(
                     repo_path=repo_path,
                     files=microtask_files,
                     deps=deps,
-                    architecture=architecture,
-                    spec_content=spec_content,
+                    review_context=review_context,
                     detail_callback=lambda d: _detail_cb(d, current_idx, "code_review"),
                 )
 

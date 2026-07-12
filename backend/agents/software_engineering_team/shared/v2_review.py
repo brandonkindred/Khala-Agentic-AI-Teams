@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import SystemArchitecture, Task
+from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.review_progress import (
     build_disk_repo_reader,
     call_code_review_agent,
@@ -188,8 +188,7 @@ def _code_review_step(
     task_id: str,
     task_description: str,
     llm_review_fn: Callable[..., List[ReviewIssue]],
-    architecture: Optional[SystemArchitecture] = None,
-    spec_content: str = "",
+    review_context: Optional[ReviewContext] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
 ) -> List[ReviewIssue]:
     """Independent code-review step: external agent (with LLM fallback), or LLM review alone.
@@ -200,9 +199,9 @@ def _code_review_step(
           single microtask; the LLM fallback always reasons over the full ``task``, unaffected).
         - ``llm_review_fn(llm=, task=, files=)`` is the per-team chunking/prompt/parse reviewer
           (the test patch surface for ``Agent`` / ``resolve_text_mode_strands_model``).
-        - ``architecture``/``spec_content`` are the caller's system architecture and project
-          specification, when available; both default to "nothing to add" (``None``/``""``) so a
-          caller that does not have them yet keeps working unchanged.
+        - ``review_context`` bundles the caller's system architecture and project specification,
+          when available; ``None`` means "nothing to add" so a caller that does not have this
+          context yet keeps working unchanged.
 
     Postconditions:
         - Never raises: an external ``code_review_agent`` failure logs a warning and falls back
@@ -220,6 +219,7 @@ def _code_review_step(
         try:
             from code_review_agent.models import CodeReviewInput as _CRInput
 
+            ctx = review_context or ReviewContext()
             # files= keeps per-file attribution and lets the coordinator bound
             # its own prompts — no header parsing, no upstream truncation.
             cr_input = _CRInput(
@@ -228,8 +228,8 @@ def _code_review_step(
                 task_requirements=task.requirements or "",
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
                 language=language,
-                architecture=architecture,
-                spec_content=spec_content,
+                architecture=ctx.architecture,
+                spec_content=ctx.spec_content,
             )
             cr_result = call_code_review_agent(
                 code_review_agent,
@@ -467,16 +467,15 @@ def run_review(
     qa_agent_fn: Callable[..., List[ReviewIssue]],
     security_agent_fn: Callable[..., List[ReviewIssue]],
     build_verify_fn: Callable[..., Tuple[bool, str]],
-    architecture: Optional[SystemArchitecture] = None,
-    spec_content: str = "",
+    review_context: Optional[ReviewContext] = None,
 ) -> ReviewResult:
     """Execute the shared Review phase over an execution result's files.
 
     Preconditions:
         - ``execution_result`` exposes ``.files: Dict[str, str]``.
         - The injected runners match the per-team wrapper signatures.
-        - ``architecture``/``spec_content`` are forwarded to the code-review step only; they
-          default to ``None``/``""`` so an existing caller that does not have them yet is
+        - ``review_context`` is forwarded to the code-review step only; ``None`` means
+          "nothing to add" so an existing caller that does not have this context yet is
           unaffected.
 
     Postconditions:
@@ -549,8 +548,7 @@ def run_review(
                     task_id=task_id,
                     task_description=task.description or "",
                     llm_review_fn=llm_review_fn,
-                    architecture=architecture,
-                    spec_content=spec_content,
+                    review_context=review_context,
                 ),
                 lambda: _qa_review_step(
                     qa_agent=qa_agent,
@@ -623,16 +621,15 @@ def run_microtask_review(
     qa_agent_fn: Callable[..., List[ReviewIssue]],
     security_agent_fn: Callable[..., List[ReviewIssue]],
     build_verify_fn: Callable[..., Tuple[bool, str]],
-    architecture: Optional[SystemArchitecture] = None,
-    spec_content: str = "",
+    review_context: Optional[ReviewContext] = None,
 ) -> ReviewResult:
     """Run the shared full review on a single microtask's output files.
 
     Preconditions:
         - ``microtask`` exposes ``.id`` / ``.title`` / ``.description``.
         - The injected runners match the per-team wrapper signatures.
-        - ``architecture``/``spec_content`` are forwarded to the code-review step only; they
-          default to ``None``/``""`` so an existing caller that does not have them yet is
+        - ``review_context`` is forwarded to the code-review step only; ``None`` means
+          "nothing to add" so an existing caller that does not have this context yet is
           unaffected.
 
     Postconditions:
@@ -728,8 +725,7 @@ def run_microtask_review(
                     task_id=task_id,
                     task_description=microtask_desc,
                     llm_review_fn=llm_review_fn,
-                    architecture=architecture,
-                    spec_content=spec_content,
+                    review_context=review_context,
                     detail_callback=detail_callback,
                 ),
                 lambda: _qa_review_step(
