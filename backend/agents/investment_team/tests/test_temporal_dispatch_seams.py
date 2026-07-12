@@ -349,6 +349,26 @@ def test_translate_advisory_failure_defaults_to_502_for_unknown_error() -> None:
     assert result.status_code == 502
 
 
+def test_execute_advisory_maps_client_not_ready_runtime_error_to_503(monkeypatch) -> None:
+    """``shared_temporal._await_client`` raises a bare RuntimeError when
+    TEMPORAL_ADDRESS is set but no worker client ever became ready — this must
+    surface as the same 503 ``_require_temporal`` raises up front, not the
+    generic 502 ``_translate_advisory_failure`` defaults to for an unrecognized
+    error."""
+    import shared_temporal
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+
+    def _raise(*a, **kw):
+        raise RuntimeError("Temporal client not available; is the team's worker running?")
+
+    monkeypatch.setattr("investment_team.temporal.start_workflow.execute_advisory_workflow", _raise)
+
+    with pytest.raises(HTTPException) as ei:
+        REAL_EXECUTE_ADVISORY("committee_memo", {}, key="k")
+    assert ei.value.status_code == 503
+
+
 def test_execute_advisory_passes_through_503_when_disabled_without_translation(
     monkeypatch,
 ) -> None:

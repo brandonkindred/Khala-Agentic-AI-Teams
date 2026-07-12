@@ -56,7 +56,7 @@ from investment_team.models import (
     ValidationReport,
     WorkflowMode,
 )
-from investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
+from investment_team.orchestrator import InvestmentTeamOrchestrator, QueueItem, WorkflowState
 from investment_team.shared.job_store import (
     JOB_STATUS_CANCELLED as _BT_JOB_STATUS_CANCELLED,
 )
@@ -1016,7 +1016,16 @@ def list_backtests(strategy_id: Optional[str] = None) -> ListBacktestsResponse:
 
 @app.post("/promotions/decide", response_model=PromotionDecisionResponse)
 def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionResponse:
-    """Run promotion gate decision for a strategy."""
+    """Run promotion gate decision for a strategy.
+
+    Postconditions:
+        The decision is computed by ``promotion_decision_activity``, which may
+        run in a different Temporal worker process. This route — always the API
+        process that also serves ``/workflow/status``/``/workflow/queues`` —
+        applies the activity's returned audit-log/escalation delta to the local
+        ``_workflow_state`` so those reads stay consistent regardless of which
+        process ran the activity.
+    """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
         validation = _validations.get(request.strategy_id)
@@ -1045,6 +1054,17 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
         },
         key=request.strategy_id,
     )
+    with _lock:
+        _workflow_state.audit_log.extend(result.get("audit_log_appended") or [])
+        escalation = result.get("escalation_enqueued")
+        if escalation:
+            _workflow_state.queues[escalation["queue"]].append(
+                QueueItem(
+                    queue=escalation["queue"],
+                    payload_id=escalation["payload_id"],
+                    priority=escalation["priority"],
+                )
+            )
     return PromotionDecisionResponse(
         strategy_id=request.strategy_id,
         decision=PromotionDecision.model_validate(result["decision"]),
@@ -1874,6 +1894,17 @@ def _execute_advisory(op: str, payload: Dict[str, Any], *, key: str) -> Dict[str
         return execute_advisory_workflow(op, payload, key=key)
     except HTTPException:
         raise
+    except RuntimeError as exc:
+        # ``shared_temporal._await_client`` raises a bare RuntimeError when
+        # TEMPORAL_ADDRESS is set but the worker's client never became ready in
+        # time — the same "no running worker" condition ``_require_temporal``
+        # checks for up front, just discovered later. Map it to the same 503
+        # instead of letting it fall through to _translate_advisory_failure's
+        # generic 502.
+        raise HTTPException(
+            status_code=503,
+            detail="This endpoint requires a running Temporal worker (client did not become ready in time).",
+        ) from exc
     except Exception as exc:
         raise _translate_advisory_failure(exc) from exc
 

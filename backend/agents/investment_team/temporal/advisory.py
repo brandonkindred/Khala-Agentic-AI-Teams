@@ -268,21 +268,22 @@ def promotion_decision_activity(payload: dict[str, Any]) -> dict[str, Any]:
         validation report for the strategy) plus the proposer/approver ids and
         the ``risk_veto`` / ``human_live_approval`` flags.
     Postconditions:
-        Appends to the shared ``_workflow_state`` audit log (and escalation
-        queue on reject/revise) and returns ``{"decision": <PromotionDecision
-        JSON>}``. Raises ``ApplicationError`` on a missing strategy / validation
-        / IPS.
+        Returns ``{"decision": <PromotionDecision JSON>, "audit_log_appended":
+        [<str>, ...], "escalation_enqueued": <queue item dict> | None}``. Raises
+        ``ApplicationError`` on a missing strategy / validation / IPS.
+
+        Does NOT mutate the API process's ``_workflow_state`` singleton — this
+        activity may run in a Temporal worker process distinct from the one
+        serving ``/workflow/status``/``/workflow/queues``, so it runs the
+        decision against a local, throwaway ``WorkflowState`` and returns the
+        resulting audit-log/escalation delta instead. The caller (the
+        ``/promotions/decide`` route, always running in the API process) applies
+        that delta to the real ``_workflow_state`` exactly once.
     """
     from investment_team.agents import AgentIdentity
-    from investment_team.api.main import (
-        _lock,
-        _orchestrator,
-        _profiles,
-        _strategies,
-        _validations,
-        _workflow_state,
-    )
+    from investment_team.api.main import _lock, _orchestrator, _profiles, _strategies, _validations
     from investment_team.models import IPS, StrategySpec, ValidationReport
+    from investment_team.orchestrator import WorkflowState
 
     strategy_id = payload["strategy_id"]
     with _lock:
@@ -312,8 +313,9 @@ def promotion_decision_activity(payload: dict[str, Any]) -> dict[str, Any]:
         role=payload.get("approver_role", "approver"),
         version=payload.get("approver_version", "1.0"),
     )
+    scratch_state = WorkflowState()
     decision = _orchestrator.promotion_decision(
-        state=_workflow_state,
+        state=scratch_state,
         strategy=strategy,
         validation=validation,
         ips=ips,
@@ -322,7 +324,20 @@ def promotion_decision_activity(payload: dict[str, Any]) -> dict[str, Any]:
         risk_veto=bool(payload.get("risk_veto", False)),
         human_live_approval=bool(payload.get("human_live_approval", False)),
     )
-    return {"decision": decision.model_dump(mode="json")}
+    escalation_enqueued = None
+    escalation_items = scratch_state.queues["escalation"]
+    if escalation_items:
+        item = escalation_items[-1]
+        escalation_enqueued = {
+            "queue": item.queue,
+            "payload_id": item.payload_id,
+            "priority": item.priority,
+        }
+    return {
+        "decision": decision.model_dump(mode="json"),
+        "audit_log_appended": list(scratch_state.audit_log),
+        "escalation_enqueued": escalation_enqueued,
+    }
 
 
 @activity.defn(name="investment_committee_memo")

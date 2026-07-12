@@ -230,3 +230,60 @@ def test_promotion_decision_activity_missing_entities_raise(monkeypatch) -> None
     monkeypatch.setattr(api_main, "_validations", {"s1": {"strategy_id": "s1"}})
     with pytest.raises(ApplicationError, match="No IPS"):
         promotion_decision_activity(dict(base))
+
+
+def test_promotion_decision_activity_returns_delta_without_mutating_shared_state(
+    monkeypatch,
+) -> None:
+    """The activity must never touch the API process's ``_workflow_state``
+    singleton (it may run in a different Temporal worker process) — it returns
+    the audit-log/escalation delta instead, for the route to apply exactly
+    once. A self-approval produces a ``reject`` outcome, exercising both the
+    audit-log entry and the escalation-queue delta."""
+    from investment_team.api import main as api_main
+    from investment_team.models import StrategySpec
+    from investment_team.orchestrator import WorkflowState
+    from investment_team.temporal.advisory import promotion_decision_activity
+    from investment_team.tests.test_investment_team import _sample_ips, _sample_validation
+
+    strategy = StrategySpec(
+        strategy_id="s-r",
+        authored_by="alice",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    validation = _sample_validation().model_copy(update={"strategy_id": "s-r"})
+    ips = _sample_ips()
+    user_id = ips.profile.user_id
+
+    monkeypatch.setattr(api_main, "_strategies", {"s-r": strategy})
+    monkeypatch.setattr(api_main, "_validations", {"s-r": validation})
+    monkeypatch.setattr(api_main, "_profiles", {user_id: ips})
+    sentinel_state = WorkflowState()
+    monkeypatch.setattr(api_main, "_workflow_state", sentinel_state)
+
+    result = promotion_decision_activity(
+        {
+            "strategy_id": "s-r",
+            "user_id": user_id,
+            "proposer_agent_id": "alice",
+            "approver_agent_id": "alice",
+            "approver_role": "approver",
+            "approver_version": "1.0",
+            "risk_veto": False,
+            "human_live_approval": False,
+        }
+    )
+
+    assert result["decision"]["outcome"] == "reject"
+    assert any(entry.startswith("promotion:s-r:reject") for entry in result["audit_log_appended"])
+    assert result["escalation_enqueued"] == {
+        "queue": "escalation",
+        "payload_id": "s-r",
+        "priority": "high",
+    }
+    # The process-global singleton is untouched — the caller applies the delta.
+    assert sentinel_state.audit_log == []
+    assert sentinel_state.queues["escalation"] == []
