@@ -2678,6 +2678,45 @@ class TestPreExistingFindings:
         )
         assert "2 pre-existing bugs to review" in job["status_text"]
 
+    def test_preexisting_tag_on_context_line_is_not_overridden(self, review_app) -> None:
+        """A pre_existing-tagged finding on a diff CONTEXT line (shown for anchoring
+        but not actually added by the PR) must stay a proposal — only a finding on a
+        line the PR actually ADDED can override a mistagged pre_existing=true back to
+        a PR finding. The default patch's line 1 is context (` ctx`), line 2 is added
+        (`+added`)."""
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=1,
+                    file_path="a.py",
+                    description="old bug on context line",
+                    pre_existing=True,
+                ),
+            ],
+        )
+        summary = job["review_summary"]
+        assert summary["total_issues"] == 0
+        assert len(summary["pending_issue_proposals"]) == 1
+        assert summary["pending_issue_proposals"][0]["description"] == "old bug on context line"
+
+    def test_preexisting_tag_on_added_line_is_overridden(self, review_app) -> None:
+        """A pre_existing-tagged finding on a line the PR actually ADDED cannot
+        legitimately be pre-existing/unchanged code — it must be overridden back to a
+        PR finding rather than silently skipping review."""
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high", line=2, file_path="a.py", description="mistagged bug", pre_existing=True
+                ),
+            ],
+        )
+        summary = job["review_summary"]
+        assert summary["total_issues"] == 1
+        assert summary["pending_issue_proposals"] == []
+
     def test_create_issues_files_selected_proposal(self, review_app) -> None:
         gh = review_app["github"]["client"]
         job = _run_review_with(
@@ -2985,6 +3024,45 @@ class TestCreateReviewIssuesUnit:
         out = pr_review.create_review_issues("job1", ["p0", "p1"], token="t")
         assert len(calls) == 1
         assert [c["proposal_id"] for c in out["created"]] == ["p1"]
+
+    def test_duplicate_proposal_id_in_request_files_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A malformed/direct request repeating the same proposal id (e.g. a doubled
+        UI click landing as one request, or ["p0", "p0"]) must open exactly one
+        GitHub issue for it — the concurrent filer has no other guard against two
+        tasks for the SAME proposal both observing issue_url unset before either
+        writes it, so the id list itself must be deduped first."""
+        from coding_team.api import main as api_main
+        from coding_team.api import pr_review
+
+        job = {
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
+            "status": "completed",
+            "review_summary": {
+                "pending_issue_proposals": [{"id": "p0", "description": "a", "issue_url": None}]
+            },
+        }
+        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
+        monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
+        monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
+        calls: list[str] = []
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return None
+
+            def create_issue(self, _o, _r, *, title, body, labels=None):
+                calls.append(title)
+                return type("_I", (), {"number": 4, "html_url": "u4"})()
+
+        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        out = pr_review.create_review_issues("job1", ["p0", "p0", "p0"], token="t")
+        assert len(calls) == 1
+        assert [c["proposal_id"] for c in out["created"]] == ["p0"]
 
     def test_persist_swallows_store_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from coding_team.api import main as api_main

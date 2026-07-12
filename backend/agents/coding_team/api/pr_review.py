@@ -790,6 +790,15 @@ def _run_pr_review_body(
                 return
 
             valid_by_path = {f.filename: parse_valid_lines(f.patch) for f in files}
+            # Lines the PR actually ADDED — narrower than valid_by_path, which also
+            # includes unchanged context lines (so a finding cited on one can still
+            # be anchored inline per map_issues_to_comments). Only an added line can
+            # override a reviewer's pre_existing tag below: a genuine pre-existing
+            # bug on an unchanged context line inside a modified hunk must still
+            # route to a proposal, not a PR comment.
+            changed_by_path = {
+                f.filename: parse_valid_lines(f.patch, added_only=True) for f in files
+            }
             code, files_reviewed = _build_review_code(files)
             if not code:
                 _complete_review_noop(
@@ -861,13 +870,15 @@ def _run_pr_review_body(
             # without the tag defaults to a PR finding (hunk-mode reviews never
             # tag, so they behave exactly as before). The LLM's self-reported tag
             # is not trusted unconditionally: a finding whose file/line is verified
-            # to be inside this PR's own diff (per is_within_diff) cannot legitimately
-            # be "pre-existing, unchanged code", so a mistagged pre_existing=true is
+            # to be a line this PR actually ADDED (per is_within_diff against
+            # changed_by_path — deliberately narrower than valid_by_path, which
+            # would also match unchanged context lines) cannot legitimately be
+            # "pre-existing, unchanged code", so a mistagged pre_existing=true is
             # overridden back to a PR finding rather than silently skipping review.
             pr_issues: List[Any] = []
             preexisting_issues: List[Any] = []
             for i in output.issues:
-                if getattr(i, "pre_existing", False) and not is_within_diff(i, valid_by_path):
+                if getattr(i, "pre_existing", False) and not is_within_diff(i, changed_by_path):
                     preexisting_issues.append(i)
                 else:
                     pr_issues.append(i)
@@ -1619,7 +1630,16 @@ def create_review_issues(
         # malformed stored record so a missing id can never collide under the
         # shared string key "None".
         by_id = {str(p.get("id")): p for p in proposals if p.get("id") is not None}
-        needed = [pid for pid in proposal_ids if pid in by_id and not by_id[pid].get("issue_url")]
+        # dict.fromkeys dedupes while preserving order: proposal_ids can repeat the
+        # same id (a malformed/direct request, or a doubled UI click that lands as
+        # one request), and each unique proposal must be filed exactly once — the
+        # concurrent creates below have no other guard against two tasks for the
+        # SAME proposal both observing issue_url unset before either writes it.
+        needed = list(
+            dict.fromkeys(
+                pid for pid in proposal_ids if pid in by_id and not by_id[pid].get("issue_url")
+            )
+        )
         created: List[Dict[str, Any]] = []
         changed = False
         try:
