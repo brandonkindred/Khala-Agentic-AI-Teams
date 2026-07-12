@@ -75,6 +75,16 @@ _HEARTBEAT_TIMEOUT = timedelta(seconds=_act.HEARTBEAT_TIMEOUT_S)
 # dict, so a plain string literal keeps the workflow body free of model imports.
 _SPLIT_TOPOLOGY = "split"
 
+# Temporal patch marker for the single-activity → per-stage-DAG decomposition.
+# New runs are patched (take the DAG); pre-decomposition histories replay the
+# unpatched drain-out branch, which re-schedules the legacy whole-pipeline
+# activity with byte-identical options so those in-flight runs stay
+# deterministic and survive the deploy.
+_PATCH_FINE_GRAINED = "market-research-fine-grained-activities"
+# Byte-identical to the pre-decomposition workflow's single execute_activity call.
+_LEGACY_ACTIVITY_TIMEOUT = timedelta(hours=2)
+_LEGACY_ACTIVITY_RETRY = RetryPolicy(maximum_attempts=1)
+
 
 @workflow.defn(name="MarketResearchWorkflow")
 class MarketResearchWorkflow:
@@ -88,6 +98,9 @@ class MarketResearchWorkflow:
               (``payload.model_dump()``).
 
         Postconditions:
+            - Pre-decomposition (unpatched) histories replay the legacy
+              single-activity path so in-flight runs survive the deploy; new
+              (patched) runs take the per-stage DAG.
             - On success returns ``{"job_id": job_id}`` with the job-store row
               COMPLETED (or left at its clean terminal state after a cancel).
             - On a fatal pipeline error the job is marked FAILED (best-effort,
@@ -95,6 +108,19 @@ class MarketResearchWorkflow:
               Temporal workflow fails — a real failure is never reported as a
               succeeded workflow.
         """
+        if not workflow.patched(_PATCH_FINE_GRAINED):
+            # Drain-out branch: a history that started before the decomposition
+            # replays here and must deterministically re-schedule the original
+            # whole-pipeline activity with byte-identical options. The legacy
+            # activity stays registered until every such run drains; then this
+            # branch and ``run_pipeline_activity`` can be deleted.
+            return await workflow.execute_activity(
+                _act.run_pipeline_activity,
+                args=[job_id, request],
+                start_to_close_timeout=_LEGACY_ACTIVITY_TIMEOUT,
+                retry_policy=_LEGACY_ACTIVITY_RETRY,
+            )
+
         try:
             return await self._pipeline(job_id, request)
         except Exception as exc:
@@ -118,9 +144,15 @@ class MarketResearchWorkflow:
         Postconditions: returns ``{"job_id": job_id}``; raises on the first fatal
             activity error (handled by :meth:`run`'s catch-all).
         """
+        # prepare only validates + returns the transcripts-stripped ctx; it does
+        # not need the transcript bodies (ingest loads them from the full
+        # request). Passing a stripped request keeps inline transcripts out of
+        # prepare's activity input in workflow history — they are already
+        # recorded once as the workflow start input, and flow to ingest.
+        prepare_request = {**request, "transcripts": [], "transcript_folder_path": None}
         ctx = await workflow.execute_activity(
             _act.prepare_activity,
-            args=[job_id, request],
+            args=[job_id, prepare_request],
             start_to_close_timeout=_IO_TIMEOUT,
             retry_policy=IO_RETRY,
         )

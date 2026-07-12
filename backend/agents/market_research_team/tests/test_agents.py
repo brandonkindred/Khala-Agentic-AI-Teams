@@ -11,7 +11,35 @@ from market_research_team.agents import (
     _parse_json,
     _safe_float,
 )
+
+# Captured at import time — BEFORE the autouse ``_mock_strands`` fixture rebinds
+# the module attribute — so this reference is the REAL ``_call_agent``.
+from market_research_team.agents import _call_agent as _real_call_agent
 from market_research_team.models import InterviewInsight, MarketSignal, ResearchMission
+
+
+class _FakeAgentResult:
+    """Mimics a strands ``AgentResult``: ``.message`` is a structured dict, and
+    ``str()`` yields the concatenated text blocks (as ``AgentResult.__str__`` does)."""
+
+    def __init__(self, text: str) -> None:
+        self.message = {"role": "assistant", "content": [{"text": text}]}
+        self._text = text
+
+    def __str__(self) -> str:
+        return self._text
+
+
+def test_call_agent_extracts_text_not_message_dict() -> None:
+    """Regression: ``AgentResult.message`` is a dict, so treating it as text (the
+    old ``result.message.strip()``) crashed; ``str(result)`` is the extraction."""
+    out = _real_call_agent(lambda prompt: _FakeAgentResult('  {"verdict": "x"}  '), "prompt")
+    assert out == '{"verdict": "x"}'
+
+
+def test_call_agent_handles_raw_string() -> None:
+    assert _real_call_agent(lambda prompt: "  hello  ", "prompt") == "hello"
+
 
 # ---------------------------------------------------------------------------
 # TranscriptIngestionAgent (unchanged — pure I/O, no LLM)

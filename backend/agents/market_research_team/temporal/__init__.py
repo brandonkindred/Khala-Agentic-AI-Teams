@@ -23,6 +23,7 @@ from market_research_team.temporal.activities import (
     prepare_activity,
     psychology_activity,
     report_progress_activity,
+    run_pipeline_activity,
     scripts_activity,
     ux_one_activity,
     viability_activity,
@@ -41,6 +42,9 @@ ACTIVITIES = [
     report_progress_activity,
     mark_failed_activity,
     finalize_activity,
+    # Legacy whole-pipeline activity, registered for drain-out of
+    # pre-decomposition histories (see workflows.MarketResearchWorkflow.run).
+    run_pipeline_activity,
 ]
 TASK_QUEUE = "market_research-queue"
 WORKFLOW_ID_PREFIX = "market-research-"
@@ -58,6 +62,7 @@ __all__ = [
     "prepare_activity",
     "psychology_activity",
     "report_progress_activity",
+    "run_pipeline_activity",
     "scripts_activity",
     "ux_one_activity",
     "viability_activity",

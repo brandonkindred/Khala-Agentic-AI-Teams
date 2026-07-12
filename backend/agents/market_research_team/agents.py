@@ -56,13 +56,22 @@ def _build_strands_agent(system_prompt: str, tools: list | None = None) -> Stran
 
 
 def _call_agent(agent: StrandsAgent, prompt: str) -> str:
-    """Call a strands.Agent and return its text output."""
-    result = agent(prompt)
-    if hasattr(result, "message"):
-        content = result.message
-    else:
-        content = str(result)
-    return content.strip()
+    """Call a strands.Agent and return its text output.
+
+    ``strands.Agent.__call__`` returns an ``AgentResult`` whose ``.message`` is a
+    structured content mapping (``{"role": ..., "content": [{"text": ...}]}``) —
+    NOT plain text. ``str(result)`` is the SDK's text extraction: ``AgentResult.
+    __str__`` concatenates the message's text blocks (and handles structured
+    output). Using ``str(result)`` also degrades gracefully if a caller or a
+    mocked agent returns a raw string.
+
+    Preconditions:
+        - ``agent`` is a constructed ``strands.Agent``; ``prompt`` is the user turn.
+    Postconditions:
+        - Returns the agent's text output, stripped (never touches ``.message``
+          as if it were a string, which would raise ``AttributeError``).
+    """
+    return str(agent(prompt)).strip()
 
 
 def _parse_json(raw: str, fallback: object) -> object:

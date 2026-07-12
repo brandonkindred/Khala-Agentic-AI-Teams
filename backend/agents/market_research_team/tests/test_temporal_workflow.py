@@ -126,9 +126,12 @@ def _default_results(*, ctx_stopped=False, progress=True):
     }
 
 
-def _install(monkeypatch, recorder: _Recorder) -> None:
+def _install(monkeypatch, recorder: _Recorder, *, patched: bool = True) -> None:
     monkeypatch.setattr(wf.workflow, "execute_activity", recorder.execute_activity)
     monkeypatch.setattr(wf.workflow, "start_activity", recorder.start_activity)
+    # ``workflow.patched`` needs a real workflow event loop; stub it to select the
+    # new per-stage DAG (True) or the legacy drain-out branch (False).
+    monkeypatch.setattr(wf.workflow, "patched", lambda *a, **k: patched)
     # The catch-all logs via ``workflow.logger``, which needs a real workflow
     # event loop; outside one (these unit tests) a MagicMock stands in for it.
     monkeypatch.setattr(wf.workflow, "logger", MagicMock())
@@ -273,3 +276,36 @@ def test_workflow_mark_failed_failure_is_swallowed(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="viability boom"):
         _run(_REQUEST_UNIFIED)
+
+
+def test_workflow_drain_out_runs_legacy_activity_when_unpatched(monkeypatch) -> None:
+    """A pre-decomposition history (workflow.patched → False) re-schedules the
+    legacy whole-pipeline activity with byte-identical options — and nothing
+    from the new DAG — so in-flight runs survive the deploy."""
+    rec = _Recorder({"market_research_run_pipeline": {"job_id": "job-x"}})
+    _install(monkeypatch, rec, patched=False)
+
+    out = _run(_REQUEST_UNIFIED)
+
+    assert out == {"job_id": "job-x"}
+    assert rec.names() == ["market_research_run_pipeline"]
+    legacy = rec.kwargs_for("market_research_run_pipeline")
+    assert legacy["args"] == ["job-x", _REQUEST_UNIFIED]
+    assert legacy["retry_policy"] is wf._LEGACY_ACTIVITY_RETRY
+    assert legacy["start_to_close_timeout"] == wf._LEGACY_ACTIVITY_TIMEOUT
+
+
+def test_workflow_prepare_receives_stripped_request(monkeypatch) -> None:
+    """Inline transcripts are stripped before prepare (not recorded in its
+    activity input); ingest still receives the full request to load them."""
+    rec = _Recorder(_default_results())
+    _install(monkeypatch, rec)
+    request = {**_REQUEST_UNIFIED, "transcripts": ["a body"], "transcript_folder_path": "/x"}
+
+    _run(request)
+
+    prep = rec.kwargs_for("market_research_prepare")["args"][1]
+    assert prep["transcripts"] == []
+    assert prep["transcript_folder_path"] is None
+    ingest = rec.kwargs_for("market_research_ingest")["args"][1]
+    assert ingest["transcripts"] == ["a body"]

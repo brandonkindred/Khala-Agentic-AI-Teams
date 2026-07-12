@@ -555,3 +555,48 @@ def scripts_activity(ctx: dict[str, Any]) -> list[str]:
     mission, _ = _mission_and_review(sctx)
     with _beating():
         return _orch().scripts(mission)
+
+
+# ---------------------------------------------------------------------------
+# Legacy whole-pipeline activity — kept registered for drain-out only
+# ---------------------------------------------------------------------------
+
+
+@activity.defn(name="market_research_run_pipeline")
+def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
+    """Legacy single-activity pipeline, kept registered for drain-out ONLY.
+
+    A pre-decomposition ``MarketResearchWorkflow`` history that is still open when
+    the fine-grained decomposition deploys replays the workflow's unpatched
+    branch (``not workflow.patched(...)``), which re-schedules THIS activity; it
+    must stay registered until those in-flight runs drain. New runs take the
+    patched per-stage DAG instead. Removal: once every pre-decomposition run has
+    drained, delete this activity and the workflow's unpatched branch.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+        - ``request`` is the serialized ``RunMarketResearchRequest``.
+
+    Postconditions:
+        - RUNNING → COMPLETED with the orchestrator result on success; a cancel
+          leaves the row untouched; a genuine failure marks the row FAILED and
+          re-raises (identical to the pre-decomposition behavior).
+    """
+    from market_research_team.models import RunMarketResearchRequest
+    from market_research_team.pipeline import prepare, run_pipeline_core
+    from market_research_team.shared.job_store import (
+        JOB_STATUS_FAILED,
+        is_job_cancelled,
+        update_job,
+    )
+
+    mission, human_review = prepare(RunMarketResearchRequest(**request))
+    try:
+        run_pipeline_core(job_id, mission, human_review)
+    except Exception as e:
+        activity.logger.exception("Market research job %s failed", job_id)
+        if is_job_cancelled(job_id):
+            return {"job_id": job_id}
+        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+        raise
+    return {"job_id": job_id}

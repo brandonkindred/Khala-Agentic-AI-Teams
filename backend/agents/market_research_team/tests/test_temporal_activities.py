@@ -388,3 +388,33 @@ def test_finalize_does_not_write_completed_when_cancel_lands_during_assembly(mon
     job = get_job("job-fin5")
     assert job["status"] == JOB_STATUS_CANCELLED
     assert "result" not in job
+
+
+# ---------------------------------------------------------------------------
+# legacy whole-pipeline activity (drain-out only)
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_run_pipeline_activity_marks_completed() -> None:
+    create_job("job-legacy", request=_REQUEST)
+
+    result = act.run_pipeline_activity("job-legacy", _REQUEST)
+
+    assert result == {"job_id": "job-legacy"}
+    assert get_job("job-legacy")["status"] == JOB_STATUS_COMPLETED
+
+
+def test_legacy_run_pipeline_activity_marks_failed_and_reraises(monkeypatch) -> None:
+    class _BoomOrchestrator:
+        def run(self, *_a, **_k):
+            raise RuntimeError("legacy boom")
+
+    monkeypatch.setattr(
+        "market_research_team.pipeline.MarketResearchOrchestrator", _BoomOrchestrator
+    )
+    create_job("job-legacy-boom", request=_REQUEST)
+
+    with pytest.raises(RuntimeError, match="legacy boom"):
+        act.run_pipeline_activity("job-legacy-boom", _REQUEST)
+
+    assert get_job("job-legacy-boom")["status"] == JOB_STATUS_FAILED
