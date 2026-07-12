@@ -1892,13 +1892,16 @@ def test_coerce_bool_recognizes_truthy_tokens_only() -> None:
     assert _coerce_bool("true") is True
     assert _coerce_bool("YES") is True
     assert _coerce_bool("1") is True
-    assert _coerce_bool(1) is True
     # Falsey / unrecognized string tokens (note: bare bool("false") would be True).
     assert _coerce_bool("false") is False
     assert _coerce_bool("no") is False
     assert _coerce_bool("") is False
     assert _coerce_bool(None) is False
     assert _coerce_bool(0) is False
+    # A bare number is never treated as true, even a truthy one — only a real
+    # bool or a recognized truthy string counts (mirrors tech_lead_agent's
+    # stricter convention for the same LLM-flag-drift problem).
+    assert _coerce_bool(1) is False
 
 
 def test_validate_line_absolute_numbering_has_no_overlap_ambiguity() -> None:

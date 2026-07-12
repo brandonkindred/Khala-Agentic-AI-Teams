@@ -38,6 +38,8 @@ import os
 import re
 from typing import Any, Iterable, Optional, Protocol
 
+from .client import scrub_token_from_text
+
 # GitHub inline review comments on side=RIGHT must target a line the diff adds
 # (`+`) or carries as context (` `). We accept both so the commentable set matches
 # exactly what the reviewer is shown by render_annotated_hunks (added + context
@@ -207,6 +209,29 @@ def map_issues_to_comments(
                 }
             )
     return review_comments, leftover
+
+
+def is_within_diff(finding: Any, valid_by_path: dict[str, set[int]]) -> bool:
+    """True when a finding's file/line is definitely inside this PR's diff.
+
+    Uses the same file/line matching as :func:`map_issues_to_comments`'s
+    line-anchored branch, so "within the diff" here means exactly "would be
+    posted as a line-anchored inline comment" — a finding whose file matches
+    but whose line does not (e.g. unchanged code inside a changed file) is NOT
+    considered within the diff, since that code legitimately can be
+    pre-existing.
+
+    Postconditions:
+        - Returns True iff ``finding.file_path`` resolves to a key in
+          ``valid_by_path`` (per :func:`_normalize_path`) and ``finding.line``
+          is a commentable line number for that file. False otherwise
+          (including when ``finding.line`` is ``None``).
+    """
+    path = _normalize_path(getattr(finding, "file_path", "") or "", valid_by_path)
+    if path is None:
+        return False
+    line = getattr(finding, "line", None)
+    return line is not None and int(line) in valid_by_path[path]
 
 
 def split_review_comments(
@@ -423,18 +448,22 @@ def proposal_from_finding(finding: Any, index: int) -> dict[str, Any]:
           ``file_path``, ``line`` (int or None), ``description``, ``suggestion``,
           ``issue_number`` (None) and ``issue_url`` (None). The two ``issue_*``
           fields start None and are filled in once a GitHub issue is created for
-          the proposal. Every string field is coerced to ``str`` so the dict is
-          JSON-serializable regardless of the finding's field types.
+          the proposal. Every string field is coerced with ``str()`` so the dict
+          is JSON-serializable regardless of the finding's field types, and
+          ``description``/``suggestion`` are token-scrubbed: this proposal is
+          persisted and served through the Code Review page before any human
+          opts to file an issue, so it must never carry a raw secret any more
+          than a posted PR comment would.
     """
     line = getattr(finding, "line", None)
     return {
         "id": f"p{index}",
-        "severity": (getattr(finding, "severity", "") or "info"),
-        "category": (getattr(finding, "category", "") or "general"),
-        "file_path": (getattr(finding, "file_path", "") or ""),
+        "severity": str(getattr(finding, "severity", "") or "info"),
+        "category": str(getattr(finding, "category", "") or "general"),
+        "file_path": str(getattr(finding, "file_path", "") or ""),
         "line": line if isinstance(line, int) and line > 0 else None,
-        "description": (getattr(finding, "description", "") or ""),
-        "suggestion": (getattr(finding, "suggestion", "") or ""),
+        "description": scrub_token_from_text(str(getattr(finding, "description", "") or "")),
+        "suggestion": scrub_token_from_text(str(getattr(finding, "suggestion", "") or "")),
         "issue_number": None,
         "issue_url": None,
     }
@@ -483,10 +512,12 @@ def build_issue_from_proposal(
     description = str(proposal.get("description") or "").strip()
     suggestion = str(proposal.get("suggestion") or "").strip()
 
-    location = _location_prefix(file_path, line if isinstance(line, int) else None)
-    # ``_location_prefix`` renders "`path:line` — "; drop the trailing separator for
-    # a standalone location line, or fall back to "n/a" when no file is named.
-    location_text = location[:-3].strip() if location else "n/a"
+    if not file_path:
+        location_text = "n/a"
+    elif isinstance(line, int) and line > 0:
+        location_text = f"`{file_path}:{line}`"
+    else:
+        location_text = f"`{file_path}`"
 
     lines: list[str] = [
         f"An automated code review of pull request #{pr_number} ({pr_url}) flagged this as a "

@@ -440,17 +440,23 @@ def _coerce_bool(value: object) -> bool:
 
     LLMs emit booleans inconsistently — as a JSON ``true``/``false``, as the
     string ``"true"``/``"yes"``/``"1"``, or omitted entirely — so a bare
-    ``bool(value)`` would read the string ``"false"`` as True.
+    ``bool(value)`` would read the string ``"false"`` as True. Mirrors the
+    strict-coercion convention coding_team's tech_lead_agent uses for the same
+    LLM-flag-drift problem: only a real ``True`` or a recognized truthy string
+    counts, so an unexpected type (a bare number, a list, ...) is never
+    silently treated as true.
 
     Postconditions:
-        - Returns True only for a truthy bool/number or a recognized truthy
+        - Returns True only for the bool ``True`` or a recognized truthy
           string token (``true``/``yes``/``1``, case-insensitive); False for
-          None, an unrecognized string (including ``"false"``/``"no"``), or any
-          falsey value. Never raises.
+          None, any number, an unrecognized string (including ``"false"``/
+          ``"no"``), or any other value. Never raises.
     """
+    if isinstance(value, bool):
+        return value
     if isinstance(value, str):
         return value.strip().lower() in {"true", "yes", "1"}
-    return bool(value)
+    return False
 
 
 def _validate_line(line: Optional[int], seg: Optional[FileSegment]) -> Optional[int]:

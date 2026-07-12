@@ -2622,6 +2622,7 @@ class TestPreExistingFindings:
                 _FakeReviewIssue(
                     "critical",
                     line=2,
+                    file_path="legacy.py",
                     description="old latent bug",
                     pre_existing=True,
                 ),
@@ -2640,7 +2641,6 @@ class TestPreExistingFindings:
         assert all("old latent bug" not in rc.get("body", "") for rc in gh.review_comments)
         # It is stored as a proposal instead.
         proposals = summary["pending_issue_proposals"]
-        assert summary["preexisting_findings"] == 1
         assert len(proposals) == 1
         p = proposals[0]
         assert p["id"] == "p0"
@@ -2652,7 +2652,11 @@ class TestPreExistingFindings:
         gh = review_app["github"]["client"]
         job = _run_review_with(
             review_app,
-            [_FakeReviewIssue("high", line=2, description="latent", pre_existing=True)],
+            [
+                _FakeReviewIssue(
+                    "high", line=2, file_path="legacy.py", description="latent", pre_existing=True
+                )
+            ],
         )
         summary = job["review_summary"]
         # The PR's own change is clean: no PR findings, a COMMENT (not
@@ -2661,15 +2665,15 @@ class TestPreExistingFindings:
         assert gh.submitted_reviews and gh.submitted_reviews[0]["event"] == "COMMENT"
         assert gh.reactions and gh.reactions[0][1] == "+1"
         # But the pre-existing bug is still surfaced as a proposal.
-        assert summary["preexisting_findings"] == 1
+        assert len(summary["pending_issue_proposals"]) == 1
 
     def test_status_text_mentions_preexisting_count(self, review_app) -> None:
         job = _run_review_with(
             review_app,
             [
                 _FakeReviewIssue("high", line=2),
-                _FakeReviewIssue("low", line=2, pre_existing=True),
-                _FakeReviewIssue("low", line=2, pre_existing=True),
+                _FakeReviewIssue("low", line=2, file_path="legacy.py", pre_existing=True),
+                _FakeReviewIssue("low", line=2, file_path="legacy.py", pre_existing=True),
             ],
         )
         assert "2 pre-existing bugs to review" in job["status_text"]
@@ -2679,8 +2683,12 @@ class TestPreExistingFindings:
         job = _run_review_with(
             review_app,
             [
-                _FakeReviewIssue("high", line=2, description="latent A", pre_existing=True),
-                _FakeReviewIssue("low", line=3, description="latent B", pre_existing=True),
+                _FakeReviewIssue(
+                    "high", line=2, file_path="legacy.py", description="latent A", pre_existing=True
+                ),
+                _FakeReviewIssue(
+                    "low", line=3, file_path="legacy.py", description="latent B", pre_existing=True
+                ),
             ],
         )
         job_id = job["job_id"]
@@ -2709,6 +2717,7 @@ class TestPreExistingFindings:
                 _FakeReviewIssue(
                     "high",
                     line=2,
+                    file_path="legacy.py",
                     description="leaked https://user:secrettoken@github.com/o/r.git in stderr",
                     pre_existing=True,
                 )
@@ -2726,7 +2735,7 @@ class TestPreExistingFindings:
         gh = review_app["github"]["client"]
         job = _run_review_with(
             review_app,
-            [_FakeReviewIssue("high", line=2, pre_existing=True)],
+            [_FakeReviewIssue("high", line=2, file_path="legacy.py", pre_existing=True)],
         )
         job_id = job["job_id"]
         review_app["client"].post(f"/reviews/{job_id}/issues", json={"proposal_ids": ["p0"]})
@@ -2740,7 +2749,7 @@ class TestPreExistingFindings:
         gh = review_app["github"]["client"]
         job = _run_review_with(
             review_app,
-            [_FakeReviewIssue("high", line=2, pre_existing=True)],
+            [_FakeReviewIssue("high", line=2, file_path="legacy.py", pre_existing=True)],
         )
         resp = review_app["client"].post(
             f"/reviews/{job['job_id']}/issues", json={"proposal_ids": ["nope"]}
@@ -2760,7 +2769,7 @@ class TestPreExistingFindings:
     ) -> None:
         job = _run_review_with(
             review_app,
-            [_FakeReviewIssue("high", line=2, pre_existing=True)],
+            [_FakeReviewIssue("high", line=2, file_path="legacy.py", pre_existing=True)],
         )
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
         resp = review_app["client"].post(
@@ -2773,7 +2782,7 @@ class TestPreExistingFindings:
         gh.create_issue_fail = True
         job = _run_review_with(
             review_app,
-            [_FakeReviewIssue("high", line=2, pre_existing=True)],
+            [_FakeReviewIssue("high", line=2, file_path="legacy.py", pre_existing=True)],
         )
         resp = review_app["client"].post(
             f"/reviews/{job['job_id']}/issues", json={"proposal_ids": ["p0"]}
@@ -2784,7 +2793,7 @@ class TestPreExistingFindings:
         gh = review_app["github"]["client"]
         job = _run_review_with(
             review_app,
-            [_FakeReviewIssue("high", line=2, pre_existing=True)],
+            [_FakeReviewIssue("high", line=2, file_path="legacy.py", pre_existing=True)],
         )
         # The review ran against o/r (see _review_body); a matching request files.
         resp = review_app["client"].post(
@@ -2798,7 +2807,7 @@ class TestPreExistingFindings:
         gh = review_app["github"]["client"]
         job = _run_review_with(
             review_app,
-            [_FakeReviewIssue("high", line=2, pre_existing=True)],
+            [_FakeReviewIssue("high", line=2, file_path="legacy.py", pre_existing=True)],
         )
         resp = review_app["client"].post(
             f"/reviews/{job['job_id']}/issues",
@@ -2892,7 +2901,6 @@ class TestCreateReviewIssuesUnit:
         }
         monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
         persisted: dict[str, Any] = {}
-        calls = {"n": 0}
 
         class _Client:
             def __enter__(self):
@@ -2902,9 +2910,10 @@ class TestCreateReviewIssuesUnit:
                 return None
 
             def create_issue(self, _o, _r, *, title, body, labels=None):
-                # Succeed on the first proposal, fail on the second.
-                calls["n"] += 1
-                if calls["n"] == 2:
+                # Fail specifically for p1's proposal (identified by its own
+                # description, not call order — proposals are filed concurrently,
+                # so no ordering between them is guaranteed).
+                if "### Description\nb" in body:
                     raise GitHubAPIError(403, "boom")
                 return type("_I", (), {"number": 1, "html_url": "u1"})()
 
@@ -2914,7 +2923,8 @@ class TestCreateReviewIssuesUnit:
 
         with pytest.raises(GitHubAPIError):
             pr_review.create_review_issues("job1", ["p0", "p1"], token="t")
-        # The issue opened before the failure was persisted (p0 filed, p1 not).
+        # The issue opened despite the other proposal failing was persisted
+        # (p0 filed, p1 not) — one proposal's rejection never stops another's.
         saved = {
             p["id"]: bool(p["issue_url"])
             for p in persisted["review_summary"]["pending_issue_proposals"]

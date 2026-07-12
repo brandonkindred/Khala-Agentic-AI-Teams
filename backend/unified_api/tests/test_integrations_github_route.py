@@ -78,13 +78,19 @@ class _FakeAsyncClient:
 
     ``calls`` records every ``post`` as a ``(url, json_payload)`` tuple; use
     ``last_payload()`` to read the JSON body of the most recent request rather
-    than indexing the tuple structure directly.
+    than indexing the tuple structure directly. ``get`` handles the
+    ``_assert_pat_can_reach_repo`` reachability probe (any ``/repos/...`` URL),
+    answering with ``repo_access_status`` (200 by default, i.e. "reachable") so
+    routes that don't exercise that gate are unaffected; the probe's own calls
+    are recorded separately in ``repo_checks``, not ``calls``.
     """
 
-    def __init__(self, *, result=None, exc=None):
+    def __init__(self, *, result=None, exc=None, repo_access_status=200):
         self._result = result
         self._exc = exc
+        self._repo_access_status = repo_access_status
         self.calls = []
+        self.repo_checks = []
 
     def last_payload(self):
         """Return the JSON payload of the most recent post (the tuple's [1])."""
@@ -95,6 +101,10 @@ class _FakeAsyncClient:
 
     async def __aexit__(self, *exc_info):
         return False
+
+    async def get(self, url, params=None, headers=None):
+        self.repo_checks.append(url)
+        return _FakeResp(self._repo_access_status, json_data={"full_name": "acme/widget"})
 
     async def post(self, url, json=None):
         self.calls.append((url, json))
@@ -1291,6 +1301,24 @@ def test_create_review_issues_502_on_malformed_body(mock_cfg, mock_cred, monkeyp
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.post(_REVIEW_ISSUES, json={"proposal_ids": ["p0"], "owner": "acme", "repo": "widget"})
     assert resp.status_code == 502
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_create_review_issues_404_when_pat_cannot_reach_repo(mock_cfg, mock_cred, monkeypatch):
+    """This route mutates Khala's own store (a review's persisted proposals) rather than
+    being implicitly gated by a GitHub call, so — mirroring GET /github/reviews — it must
+    verify the PAT can reach owner/repo before ever contacting the coding-team service.
+    A repo the PAT can't reach (GitHub 404 on the access probe) yields 404 and never
+    forwards the request, so a caller cannot use a job_id to file issues into (or read
+    proposal detail for) a repository outside the PAT's own access boundary."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(result=_FakeResp(200, json_data={}), repo_access_status=404)
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_REVIEW_ISSUES, json={"proposal_ids": ["p0"], "owner": "secret", "repo": "repo"})
+    assert resp.status_code == 404
+    assert fake.repo_checks  # the PAT access probe ran
+    assert fake.calls == []  # the coding-team forward was skipped
 
 
 # ---------------------------------------------------------------------------

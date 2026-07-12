@@ -131,8 +131,6 @@ export interface CodeReviewSummary {
   /** Pre-existing bugs the reviewer flagged in unchanged code, offered as
    * GitHub-issue candidates. Absent on reviews run before this feature. */
   pending_issue_proposals?: PendingIssueProposal[];
-  /** Count of `pending_issue_proposals` (denormalized). */
-  preexisting_findings?: number;
 }
 
 export interface TaskSnapshot {

@@ -801,6 +801,33 @@ describe('CodeReviewPanelComponent', () => {
     expect(integrationsSpy.createGitHubReviewIssues).not.toHaveBeenCalled();
   });
 
+  it('drops a proposal skipped server-side from the selection, not just the ones it created', async () => {
+    await setup();
+    const rec = terminalRecordWith([proposal('p0'), proposal('p1')]);
+    // p1 was already filed by another tab before this request landed: the
+    // server skips it (not in `created`) but the returned proposals already
+    // show its issue_url set.
+    integrationsSpy.createGitHubReviewIssues.mockReturnValue(
+      of({
+        job_id: 'j1',
+        created: [
+          { proposal_id: 'p0', issue_number: 5, issue_url: 'https://x/issues/5', title: 't' },
+        ],
+        proposals: [
+          proposal('p0', { issue_number: 5, issue_url: 'https://x/issues/5' }),
+          proposal('p1', { issue_number: 9, issue_url: 'https://x/issues/9' }),
+        ],
+      }),
+    );
+    component.toggleProposal('j1', 'p0');
+    component.toggleProposal('j1', 'p1');
+    component.createIssuesFor(rec);
+    // Both are gone from the selection — p0 because it was just created, p1
+    // because the updated proposal list shows it is no longer open — instead
+    // of p1 lingering selected forever because it was never in `created`.
+    expect(component.selectedCount('j1')).toBe(0);
+  });
+
   it('surfaces a create-issue error', async () => {
     await setup();
     const rec = terminalRecordWith([proposal('p0')]);

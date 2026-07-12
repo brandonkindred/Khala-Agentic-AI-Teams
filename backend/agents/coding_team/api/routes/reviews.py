@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import uuid
 from typing import List, Optional
 
@@ -18,6 +17,7 @@ from coding_team.api.models import (
     ReviewPrResponse,
     ReviewRunItem,
 )
+from coding_team.api.routes._common import resolve_github_token
 from coding_team.github_source import (
     GitHubAPIError,
 )
@@ -40,9 +40,7 @@ def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
         - Creates a job, starts the review hook in the background, and returns the
           job id plus the PR URL. Poll ``GET /status/{job_id}`` for progress.
     """
-    token = request.github_token or os.environ.get("GITHUB_TOKEN")
-    if not token:
-        raise HTTPException(status_code=400, detail="GITHUB_TOKEN not configured")
+    token = resolve_github_token(request)
 
     # Validate the PR exists BEFORE taking the admission lock: the GitHub round-trip is
     # the slowest step, and keeping it outside the critical section keeps admission
@@ -132,9 +130,7 @@ def post_create_review_issues(
           requested owner/repo do not match the reviewed repository, and 502 on a
           GitHub API failure.
     """
-    token = request.github_token or os.environ.get("GITHUB_TOKEN")
-    if not token:
-        raise HTTPException(status_code=400, detail="GITHUB_TOKEN not configured")
+    token = resolve_github_token(request)
     try:
         data = _main.create_review_issues(
             job_id,

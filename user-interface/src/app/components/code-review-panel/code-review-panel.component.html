@@ -193,8 +193,11 @@
                     <app-inline-banner variant="error" [message]="reviewError" />
                   }
 
-                  <!-- All review runs for this PR -->
-                  @if (hasReviews(pull.number)) {
+                  <!-- All review runs for this PR. Computed once via `as revs` and
+                       reused by the proposals block below, instead of each calling
+                       reviewsFor(pull.number) with its own @for pass. -->
+                  @if (reviewsFor(pull.number); as revs) {
+                  @if (revs.length > 0) {
                     <table class="cr-reviews-table">
                       <thead>
                         <tr>
@@ -206,7 +209,7 @@
                         </tr>
                       </thead>
                       <tbody>
-                        @for (rec of reviewsFor(pull.number); track rec.jobId) {
+                        @for (rec of revs; track rec.jobId) {
                           <tr>
                             <td>
                               <span class="cr-job-status cr-job-status--{{ rec.status }}">
@@ -254,7 +257,7 @@
 
                   <!-- Pre-existing bugs the reviewer found in unchanged code:
                        offered as GitHub-issue candidates, one block per run. -->
-                  @for (rec of reviewsFor(pull.number); track rec.jobId) {
+                  @for (rec of revs; track rec.jobId) {
                     @if (hasProposals(rec)) {
                       <div class="cr-proposals">
                         <h4 class="cr-proposals__title">
@@ -333,6 +336,7 @@
                         }
                       </div>
                     }
+                  }
                   }
                 </div>
               }

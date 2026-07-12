@@ -614,8 +614,10 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   /**
    * File GitHub issues for the currently-selected proposals of a review. On
    * success the record's proposal list is replaced with the server's updated
-   * copy (filed proposals now carry `issue_url`), and the filed ids are dropped
-   * from the selection so the button reflects only what is still pending.
+   * copy (filed proposals now carry `issue_url`), and the selection is reduced
+   * to whatever proposals are still open (no `issue_url`) in that updated copy
+   * — not just the ones this call filed — so a proposal skipped server-side
+   * (already filed by another tab, or an unknown id) never lingers selected.
    */
   createIssuesFor(record: PrReviewRecord): void {
     const jobId = record.jobId;
@@ -635,19 +637,18 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
               pending_issue_proposals: resp.proposals,
             };
           }
-          const filed = new Set(resp.created.map((c) => c.proposal_id));
+          const openIds = new Set(
+            resp.proposals.filter((p) => !p.issue_url).map((p) => p.id),
+          );
           const remaining = new Set(
-            Array.from(this.selectedProposals.get(jobId) ?? []).filter((id) => !filed.has(id)),
+            Array.from(this.selectedProposals.get(jobId) ?? []).filter((id) => openIds.has(id)),
           );
           this.selectedProposals.set(jobId, remaining);
           this.cdr.markForCheck();
         },
-        error: (err: { error?: { detail?: string }; message?: string }) => {
+        error: (err: unknown) => {
           this.creatingIssues.delete(jobId);
-          this.createIssueErrors.set(
-            jobId,
-            err?.error?.detail || err?.message || 'Failed to create issue(s).',
-          );
+          this.createIssueErrors.set(jobId, extractErrorDetail(err, 'Failed to create issue(s).'));
           this.cdr.markForCheck();
         },
       });
