@@ -77,12 +77,15 @@ class RoutePlannerAgent:
             result = self._agent(prompt)
             raw = str(result).strip()
             data = json.loads(raw)
+            raw_stops = data.get("ordered_stops") or []
+            stops = [RouteStop.model_validate(s) for s in raw_stops if isinstance(s, dict)]
         except Exception as e:
-            logger.warning("RoutePlannerAgent JSON parse failed: %s", e)
+            # Covers both a malformed LLM response (JSON parse failure) and a
+            # syntactically-valid-but-schema-invalid stop (pydantic ValidationError)
+            # — either way the postcondition below holds: fall back rather than raise.
+            logger.warning("RoutePlannerAgent JSON parse/validation failed: %s", e)
             return self._fallback_route(trip, end)
 
-        raw_stops = data.get("ordered_stops") or []
-        stops = [RouteStop.model_validate(s) for s in raw_stops if isinstance(s, dict)]
         if not stops or not self._covers_required_stops(stops, trip):
             # Valid JSON that yields no usable stops (e.g. an empty object from a
             # refusal) or that silently drops a must-visit stop — fall back to a
@@ -142,5 +145,7 @@ class RoutePlannerAgent:
         stops.append(RouteStop(location=end, stop_type="end", recommended_nights=0))
         return RoutePlan(
             ordered_stops=stops,
-            suggested_total_days=trip.trip_duration_days or len(trip.required_stops) * 2,
+            # max(1, ...): a trip with no explicit duration and no required stops
+            # (start → end only) would otherwise evaluate to 0 days.
+            suggested_total_days=max(1, trip.trip_duration_days or len(trip.required_stops) * 2),
         )

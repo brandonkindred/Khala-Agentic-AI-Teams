@@ -17,7 +17,7 @@ thread mode. Both modes therefore share one implementation and produce the same
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import Callable, List, Optional
 
 from .agents.activities_expert_agent import ActivitiesExpertAgent
 from .agents.itinerary_composer_agent import ItineraryComposerAgent
@@ -83,7 +83,7 @@ def recommend_activities(
     group_profile: TravelerGroupProfile,
     trip: TripRequest,
     llm=None,
-    on_stop=None,
+    on_stop: Optional[Callable[[], None]] = None,
 ) -> List[StopActivities]:
     """Recommend activities and dining for each stop on the route.
 
@@ -178,7 +178,9 @@ def run_pipeline(trip_request: PlanTripRequest) -> TripItinerary:
         return TripItinerary(
             title=f"Road Trip: {trip.start_location} to {trip.end_location or trip.start_location}",
             overview="Itinerary generation completed but a planning step failed.",
-            total_days=trip.trip_duration_days or len(trip.required_stops) * 2,
+            # max(1, ...): a trip with no explicit duration and no required stops
+            # (start → end only) would otherwise evaluate to 0 days.
+            total_days=max(1, trip.trip_duration_days or len(trip.required_stops) * 2),
         )
 
 
@@ -193,9 +195,11 @@ def run_plan_core(job_id: str, body: PlanTripRequest) -> None:
         - ``body`` is a validated ``PlanTripRequest``.
 
     Postconditions:
-        - Writes RUNNING then COMPLETED (with the itinerary result) on success.
-        - Propagates any pipeline exception unchanged — the caller owns the
-          failure policy (swallow vs. re-raise).
+        - Writes RUNNING then COMPLETED with the itinerary result. ``run_pipeline``
+          already catches step failures internally and degrades to a fallback
+          ``TripItinerary`` rather than raising, so this reaches COMPLETED in the
+          normal case; only a failure outside that guard (e.g. the job-store write
+          itself) propagates, and the caller owns that failure policy.
     """
     update_job(job_id, status=JOB_STATUS_RUNNING)
     itinerary = run_pipeline(body)

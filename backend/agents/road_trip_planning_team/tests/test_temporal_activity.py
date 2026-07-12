@@ -279,6 +279,13 @@ def test_workflow_progress_starts_before_run():
     assert wf.RoadTripWorkflow().progress() == {"step": "starting", "fraction": 0.0}
 
 
+def test_advance_raises_valueerror_on_out_of_range_fraction():
+    # An explicit raise (not assert) so the check survives python -O — progress()
+    # is a public workflow query, not an internal-only invariant.
+    with pytest.raises(ValueError, match=r"out of \[0.0, 1.0\]"):
+        wf.RoadTripWorkflow()._advance("bad", 1.5)
+
+
 def test_workflow_marks_failed_and_reraises_on_step_error(monkeypatch, sample_trip_body):
     calls: list[dict] = []
 

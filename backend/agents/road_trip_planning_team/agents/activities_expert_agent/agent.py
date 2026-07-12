@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import List
+from typing import Callable, List, Optional
 
 from strands import Agent
 
@@ -53,7 +53,7 @@ class ActivitiesExpertAgent:
         route: RoutePlan,
         group_profile: TravelerGroupProfile,
         trip: TripRequest,
-        on_stop=None,
+        on_stop: Optional[Callable[[], None]] = None,
     ) -> List[StopActivities]:
         """Generate activity recommendations for each stop on the route.
 
@@ -63,6 +63,17 @@ class ActivitiesExpertAgent:
         each call rather than only firing once the blocking call has already
         returned. A stalled worker is then detected within the heartbeat timeout
         instead of only at the activity's start-to-close timeout.
+
+        Preconditions:
+            - ``route`` is a ``RoutePlan`` whose ``ordered_stops`` is non-empty;
+              ``group_profile`` and ``trip`` are the upstream typed outputs.
+
+        Postconditions:
+            - Returns exactly one ``StopActivities`` per stop in
+              ``route.ordered_stops``, in order. A pass-through start/end stop
+              (``recommended_nights == 0``) gets an empty entry with no LLM call;
+              every other stop's entry comes from ``_get_stop_activities``, which
+              never raises (see its own contract).
         """
         results: List[StopActivities] = []
 
@@ -82,7 +93,17 @@ class ActivitiesExpertAgent:
         group_profile: TravelerGroupProfile,
         trip: TripRequest,
     ) -> StopActivities:
-        """Get activities for a single stop."""
+        """Get activities for a single stop.
+
+        Preconditions:
+            - ``location`` is a non-empty stop location; ``group_profile`` and
+              ``trip`` are the upstream typed outputs.
+
+        Postconditions:
+            - Returns a ``StopActivities`` for ``location``. Never raises: on
+              LLM/parse failure returns a ``StopActivities`` with empty
+              ``activities``/``dining``/``tips`` rather than propagating the error.
+        """
         prompt = (
             f"Location: {location}\n\n"
             f"Group profile:\n"

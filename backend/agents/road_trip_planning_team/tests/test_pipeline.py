@@ -19,6 +19,7 @@ from road_trip_planning_team.models import (
     StopActivities,
     TravelerGroupProfile,
     TripItinerary,
+    TripRequest,
 )
 from road_trip_planning_team.shared.job_store import (
     JOB_STATUS_COMPLETED,
@@ -86,6 +87,22 @@ def test_plan_route_falls_back_on_bad_json(sample_plan_request):
     assert "Yosemite" in locations
 
 
+def test_plan_route_falls_back_on_schema_invalid_stop(sample_plan_request):
+    # Syntactically valid JSON with a schema-invalid stop (wrong field type) must
+    # also fall back — a pydantic ValidationError here must not bypass the
+    # documented fallback contract and crash the step.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "SF", "recommended_nights": "not-a-number"}],'
+        ' "route_summary": "coastal"}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert isinstance(route, RoutePlan)
+    locations = [s.location for s in route.ordered_stops]
+    assert "San Francisco, CA" in locations
+    assert "Yosemite" in locations
+    assert route.route_summary == ""  # fallback route, not the LLM's "coastal" summary
+
+
 def test_plan_route_falls_back_when_json_omits_stops(sample_plan_request):
     # Valid JSON that omits ordered_stops (e.g. a `{}` refusal) must still yield a
     # route covering start → required stops → end, not an empty route that would
@@ -124,6 +141,29 @@ def test_fallback_route_endpoints_are_pass_through(sample_plan_request):
     assert by_type["end"].recommended_nights == 0
     dests = [s for s in route.ordered_stops if s.stop_type == "destination"]
     assert dests and all(s.recommended_nights == 1 for s in dests)
+
+
+def test_fallback_route_never_yields_zero_days():
+    # No explicit duration and no required stops (a minimal start→end trip, the
+    # only fields the API requires) must not degrade suggested_total_days to 0.
+    trip = TripRequest(start_location="San Francisco, CA", travelers=[{"name": "Alice"}])
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=_FakeLLM("x"))
+    assert route.suggested_total_days >= 1
+
+
+def test_run_pipeline_fallback_never_yields_zero_days(monkeypatch):
+    # Same zero-days edge case, but through run_pipeline's own except-fallback.
+    trip = TripRequest(start_location="San Francisco, CA", travelers=[{"name": "Alice"}])
+    from road_trip_planning_team.models import PlanTripRequest
+
+    def _boom(_trip):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(rtp_pipeline, "profile_travelers", _boom)
+
+    itinerary = rtp_pipeline.run_pipeline(PlanTripRequest(trip=trip))
+
+    assert itinerary.total_days >= 1
 
 
 def test_recommend_activities_parses_and_skips_passthrough(sample_plan_request):

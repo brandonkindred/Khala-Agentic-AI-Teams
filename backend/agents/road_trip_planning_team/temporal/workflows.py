@@ -163,7 +163,10 @@ class RoadTripWorkflow:
         Postconditions:
             - ``progress()`` subsequently reports ``step``/``fraction``.
         """
-        assert 0.0 <= fraction <= 1.0, f"progress fraction {fraction} out of [0.0, 1.0]"
+        # An explicit raise (not ``assert``) so the check isn't stripped under
+        # ``-O`` — ``progress`` is a public workflow query, not an internal-only path.
+        if not (0.0 <= fraction <= 1.0):
+            raise ValueError(f"progress fraction {fraction} out of [0.0, 1.0]")
         self._step = step
         self._fraction = fraction
 
