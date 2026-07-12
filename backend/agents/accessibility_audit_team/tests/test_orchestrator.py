@@ -185,14 +185,38 @@ async def test_run_retest_persists_updated_state(monkeypatch, sample_findings):
 
 
 @pytest.mark.anyio
-async def test_run_retest_no_finding_ids_and_none_pending_persists_state(monkeypatch):
-    """The legitimate "nothing to retest" case (no finding_ids requested, and the
-    audit genuinely has no final findings) must still persist the updated
-    summary — otherwise the note never survives a restart/reload, unlike every
-    other branch of run_retest."""
+async def test_run_retest_does_not_duplicate_completed_phases_entry(monkeypatch, sample_findings):
+    """A second retest for an audit that already has RETEST recorded (e.g. a
+    prior successful retest, or a Temporal retry landing after the phase already
+    persisted) must not grow completed_phases with a duplicate RETEST entry."""
     orchestrator = AccessibilityAuditOrchestrator()
     orchestrator._audits["audit_rt"] = AccessibilityAuditResult(
-        audit_id="audit_rt", final_findings=[]
+        audit_id="audit_rt", final_findings=sample_findings, completed_phases=[Phase.RETEST]
+    )
+    monkeypatch.setattr(orchestrator, "_persist_audit", AsyncMock())
+
+    with patch(
+        "accessibility_audit_team.orchestrator.run_retest_phase",
+        new_callable=AsyncMock,
+        return_value=RetestResult(
+            success=True, findings_retested=3, findings_closed=1, findings_still_open=2
+        ),
+    ):
+        result = await orchestrator.run_retest("audit_rt", None)
+
+    assert result.completed_phases.count(Phase.RETEST) == 1
+
+
+@pytest.mark.anyio
+async def test_run_retest_no_finding_ids_and_none_pending_does_not_persist(monkeypatch):
+    """The "nothing to retest" case (no finding_ids requested, and the audit
+    genuinely has no final findings) is a no-op — no retest phase actually runs —
+    so it must NOT overwrite the stored audit's real completion summary with the
+    informational notice. A later /report or /findings read must still see the
+    original summary, not the no-op one."""
+    orchestrator = AccessibilityAuditOrchestrator()
+    orchestrator._audits["audit_rt"] = AccessibilityAuditResult(
+        audit_id="audit_rt", final_findings=[], summary="Audit complete. 0 findings."
     )
     persist = AsyncMock()
     monkeypatch.setattr(orchestrator, "_persist_audit", persist)
@@ -200,7 +224,9 @@ async def test_run_retest_no_finding_ids_and_none_pending_persists_state(monkeyp
     result = await orchestrator.run_retest("audit_rt", None)
 
     assert result.summary == "No findings to retest"
-    persist.assert_awaited_once()
+    persist.assert_not_awaited()
+    # The cached audit's own state must be untouched by the no-op request.
+    assert orchestrator._audits["audit_rt"].summary == "Audit complete. 0 findings."
 
 
 @pytest.mark.anyio

@@ -462,9 +462,13 @@ class AccessibilityAuditOrchestrator:
                 else:
                     findings_to_retest = result.final_findings
                     if not findings_to_retest:
-                        result.summary = "No findings to retest"
-                        await self._persist_audit(result)
-                        return result
+                        # No retest phase actually runs for this request — return a
+                        # copy with an informational summary WITHOUT persisting it
+                        # (same reasoning as the invalid-finding_ids case above):
+                        # overwriting the stored audit's real completion summary for
+                        # a no-op request would permanently replace it for every
+                        # future /report or /findings reader.
+                        return result.model_copy(update={"summary": "No findings to retest"})
 
                 # Run retest phase
                 logger.info("Starting retest phase for audit %s", audit_id)
@@ -478,7 +482,8 @@ class AccessibilityAuditOrchestrator:
                 )
 
                 result.retest_result = retest_result
-                result.completed_phases.append(Phase.RETEST)
+                if Phase.RETEST not in result.completed_phases:
+                    result.completed_phases.append(Phase.RETEST)
 
                 # Update final findings
                 if retest_result.updated_findings:

@@ -52,6 +52,21 @@ _PHASE_RETRY_POLICY = RetryPolicy(
     maximum_attempts=3,
 )
 
+#: Unlike the pipeline phases, ``orchestrator.run_retest`` has no
+#: completed-phases/failure_reason short-circuit — it persists the retested audit
+#: (appending ``Phase.RETEST`` and overwriting ``final_findings``) *before*
+#: ``retest_activity`` writes its own terminal job-store status. If that terminal
+#: write then fails, a retry under ``_PHASE_RETRY_POLICY`` would find the job still
+#: RUNNING and re-run the retest phase against the already-updated findings,
+#: duplicating LLM/scan work and the ``completed_phases`` entry. A single-attempt
+#: policy avoids the unsafe retry entirely; a failed retest surfaces to the caller,
+#: who can issue a fresh retest request instead of Temporal silently redoing one.
+_RETEST_RETRY_POLICY = RetryPolicy(
+    initial_interval=timedelta(seconds=5),
+    maximum_interval=timedelta(minutes=2),
+    maximum_attempts=1,
+)
+
 # --- Legacy single-activity path (rollout compatibility only) --------------
 #: Timeout + policy for the legacy ``run_pipeline_activity`` branch. These MUST stay
 #: byte-for-byte what pre-decomposition ``AccessibilityAuditWorkflow`` histories
@@ -241,5 +256,5 @@ class AccessibilityRetestWorkflow:
             task_queue=TASK_QUEUE,
             start_to_close_timeout=RETEST_TIMEOUT,
             heartbeat_timeout=HEARTBEAT_TIMEOUT,
-            retry_policy=_PHASE_RETRY_POLICY,
+            retry_policy=_RETEST_RETRY_POLICY,
         )
