@@ -361,3 +361,22 @@ def test_budget_warning_flows_through_collect_event():
     assert budget_events[0].agent_id == "a2"
     # And it made it into the stored events list as well.
     assert any(e.event_type == AgentEventType.BUDGET_WARNING for e in orch._events)
+
+
+def test_default_llm_exposes_complete_and_complete_json(monkeypatch):
+    """Regression guard: the default (no ``llm=`` passed) client is a real ``LLMClient``.
+
+    A ``strands.Agent`` wrapping ``get_strands_model`` does NOT expose
+    ``complete``/``complete_json`` (its public surface is ``__call__``) — every
+    real completion would silently raise ``AttributeError``, swallowed by the
+    broad ``except Exception`` in ``DeepthoughtAgent``'s LLM methods, and fall
+    through to hard-coded fallback text. ``LLM_PROVIDER=dummy`` exercises the
+    real (unmocked) default-construction branch without touching Postgres.
+    """
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    orch = DeepthoughtOrchestrator()
+    assert callable(orch._llm.complete)
+    assert callable(orch._llm.complete_json)
+    # The dummy client must actually answer, not raise.
+    assert isinstance(orch._llm.complete("hello", objective="test"), str)
+    assert isinstance(orch._llm.complete_json("hello", objective="test"), dict)

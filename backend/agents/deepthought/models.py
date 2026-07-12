@@ -40,6 +40,7 @@ class AgentEventType(str, Enum):
     AGENT_COMPLETE = "agent_complete"
     BUDGET_WARNING = "budget_warning"
     KNOWLEDGE_REUSED = "knowledge_reused"
+    AGENT_CANCELLED = "agent_cancelled"
 
 
 class AgentEvent(BaseModel):
