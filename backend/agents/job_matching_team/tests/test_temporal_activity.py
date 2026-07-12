@@ -535,7 +535,7 @@ def test_fail_marks_run_and_job_failed(monkeypatch):
     store = _FakeStore()
     _patch_stores(monkeypatch, job=job, store=store)
 
-    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
+    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True, True)
 
     assert store.mark_failed_calls == [("run-1", "boom")]
     assert job.updates == [{"status": "failed", "error": "boom"}]
@@ -546,7 +546,7 @@ def test_fail_skips_job_when_cancelled(monkeypatch):
     store = _FakeStore()
     _patch_stores(monkeypatch, job=job, store=store)
 
-    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
+    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True, True)
 
     assert store.mark_failed_calls == [("run-1", "boom")]  # run row still marked failed
     assert job.statuses == []  # job FAILED skipped
@@ -557,7 +557,7 @@ def test_fail_store_ok_false_skips_run_mark(monkeypatch):
     store = _FakeStore()
     _patch_stores(monkeypatch, job=job, store=store)
 
-    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", False)
+    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", False, False)
 
     assert store.mark_failed_calls == []
     assert job.updates == [{"status": "failed", "error": "boom"}]
@@ -569,7 +569,7 @@ def test_fail_swallows_mark_failed_error(monkeypatch):
     _patch_stores(monkeypatch, job=job, store=store)
 
     # mark_failed raising must not stop the job-store FAILED write.
-    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
+    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True, True)
 
     assert job.updates == [{"status": "failed", "error": "boom"}]
 
@@ -588,7 +588,7 @@ def test_fail_reraises_when_job_status_unrecordable(monkeypatch):
     monkeypatch.setattr("job_matching_team.shared.job_store.update_job", _down)
 
     with pytest.raises(RuntimeError):
-        ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", False)
+        ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", False, False)
 
 
 def test_fail_cancellation_check_failure_propagates_instead_of_overwriting(monkeypatch):
@@ -602,7 +602,7 @@ def test_fail_cancellation_check_failure_propagates_instead_of_overwriting(monke
     _patch_stores(monkeypatch, job=job, store=store)
 
     with pytest.raises(RuntimeError):
-        ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
+        ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True, True)
 
     assert store.mark_failed_calls == [("run-1", "boom")]  # run row still recorded
     assert job.updates == []  # job FAILED NOT written on an unverifiable cancel state
@@ -630,7 +630,7 @@ def test_fail_self_heals_job_to_completed_when_run_already_completed(monkeypatch
     store = _FakeStore(completed_response=payload)
     _patch_stores(monkeypatch, job=job, store=store)
 
-    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
+    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True, True)
 
     assert store.mark_failed_calls == []
     assert job.updates == [{"status": "completed", "result": payload.model_dump(mode="json")}]
@@ -643,7 +643,7 @@ def test_fail_does_not_complete_job_when_already_completed_but_cancelled(monkeyp
     store = _FakeStore(completed_response=_completed_response())
     _patch_stores(monkeypatch, job=job, store=store)
 
-    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
+    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True, True)
 
     assert job.updates == []
 
@@ -657,7 +657,7 @@ def test_fail_completed_cancellation_check_failure_propagates(monkeypatch):
     _patch_stores(monkeypatch, job=job, store=store)
 
     with pytest.raises(RuntimeError):
-        ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
+        ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True, True)
 
     assert job.updates == []
 
@@ -672,10 +672,41 @@ def test_fail_get_run_response_failure_raises(monkeypatch):
     _patch_stores(monkeypatch, job=job, store=store)
 
     with pytest.raises(RuntimeError):
-        ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
+        ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True, True)
 
     assert store.mark_failed_calls == []
     assert job.updates == []
+
+
+def test_fail_skips_completion_probe_when_not_may_be_completed(monkeypatch):
+    # Bug fix: a pre-finalize phase failure (build_queries/scan/rank) can never
+    # have a completed run to self-heal from, so may_be_completed=False must
+    # skip the probe entirely — proven by supplying a completed_response the
+    # code must never even look at.
+    job = _FakeJobStore()
+    store = _FakeStore(completed_response=_completed_response())
+    _patch_stores(monkeypatch, job=job, store=store)
+
+    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True, False)
+
+    assert store.mark_failed_calls == [("run-1", "boom")]
+    assert job.updates == [{"status": "failed", "error": "boom"}]
+
+
+def test_fail_pre_finalize_failure_survives_unrelated_run_store_outage(monkeypatch):
+    # Bug fix: a pre-finalize phase failure must not be blocked by an unrelated
+    # run-store outage. get_run_response would raise if called, but with
+    # may_be_completed=False it must never be called, so the job FAILED write
+    # still succeeds instead of being swallowed by fail_scan's own bounded retry
+    # exhaustion.
+    job = _FakeJobStore()
+    store = _FakeStore(get_run_response_raises=True)
+    _patch_stores(monkeypatch, job=job, store=store)
+
+    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True, False)
+
+    assert store.mark_failed_calls == [("run-1", "boom")]
+    assert job.updates == [{"status": "failed", "error": "boom"}]
 
 
 # ===========================================================================
@@ -902,8 +933,32 @@ def test_workflow_phase_failure_records_fail_and_returns_empty(monkeypatch):
     assert fail_call["args"][:2] == ["job-1", _FIXED_RUN_ID]
     assert fail_call["args"][3] is True  # store_ok threaded through
     assert "job_matching_scan failed" in fail_call["args"][2]
+    # scan is a pre-finalize phase: finalize never ran, so the run can't
+    # possibly be completed — may_be_completed must be False.
+    assert fail_call["args"][4] is False
     # fail_scan only flips statuses (idempotent), so it retries like the phases.
     assert fail_call["retry"].maximum_attempts == 3
+
+
+def test_workflow_finalize_failure_passes_may_be_completed_true(monkeypatch):
+    # finalize is the only phase that can ever complete a run (its own failure
+    # always happens after its save attempt), so a failure from finalize itself
+    # must tell fail_scan the run might already be completed.
+    stub = _WorkflowStub(fail_on=wf.finalize_scan_activity)
+    _patch_workflow(monkeypatch, stub)
+
+    result = _run_workflow()
+
+    assert result == {}
+    assert [c["fn"] for c in stub.calls] == [
+        wf.prepare_scan_activity,
+        wf.build_queries_activity,
+        wf.scan_activity,
+        wf.rank_activity,
+        wf.finalize_scan_activity,
+        wf.fail_scan_activity,
+    ]
+    assert stub.calls[-1]["args"][4] is True
 
 
 def test_workflow_fail_scan_error_does_not_fail_workflow(monkeypatch):
@@ -969,6 +1024,8 @@ def test_workflow_prepare_failure_records_fail(monkeypatch):
     # exist because prepare succeeded but its result never reached the workflow
     # (a worker crash/timeout, not a code exception).
     assert fail_call["args"][3] is True
+    # prepare is a pre-finalize phase: may_be_completed must be False.
+    assert fail_call["args"][4] is False
 
 
 # ===========================================================================

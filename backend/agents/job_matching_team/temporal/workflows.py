@@ -405,7 +405,9 @@ def finalize_scan_activity(
 
 
 @activity.defn(name="job_matching_fail_scan")
-def fail_scan_activity(job_id: str, run_id: str, error: str, store_ok: bool) -> None:
+def fail_scan_activity(
+    job_id: str, run_id: str, error: str, store_ok: bool, may_be_completed: bool
+) -> None:
     """Record a failed scan, or self-heal the job if it actually succeeded.
 
     Invoked by the workflow when a pipeline phase exhausts its retries. Marks the
@@ -439,24 +441,33 @@ def fail_scan_activity(job_id: str, run_id: str, error: str, store_ok: bool) -> 
           row exists, while skipping them would strand a row that *does* exist
           from a since-abandoned prepare attempt whose success was never
           delivered back to the workflow).
+        * ``may_be_completed`` is True only when the workflow reached
+          ``finalize_scan_activity`` before this failure was recorded — the
+          only activity that can ever complete a run. A failure from any
+          earlier phase (build_queries/scan/rank) can never have a completed
+          run to self-heal from, so the workflow passes False in that case.
     Postconditions:
-        * If ``store_ok`` and rebuilding the run's response fails (run store
-          unreachable, or the run is completed but its ``profile_snapshot`` is
-          corrupt), this raises so Temporal retries rather than guessing the
-          run isn't completed.
-        * If ``store_ok`` and the run already reports ``completed`` (a later
-          phase durably saved its results before this failure was recorded —
-          e.g. finalize's post-save cancellation check exhausted its retries),
-          the JOB is COMPLETED with the run's persisted results (unless
-          cancelled, mirroring finalize's own check) instead of ever being
-          marked FAILED or left stuck RUNNING — the whole point of this
-          self-healing path is that a scan that actually succeeded is reported
-          as such.
+        * If ``store_ok`` and ``may_be_completed`` and rebuilding the run's
+          response fails (run store unreachable, or the run is completed but
+          its ``profile_snapshot`` is corrupt), this raises so Temporal retries
+          rather than guessing the run isn't completed.
+        * If ``store_ok`` and ``may_be_completed`` and the run already reports
+          ``completed`` (a later phase durably saved its results before this
+          failure was recorded — e.g. finalize's post-save cancellation check
+          exhausted its retries), the JOB is COMPLETED with the run's persisted
+          results (unless cancelled, mirroring finalize's own check) instead of
+          ever being marked FAILED or left stuck RUNNING — the whole point of
+          this self-healing path is that a scan that actually succeeded is
+          reported as such.
+        * When ``may_be_completed`` is False, the completion rebuild is skipped
+          entirely — a run-store outage unrelated to the actual failure (e.g. a
+          build_queries/scan/rank failure while the run-specific Postgres store
+          happens to be down) must not block recording the job FAILED.
         * Otherwise the run row is FAILED when ``store_ok`` and not already
           completed; a mark_failed write failure is swallowed (best-effort
           history) — it does not fall under the raise above, since by that
-          point the run is known not completed and only the write itself
-          failed.
+          point the run is known not completed (or unreachable for reasons
+          unrelated to completion) and only the write itself failed.
         * The job row is FAILED unless it was cancelled. If either the
           cancellation check or the job-status write can't reach the job store,
           this raises so Temporal retries; on retry exhaustion the workflow
@@ -473,25 +484,26 @@ def fail_scan_activity(job_id: str, run_id: str, error: str, store_ok: bool) -> 
         from job_matching_team.store import get_store
 
         store = get_store()
-        completed_payload = store.get_run_response(run_id)
-        if completed_payload is not None:
-            # A later phase already saved results and completed the run before
-            # this failure was recorded (see the finalize->fail_scan note in
-            # finalize_scan_activity's docstring). Self-heal instead of
-            # reporting FAILED (or leaving the job stuck RUNNING) over a scan
-            # that actually succeeded: complete the job with the run's
-            # persisted results. Mirrors finalize's own cancellation check —
-            # only complete when confirmed not cancelled; if that check itself
-            # fails (the same ambiguity that likely routed here), let it
-            # propagate so Temporal retries with a fresh read rather than
-            # guessing.
-            if not is_job_cancelled(job_id):
-                update_job(
-                    job_id,
-                    status=JOB_STATUS_COMPLETED,
-                    result=completed_payload.model_dump(mode="json"),
-                )
-            return
+        if may_be_completed:
+            completed_payload = store.get_run_response(run_id)
+            if completed_payload is not None:
+                # A later phase already saved results and completed the run
+                # before this failure was recorded (see the finalize->fail_scan
+                # note in finalize_scan_activity's docstring). Self-heal instead
+                # of reporting FAILED (or leaving the job stuck RUNNING) over a
+                # scan that actually succeeded: complete the job with the run's
+                # persisted results. Mirrors finalize's own cancellation check —
+                # only complete when confirmed not cancelled; if that check
+                # itself fails (the same ambiguity that likely routed here), let
+                # it propagate so Temporal retries with a fresh read rather than
+                # guessing.
+                if not is_job_cancelled(job_id):
+                    update_job(
+                        job_id,
+                        status=JOB_STATUS_COMPLETED,
+                        result=completed_payload.model_dump(mode="json"),
+                    )
+                return
         _best_effort(
             activity.logger,
             lambda: store.mark_failed(run_id, error),
@@ -624,14 +636,21 @@ class JobMatchingWorkflow:
               risking prematurely cancelling) a legitimately slow individual
               phase; if an aggregate ceiling is needed, add it explicitly (e.g.
               a workflow-level timer race) rather than assuming one.
-            * None of ``build_queries``/``scan``/``rank`` heartbeat, so — same as
-              the monolith's single activity — an attempt that runs past its
+            * None of the five phases heartbeat, so — same as the monolith's
+              single activity — an attempt that runs past its
               ``start_to_close_timeout`` is retried while its own worker thread
-              keeps executing; a slow-but-eventually-successful attempt can
-              execute more than once concurrently (bounded by
-              ``maximum_attempts``). The decomposition doesn't introduce this
-              risk, but does spread it across three independent phases instead
-              of one.
+              keeps executing with no way to learn it's been abandoned; a
+              slow-but-eventually-successful attempt can complete more than
+              once concurrently (bounded by ``maximum_attempts``). For
+              ``build_queries``/``scan``/``rank`` this only means duplicated
+              work (LLM/network calls); for ``prepare``/``finalize``, whose
+              zombie attempts can still write to the run store after a later
+              attempt already did, it is a real correctness hazard — see
+              ``create_run``'s and ``save_results``'s own docstrings for the
+              specific races and how they're guarded. The decomposition doesn't
+              introduce the underlying no-heartbeat risk (the monolith had it
+              too, for its one activity), but does spread it across five
+              independent phases instead of one.
             * Workflows started before the decomposition replay the single
               ``run_scan_activity`` path (gated by ``workflow.patched``) so their
               histories stay deterministic; new runs take the decomposed phases.
@@ -665,6 +684,15 @@ class JobMatchingWorkflow:
         # permanently stuck RUNNING, since fail_scan would never even attempt
         # to touch it.
         store_ok = True
+        # Only finalize_scan_activity can ever complete a run (via save_results),
+        # so a failure from any earlier phase can never have a completed run to
+        # self-heal from — track whether we've reached finalize so fail_scan can
+        # skip that probe otherwise. This matters because the probe
+        # (store.get_run_response) is deliberately unguarded: if a pre-finalize
+        # phase fails while the run store happens to be down for an unrelated
+        # reason, fail_scan must still be able to record the job FAILED without
+        # that irrelevant probe blocking it.
+        run_might_be_completed = False
         try:
             prep = await workflow.execute_activity(
                 prepare_scan_activity,
@@ -698,6 +726,7 @@ class JobMatchingWorkflow:
                 start_to_close_timeout=_RANK_TIMEOUT,
                 retry_policy=DEFAULT_RETRY_POLICY,
             )
+            run_might_be_completed = True
             return await workflow.execute_activity(
                 finalize_scan_activity,
                 args=[
@@ -724,7 +753,13 @@ class JobMatchingWorkflow:
             try:
                 await workflow.execute_activity(
                     fail_scan_activity,
-                    args=[job_id, run_id, _activity_error_message(exc), store_ok],
+                    args=[
+                        job_id,
+                        run_id,
+                        _activity_error_message(exc),
+                        store_ok,
+                        run_might_be_completed,
+                    ],
                     start_to_close_timeout=_FAIL_TIMEOUT,
                     retry_policy=DEFAULT_RETRY_POLICY,
                 )
