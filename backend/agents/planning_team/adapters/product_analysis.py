@@ -11,10 +11,9 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from typing import Any, Dict, List, Optional
 
-import httpx
+from shared_http.job_polling import get_json, poll_until_terminal, post_json
 
 logger = logging.getLogger(__name__)
 
@@ -22,13 +21,13 @@ DEFAULT_TIMEOUT = 30.0
 POLL_INTERVAL = 5.0
 MAX_POLL_WAIT = 3600.0
 
+_TERMINAL_STATUSES = frozenset({"completed", "failed"})
 
-def _se_base_url() -> str:
-    return (
-        os.environ.get("PLANNING_SOFTWARE_ENGINEERING_URL")
-        or os.environ.get("UNIFIED_API_BASE_URL")
-        or "http://localhost:8080"
-    ).rstrip("/")
+
+def _se_base_url() -> Optional[str]:
+    return os.environ.get("PLANNING_SOFTWARE_ENGINEERING_URL") or os.environ.get(
+        "UNIFIED_API_BASE_URL"
+    )
 
 
 def run_product_analysis(
@@ -36,36 +35,31 @@ def run_product_analysis(
     spec_content: Optional[str] = None,
 ) -> Optional[str]:
     """
-    Start Product Requirements Analysis. Returns job_id or None on failure.
+    Start Product Requirements Analysis. Returns job_id or None on failure
+    (including when the Software Engineering service is unconfigured).
     """
     base = _se_base_url()
-    url = f"{base}/api/software-engineering/product-analysis/run"
+    if not base:
+        logger.debug("No base URL for product analysis; skipping.")
+        return None
+    url = f"{base.rstrip('/')}/api/software-engineering/product-analysis/run"
     payload: Dict[str, Any] = {"repo_path": repo_path}
     if spec_content is not None:
         payload["spec_content"] = spec_content
-    try:
-        with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
-            resp = client.post(url, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("job_id")
-    except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError) as e:
-        logger.warning("Product analysis run failed: %s", e)
-        return None
+    data = post_json(url, payload, timeout=DEFAULT_TIMEOUT, log_context="Product analysis run")
+    return data.get("job_id") if data else None
 
 
 def get_product_analysis_status(job_id: str) -> Optional[Dict[str, Any]]:
     """Get status of a product analysis job. Returns None on failure."""
     base = _se_base_url()
-    url = f"{base}/api/software-engineering/product-analysis/status/{job_id}"
-    try:
-        with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            return resp.json()
-    except (httpx.HTTPError, httpx.TimeoutException, ValueError) as e:
-        logger.warning("Product analysis status failed for %s: %s", job_id, e)
+    if not base:
+        logger.debug("No base URL for product analysis; skipping.")
         return None
+    url = f"{base.rstrip('/')}/api/software-engineering/product-analysis/status/{job_id}"
+    return get_json(
+        url, timeout=DEFAULT_TIMEOUT, log_context=f"Product analysis status for {job_id}"
+    )
 
 
 def submit_product_analysis_answers(
@@ -77,15 +71,16 @@ def submit_product_analysis_answers(
     Returns updated status dict or None on failure.
     """
     base = _se_base_url()
-    url = f"{base}/api/software-engineering/product-analysis/{job_id}/answers"
-    try:
-        with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
-            resp = client.post(url, json={"answers": answers})
-            resp.raise_for_status()
-            return resp.json()
-    except (httpx.HTTPError, httpx.TimeoutException, ValueError) as e:
-        logger.warning("Product analysis submit answers failed for %s: %s", job_id, e)
+    if not base:
+        logger.debug("No base URL for product analysis; skipping.")
         return None
+    url = f"{base.rstrip('/')}/api/software-engineering/product-analysis/{job_id}/answers"
+    return post_json(
+        url,
+        {"answers": answers},
+        timeout=DEFAULT_TIMEOUT,
+        log_context=f"Product analysis submit answers for {job_id}",
+    )
 
 
 def wait_for_product_analysis_completion(
@@ -99,20 +94,19 @@ def wait_for_product_analysis_completion(
     is provided, call answer_callback(pending_questions) and submit answers then resume.
     Returns final status dict; status key is 'completed' or 'failed'.
     """
-    start = time.monotonic()
-    while (time.monotonic() - start) < max_wait:
-        status = get_product_analysis_status(job_id)
-        if status is None:
-            return {"status": "failed", "error": "Failed to get status"}
-        s = status.get("status", "")
-        if s == "completed":
-            return status
-        if s == "failed":
-            return status
+
+    def _on_poll(status: Dict[str, Any]) -> None:
         if status.get("waiting_for_answers") and answer_callback:
             pending = status.get("pending_questions", [])
             answers = answer_callback(pending)
             if answers:
                 submit_product_analysis_answers(job_id, answers)
-        time.sleep(poll_interval)
-    return {"status": "failed", "error": "Timed out waiting for product analysis"}
+
+    return poll_until_terminal(
+        lambda: get_product_analysis_status(job_id),
+        terminal_statuses=_TERMINAL_STATUSES,
+        poll_interval=poll_interval,
+        total_timeout=max_wait,
+        on_poll=_on_poll,
+        log_context="product analysis",
+    )
