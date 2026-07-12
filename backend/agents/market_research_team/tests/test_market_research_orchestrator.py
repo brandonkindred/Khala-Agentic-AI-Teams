@@ -80,6 +80,57 @@ def test_orchestrator_split_mode_adds_consistency_signal_for_empty_inputs() -> N
     assert "Insufficient transcript volume" in consistency[0].evidence[0]
 
 
+def test_orchestrator_runs_scripts_concurrently_with_ingest_and_ux(monkeypatch) -> None:
+    """Regression: ``scripts`` must run concurrently with ingest+UX (mirrors
+    the Temporal path's independently-started ``scripts_activity``), not
+    serialized after the UX fan-out completes onto the critical path."""
+    orchestrator = MarketResearchOrchestrator()
+    mission = ResearchMission(
+        product_concept="Concept",
+        target_users="Users",
+        business_goal="Goal",
+        topology=TeamTopology.UNIFIED,
+    )
+    delay = 0.2
+
+    def _slow_ingest_and_analyze(mission):
+        time.sleep(delay)
+        return []
+
+    def _slow_scripts(mission):
+        time.sleep(delay)
+        return ["script"]
+
+    monkeypatch.setattr(orchestrator, "_ingest_and_analyze", _slow_ingest_and_analyze)
+    monkeypatch.setattr(orchestrator, "scripts", _slow_scripts)
+    monkeypatch.setattr(
+        orchestrator,
+        "psychology",
+        lambda insights: [
+            MarketSignal(signal="a", confidence=0.5, evidence=[]),
+            MarketSignal(signal="b", confidence=0.5, evidence=[]),
+        ],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "viability",
+        lambda mission, signals, count: ViabilityRecommendation(
+            verdict="needs_more_validation",
+            confidence=0.5,
+            rationale=[],
+            suggested_next_experiments=[],
+        ),
+    )
+
+    started = time.monotonic()
+    output = orchestrator.run(mission, HumanReview(approved=True))
+    elapsed = time.monotonic() - started
+
+    # Sequential execution would take >= 2 * delay; concurrent stays well under.
+    assert elapsed < delay * 1.8
+    assert output.proposed_research_scripts == ["script"]
+
+
 def test_orchestrator_split_mode_runs_psychology_and_consistency_concurrently(monkeypatch) -> None:
     """Regression: split-mode psychology/consistency must run concurrently via
     ``parallel_map`` (mirrors the Temporal path's ``asyncio.gather``), not

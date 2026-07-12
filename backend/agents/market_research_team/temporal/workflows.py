@@ -233,14 +233,27 @@ class MarketResearchWorkflow:
             insights = [i for i in ux_results if not isinstance(i, BaseException)]
 
             active = await self._progress(job_id, "analysis", 45)
-            # Transcripts were loaded but EVERY UX analysis was dropped: if the
-            # job is still active (not a cancel — a cancel makes ux_one raise,
-            # which gather captures too), this is a total analysis failure.
-            # Surface it as a failed run rather than silently emitting an
-            # "insufficient evidence / collect more interviews" result from
-            # zero insights (which would misrepresent a run that had data but
-            # couldn't analyze it).
-            if active and refs and not insights:
+            if not active:
+                # Job went terminal (cancel / stale-job monitor) after
+                # scripts_handle was already scheduled. Every other activity
+                # from here on self-guards into a cheap no-op, but the
+                # already-running scripts activity does not re-check
+                # mid-flight — left alone, it would keep paying for its LLM
+                # call (and this method would keep waiting on it via
+                # ``_await_scripts``) for a job that's already done. Cancel +
+                # drain it here, same as the catch-all below.
+                scripts_handle.cancel()
+                with suppress(BaseException):
+                    await scripts_handle
+                return {"job_id": job_id}
+
+            # Transcripts were loaded but EVERY UX analysis was dropped (not a
+            # cancel — that's handled above — but every transcript's own
+            # activity failed after retries). Surface it as a failed run
+            # rather than silently emitting an "insufficient evidence / collect
+            # more interviews" result from zero insights, which would
+            # misrepresent a run that had data but couldn't analyze it.
+            if refs and not insights:
                 raise RuntimeError(f"All {len(refs)} transcript analyses failed")
 
             # Psychology and (split mode) consistency run concurrently after UX.

@@ -330,6 +330,37 @@ def test_workflow_mark_failed_failure_is_swallowed(monkeypatch) -> None:
         _run(_REQUEST_UNIFIED)
 
 
+def test_workflow_cancels_scripts_handle_when_analysis_gate_reports_terminal(monkeypatch) -> None:
+    """Regression: a cancel landing after ``scripts_handle`` started but before
+    the post-UX ("analysis") progress gate must cancel + drain that handle and
+    short-circuit — not fall through to psychology/viability/finalize while the
+    already in-flight scripts activity keeps running for a dead job."""
+    progress_calls = {"n": 0}
+
+    class _GateRecorder(_Recorder):
+        async def execute_activity(self, fn, *args, **kwargs):
+            name = _act_name(fn)
+            if name == "market_research_report_progress":
+                progress_calls["n"] += 1
+                self.calls.append((name, {"args": args, **kwargs}))
+                # The first gate (post-"ingest") stays active; the post-UX
+                # ("analysis") gate reports the job has gone terminal.
+                return progress_calls["n"] == 1
+            return await super().execute_activity(fn, *args, **kwargs)
+
+    rec = _GateRecorder(_default_results())
+    _install(monkeypatch, rec)
+
+    out = _run(_REQUEST_UNIFIED)
+
+    assert out == {"job_id": "job-x"}
+    assert rec.started_handle is not None
+    assert rec.started_handle._cancelled is True
+    assert "market_research_psychology" not in rec.names()
+    assert "market_research_viability" not in rec.names()
+    assert "market_research_finalize" not in rec.names()
+
+
 def test_workflow_cancels_scripts_handle_on_stage_failure(monkeypatch) -> None:
     """A fatal error after ``scripts`` was started must cancel + drain that
     independently-scheduled handle instead of leaving it orphaned."""

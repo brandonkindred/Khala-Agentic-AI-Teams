@@ -146,13 +146,19 @@ def sweep_orphaned(is_active: Callable[[str], bool]) -> int:
     Preconditions:
         - ``is_active(job_id)`` returns ``True`` iff ``job_id`` still has
           in-progress work in the job store (PENDING/RUNNING); any exception
-          from ``is_active`` for a given job is treated as "not active" (err on
-          the side of clearing) and logged.
+          from ``is_active`` for a given job is treated as "active" (skip —
+          err on the side of NOT clearing) and logged. A transient job-store
+          read error must never delete a running job's transcripts — those
+          files are the only copy ``ux_one_activity`` can load from, so
+          wrongly clearing them turns a harmless blip into every interview
+          analysis failing. A truly-orphaned directory that happens to hit
+          this path just survives until the next successful sweep.
     Postconditions:
-        - Removes every persisted job directory for which ``is_active`` returns
-          ``False`` and returns the count cleared. Never raises — this runs
-          during app startup and a job-service hiccup at that moment must not
-          block boot.
+        - Removes every persisted job directory for which ``is_active``
+          returned ``False`` and returns the count cleared. A directory whose
+          status check raised is left untouched and not counted. Never
+          raises — this runs during app startup and a job-service hiccup at
+          that moment must not block boot.
     """
     base = _base_dir()
     if not base.is_dir():
@@ -166,9 +172,12 @@ def sweep_orphaned(is_active: Callable[[str], bool]) -> int:
             active = is_active(job_id)
         except Exception:
             logger.warning(
-                "sweep_orphaned: could not check status for job %s; clearing", job_id, exc_info=True
+                "sweep_orphaned: could not check status for job %s; leaving its "
+                "transcripts in place rather than risking deletion of an active run",
+                job_id,
+                exc_info=True,
             )
-            active = False
+            continue
         if not active:
             shutil.rmtree(job_dir, ignore_errors=True)
             cleared += 1

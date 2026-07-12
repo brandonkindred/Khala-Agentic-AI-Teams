@@ -64,7 +64,11 @@ def test_sweep_orphaned_clears_only_inactive_jobs() -> None:
         ts.load_transcript("job-inactive", 0)
 
 
-def test_sweep_orphaned_treats_status_check_error_as_inactive() -> None:
+def test_sweep_orphaned_preserves_transcripts_when_status_check_errors() -> None:
+    """Regression: a transient job-store read error must NOT be treated as
+    "inactive, clear it" — an active RUNNING job's transcripts are the only
+    copy ux_one activities can load, so a status-check blip must leave the
+    directory alone rather than risk breaking an in-progress run."""
     ts.save_transcripts("job-error", [("s", "body")])
 
     def _boom(job_id: str) -> bool:
@@ -72,9 +76,8 @@ def test_sweep_orphaned_treats_status_check_error_as_inactive() -> None:
 
     cleared = ts.sweep_orphaned(_boom)
 
-    assert cleared == 1
-    with pytest.raises(FileNotFoundError):
-        ts.load_transcript("job-error", 0)
+    assert cleared == 0
+    assert ts.load_transcript("job-error", 0) == ("s", "body")
 
 
 def test_base_dir_warns_once_when_agent_cache_unset(monkeypatch, caplog) -> None:

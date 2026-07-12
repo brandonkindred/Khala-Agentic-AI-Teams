@@ -290,6 +290,30 @@ class MarketResearchOrchestrator:
             human_feedback=human_review.feedback or "Approved.",
         )
 
+    def _ingest_and_analyze(self, mission: ResearchMission) -> List[InterviewInsight]:
+        """Load transcripts and run the per-transcript UX fan-out, combined.
+
+        Bundled as a single callable (rather than two ``run`` statements) so it
+        can be scheduled as one branch of the ``ingest+UX`` vs. ``scripts``
+        ``parallel_map`` in :meth:`run` — mirroring the Temporal workflow,
+        where ``scripts_activity`` starts before ``ingest``/``ux_one`` rather
+        than after they complete.
+
+        Preconditions:
+            - ``mission`` is a validated ``ResearchMission``.
+        Postconditions:
+            - Returns one ``InterviewInsight`` per loaded transcript (``[]``
+              when none load, without spinning up the UX thread pool).
+        """
+        loaded = self.ingest(mission)
+        if not loaded:
+            return []
+        return parallel_map(
+            loaded,
+            lambda item: self.ux_one(item[0], item[1]),
+            max_workers=_UX_FANOUT_WORKERS,
+        )
+
     # ------------------------------------------------------------------
     # Thread-path driver (Temporal mode reproduces this DAG across activities)
     # ------------------------------------------------------------------
@@ -308,19 +332,16 @@ class MarketResearchOrchestrator:
               failure raises (whole-run failure), matching the previous
               behavior; the Temporal path instead retries/drops per transcript.
         """
-        loaded = self.ingest(mission)
-
-        insights: List[InterviewInsight] = (
-            parallel_map(
-                loaded,
-                lambda item: self.ux_one(item[0], item[1]),
-                max_workers=_UX_FANOUT_WORKERS,
-            )
-            if loaded
-            else []
+        # ``scripts`` needs only the mission, so — like the Temporal path's
+        # independently-started ``scripts_activity`` — it runs concurrently
+        # with ingest+UX rather than serialized after them onto the critical
+        # path (which could otherwise push a multi-transcript run past
+        # ``_pipeline_timeout_s()``).
+        insights, scripts = parallel_map(
+            [self._ingest_and_analyze, self.scripts],
+            lambda stage: stage(mission),
+            max_workers=2,
         )
-
-        scripts = self.scripts(mission)
 
         if mission.topology == TeamTopology.SPLIT:
             # Psychology and consistency are independent LLM calls over the
