@@ -1,6 +1,14 @@
 import json
+import time
 
-from market_research_team.models import HumanReview, ResearchMission, TeamTopology, WorkflowStatus
+from market_research_team.models import (
+    HumanReview,
+    MarketSignal,
+    ResearchMission,
+    TeamTopology,
+    ViabilityRecommendation,
+    WorkflowStatus,
+)
 from market_research_team.orchestrator import MarketResearchOrchestrator
 
 
@@ -70,6 +78,54 @@ def test_orchestrator_split_mode_adds_consistency_signal_for_empty_inputs() -> N
     ]
     assert len(consistency) == 1
     assert "Insufficient transcript volume" in consistency[0].evidence[0]
+
+
+def test_orchestrator_split_mode_runs_psychology_and_consistency_concurrently(monkeypatch) -> None:
+    """Regression: split-mode psychology/consistency must run concurrently via
+    ``parallel_map`` (mirrors the Temporal path's ``asyncio.gather``), not
+    sequentially back-to-back — and their results must combine in
+    psychology-then-consistency order regardless of completion order."""
+    orchestrator = MarketResearchOrchestrator()
+    mission = ResearchMission(
+        product_concept="Concept",
+        target_users="Users",
+        business_goal="Goal",
+        topology=TeamTopology.SPLIT,
+    )
+    delay = 0.2
+
+    def _slow_psychology(insights):
+        time.sleep(delay)
+        return [MarketSignal(signal="psych", confidence=0.5, evidence=[])]
+
+    def _slow_consistency(insights):
+        # Finishes first despite being scheduled second — order must still
+        # come back psychology-then-consistency (parallel_map preserves input
+        # order, not completion order).
+        return [MarketSignal(signal="consistency", confidence=0.5, evidence=[])]
+
+    monkeypatch.setattr(orchestrator, "ingest", lambda mission: [])
+    monkeypatch.setattr(orchestrator, "scripts", lambda mission: ["script"])
+    monkeypatch.setattr(orchestrator, "psychology", _slow_psychology)
+    monkeypatch.setattr(orchestrator, "consistency", _slow_consistency)
+    monkeypatch.setattr(
+        orchestrator,
+        "viability",
+        lambda mission, signals, count: ViabilityRecommendation(
+            verdict="needs_more_validation",
+            confidence=0.5,
+            rationale=[],
+            suggested_next_experiments=[],
+        ),
+    )
+
+    started = time.monotonic()
+    output = orchestrator.run(mission, HumanReview(approved=True))
+    elapsed = time.monotonic() - started
+
+    # Sequential execution would take >= 2 * delay; concurrent stays well under.
+    assert elapsed < delay * 1.8
+    assert [s.signal for s in output.market_signals[:2]] == ["psych", "consistency"]
 
 
 def test_orchestrator_consistency_signal_survives_null_signal_name(monkeypatch) -> None:

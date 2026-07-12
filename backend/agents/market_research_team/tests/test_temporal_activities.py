@@ -229,6 +229,19 @@ def test_viability_zero_evidence_when_terminal() -> None:
     assert rec["verdict"] == "insufficient_evidence"
 
 
+def test_viability_skips_signal_validation_when_terminal() -> None:
+    """Regression: the stopped check must run before ``signals`` is validated
+    into ``MarketSignal`` objects — malformed signals on an already-terminal
+    job must not raise, since they're discarded either way."""
+    create_job("job-vc2", request=_REQUEST)
+    update_job("job-vc2", status=JOB_STATUS_CANCELLED)
+    malformed_signals = [{"signal": "s"}]  # missing required "confidence" field
+
+    rec = act.viability_activity(_ctx("job-vc2"), malformed_signals, insight_count=5)
+
+    assert rec["verdict"] == "insufficient_evidence"
+
+
 def test_scripts_returns_list_and_skips_when_terminal() -> None:
     create_job("job-s", request=_REQUEST)
     update_job("job-s", status=JOB_STATUS_RUNNING)

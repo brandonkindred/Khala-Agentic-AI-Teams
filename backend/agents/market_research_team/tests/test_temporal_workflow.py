@@ -39,13 +39,30 @@ def _act_name(fn) -> str:
 
 
 class _Handle:
-    """A minimal awaitable standing in for a Temporal ActivityHandle."""
+    """A minimal awaitable standing in for a Temporal ActivityHandle.
 
-    def __init__(self, result):
+    Mirrors the real ``ActivityHandle``'s ``cancel()``: it does not resolve the
+    result immediately, it marks the handle so the next await raises
+    ``asyncio.CancelledError`` — matching how a cancelled ``asyncio.Task``
+    behaves, which the workflow's ``with suppress(BaseException): await
+    scripts_handle`` after ``.cancel()`` relies on.
+    """
+
+    def __init__(self, result, error=None):
         self._result = result
+        self._error = error
+        self._cancelled = False
+
+    def cancel(self) -> bool:
+        self._cancelled = True
+        return True
 
     def __await__(self):
         async def _coro():
+            if self._cancelled:
+                raise asyncio.CancelledError()
+            if self._error is not None:
+                raise self._error
             return self._result
 
         return _coro().__await__()
@@ -58,6 +75,10 @@ class _Recorder:
         self.calls: list[tuple[str, dict]] = []
         self.results = results
         self.raise_for = raise_for or {}
+        # The workflow only ever starts one activity via ``start_activity``
+        # (``scripts``), so a single slot is enough to let tests assert on the
+        # handle it was given (e.g. that ``.cancel()`` was called on it).
+        self.started_handle: _Handle | None = None
 
     async def execute_activity(self, fn, *args, **kwargs):
         name = _act_name(fn)
@@ -77,12 +98,12 @@ class _Recorder:
     def start_activity(self, fn, *args, **kwargs):
         name = _act_name(fn)
         self.calls.append((name, {"args": args, **kwargs}))
-        # start_activity is only used for real, always-seeded activities (the
-        # scripts branch), so a missing result is a test-setup bug — surface it
-        # loudly instead of resolving to a silent ``None`` handle.
-        if name not in self.results:
+        # Mirrors the real ActivityHandle: starting never raises, a scheduled
+        # failure only surfaces when the handle is later awaited.
+        if name not in self.results and name not in self.raise_for:
             raise KeyError(f"Unknown activity started (not seeded in results): {name}")
-        return _Handle(self.results[name])
+        self.started_handle = _Handle(self.results.get(name), error=self.raise_for.get(name))
+        return self.started_handle
 
     def names(self) -> list[str]:
         return [name for name, _ in self.calls]
@@ -229,6 +250,37 @@ def test_workflow_no_transcripts_completes_without_failing(monkeypatch) -> None:
     assert "market_research_mark_failed" not in rec.names()
 
 
+def test_root_cause_message_unwraps_chained_exception() -> None:
+    root = ValueError("real root cause")
+    wrapper = RuntimeError("Activity task failed")
+    wrapper.__cause__ = root
+
+    assert wf._root_cause_message(wrapper) == "real root cause"
+
+
+def test_root_cause_message_returns_str_when_unchained() -> None:
+    assert wf._root_cause_message(RuntimeError("plain failure")) == "plain failure"
+
+
+def test_workflow_mark_failed_receives_root_cause_not_wrapper_text(monkeypatch) -> None:
+    """Regression: ``execute_activity`` failures surface as an ``ActivityError``
+    wrapper whose own ``str()`` is generic boilerplate — the workflow's
+    catch-all must pass the innermost chained message to ``mark_failed``, not
+    the wrapper's text."""
+    wrapper = RuntimeError("Activity task failed")
+    wrapper.__cause__ = ValueError("viability blew up for real")
+    rec = _Recorder(
+        _default_results(),
+        raise_for={"market_research_viability": wrapper},
+    )
+    _install(monkeypatch, rec)
+
+    with pytest.raises(RuntimeError, match="Activity task failed"):
+        _run(_REQUEST_UNIFIED)
+
+    assert rec.kwargs_for("market_research_mark_failed")["args"][1] == "viability blew up for real"
+
+
 def test_workflow_marks_failed_and_reraises_on_stage_error(monkeypatch) -> None:
     rec = _Recorder(
         _default_results(),
@@ -276,6 +328,37 @@ def test_workflow_mark_failed_failure_is_swallowed(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="viability boom"):
         _run(_REQUEST_UNIFIED)
+
+
+def test_workflow_cancels_scripts_handle_on_stage_failure(monkeypatch) -> None:
+    """A fatal error after ``scripts`` was started must cancel + drain that
+    independently-scheduled handle instead of leaving it orphaned."""
+    rec = _Recorder(
+        _default_results(),
+        raise_for={"market_research_viability": RuntimeError("viability boom")},
+    )
+    _install(monkeypatch, rec)
+
+    with pytest.raises(RuntimeError, match="viability boom"):
+        _run(_REQUEST_UNIFIED)
+
+    assert rec.started_handle._cancelled is True
+
+
+def test_workflow_scripts_failure_is_best_effort(monkeypatch) -> None:
+    """The scripts activity failing (after every other stage succeeded) must
+    not fail the whole run — finalize still runs, with an empty scripts list."""
+    rec = _Recorder(
+        _default_results(),
+        raise_for={"market_research_scripts": RuntimeError("scripts boom")},
+    )
+    _install(monkeypatch, rec)
+
+    out = _run(_REQUEST_UNIFIED)
+
+    assert out == {"job_id": "job-x"}
+    assert rec.kwargs_for("market_research_finalize")["args"][4] == []
+    assert "market_research_mark_failed" not in rec.names()
 
 
 def test_workflow_drain_out_runs_legacy_activity_when_unpatched(monkeypatch) -> None:

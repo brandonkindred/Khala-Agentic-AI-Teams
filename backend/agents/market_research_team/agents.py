@@ -24,7 +24,6 @@ from strands import Agent as StrandsAgent
 from strands_tools import current_time, http_request, python_repl
 
 from .models import InterviewInsight, MarketSignal, ResearchMission, ViabilityRecommendation
-from .prompts import CONSISTENCY_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +189,30 @@ Return at least 2 signals. Suggested signal types: "User pain urgency", \
 "Willingness to pay indicators".
 """
 
+_CONSISTENCY_SYSTEM_PROMPT = """\
+You are a Cross-Interview Consistency Analyst. Your job is to identify recurring themes \
+across multiple user interviews and assess how consistent the evidence is.
+
+## Your Methodology
+- Compare pain points, user jobs, and desired outcomes across all interviews.
+- Identify themes that appear in 2+ interviews — these are the strongest signals.
+- Assess whether different interviewees describe the same underlying problem in different words \
+(semantic similarity, not just exact matches).
+- Higher consistency = higher confidence that the problem is real and widespread.
+
+## Confidence Calibration
+- 5+ interviews with 3+ repeated themes: confidence 0.8-0.95
+- 3-4 interviews with 2+ repeated themes: confidence 0.6-0.8
+- 1-2 interviews or few repeated themes: confidence 0.4-0.6
+- Contradictory signals across interviews: confidence 0.2-0.4
+
+## Output Format
+Return ONLY a valid JSON object (no markdown, no commentary) with these exact keys:
+- "signal": always "Cross-interview theme consistency"
+- "confidence": float 0.0-1.0
+- "evidence": array of strings — the repeated themes or patterns found across interviews
+"""
+
 _MARKET_VIABILITY_SYSTEM_PROMPT = """\
 You are a Business Viability Strategist who evaluates product concept viability based on \
 market signals and interview evidence.
@@ -309,6 +332,13 @@ _DEFAULT_SCRIPTS_FALLBACK = [
 # ---------------------------------------------------------------------------
 
 
+# Bounds the per-transcript UX fan-out (one Temporal activity — or one
+# thread-pool call — per transcript): neither inline transcripts nor a
+# transcript folder are otherwise capped, so a very large corpus could
+# schedule an unbounded number of activities in a single workflow task.
+_MAX_TRANSCRIPTS = 200
+
+
 @dataclass
 class TranscriptIngestionAgent:
     """Loads transcript text from a mission payload or folder path."""
@@ -327,6 +357,15 @@ class TranscriptIngestionAgent:
                     text = file_path.read_text(encoding="utf-8", errors="replace").strip()
                     if text:
                         loaded.append((file_path.name, text))
+
+        if len(loaded) > _MAX_TRANSCRIPTS:
+            logger.warning(
+                "Loaded %d transcripts (inline + folder), truncating to the first %d "
+                "to bound the per-transcript analysis fan-out.",
+                len(loaded),
+                _MAX_TRANSCRIPTS,
+            )
+            loaded = loaded[:_MAX_TRANSCRIPTS]
 
         return loaded
 
@@ -391,9 +430,11 @@ class UserPsychologyAgent:
         for item in data:
             if not isinstance(item, dict):
                 continue
+            raw_signal = item.get("signal")
+            signal_name = raw_signal if isinstance(raw_signal, str) else "Unknown signal"
             signals.append(
                 MarketSignal(
-                    signal=str(item.get("signal", "Unknown signal")),
+                    signal=signal_name,
                     confidence=min(1.0, max(0.0, _safe_float(item.get("confidence"), 0.5))),
                     evidence=_ensure_list(item.get("evidence"), []),
                 )
@@ -415,7 +456,7 @@ class ConsistencyAgent:
     _agent: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._agent = _build_strands_agent(CONSISTENCY_SYSTEM_PROMPT, _DEFAULT_TOOLS)
+        self._agent = _build_strands_agent(_CONSISTENCY_SYSTEM_PROMPT, _DEFAULT_TOOLS)
 
     def analyze(self, insights: List[InterviewInsight]) -> List[MarketSignal]:
         """Assess how consistent recurring themes are across interviews.

@@ -136,6 +136,8 @@ class MarketResearchOrchestrator:
     def ingest(self, mission: ResearchMission) -> List[Tuple[str, str]]:
         """Load transcript text for ``mission`` (pure I/O, no LLM).
 
+        Preconditions:
+            - ``mission`` is a validated ``ResearchMission``.
         Postconditions:
             - Returns ``[(source, text), ...]`` — inline transcripts first, then
               ``*.txt`` files under ``transcript_folder_path`` (may be empty).
@@ -156,6 +158,8 @@ class MarketResearchOrchestrator:
     def psychology(self, insights: List[InterviewInsight]) -> List[MarketSignal]:
         """Derive adoption/behavior ``MarketSignal``s from ``insights``.
 
+        Preconditions:
+            - ``insights`` is the per-transcript UX output (may be empty).
         Postconditions:
             - Returns at least two signals (the agent pads with defaults).
         """
@@ -164,6 +168,10 @@ class MarketResearchOrchestrator:
     def consistency(self, insights: List[InterviewInsight]) -> List[MarketSignal]:
         """Score cross-interview theme consistency (split mode only).
 
+        Preconditions:
+            - ``insights`` is the per-transcript UX output (may be empty — the
+              empty case is this method's own responsibility, unlike
+              ``ConsistencyAgent.analyze`` which requires non-empty input).
         Postconditions:
             - Empty ``insights`` (no transcripts) → a single deterministic
               "Cross-interview theme consistency" fallback signal (no LLM call),
@@ -179,6 +187,11 @@ class MarketResearchOrchestrator:
     ) -> ViabilityRecommendation:
         """Produce the viability verdict from the real derived ``signals``.
 
+        Preconditions:
+            - ``mission`` is a validated ``ResearchMission``; ``signals`` are
+              the real derived signals (empty when ``insight_count == 0``);
+              ``insight_count`` is the number of successfully-analyzed
+              transcripts (``len(insights)``, not ``len(signals)``).
         Postconditions:
             - ``insight_count == 0`` → a deterministic ``insufficient_evidence``
               recommendation (no LLM call); otherwise an LLM-backed verdict.
@@ -188,6 +201,8 @@ class MarketResearchOrchestrator:
     def scripts(self, mission: ResearchMission) -> List[str]:
         """Generate the research scripts/templates for ``mission`` (one LLM call).
 
+        Preconditions:
+            - ``mission`` is a validated ``ResearchMission``.
         Postconditions:
             - Returns a non-empty ``list[str]`` (agent defaults on parse failure).
         """
@@ -195,7 +210,16 @@ class MarketResearchOrchestrator:
 
     @staticmethod
     def _consistency_empty_signal() -> MarketSignal:
-        """The deterministic split-mode fallback when no transcripts exist."""
+        """The deterministic split-mode fallback when no transcripts exist.
+
+        Preconditions:
+            - None. Called only by :meth:`consistency` when ``insights`` is
+              empty; calling it for a non-empty-insights run would silently
+              substitute this fixed signal for a real assessment.
+        Postconditions:
+            - Returns a fixed ``MarketSignal`` (confidence 0.55) noting
+              insufficient transcript volume.
+        """
         return MarketSignal(
             signal="Cross-interview theme consistency",
             confidence=0.55,
@@ -298,9 +322,19 @@ class MarketResearchOrchestrator:
 
         scripts = self.scripts(mission)
 
-        signals = self.psychology(insights)
         if mission.topology == TeamTopology.SPLIT:
-            signals = signals + self.consistency(insights)
+            # Psychology and consistency are independent LLM calls over the
+            # same insights — run them concurrently (mirrors the Temporal
+            # path's asyncio.gather(psych_coro, cons_coro)) instead of paying
+            # their latencies back-to-back.
+            psych_signals, cons_signals = parallel_map(
+                [self.psychology, self.consistency],
+                lambda stage: stage(insights),
+                max_workers=2,
+            )
+            signals = psych_signals + cons_signals
+        else:
+            signals = self.psychology(insights)
 
         recommendation = self.viability(mission, signals, len(insights))
 

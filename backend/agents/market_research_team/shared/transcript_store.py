@@ -23,11 +23,19 @@ never tripped.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, Callable, List, Tuple
+
+logger = logging.getLogger(__name__)
+
+# One-shot warning guard (mirrors blogging/shared/run_pipeline_job.py's
+# _tempfile_fallback_warned convention) — logs once per process instead of
+# once per activity call.
+_tempfile_fallback_warned = False
 
 
 def _base_dir() -> Path:
@@ -37,11 +45,29 @@ def _base_dir() -> Path:
         - None (``AGENT_CACHE`` may be unset).
     Postconditions:
         - Returns ``<AGENT_CACHE or a temp dir>/market_research_team/transcripts``.
-          Never reads the environment at import time.
+          Never reads the environment at import time. When ``AGENT_CACHE`` is
+          unset, logs one warning per process — the fallback tempdir is
+          per-process/non-shared, so a multi-worker deployment would silently
+          fail to find another worker's persisted transcripts without this
+          diagnostic pointing at the real misconfiguration.
     """
-    root = os.getenv("AGENT_CACHE", "").strip() or os.path.join(
-        tempfile.gettempdir(), "market_research_agent_cache"
-    )
+    global _tempfile_fallback_warned
+    agent_cache = os.getenv("AGENT_CACHE", "").strip()
+    if agent_cache:
+        root = agent_cache
+    else:
+        root = os.path.join(tempfile.gettempdir(), "market_research_agent_cache")
+        if not _tempfile_fallback_warned:
+            _tempfile_fallback_warned = True
+            logger.warning(
+                "AGENT_CACHE is not set — persisted transcripts will be written to %s, "
+                "a per-process temp directory that is NOT shared across worker "
+                "processes/hosts. In a multi-worker Temporal deployment this will cause "
+                "ux_one activities to fail with FileNotFoundError if scheduled on a "
+                "different worker than the one that ran ingest. Set AGENT_CACHE to a "
+                "shared volume for production deployments.",
+                root,
+            )
     return Path(root) / "market_research_team" / "transcripts"
 
 
@@ -100,3 +126,50 @@ def clear_transcripts(job_id: str) -> None:
           cleanup failure must not affect the run's terminal status).
     """
     shutil.rmtree(_job_dir(job_id), ignore_errors=True)
+
+
+def sweep_orphaned(is_active: Callable[[str], bool]) -> int:
+    """Clear persisted transcripts for jobs the caller reports as no longer active.
+
+    ``clear_transcripts`` only runs from ``finalize_activity``/``mark_failed_activity``,
+    so a job whose WORKER process died (crash, forced container recycle) before
+    either ran leaves its transcript directory behind with nothing to clean it up
+    — the same class of orphan the team-service's own job-status startup
+    reconciliation (``mark_all_active_jobs_interrupted``) exists to catch for job
+    *records*, but that mechanism has no knowledge of this store's *files*. Calling
+    this once at service startup (after that reconciliation has run) closes that
+    gap for the common "worker restarted" case. It does NOT help a workflow that
+    is forcibly ``TerminateWorkflowExecution``-ed on an otherwise-healthy,
+    long-running worker — that bypasses all app code, including this sweep, until
+    the process itself is restarted.
+
+    Preconditions:
+        - ``is_active(job_id)`` returns ``True`` iff ``job_id`` still has
+          in-progress work in the job store (PENDING/RUNNING); any exception
+          from ``is_active`` for a given job is treated as "not active" (err on
+          the side of clearing) and logged.
+    Postconditions:
+        - Removes every persisted job directory for which ``is_active`` returns
+          ``False`` and returns the count cleared. Never raises — this runs
+          during app startup and a job-service hiccup at that moment must not
+          block boot.
+    """
+    base = _base_dir()
+    if not base.is_dir():
+        return 0
+    cleared = 0
+    for job_dir in base.iterdir():
+        if not job_dir.is_dir():
+            continue
+        job_id = job_dir.name
+        try:
+            active = is_active(job_id)
+        except Exception:
+            logger.warning(
+                "sweep_orphaned: could not check status for job %s; clearing", job_id, exc_info=True
+            )
+            active = False
+        if not active:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            cleared += 1
+    return cleared

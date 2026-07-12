@@ -150,6 +150,8 @@ def _job_status(job_id: str) -> Optional[str]:
 def _job_stopped(job_id: str) -> bool:
     """Whether pipeline work must not proceed for ``job_id``.
 
+    Preconditions:
+        - ``job_id`` is a job-store id (the row may or may not exist).
     Postconditions:
         - Returns ``True`` when the job is missing or in any terminal state — a
           queued/running activity must never do work (or write progress) for a
@@ -158,6 +160,44 @@ def _job_stopped(job_id: str) -> bool:
     terminal, _ = _status_sets()
     status = _job_status(job_id)
     return status is None or status in terminal
+
+
+def _check_not_terminal(job_id: str, stage: str) -> Optional[str]:
+    """Guard a lifecycle activity against a missing/FAILED/clean-terminal job.
+
+    Shared by ``prepare_activity`` and ``finalize_activity`` — the two
+    lifecycle activities that must RAISE (not silently no-op) on a missing or
+    already-FAILED job, but cleanly short-circuit on a clean terminal state.
+    Each caller builds its own short-circuit return payload.
+
+    Preconditions:
+        - ``job_id`` is a job-store id; ``stage`` labels the caller (used only
+          in raised/logged messages, e.g. ``"prepare"``/``"finalize"``).
+    Postconditions:
+        - Job missing → raises ``RuntimeError`` (retryable — a transient store
+          read glitch is retried by the workflow's IO policy).
+        - Job FAILED → raises a non-retryable ``ApplicationError`` (never
+          resurrect a failed job).
+        - Job in a clean-terminal state (COMPLETED/CANCELLED/INTERRUPTED) →
+          logs and returns that status string.
+        - Otherwise (job active) → returns ``None``.
+    """
+    from market_research_team.shared.job_store import JOB_STATUS_FAILED
+
+    _, clean_terminal = _status_sets()
+    status = _job_status(job_id)
+    if status is None:
+        raise RuntimeError(f"Market research job {job_id} not found at {stage}")
+    if status == JOB_STATUS_FAILED:
+        raise ApplicationError(
+            f"Market research job {job_id} was already FAILED at {stage}", non_retryable=True
+        )
+    if status in clean_terminal:
+        activity.logger.info(
+            "Market research job %s terminal (%s) at %s; short-circuiting", job_id, status, stage
+        )
+        return status
+    return None
 
 
 def _orch():
@@ -241,11 +281,7 @@ def prepare_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
           carrier with ``transcripts``/``transcript_folder_path`` stripped.
     """
     from market_research_team.models import RunMarketResearchRequest
-    from market_research_team.shared.job_store import (
-        JOB_STATUS_FAILED,
-        JOB_STATUS_RUNNING,
-        update_job,
-    )
+    from market_research_team.shared.job_store import JOB_STATUS_RUNNING, update_job
 
     try:
         req = RunMarketResearchRequest(**request)
@@ -256,18 +292,7 @@ def prepare_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
 
     carried = req.model_copy(update={"transcripts": [], "transcript_folder_path": None})
 
-    _, clean_terminal = _status_sets()
-    status = _job_status(job_id)
-    if status is None:
-        raise RuntimeError(f"Market research job {job_id} not found at prepare")
-    if status == JOB_STATUS_FAILED:
-        raise ApplicationError(
-            f"Market research job {job_id} was already FAILED before start", non_retryable=True
-        )
-    if status in clean_terminal:
-        activity.logger.info(
-            "Market research job %s already terminal (%s) at prepare; stopping run", job_id, status
-        )
+    if _check_not_terminal(job_id, "prepare") is not None:
         return MarketResearchRunContext(request=carried, job_id=job_id, stopped=True).model_dump(
             mode="json"
         )
@@ -333,6 +358,10 @@ def mark_failed_activity(job_id: str, error: str) -> None:
     exhausted its retries, so failure marking can never defeat an activity's own
     retry policy.
 
+    Preconditions:
+        - ``error`` is the stringified fatal error (see ``_root_cause_message``
+          in the workflow module, which unwraps Temporal's ``ActivityError``
+          wrapper to the real underlying message before calling this).
     Postconditions:
         - Job missing or already terminal → status left untouched (a
           cancel/interrupt/earlier terminal state is never clobbered).
@@ -388,34 +417,14 @@ def finalize_activity(
         MarketSignal,
         ViabilityRecommendation,
     )
-    from market_research_team.shared.job_store import (
-        JOB_STATUS_COMPLETED,
-        JOB_STATUS_FAILED,
-        update_job,
-    )
+    from market_research_team.shared.job_store import JOB_STATUS_COMPLETED, update_job
     from market_research_team.shared.transcript_store import clear_transcripts
 
     sctx = MarketResearchRunContext.model_validate(ctx)
     job_id = sctx.job_id
-    _, clean_terminal = _status_sets()
 
     def _terminal_short_circuit() -> Optional[dict[str, Any]]:
-        status = _job_status(job_id)
-        if status is None:
-            raise RuntimeError(f"Market research job {job_id} not found at finalize")
-        if status == JOB_STATUS_FAILED:
-            raise ApplicationError(
-                f"Market research job {job_id} was marked FAILED during the run",
-                non_retryable=True,
-            )
-        if status in clean_terminal:
-            activity.logger.info(
-                "Market research job %s terminal (%s) at finalize; not writing COMPLETED",
-                job_id,
-                status,
-            )
-            return {"job_id": job_id}
-        return None
+        return {"job_id": job_id} if _check_not_terminal(job_id, "finalize") is not None else None
 
     try:
         early = _terminal_short_circuit()
@@ -494,6 +503,9 @@ def psychology_activity(
 ) -> list[dict[str, Any]]:
     """Derive adoption/behavior signals from the collected insights. Single-shot.
 
+    Preconditions:
+        - ``ctx`` is the ``market_research_prepare`` carrier; ``insights`` are
+          the collected per-transcript UX insight dicts (may be empty).
     Postconditions:
         - Job terminal/missing → returns ``[]`` (finalize surfaces the state).
         - Otherwise returns the signal dicts (agent guarantees at least two).
@@ -507,6 +519,9 @@ def consistency_activity(
 ) -> list[dict[str, Any]]:
     """Score cross-interview theme consistency (split mode only). Single-shot.
 
+    Preconditions:
+        - ``ctx`` is the ``market_research_prepare`` carrier; ``insights`` are
+          the collected per-transcript UX insight dicts (may be empty).
     Postconditions:
         - Job terminal/missing → returns ``[]`` (finalize surfaces the state).
         - Empty ``insights`` → the deterministic fallback signal (no LLM call);
@@ -521,6 +536,10 @@ def viability_activity(
 ) -> dict[str, Any]:
     """Produce the viability verdict from the derived signals. Single-shot.
 
+    Preconditions:
+        - ``ctx`` is the ``market_research_prepare`` carrier; ``signals`` are
+          the derived signal dicts; ``insight_count`` is the number of
+          successfully-analyzed transcripts (``len(insights)``).
     Postconditions:
         - Job terminal/missing → returns the deterministic zero-evidence
           recommendation (no LLM call); finalize discards it on the terminal
@@ -530,14 +549,16 @@ def viability_activity(
     from market_research_team.models import MarketSignal
 
     sctx = MarketResearchRunContext.model_validate(ctx)
-    orch = _orch()
-    mission, _ = _mission_and_review(sctx)
     if _job_stopped(sctx.job_id):
+        # Checked before rebuilding the mission or touching signals — matches
+        # the stopped-first ordering every sibling stage activity uses.
         # Deterministic (insight_count=0 short-circuit) — no LLM spend on cancel.
-        return orch.viability(mission, [], 0).model_dump(mode="json")
+        mission, _ = _mission_and_review(sctx)
+        return _orch().viability(mission, [], 0).model_dump(mode="json")
+    mission, _ = _mission_and_review(sctx)
     signal_objs = [MarketSignal.model_validate(s) for s in signals]
     with _beating():
-        recommendation = orch.viability(mission, signal_objs, insight_count)
+        recommendation = _orch().viability(mission, signal_objs, insight_count)
     return recommendation.model_dump(mode="json")
 
 
@@ -545,6 +566,8 @@ def viability_activity(
 def scripts_activity(ctx: dict[str, Any]) -> list[str]:
     """Generate the research scripts/templates for the mission. Single-shot.
 
+    Preconditions:
+        - ``ctx`` is the ``market_research_prepare`` carrier.
     Postconditions:
         - Job terminal/missing → returns ``[]`` (finalize surfaces the state).
         - Otherwise returns the non-empty scripts list.
@@ -573,6 +596,16 @@ def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any
     patched per-stage DAG instead. Removal: once every pre-decomposition run has
     drained, delete this activity and the workflow's unpatched branch.
 
+    Fidelity note: this activity delegates to the SAME ``MarketResearchOrchestrator``
+    class the per-stage DAG uses, not a frozen pre-decomposition copy. Temporal's
+    replay determinism only requires that this activity type is scheduled with
+    the same args/options on replay (guaranteed above) — it has no visibility
+    into what runs inside the activity body. So while the job-store status
+    bookkeeping below genuinely is unchanged, the orchestrator's own analysis
+    methodology is NOT frozen: a future change to ``MarketResearchOrchestrator.run``
+    changes what a drained-out run actually does, even though the drain-out
+    mechanism itself keeps working correctly.
+
     Preconditions:
         - ``job_id`` refers to a job already created in the job store.
         - ``request`` is the serialized ``RunMarketResearchRequest``.
@@ -580,7 +613,9 @@ def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any
     Postconditions:
         - RUNNING → COMPLETED with the orchestrator result on success; a cancel
           leaves the row untouched; a genuine failure marks the row FAILED and
-          re-raises (identical to the pre-decomposition behavior).
+          re-raises. This status-bookkeeping contract (not the orchestrator's
+          internal analysis behavior — see the fidelity note above) is what
+          stays identical to the pre-decomposition activity.
     """
     from market_research_team.models import RunMarketResearchRequest
     from market_research_team.pipeline import prepare, run_pipeline_core

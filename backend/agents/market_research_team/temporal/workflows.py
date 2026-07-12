@@ -36,6 +36,7 @@ workflow registration (guarded by ``test_temporal_bootstrap``).
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import timedelta
 from typing import Any
 
@@ -86,6 +87,27 @@ _LEGACY_ACTIVITY_TIMEOUT = timedelta(hours=2)
 _LEGACY_ACTIVITY_RETRY = RetryPolicy(maximum_attempts=1)
 
 
+def _root_cause_message(exc: BaseException) -> str:
+    """Return the innermost chained exception's message.
+
+    ``workflow.execute_activity`` failures surface as a
+    ``temporalio.exceptions.ActivityError`` wrapper whose own ``str()`` is
+    generic Temporal boilerplate (e.g. "Activity task failed"); the actual
+    activity-side exception is chained via ``__cause__``.
+
+    Preconditions:
+        - ``exc`` is any exception (chained or not).
+    Postconditions:
+        - Returns ``str()`` of the innermost ``__cause__`` in the chain, or
+          ``str(exc)`` unchanged when there is no chain — so a FAILED job's
+          recorded error reflects the real root cause instead of a wrapper's
+          generic text.
+    """
+    while exc.__cause__ is not None:
+        exc = exc.__cause__
+    return str(exc)
+
+
 @workflow.defn(name="MarketResearchWorkflow")
 class MarketResearchWorkflow:
     @workflow.run
@@ -127,7 +149,7 @@ class MarketResearchWorkflow:
             try:
                 await workflow.execute_activity(
                     _act.mark_failed_activity,
-                    args=[job_id, str(exc)],
+                    args=[job_id, _root_cause_message(exc)],
                     start_to_close_timeout=_IO_TIMEOUT,
                     retry_policy=IO_RETRY,
                 )
@@ -179,77 +201,89 @@ class MarketResearchWorkflow:
             retry_policy=LLM_RETRY,
         )
 
-        # Ingest persists transcripts to the shared per-job store and returns
-        # only lightweight refs ({"index", "source"}); the transcript bodies
-        # never enter workflow history (ux_one loads each from the store).
-        refs = await workflow.execute_activity(
-            _act.ingest_activity,
-            args=[job_id, request],
-            start_to_close_timeout=_INGEST_TIMEOUT,
-            retry_policy=IO_RETRY,
-        )
+        try:
+            # Ingest persists transcripts to the shared per-job store and returns
+            # only lightweight refs ({"index", "source"}); the transcript bodies
+            # never enter workflow history (ux_one loads each from the store).
+            refs = await workflow.execute_activity(
+                _act.ingest_activity,
+                args=[job_id, request],
+                start_to_close_timeout=_INGEST_TIMEOUT,
+                retry_policy=IO_RETRY,
+            )
 
-        # UX: one activity per transcript, fanned out concurrently. A transcript
-        # whose activity fails after its retries is dropped (return_exceptions),
-        # not fatal to the run — the Temporal upgrade over the thread path's
-        # whole-run failure. An outer cancellation still propagates out of gather.
-        ux_results = await asyncio.gather(
-            *[
-                workflow.execute_activity(
-                    _act.ux_one_activity,
-                    args=[ctx, ref],
-                    start_to_close_timeout=_STAGE_TIMEOUT,
-                    heartbeat_timeout=_HEARTBEAT_TIMEOUT,
-                    retry_policy=LLM_RETRY,
-                )
-                for ref in refs
-            ],
-            return_exceptions=True,
-        )
-        insights = [i for i in ux_results if not isinstance(i, BaseException)]
+            # UX: one activity per transcript, fanned out concurrently. A
+            # transcript whose activity fails after its retries is dropped
+            # (return_exceptions), not fatal to the run — the Temporal upgrade
+            # over the thread path's whole-run failure. An outer cancellation
+            # still propagates out of gather.
+            ux_results = await asyncio.gather(
+                *[
+                    workflow.execute_activity(
+                        _act.ux_one_activity,
+                        args=[ctx, ref],
+                        start_to_close_timeout=_STAGE_TIMEOUT,
+                        heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+                        retry_policy=LLM_RETRY,
+                    )
+                    for ref in refs
+                ],
+                return_exceptions=True,
+            )
+            insights = [i for i in ux_results if not isinstance(i, BaseException)]
 
-        active = await self._progress(job_id, "analysis", 45)
-        # Transcripts were loaded but EVERY UX analysis was dropped: if the job is
-        # still active (not a cancel — a cancel makes ux_one raise, which gather
-        # captures too), this is a total analysis failure. Surface it as a failed
-        # run rather than silently emitting an "insufficient evidence / collect
-        # more interviews" result from zero insights (which would misrepresent a
-        # run that had data but couldn't analyze it).
-        if active and refs and not insights:
-            raise RuntimeError(f"All {len(refs)} transcript analyses failed")
+            active = await self._progress(job_id, "analysis", 45)
+            # Transcripts were loaded but EVERY UX analysis was dropped: if the
+            # job is still active (not a cancel — a cancel makes ux_one raise,
+            # which gather captures too), this is a total analysis failure.
+            # Surface it as a failed run rather than silently emitting an
+            # "insufficient evidence / collect more interviews" result from
+            # zero insights (which would misrepresent a run that had data but
+            # couldn't analyze it).
+            if active and refs and not insights:
+                raise RuntimeError(f"All {len(refs)} transcript analyses failed")
 
-        # Psychology and (split mode) consistency run concurrently after UX.
-        psych_coro = workflow.execute_activity(
-            _act.psychology_activity,
-            args=[ctx, insights],
-            start_to_close_timeout=_STAGE_TIMEOUT,
-            heartbeat_timeout=_HEARTBEAT_TIMEOUT,
-            retry_policy=LLM_RETRY,
-        )
-        if split:
-            cons_coro = workflow.execute_activity(
-                _act.consistency_activity,
+            # Psychology and (split mode) consistency run concurrently after UX.
+            psych_coro = workflow.execute_activity(
+                _act.psychology_activity,
                 args=[ctx, insights],
                 start_to_close_timeout=_STAGE_TIMEOUT,
                 heartbeat_timeout=_HEARTBEAT_TIMEOUT,
                 retry_policy=LLM_RETRY,
             )
-            psych_signals, cons_signals = await asyncio.gather(psych_coro, cons_coro)
-            signals = psych_signals + cons_signals
-        else:
-            signals = await psych_coro
+            if split:
+                cons_coro = workflow.execute_activity(
+                    _act.consistency_activity,
+                    args=[ctx, insights],
+                    start_to_close_timeout=_STAGE_TIMEOUT,
+                    heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+                    retry_policy=LLM_RETRY,
+                )
+                psych_signals, cons_signals = await asyncio.gather(psych_coro, cons_coro)
+                signals = psych_signals + cons_signals
+            else:
+                signals = await psych_coro
 
-        await self._progress(job_id, "viability", 75)
+            await self._progress(job_id, "viability", 75)
 
-        recommendation = await workflow.execute_activity(
-            _act.viability_activity,
-            args=[ctx, signals, len(insights)],
-            start_to_close_timeout=_STAGE_TIMEOUT,
-            heartbeat_timeout=_HEARTBEAT_TIMEOUT,
-            retry_policy=LLM_RETRY,
-        )
+            recommendation = await workflow.execute_activity(
+                _act.viability_activity,
+                args=[ctx, signals, len(insights)],
+                start_to_close_timeout=_STAGE_TIMEOUT,
+                heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+                retry_policy=LLM_RETRY,
+            )
+        except BaseException:
+            # Any failure past this point must not leave the independently-
+            # scheduled scripts activity orphaned (still running/retrying for
+            # a job that's about to be marked FAILED). Request cancellation and
+            # drain the handle before this exception reaches run()'s catch-all.
+            scripts_handle.cancel()
+            with suppress(BaseException):
+                await scripts_handle
+            raise
 
-        scripts = await scripts_handle
+        scripts = await self._await_scripts(job_id, scripts_handle)
 
         await workflow.execute_activity(
             _act.finalize_activity,
@@ -258,6 +292,30 @@ class MarketResearchWorkflow:
             retry_policy=IO_RETRY,
         )
         return {"job_id": job_id}
+
+    async def _await_scripts(self, job_id: str, handle: workflow.ActivityHandle) -> list[str]:
+        """Await the scripts activity, tolerating its own failure (best-effort).
+
+        Preconditions:
+            - ``handle`` is the ``ActivityHandle`` returned by starting
+              ``scripts_activity``; every other pipeline stage already
+              succeeded (the caller only reaches here past the try/except that
+              cancels ``handle`` on any earlier failure).
+        Postconditions:
+            - Returns the scripts list on success. On ANY failure (retry
+              exhaustion, timeout) logs a warning and returns ``[]`` instead of
+              failing the whole run — matching the fault-tolerance the UX
+              fan-out already gets via ``return_exceptions=True``, since
+              ``scripts`` is documented as an independent branch.
+        """
+        try:
+            return await handle
+        except Exception:
+            workflow.logger.warning(
+                "market_research job %s: scripts activity failed; continuing without scripts",
+                job_id,
+            )
+            return []
 
     async def _progress(self, job_id: str, stage: str, pct: int) -> bool:
         """Write stage progress via the report-progress activity.

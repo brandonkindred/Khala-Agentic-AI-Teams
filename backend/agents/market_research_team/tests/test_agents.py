@@ -68,6 +68,23 @@ def test_transcript_ingestion_loads_inline_and_folder(tmp_path: Path) -> None:
     assert all(name != "c.md" for name, _ in loaded)
 
 
+def test_transcript_ingestion_truncates_beyond_max() -> None:
+    from market_research_team.agents import _MAX_TRANSCRIPTS
+
+    mission = ResearchMission(
+        product_concept="Concept",
+        target_users="Users",
+        business_goal="Goal",
+        transcripts=[f"text {i}" for i in range(_MAX_TRANSCRIPTS + 10)],
+    )
+
+    loaded = TranscriptIngestionAgent().load_transcripts(mission)
+
+    assert len(loaded) == _MAX_TRANSCRIPTS
+    assert loaded[0] == ("inline_transcript_1", "text 0")
+    assert loaded[-1] == ("inline_transcript_200", f"text {_MAX_TRANSCRIPTS - 1}")
+
+
 def test_transcript_ingestion_handles_missing_folder() -> None:
     mission = ResearchMission(
         product_concept="Concept",
@@ -145,6 +162,25 @@ def test_user_psychology_pads_to_minimum_two_signals(monkeypatch) -> None:
     )
     signals = UserPsychologyAgent().derive_signals([])
     assert len(signals) >= 2
+
+
+def test_user_psychology_null_signal_name_defaults_to_placeholder(monkeypatch) -> None:
+    """Regression: a signal object with ``"signal": null`` (or any non-string)
+    used to construct ``MarketSignal(signal=None, ...)``, which is invalid per
+    the model's ``str`` field — this must fall back to a placeholder name
+    instead of raising."""
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: json.dumps(
+            [
+                {"signal": None, "confidence": 0.6, "evidence": ["e1"]},
+                {"signal": "Real signal", "confidence": 0.7, "evidence": ["e2"]},
+            ]
+        ),
+    )
+    signals = UserPsychologyAgent().derive_signals([])
+    assert signals[0].signal == "Unknown signal"
+    assert signals[1].signal == "Real signal"
 
 
 # ---------------------------------------------------------------------------
