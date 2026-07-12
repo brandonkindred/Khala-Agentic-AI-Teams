@@ -143,12 +143,27 @@ def test_recommend_activities_activity_returns_list_of_dicts(monkeypatch, sample
     canned = [StopActivities(location="Yosemite"), StopActivities(location="Los Angeles, CA")]
     captured: dict = {}
 
-    def _fake(route, group_profile, trip, llm=None, on_stop=None):
+    def _fake(route, group_profile, trip, llm=None):
         captured["route"] = route
-        captured["on_stop"] = on_stop
         return canned
 
     monkeypatch.setattr(rtp_pipeline, "recommend_activities", _fake)
+
+    import shared_concurrency
+
+    heartbeat_calls: list[tuple] = []
+
+    class _FakeBackgroundHeartbeat:
+        def __init__(self, beat, interval_s, *, copy_context=False, **kwargs):
+            heartbeat_calls.append((beat, interval_s, copy_context))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", _FakeBackgroundHeartbeat)
     profile = TravelerGroupProfile().model_dump()
     route = RoutePlan(route_summary="loop").model_dump()
 
@@ -157,8 +172,15 @@ def test_recommend_activities_activity_returns_list_of_dicts(monkeypatch, sample
     assert out == [s.model_dump() for s in canned]
     assert isinstance(captured["route"], RoutePlan)
     assert captured["route"].route_summary == "loop"
-    # The activity wires the per-stop heartbeat callback through.
-    assert callable(captured["on_stop"])
+    # The activity wraps the per-stop LLM loop in a background heartbeat rather
+    # than threading a per-stop callback through the business-logic call (the
+    # _fake signature above has no on_stop param — a leftover call-site
+    # argument would raise a TypeError and fail this test).
+    assert len(heartbeat_calls) == 1
+    beat, interval_s, copy_context = heartbeat_calls[0]
+    assert callable(beat)
+    assert interval_s == acts._ACTIVITIES_HEARTBEAT_INTERVAL_S
+    assert copy_context is True
 
 
 def test_plan_logistics_activity_returns_dict(monkeypatch, sample_trip_body):

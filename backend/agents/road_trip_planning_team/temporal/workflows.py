@@ -72,8 +72,10 @@ _BOOKKEEPING_RETRY = RetryPolicy(
 
 _SHORT_TIMEOUT = timedelta(minutes=5)
 _STEP_TIMEOUT = timedelta(minutes=30)
-# recommend_activities loops one LLM call per stop and heartbeats before each, so
-# a stalled worker is caught within this window rather than only at start-to-close.
+# recommend_activities loops one LLM call per stop; the activity emits a
+# background heartbeat every 30s for the duration of the loop (see
+# _ACTIVITIES_HEARTBEAT_INTERVAL_S in temporal/activities.py), so a stalled
+# worker is caught within this window rather than only at start-to-close.
 # Sized to comfortably exceed a single (possibly slow) per-stop LLM call so a
 # legitimately-long call is never mistaken for a stall, while still detecting a
 # genuine hang well before the 30-minute start-to-close budget.
@@ -238,6 +240,14 @@ class RoadTripWorkflow:
             # recommend_activities and plan_logistics both derive only from
             # route + profile + trip and don't consume each other's output, so run
             # them concurrently and join before composing.
+            # No return_exceptions: either activity's failure propagates from
+            # gather immediately rather than waiting on the sibling — intentional
+            # since neither step consumes the other's output. The other activity
+            # execution isn't cancelled and keeps running to completion with its
+            # result discarded; the outer except below still routes the failure
+            # to mark_road_trip_failed_activity, so the run always ends in a
+            # definitive FAILED state. Same trade-off branding_team's
+            # BrandingWorkflow accepts for its own asyncio.gather of integrations.
             self._advance("recommend_activities_and_logistics", 0.45)
             activities, logistics = await asyncio.gather(
                 workflow.execute_activity(

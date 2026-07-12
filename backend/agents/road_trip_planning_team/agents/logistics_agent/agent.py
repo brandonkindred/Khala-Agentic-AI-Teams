@@ -79,16 +79,18 @@ class LogisticsAgent:
             result = self._agent(prompt)
             raw = str(result).strip()
             data = json.loads(raw)
+            return LogisticsPlan(
+                stop_logistics=data.get("stop_logistics") or [],
+                packing_suggestions=data.get("packing_suggestions") or [],
+                travel_tips=data.get("travel_tips") or [],
+                budget_estimate=data.get("budget_estimate") or "",
+            )
         except Exception as e:
-            logger.warning("LogisticsAgent JSON parse failed: %s", e)
+            # Covers both a malformed LLM response (JSON parse failure) and a
+            # syntactically-valid-but-schema-invalid logistics field (pydantic
+            # ValidationError) — either way, fall back rather than raise.
+            logger.warning("LogisticsAgent JSON parse/validation failed: %s", e)
             return LogisticsPlan(
                 packing_suggestions=["Sunscreen", "Snacks", "Water bottles", "First aid kit"],
                 travel_tips=["Start driving early to beat traffic", "Download offline maps"],
             )
-
-        return LogisticsPlan(
-            stop_logistics=data.get("stop_logistics") or [],
-            packing_suggestions=data.get("packing_suggestions") or [],
-            travel_tips=data.get("travel_tips") or [],
-            budget_estimate=data.get("budget_estimate") or "",
-        )

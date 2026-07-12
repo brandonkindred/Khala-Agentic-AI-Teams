@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Callable, List, Optional
+from typing import List
 
 from strands import Agent
 
@@ -53,16 +53,8 @@ class ActivitiesExpertAgent:
         route: RoutePlan,
         group_profile: TravelerGroupProfile,
         trip: TripRequest,
-        on_stop: Optional[Callable[[], None]] = None,
     ) -> List[StopActivities]:
         """Generate activity recommendations for each stop on the route.
-
-        ``on_stop`` (if provided) is a no-arg callable invoked *before* each stop
-        is processed — used by the Temporal activity to emit a heartbeat ahead of
-        the (potentially slow) per-stop LLM call, so the heartbeat timer covers
-        each call rather than only firing once the blocking call has already
-        returned. A stalled worker is then detected within the heartbeat timeout
-        instead of only at the activity's start-to-close timeout.
 
         Preconditions:
             - ``route`` is a ``RoutePlan`` whose ``ordered_stops`` is non-empty;
@@ -75,11 +67,19 @@ class ActivitiesExpertAgent:
               every other stop's entry comes from ``_get_stop_activities``, which
               never raises (see its own contract).
         """
+        # An explicit raise (not assert) so the check survives `python -O` —
+        # this is the agent's public entry point, invoked across the Temporal
+        # activity boundary where `route` is reconstructed from cross-process
+        # JSON, not a purely internal-only call. Same reasoning
+        # RoadTripWorkflow._advance uses for its own explicit-raise precondition
+        # check. RoutePlannerAgent's postcondition guarantees ordered_stops is
+        # never empty, so this should never fire in normal operation.
+        if not route.ordered_stops:
+            raise ValueError("ActivitiesExpertAgent.run requires a non-empty route.ordered_stops")
+
         results: List[StopActivities] = []
 
         for stop in route.ordered_stops:
-            if on_stop is not None:
-                on_stop()
             if stop.stop_type in ("start", "end") and stop.recommended_nights == 0:
                 results.append(StopActivities(location=stop.location))
             else:
@@ -121,13 +121,17 @@ class ActivitiesExpertAgent:
             result = self._agent(prompt)
             raw = str(result).strip()
             data = json.loads(raw)
+            return StopActivities(
+                location=location,
+                activities=data.get("activities") or [],
+                dining=data.get("dining") or [],
+                tips=data.get("tips") or [],
+            )
         except Exception as e:
-            logger.warning("ActivitiesExpertAgent JSON parse failed for %s: %s", location, e)
+            # Covers both a malformed LLM response (JSON parse failure) and a
+            # syntactically-valid-but-schema-invalid activity/dining entry
+            # (pydantic ValidationError) — either way, fall back rather than raise.
+            logger.warning(
+                "ActivitiesExpertAgent JSON parse/validation failed for %s: %s", location, e
+            )
             return StopActivities(location=location)
-
-        return StopActivities(
-            location=location,
-            activities=data.get("activities") or [],
-            dining=data.get("dining") or [],
-            tips=data.get("tips") or [],
-        )

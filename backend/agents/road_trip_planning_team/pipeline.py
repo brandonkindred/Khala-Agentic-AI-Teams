@@ -17,7 +17,7 @@ thread mode. Both modes therefore share one implementation and produce the same
 from __future__ import annotations
 
 import logging
-from typing import Callable, List, Optional
+from typing import List
 
 from .agents.activities_expert_agent import ActivitiesExpertAgent
 from .agents.itinerary_composer_agent import ItineraryComposerAgent
@@ -83,22 +83,18 @@ def recommend_activities(
     group_profile: TravelerGroupProfile,
     trip: TripRequest,
     llm=None,
-    on_stop: Optional[Callable[[], None]] = None,
 ) -> List[StopActivities]:
     """Recommend activities and dining for each stop on the route.
 
     Preconditions:
         - ``route`` is the ``RoutePlan`` from ``plan_route``; ``group_profile``
           the profile from ``profile_travelers``; ``trip`` the original request.
-        - ``on_stop`` is ``None`` or a no-arg callable invoked once per route
-          stop (used by the Temporal activity to emit heartbeats during the
-          per-stop LLM loop).
 
     Postconditions:
         - Returns one ``StopActivities`` per stop in ``route.ordered_stops``
           (pass-through start/end stops get an empty entry).
     """
-    return ActivitiesExpertAgent(llm=llm).run(route, group_profile, trip, on_stop=on_stop)
+    return ActivitiesExpertAgent(llm=llm).run(route, group_profile, trip)
 
 
 def plan_logistics(
@@ -155,33 +151,27 @@ def run_pipeline(trip_request: PlanTripRequest) -> TripItinerary:
           layer enforces this before dispatch).
 
     Postconditions:
-        - Returns a ``TripItinerary``. Each step already degrades to a typed
-          fallback on LLM/parse failure; the outer guard additionally catches an
-          unexpected step failure (e.g. a schema-invalid LLM response) and
-          returns a minimal fallback, so thread mode always reaches a terminal
-          COMPLETED state with a usable (if degraded) result rather than raising.
-          (The Temporal path drives the steps as individual activities and lets a
-          genuine step failure surface for durable retry/resubmission instead.)
+        - Returns a ``TripItinerary``. Every step already degrades to a typed
+          fallback on LLM/parse/validation failure — that is each specialist
+          agent's own contract, enforced internally by its own try/except (never
+          raises). This function has no outer guard of its own: a step raising
+          past its own documented contract is a genuine bug, not a normal
+          degraded-LLM outcome, and must propagate rather than be silently
+          coerced into a fake-COMPLETED result (see CLAUDE.md's Design by
+          Contract section). ``run_plan_background`` (thread mode) and
+          ``run_pipeline_activity`` (the legacy Temporal drain path) already
+          convert a propagated failure into a FAILED job, matching how the
+          per-step Temporal path already treats a step failure.
     """
     trip = trip_request.trip
 
     logger.info("Road trip planning started: %s → %s", trip.start_location, trip.required_stops)
 
-    try:
-        group_profile = profile_travelers(trip)
-        route = plan_route(trip, group_profile)
-        activities_per_stop = recommend_activities(route, group_profile, trip)
-        logistics = plan_logistics(route, group_profile, trip)
-        return compose_itinerary(trip, group_profile, route, activities_per_stop, logistics)
-    except Exception as e:
-        logger.warning("Road trip pipeline degraded to fallback itinerary: %s", e)
-        return TripItinerary(
-            title=f"Road Trip: {trip.start_location} to {trip.end_location or trip.start_location}",
-            overview="Itinerary generation completed but a planning step failed.",
-            # max(1, ...): a trip with no explicit duration and no required stops
-            # (start → end only) would otherwise evaluate to 0 days.
-            total_days=max(1, trip.trip_duration_days or len(trip.required_stops) * 2),
-        )
+    group_profile = profile_travelers(trip)
+    route = plan_route(trip, group_profile)
+    activities_per_stop = recommend_activities(route, group_profile, trip)
+    logistics = plan_logistics(route, group_profile, trip)
+    return compose_itinerary(trip, group_profile, route, activities_per_stop, logistics)
 
 
 def run_plan_core(job_id: str, body: PlanTripRequest) -> None:
@@ -195,11 +185,13 @@ def run_plan_core(job_id: str, body: PlanTripRequest) -> None:
         - ``body`` is a validated ``PlanTripRequest``.
 
     Postconditions:
-        - Writes RUNNING then COMPLETED with the itinerary result. ``run_pipeline``
-          already catches step failures internally and degrades to a fallback
-          ``TripItinerary`` rather than raising, so this reaches COMPLETED in the
-          normal case; only a failure outside that guard (e.g. the job-store write
-          itself) propagates, and the caller owns that failure policy.
+        - Writes RUNNING then COMPLETED with the itinerary result in the normal
+          case. Each specialist step degrades to a typed fallback on LLM/parse/
+          validation failure rather than raising, so ``run_pipeline`` itself only
+          raises on a genuine bug (a step breaking its own contract) or a
+          job-store write failure — either way this function does not catch it;
+          the caller owns that failure policy (see ``run_plan_background``'s and
+          ``run_pipeline_activity``'s except-branches).
     """
     update_job(job_id, status=JOB_STATUS_RUNNING)
     itinerary = run_pipeline(body)

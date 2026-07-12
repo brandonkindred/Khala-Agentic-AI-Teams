@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from strands import Agent
 
@@ -100,17 +101,26 @@ class RoutePlannerAgent:
             total_driving_miles=data.get("total_driving_miles"),
             total_driving_hours=data.get("total_driving_hours"),
             route_summary=data.get("route_summary", ""),
-            suggested_total_days=data.get("suggested_total_days", trip.trip_duration_days or 7),
+            # max(1, ...): dict.get's default only applies when the key is
+            # missing, so an LLM response with an explicit 0 (or negative)
+            # would otherwise pass through unguarded.
+            suggested_total_days=max(
+                1, data.get("suggested_total_days", trip.trip_duration_days or 7)
+            ),
         )
 
     def _covers_required_stops(self, stops: list[RouteStop], trip: TripRequest, end: str) -> bool:
         """Return True if the start, every required stop, and the end are represented.
 
-        Matching is case-insensitive and bidirectional-substring (a required
-        ``"Yosemite"`` matches a planned ``"Yosemite National Park"`` and vice
-        versa) to tolerate the LLM naming a stop more or less verbosely than the
-        request. Checking the start/end too catches a route that covers every
-        required stop but truncates the actual origin or destination.
+        Matching (see ``_locations_match``) tolerates the LLM naming a stop more
+        or less verbosely than the request (e.g. a required ``"Yosemite"``
+        matches a planned ``"Yosemite National Park"``), or a short caller
+        abbreviation (e.g. ``"SF"`` matching ``"San Francisco, CA"``), without
+        the false-positive risk of raw substring containment on short strings
+        (e.g. ``"LA"`` is a literal substring of ``"Atlanta, GA"``). Checking
+        the start/end too catches a route that covers every required stop but
+        truncates the actual origin or destination. Blank required-stop entries
+        are skipped rather than trivially "covered".
 
         Preconditions:
             - ``stops`` is the parsed, non-empty route.
@@ -118,16 +128,47 @@ class RoutePlannerAgent:
               start location for a round trip).
 
         Postconditions:
-            - Returns True when the start, the end, and every required stop are
-              present (trivially True for start/end when there are no required
-              stops, since a route always has at least a start and an end).
+            - Returns True when the start, the end, and every non-blank required
+              stop are present (trivially True for start/end when there are no
+              required stops, since a route always has at least a start and an
+              end).
         """
         planned = [s.location.lower() for s in stops if s.location]
         for req in [trip.start_location, *trip.required_stops, end]:
-            r = req.lower()
-            if not any(r in p or p in r for p in planned):
+            r = (req or "").strip().lower()
+            if not r:
+                continue  # no location to verify against the planned route
+            if not any(self._locations_match(r, p) for p in planned):
                 return False
         return True
+
+    @staticmethod
+    def _locations_match(a: str, b: str) -> bool:
+        """Best-effort, already-lowercased location match — more robust than
+        raw substring containment without needing a geocoding/gazetteer lookup.
+
+        Matches when the shorter string appears in the longer one at a word
+        boundary (so ``"yosemite"`` matches ``"yosemite national park"`` and
+        ``"san francisco"`` matches ``"san francisco, ca"``, but the bare
+        substring ``"la"`` no longer wrongly matches inside ``"atlanta, ga"``
+        since it's embedded mid-word there, not word-bounded), or when the
+        shorter string equals the initials of the longer string's words
+        (state-code-length tokens excluded, so ``"sf"`` matches
+        ``"san francisco, ca"`` via "San Francisco" without "CA" corrupting the
+        acronym).
+
+        Preconditions:
+            - ``a``, ``b`` are already lowercased, non-empty.
+
+        Postconditions:
+            - Returns True on a word-bounded containment or initials match,
+              False otherwise.
+        """
+        shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+        if re.search(rf"\b{re.escape(shorter)}\b", longer):
+            return True
+        words = [w for w in re.findall(r"[a-z0-9]+", longer) if len(w) > 2]
+        return len(shorter) > 1 and shorter == "".join(w[0] for w in words)
 
     def _fallback_route(self, trip: TripRequest, end: str) -> RoutePlan:
         """Build a minimal route covering start → required stops → end.

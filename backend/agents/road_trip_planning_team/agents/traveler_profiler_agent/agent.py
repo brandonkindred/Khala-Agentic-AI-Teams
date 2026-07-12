@@ -60,13 +60,15 @@ class TravelerProfilerAgent:
             result = self._agent(prompt)
             raw = str(result).strip()
             data = json.loads(raw)
+            return TravelerGroupProfile.model_validate(data)
         except Exception as e:
-            logger.warning("TravelerProfilerAgent JSON parse failed: %s", e)
+            # Covers both a malformed LLM response (JSON parse failure) and a
+            # syntactically-valid-but-schema-invalid profile (pydantic
+            # ValidationError) — either way, fall back rather than raise.
+            logger.warning("TravelerProfilerAgent JSON parse/validation failed: %s", e)
             return TravelerGroupProfile(
                 group_description="Group of travelers",
                 combined_interests=[i for t in trip.travelers for i in t.interests],
                 combined_needs=[n for t in trip.travelers for n in t.needs],
                 age_groups_present=list({t.age_group for t in trip.travelers}),
             )
-
-        return TravelerGroupProfile.model_validate(data)

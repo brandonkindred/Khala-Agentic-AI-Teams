@@ -33,6 +33,12 @@ from typing import Any
 
 from temporalio import activity
 
+# Background-heartbeat cadence (seconds) for the whole recommend_activities
+# call (its per-stop LLM loop), kept well under _STEP_HEARTBEAT_TIMEOUT (10
+# min, in workflows.py) so a live run is never mistaken for a stalled worker.
+# Matches the 30s convention used by branding_team/temporal/activities.py.
+_ACTIVITIES_HEARTBEAT_INTERVAL_S = 30.0
+
 # ---------------------------------------------------------------------------
 # Payload decoders — shared by the specialist activities so a change to how a
 # JSON-native payload is reconstructed lives in one place. Imports stay inside
@@ -41,24 +47,58 @@ from temporalio import activity
 
 
 def _decode_trip(request: dict[str, Any]):
+    """Reconstruct the trip request from its JSON-safe dict.
+
+    Preconditions:
+        - ``request`` is a ``PlanTripRequest`` dict (``body.model_dump()``).
+
+    Postconditions:
+        - Returns the ``TripRequest`` nested in the reconstructed ``PlanTripRequest``.
+    """
     from road_trip_planning_team.models import PlanTripRequest
 
     return PlanTripRequest(**request).trip
 
 
 def _decode_profile(profile: dict[str, Any]):
+    """Reconstruct a traveler group profile from its JSON-safe dict.
+
+    Preconditions:
+        - ``profile`` is a ``TravelerGroupProfile`` dict produced by
+          ``model_dump(mode="json")``.
+
+    Postconditions:
+        - Returns the reconstructed ``TravelerGroupProfile``.
+    """
     from road_trip_planning_team.models import TravelerGroupProfile
 
     return TravelerGroupProfile.model_validate(profile)
 
 
 def _decode_route(route: dict[str, Any]):
+    """Reconstruct a route plan from its JSON-safe dict.
+
+    Preconditions:
+        - ``route`` is a ``RoutePlan`` dict produced by ``model_dump(mode="json")``.
+
+    Postconditions:
+        - Returns the reconstructed ``RoutePlan``.
+    """
     from road_trip_planning_team.models import RoutePlan
 
     return RoutePlan.model_validate(route)
 
 
 def _decode_logistics(logistics: dict[str, Any]):
+    """Reconstruct a logistics plan from its JSON-safe dict.
+
+    Preconditions:
+        - ``logistics`` is a ``LogisticsPlan`` dict produced by
+          ``model_dump(mode="json")``.
+
+    Postconditions:
+        - Returns the reconstructed ``LogisticsPlan``.
+    """
     from road_trip_planning_team.models import LogisticsPlan
 
     return LogisticsPlan.model_validate(logistics)
@@ -127,18 +167,26 @@ def recommend_activities_activity(
 
     Postconditions:
         - Returns a list of JSON-safe ``StopActivities`` dicts, one per route stop.
-          Emits a Temporal heartbeat after each stop so this per-stop LLM loop is
-          detected as stalled within the heartbeat timeout, not only at
-          start-to-close.
+          A background heartbeat fires every ``_ACTIVITIES_HEARTBEAT_INTERVAL_S``
+          seconds for the whole call (not tied to per-stop boundaries), so a
+          stall anywhere in the per-stop LLM loop is detected within the
+          heartbeat timeout rather than only at start-to-close.
     """
     from road_trip_planning_team.pipeline import recommend_activities
 
-    stops = recommend_activities(
-        _decode_route(route),
-        _decode_profile(profile),
-        _decode_trip(request),
-        on_stop=activity.heartbeat,
-    )
+    # shared_concurrency is stdlib-only (threading/contextvars/logging) with no
+    # import side effects, and this runs in the worker thread pool (outside the
+    # workflow sandbox), so the call-time import is safe.
+    from shared_concurrency import BackgroundHeartbeat
+
+    with BackgroundHeartbeat(
+        activity.heartbeat, _ACTIVITIES_HEARTBEAT_INTERVAL_S, copy_context=True
+    ):
+        stops = recommend_activities(
+            _decode_route(route),
+            _decode_profile(profile),
+            _decode_trip(request),
+        )
     return [s.model_dump(mode="json") for s in stops]
 
 
