@@ -191,6 +191,71 @@ def test_cancelled_at_specialist(monkeypatch):
     assert acts.generate_response_activity not in calls
 
 
+def test_profile_intent_runs_specialist_then_profile_updates_sequentially(monkeypatch):
+    calls: list = []
+    _script(
+        monkeypatch,
+        {
+            acts.classify_intent_activity: {
+                "primary": "profile",
+                "confidence": 1.0,
+                "entities": {},
+            },
+            acts.handle_profile_activity: {
+                "agent": "profile",
+                "action": "update_profile",
+                "result": {},
+                "success": True,
+            },
+            acts.check_profile_updates_activity: [{"pref": "x"}],
+            acts.generate_response_activity: {"message": "ok"},
+            acts.finalize_success_activity: None,
+        },
+        calls=calls,
+    )
+
+    _run()
+
+    assert calls == [
+        acts.classify_intent_activity,
+        acts.handle_profile_activity,
+        acts.check_profile_updates_activity,
+        acts.generate_response_activity,
+        acts.finalize_success_activity,
+    ]
+
+
+def test_profile_intent_cancelled_at_specialist_skips_profile_updates(monkeypatch):
+    # Regression test: unlike every other intent (which schedules the
+    # specialist and profile-updates activities concurrently via
+    # asyncio.gather, so check_profile_updates_activity still runs even on a
+    # specialist cancellation), "profile" runs them sequentially to avoid a
+    # lost-update race in UserProfileStore (pa_handle_profile's
+    # learn_from_text(auto_apply=True) and pa_check_profile_updates both
+    # apply extracted preferences from the same message). A specialist-level
+    # cancellation must short-circuit BEFORE check_profile_updates_activity
+    # is ever scheduled — not just before its result is used.
+    calls: list = []
+    _script(
+        monkeypatch,
+        {
+            acts.classify_intent_activity: {
+                "primary": "profile",
+                "confidence": 1.0,
+                "entities": {},
+            },
+            acts.handle_profile_activity: {"cancelled": True},
+        },
+        calls=calls,
+    )
+
+    result = _run()
+
+    assert result == {"cancelled": True}
+    assert calls == [acts.classify_intent_activity, acts.handle_profile_activity]
+    assert acts.check_profile_updates_activity not in calls
+
+
 def test_cancelled_at_profile_updates(monkeypatch):
     # check_profile_updates returns None (cancelled) -> workflow stops before
     # generating a response or finalizing.

@@ -71,8 +71,11 @@ def _run_specialist(
           orchestrator.
 
     Postconditions:
-        - Returns ``AgentAction.model_dump()`` for the handler's result, or the
-          ``{"cancelled": True}`` sentinel if the job was cancelled first.
+        - Returns ``AgentAction.model_dump(mode="json")`` for the handler's
+          result (JSON mode: a handler's ``result`` may embed non-JSON-native
+          Pydantic values, e.g. an ``HttpUrl``, which the Temporal payload
+          converter cannot encode as-is), or the ``{"cancelled": True}``
+          sentinel if the job was cancelled first.
         - A non-``LLMNotConfiguredError`` exception from the handler CALL ITSELF
           is caught and turned into an ``orchestrator:error`` ``AgentAction``
           (success=False) so the job still completes with a degraded response —
@@ -112,7 +115,16 @@ def _run_specialist(
         action = AgentAction(
             agent="orchestrator", action="error", result={"error": str(e)}, success=False
         )
-    return action.model_dump()
+    # mode="json": `action.result` is a `Dict[str, Any]` that specialist
+    # handlers populate with arbitrary nested Pydantic model dumps — e.g. the
+    # deal-finder's `DealMatch.url` is an `HttpUrl`. A plain `model_dump()`
+    # leaves those as non-JSON-native objects (an `HttpUrl`, not a `str`),
+    # which the shared Temporal payload converter cannot encode, failing this
+    # activity at the boundary. `mode="json"` recursively normalizes them
+    # (Pydantic's json-mode serializer converts known non-JSON-native types —
+    # HttpUrl, UUID, datetime, etc. — even when nested under an Any-typed
+    # field) before this ever reaches the wire.
+    return action.model_dump(mode="json")
 
 
 @activity.defn(name="pa_classify_intent")
@@ -127,8 +139,8 @@ def classify_intent_activity(
         - ``job_id`` refers to a job already created in the PA job store.
 
     Postconditions:
-        - Marks the job RUNNING and returns ``Intent.model_dump()``, or the
-          cancellation sentinel if the job was cancelled.
+        - Marks the job RUNNING and returns ``Intent.model_dump(mode="json")``,
+          or the cancellation sentinel if the job was cancelled.
         - Re-raises ``LLMNotConfiguredError`` (a missing provider must fail the
           run, not default to ``general``).
     """
@@ -155,7 +167,9 @@ def classify_intent_activity(
         progress=15,
         request_type=intent.primary,
     )
-    return intent.model_dump()
+    # mode="json": see the matching note on _run_specialist's return — cheap
+    # defense against any future non-JSON-native value landing in `entities`.
+    return intent.model_dump(mode="json")
 
 
 @activity.defn(name="pa_handle_email")
@@ -455,8 +469,8 @@ def generate_response_activity(
         - Returns the ``{"cancelled": True}`` sentinel (the workflow then skips
           finalize) WITHOUT running the response LLM call, when the job was
           cancelled first.
-        - Otherwise returns ``OrchestratorResponse.model_dump()`` with
-          ``profile_updates`` set to the given list (matching the thread
+        - Otherwise returns ``OrchestratorResponse.model_dump(mode="json")``
+          with ``profile_updates`` set to the given list (matching the thread
           path's ``response.profile_updates = profile_updates`` assignment).
           Leaves progress at 85 ("Generating response..."); the next write is
           ``finalize_success_activity``'s own COMPLETED/100 write, which
@@ -478,7 +492,11 @@ def generate_response_activity(
         request, Intent(**intent), action_objs, results
     )
     response.profile_updates = profile_updates or []
-    return response.model_dump()
+    # mode="json": see the matching note on _run_specialist's return —
+    # `response.data` is `results`, which already crossed the wire once as
+    # part of a specialist activity's return value, but this keeps the
+    # activity boundary safe regardless of that upstream detail.
+    return response.model_dump(mode="json")
 
 
 @activity.defn(name="pa_finalize_success")

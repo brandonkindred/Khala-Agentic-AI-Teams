@@ -196,6 +196,48 @@ def test_specialist_activity_malformed_intent_raises_loudly(orchestrator, job_cl
     assert orchestrator.calls == []
 
 
+def test_specialist_activity_result_is_json_serializable_with_nested_http_url(
+    job_client, monkeypatch
+):
+    # Regression test: DealMatch.url is a Pydantic HttpUrl. A plain
+    # `.model_dump()` (not mode="json") leaves that as a non-JSON-native
+    # object nested inside AgentAction.result (a Dict[str, Any]), which the
+    # shared Temporal payload converter cannot encode, failing the deals
+    # activity at the boundary. _run_specialist's mode="json" dump must
+    # normalize it to a plain str before returning.
+    import json
+
+    from pydantic import HttpUrl
+
+    class _DealsOrchestrator:
+        def _handle_deals(self, request, intent):
+            return AgentAction(
+                agent="deals",
+                action="search_deals",
+                result={
+                    "deals": [
+                        {
+                            "deal_id": "d1",
+                            "title": "Deal",
+                            "url": HttpUrl("https://example.com/deal"),
+                        }
+                    ]
+                },
+            )
+
+    monkeypatch.setattr(
+        "personal_assistant_team.core.get_orchestrator", lambda: _DealsOrchestrator()
+    )
+    _new_job(job_client)
+
+    result = acts.handle_deals_activity("job-1", "u1", "find deals", {}, _intent("deals"))
+
+    # json.dumps must succeed — this is exactly what the Temporal payload
+    # converter needs to do when the activity completes.
+    json.dumps(result)
+    assert result["result"]["deals"][0]["url"] == "https://example.com/deal"
+
+
 # --------------------------------------------------------------------------- #
 # profile-updates / response / finalize / fail
 # --------------------------------------------------------------------------- #

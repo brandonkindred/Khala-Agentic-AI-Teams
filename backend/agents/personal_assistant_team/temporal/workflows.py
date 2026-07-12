@@ -173,31 +173,54 @@ class PaAssistantWorkflow:
             )
             # The specialist handler and the profile-update extraction are
             # each their own LLM call, and neither's input depends on the
-            # other's output, so they run concurrently rather than back to
-            # back — halving this stretch's wall-clock latency, which is paid
-            # on every single job. Both activities write their own progress
-            # percentage via update_job, so running them concurrently means
-            # those writes can land in either order and the job's reported
-            # progress can visibly jump backwards for a moment (e.g. 70 then
-            # 30). That is a cosmetic, self-correcting UX quirk — the next
-            # write always moves progress forward again — and is judged worth
-            # the real latency savings for every job.
-            action, profile_result = await asyncio.gather(
-                workflow.execute_activity(
-                    specialist_activity,
-                    args=[job_id, user_id, message, context, intent],
-                    start_to_close_timeout=STEP_TIMEOUT,
-                    retry_policy=LLM_RETRY,
-                ),
-                workflow.execute_activity(
+            # other's output, so — for every intent EXCEPT "profile" — they
+            # run concurrently rather than back to back, halving this
+            # stretch's wall-clock latency, which is paid on every single
+            # job. Both activities write their own progress percentage via
+            # update_job, so running them concurrently means those writes can
+            # land in either order and the job's reported progress can
+            # visibly jump backwards for a moment (e.g. 70 then 30). That is
+            # a cosmetic, self-correcting UX quirk — the next write always
+            # moves progress forward again — and is judged worth the real
+            # latency savings for every job.
+            #
+            # "profile" is the one exception, and stays sequential:
+            # pa_handle_profile's UserProfileAgent.learn_from_text
+            # (auto_apply=True) and pa_check_profile_updates's own preference
+            # extraction both apply extracted preferences to the SAME user's
+            # UserProfileStore from the SAME message, and UserProfileStore
+            # does unlocked read-modify-write file saves — concurrently
+            # applying preferences from both activities risks one save
+            # silently clobbering the other's write (a lost update), not just
+            # a cosmetic progress-ordering quirk.
+            specialist_coro = workflow.execute_activity(
+                specialist_activity,
+                args=[job_id, user_id, message, context, intent],
+                start_to_close_timeout=STEP_TIMEOUT,
+                retry_policy=LLM_RETRY,
+            )
+            if primary == "profile":
+                action = await specialist_coro
+                if action.get("cancelled"):
+                    return action
+                profile_result = await workflow.execute_activity(
                     _activities.check_profile_updates_activity,
                     args=[job_id, user_id, message, context],
                     start_to_close_timeout=STEP_TIMEOUT,
                     retry_policy=LLM_RETRY,
-                ),
-            )
-            if action.get("cancelled"):
-                return action
+                )
+            else:
+                action, profile_result = await asyncio.gather(
+                    specialist_coro,
+                    workflow.execute_activity(
+                        _activities.check_profile_updates_activity,
+                        args=[job_id, user_id, message, context],
+                        start_to_close_timeout=STEP_TIMEOUT,
+                        retry_policy=LLM_RETRY,
+                    ),
+                )
+                if action.get("cancelled"):
+                    return action
             if profile_result is None:
                 return {"cancelled": True}
 
