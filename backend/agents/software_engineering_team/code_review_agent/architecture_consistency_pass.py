@@ -90,7 +90,9 @@ def _build_prompt(
     """
     parts: List[str] = []
 
-    arch_doc = (architecture.architecture_document or architecture.overview or "").strip()
+    arch_doc = (architecture.architecture_document or "").strip() or (
+        architecture.overview or ""
+    ).strip()
     inlined_doc = arch_doc[:max_arch_doc_chars]
     doc_fence = _code_fence_for(inlined_doc)
     parts.append("**Architecture document:**")
@@ -123,6 +125,11 @@ def _build_prompt(
         parts.append(body_fence)
         parts.append(body)
         parts.append(body_fence)
+        if len(body) < len(content):
+            parts.append(
+                f"(Only the first {len(body)} characters of `{path}` are shown above; call "
+                "read_file to see the rest.)"
+            )
         remaining -= len(body)
     if omitted:
         parts.append(
@@ -132,8 +139,9 @@ def _build_prompt(
     parts.append("")
 
     parts.append(
-        "Use search_codebase/read_file/list_files to inspect the REST of the repository (files "
-        "not shown above) before flagging a cross-codebase duplicate, and to confirm any "
+        "Use list_files()/read_file() to inspect the REST of the repository (files not shown "
+        "above) before flagging a cross-codebase duplicate -- search_codebase only searches the "
+        "files shown in this prompt, not the wider repository. Use read_file() to confirm any "
         "architecture contradiction against the document above."
     )
     parts.append(

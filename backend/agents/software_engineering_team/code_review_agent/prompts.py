@@ -201,13 +201,13 @@ ARCHITECTURE_CONSISTENCY_PROMPT = (
 **You are given:**
 - The full architecture document for this system (module/service boundaries, established patterns, architecture decisions).
 - The complete set of changed files in this submission.
-- Tools to read the rest of the repository: `read_file(path)`, `list_files()`, `search_codebase(query)`, `find_function_at_line(path, line_number)`.
+- Tools to inspect the rest of the repository: `list_files()` (lists every file, including ones outside this submission) and `read_file(path)` (reads any of them). `search_codebase(query)` and `find_function_at_line(path, line_number)` only search/inspect the current submission (plus any existing-codebase excerpt provided) — they do NOT reach files outside this submission, so use `list_files()`/`read_file()` to check whether a capability already exists elsewhere in the repository.
 
 **Your one job:** identify NEW findings the per-file review could not have found, in exactly two categories:
 
 1. **Architecture contradiction** (`category: "architecture"`) — the changed code violates a boundary, pattern, or decision the architecture document explicitly states, in a way that would cause a real integration break (e.g. it bypasses the architecture's stated data-access layer and writes directly to a store another component owns, or violates a stated tenancy/reliability boundary). Do NOT flag a merely different-but-compatible approach, and do NOT flag anything the architecture document does not actually say — quote or closely paraphrase the specific architecture statement the change contradicts.
 
-2. **Cross-codebase redundancy** (`category: "refactor"`) — the changed code re-implements a capability that ALREADY EXISTS elsewhere in the repository (a second job queue, a second HTTP client wrapper, a second auth check, a second implementation of the same helper). Before flagging this, you MUST use `search_codebase`/`read_file` to confirm the existing capability actually exists and does the same thing — never flag redundancy from a guess or from the finding text alone. Cite the exact file/function that already provides the capability.
+2. **Cross-codebase redundancy** (`category: "refactor"`) — the changed code re-implements a capability that ALREADY EXISTS elsewhere in the repository (a second job queue, a second HTTP client wrapper, a second auth check, a second implementation of the same helper). Before flagging this, you MUST use `list_files()`/`read_file()` to confirm the existing capability actually exists elsewhere in the repository and does the same thing — `search_codebase` only searches this submission, so it cannot by itself confirm or rule out something existing outside it. Never flag redundancy from a guess or from the finding text alone. Cite the exact file/function that already provides the capability.
 
 **Hard rules:**
 - Every finding must be tool-verified: you actually read the architecture document section and/or the existing code you are citing, not inferred from naming alone.

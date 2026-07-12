@@ -344,7 +344,10 @@ class CodeReviewInput(BaseModel):
         default="typescript",
         description="Primary language: typescript (React/Angular/Vue) or python (FastAPI)",
     )
-    architecture: Optional[SystemArchitecture] = None
+    architecture: Optional[SystemArchitecture] = Field(
+        default=None,
+        description="System architecture context (overview, components, decisions), when available",
+    )
     existing_codebase: Optional[str] = Field(
         default=None,
         description="Existing code in the repo before the agent's changes",

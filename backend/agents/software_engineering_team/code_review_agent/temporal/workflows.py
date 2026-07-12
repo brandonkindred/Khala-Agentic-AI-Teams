@@ -2,17 +2,19 @@
 
 ``CodeReviewWorkflow`` reproduces ``coordinator.run_coordinator`` as a durable,
 resumable computation. It orchestrates the review as a sequence of activities —
-prepare → map fan-out → false-positive verify → deterministic gate → (conditional)
-narrative synthesis — so a worker restart mid-review re-runs only the unfinished
-activities instead of re-reviewing the whole submission.
+prepare → map fan-out → false-positive verify → architecture-consistency /
+redundancy pass → deterministic gate → (conditional) narrative synthesis — so a
+worker restart mid-review re-runs only the unfinished activities instead of
+re-reviewing the whole submission.
 
 The verdict is behavior-identical to thread mode because every phase calls the
 same underlying coordinator functions (through :mod:`.activities`): the map unit
 is ``mapping._cached_review_chunk``, verification is
-``false_positive_filter.filter_false_positives``, the gate is
-``coordinator._dedupe_issues`` + ``_reconcile_approval``, and the narrative is
-``synthesis.synthesize_review_findings`` with the same deterministic-concat
-fallback.
+``false_positive_filter.filter_false_positives``, the additive architecture pass
+is ``architecture_consistency_pass.find_architecture_and_redundancy_issues``, the
+gate is ``coordinator._dedupe_issues`` + ``_reconcile_approval``, and the
+narrative is ``synthesis.synthesize_review_findings`` with the same
+deterministic-concat fallback.
 
 Sandbox note: activity and constant imports are wrapped in
 ``workflow.unsafe.imports_passed_through()``; the workflow body itself performs
@@ -195,6 +197,20 @@ class CodeReviewWorkflow:
             start_to_close_timeout=timedelta(minutes=30),
             retry_policy=_LLM_RETRY,
         )
+
+        # Architecture-consistency / cross-codebase-redundancy pass: additive,
+        # once per submission (not once per chunk), matching thread mode's
+        # run_coordinator (see coordinator.py's identical call ordering — after
+        # false-positive verification, before the final dedupe/gate).
+        architecture_findings = await workflow.execute_activity(
+            A.find_architecture_and_redundancy_activity,
+            args=[review_input],
+            task_queue=TASK_QUEUE,
+            start_to_close_timeout=timedelta(minutes=30),
+            retry_policy=_LLM_RETRY,
+        )
+        if architecture_findings:
+            verified = [*verified, *architecture_findings]
 
         self._advance("finalizing", 0.95)
         gate = await workflow.execute_activity(

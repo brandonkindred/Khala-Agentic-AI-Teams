@@ -10,6 +10,9 @@ phase, with independent retries and resumability:
   cache (wraps ``mapping._cached_review_chunk``); this is the fan-out unit.
 - :func:`filter_false_positives_activity` — re-check findings against the whole
   submission (wraps ``false_positive_filter.filter_false_positives``).
+- :func:`find_architecture_and_redundancy_activity` — once-per-submission
+  architecture-consistency / cross-codebase-redundancy pass (wraps
+  ``architecture_consistency_pass.find_architecture_and_redundancy_issues``).
 - :func:`finalize_review_activity` — deterministic reduce gate: dedupe +
   approval reconciliation (wraps ``coordinator._dedupe_issues`` /
   ``_reconcile_approval``).
@@ -238,6 +241,39 @@ def filter_false_positives_activity(
     llm = _resolve_llm()
     verified = filter_false_positives(llm, input_data, genuine, repo_reader=None)
     return [i.model_dump(mode="json") for i in verified]
+
+
+@activity.defn(name="code_review_architecture_consistency")
+def find_architecture_and_redundancy_activity(
+    review_input: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Once-per-submission architecture-consistency / redundancy pass.
+
+    Preconditions:
+        - ``review_input`` is a ``CodeReviewInput.model_dump(mode="json")`` dict
+          (the same one every other activity in this module reconstructs from).
+
+    Postconditions:
+        - Returns zero or more NEW ``CodeReviewIssue`` dicts (category
+          ``"architecture"`` or ``"refactor"``); never mutates or removes any
+          finding from the caller's perspective — this activity is purely
+          additive, mirroring ``find_architecture_and_redundancy_issues``'s own
+          contract. ``repo_reader`` is not available across the Temporal
+          boundary (same limitation as ``filter_false_positives_activity``), so
+          this pass can confirm redundancy only within the submission's own
+          files plus the ``existing_codebase`` excerpt.
+        - Never raises: the wrapped function is itself fail-safe (disabled via
+          env, no architecture document, or any setup/LLM failure all degrade
+          to an empty list), so an activity failure here would only ever be an
+          unexpected defect, not an expected outcome.
+    """
+    from ..architecture_consistency_pass import find_architecture_and_redundancy_issues
+    from ..models import CodeReviewInput
+
+    input_data = CodeReviewInput.model_validate(review_input)
+    llm = _resolve_llm()
+    findings = find_architecture_and_redundancy_issues(llm, input_data, repo_reader=None)
+    return [i.model_dump(mode="json") for i in findings]
 
 
 @activity.defn(name="code_review_finalize")

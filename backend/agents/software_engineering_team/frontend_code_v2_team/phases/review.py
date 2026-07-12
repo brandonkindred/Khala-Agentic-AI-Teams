@@ -244,6 +244,16 @@ def run_microtask_review(
     Thin wrapper over
     :func:`software_engineering_team.shared.v2_review.run_microtask_review`; see
     :func:`run_review` for the injection rationale.
+
+    Preconditions:
+        - ``microtask`` exposes ``.id``/``.title``/``.description``.
+
+    Postconditions:
+        - Delegates to ``_shared_run_microtask_review``, which forwards
+          ``architecture``/``spec_content`` into the code-review step's
+          ``CodeReviewInput`` (both default to ``None``/``""`` when omitted,
+          so existing callers are unaffected). See the shared function for the
+          full review-result contract.
     """
     return _shared_run_microtask_review(
         config=REVIEW_CONFIG,

@@ -159,6 +159,9 @@ def _run_activity_pipeline(review_input: CodeReviewInput) -> CodeReviewOutput:
     verified = A.filter_false_positives_activity(
         payload, issues, bool(payload.get("skip_false_positive_filter", False))
     )
+    architecture_findings = A.find_architecture_and_redundancy_activity(payload)
+    if architecture_findings:
+        verified = [*verified, *architecture_findings]
     gate = A.finalize_review_activity(
         verified, not_reviewed, prep["skipped_issues"], approved_flags
     )
@@ -267,6 +270,15 @@ def test_filter_activity_skip_returns_deduped_genuine() -> None:
     # Deduped to one, and no LLM verification ran (skip=True).
     assert len(out) == 1
     assert out[0]["description"] == "dup"
+
+
+def test_architecture_activity_returns_empty_with_no_architecture() -> None:
+    """No architecture on the input -> no LLM call, empty findings (mirrors the
+    in-process ``find_architecture_and_redundancy_issues`` contract)."""
+    from code_review_agent.temporal import activities as A
+
+    out = A.find_architecture_and_redundancy_activity(_input().model_dump(mode="json"))
+    assert out == []
 
 
 def test_finalize_activity_reconciles_minor_only_to_approved() -> None:
@@ -485,7 +497,8 @@ def test_dispatch_unavailable_is_distinct_from_review_failure() -> None:
 
 def test_workflow_and_activities_are_registered() -> None:
     assert CodeReviewWorkflow in WORKFLOWS
-    assert len(ACTIVITIES) == 5
+    assert len(ACTIVITIES) == 6
     names = {getattr(a, "__name__", "") for a in ACTIVITIES}
     assert "review_chunk_activity" in names
     assert "prepare_review_activity" in names
+    assert "find_architecture_and_redundancy_activity" in names
