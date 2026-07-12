@@ -60,14 +60,33 @@ def _ranked(company="Acme", score=0.9):
     )
 
 
-def test_create_run_executes_insert(monkeypatch):
+def test_create_run_upserts_on_conflict(monkeypatch):
     cur = FakeCursor()
     _patch_conn(monkeypatch, cur)
     JobMatchingStore().create_run("r1", JobSeekerProfile(), JobMatchRequest(top_n=7))
-    assert any("INSERT INTO job_matching_runs" in sql for sql, _ in cur.executed)
+    insert, params = next(
+        (sql, p) for sql, p in cur.executed if "INSERT INTO job_matching_runs" in sql
+    )
+    # Idempotent on run_id so a Temporal prepare retry can't duplicate the row,
+    # and a retry that observed a changed profile refreshes the stored snapshot
+    # instead of silently keeping an earlier, lost attempt's stale one.
+    assert "ON CONFLICT (run_id) DO UPDATE SET" in insert
+    assert "profile_snapshot = EXCLUDED.profile_snapshot" in insert
+    assert "request_json = EXCLUDED.request_json" in insert
+    assert "top_n = EXCLUDED.top_n" in insert
+    # But only while the run is still running: a late, abandoned attempt's
+    # stale snapshot must not overwrite an already-completed run.
+    assert "WHERE job_matching_runs.status = %s" in insert
+    assert params[-1] == "running"
 
 
-def test_save_results_inserts_rows_and_completes(monkeypatch):
+def test_save_results_deletes_prior_rows_unconditionally(monkeypatch):
+    # Idempotent re-save: prior rows for the run are deleted before
+    # re-inserting, and the DELETE precedes the INSERTs — unconditionally, not
+    # gated on an attempt/retry count (see the method's docstring for why: a
+    # "timed out" attempt's own worker can keep running and commit after a
+    # later attempt already saved, and from THAT attempt's own perspective it
+    # is still attempt 1).
     cur = FakeCursor()
     _patch_conn(monkeypatch, cur)
     JobMatchingStore().save_results(
@@ -76,14 +95,49 @@ def test_save_results_inserts_rows_and_completes(monkeypatch):
         total_found=4,
         scanned_fingerprints=["a", "b", "c", "a", ""],
     )
-    inserts = [s for s, _ in cur.executed if "INSERT INTO job_matching_ranked_jobs" in s]
-    updates = [s for s, p in cur.executed if "UPDATE job_matching_runs" in s]
+    executed = [s for s, _ in cur.executed]
+    deletes = [s for s in executed if "DELETE FROM job_matching_ranked_jobs" in s]
+    inserts = [s for s in executed if "INSERT INTO job_matching_ranked_jobs" in s]
+    updates = [s for s in executed if "UPDATE job_matching_runs" in s]
+    assert len(deletes) == 1
     assert len(inserts) == 2
     assert len(updates) == 1
+    assert executed.index(deletes[0]) < executed.index(inserts[0])
     # The UPDATE persists the de-duplicated, non-empty scanned fingerprint set.
     update_params = next(p for s, p in cur.executed if "UPDATE job_matching_runs" in s)
     seen_json = update_params[3]
     assert sorted(seen_json.obj) == ["a", "b", "c"]
+
+
+def test_save_results_acquires_advisory_lock_before_delete(monkeypatch):
+    # Concurrent saves for the same run_id (e.g. a zombie finalize attempt's
+    # worker still running concurrently with its own retry) must serialize via
+    # a transaction-scoped advisory lock before the delete-then-insert
+    # sequence, since there's no unique constraint on (run_id, rank) to fall
+    # back on and an unconditional DELETE alone doesn't prevent interleaving.
+    cur = FakeCursor()
+    _patch_conn(monkeypatch, cur)
+    JobMatchingStore().save_results("r1", [_ranked("A")], total_found=1)
+    executed = [s for s, _ in cur.executed]
+    lock_idx = next(i for i, s in enumerate(executed) if "pg_advisory_xact_lock" in s)
+    delete_idx = next(
+        i for i, s in enumerate(executed) if "DELETE FROM job_matching_ranked_jobs" in s
+    )
+    assert lock_idx < delete_idx
+    lock_params = next(p for s, p in cur.executed if "pg_advisory_xact_lock" in s)
+    assert lock_params == ("r1",)
+
+
+def test_save_results_defaults_scanned_fingerprints_to_ranked(monkeypatch):
+    # Omitting scanned_fingerprints falls back to the ranked postings' own
+    # fingerprints (store.py default path).
+    cur = FakeCursor()
+    _patch_conn(monkeypatch, cur)
+    ranked = [_ranked("A"), _ranked("B")]
+    JobMatchingStore().save_results("r1", ranked, total_found=2)
+    update_params = next(p for s, p in cur.executed if "UPDATE job_matching_runs" in s)
+    seen_json = update_params[3]
+    assert sorted(seen_json.obj) == sorted({r.posting.fingerprint for r in ranked})
 
 
 def test_mark_failed_truncates(monkeypatch):
@@ -92,6 +146,103 @@ def test_mark_failed_truncates(monkeypatch):
     JobMatchingStore().mark_failed("r1", "x" * 5000)
     _, params = cur.executed[0]
     assert len(params[1]) <= 2000
+
+
+def test_mark_failed_does_not_overwrite_completed(monkeypatch):
+    # Guard so a Temporal fail_scan firing after finalize already saved results
+    # can't flip a COMPLETED run (with its persisted rows) back to failed.
+    cur = FakeCursor()
+    _patch_conn(monkeypatch, cur)
+    JobMatchingStore().mark_failed("r1", "boom")
+    sql, params = cur.executed[0]
+    assert "status <> %s" in sql
+    assert params[-1] == "completed"
+
+
+def test_run_status_returns_column_value(monkeypatch):
+    cur = FakeCursor(fetchone=[("completed",)])
+    _patch_conn(monkeypatch, cur)
+    assert JobMatchingStore().run_status("r1") == "completed"
+    sql, params = cur.executed[0]
+    assert "SELECT status FROM job_matching_runs" in sql
+    assert params == ("r1",)
+
+
+def test_run_status_returns_none_for_unknown_run(monkeypatch):
+    cur = FakeCursor(fetchone=[None])
+    _patch_conn(monkeypatch, cur)
+    assert JobMatchingStore().run_status("nope") is None
+
+
+def test_get_run_response_returns_none_for_unknown_run(monkeypatch):
+    cur = FakeCursor(fetchone=[None])
+    _patch_conn(monkeypatch, cur)
+    assert JobMatchingStore().get_run_response("nope") is None
+
+
+def test_get_run_response_returns_none_when_not_completed(monkeypatch):
+    # Nothing valid to rebuild while the run is still running/failed.
+    run_row = {
+        "run_id": "r1",
+        "status": "running",
+        "total_found": 0,
+        "total_ranked": 0,
+        "error": None,
+        "created_at": None,
+        "completed_at": None,
+    }
+    cur = FakeCursor(fetchone=[run_row], fetchall=[[]])
+    _patch_conn(monkeypatch, cur)
+    assert JobMatchingStore().get_run_response("r1") is None
+
+
+def test_get_run_response_rebuilds_completed_response(monkeypatch):
+    run_row = {
+        "run_id": "r1",
+        "status": "completed",
+        "total_found": 2,
+        "total_ranked": 1,
+        "error": None,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "completed_at": "2026-01-01T01:00:00+00:00",
+    }
+    job_rows = [
+        {
+            "score": 0.9,
+            "sub_scores": {"title_fit": 0.8},
+            "posting": {"company": "Acme", "title": "Eng"},
+            "recommendation": "apply",
+            "rationale": "good",
+            "concerns": ["c1"],
+        }
+    ]
+    profile = JobSeekerProfile(target_titles=["Engineer"]).model_dump(mode="json")
+    cur = FakeCursor(fetchone=[run_row, (profile,)], fetchall=[job_rows])
+    _patch_conn(monkeypatch, cur)
+    response = JobMatchingStore().get_run_response("r1")
+    assert response is not None
+    assert response.run_id == "r1"
+    assert response.total_found == 2
+    assert response.total_ranked == 1
+    assert response.ranked_jobs[0].posting.company == "Acme"
+    assert response.profile_snapshot.target_titles == ["Engineer"]
+
+
+def test_get_run_response_returns_none_if_row_vanishes_between_reads(monkeypatch):
+    # Defensive guard for the extreme-edge-case race between the get_run() read
+    # and the follow-up profile_snapshot read.
+    run_row = {
+        "run_id": "r1",
+        "status": "completed",
+        "total_found": 0,
+        "total_ranked": 0,
+        "error": None,
+        "created_at": None,
+        "completed_at": None,
+    }
+    cur = FakeCursor(fetchone=[run_row, None], fetchall=[[]])
+    _patch_conn(monkeypatch, cur)
+    assert JobMatchingStore().get_run_response("r1") is None
 
 
 def test_list_runs_maps_rows(monkeypatch):
@@ -205,6 +356,20 @@ def test_list_listings_all_disables_filtering(monkeypatch):
     JobMatchingStore().list_listings(status="all")
     listing_sql, _ = cur.executed[0]
     assert "WHERE COALESCE" not in listing_sql
+
+
+def test_list_listings_active_empty_result(monkeypatch):
+    # Empty result set under the default 'active' filter yields an empty,
+    # count-less response (not just the 'all' case).
+    cur = FakeCursor(fetchall=[[], []])
+    _patch_conn(monkeypatch, cur)
+    out = JobMatchingStore().list_listings(status="active", limit=25)
+    assert out.total == 0
+    assert out.listings == []
+    assert out.counts == {}
+    listing_sql, listing_params = cur.executed[0]
+    assert "NOT IN ('archived', 'not_interested')" in listing_sql
+    assert listing_params == (25,)
 
 
 def test_list_listings_rejects_invalid_filter(monkeypatch):
