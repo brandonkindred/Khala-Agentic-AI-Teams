@@ -382,12 +382,35 @@ async def retest_activity(job_id: str, audit_id: str, finding_ids: List[str]) ->
           dict once the retest reaches a terminal state. Runs under a background
           heartbeat so a genuinely long retest keeps the activity alive within the
           workflow's ``heartbeat_timeout`` instead of being timed out mid-run.
+        - An exception raised by ``run_retest_job`` propagates so Temporal retries;
+          on the LAST scheduled attempt it also marks the job FAILED first (guarded
+          against clobbering an already-terminal status, and with progress/result
+          fields best-effort recovered from persisted state — see
+          :func:`_best_effort_terminal_fields`) so the job is never left stranded
+          RUNNING once Temporal gives up retrying, unlike relying solely on the
+          external stale-job monitor's much coarser timeout.
     """
-    from accessibility_audit_team.audit_execution import run_retest_job
+    from accessibility_audit_team.audit_execution import (
+        JOB_STATUS_FAILED,
+        get_job_manager,
+        run_retest_job,
+    )
     from shared_concurrency import BackgroundHeartbeat
 
-    with BackgroundHeartbeat(activity.heartbeat, _HEARTBEAT_INTERVAL_S, copy_context=True):
-        await run_retest_job(job_id, audit_id, finding_ids)
+    manager = get_job_manager()
+    try:
+        with BackgroundHeartbeat(activity.heartbeat, _HEARTBEAT_INTERVAL_S, copy_context=True):
+            await run_retest_job(job_id, audit_id, finding_ids)
+    except Exception as exc:
+        if _is_last_attempt() and not _is_job_terminal(manager, job_id):
+            manager.update_job(
+                job_id,
+                status=JOB_STATUS_FAILED,
+                current_phase="retest",
+                error=str(exc),
+                **await _best_effort_terminal_fields(audit_id),
+            )
+        raise
     return {"status": "done", "audit_id": audit_id}
 
 

@@ -18,7 +18,7 @@ QCR ensures Lane A doesn't dump garbage into Lane B.
 import asyncio
 import logging
 import weakref
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .agents import (
     AccessibilityProgramLead,
@@ -109,6 +109,12 @@ class AccessibilityAuditOrchestrator:
             weakref.WeakValueDictionary()
         )
 
+        # audit_ids with a run_audit/run_retest call actively mutating this
+        # process's cached AccessibilityAuditResult in place — see get_audit_state,
+        # which must not replace a locally-live object with a (possibly older)
+        # store snapshot while one of these is in flight.
+        self._locally_running_audits: Set[str] = set()
+
     async def run_audit(
         self,
         audit_request: AuditRequest,
@@ -132,29 +138,40 @@ class AccessibilityAuditOrchestrator:
             current_phase=Phase.INTAKE,
         )
 
+        # Marks this audit_id as locally live for the duration of the run, so
+        # get_audit_state trusts self._audits' in-place-mutating object instead of
+        # replacing it with a (possibly older) store snapshot mid-run — see
+        # get_audit_state and the _locally_running_audits field docstring.
+        audit_id = result.audit_id
+        self._locally_running_audits.add(audit_id)
         try:
-            if timeout_seconds:
-                result = await asyncio.wait_for(
-                    self._run_audit_phases(audit_request, tech_stack, result),
-                    timeout=timeout_seconds,
+            try:
+                if timeout_seconds:
+                    result = await asyncio.wait_for(
+                        self._run_audit_phases(audit_request, tech_stack, result),
+                        timeout=timeout_seconds,
+                    )
+                else:
+                    result = await self._run_audit_phases(audit_request, tech_stack, result)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Audit %s timed out after %s hours",
+                    result.audit_id,
+                    audit_request.timebox_hours,
                 )
-            else:
-                result = await self._run_audit_phases(audit_request, tech_stack, result)
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Audit %s timed out after %s hours", result.audit_id, audit_request.timebox_hours
-            )
-            result.success = False
-            result.failure_reason = (
-                f"Audit timed out after {audit_request.timebox_hours} hour(s). "
-                f"Completed phases: {[p.value for p in result.completed_phases]}"
-            )
-            await self._persist_audit(result)
-        except Exception as e:
-            logger.exception("Audit failed: %s", e)
-            result.success = False
-            result.failure_reason = str(e)
-            await self._persist_audit(result)
+                result.success = False
+                result.failure_reason = (
+                    f"Audit timed out after {audit_request.timebox_hours} hour(s). "
+                    f"Completed phases: {[p.value for p in result.completed_phases]}"
+                )
+                await self._persist_audit(result)
+            except Exception as e:
+                logger.exception("Audit failed: %s", e)
+                result.success = False
+                result.failure_reason = str(e)
+                await self._persist_audit(result)
+        finally:
+            self._locally_running_audits.discard(audit_id)
 
         return result
 
@@ -315,7 +332,14 @@ class AccessibilityAuditOrchestrator:
         return await load_audit_state(audit_id)
 
     async def _ensure_loaded(self, audit_id: str) -> Optional[AccessibilityAuditResult]:
-        """Return the audit from cache or load from persistent store."""
+        """Return the audit from cache or load from persistent store.
+
+        Internal helper for ``run_retest``'s cache-and-mutate pattern: a cache hit
+        is trusted and returned as-is (never re-checked against the store), so the
+        SAME object instance is returned across repeated calls for one audit_id —
+        callers that need a cross-process-fresh view must use ``get_audit_state``
+        instead, which always reloads.
+        """
         if audit_id in self._audits:
             return self._audits[audit_id]
         loaded = await self._load_audit(audit_id)
@@ -324,19 +348,38 @@ class AccessibilityAuditOrchestrator:
         return loaded
 
     async def get_audit_state(self, audit_id: str) -> Optional[AccessibilityAuditResult]:
-        """Return an audit's full state, loading it from the artifact store if needed.
+        """Return an audit's full state, refreshed from the artifact store.
 
-        The public, cross-process-aware lookup: it consults the in-memory cache and
-        falls back to the shared artifact store, so a caller in a different process
-        (e.g. the API when the audit ran in a Temporal worker) still resolves it.
+        The public, cross-process-aware lookup, used as the cross-process source of
+        truth (e.g. by the findings/report/export/case-study/retest endpoints'
+        existence checks). Unlike ``_ensure_loaded`` (used internally by
+        ``run_retest``'s cache-and-mutate pattern), a cache hit here is NOT trusted
+        forever: a Temporal worker — or another retest — can keep advancing an
+        audit's persisted state after this process cached an earlier snapshot (via
+        an earlier call to this method, or ``run_audit``/``run_retest`` seeding the
+        cache), so always reloading avoids serving a permanently stale result.
 
         Preconditions:
             - ``audit_id`` is a non-empty audit identifier.
         Postconditions:
-            - Returns the ``AccessibilityAuditResult`` (caching it), or ``None`` when
-              no state exists anywhere.
+            - When ``audit_id`` is NOT in ``_locally_running_audits`` (no
+              ``run_audit``/``run_retest`` call in THIS process is actively
+              mutating it), reloads from the store and, on a hit, refreshes the
+              cache and returns the freshly-loaded result; on a store miss, falls
+              back to any existing cached copy (a transient store hiccup must not
+              spuriously 404 an audit this process already knows about) or ``None``.
+            - When ``audit_id`` IS in ``_locally_running_audits``, returns the
+              cached live object as-is without reloading — replacing it mid-run
+              with a (store-lagging) snapshot would detach the cache from the
+              object ``run_audit``/``run_retest`` is still mutating in place.
         """
-        return await self._ensure_loaded(audit_id)
+        if audit_id in self._locally_running_audits:
+            return self._audits.get(audit_id)
+        loaded = await self._load_audit(audit_id)
+        if loaded is not None:
+            self._audits[audit_id] = loaded
+            return loaded
+        return self._audits.get(audit_id)
 
     def _get_retest_lock(self, audit_id: str) -> asyncio.Lock:
         """Return (creating if needed) the lock serializing ``run_retest`` calls
@@ -386,56 +429,65 @@ class AccessibilityAuditOrchestrator:
             Updated AccessibilityAuditResult
         """
         async with self._get_retest_lock(audit_id):
-            result = await self._ensure_loaded(audit_id)
-            if not result:
-                return AccessibilityAuditResult(
+            # See _locally_running_audits' docstring: guards get_audit_state against
+            # replacing this method's live, in-place-mutating cached object with a
+            # (possibly pre-retest) store snapshot while this block is in flight.
+            self._locally_running_audits.add(audit_id)
+            try:
+                result = await self._ensure_loaded(audit_id)
+                if not result:
+                    return AccessibilityAuditResult(
+                        audit_id=audit_id,
+                        success=False,
+                        failure_reason=f"Audit {audit_id} not found",
+                    )
+
+                # Get findings to retest
+                if finding_ids:
+                    findings_to_retest = [f for f in result.final_findings if f.id in finding_ids]
+                else:
+                    findings_to_retest = result.final_findings
+
+                if not findings_to_retest:
+                    result.summary = "No findings to retest"
+                    await self._persist_audit(result)
+                    return result
+
+                # Run retest phase
+                logger.info("Starting retest phase for audit %s", audit_id)
+                result.current_phase = Phase.RETEST
+
+                retest_result = await run_retest_phase(
                     audit_id=audit_id,
-                    success=False,
-                    failure_reason=f"Audit {audit_id} not found",
+                    findings_to_retest=findings_to_retest,
+                    llm_client=self.llm_client,
+                    message_bus=self.message_bus,
                 )
 
-            # Get findings to retest
-            if finding_ids:
-                findings_to_retest = [f for f in result.final_findings if f.id in finding_ids]
-            else:
-                findings_to_retest = result.final_findings
+                result.retest_result = retest_result
+                result.completed_phases.append(Phase.RETEST)
 
-            if not findings_to_retest:
-                result.summary = "No findings to retest"
+                # Update final findings
+                if retest_result.updated_findings:
+                    finding_map = {f.id: f for f in retest_result.updated_findings}
+                    result.final_findings = [
+                        finding_map.get(f.id, f) for f in result.final_findings
+                    ]
+
+                result.summary = (
+                    f"Retest complete. {retest_result.findings_closed} findings closed, "
+                    f"{retest_result.findings_still_open} still open."
+                )
+
+                # Persist the retested state so a later report/retest request —
+                # possibly in a different process (the Temporal worker vs the API) or
+                # after a restart — reloads the updated findings instead of the stale
+                # pre-retest snapshot.
                 await self._persist_audit(result)
+
                 return result
-
-            # Run retest phase
-            logger.info("Starting retest phase for audit %s", audit_id)
-            result.current_phase = Phase.RETEST
-
-            retest_result = await run_retest_phase(
-                audit_id=audit_id,
-                findings_to_retest=findings_to_retest,
-                llm_client=self.llm_client,
-                message_bus=self.message_bus,
-            )
-
-            result.retest_result = retest_result
-            result.completed_phases.append(Phase.RETEST)
-
-            # Update final findings
-            if retest_result.updated_findings:
-                finding_map = {f.id: f for f in retest_result.updated_findings}
-                result.final_findings = [finding_map.get(f.id, f) for f in result.final_findings]
-
-            result.summary = (
-                f"Retest complete. {retest_result.findings_closed} findings closed, "
-                f"{retest_result.findings_still_open} still open."
-            )
-
-            # Persist the retested state so a later report/retest request —
-            # possibly in a different process (the Temporal worker vs the API) or
-            # after a restart — reloads the updated findings instead of the stale
-            # pre-retest snapshot.
-            await self._persist_audit(result)
-
-            return result
+            finally:
+                self._locally_running_audits.discard(audit_id)
 
     def get_audit_status(self, audit_id: str) -> Dict[str, Any]:
         """

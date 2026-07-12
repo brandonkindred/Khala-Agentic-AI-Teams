@@ -1406,6 +1406,106 @@ def test_retest_activity_delegates_to_run_retest_job(monkeypatch):
     assert out == {"status": "done", "audit_id": "a1"}
 
 
+def test_retest_activity_propagates_exception_and_marks_failed_on_last_attempt(monkeypatch):
+    """An infra failure while retesting propagates (so Temporal retries) and, on
+    the last scheduled attempt, marks the job FAILED first rather than leaving it
+    stranded RUNNING forever — retest_activity previously had no equivalent to
+    _run_phase's/finalize_activity's last-attempt terminal-write guard."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = _patch_activity_jobmanager(monkeypatch)
+    jm.get_job.return_value = None
+    monkeypatch.setattr(
+        ax, "run_retest_job", mock.AsyncMock(side_effect=RuntimeError("infra boom"))
+    )
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+
+    with pytest.raises(RuntimeError, match="infra boom"):
+        asyncio.run(acts.retest_activity("j1", "a1", ["f1"]))
+
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed
+    assert failed[0].kwargs.get("error") == "infra boom"
+    assert failed[0].kwargs.get("current_phase") == "retest"
+
+
+def test_retest_activity_does_not_mark_failed_when_not_last_attempt(monkeypatch):
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = _patch_activity_jobmanager(monkeypatch)
+    jm.get_job.return_value = None
+    monkeypatch.setattr(
+        ax, "run_retest_job", mock.AsyncMock(side_effect=RuntimeError("infra boom"))
+    )
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: False)
+
+    with pytest.raises(RuntimeError, match="infra boom"):
+        asyncio.run(acts.retest_activity("j1", "a1", ["f1"]))
+
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert not failed
+
+
+def test_retest_activity_exception_skips_write_when_already_terminal(monkeypatch):
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = _patch_activity_jobmanager(monkeypatch)
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_COMPLETED}
+    monkeypatch.setattr(
+        ax, "run_retest_job", mock.AsyncMock(side_effect=RuntimeError("infra boom"))
+    )
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+
+    with pytest.raises(RuntimeError, match="infra boom"):
+        asyncio.run(acts.retest_activity("j1", "a1", ["f1"]))
+
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert not failed
+
+
+def test_retest_activity_exception_recovers_progress_and_result_from_persisted_state(monkeypatch):
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = _patch_activity_jobmanager(monkeypatch)
+    jm.get_job.return_value = None
+    monkeypatch.setattr(
+        ax, "run_retest_job", mock.AsyncMock(side_effect=RuntimeError("infra boom"))
+    )
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+    persisted = SimpleNamespace(
+        completed_phases=[
+            SimpleNamespace(value="report_packaging"),
+            SimpleNamespace(value="retest"),
+        ],
+        total_findings=4,
+        model_dump=lambda: {"audit_id": "a1", "success": True},
+    )
+    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=persisted))
+
+    with pytest.raises(RuntimeError, match="infra boom"):
+        asyncio.run(acts.retest_activity("j1", "a1", ["f1"]))
+
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed
+    kwargs = failed[0].kwargs
+    assert kwargs.get("progress") == 100
+    assert kwargs.get("completed_phases") == ["report_packaging", "retest"]
+    assert kwargs.get("findings_count") == 4
+    assert kwargs.get("result") == {"audit_id": "a1", "success": True}
+
+
 # ---------------------------------------------------------------------------
 # Retest execution core (symmetric with run_audit_job / execute_audit_job)
 # ---------------------------------------------------------------------------
