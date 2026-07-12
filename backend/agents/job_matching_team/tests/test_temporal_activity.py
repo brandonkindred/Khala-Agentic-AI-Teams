@@ -90,7 +90,13 @@ class _FakeJobStore:
 
 
 class _FakeStore:
-    """In-memory stand-in for ``JobMatchingStore`` — records run bookkeeping."""
+    """In-memory stand-in for ``JobMatchingStore`` — records run bookkeeping.
+
+    ``run_status`` is what :meth:`run_status` returns (default ``"running"`` —
+    not completed, so existing fail_scan behavior proceeds unless a test
+    explicitly sets it to ``"completed"`` to exercise the already-completed
+    short-circuit).
+    """
 
     def __init__(
         self,
@@ -100,6 +106,8 @@ class _FakeStore:
         mark_failed_raises: bool = False,
         seen_raises: bool = False,
         seen: set[str] | None = None,
+        run_status: str | None = "running",
+        run_status_raises: bool = False,
     ) -> None:
         self.create_calls: list[tuple] = []
         self.save_calls: list[tuple] = []
@@ -110,6 +118,8 @@ class _FakeStore:
         self._mark_failed_raises = mark_failed_raises
         self._seen_raises = seen_raises
         self._seen = seen or set()
+        self._run_status = run_status
+        self._run_status_raises = run_status_raises
 
     def create_run(self, run_id, profile, request):
         self.create_calls.append((run_id, profile, request))
@@ -122,8 +132,10 @@ class _FakeStore:
             raise RuntimeError("seen query failed")
         return set(self._seen)
 
-    def save_results(self, run_id, ranked, *, total_found, scanned_fingerprints):
-        self.save_calls.append((run_id, list(ranked), total_found, list(scanned_fingerprints)))
+    def save_results(self, run_id, ranked, *, total_found, scanned_fingerprints, is_retry=False):
+        self.save_calls.append(
+            (run_id, list(ranked), total_found, list(scanned_fingerprints), is_retry)
+        )
         if self._save_raises:
             raise RuntimeError("save failed")
 
@@ -131,6 +143,11 @@ class _FakeStore:
         self.mark_failed_calls.append((run_id, error))
         if self._mark_failed_raises:
             raise RuntimeError("mark_failed failed")
+
+    def run_status(self, run_id):
+        if self._run_status_raises:
+            raise RuntimeError("run store unreachable")
+        return self._run_status
 
 
 class _FakeAgent:
@@ -163,6 +180,20 @@ def _patch_job_store(monkeypatch, store: _FakeJobStore) -> None:
     )
 
 
+def _patch_stores(monkeypatch, *, job: _FakeJobStore | None = None, store=None) -> None:
+    """Patch both the job store and the run store in one call.
+
+    Collapses the two-line ``_patch_job_store`` + ``job_matching_team.store.
+    get_store`` pairing every activity test below needs. Either patch is
+    skipped when its argument is None, so a test that only needs one still
+    calls this with the other left unset.
+    """
+    if job is not None:
+        _patch_job_store(monkeypatch, job)
+    if store is not None:
+        monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+
+
 def _serialize_postings(postings: list[JobPosting]) -> list[dict]:
     return [p.ensure_fingerprint().model_dump(mode="json") for p in postings]
 
@@ -179,8 +210,7 @@ def _profile_dict(**kwargs) -> dict:
 def test_prepare_ready_creates_run_and_sets_running(monkeypatch):
     job = _FakeJobStore()  # untracked -> proceeds
     store = _FakeStore()
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
     monkeypatch.setattr(
         "job_matching_team.profile.loader.load_job_seeker_profile",
         lambda: JobSeekerProfile(target_titles=["Engineer"]),
@@ -205,8 +235,7 @@ def test_prepare_already_completed_replays(monkeypatch):
     stored = {"run_id": "run-1", "ranked_jobs": []}
     job = _FakeJobStore(existing={"status": "completed", "result": stored})
     store = _FakeStore()
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
 
     result = ActivityEnvironment().run(prepare_scan_activity, "job-1", {}, "run-xyz")
 
@@ -218,8 +247,7 @@ def test_prepare_already_completed_replays(monkeypatch):
 def test_prepare_cancelled_at_entry(monkeypatch):
     job = _FakeJobStore(existing={"status": "cancelled"})
     store = _FakeStore()
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
 
     result = ActivityEnvironment().run(prepare_scan_activity, "job-1", {}, "run-xyz")
 
@@ -231,8 +259,7 @@ def test_prepare_cancelled_at_entry(monkeypatch):
 def test_prepare_store_failure_downgrades(monkeypatch):
     job = _FakeJobStore()
     store = _FakeStore(create_raises=True)
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
     monkeypatch.setattr(
         "job_matching_team.profile.loader.load_job_seeker_profile", JobSeekerProfile
     )
@@ -251,8 +278,7 @@ def test_prepare_store_failure_downgrades(monkeypatch):
 def test_prepare_exclude_seen_loads_sorted_skip(monkeypatch):
     job = _FakeJobStore()
     store = _FakeStore(seen={"fp2", "fp1"})
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
     monkeypatch.setattr(
         "job_matching_team.profile.loader.load_job_seeker_profile", JobSeekerProfile
     )
@@ -268,8 +294,7 @@ def test_prepare_exclude_seen_loads_sorted_skip(monkeypatch):
 def test_prepare_seen_lookup_failure_swallowed(monkeypatch):
     job = _FakeJobStore()
     store = _FakeStore(seen_raises=True)
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
     monkeypatch.setattr(
         "job_matching_team.profile.loader.load_job_seeker_profile", JobSeekerProfile
     )
@@ -366,8 +391,7 @@ def _one_ranked_dict() -> list[dict]:
 def test_finalize_saves_and_completes(monkeypatch):
     job = _FakeJobStore()
     store = _FakeStore()
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
 
     result = ActivityEnvironment().run(
         finalize_scan_activity,
@@ -394,8 +418,7 @@ def test_finalize_saves_and_completes(monkeypatch):
 def test_finalize_cancelled_skips_completion(monkeypatch):
     job = _FakeJobStore(cancelled=True)
     store = _FakeStore()
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
 
     result = ActivityEnvironment().run(
         finalize_scan_activity,
@@ -419,8 +442,7 @@ def test_finalize_reraises_when_cancel_check_errors(monkeypatch):
     # persisted before the check, and the job is NOT marked completed.
     job = _FakeJobStore(cancel_raises=True)
     store = _FakeStore()
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
 
     with pytest.raises(RuntimeError):
         ActivityEnvironment().run(
@@ -441,8 +463,7 @@ def test_finalize_reraises_when_cancel_check_errors(monkeypatch):
 def test_finalize_store_ok_false_skips_save(monkeypatch):
     job = _FakeJobStore()
     store = _FakeStore()
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
 
     result = ActivityEnvironment().run(
         finalize_scan_activity,
@@ -463,8 +484,7 @@ def test_finalize_store_ok_false_skips_save(monkeypatch):
 def test_finalize_save_failure_marks_run_failed_but_still_completes(monkeypatch):
     job = _FakeJobStore()
     store = _FakeStore(save_raises=True)
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
 
     result = ActivityEnvironment().run(
         finalize_scan_activity,
@@ -485,8 +505,7 @@ def test_finalize_save_failure_marks_run_failed_but_still_completes(monkeypatch)
 def test_finalize_save_and_markfailed_both_fail_are_swallowed(monkeypatch):
     job = _FakeJobStore()
     store = _FakeStore(save_raises=True, mark_failed_raises=True)
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
 
     # Neither the save nor the mark-failed error escapes the activity.
     result = ActivityEnvironment().run(
@@ -512,8 +531,7 @@ def test_finalize_save_and_markfailed_both_fail_are_swallowed(monkeypatch):
 def test_fail_marks_run_and_job_failed(monkeypatch):
     job = _FakeJobStore()
     store = _FakeStore()
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
 
     ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
 
@@ -524,8 +542,7 @@ def test_fail_marks_run_and_job_failed(monkeypatch):
 def test_fail_skips_job_when_cancelled(monkeypatch):
     job = _FakeJobStore(cancelled=True)
     store = _FakeStore()
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
 
     ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
 
@@ -536,8 +553,7 @@ def test_fail_skips_job_when_cancelled(monkeypatch):
 def test_fail_store_ok_false_skips_run_mark(monkeypatch):
     job = _FakeJobStore()
     store = _FakeStore()
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
 
     ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", False)
 
@@ -548,8 +564,7 @@ def test_fail_store_ok_false_skips_run_mark(monkeypatch):
 def test_fail_swallows_mark_failed_error(monkeypatch):
     job = _FakeJobStore()
     store = _FakeStore(mark_failed_raises=True)
-    _patch_job_store(monkeypatch, job)
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, job=job, store=store)
 
     # mark_failed raising must not stop the job-store FAILED write.
     ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
@@ -558,11 +573,11 @@ def test_fail_swallows_mark_failed_error(monkeypatch):
 
 
 def test_fail_reraises_when_job_status_unrecordable(monkeypatch):
-    # update_job(FAILED) failing must RAISE so Temporal's bounded retry can
-    # eventually record FAILED, instead of silently leaving the job RUNNING. An
-    # unreadable cancel flag is still swallowed (we proceed to record FAILED).
+    # A job-store outage that breaks both reads/writes must RAISE so Temporal's
+    # bounded retry can eventually record FAILED, instead of silently leaving
+    # the job RUNNING.
     store = _FakeStore()
-    monkeypatch.setattr("job_matching_team.store.get_store", lambda: store)
+    _patch_stores(monkeypatch, store=store)
 
     def _down(job_id, **fields):
         raise RuntimeError("job service unreachable")
@@ -572,6 +587,54 @@ def test_fail_reraises_when_job_status_unrecordable(monkeypatch):
 
     with pytest.raises(RuntimeError):
         ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", False)
+
+
+def test_fail_cancellation_check_failure_propagates_instead_of_overwriting(monkeypatch):
+    # Bug fix: a transient is_job_cancelled failure must propagate (driving
+    # Temporal's bounded retry) rather than defaulting to "not cancelled" and
+    # risking an incorrect FAILED write over a job that was genuinely
+    # cancelled by the user. update_job itself would succeed here if reached —
+    # it must never be reached while cancellation is unverified.
+    job = _FakeJobStore(cancel_raises=True)
+    store = _FakeStore()
+    _patch_stores(monkeypatch, job=job, store=store)
+
+    with pytest.raises(RuntimeError):
+        ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
+
+    assert store.mark_failed_calls == [("run-1", "boom")]  # run row still recorded
+    assert job.updates == []  # job FAILED NOT written on an unverifiable cancel state
+
+
+def test_fail_skips_all_bookkeeping_when_run_already_completed(monkeypatch):
+    # Bug fix: finalize already saved results and COMPLETEd the run before this
+    # failure was recorded (e.g. its post-save cancellation check exhausted
+    # retries) — neither the run nor the job should be marked FAILED over
+    # results that actually exist.
+    job = _FakeJobStore()
+    store = _FakeStore(run_status="completed")
+    _patch_stores(monkeypatch, job=job, store=store)
+
+    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
+
+    assert store.mark_failed_calls == []
+    assert job.updates == []
+
+
+def test_fail_run_status_probe_failure_raises(monkeypatch):
+    # Bug fix companion: if the run-completion probe itself can't be answered,
+    # don't guess "not completed" — raise so Temporal retries with a fresh read
+    # instead of risking an incorrect FAILED write over a scan that actually
+    # succeeded.
+    job = _FakeJobStore()
+    store = _FakeStore(run_status_raises=True)
+    _patch_stores(monkeypatch, job=job, store=store)
+
+    with pytest.raises(RuntimeError):
+        ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
+
+    assert store.mark_failed_calls == []
+    assert job.updates == []
 
 
 # ===========================================================================
@@ -592,9 +655,19 @@ def test_prepare_activity_signature():
 # ===========================================================================
 
 
-def _activity_error(activity_type: str) -> ActivityError:
-    return ActivityError(
-        f"{activity_type} failed",
+def _activity_error(activity_type: str, *, cause: Exception | None = None) -> ActivityError:
+    """Build an ActivityError shaped like production, not like a convenient mock.
+
+    The real Temporal SDK always gives ActivityError a generic top-level
+    message ("Activity task failed") regardless of activity type or cause; the
+    actual failure is chained as ``__cause__``. Embedding the descriptive text
+    directly in the top-level message (as this helper used to) would silently
+    mask a regression to ``str(exc)`` at the call site, since that would
+    "coincidentally" look correct in tests while losing the real message in
+    production (every real failure ends up with the same generic string).
+    """
+    err = ActivityError(
+        "Activity task failed",
         scheduled_event_id=1,
         started_event_id=2,
         identity="test",
@@ -602,6 +675,29 @@ def _activity_error(activity_type: str) -> ActivityError:
         activity_id="a1",
         retry_state=RetryState.MAXIMUM_ATTEMPTS_REACHED,
     )
+    err.__cause__ = cause if cause is not None else RuntimeError(f"{activity_type} failed")
+    return err
+
+
+def test_activity_error_message_prefers_chained_cause(monkeypatch):
+    exc = _activity_error(
+        "job_matching_build_queries", cause=ValueError("LLM returned unparseable query JSON")
+    )
+    assert exc.args[0] == "Activity task failed"  # the SDK's generic wrapper text
+    assert wf._activity_error_message(exc) == "LLM returned unparseable query JSON"
+
+
+def test_activity_error_message_falls_back_without_cause():
+    exc = ActivityError(
+        "Activity task timed out",
+        scheduled_event_id=1,
+        started_event_id=2,
+        identity="test",
+        activity_type="job_matching_scan",
+        activity_id="a1",
+        retry_state=RetryState.TIMEOUT,
+    )
+    assert wf._activity_error_message(exc) == "Activity task timed out"
 
 
 class _WorkflowStub:
@@ -827,7 +923,10 @@ def test_workflow_prepare_failure_records_fail(monkeypatch):
     ]
     fail_call = stub.calls[-1]
     assert fail_call["args"][:2] == ["job-1", _FIXED_RUN_ID]
-    assert fail_call["args"][3] is True  # store_ok defaults to True when prepare fails
+    # store_ok defaults to False: every unguarded exception path inside
+    # prepare_scan_activity precedes its create_run call, so a run row was
+    # never created for fail_scan to (incorrectly) attempt mark_failed against.
+    assert fail_call["args"][3] is False
 
 
 # ===========================================================================

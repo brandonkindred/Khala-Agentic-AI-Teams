@@ -131,21 +131,29 @@ class JobMatchingStore:
 
     @timed_query(store=_STORE, op="create_run")
     def create_run(self, run_id: str, profile: JobSeekerProfile, request: JobMatchRequest) -> None:
-        """Insert a new run row in ``running`` state (idempotent on ``run_id``).
+        """Insert or refresh a run row in ``running`` state (idempotent on ``run_id``).
 
         Preconditions:
             * ``run_id`` is caller-generated (e.g. a UUID or a workflow-owned id).
         Postconditions:
             * Exactly one run row exists for ``run_id`` in ``running`` state.
-            * Idempotent: a repeat call with the same ``run_id`` is a no-op
-              (``ON CONFLICT DO NOTHING``), so a Temporal activity that mints the
-              id once and re-runs on retry does not create a duplicate run row.
+            * Idempotent: a repeat call with the same ``run_id`` refreshes
+              ``profile_snapshot``/``request_json``/``top_n`` to this call's
+              values (``ON CONFLICT (run_id) DO UPDATE``) rather than duplicating
+              the row or silently keeping a stale snapshot from an earlier, lost
+              attempt — a Temporal activity retry that observed a changed profile
+              persists the profile it actually used. ``status`` and
+              ``created_at`` are left untouched on the update.
         """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO job_matching_runs "
                 "(run_id, status, profile_snapshot, request_json, top_n, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (run_id) DO NOTHING",
+                "VALUES (%s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (run_id) DO UPDATE SET "
+                "profile_snapshot = EXCLUDED.profile_snapshot, "
+                "request_json = EXCLUDED.request_json, "
+                "top_n = EXCLUDED.top_n",
                 (
                     run_id,
                     RUN_STATUS_RUNNING,
@@ -164,6 +172,7 @@ class JobMatchingStore:
         *,
         total_found: int,
         scanned_fingerprints: Optional[List[str]] = None,
+        is_retry: bool = False,
     ) -> None:
         """Persist ranked rows and mark the run completed.
 
@@ -173,15 +182,23 @@ class JobMatchingStore:
             scanned_fingerprints: Fingerprints of *every* posting scanned this
                 run (not just the returned top-N). Persisted on the run row so
                 ``exclude_seen`` can suppress lower-ranked roles already seen.
+            is_retry: True when the caller knows this call is a Temporal activity
+                retry (e.g. ``activity.info().attempt > 1``), not a first
+                attempt. Only then are prior rows for this run deleted before
+                re-inserting — skipping that delete on the (overwhelming
+                majority) first-attempt path saves a DB round-trip that would
+                otherwise match zero rows, since a fresh ``run_id`` can't yet
+                have any ranked rows.
 
         Postconditions:
             * The run's ``status`` is ``completed`` with ``total_found`` /
               ``total_ranked`` populated and ``completed_at`` set.
             * Exactly one ``job_matching_ranked_jobs`` row exists per entry in
               ``ranked`` (rank starts at 1, in list order).
-            * Idempotent on ``run_id``: any ranked rows from a prior call for the
-              same run are deleted first, so a Temporal ``finalize`` activity that
-              re-runs on retry replaces its rows instead of duplicating them.
+            * Idempotent on ``run_id`` when ``is_retry``: any ranked rows from a
+              prior call for the same run are deleted first, so a Temporal
+              ``finalize`` activity that re-runs on retry replaces its rows
+              instead of duplicating them.
             * The run's ``seen_fingerprints`` holds the de-duplicated set of
               ``scanned_fingerprints`` (falling back to the ranked postings'
               fingerprints when not supplied).
@@ -191,9 +208,11 @@ class JobMatchingStore:
         seen = sorted({fp for fp in scanned_fingerprints if fp})
         now = _now()
         with get_conn() as conn, conn.cursor() as cur:
-            # Idempotent re-save: drop any rows a prior (crashed-then-retried)
-            # attempt wrote for this run before re-inserting the current set.
-            cur.execute("DELETE FROM job_matching_ranked_jobs WHERE run_id = %s", (run_id,))
+            if is_retry:
+                # Idempotent re-save: drop any rows a prior (crashed-then-retried)
+                # attempt wrote for this run before re-inserting the current set.
+                # Skipped on a first attempt, where no such rows can exist yet.
+                cur.execute("DELETE FROM job_matching_ranked_jobs WHERE run_id = %s", (run_id,))
             for idx, rj in enumerate(ranked, start=1):
                 cur.execute(
                     "INSERT INTO job_matching_ranked_jobs "
@@ -223,6 +242,9 @@ class JobMatchingStore:
     def mark_failed(self, run_id: str, error: str) -> None:
         """Mark a run failed, unless it already completed.
 
+        Preconditions:
+            * ``run_id`` may or may not have an existing row; a miss is a silent
+              no-op (this method never creates a row).
         Postconditions:
             * The stored ``error`` is capped at 2000 characters so an unbounded
               exception dump cannot bloat the run row.
@@ -237,6 +259,26 @@ class JobMatchingStore:
                 "WHERE run_id = %s AND status <> %s",
                 (RUN_STATUS_FAILED, (error or "")[:2000], _now(), run_id, RUN_STATUS_COMPLETED),
             )
+
+    @timed_query(store=_STORE, op="run_status")
+    def run_status(self, run_id: str) -> Optional[str]:
+        """Return the run's current status, or None if unknown.
+
+        Cheap, single-column probe used by ``fail_scan_activity`` to check
+        whether a run already completed before recording a failure over it — a
+        full :meth:`get_run` (which also fetches every ranked row) would be
+        overkill for that check.
+
+        Preconditions:
+            * ``run_id`` may or may not have an existing row.
+        Postconditions:
+            * Returns the ``status`` column's value, or ``None`` when no row
+              exists for ``run_id``.
+        """
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT status FROM job_matching_runs WHERE run_id = %s", (run_id,))
+            row = cur.fetchone()
+            return row[0] if row is not None else None
 
     @timed_query(store=_STORE, op="list_runs")
     def list_runs(self, *, limit: int = 50) -> List[RunSummary]:

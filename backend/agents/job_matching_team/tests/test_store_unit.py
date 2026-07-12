@@ -60,16 +60,23 @@ def _ranked(company="Acme", score=0.9):
     )
 
 
-def test_create_run_executes_idempotent_insert(monkeypatch):
+def test_create_run_upserts_on_conflict(monkeypatch):
     cur = FakeCursor()
     _patch_conn(monkeypatch, cur)
     JobMatchingStore().create_run("r1", JobSeekerProfile(), JobMatchRequest(top_n=7))
     insert = next(sql for sql, _ in cur.executed if "INSERT INTO job_matching_runs" in sql)
-    # Idempotent on run_id so a Temporal prepare retry can't duplicate the row.
-    assert "ON CONFLICT (run_id) DO NOTHING" in insert
+    # Idempotent on run_id so a Temporal prepare retry can't duplicate the row,
+    # and a retry that observed a changed profile refreshes the stored snapshot
+    # instead of silently keeping an earlier, lost attempt's stale one.
+    assert "ON CONFLICT (run_id) DO UPDATE SET" in insert
+    assert "profile_snapshot = EXCLUDED.profile_snapshot" in insert
+    assert "request_json = EXCLUDED.request_json" in insert
+    assert "top_n = EXCLUDED.top_n" in insert
 
 
-def test_save_results_inserts_rows_and_completes(monkeypatch):
+def test_save_results_first_attempt_skips_delete(monkeypatch):
+    # A fresh run_id can't yet have any ranked rows, so the (default,
+    # non-retry) first attempt skips the delete round-trip entirely.
     cur = FakeCursor()
     _patch_conn(monkeypatch, cur)
     JobMatchingStore().save_results(
@@ -82,16 +89,34 @@ def test_save_results_inserts_rows_and_completes(monkeypatch):
     deletes = [s for s in executed if "DELETE FROM job_matching_ranked_jobs" in s]
     inserts = [s for s in executed if "INSERT INTO job_matching_ranked_jobs" in s]
     updates = [s for s in executed if "UPDATE job_matching_runs" in s]
-    # Idempotent re-save: prior rows for the run are deleted before re-inserting,
-    # and the DELETE precedes the INSERTs.
-    assert len(deletes) == 1
+    assert deletes == []
     assert len(inserts) == 2
     assert len(updates) == 1
-    assert executed.index(deletes[0]) < executed.index(inserts[0])
     # The UPDATE persists the de-duplicated, non-empty scanned fingerprint set.
     update_params = next(p for s, p in cur.executed if "UPDATE job_matching_runs" in s)
     seen_json = update_params[3]
     assert sorted(seen_json.obj) == ["a", "b", "c"]
+
+
+def test_save_results_retry_deletes_prior_rows_first(monkeypatch):
+    # is_retry=True (a Temporal activity retry) deletes any rows a prior,
+    # crashed-then-retried attempt wrote for this run before re-inserting —
+    # idempotent re-save, DELETE preceding the INSERTs.
+    cur = FakeCursor()
+    _patch_conn(monkeypatch, cur)
+    JobMatchingStore().save_results(
+        "r1",
+        [_ranked("A"), _ranked("B")],
+        total_found=4,
+        scanned_fingerprints=["a", "b", "c", "a", ""],
+        is_retry=True,
+    )
+    executed = [s for s, _ in cur.executed]
+    deletes = [s for s in executed if "DELETE FROM job_matching_ranked_jobs" in s]
+    inserts = [s for s in executed if "INSERT INTO job_matching_ranked_jobs" in s]
+    assert len(deletes) == 1
+    assert len(inserts) == 2
+    assert executed.index(deletes[0]) < executed.index(inserts[0])
 
 
 def test_save_results_defaults_scanned_fingerprints_to_ranked(monkeypatch):
@@ -123,6 +148,21 @@ def test_mark_failed_does_not_overwrite_completed(monkeypatch):
     sql, params = cur.executed[0]
     assert "status <> %s" in sql
     assert params[-1] == "completed"
+
+
+def test_run_status_returns_column_value(monkeypatch):
+    cur = FakeCursor(fetchone=[("completed",)])
+    _patch_conn(monkeypatch, cur)
+    assert JobMatchingStore().run_status("r1") == "completed"
+    sql, params = cur.executed[0]
+    assert "SELECT status FROM job_matching_runs" in sql
+    assert params == ("r1",)
+
+
+def test_run_status_returns_none_for_unknown_run(monkeypatch):
+    cur = FakeCursor(fetchone=[None])
+    _patch_conn(monkeypatch, cur)
+    assert JobMatchingStore().run_status("nope") is None
 
 
 def test_list_runs_maps_rows(monkeypatch):
