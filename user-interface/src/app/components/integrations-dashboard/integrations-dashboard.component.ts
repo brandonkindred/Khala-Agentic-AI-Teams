@@ -140,7 +140,8 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     if (this.googleBrowserLoginConfigured) n += 1;
     if (this.oauthConnected) n += 1;
     if (this.mediumReadyForStats) n += 1;
-    if (this.githubTokenConfigured && this.githubOwner && this.githubRepo) n += 1;
+    // The PAT alone defines repository access — a stored token means connected.
+    if (this.githubTokenConfigured) n += 1;
     if (this.tradingViewEnabled && !!this.tradingViewServerUrl) n += 1;
     return n;
   }
@@ -631,8 +632,6 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
   githubError: string | null = null;
 
   githubEnabled = false;
-  githubOwner = '';
-  githubRepo = '';
   githubPat = '';
   githubDefaultLabel = '';
   githubTokenConfigured = false;
@@ -651,8 +650,6 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     this.api.getGitHubConfig().subscribe({
       next: (res: GitHubConfigResponse) => {
         this.githubEnabled = res.enabled;
-        this.githubOwner = res.owner;
-        this.githubRepo = res.repo;
         this.githubDefaultLabel = res.default_label;
         this.githubTokenConfigured = res.token_configured;
         this.githubStoreUnreachable = res.credential_store_unreachable ?? false;
@@ -674,10 +671,10 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
   saveGitHubConfig(): void {
     this.githubSaving = true;
     this.githubError = null;
+    // No repository list is sent: the PAT's own authorization configuration decides
+    // which repositories the integration can reach.
     const body: GitHubConfigUpdate = {
       enabled: this.githubEnabled,
-      owner: this.githubOwner.trim(),
-      repo: this.githubRepo.trim(),
       token: this.githubPat,
       default_label: this.githubDefaultLabel.trim(),
       repo_path: '',
@@ -687,8 +684,6 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     this.api.updateGitHubConfig(body).subscribe({
       next: (res: GitHubConfigResponse) => {
         this.githubEnabled = res.enabled;
-        this.githubOwner = res.owner;
-        this.githubRepo = res.repo;
         this.githubDefaultLabel = res.default_label;
         this.githubTokenConfigured = res.token_configured;
         this.githubWebhookSecretConfigured = res.webhook_secret_configured ?? false;
@@ -710,8 +705,6 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     this.api.deleteGitHubConfig().subscribe({
       next: (res: GitHubConfigResponse) => {
         this.githubEnabled = res.enabled;
-        this.githubOwner = res.owner;
-        this.githubRepo = res.repo;
         this.githubDefaultLabel = res.default_label;
         this.githubTokenConfigured = res.token_configured;
         this.githubWebhookSecretConfigured = res.webhook_secret_configured ?? false;
