@@ -272,7 +272,7 @@ class CodeReviewIssue(BaseModel):
         default="general",
         description=(
             "Category: naming, structure, logic, spec-compliance, standards, integration, "
-            "testing, architecture, refactor, maintainability"
+            "testing, architecture, refactor, maintainability, or general (no specific category)"
         ),
     )
     file_path: str = Field(

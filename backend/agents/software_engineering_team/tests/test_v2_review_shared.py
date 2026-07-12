@@ -33,6 +33,7 @@ from software_engineering_team.shared.models import ReviewContext, SystemArchite
 from software_engineering_team.shared.v2_models import ReviewIssue
 from software_engineering_team.shared.v2_review import (
     ReviewConfig,
+    _lint_passed,
     run_microtask_review,
     run_review,
 )
@@ -138,6 +139,19 @@ def test_run_review_lint_agent_raises_is_logged_not_raised(tmp_path: Path) -> No
         **_noop_runners(),
     )
     assert result.passed  # lint failure was swallowed; no blocking issue
+
+
+def test_lint_passed_defends_missing_execution_result() -> None:
+    """A lint-tool result lacking ``execution_result`` entirely (not just a
+    falsy inner ``.success``) must not raise -- only the innermost lookup was
+    previously getattr-guarded, so ``lint_result.execution_result`` itself
+    could raise AttributeError for a differently-shaped lint tool return."""
+    assert _lint_passed(SimpleNamespace()) is True  # nothing to report -> assume success
+    assert _lint_passed(SimpleNamespace(passed=False)) is False
+    assert _lint_passed(SimpleNamespace(execution_result=SimpleNamespace(success=False))) is False
+    assert _lint_passed(SimpleNamespace(execution_result=SimpleNamespace(success=True))) is True
+    # execution_result present but success looked up via getattr default too.
+    assert _lint_passed(SimpleNamespace(execution_result=SimpleNamespace())) is True
 
 
 def test_run_review_lint_fail_with_remap_blocks(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -37,6 +38,7 @@ from software_engineering_team.shared.security_service import is_blocking
 from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
 from software_engineering_team.shared.v2_review import (
     _code_review_step,
+    _lint_passed,
     _review_steps_run_sequentially,  # noqa: F401  (re-exported for tests)
 )
 from software_engineering_team.shared.v2_review import (
@@ -368,9 +370,7 @@ def run_code_review_phase(
                     task_description=f"Microtask: {microtask.title or microtask_id}",
                 )
             )
-            if lint_result and not getattr(
-                lint_result.execution_result, "success", getattr(lint_result, "passed", True)
-            ):
+            if lint_result and not _lint_passed(lint_result):
                 lint_ok = False
                 _lint_severity_map = {"error": "high", "warning": "medium", "info": "low"}
                 for li in getattr(lint_result, "linter_issues", getattr(lint_result, "issues", [])):
@@ -636,7 +636,7 @@ def run_qa_testing_phase(
         microtask=microtask,
         files=files,
         review_agent=qa_agent,
-        agent_runner=lambda **kw: _run_qa_agent(qa_agent=qa_agent, **kw),
+        agent_runner=partial(_run_qa_agent, qa_agent=qa_agent),
         tool_agents=tool_agents,
         repo_path=repo_path,
         detail_callback=detail_callback,
@@ -667,7 +667,7 @@ def run_security_testing_phase(
         microtask=microtask,
         files=files,
         review_agent=security_agent,
-        agent_runner=lambda **kw: _run_security_agent(security_agent=security_agent, **kw),
+        agent_runner=partial(_run_security_agent, security_agent=security_agent),
         tool_agents=tool_agents,
         repo_path=repo_path,
         detail_callback=detail_callback,
@@ -683,6 +683,7 @@ def run_documentation_review_phase(
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     repo_path: Optional[Path] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
+    language: str = "python",
 ) -> PhaseReviewResult:
     """
     Run documentation review phase: check for missing/incomplete documentation.
@@ -708,7 +709,7 @@ def run_documentation_review_phase(
                     repo_path=str(repo_path) if repo_path else "",
                     existing_code="",
                     spec_context=task.description or "",
-                    language="python",
+                    language=language,
                     current_files=files,
                     review_issues=issues,
                     task_title=task.title or "",

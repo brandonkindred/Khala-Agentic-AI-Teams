@@ -198,6 +198,14 @@ def _run_build_verification(
     build_verifier: Optional[Callable[..., Tuple[bool, str]]],
     task_id: str,
 ) -> Tuple[bool, str]:
+    """Run the build verifier if provided, else assume success.
+
+    Postconditions:
+        - Returns ``(True, "No build verifier provided; skipping.")`` when
+          ``build_verifier`` is ``None``. Otherwise returns the verifier's own
+          ``(passed, message)``, or ``(False, str(exc))`` if it raises — never
+          propagates a verifier failure.
+    """
     if build_verifier is None:
         return True, "No build verifier provided; skipping."
     try:

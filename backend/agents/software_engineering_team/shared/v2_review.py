@@ -117,6 +117,23 @@ class ReviewConfig:
     microtask_intro: Callable[..., str]
 
 
+def _lint_passed(lint_result: Any) -> bool:
+    """Resolve whether a lint-tool result reports success, defensively.
+
+    Preconditions: ``lint_result`` is any lint-tool return object shape.
+    Postconditions: returns ``lint_result.execution_result.success`` when both
+    attributes are present; else ``lint_result.passed`` when present; else
+    ``True`` (assume success -- nothing to flag). Every attribute lookup is
+    guarded by ``getattr`` (not just the innermost one), so a lint-tool object
+    missing ``execution_result`` entirely never raises ``AttributeError``.
+    """
+    execution_result = getattr(lint_result, "execution_result", None)
+    success = getattr(execution_result, "success", None) if execution_result is not None else None
+    if success is None:
+        success = getattr(lint_result, "passed", True)
+    return bool(success)
+
+
 def _lint_severity(config: ReviewConfig, raw: str) -> str:
     """Map a raw linter severity to a review severity using the config remap.
 
@@ -515,9 +532,7 @@ def run_review(
                     task_description=task.description or "",
                 )
             )
-            if lint_result and not getattr(
-                lint_result.execution_result, "success", getattr(lint_result, "passed", True)
-            ):
+            if lint_result and not _lint_passed(lint_result):
                 lint_ok = False
                 for li in getattr(lint_result, "linter_issues", getattr(lint_result, "issues", [])):
                     sev = getattr(li, "severity", "medium")
@@ -673,9 +688,7 @@ def run_microtask_review(
                     task_description=f"Microtask: {microtask.title or microtask_id}",
                 )
             )
-            if lint_result and not getattr(
-                lint_result.execution_result, "success", getattr(lint_result, "passed", True)
-            ):
+            if lint_result and not _lint_passed(lint_result):
                 lint_ok = False
                 for li in getattr(lint_result, "linter_issues", getattr(lint_result, "issues", [])):
                     file_path = getattr(li, "file_path", "")

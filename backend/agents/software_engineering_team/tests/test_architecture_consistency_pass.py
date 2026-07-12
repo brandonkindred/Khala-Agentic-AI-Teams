@@ -132,11 +132,17 @@ def test_build_prompt_caps_architecture_document_and_notes_truncation() -> None:
 def test_build_prompt_omits_files_beyond_inline_budget() -> None:
     """Changed files beyond the inline budget are named as tool-reachable, not dropped."""
     arch = _arch()
-    files = {"a.py": "x" * 50, "b.py": "y" * 50}
+    file_a_content = "x" * 50
+    files = {"a.py": file_a_content, "b.py": "y" * 50}
     index = CodebaseIndex.from_input(_input(files=files, architecture=arch))
-    # Exactly enough budget for the first file's body; the second gets none.
-    prompt = _build_prompt(index, arch, max_inline_chars=50, max_arch_doc_chars=1000)
-    assert "a.py" in prompt  # inlined (fits the budget)
+    # Budget computed from the first file's own size (not an independent magic
+    # number that happens to match it) so the second file is fully omitted
+    # rather than partially truncated -- see test_build_prompt_notes_mid_file_truncation
+    # for that other branch.
+    prompt = _build_prompt(
+        index, arch, max_inline_chars=len(file_a_content), max_arch_doc_chars=1000
+    )
+    assert file_a_content in prompt  # inlined in full (fits the budget exactly)
     assert "more changed file(s) not shown above" in prompt
     assert "list_files()" in prompt
 
@@ -510,5 +516,14 @@ def test_coordinator_skips_pass_with_no_architecture() -> None:
 
 def test_arch_doc_abs_chars_default_is_generous() -> None:
     """Sanity check the default cap: generous relative to the per-chunk overview
-    excerpt cap, since this pass pays its cost once per submission, not per chunk."""
-    assert _ARCH_DOC_ABS_CHARS >= 20_000
+    excerpt cap, since this pass pays its cost once per submission, not per chunk.
+
+    Compared against the actual per-chunk cap constant (not an independent magic
+    number) so this test states its real intent and does not silently drift out
+    of sync if either constant is retuned.
+    """
+    from software_engineering_team.shared.context_sizing import (
+        CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS,
+    )
+
+    assert _ARCH_DOC_ABS_CHARS >= CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS * 5

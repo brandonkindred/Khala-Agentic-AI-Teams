@@ -50,6 +50,24 @@ DEFAULT_MAP_PARALLELISM = 4  # CODE_REVIEW_MAP_PARALLELISM, floor 1
 _BLOCK_JOINER_CHARS = 2  # "\n\n" between rendered blocks in a chunk
 
 _VALID_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
+# Mirrors CodeReviewIssue.category's documented set (models.py) plus "general",
+# the synthetic fallback used for issues with no specific category (e.g. a
+# rejected-with-no-issues summary or an unreviewed-range notice).
+_VALID_CATEGORIES = frozenset(
+    {
+        "naming",
+        "structure",
+        "logic",
+        "spec-compliance",
+        "standards",
+        "integration",
+        "testing",
+        "architecture",
+        "refactor",
+        "maintainability",
+        "general",
+    }
+)
 
 
 def _min_split_segment_chars() -> int:
@@ -481,10 +499,13 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
         severity = _clean_str(item.get("severity"), "high").lower()
         if severity not in _VALID_SEVERITIES:
             severity = "high"
+        category = _clean_str(item.get("category"), "general").lower()
+        if category not in _VALID_CATEGORIES:
+            category = "general"
         issues.append(
             CodeReviewIssue(
                 severity=severity,
-                category=_clean_str(item.get("category"), "general"),
+                category=category,
                 file_path=path,
                 line=_validate_line(coerce_line(item.get("line")), seg),
                 start_line=_validate_line(coerce_line(item.get("start_line")), seg),

@@ -1943,6 +1943,19 @@ def test_malformed_severity_and_category_are_sanitized_not_crashing() -> None:
     assert issues[0].category == "general"
 
 
+def test_unrecognized_category_is_clamped_to_general() -> None:
+    """An off-contract category string (not in the documented set) is clamped
+    to 'general' rather than passed through verbatim -- mirrors the existing
+    severity clamp so CodeReviewIssue.category never drifts from its contract."""
+    seg = FileSegment(path="a.py", content="x = 1", total_lines=1)
+    chunk = ReviewChunk(segments=[seg])
+    issues = _issues_from_chunk_output(
+        chunk,
+        [{"description": "d", "category": "made-up-category", "severity": "high"}],
+    )
+    assert issues[0].category == "general"
+
+
 def test_validate_line_absolute_numbering_has_no_overlap_ambiguity() -> None:
     """Partial segments are rendered with original line-number prefixes, so a
     citation is absolute by construction: a segment whose absolute range

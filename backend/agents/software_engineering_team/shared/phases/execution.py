@@ -38,6 +38,22 @@ from software_engineering_team.shared.strands_model import LlmRunner
 
 logger = logging.getLogger(__name__)
 
+# Hard char caps on the existing-code excerpt inlined into the general coder's
+# prompt (no LLM-aware compaction here, unlike the code-review coordinator's
+# excerpts -- this is a plain truncation to bound prompt size cheaply).
+_GENERAL_MICROTASK_EXISTING_CODE_CHARS = 8_000
+_TOOL_AGENT_EXISTING_CODE_CHARS = 6_000
+
+# Iteration budget for the gated loop's own final documentation self-review pass.
+# Deliberately its own (lower) constants rather than reusing
+# review_utils.MIN/MAX_DOC_SELF_REVIEW_ITERATIONS (3/3): this pass runs once per
+# microtask on top of the code/QA/security review cycles already spent, so a
+# smaller budget here is intentional, not an oversight -- kept separate so tuning
+# one never silently changes the other.
+_GATED_DOC_SELF_REVIEW_MIN_ITERATIONS = 1
+_GATED_DOC_SELF_REVIEW_MAX_ITERATIONS = 2
+_GATED_DOC_SELF_REVIEW_QUALITY_THRESHOLD = 0.9
+
 
 def _dedup_issues(issues: List[Any], seen: set[tuple[str, str]]) -> List[Any]:
     """Remove duplicate issues across review cycles based on (file_path, description).
@@ -151,12 +167,20 @@ def _run_general_microtask_impl(
     """
     arch_ctx = ""
     if architecture:
-        arch_ctx = architecture.overview
+        # Lazy import: code_review_agent submodules are imported on demand
+        # rather than at module scope elsewhere in the review call chain
+        # (e.g. _code_review_step's CodeReviewInput import), so this module
+        # follows the same convention rather than adding a new eager edge.
+        from code_review_agent.architecture_context import render_architecture_context
+
+        arch_ctx = render_architecture_context(architecture)
 
     fmt: Dict[str, Any] = dict(
         microtask_description=microtask.description or microtask.title,
         requirements=task.requirements or task.description,
-        existing_code=existing_code[:8000] if existing_code else "(none)",
+        existing_code=existing_code[:_GENERAL_MICROTASK_EXISTING_CODE_CHARS]
+        if existing_code
+        else "(none)",
         architecture_context=arch_ctx or "(none)",
     )
     if profile.has_language_conventions:
@@ -200,7 +224,7 @@ def generate_microtask_files(
         inp = models.ToolAgentInput(
             microtask=mt,
             repo_path=str(repo_path),
-            existing_code=existing_code[:6000] if existing_code else "",
+            existing_code=existing_code[:_TOOL_AGENT_EXISTING_CODE_CHARS] if existing_code else "",
             language=planning_result.language,
         )
         out = runner(inp)
@@ -232,7 +256,7 @@ def run_execution_impl(
     models: PhaseModels,
     run_general_microtask: Callable[..., Dict[str, str]],
 ) -> Any:
-    """Execute microtasks in dependency order (non-gated).
+    """Execute microtasks in the planner's stated order, best-effort on dependencies.
 
     If ``only_microtask_ids`` is set, only those microtasks are run (e.g. fix
     microtasks from ``plan_fixes_for_unresolved_issues``). ``tool_runners`` maps
@@ -245,7 +269,14 @@ def run_execution_impl(
         boundary for its LLM ``Agent``).
     Postconditions:
         Returns an ``ExecutionResult``; a failed microtask is marked FAILED and
-        execution continues with the rest.
+        execution continues with the rest. An unmet ``depends_on`` is logged and
+        the microtask still runs ("running anyway") rather than being skipped or
+        failed outright: ``depends_on`` is an LLM-planned ordering hint, not a
+        verified DAG, so failing closed on it would silently drop a legitimately
+        runnable microtask over a planner inconsistency (a stale id, a reordering
+        quirk). The unmet-deps case is intentionally soft here, unlike the gated
+        loop's ``run_gated_execution_impl``, which SKIPS a microtask depending on
+        one that already REVIEW_FAILED — a stronger signal than "not yet run".
     """
     microtask_status_enum = models.MicrotaskStatus
     execution_result_cls = models.ExecutionResult
@@ -478,6 +509,10 @@ def run_gated_execution_impl(
                 mt.status = microtask_status.SKIPPED
                 mt.notes = f"Skipped: depends on review-failed microtasks {unmet}"
                 continue
+            # Unmet but not review-failed (not yet run, or run out of order): soft
+            # dependency hint, not a verified DAG -- run anyway rather than fail
+            # closed on a planner ordering quirk (see run_execution_impl's docstring
+            # for the fuller rationale, shared by both loops).
             logger.warning(
                 "[%s] Microtask %s has unmet deps %s — running anyway", task_id, mt.id, unmet
             )
@@ -892,9 +927,11 @@ def run_gated_execution_impl(
             mt.status = microtask_status.IN_DOCUMENTATION
             current_phase = "documentation"
             logger.info(
-                "[%s] Microtask %s: Running documentation self-review (3-5 iterations)",
+                "[%s] Microtask %s: Running documentation self-review (%d-%d iterations)",
                 task_id,
                 mt.id,
+                _GATED_DOC_SELF_REVIEW_MIN_ITERATIONS,
+                _GATED_DOC_SELF_REVIEW_MAX_ITERATIONS,
             )
 
             if progress_callback:
@@ -941,9 +978,9 @@ def run_gated_execution_impl(
                 documentation=doc_files,
                 code_files=microtask_files,
                 task_description=task.description or "",
-                min_iterations=1,
-                max_iterations=2,
-                quality_threshold=0.9,
+                min_iterations=_GATED_DOC_SELF_REVIEW_MIN_ITERATIONS,
+                max_iterations=_GATED_DOC_SELF_REVIEW_MAX_ITERATIONS,
+                quality_threshold=_GATED_DOC_SELF_REVIEW_QUALITY_THRESHOLD,
                 detail_callback=lambda d: _detail_cb(d, current_idx, "documentation"),
             )
 

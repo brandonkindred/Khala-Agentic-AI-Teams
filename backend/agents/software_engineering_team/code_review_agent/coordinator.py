@@ -182,6 +182,16 @@ __all__ = [
 # guaranteed miss). Coarser and independent of the per-chunk cache in ``mapping``.
 DEFAULT_SUBMISSION_CACHE_SIZE = 256  # CODE_REVIEW_SUBMISSION_CACHE_SIZE, floor 0
 
+# Progress-bar checkpoints (0.0-1.0), in the order the review actually reaches them:
+# preparing input -> chunking done (also the map phase's start -- see
+# mapping.py's _MAP_PHASE_START, which must stay equal to this) -> per-chunk map
+# review (reported incrementally by mapping.py, not here) -> verifying -> finalizing -> done.
+_PROGRESS_PREPARING_INPUT = 0.05
+_PROGRESS_CHUNKING_DONE = 0.10
+_PROGRESS_VERIFYING = 0.92
+_PROGRESS_FINALIZING = 0.95
+_PROGRESS_DONE = 1.0
+
 _SUBMISSION_OUTCOME_CACHE: "OrderedDict[str, CodeReviewOutput]" = OrderedDict()
 _SUBMISSION_OUTCOME_CACHE_LOCK = threading.Lock()
 
@@ -426,11 +436,16 @@ def run_coordinator(
         if cached is not None:
             logger.info("CodeReviewCoordinator: submission cache hit; skipping review (approved)")
             notify_review_progress(
-                progress_callback, "done", "identical approved submission; review skipped", 1.0
+                progress_callback,
+                "done",
+                "identical approved submission; review skipped",
+                _PROGRESS_DONE,
             )
             return cached.model_copy(deep=True)
 
-    notify_review_progress(progress_callback, "preparing", "preparing review input", 0.05)
+    notify_review_progress(
+        progress_callback, "preparing", "preparing review input", _PROGRESS_PREPARING_INPUT
+    )
     blocks, skipped_empty = _blocks_from_input(input_data)
     skipped_issues = [
         CodeReviewIssue(
@@ -443,7 +458,7 @@ def run_coordinator(
         for path in skipped_empty
     ]
     if not blocks:
-        notify_review_progress(progress_callback, "done", "no code to review", 1.0)
+        notify_review_progress(progress_callback, "done", "no code to review", _PROGRESS_DONE)
         return CodeReviewOutput(
             approved=True,
             issues=skipped_issues,
@@ -480,7 +495,9 @@ def run_coordinator(
         len(blocks),
         len(chunks),
     )
-    notify_review_progress(progress_callback, "preparing", f"split into {len(chunks)} chunks", 0.10)
+    notify_review_progress(
+        progress_callback, "preparing", f"split into {len(chunks)} chunks", _PROGRESS_CHUNKING_DONE
+    )
 
     base_input = {
         "language": input_data.language or "",
@@ -537,7 +554,7 @@ def run_coordinator(
         progress_callback,
         "verifying",
         f"verifying {len(genuine_issues)} findings against the full codebase",
-        0.92,
+        _PROGRESS_VERIFYING,
     )
     # Built once and shared with the architecture-consistency pass below: both read the
     # same submission/repo_reader, so a single index avoids parsing the submission twice.
@@ -567,7 +584,10 @@ def run_coordinator(
         verified = [*verified, *architecture_findings]
 
     notify_review_progress(
-        progress_callback, "finalizing", "deduplicating findings and applying approval rules", 0.95
+        progress_callback,
+        "finalizing",
+        "deduplicating findings and applying approval rules",
+        _PROGRESS_FINALIZING,
     )
     # A chunk that could not be reviewed after recovery degrades gracefully: by
     # default its "not reviewed" coverage findings are NOT posted and do NOT block
@@ -602,7 +622,7 @@ def run_coordinator(
     )
 
     notify_review_progress(
-        progress_callback, "done", f"approved={approved}, issues={len(deduped)}", 1.0
+        progress_callback, "done", f"approved={approved}, issues={len(deduped)}", _PROGRESS_DONE
     )
     result = CodeReviewOutput(
         approved=approved,

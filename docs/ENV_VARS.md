@@ -187,7 +187,7 @@ of configuration — so a mis-set value can never make a healthy activity
 heartbeat-timeout. Parsed via the shared `env_float` (unset/garbage/non-finite →
 default, with a warning on a set-but-unparseable value).
 
-### Code review agent: Temporal by default
+### TEMPORAL_ADDRESS (code review agent default)
 **The code review agent runs Temporal by default** (unlike the other teams, which
 only switch on when `TEMPORAL_ADDRESS` is set): `CodeReviewAgent.run` dispatches
 the durable `CodeReviewWorkflow` and falls back to the in-process coordinator only
@@ -294,7 +294,7 @@ cost are exposed at `GET /api/se/metrics` (alias of
 Tech Lead's Design prompt. All Postgres-backed pieces no-op when `POSTGRES_HOST`
 is unset; there is **no** per-job budget cap.
 
-### LLM_PRICE_&lt;model&gt;
+### `LLM_PRICE_<model>`
 Per-model price override for token→USD cost estimation, formatted
 `<usd_per_1k_input>/<usd_per_1k_output>`. `<model>` is the model name uppercased
 with each run of non-alphanumerics collapsed to `_` (e.g.
