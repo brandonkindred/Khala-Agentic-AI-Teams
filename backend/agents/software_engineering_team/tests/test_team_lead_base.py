@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+
 from software_engineering_team.shared.team_lead_base import (
     BaseTeamLead,
     copy_development_result_fields,
