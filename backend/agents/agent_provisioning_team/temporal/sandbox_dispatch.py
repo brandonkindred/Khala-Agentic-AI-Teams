@@ -24,6 +24,7 @@ from agent_provisioning_team.temporal.constants import (
     SANDBOX_ACQUIRE_CLIENT_TIMEOUT_S,
     SANDBOX_REAPER_INTERVAL_S,
     SANDBOX_REAPER_WORKFLOW_ID,
+    SANDBOX_TEARDOWN_CLIENT_TIMEOUT_S,
     TASK_QUEUE,
     WORKFLOW_ID_PREFIX,
 )
@@ -74,6 +75,7 @@ async def acquire_sandbox(agent_id: str) -> SandboxHandle:
         * Returns the resulting :class:`SandboxHandle`. Raises the same
           ``UnknownAgentError`` / ``DockerUnavailableError`` types in both modes.
     """
+    assert agent_id, "agent_id must be non-empty"
     if sandbox_temporal_enabled():
         return await acquire_sandbox_via_temporal(agent_id)
     from agent_provisioning_team.sandbox import acquire as _acquire
@@ -89,6 +91,7 @@ async def teardown_sandbox(agent_id: str) -> None:
     Postconditions:
         * The sandbox is torn down in whichever mode is active.
     """
+    assert agent_id, "agent_id must be non-empty"
     if sandbox_temporal_enabled():
         await teardown_sandbox_via_temporal(agent_id)
         return
@@ -130,38 +133,33 @@ def _reraise_sandbox_error(exc: Exception) -> None:
     exception the callers already map to HTTP status codes.
 
     Preserves parity with the in-process path: the ``/warm`` route maps
-    ``UnknownAgentError`` → 404 and ``DockerUnavailableError`` → 503, and
-    ``reap_once()`` catches ``DockerError`` specifically around its own direct
-    (non-Temporal) ``teardown()`` call. Temporal wraps the activity's
-    exception, so we unwrap the ``ApplicationError`` and, on a recognized
-    ``type`` name, re-raise the original exception class. Anything else
-    (including a client-side ``asyncio.TimeoutError``, which carries no
-    ``.type``) is left for the caller to re-raise unchanged.
+    ``UnknownAgentError`` → 404, ``DockerUnavailableError`` → 503, and
+    ``SandboxAcquireFailedError`` → 503; ``reap_once()`` catches ``DockerError``
+    specifically around its own direct (non-Temporal) ``teardown()`` call.
+    Delegates the actual cause-chain walk to
+    :func:`shared_temporal.translate_workflow_failure` — the codebase's single
+    shared implementation of "walk the chain, match an ``ApplicationError``
+    type marker, re-raise the native exception" — rather than a bespoke walk.
+    A client-side ``asyncio.TimeoutError`` (which carries no ``.type``) has no
+    match and is left for the caller to re-raise unchanged.
     """
-    # Walk the __cause__ chain to the ApplicationError carrying the type name.
-    app_type: str | None = None
-    message = str(exc)
-    cursor: BaseException | None = exc
-    seen = 0
-    while cursor is not None and seen < 5:
-        t = getattr(cursor, "type", None)
-        if isinstance(t, str):
-            app_type = t
-            message = getattr(cursor, "message", None) or message
-            break
-        cursor = getattr(cursor, "cause", None) or cursor.__cause__
-        seen += 1
-    if app_type is None:
-        return
-    from agent_provisioning_team.sandbox import DockerUnavailableError, UnknownAgentError
+    from agent_provisioning_team.sandbox import (
+        DockerUnavailableError,
+        SandboxAcquireFailedError,
+        UnknownAgentError,
+    )
     from agent_provisioning_team.sandbox.provisioner import DockerError
+    from shared_temporal import translate_workflow_failure
 
-    if app_type == "UnknownAgentError":
-        raise UnknownAgentError(message) from exc
-    if app_type == "DockerUnavailableError":
-        raise DockerUnavailableError(message) from exc
-    if app_type == "DockerError":
-        raise DockerError(message) from exc
+    translate_workflow_failure(
+        exc,
+        {
+            "UnknownAgentError": UnknownAgentError,
+            "DockerUnavailableError": DockerUnavailableError,
+            "DockerError": DockerError,
+            "SandboxAcquireFailedError": SandboxAcquireFailedError,
+        },
+    )
 
 
 async def teardown_sandbox_via_temporal(agent_id: str) -> None:
@@ -174,7 +172,10 @@ async def teardown_sandbox_via_temporal(agent_id: str) -> None:
           the in-process ``teardown()`` path would have raised (e.g.
           ``DockerError``) — see :func:`_reraise_sandbox_error` — rather than
           an opaque ``WorkflowFailureError``, for parity with
-          :func:`acquire_sandbox_via_temporal`.
+          :func:`acquire_sandbox_via_temporal`. The client wait
+          (``SANDBOX_TEARDOWN_CLIENT_TIMEOUT_S``) exceeds the workflow's own
+          worst-case retry budget, so a legitimately-retrying teardown is not
+          mistaken for a hung one.
     """
     assert agent_id, "agent_id must be non-empty"
     workflow_id = f"{WORKFLOW_ID_PREFIX}sandbox-teardown-{agent_id}-{uuid.uuid4().hex[:8]}"
@@ -184,13 +185,18 @@ async def teardown_sandbox_via_temporal(agent_id: str) -> None:
             agent_id,
             workflow_id=workflow_id,
             task_queue=TASK_QUEUE,
+            execute_timeout_s=SANDBOX_TEARDOWN_CLIENT_TIMEOUT_S,
         )
     except Exception as exc:  # noqa: BLE001
         _reraise_sandbox_error(exc)
         raise
 
 
-def start_sandbox_reaper_workflow(interval_s: int = SANDBOX_REAPER_INTERVAL_S) -> None:
+def start_sandbox_reaper_workflow(
+    interval_s: int = SANDBOX_REAPER_INTERVAL_S,
+    *,
+    client_ready_timeout_s: float | None = None,
+) -> None:
     """Start the singleton idle-reaper workflow (fixed id); no-op if already running.
 
     Preconditions:
@@ -200,6 +206,15 @@ def start_sandbox_reaper_workflow(interval_s: int = SANDBOX_REAPER_INTERVAL_S) -
           ``WorkflowAlreadyStartedError`` (a reaper already running, e.g. after a
           restart or from a sibling replica) is swallowed — that IS the desired
           single-instance behavior. Any other exception propagates.
+
+    ``client_ready_timeout_s`` is forwarded to :func:`shared_temporal.start_workflow_sync`
+    (which forwards it to its own internal client-readiness poll). Boot-time
+    callers that already retry this whole call with their own backoff (e.g.
+    ``unified_api.main._start_sandbox_reaper_with_retry``) should pass a short
+    value here — otherwise the default 10s internal poll
+    (``shared_temporal.runner.CLIENT_READY_TIMEOUT_S``) stacks underneath the
+    caller's own backoff, so a single outer "attempt" can block for up to 10s
+    before the outer retry loop even gets a chance to apply its own delay.
     """
     try:
         start_workflow_sync(
@@ -207,6 +222,7 @@ def start_sandbox_reaper_workflow(interval_s: int = SANDBOX_REAPER_INTERVAL_S) -
             interval_s,
             workflow_id=SANDBOX_REAPER_WORKFLOW_ID,
             task_queue=TASK_QUEUE,
+            client_ready_timeout_s=client_ready_timeout_s,
         )
         logger.info("Started SandboxReaperWorkflow id=%s", SANDBOX_REAPER_WORKFLOW_ID)
     except WorkflowAlreadyStartedError:

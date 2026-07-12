@@ -8,6 +8,7 @@ API and Agent Console switch to this module in Phase 3 (#265).
 from .lifecycle import (
     DockerUnavailableError,
     Lifecycle,
+    SandboxAcquireFailedError,
     UnknownAgentError,
     acquire,
     get_lifecycle,
@@ -35,6 +36,7 @@ __all__ = [
     "DockerUnavailableError",
     "Lifecycle",
     "ReaperStats",
+    "SandboxAcquireFailedError",
     "SandboxHandle",
     "SandboxMetrics",
     "SandboxState",

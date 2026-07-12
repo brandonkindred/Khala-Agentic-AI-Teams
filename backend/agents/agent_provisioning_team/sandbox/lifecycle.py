@@ -89,6 +89,24 @@ class DockerUnavailableError(RuntimeError):
     """Raised when the ``docker`` CLI is not installed or the daemon is unreachable."""
 
 
+class SandboxAcquireFailedError(RuntimeError):
+    """Raised by the Temporal ``sandbox_acquire_activity`` when a transient
+    provisioning failure survives every ``SANDBOX_ACQUIRE_RETRY_POLICY``
+    attempt.
+
+    ``Lifecycle.acquire()`` itself never raises this — a transient failure
+    inside its provisioning try block is caught internally and returned as a
+    non-raising ERROR-status :class:`~agent_provisioning_team.sandbox.state.SandboxHandle`
+    (see the ``except Exception`` block below), so direct/thread-mode callers
+    always get a handle back. This type exists purely as the Temporal-side
+    "retries exhausted" marker: the activity raises it so Temporal's retry
+    policy can retry the transient failure, and once retries are truly
+    exhausted, ``sandbox_dispatch._reraise_sandbox_error`` translates it back
+    to this exact type so ``POST /warm`` can map it to a clean 503 instead of
+    an opaque ``WorkflowFailureError``.
+    """
+
+
 def _has_non_default_docker_context() -> bool:
     """Return True when the Docker config selects a non-default context.
 
@@ -164,6 +182,12 @@ class Lifecycle:
         self._torn_down_last_tick: int = 0
         self._reaper_last_tick_at: datetime | None = None
         self._reaper_interval_s: int | None = None
+        # Monotonic sequence guarding _persist()'s write against out-of-order
+        # completion: since each call's disk write runs unlocked (see
+        # _persist()'s docstring), a slower write of an older snapshot could
+        # otherwise land after a faster write of a newer one and revert
+        # state_file to stale content. Guarded by _state_lock.
+        self._persist_seq: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -287,7 +311,13 @@ class Lifecycle:
             with self._state_lock:
                 st.status = SandboxStatus.COLD
             await self._persist()
-        return SandboxHandle.from_state(st)
+        # Snapshot immediately before the multi-field read below (see
+        # list_active()'s docstring) — ``st`` is still the live object tracked
+        # in ``self._state``, which a concurrent acquire()/teardown() could be
+        # mutating field-by-field.
+        with self._state_lock:
+            snapshot = st.model_copy()
+        return SandboxHandle.from_state(snapshot)
 
     async def teardown(self, agent_id: str) -> None:
         """Explicitly stop the sandbox for ``agent_id`` and evict from state.
@@ -317,7 +347,12 @@ class Lifecycle:
     async def list_active(self) -> list[SandboxHandle]:
         """Return a handle for every sandbox currently tracked in state."""
         with self._state_lock:
-            snapshot = list(self._state.values())
+            # model_copy() snapshots each object's *field values*, not just the
+            # list of references — SandboxHandle.from_state() below then reads
+            # independent copies, safe from a concurrent acquire()/teardown()
+            # mutating the live SandboxState objects field-by-field after this
+            # lock releases.
+            snapshot = [st.model_copy() for st in self._state.values()]
         return [SandboxHandle.from_state(st) for st in snapshot]
 
     async def note_activity(self, agent_id: str) -> None:
@@ -336,7 +371,10 @@ class Lifecycle:
         historical per-invocation data lives in ``agent_console_runs``.
         """
         with self._state_lock:
-            snapshot = list(self._state.values())
+            # model_copy() so by_status/ages below read independent copies,
+            # not live objects a concurrent acquire()/teardown() could still
+            # be mutating (see list_active()'s docstring).
+            snapshot = [st.model_copy() for st in self._state.values()]
             boot_samples = list(self._boot_ms_samples)
             reaper_last_tick_at = self._reaper_last_tick_at
             reaper_interval_s = self._reaper_interval_s
@@ -454,11 +492,11 @@ class Lifecycle:
               acquires it itself, briefly, and releases it before the ``await``).
         Postconditions:
             * ``self._state_file`` reflects the ``_state`` snapshot taken at
-              call time (or a very-slightly-newer one, if a concurrent mutation
-              lands between the snapshot and the write — self-healing, since the
-              next successful ``_persist()`` call always reflects then-current
-              state). Never raises; an ``OSError`` writing the file is logged
-              and swallowed, matching the prior synchronous behavior.
+              call time, or a newer one if a concurrent ``_persist()`` call was
+              also in flight (self-healing either way — the next successful
+              call always reflects then-current state). Never raises; an
+              ``OSError`` writing the file is logged and swallowed, matching
+              the prior synchronous behavior.
 
         Invariants:
             * The lock is held only for the synchronous ``dict(self._state)``
@@ -470,11 +508,35 @@ class Lifecycle:
               coroutine — for as long as the disk write takes. Running the
               write via ``asyncio.to_thread`` keeps it off this event loop
               entirely.
+            * Two ``_persist()`` calls can be concurrently in flight (one on
+              the Temporal worker loop, one on the API loop), and nothing
+              orders their unlocked disk writes relative to each other — a
+              slower write of an *older* snapshot could otherwise land after a
+              faster write of a *newer* one and revert ``state_file`` to stale
+              content. ``self._persist_seq`` (bumped when each call snapshots,
+              re-checked immediately before the write) closes most of that
+              window: once a newer call has been requested, an older call's
+              write is skipped rather than risking a stale overwrite — the
+              newer call's own write already reflects state at least as fresh.
+              This narrows, rather than eliminates, the race (a still-newer
+              call could itself start after this check passes); a fully
+              airtight guarantee would need a single background writer, which
+              is disproportionate for this best-effort checkpoint file — state
+              is already reconciled against ``docker inspect`` on next use.
         """
         with self._state_lock:
+            self._persist_seq += 1
+            my_seq = self._persist_seq
             snapshot = dict(self._state)
+
+        def _write_if_still_latest() -> None:
+            with self._state_lock:
+                if my_seq != self._persist_seq:
+                    return
+            state_mod.save(self._state_file, snapshot)
+
         try:
-            await asyncio.to_thread(state_mod.save, self._state_file, snapshot)
+            await asyncio.to_thread(_write_if_still_latest)
         except OSError as exc:
             logger.warning("Could not persist sandbox state: %s", exc)
 

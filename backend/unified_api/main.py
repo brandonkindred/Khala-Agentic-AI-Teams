@@ -171,6 +171,14 @@ async def _start_sandbox_reaper_with_retry() -> None:
           running). Retries indefinitely with exponential backoff (capped at
           60s) on any other failure; propagates ``asyncio.CancelledError``
           untouched so app shutdown can cancel this task cleanly.
+
+    Passes a short ``client_ready_timeout_s`` to ``start_sandbox_reaper_workflow``
+    so its internal client-readiness poll (default 10s,
+    ``shared_temporal.runner.CLIENT_READY_TIMEOUT_S``) doesn't stack underneath
+    this loop's own backoff — this loop already retries the whole call, so it
+    should own all the waiting; each attempt should fail fast if the client
+    isn't ready *yet* rather than block for up to 10s before this loop's own
+    delay even applies.
     """
     from agent_provisioning_team.temporal.sandbox_dispatch import start_sandbox_reaper_workflow
 
@@ -178,7 +186,7 @@ async def _start_sandbox_reaper_with_retry() -> None:
     while True:
         try:
             # start_workflow_sync blocks briefly on client-ready; keep it off the loop.
-            await asyncio.to_thread(start_sandbox_reaper_workflow)
+            await asyncio.to_thread(start_sandbox_reaper_workflow, client_ready_timeout_s=1.0)
             logger.info("Started Agent Console sandbox idle reaper (Temporal workflow)")
             return
         except asyncio.CancelledError:

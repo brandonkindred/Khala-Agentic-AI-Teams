@@ -12,6 +12,9 @@ import asyncio
 import threading
 from pathlib import Path
 
+import pytest
+
+from agent_provisioning_team.sandbox import lifecycle as lifecycle_mod
 from agent_provisioning_team.sandbox import state as state_mod
 from agent_provisioning_team.sandbox.lifecycle import Lifecycle
 
@@ -155,3 +158,46 @@ def test_boot_ms_samples_append_and_read_are_thread_safe(tmp_path: Path) -> None
         t.join(timeout=10)
 
     assert errors == []
+
+
+@pytest.mark.asyncio
+async def test_persist_skips_write_when_superseded_before_write_runs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``_persist()``'s sequence gate: if a newer call has already snapshotted
+    by the time an older call's threaded write runs, the older write must be
+    skipped rather than risking a stale overwrite of the newer one.
+
+    Deterministic (no real thread race): ``asyncio.to_thread`` is replaced
+    with a fake that captures the write thunk instead of running it, so the
+    two thunks can be invoked in a controlled order after both ``_persist()``
+    calls have snapshotted and bumped ``_persist_seq``.
+    """
+    lc = Lifecycle(state_file=tmp_path / "state.json")
+    lc._state.update(_seed(2))
+
+    save_calls: list[dict] = []
+
+    def fake_save(path, state) -> None:
+        save_calls.append(dict(state))
+
+    monkeypatch.setattr(state_mod, "save", fake_save)
+
+    captured_thunks = []
+
+    async def fake_to_thread(func, *args, **kwargs):
+        captured_thunks.append(func)
+
+    monkeypatch.setattr(lifecycle_mod.asyncio, "to_thread", fake_to_thread)
+
+    await lc._persist()  # seq -> 1, thunk captured but not run
+    await lc._persist()  # seq -> 2, thunk captured but not run
+    assert len(captured_thunks) == 2
+
+    # Run the stale (seq=1) write after the fresh (seq=2) one has already
+    # been requested: it must be a no-op.
+    captured_thunks[0]()
+    assert save_calls == []
+
+    captured_thunks[1]()
+    assert len(save_calls) == 1

@@ -44,19 +44,24 @@ async def sandbox_acquire_activity(agent_id: str) -> Dict[str, Any]:
           ``Lifecycle.acquire()`` itself never raises for a transient failure
           during provisioning — it catches internally and returns a
           non-raising ERROR-status handle, so that its own direct/thread-mode
-          callers always get a handle back. This activity re-raises on that
-          ERROR status specifically so ``SANDBOX_ACQUIRE_RETRY_POLICY``
-          actually retries those transient failures instead of the workflow
-          silently "succeeding" with an ERROR result on the first attempt.
+          callers always get a handle back. This activity re-raises
+          ``SandboxAcquireFailedError`` on that ERROR status specifically so
+          ``SANDBOX_ACQUIRE_RETRY_POLICY`` actually retries those transient
+          failures instead of the workflow silently "succeeding" with an
+          ERROR result on the first attempt. Using a dedicated type (rather
+          than a bare ``RuntimeError``) lets
+          ``sandbox_dispatch._reraise_sandbox_error`` recognize it by name once
+          retries are exhausted and map it to a clean HTTP 503, instead of an
+          opaque ``WorkflowFailureError``.
     """
-    from agent_provisioning_team.sandbox import get_lifecycle
+    from agent_provisioning_team.sandbox import SandboxAcquireFailedError, get_lifecycle
     from agent_provisioning_team.sandbox.state import SandboxStatus
 
     assert agent_id, "agent_id must be non-empty"
     activity.heartbeat("sandbox_acquire")
     handle = await get_lifecycle().acquire(agent_id)
     if handle.status == SandboxStatus.ERROR:
-        raise RuntimeError(handle.error or f"Sandbox acquire failed for {agent_id}")
+        raise SandboxAcquireFailedError(handle.error or f"Sandbox acquire failed for {agent_id}")
     return handle.model_dump(mode="json")
 
 

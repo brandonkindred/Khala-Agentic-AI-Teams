@@ -20,7 +20,7 @@ import unified_api.main as main
 async def test_reaper_retry_succeeds_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[bool] = []
 
-    def _start() -> None:
+    def _start(**kwargs) -> None:
         calls.append(True)
 
     monkeypatch.setattr(
@@ -50,7 +50,7 @@ async def test_reaper_retry_recovers_after_transient_failures(
     except and never retried, so the reaper could silently never start."""
     attempts: list[int] = []
 
-    def _start() -> None:
+    def _start(**kwargs) -> None:
         attempts.append(1)
         if len(attempts) < 3:
             raise RuntimeError("Temporal client not available; is the team's worker running?")
@@ -80,7 +80,7 @@ async def test_reaper_retry_propagates_cancellation_from_backoff_sleep(
     """Cancelling the background task (app shutdown) while it's backing off
     between retries must not be swallowed as just another retryable failure."""
 
-    def _start() -> None:
+    def _start(**kwargs) -> None:
         raise RuntimeError("still not ready")
 
     monkeypatch.setattr(
@@ -105,7 +105,7 @@ async def test_reaper_retry_propagates_cancellation_from_start_attempt(
     in-flight (the realistic app-shutdown-during-startup case) must propagate,
     not be caught by the generic ``except Exception`` retry branch."""
 
-    def _start() -> None:
+    def _start(**kwargs) -> None:
         raise asyncio.CancelledError()
 
     monkeypatch.setattr(

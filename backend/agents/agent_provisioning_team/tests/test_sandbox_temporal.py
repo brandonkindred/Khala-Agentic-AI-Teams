@@ -62,7 +62,11 @@ async def test_sandbox_acquire_activity_raises_on_error_status() -> None:
     non-raising ERROR-status handle so its direct/thread-mode callers always
     get a handle back. The activity must re-raise on that status so
     SANDBOX_ACQUIRE_RETRY_POLICY actually retries; otherwise Temporal sees the
-    activity as a success and the retry policy is dead code."""
+    activity as a success and the retry policy is dead code. Raises the
+    dedicated SandboxAcquireFailedError (not a bare RuntimeError) so
+    _reraise_sandbox_error can recognize and translate it once retries are
+    exhausted, instead of leaking an opaque WorkflowFailureError."""
+    from agent_provisioning_team.sandbox import SandboxAcquireFailedError
     from agent_provisioning_team.temporal import sandbox_activities as sa
 
     error_handle = _handle()
@@ -75,7 +79,7 @@ async def test_sandbox_acquire_activity_raises_on_error_status() -> None:
         patch("agent_provisioning_team.sandbox.get_lifecycle", return_value=fake_lc),
         patch("temporalio.activity.heartbeat"),
     ):
-        with pytest.raises(RuntimeError, match="docker run failed: transient"):
+        with pytest.raises(SandboxAcquireFailedError, match="docker run failed: transient"):
             await sa.sandbox_acquire_activity("blog.writer")
 
 
@@ -344,21 +348,25 @@ class _FakeApplicationError(Exception):
     def __init__(self, type_name: str, message: str) -> None:
         self.type = type_name
         self.message = message
-        self.cause = None
         super().__init__(message)
 
 
-class _FakeWorkflowFailure(Exception):
-    def __init__(self, app: _FakeApplicationError) -> None:
-        self.cause = app
-        super().__init__("workflow failed")
+def _fake_workflow_failure(app: _FakeApplicationError) -> Exception:
+    """Build a WorkflowFailureError-shaped exception using the standard
+    __cause__ chaining attribute (matching real Temporal — FailureError.cause
+    is documented as an alias of __cause__ — and the shared
+    shared_temporal.translate_workflow_failure walk, which reads
+    __cause__/__context__, not a nonstandard '.cause' attribute)."""
+    failure = Exception("workflow failed")
+    failure.__cause__ = app
+    return failure
 
 
 def test_reraise_unwraps_unknown_agent() -> None:
     from agent_provisioning_team.sandbox import UnknownAgentError
     from agent_provisioning_team.temporal import sandbox_dispatch as sd
 
-    exc = _FakeWorkflowFailure(_FakeApplicationError("UnknownAgentError", "no agent"))
+    exc = _fake_workflow_failure(_FakeApplicationError("UnknownAgentError", "no agent"))
     with pytest.raises(UnknownAgentError, match="no agent"):
         sd._reraise_sandbox_error(exc)
 
@@ -367,7 +375,7 @@ def test_reraise_unwraps_docker_unavailable() -> None:
     from agent_provisioning_team.sandbox import DockerUnavailableError
     from agent_provisioning_team.temporal import sandbox_dispatch as sd
 
-    exc = _FakeWorkflowFailure(_FakeApplicationError("DockerUnavailableError", "no docker"))
+    exc = _fake_workflow_failure(_FakeApplicationError("DockerUnavailableError", "no docker"))
     with pytest.raises(DockerUnavailableError, match="no docker"):
         sd._reraise_sandbox_error(exc)
 
@@ -380,9 +388,42 @@ def test_reraise_unwraps_docker_error() -> None:
     from agent_provisioning_team.sandbox.provisioner import DockerError
     from agent_provisioning_team.temporal import sandbox_dispatch as sd
 
-    exc = _FakeWorkflowFailure(_FakeApplicationError("DockerError", "daemon unreachable"))
+    exc = _fake_workflow_failure(_FakeApplicationError("DockerError", "daemon unreachable"))
     with pytest.raises(DockerError, match="daemon unreachable"):
         sd._reraise_sandbox_error(exc)
+
+
+def test_reraise_unwraps_sandbox_acquire_failed() -> None:
+    """Once SANDBOX_ACQUIRE_RETRY_POLICY's retries are exhausted, the
+    SandboxAcquireFailedError marker must round-trip back to itself so
+    warm_sandbox can map it to a clean 503 instead of an opaque
+    WorkflowFailureError."""
+    from agent_provisioning_team.sandbox import SandboxAcquireFailedError
+    from agent_provisioning_team.temporal import sandbox_dispatch as sd
+
+    exc = _fake_workflow_failure(
+        _FakeApplicationError("SandboxAcquireFailedError", "docker daemon unreachable")
+    )
+    with pytest.raises(SandboxAcquireFailedError, match="docker daemon unreachable"):
+        sd._reraise_sandbox_error(exc)
+
+
+@pytest.mark.asyncio
+async def test_acquire_via_temporal_unwraps_sandbox_acquire_failed() -> None:
+    """End-to-end: after SandboxAcquireWorkflow's retries exhaust, the caller
+    (e.g. warm_sandbox) gets back SandboxAcquireFailedError, not a raw
+    WorkflowFailureError."""
+    from agent_provisioning_team.sandbox import SandboxAcquireFailedError
+    from agent_provisioning_team.temporal import sandbox_dispatch as sd
+
+    exc = _fake_workflow_failure(
+        _FakeApplicationError("SandboxAcquireFailedError", "retries exhausted")
+    )
+    with (
+        patch.object(sd, "execute_workflow_async", new=AsyncMock(side_effect=exc)),
+        pytest.raises(SandboxAcquireFailedError, match="retries exhausted"),
+    ):
+        await sd.acquire_sandbox_via_temporal("blog.writer")
 
 
 def test_reraise_is_noop_for_unknown_type() -> None:
@@ -397,7 +438,7 @@ async def test_acquire_via_temporal_unwraps_error() -> None:
     from agent_provisioning_team.sandbox import UnknownAgentError
     from agent_provisioning_team.temporal import sandbox_dispatch as sd
 
-    exc = _FakeWorkflowFailure(_FakeApplicationError("UnknownAgentError", "ghost"))
+    exc = _fake_workflow_failure(_FakeApplicationError("UnknownAgentError", "ghost"))
     with (
         patch.object(sd, "execute_workflow_async", new=AsyncMock(side_effect=exc)),
         pytest.raises(UnknownAgentError, match="ghost"),
@@ -463,10 +504,24 @@ async def test_teardown_via_temporal_unwraps_docker_error() -> None:
     from agent_provisioning_team.sandbox.provisioner import DockerError
     from agent_provisioning_team.temporal import sandbox_dispatch as sd
 
-    exc = _FakeWorkflowFailure(_FakeApplicationError("DockerError", "stop_container failed"))
+    exc = _fake_workflow_failure(_FakeApplicationError("DockerError", "stop_container failed"))
     with (
         patch.object(sd, "execute_workflow_async", new=AsyncMock(side_effect=exc)),
         pytest.raises(DockerError, match="stop_container failed"),
+    ):
+        await sd.teardown_sandbox_via_temporal("blog.writer")
+
+
+@pytest.mark.asyncio
+async def test_teardown_via_temporal_reraises_unrecognized_error() -> None:
+    """Mirrors ``test_acquire_via_temporal_reraises_unrecognized_error``: an
+    error with no recognizable ApplicationError type (e.g. a client-side
+    timeout) propagates unchanged rather than being swallowed."""
+    from agent_provisioning_team.temporal import sandbox_dispatch as sd
+
+    with (
+        patch.object(sd, "execute_workflow_async", new=AsyncMock(side_effect=RuntimeError("boom"))),
+        pytest.raises(RuntimeError, match="boom"),
     ):
         await sd.teardown_sandbox_via_temporal("blog.writer")
 
