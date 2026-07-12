@@ -8,7 +8,7 @@ import threading
 import uuid
 from typing import Any
 
-from deepthought.agent import DEFAULT_AGENT_BUDGET, DeepthoughtAgent
+from deepthought.agent import DeepthoughtAgent
 from deepthought.knowledge_base import SharedKnowledgeBase
 from deepthought.models import (
     AgentEvent,
@@ -20,6 +20,7 @@ from deepthought.models import (
     DeepthoughtResponse,
 )
 from deepthought.prompts import CLASSIFY_QUESTION_SYSTEM_PROMPT
+from deepthought.reasoning import DEFAULT_AGENT_BUDGET, format_answer
 from deepthought.result_cache import ResultCache
 
 logger = logging.getLogger(__name__)
@@ -41,14 +42,18 @@ class DeepthoughtOrchestrator:
         if llm is not None:
             self._llm = llm
         else:
-            from strands import Agent
+            # ``get_client`` returns an ``LLMClient`` exposing ``complete``/
+            # ``complete_json`` — the interface every call site in this module and
+            # in ``DeepthoughtAgent`` actually uses. (A ``strands.Agent`` wrapping
+            # ``get_strands_model`` does NOT expose those methods — its public
+            # surface is ``__call__`` — so building one here was a latent bug:
+            # every real completion silently raised ``AttributeError``, was
+            # swallowed by the broad ``except Exception`` in ``_analyse``/
+            # ``_force_direct_answer``/``_deliberate``/``_synthesise``, and fell
+            # through to their hard-coded fallback text.)
+            from llm_service import get_client
 
-            from llm_service import get_strands_model
-
-            self._llm = Agent(
-                model=get_strands_model("deepthought"),
-                system_prompt=CLASSIFY_QUESTION_SYSTEM_PROMPT,
-            )
+            self._llm = get_client("deepthought")
 
         self._agent_budget = agent_budget
         self._result_cache = result_cache if result_cache is not None else _global_result_cache
@@ -198,23 +203,5 @@ class DeepthoughtOrchestrator:
 
     @staticmethod
     def _format_answer(result: AgentResult) -> str:
-        """Append a 'Specialists consulted' footer to the answer when decomposition occurred."""
-        if not result.was_decomposed:
-            return result.answer
-
-        specialists = _collect_specialists(result)
-        if not specialists:
-            return result.answer
-
-        footer_lines = [f"- **{name}**: {focus}" for name, focus in specialists]
-        footer = "\n\n---\n**Specialists consulted:**\n" + "\n".join(footer_lines)
-        return result.answer + footer
-
-
-def _collect_specialists(result: AgentResult) -> list[tuple[str, str]]:
-    """Recursively collect (name, focus_question) for all child agents."""
-    specialists: list[tuple[str, str]] = []
-    for child in result.child_results:
-        specialists.append((child.agent_name, child.focus_question))
-        specialists.extend(_collect_specialists(child))
-    return specialists
+        """Append a 'Specialists consulted' footer (delegates to ``reasoning``)."""
+        return format_answer(result)
