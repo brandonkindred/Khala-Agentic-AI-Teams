@@ -96,17 +96,23 @@ class RoutePlannerAgent:
             logger.warning("RoutePlannerAgent route missing required stops; using fallback route")
             return self._fallback_route(trip, end)
 
+        raw_days = data.get("suggested_total_days", trip.trip_duration_days or 7)
+        try:
+            # dict.get's default only applies when the key is missing, not when
+            # it's present-but-non-numeric (e.g. a numeric string like "3", which
+            # pydantic would coerce for an int field but max() won't — comparing
+            # int and str raises TypeError). Normalize before clamping.
+            parsed_days = int(raw_days)
+        except (TypeError, ValueError):
+            parsed_days = trip.trip_duration_days or 7
+
         return RoutePlan(
             ordered_stops=stops,
             total_driving_miles=data.get("total_driving_miles"),
             total_driving_hours=data.get("total_driving_hours"),
             route_summary=data.get("route_summary", ""),
-            # max(1, ...): dict.get's default only applies when the key is
-            # missing, so an LLM response with an explicit 0 (or negative)
-            # would otherwise pass through unguarded.
-            suggested_total_days=max(
-                1, data.get("suggested_total_days", trip.trip_duration_days or 7)
-            ),
+            # max(1, ...): the parsed/defaulted value could still be 0 or negative.
+            suggested_total_days=max(1, parsed_days),
         )
 
     def _covers_required_stops(self, stops: list[RouteStop], trip: TripRequest, end: str) -> bool:

@@ -237,6 +237,39 @@ def test_plan_route_normalizes_zero_suggested_total_days(sample_plan_request):
     assert route.suggested_total_days >= 1
 
 
+def test_plan_route_normalizes_numeric_string_suggested_total_days(sample_plan_request):
+    # An LLM response with suggested_total_days as a numeric string (e.g. "3")
+    # must not crash — max() compares raw types and raises TypeError on int
+    # vs str, even though pydantic would happily coerce the same string for an
+    # int field. Must parse it rather than pass it through unguarded.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": "3"}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.suggested_total_days == 3
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+
+
+def test_plan_route_falls_back_to_default_on_non_numeric_suggested_total_days(
+    sample_plan_request,
+):
+    # A non-numeric, non-coercible suggested_total_days (e.g. a stray word)
+    # must degrade to the same default dict.get would use for a missing key,
+    # not crash the whole route step.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": "a few"}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.suggested_total_days == sample_plan_request.trip.trip_duration_days
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+
+
 def test_fallback_route_endpoints_are_pass_through(sample_plan_request):
     # Fallback endpoints must be pass-through (recommended_nights=0) so the
     # activities/composer steps don't turn the start and end into extra days.
