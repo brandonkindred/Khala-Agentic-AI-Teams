@@ -10,6 +10,17 @@ present (falling back to ``f"{team}-queue"`` otherwise) — this lets a team
 pin a fixed/legacy queue name (e.g. for a workflow.patched drain, or to match
 a pre-existing external queue) and still register normally here, instead of
 special-casing itself out of this registry.
+
+Likewise, a team's own module's ``MAX_CONCURRENT_ACTIVITIES`` constant, when
+present, overrides ``start_team_worker``'s default concurrency cap. This
+matters because ``start_team_worker`` is idempotent per team name: whichever
+caller starts a team's worker FIRST wins for the whole process. A team with
+its own dedicated boot hook (e.g. a docker-compose ``TEAM_TEMPORAL_WORKER_FUNC``)
+that pins a non-default cap there must export that SAME value here too, or a
+consolidated process calling ``start_all_team_workers`` before that hook runs
+would silently start the worker at the default cap instead, and the team's
+own hook would then no-op (the worker is already running) without ever
+re-pinning it.
 """
 
 from __future__ import annotations
@@ -62,6 +73,10 @@ def start_all_team_workers(only: Iterable[str] | None = None) -> dict[str, bool]
           ``WORKFLOWS``/``ACTIVITIES``, is skipped with an error/warning log
           and mapped to ``False`` rather than raising and blocking startup of
           the remaining teams.
+        - A team exporting ``MAX_CONCURRENT_ACTIVITIES`` starts its worker
+          with that cap instead of ``start_team_worker``'s default, so this
+          bulk path agrees with that team's own dedicated boot hook on
+          whichever one wins the idempotent-start race.
     """
     results: dict[str, bool] = {}
     teams = TEAM_TEMPORAL_MODULES.items()
@@ -82,11 +97,18 @@ def start_all_team_workers(only: Iterable[str] | None = None) -> dict[str, bool]
                 )
                 results[team] = False
                 continue
+            kwargs = {"task_queue": getattr(mod, "TASK_QUEUE", f"{team}-queue")}
+            max_concurrent_activities = getattr(mod, "MAX_CONCURRENT_ACTIVITIES", None)
+            if max_concurrent_activities is not None:
+                # Omitted entirely (rather than passed as a literal default)
+                # when a team defines no override, so start_team_worker's own
+                # default stays the single source of truth for "no opinion".
+                kwargs["max_concurrent_activities"] = max_concurrent_activities
             started = start_team_worker(
                 team,
                 workflows=workflows,
                 activities=activities,
-                task_queue=getattr(mod, "TASK_QUEUE", f"{team}-queue"),
+                **kwargs,
             )
             results[team] = started
         except Exception as e:

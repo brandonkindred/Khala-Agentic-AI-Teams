@@ -16,7 +16,12 @@ from __future__ import annotations
 
 import logging
 
-from personal_assistant_team.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
+from personal_assistant_team.temporal import (
+    ACTIVITIES,
+    MAX_CONCURRENT_ACTIVITIES,
+    TASK_QUEUE,
+    WORKFLOWS,
+)
 from shared_temporal import is_temporal_enabled, start_team_worker
 
 logger = logging.getLogger(__name__)
@@ -42,9 +47,9 @@ def start_pa_temporal_worker_thread() -> bool:
         WORKFLOWS,
         ACTIVITIES,
         task_queue=TASK_QUEUE,
-        # Pins the pre-migration cap (the hand-rolled worker this replaced
-        # used `max_workers=2` / `max_concurrent_activities=2`). Explicit here
-        # rather than left to `start_team_worker`'s default of 4, which would
-        # silently double PA's concurrent-activity ceiling.
-        max_concurrent_activities=2,
+        # MAX_CONCURRENT_ACTIVITIES is the single source of truth shared with
+        # shared_temporal.teams_registry.start_all_team_workers (which reads
+        # it off this same package) — see temporal/constants.py's docstring
+        # for why this must not be a literal here.
+        max_concurrent_activities=MAX_CONCURRENT_ACTIVITIES,
     )

@@ -25,7 +25,22 @@ primary boot path remains its own docker-compose hook
 entry lets ``start_all_team_workers`` also host PA's worker (e.g. in a
 consolidated process) on the SAME queue, safely, since ``start_team_worker`` is
 idempotent per team name.
+
+``MAX_CONCURRENT_ACTIVITIES`` is the SAME single source of truth read by both
+boot paths, for the same reason ``TASK_QUEUE`` is: ``start_team_worker`` is
+idempotent per team name, so whichever caller starts the worker FIRST wins for
+the whole process, and a caller that hardcoded a different concurrency value
+would silently never take effect. ``temporal/worker.py``'s dedicated hook
+imports this constant instead of hardcoding the cap, and
+``start_all_team_workers`` reads it via ``getattr(mod, "MAX_CONCURRENT_ACTIVITIES", 4)``
+— so both paths agree on 2 regardless of which one wins the startup race.
 """
 
 TASK_QUEUE = "personal-assistant"
 WORKFLOW_ID_PREFIX_ASSISTANT = "pa-assistant-"
+
+# Pins the pre-migration cap (the hand-rolled worker this replaced used
+# `max_workers=2` / `max_concurrent_activities=2`), rather than leaving it to
+# `start_team_worker`'s default of 4. See this module's docstring for why this
+# lives here rather than as a literal in `worker.py`.
+MAX_CONCURRENT_ACTIVITIES = 2

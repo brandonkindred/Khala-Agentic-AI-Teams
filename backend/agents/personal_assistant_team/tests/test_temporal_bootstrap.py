@@ -63,6 +63,7 @@ def test_export_contract():
     """WORKFLOWS/ACTIVITIES/TASK_QUEUE expose the full decomposed team."""
     from personal_assistant_team.temporal import (
         ACTIVITIES,
+        MAX_CONCURRENT_ACTIVITIES,
         TASK_QUEUE,
         WORKFLOW_ID_PREFIX_ASSISTANT,
         WORKFLOWS,
@@ -88,6 +89,7 @@ def test_export_contract():
     assert WORKFLOWS == [PaAssistantWorkflow]
     assert TASK_QUEUE == "personal-assistant"
     assert WORKFLOW_ID_PREFIX_ASSISTANT == "pa-assistant-"
+    assert MAX_CONCURRENT_ACTIVITIES == 2
 
     expected_activities = {
         classify_intent_activity,
@@ -208,7 +210,7 @@ def test_shared_registry_derives_pa_task_queue_from_module_export(monkeypatch):
 
     captured: dict = {}
 
-    def _fake_start(team, workflows, activities, *, task_queue):
+    def _fake_start(team, workflows, activities, *, task_queue, max_concurrent_activities=4):
         captured[team] = task_queue
         return True
 
@@ -217,3 +219,25 @@ def test_shared_registry_derives_pa_task_queue_from_module_export(monkeypatch):
     teams_registry.start_all_team_workers(only=["personal_assistant"])
 
     assert captured["personal_assistant"] == "personal-assistant"
+
+
+def test_shared_registry_derives_pa_max_concurrent_activities_from_module_export(monkeypatch):
+    # Regression test: if start_all_team_workers ever won the startup race
+    # against PA's own dedicated boot hook (start_pa_temporal_worker_thread),
+    # it must start PA's worker at the SAME cap of 2 that hook pins — not
+    # silently fall back to start_team_worker's default of 4 — since
+    # start_team_worker is idempotent per team and whichever caller starts
+    # the worker first wins for the whole process.
+    from shared_temporal import teams_registry
+
+    captured: dict = {}
+
+    def _fake_start(team, workflows, activities, *, task_queue, max_concurrent_activities=4):
+        captured[team] = max_concurrent_activities
+        return True
+
+    monkeypatch.setattr(teams_registry, "start_team_worker", _fake_start)
+
+    teams_registry.start_all_team_workers(only=["personal_assistant"])
+
+    assert captured["personal_assistant"] == 2

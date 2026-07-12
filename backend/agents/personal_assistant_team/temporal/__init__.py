@@ -30,6 +30,7 @@ from personal_assistant_team.temporal.activities import (
     run_assistant_activity,
 )
 from personal_assistant_team.temporal.constants import (
+    MAX_CONCURRENT_ACTIVITIES,
     TASK_QUEUE,
     WORKFLOW_ID_PREFIX_ASSISTANT,
 )
@@ -60,6 +61,7 @@ WORKFLOW_ID_PREFIX = WORKFLOW_ID_PREFIX_ASSISTANT
 
 __all__ = [
     "ACTIVITIES",
+    "MAX_CONCURRENT_ACTIVITIES",
     "PaAssistantWorkflow",
     "TASK_QUEUE",
     "WORKFLOWS",
