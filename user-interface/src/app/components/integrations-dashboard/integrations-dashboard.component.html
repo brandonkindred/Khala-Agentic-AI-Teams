@@ -592,8 +592,8 @@
           <div class="integration-card__title-block">
             <h2 class="integration-card__title">GitHub</h2>
             <p class="integration-card__tag">
-              @if (githubTokenConfigured && githubOwner && githubRepo) {
-                {{ githubOwner }}/{{ githubRepo }}
+              @if (githubTokenConfigured) {
+                All repositories the token can access
               } @else {
                 Issue-to-PR workflow
               }
@@ -604,7 +604,7 @@
         <div class="integration-card__status">
           @if (githubLoading) {
             <mat-spinner diameter="20" class="integration-card__spinner"></mat-spinner>
-          } @else if (githubTokenConfigured && githubOwner && githubRepo) {
+          } @else if (githubTokenConfigured) {
             <span class="status-chip status-chip--success">
               <mat-icon aria-hidden="true">check_circle</mat-icon>
               Connected
@@ -616,7 +616,9 @@
       </header>
 
       <p class="integration-card__summary">
-        Connect a GitHub repository so the <strong>Coding Team</strong> can pick up issues and deliver draft PRs autonomously.
+        Connect GitHub with a Personal Access Token so the <strong>Coding Team</strong> can pick up issues and deliver
+        draft PRs autonomously. The token's own authorization configuration decides which repositories are available —
+        no repository list is configured here.
       </p>
 
       <div class="integration-card__actions">
@@ -631,7 +633,7 @@
           {{ expanded === 'github' ? 'Hide settings' : (githubTokenConfigured ? 'Manage' : 'Configure') }}
         </button>
 
-        @if (githubTokenConfigured || githubOwner || githubRepo) {
+        @if (githubTokenConfigured) {
           <button
             type="button"
             mat-stroked-button
@@ -657,7 +659,9 @@
           }
 
           <p class="form-hint">
-            Enter a <strong>Personal Access Token</strong> with <code>repo</code> scope, along with the repository owner and name.
+            Enter a <strong>Personal Access Token</strong> with <code>repo</code> scope. Every repository the token
+            can access (per its GitHub authorization configuration) becomes available to the Coding Team and Code
+            Review pages — grant or revoke repositories on the token itself, not here.
           </p>
 
           <div class="form-grid">
@@ -698,17 +702,6 @@
             </mat-form-field>
           </div>
 
-          <div class="form-grid form-grid--two">
-            <mat-form-field appearance="outline">
-              <mat-label>Owner / Organization</mat-label>
-              <input matInput [(ngModel)]="githubOwner" placeholder="my-org" autocomplete="off" />
-            </mat-form-field>
-            <mat-form-field appearance="outline">
-              <mat-label>Repository</mat-label>
-              <input matInput [(ngModel)]="githubRepo" placeholder="my-repo" autocomplete="off" />
-            </mat-form-field>
-          </div>
-
           <div class="form-grid">
             <mat-form-field appearance="outline">
               <mat-label>Default label filter (optional)</mat-label>
@@ -729,7 +722,7 @@
               color="primary"
               type="button"
               (click)="saveGitHubConfig()"
-              [disabled]="githubSaving || (!githubOwner.trim() && !githubTokenConfigured) || (!githubRepo.trim() && !githubTokenConfigured)"
+              [disabled]="githubSaving || (!githubPat.trim() && !githubTokenConfigured)"
             >
               @if (githubSaving) { Saving… } @else { Save GitHub settings }
             </button>
