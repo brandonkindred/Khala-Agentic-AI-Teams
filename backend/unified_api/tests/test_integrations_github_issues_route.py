@@ -171,6 +171,16 @@ def test_issues_returns_400_when_owner_repo_missing(mock_cfg, mock_cred):
     assert "owner/repo" in resp.json()["detail"]
 
 
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "owner": "../etc", "repo": "widget"})
+def test_issues_rejects_unsafe_configured_default_owner(mock_cfg, mock_cred):
+    """A corrupted/misconfigured default owner is validated like a request-supplied one,
+    so a traversal-shaped value yields a 400 rather than a malformed GitHub URL."""
+    resp = client.get(_ISSUES)
+    assert resp.status_code == 400
+    assert "invalid GitHub owner" in resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # GitHub HTTP error mapping
 # ---------------------------------------------------------------------------
@@ -274,6 +284,74 @@ def test_issues_query_label_overrides_default(mock_cfg, mock_cred):
         resp = client.get(_ISSUES, params={"label": "blocked"})
     assert resp.status_code == 200
     assert fake.calls[0][1]["labels"] == "blocked"
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "default_label": "ready"})
+def test_issues_default_label_not_applied_to_explicit_repo(mock_cfg, mock_cred):
+    """The configured ``default_label`` is scoped to the legacy default repo; targeting a
+    DIFFERENT repo explicitly must not silently filter out issues that repo never tagged."""
+    fake = _FakeIssuesClient([_FakeIssuesResp(200, [_issue(1)])])
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES, params={"owner": "other", "repo": "thing"})
+    assert resp.status_code == 200
+    # No label was forwarded to GitHub for the explicitly-targeted repo.
+    assert "labels" not in fake.calls[0][1]
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_issues_rejects_owner_with_url_metacharacters(mock_cfg, mock_cred):
+    """An owner carrying a URL metacharacter (``?``/``#``/``@`` …) is rejected with a 400
+    rather than rewriting the GitHub API request path."""
+    for bad in ("someorg?per_page=1", "a#b", "a@b", "a%2eb", "a:b"):
+        resp = client.get(_ISSUES, params={"owner": bad, "repo": "thing"})
+        assert resp.status_code == 400, bad
+        assert "invalid GitHub owner" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Per-request repository targeting (owner/repo query params)
+# ---------------------------------------------------------------------------
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_issues_owner_repo_query_overrides_configured_default(mock_cfg, mock_cred):
+    """An explicit owner/repo pair targets that repository — the configured default is
+    only a fallback; the PAT's own authorization decides what is actually reachable."""
+    fake = _FakeIssuesClient([_FakeIssuesResp(200, [_issue(1)])])
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES, params={"owner": "other", "repo": "thing"})
+    assert resp.status_code == 200
+    assert fake.calls[0][0].endswith("/repos/other/thing/issues")
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "owner": "", "repo": ""})
+def test_issues_owner_repo_query_works_without_configured_default(mock_cfg, mock_cred):
+    fake = _FakeIssuesClient([_FakeIssuesResp(200, [_issue(1)])])
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES, params={"owner": "other", "repo": "thing"})
+    assert resp.status_code == 200
+    assert fake.calls[0][0].endswith("/repos/other/thing/issues")
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_issues_owner_without_repo_is_400(mock_cfg, mock_cred):
+    resp = client.get(_ISSUES, params={"owner": "other"})
+    assert resp.status_code == 400
+    assert "together" in resp.json()["detail"]
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_issues_rejects_unsafe_owner_query(mock_cfg, mock_cred):
+    """A traversal-shaped owner/repo is rejected before any URL or path is built."""
+    resp = client.get(_ISSUES, params={"owner": "../etc", "repo": "thing"})
+    assert resp.status_code == 400
+    assert "invalid GitHub owner" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
