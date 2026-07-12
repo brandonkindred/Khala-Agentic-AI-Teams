@@ -1260,6 +1260,58 @@ def test_run_phase_writes_initial_running_when_job_not_terminal(monkeypatch):
     assert running_writes and running_writes[0].kwargs.get("current_phase") == "discovery"
 
 
+def test_run_phase_reconciles_on_last_attempt_when_initial_write_raises(monkeypatch):
+    """The initial RUNNING/progress write is inside the same failure handling as
+    ``step`` itself: a transient job-service error there (not just a failure
+    inside ``step``) must also be caught and, on the last scheduled attempt,
+    reconciled via the FAILED write — otherwise the job is left stuck at its
+    previous pending/running status until the external stale-job sweep catches it,
+    with `step` never even having run."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    # First call is the initial RUNNING write (raises); the second is the
+    # last-attempt reconciliation FAILED write, which succeeds.
+    jm.update_job.side_effect = [ConnectionError("job-service unreachable"), None]
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+    step = mock.AsyncMock()
+
+    with pytest.raises(ConnectionError, match="job-service unreachable"):
+        asyncio.run(acts._run_phase("j1", "a1", "discovery", 40, step))
+
+    step.assert_not_called()
+    assert jm.update_job.call_count == 2
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed and "job-service unreachable" in failed[0].kwargs.get("error")
+
+
+def test_run_phase_does_not_reconcile_when_initial_write_raises_and_not_last_attempt(monkeypatch):
+    """Same failure, but not the last scheduled attempt — Temporal will retry, so
+    the job is left non-terminal (no premature FAILED write) rather than reconciled."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    jm.update_job.side_effect = ConnectionError("job-service unreachable")
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: False)
+    step = mock.AsyncMock()
+
+    with pytest.raises(ConnectionError, match="job-service unreachable"):
+        asyncio.run(acts._run_phase("j1", "a1", "discovery", 40, step))
+
+    step.assert_not_called()
+    # Only the (failing) initial RUNNING write was attempted — no reconciliation
+    # write, since it's not the ConnectionError-raising last attempt.
+    assert jm.update_job.call_count == 1
+
+
 def test_run_phase_marks_failed_on_last_attempt_exception(monkeypatch):
     from accessibility_audit_team import audit_execution as ax
     from accessibility_audit_team.temporal import activities as acts

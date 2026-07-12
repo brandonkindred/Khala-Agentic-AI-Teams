@@ -200,7 +200,12 @@ async def _run_phase(
           the earlier terminal failure. Returns ``{"status": "FAIL", ...}``
           immediately without touching the job store.
         - Otherwise writes ``RUNNING``/``current_phase``/``progress`` before
-          running the step.
+          running the step. That write is inside the same failure handling as
+          ``step`` itself: a transient job-service error on the initial write
+          (not just a failure inside ``step``) is also caught below and, on the
+          last scheduled attempt, reconciled via the FAILED write rather than
+          propagating unhandled and leaving the job stuck at its previous
+          pending/running status until the external stale-job sweep catches it.
         - On a *logical* phase failure (``result.failure_reason`` set), the terminal
           job-store write (with the phase's full partial result) is skipped if a
           concurrent path already marked the job terminal (e.g. a timebox timeout
@@ -208,10 +213,11 @@ async def _run_phase(
           always reflects this attempt's own outcome regardless of that guard.
           Returns ``{"status": "FAIL", ...}`` so the workflow short-circuits.
         - On success returns ``{"status": "PASS", "audit_id": audit_id}``.
-        - An exception RAISED by ``step`` (an infrastructure/plumbing failure, as
-          opposed to a returned ``failure_reason``) propagates so Temporal retries;
-          on the LAST scheduled attempt it also marks the job FAILED first (guarded
-          against clobbering an already-terminal status, and with progress/result
+        - An exception RAISED by the initial job-store write or by ``step`` (an
+          infrastructure/plumbing failure, as opposed to a returned
+          ``failure_reason``) propagates so Temporal retries; on the LAST
+          scheduled attempt it also marks the job FAILED first (guarded against
+          clobbering an already-terminal status, and with progress/result
           fields best-effort recovered from persisted state — see
           :func:`_best_effort_terminal_fields`) so the job is never left stranded
           non-terminal, with a stale partial record, once Temporal gives up retrying.
@@ -232,11 +238,10 @@ async def _run_phase(
         logger.warning("Skipping %s phase for job %s: job is already terminal", phase_name, job_id)
         return {"status": "FAIL", "audit_id": audit_id, "error": "job already terminal"}
 
-    manager.update_job(
-        job_id, status=JOB_STATUS_RUNNING, current_phase=phase_name, progress=progress
-    )
-
     try:
+        manager.update_job(
+            job_id, status=JOB_STATUS_RUNNING, current_phase=phase_name, progress=progress
+        )
         if heartbeat:
             from shared_concurrency import BackgroundHeartbeat
 

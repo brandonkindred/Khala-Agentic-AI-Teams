@@ -471,8 +471,11 @@ async def run_intake_step(
         - Returns a fresh ``AccessibilityAuditResult`` keyed by ``audit_id`` with
           the intake result attached (``INTAKE`` recorded) on success, or with
           ``success=False`` and ``failure_reason`` set when intake fails. Either
-          way the state is persisted. An infrastructure failure inside the phase
-          propagates.
+          way the state must be durably persisted before returning — on either
+          path, a store-write failure raises ``RuntimeError`` (so Temporal
+          retries) instead of returning a result whose audit_state was never
+          actually saved. An infrastructure failure inside the phase itself
+          also propagates.
         - If intake was already recorded complete OR already failed and persisted
           under ``audit_id`` (an at-least-once Temporal retry after the prior
           attempt's persist succeeded but its completion ack was lost), the
@@ -509,7 +512,11 @@ async def run_intake_step(
     if not intake_result.success:
         result.success = False
         result.failure_reason = intake_result.error or "Intake failed"
-        await _persist_unless_job_terminal(job_id, result)
+        if not await _persist_unless_job_terminal(job_id, result):
+            # As with the success path: a store failure here must fail this
+            # activity loudly so Temporal retries, rather than silently returning
+            # a failure result whose audit_state was never actually saved.
+            raise RuntimeError(f"intake step: failed to persist audit state for {audit_id}")
         return result
 
     # Keep the API-supplied ``audit_id`` as the canonical store key. In practice the
@@ -535,6 +542,9 @@ async def run_discovery_step(job_id: str, audit_id: str) -> AccessibilityAuditRe
     Postconditions:
         - Returns the audit result with the discovery result attached (``DISCOVERY``
           recorded) on success, or ``success=False`` on a logical discovery failure.
+          Either path raises ``RuntimeError`` if persisting that result fails, so
+          Temporal retries rather than returning a result whose audit_state was
+          never actually saved.
         - If discovery was already recorded complete, OR already failed and
           persisted (e.g. the job-store FAILED write for that failure itself
           failed, so Temporal retries this activity), the already-persisted
@@ -568,7 +578,8 @@ async def run_discovery_step(job_id: str, audit_id: str) -> AccessibilityAuditRe
     if not discovery_result.success:
         result.success = False
         result.failure_reason = discovery_result.error or "Discovery failed"
-        await _persist_unless_job_terminal(job_id, result)
+        if not await _persist_unless_job_terminal(job_id, result):
+            raise RuntimeError(f"discovery step: failed to persist audit state for {audit_id}")
         return result
 
     result.discovery_result = discovery_result
@@ -594,7 +605,9 @@ async def run_verification_step(
     Postconditions:
         - Returns the audit result with the verification result attached
           (``VERIFICATION`` recorded) on success, or ``success=False`` on a logical
-          verification failure.
+          verification failure. Either path raises ``RuntimeError`` if persisting
+          that result fails, so Temporal retries rather than returning a result
+          whose audit_state was never actually saved.
         - If verification was already recorded complete, OR already failed and
           persisted, the already-persisted result is returned as-is WITHOUT
           re-running verification — see :func:`run_discovery_step` for why.
@@ -625,7 +638,8 @@ async def run_verification_step(
     if not verification_result.success:
         result.success = False
         result.failure_reason = verification_result.error or "Verification failed"
-        await _persist_unless_job_terminal(job_id, result)
+        if not await _persist_unless_job_terminal(job_id, result):
+            raise RuntimeError(f"verification step: failed to persist audit state for {audit_id}")
         return result
 
     result.verification_result = verification_result
@@ -648,6 +662,9 @@ async def run_report_packaging_step(job_id: str, audit_id: str) -> Accessibility
           (``REPORT_PACKAGING`` recorded) on success, or ``success=False`` on a
           logical report-packaging failure. Final assembly (severity counts /
           summary / ``success``) is deferred to :func:`finalize_audit_step`.
+          Either path raises ``RuntimeError`` if persisting that result fails,
+          so Temporal retries rather than returning a result whose audit_state
+          was never actually saved.
         - If report packaging was already recorded complete, OR already failed
           and persisted, the already-persisted result is returned as-is WITHOUT
           re-running it — see :func:`run_discovery_step` for why.
@@ -679,7 +696,10 @@ async def run_report_packaging_step(job_id: str, audit_id: str) -> Accessibility
     if not report_result.success:
         result.success = False
         result.failure_reason = report_result.error or "Report packaging failed"
-        await _persist_unless_job_terminal(job_id, result)
+        if not await _persist_unless_job_terminal(job_id, result):
+            raise RuntimeError(
+                f"report packaging step: failed to persist audit state for {audit_id}"
+            )
         return result
 
     result.report_packaging_result = report_result
@@ -734,14 +754,20 @@ async def mark_audit_timed_out(job_id: str, audit_id: str, timebox_hours: int) -
     Postconditions:
         - The job is marked ``failed`` with a timeout reason; when persisted audit
           state exists it is also flipped to ``success=False`` with that reason.
+        - Raises ``RuntimeError`` if persisting that flipped state fails (after
+          still marking the job failed) so Temporal retries this activity — a
+          transient artifact-store error must not leave ``audit_state_{audit_id}``
+          stale (still looking in-progress) for ``/report``/``/findings`` readers,
+          even though the job record itself was successfully marked failed.
     """
     result = await load_audit_state(audit_id)
     completed = [p.value for p in result.completed_phases] if result is not None else []
     reason = f"Audit timed out after {timebox_hours} hour(s). Completed phases: {completed}"
+    persisted = True
     if result is not None:
         result.success = False
         result.failure_reason = reason
-        await persist_audit_state(result)
+        persisted = await persist_audit_state(result)
     get_job_manager().update_job(
         job_id,
         status=JOB_STATUS_FAILED,
@@ -751,6 +777,8 @@ async def mark_audit_timed_out(job_id: str, audit_id: str, timebox_hours: int) -
         findings_count=result.total_findings if result is not None else 0,
         result=result.model_dump(mode="json") if result is not None else None,
     )
+    if not persisted:
+        raise RuntimeError(f"mark_audit_timed_out: failed to persist audit state for {audit_id}")
 
 
 async def run_retest_job(job_id: str, audit_id: str, finding_ids: List[str]) -> None:

@@ -116,6 +116,17 @@ def test_run_intake_step_failure_sets_failure_reason(monkeypatch):
     assert Phase.INTAKE not in result.completed_phases
 
 
+def test_run_intake_step_raises_when_persist_fails_on_logical_failure(monkeypatch):
+    monkeypatch.setattr(
+        ax,
+        "run_intake_phase",
+        mock.AsyncMock(return_value=IntakeResult(success=False, error="APL failed")),
+    )
+    monkeypatch.setattr(ax, "persist_audit_state", mock.AsyncMock(return_value=False))
+    with pytest.raises(RuntimeError, match="failed to persist audit state"):
+        asyncio.run(ax.run_intake_step("j1", "a1", ax.CreateAuditRequest()))
+
+
 def test_run_intake_step_skips_rerun_when_already_complete(monkeypatch, sample_audit_plan):
     """An at-least-once Temporal retry after intake already succeeded and
     persisted (the completion ack to the server was lost) must not re-run the
@@ -344,6 +355,29 @@ def test_run_discovery_step_failure(monkeypatch, sample_audit_plan):
     assert Phase.DISCOVERY not in result.completed_phases
 
 
+def test_run_discovery_step_raises_when_persist_fails_on_logical_failure(
+    monkeypatch, sample_audit_plan
+):
+    """A store-write failure while persisting a LOGICAL discovery failure must
+    also fail this activity loudly (mirroring the success-path guard) rather than
+    silently returning a failure result whose audit_state was never saved — a
+    concurrent path could otherwise see a stale, not-actually-failed state."""
+    _seed(
+        monkeypatch,
+        AccessibilityAuditResult(
+            audit_id="a1", intake_result=IntakeResult(success=True, audit_plan=sample_audit_plan)
+        ),
+    )
+    monkeypatch.setattr(
+        ax,
+        "run_discovery_phase",
+        mock.AsyncMock(return_value=DiscoveryResult(success=False, error="discovery boom")),
+    )
+    monkeypatch.setattr(ax, "persist_audit_state", mock.AsyncMock(return_value=False))
+    with pytest.raises(RuntimeError, match="failed to persist audit state"):
+        asyncio.run(ax.run_discovery_step("j1", "a1"))
+
+
 def test_run_verification_step_failure(monkeypatch, sample_findings):
     _seed(
         monkeypatch,
@@ -360,6 +394,26 @@ def test_run_verification_step_failure(monkeypatch, sample_findings):
     result = asyncio.run(ax.run_verification_step("j1", "a1", {}))
     assert result.failure_reason == "verif boom"
     assert Phase.VERIFICATION not in result.completed_phases
+
+
+def test_run_verification_step_raises_when_persist_fails_on_logical_failure(
+    monkeypatch, sample_findings
+):
+    _seed(
+        monkeypatch,
+        AccessibilityAuditResult(
+            audit_id="a1",
+            discovery_result=DiscoveryResult(success=True, draft_findings=sample_findings),
+        ),
+    )
+    monkeypatch.setattr(
+        ax,
+        "run_verification_phase",
+        mock.AsyncMock(return_value=VerificationResult(success=False, error="verif boom")),
+    )
+    monkeypatch.setattr(ax, "persist_audit_state", mock.AsyncMock(return_value=False))
+    with pytest.raises(RuntimeError, match="failed to persist audit state"):
+        asyncio.run(ax.run_verification_step("j1", "a1", {}))
 
 
 def test_run_verification_step_raises_when_state_missing(monkeypatch):
@@ -456,6 +510,27 @@ def test_run_report_packaging_step_failure(monkeypatch, sample_findings):
     result = asyncio.run(ax.run_report_packaging_step("j1", "a1"))
     assert result.failure_reason == "report boom"
     assert Phase.REPORT_PACKAGING not in result.completed_phases
+
+
+def test_run_report_packaging_step_raises_when_persist_fails_on_logical_failure(
+    monkeypatch, sample_findings
+):
+    _seed(
+        monkeypatch,
+        AccessibilityAuditResult(
+            audit_id="a1",
+            intake_result=IntakeResult(success=True),
+            verification_result=VerificationResult(success=True, verified_findings=sample_findings),
+        ),
+    )
+    monkeypatch.setattr(
+        ax,
+        "run_report_packaging_phase",
+        mock.AsyncMock(return_value=ReportPackagingResult(success=False, error="report boom")),
+    )
+    monkeypatch.setattr(ax, "persist_audit_state", mock.AsyncMock(return_value=False))
+    with pytest.raises(RuntimeError, match="failed to persist audit state"):
+        asyncio.run(ax.run_report_packaging_step("j1", "a1"))
 
 
 def test_run_report_packaging_step_raises_when_persist_fails(monkeypatch, sample_findings):
@@ -673,6 +748,28 @@ def test_mark_audit_timed_out_without_persisted_state(monkeypatch):
         c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
     ]
     assert failed and "timed out after 1 hour" in failed[0].kwargs["error"]
+
+
+def test_mark_audit_timed_out_raises_when_persist_fails(monkeypatch):
+    """A transient artifact-store failure while persisting the flipped timeout
+    state must still mark the job failed (best-effort, so a client polling job
+    status isn't left hanging) but also raise so Temporal retries this activity —
+    otherwise audit_state_{audit_id} stays stale (not reflecting the timeout) for
+    any /report or /findings reader, with no retry to fix it."""
+    seeded = AccessibilityAuditResult(audit_id="a1", completed_phases=[Phase.INTAKE])
+    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=seeded))
+    monkeypatch.setattr(ax, "persist_audit_state", mock.AsyncMock(return_value=False))
+    jm = mock.Mock()
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+
+    with pytest.raises(RuntimeError, match="failed to persist audit state"):
+        asyncio.run(ax.mark_audit_timed_out("j1", "a1", 2))
+
+    # The job is still marked failed despite the persist failure.
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed
 
 
 def test_load_audit_state_strict_round_trips_like_load(monkeypatch):
