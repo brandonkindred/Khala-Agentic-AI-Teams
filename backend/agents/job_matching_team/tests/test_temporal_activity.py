@@ -92,10 +92,9 @@ class _FakeJobStore:
 class _FakeStore:
     """In-memory stand-in for ``JobMatchingStore`` — records run bookkeeping.
 
-    ``run_status`` is what :meth:`run_status` returns (default ``"running"`` —
-    not completed, so existing fail_scan behavior proceeds unless a test
-    explicitly sets it to ``"completed"`` to exercise the already-completed
-    short-circuit).
+    ``completed_response`` is what :meth:`get_run_response` returns (default
+    None — nothing to rebuild, so existing fail_scan behavior proceeds unless a
+    test explicitly supplies a payload to exercise the self-healing path).
     """
 
     def __init__(
@@ -107,7 +106,8 @@ class _FakeStore:
         seen_raises: bool = False,
         seen: set[str] | None = None,
         run_status: str | None = "running",
-        run_status_raises: bool = False,
+        completed_response=None,
+        get_run_response_raises: bool = False,
     ) -> None:
         self.create_calls: list[tuple] = []
         self.save_calls: list[tuple] = []
@@ -119,7 +119,8 @@ class _FakeStore:
         self._seen_raises = seen_raises
         self._seen = seen or set()
         self._run_status = run_status
-        self._run_status_raises = run_status_raises
+        self._completed_response = completed_response
+        self._get_run_response_raises = get_run_response_raises
 
     def create_run(self, run_id, profile, request):
         self.create_calls.append((run_id, profile, request))
@@ -145,9 +146,12 @@ class _FakeStore:
             raise RuntimeError("mark_failed failed")
 
     def run_status(self, run_id):
-        if self._run_status_raises:
-            raise RuntimeError("run store unreachable")
         return self._run_status
+
+    def get_run_response(self, run_id):
+        if self._get_run_response_raises:
+            raise RuntimeError("run store unreachable")
+        return self._completed_response
 
 
 class _FakeAgent:
@@ -606,28 +610,67 @@ def test_fail_cancellation_check_failure_propagates_instead_of_overwriting(monke
     assert job.updates == []  # job FAILED NOT written on an unverifiable cancel state
 
 
-def test_fail_skips_all_bookkeeping_when_run_already_completed(monkeypatch):
+def _completed_response(**overrides) -> JobMatchResponse:
+    defaults = dict(
+        run_id="run-1",
+        ranked_jobs=[],
+        total_found=0,
+        total_ranked=0,
+        profile_snapshot=JobSeekerProfile(),
+    )
+    defaults.update(overrides)
+    return JobMatchResponse(**defaults)
+
+
+def test_fail_self_heals_job_to_completed_when_run_already_completed(monkeypatch):
     # Bug fix: finalize already saved results and COMPLETEd the run before this
     # failure was recorded (e.g. its post-save cancellation check exhausted
-    # retries) — neither the run nor the job should be marked FAILED over
-    # results that actually exist.
+    # retries) — instead of leaving the job stuck RUNNING (or wrongly FAILED),
+    # fail_scan self-heals it to COMPLETED using the run's persisted results.
     job = _FakeJobStore()
-    store = _FakeStore(run_status="completed")
+    payload = _completed_response(total_found=3)
+    store = _FakeStore(completed_response=payload)
     _patch_stores(monkeypatch, job=job, store=store)
 
     ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
 
     assert store.mark_failed_calls == []
+    assert job.updates == [{"status": "completed", "result": payload.model_dump(mode="json")}]
+
+
+def test_fail_does_not_complete_job_when_already_completed_but_cancelled(monkeypatch):
+    # Self-healing must not complete a job the user genuinely cancelled, even
+    # though the run's results exist — mirrors finalize's own cancellation check.
+    job = _FakeJobStore(cancelled=True)
+    store = _FakeStore(completed_response=_completed_response())
+    _patch_stores(monkeypatch, job=job, store=store)
+
+    ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
+
     assert job.updates == []
 
 
-def test_fail_run_status_probe_failure_raises(monkeypatch):
-    # Bug fix companion: if the run-completion probe itself can't be answered,
-    # don't guess "not completed" — raise so Temporal retries with a fresh read
-    # instead of risking an incorrect FAILED write over a scan that actually
-    # succeeded.
+def test_fail_completed_cancellation_check_failure_propagates(monkeypatch):
+    # If self-healing's own cancellation check can't be answered, don't guess —
+    # raise so Temporal retries with a fresh read rather than risking an
+    # incorrect completion over a job that was actually cancelled.
+    job = _FakeJobStore(cancel_raises=True)
+    store = _FakeStore(completed_response=_completed_response())
+    _patch_stores(monkeypatch, job=job, store=store)
+
+    with pytest.raises(RuntimeError):
+        ActivityEnvironment().run(fail_scan_activity, "job-1", "run-1", "boom", True)
+
+    assert job.updates == []
+
+
+def test_fail_get_run_response_failure_raises(monkeypatch):
+    # Bug fix companion: if rebuilding the run's response fails (run store
+    # unreachable, or the run's persisted data is corrupt), don't guess "not
+    # completed" — raise so Temporal retries with a fresh read instead of
+    # risking an incorrect FAILED write over a scan that actually succeeded.
     job = _FakeJobStore()
-    store = _FakeStore(run_status_raises=True)
+    store = _FakeStore(get_run_response_raises=True)
     _patch_stores(monkeypatch, job=job, store=store)
 
     with pytest.raises(RuntimeError):
@@ -698,6 +741,15 @@ def test_activity_error_message_falls_back_without_cause():
         retry_state=RetryState.TIMEOUT,
     )
     assert wf._activity_error_message(exc) == "Activity task timed out"
+
+
+def test_activity_error_message_falls_back_when_cause_has_no_message():
+    # Bug fix: a bare `raise SomeError()` or an unmessaged `assert` chains a
+    # cause whose str() is "" — that must not silently discard the SDK's
+    # generic-but-non-empty message in favor of a blank diagnostic.
+    exc = _activity_error("job_matching_rank", cause=AssertionError())
+    assert str(exc.__cause__) == ""
+    assert wf._activity_error_message(exc) == "Activity task failed"
 
 
 class _WorkflowStub:
@@ -868,19 +920,9 @@ def test_workflow_fail_scan_error_does_not_fail_workflow(monkeypatch):
     assert stub.calls[-1]["fn"] is wf.fail_scan_activity  # attempted, then swallowed
 
 
-def test_workflow_new_run_never_schedules_legacy_activity(monkeypatch):
-    # A NEW run (patched on) must schedule only the decomposed phases and never
-    # the legacy monolith — guard against a future edit reintroducing it
-    # alongside the phase activities (duplicate scans).
-    stub = _WorkflowStub()
-    _patch_workflow(monkeypatch, stub)
-
-    _run_workflow()
-
-    scheduled = [c["fn"] for c in stub.calls]
-    assert wf.run_scan_activity not in scheduled
-
-
+# The happy-path "never schedules the legacy activity" invariant is already
+# proven by test_workflow_run_delegates_through_phases's exact-list-equality
+# assertion on the scheduled activities — no separate test needed for it.
 def test_workflow_failure_path_never_schedules_legacy_activity(monkeypatch):
     # The invariant also holds on the failure path (which adds fail_scan).
     stub = _WorkflowStub(fail_on=wf.scan_activity)

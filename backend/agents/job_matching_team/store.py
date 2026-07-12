@@ -21,6 +21,7 @@ from shared_postgres.metrics import timed_query
 from .models import (
     LISTING_FILTERS,
     JobMatchRequest,
+    JobMatchResponse,
     JobPosting,
     Listing,
     ListingsResponse,
@@ -264,10 +265,9 @@ class JobMatchingStore:
     def run_status(self, run_id: str) -> Optional[str]:
         """Return the run's current status, or None if unknown.
 
-        Cheap, single-column probe used by ``fail_scan_activity`` to check
-        whether a run already completed before recording a failure over it — a
-        full :meth:`get_run` (which also fetches every ranked row) would be
-        overkill for that check.
+        Cheap, single-column probe for callers that only need the status, not
+        the full run — a :meth:`get_run` (which also fetches every ranked row)
+        or :meth:`get_run_response` would be overkill for that check.
 
         Preconditions:
             * ``run_id`` may or may not have an existing row.
@@ -279,6 +279,46 @@ class JobMatchingStore:
             cur.execute("SELECT status FROM job_matching_runs WHERE run_id = %s", (run_id,))
             row = cur.fetchone()
             return row[0] if row is not None else None
+
+    @timed_query(store=_STORE, op="get_run_response")
+    def get_run_response(self, run_id: str) -> Optional[JobMatchResponse]:
+        """Rebuild a completed run's full response from persisted data.
+
+        Used by ``fail_scan_activity`` to self-heal a job whose own completion
+        write never happened (e.g. a run that finalize durably saved, but whose
+        subsequent cancellation check then failed on every retry) — reconstructs
+        the same :class:`JobMatchResponse` finalize_scan_activity would have
+        returned, from the run row and its ranked-job rows alone.
+
+        Preconditions:
+            * ``run_id`` may or may not have an existing row.
+        Postconditions:
+            * Returns None when no row exists for ``run_id`` or its status is
+              not ``completed`` — there is nothing valid to rebuild.
+            * Otherwise returns the run's :class:`JobMatchResponse`, built from
+              its persisted ``profile_snapshot`` and ranked-job rows (rank
+              order). Raises if the run is completed but its
+              ``profile_snapshot`` is missing or fails validation — a
+              data-integrity problem the caller should not silently paper over
+              by guessing a response, unlike the "nothing to rebuild" None case.
+        """
+        detail = self.get_run(run_id)
+        if detail is None or detail.status != RUN_STATUS_COMPLETED:
+            return None
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT profile_snapshot FROM job_matching_runs WHERE run_id = %s", (run_id,)
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+        return JobMatchResponse(
+            run_id=detail.run_id,
+            ranked_jobs=detail.ranked_jobs,
+            total_found=detail.total_found,
+            total_ranked=detail.total_ranked,
+            profile_snapshot=JobSeekerProfile.model_validate(row[0]),
+        )
 
     @timed_query(store=_STORE, op="list_runs")
     def list_runs(self, *, limit: int = 50) -> List[RunSummary]:

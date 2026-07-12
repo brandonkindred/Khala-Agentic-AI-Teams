@@ -119,14 +119,21 @@ def _activity_error_message(exc: ActivityError) -> str:
     (e.g. "Activity task failed") — the same for every activity type and every
     failure — while the underlying business exception (what a phase actually
     raised) is chained on ``__cause__``. Prefer that; fall back to ``str(exc)``
-    only when there is no cause (e.g. a raw timeout/cancellation).
+    when there is no cause (e.g. a raw timeout/cancellation) or the cause itself
+    has no message (e.g. a bare ``raise SomeError()`` or an unmessaged
+    ``assert``, whose ``str()`` is ``""``) — an empty diagnostic would be worse
+    than the SDK's generic-but-non-empty fallback text.
 
+    Preconditions:
+        * ``exc`` is a caught ``ActivityError``; it need not have a chained
+          ``__cause__`` (a raw timeout/cancellation may not).
     Postconditions:
-        * Returns ``str(exc.__cause__)`` when a cause is chained, else
-          ``str(exc)``.
+        * Returns ``str(exc.__cause__)`` when a cause is chained and that text
+          is non-empty, else ``str(exc)``.
     """
     cause = exc.__cause__
-    return str(cause) if cause is not None else str(exc)
+    cause_text = str(cause) if cause is not None else ""
+    return cause_text or str(exc)
 
 
 @activity.defn(name="job_matching_prepare_scan")
@@ -326,8 +333,10 @@ def finalize_scan_activity(
         * If the cancellation check itself fails, raises so Temporal retries
           finalize (idempotent on ``run_id``) with a fresh read rather than
           completing a possibly-cancelled job; the run row stays COMPLETED across
-          retries and, since ``mark_failed`` won't overwrite it, is never flipped
-          to FAILED if the retries exhaust into ``fail_scan``.
+          retries, and if they exhaust into ``fail_scan``, that activity
+          self-heals the job to COMPLETED from the run's persisted results
+          instead of marking it FAILED (or leaving it stuck RUNNING) over a
+          scan that actually succeeded.
     """
     from job_matching_team.models import JobMatchResponse, RankedJob
     from job_matching_team.profile.model import JobSeekerProfile
@@ -398,25 +407,28 @@ def finalize_scan_activity(
 
 @activity.defn(name="job_matching_fail_scan")
 def fail_scan_activity(job_id: str, run_id: str, error: str, store_ok: bool) -> None:
-    """Record a failed scan on the run row (best effort) and the job store.
+    """Record a failed scan, or self-heal the job if it actually succeeded.
 
     Invoked by the workflow when a pipeline phase exhausts its retries. Marks the
-    run FAILED (when persisted) and the job FAILED (unless cancelled or the run
-    already completed successfully — see Postconditions).
+    run FAILED (when persisted) and the job FAILED, unless the job was cancelled
+    or — the case this activity exists to catch — a later phase already
+    completed the run before this failure was recorded, in which case the job is
+    completed instead of failed (see Postconditions).
 
     Re-running this activity only re-runs status flips — never the scan — so,
-    unlike the monolith, the authoritative *job-status* write is allowed to raise
-    on failure: that lets the bounded ``DEFAULT_RETRY_POLICY`` actually record
-    FAILED once a transient job-store outage clears, instead of silently leaving
-    the job RUNNING. The run-completion probe (``store.run_status``) and the
-    cancellation read are likewise unguarded: a failure in either propagates the
-    same way rather than guessing "not completed" / "not cancelled" and risking
-    an incorrect FAILED write over a scan that actually succeeded or a job the
-    user genuinely cancelled. A sustained outage on any of these exhausts the
-    retries and is swallowed by the workflow's inner ``except ActivityError``,
-    leaving job/run in their last-known state instead of a guessed, possibly
-    wrong one. The run-row ``mark_failed`` write itself is secondary history and
-    stays best-effort (also guarded by its own ``status <> completed`` check).
+    unlike the monolith, every job-store write here is allowed to raise on
+    failure: that lets the bounded ``DEFAULT_RETRY_POLICY`` actually record the
+    right terminal status once a transient outage clears, instead of silently
+    leaving the job RUNNING or guessing. The run-completion rebuild
+    (``store.get_run_response``) and both cancellation reads are likewise
+    unguarded: a failure in any of them propagates the same way rather than
+    guessing "not completed" / "not cancelled" and risking an incorrect FAILED
+    write over a scan that actually succeeded or a job the user genuinely
+    cancelled. A sustained outage on any of these exhausts the retries and is
+    swallowed by the workflow's inner ``except ActivityError``, leaving job/run
+    in their last-known state instead of a guessed, possibly wrong one. The
+    run-row ``mark_failed`` write itself is secondary history and stays
+    best-effort (also guarded by its own ``status <> completed`` check).
 
     Preconditions:
         * ``job_id`` refers to a job row already created by ``POST /scan``.
@@ -426,14 +438,18 @@ def fail_scan_activity(job_id: str, run_id: str, error: str, store_ok: bool) -> 
           a prepare-phase failure, since prepare's only unguarded exception
           paths all precede ``create_run``).
     Postconditions:
-        * If ``store_ok`` and the run's status probe fails (run store
-          unreachable), this raises so Temporal retries rather than guessing
-          the run isn't completed.
+        * If ``store_ok`` and rebuilding the run's response fails (run store
+          unreachable, or the run is completed but its ``profile_snapshot`` is
+          corrupt), this raises so Temporal retries rather than guessing the
+          run isn't completed.
         * If ``store_ok`` and the run already reports ``completed`` (a later
           phase durably saved its results before this failure was recorded —
           e.g. finalize's post-save cancellation check exhausted its retries),
-          this activity is a no-op: neither the run nor the job row is touched,
-          so a scan that actually succeeded is never reported as FAILED.
+          the JOB is COMPLETED with the run's persisted results (unless
+          cancelled, mirroring finalize's own check) instead of ever being
+          marked FAILED or left stuck RUNNING — the whole point of this
+          self-healing path is that a scan that actually succeeded is reported
+          as such.
         * Otherwise the run row is FAILED when ``store_ok`` and not already
           completed; a mark_failed write failure is swallowed (best-effort
           history) — it does not fall under the raise above, since by that
@@ -445,27 +461,34 @@ def fail_scan_activity(job_id: str, run_id: str, error: str, store_ok: bool) -> 
           swallows it (bounded).
     """
     from job_matching_team.shared.job_store import (
+        JOB_STATUS_COMPLETED,
         JOB_STATUS_FAILED,
         is_job_cancelled,
         update_job,
     )
 
     if store_ok:
-        from job_matching_team.store import RUN_STATUS_COMPLETED, get_store
+        from job_matching_team.store import get_store
 
         store = get_store()
-        already_completed = store.run_status(run_id) == RUN_STATUS_COMPLETED
-        if already_completed:
+        completed_payload = store.get_run_response(run_id)
+        if completed_payload is not None:
             # A later phase already saved results and completed the run before
             # this failure was recorded (see the finalize->fail_scan note in
-            # finalize_scan_activity's docstring). Recording FAILED on either
-            # store here would misreport a scan that actually succeeded, so
-            # stop: no run or job write.
-            activity.logger.warning(
-                "Run %s already completed; skipping FAILED bookkeeping for job %s",
-                run_id,
-                job_id,
-            )
+            # finalize_scan_activity's docstring). Self-heal instead of
+            # reporting FAILED (or leaving the job stuck RUNNING) over a scan
+            # that actually succeeded: complete the job with the run's
+            # persisted results. Mirrors finalize's own cancellation check —
+            # only complete when confirmed not cancelled; if that check itself
+            # fails (the same ambiguity that likely routed here), let it
+            # propagate so Temporal retries with a fresh read rather than
+            # guessing.
+            if not is_job_cancelled(job_id):
+                update_job(
+                    job_id,
+                    status=JOB_STATUS_COMPLETED,
+                    result=completed_payload.model_dump(mode="json"),
+                )
             return
         _best_effort(
             activity.logger,

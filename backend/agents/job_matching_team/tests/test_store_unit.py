@@ -165,6 +165,77 @@ def test_run_status_returns_none_for_unknown_run(monkeypatch):
     assert JobMatchingStore().run_status("nope") is None
 
 
+def test_get_run_response_returns_none_for_unknown_run(monkeypatch):
+    cur = FakeCursor(fetchone=[None])
+    _patch_conn(monkeypatch, cur)
+    assert JobMatchingStore().get_run_response("nope") is None
+
+
+def test_get_run_response_returns_none_when_not_completed(monkeypatch):
+    # Nothing valid to rebuild while the run is still running/failed.
+    run_row = {
+        "run_id": "r1",
+        "status": "running",
+        "total_found": 0,
+        "total_ranked": 0,
+        "error": None,
+        "created_at": None,
+        "completed_at": None,
+    }
+    cur = FakeCursor(fetchone=[run_row], fetchall=[[]])
+    _patch_conn(monkeypatch, cur)
+    assert JobMatchingStore().get_run_response("r1") is None
+
+
+def test_get_run_response_rebuilds_completed_response(monkeypatch):
+    run_row = {
+        "run_id": "r1",
+        "status": "completed",
+        "total_found": 2,
+        "total_ranked": 1,
+        "error": None,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "completed_at": "2026-01-01T01:00:00+00:00",
+    }
+    job_rows = [
+        {
+            "score": 0.9,
+            "sub_scores": {"title_fit": 0.8},
+            "posting": {"company": "Acme", "title": "Eng"},
+            "recommendation": "apply",
+            "rationale": "good",
+            "concerns": ["c1"],
+        }
+    ]
+    profile = JobSeekerProfile(target_titles=["Engineer"]).model_dump(mode="json")
+    cur = FakeCursor(fetchone=[run_row, (profile,)], fetchall=[job_rows])
+    _patch_conn(monkeypatch, cur)
+    response = JobMatchingStore().get_run_response("r1")
+    assert response is not None
+    assert response.run_id == "r1"
+    assert response.total_found == 2
+    assert response.total_ranked == 1
+    assert response.ranked_jobs[0].posting.company == "Acme"
+    assert response.profile_snapshot.target_titles == ["Engineer"]
+
+
+def test_get_run_response_returns_none_if_row_vanishes_between_reads(monkeypatch):
+    # Defensive guard for the extreme-edge-case race between the get_run() read
+    # and the follow-up profile_snapshot read.
+    run_row = {
+        "run_id": "r1",
+        "status": "completed",
+        "total_found": 0,
+        "total_ranked": 0,
+        "error": None,
+        "created_at": None,
+        "completed_at": None,
+    }
+    cur = FakeCursor(fetchone=[run_row, None], fetchall=[[]])
+    _patch_conn(monkeypatch, cur)
+    assert JobMatchingStore().get_run_response("r1") is None
+
+
 def test_list_runs_maps_rows(monkeypatch):
     rows = [
         {
