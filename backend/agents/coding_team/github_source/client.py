@@ -620,7 +620,14 @@ class GitHubClient:
         body: str,
     ) -> PullRequest:
         """Patch an existing PR's body. Used to keep a reused PR's description in sync with the
-        latest run (e.g. surfacing tasks that failed on a retry)."""
+        latest run (e.g. surfacing tasks that failed on a retry).
+
+        Preconditions:
+            - ``owner``/``repo``/``number`` identify an existing pull request.
+        Postconditions:
+            - Returns the updated ``PullRequest`` with ``body`` replaced. Raises
+              ``GitHubAPIError`` on any non-2xx.
+        """
         r = self._check(
             self._request(
                 "PATCH",
@@ -635,6 +642,8 @@ class GitHubClient:
     def list_open_pull_requests(self, owner: str, repo: str) -> Iterator[PullRequest]:
         """Yield every open pull request, following ``Link``-header pagination.
 
+        Preconditions:
+            - ``owner``/``repo`` name an existing repository.
         Postconditions:
             - Yields one ``PullRequest`` per open PR in GitHub's response order,
               bounded by ``MAX_ISSUES_TRAVERSED`` to cap an unbounded traversal.
@@ -658,7 +667,15 @@ class GitHubClient:
             url = _parse_next_link(response.headers.get("Link"))
 
     def get_pull_request(self, owner: str, repo: str, number: int) -> PullRequestDetail:
-        """Fetch full detail for one pull request, including its head commit SHA."""
+        """Fetch full detail for one pull request, including its head commit SHA.
+
+        Preconditions:
+            - ``number`` names an existing pull request.
+        Postconditions:
+            - Returns the full ``PullRequestDetail`` (including ``head_sha``, the
+              commit id an inline review must anchor to). Raises ``GitHubAPIError``
+              on any non-2xx.
+        """
         r = self._check(self._request("GET", f"/repos/{owner}/{repo}/pulls/{number}"))
         return _pr_detail_from_payload(r.json())
 
