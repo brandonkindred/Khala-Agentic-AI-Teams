@@ -969,6 +969,140 @@ def test_is_job_terminal_false_when_job_missing():
 
 
 # ---------------------------------------------------------------------------
+# _heartbeat_activity_and_job — combined Temporal + job-service heartbeat
+# ---------------------------------------------------------------------------
+
+
+def test_heartbeat_activity_and_job_pings_both(monkeypatch):
+    from accessibility_audit_team.temporal import activities as acts
+
+    beat = mock.Mock()
+    monkeypatch.setattr(acts.activity, "heartbeat", beat)
+    manager = mock.Mock()
+
+    acts._heartbeat_activity_and_job(manager, "j1")
+
+    beat.assert_called_once()
+    manager.heartbeat.assert_called_once_with("j1")
+
+
+def test_heartbeat_activity_and_job_swallows_job_service_failure(monkeypatch):
+    """A transient job-service hiccup while heartbeating must not raise — the
+    background loop would otherwise treat it as a fatal beat error."""
+    from accessibility_audit_team.temporal import activities as acts
+
+    beat = mock.Mock()
+    monkeypatch.setattr(acts.activity, "heartbeat", beat)
+    manager = mock.Mock()
+    manager.heartbeat.side_effect = RuntimeError("job service unreachable")
+
+    acts._heartbeat_activity_and_job(manager, "j1")  # must not raise
+
+    beat.assert_called_once()
+    manager.heartbeat.assert_called_once_with("j1")
+
+
+def test_heartbeat_activity_and_job_propagates_temporal_cancellation(monkeypatch):
+    """activity.heartbeat() raising (e.g. a Temporal-signaled cancellation) must
+    propagate out — only the job-service heartbeat is swallowed."""
+    from accessibility_audit_team.temporal import activities as acts
+
+    beat = mock.Mock(side_effect=RuntimeError("cancelled"))
+    monkeypatch.setattr(acts.activity, "heartbeat", beat)
+    manager = mock.Mock()
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        acts._heartbeat_activity_and_job(manager, "j1")
+
+    manager.heartbeat.assert_not_called()
+
+
+class _FakeBackgroundHeartbeat:
+    """Stand-in for ``shared_concurrency.BackgroundHeartbeat`` that just captures
+    the ``beat`` callable instead of running a real background thread, so tests
+    can invoke it directly to assert on the combined heartbeat wiring."""
+
+    captured_beat = None
+
+    def __init__(self, beat, interval_s, copy_context=False):
+        _FakeBackgroundHeartbeat.captured_beat = beat
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def test_run_phase_wires_combined_heartbeat(monkeypatch):
+    """A long phase's BackgroundHeartbeat must ping both Temporal and the job
+    service — not just Temporal — or the job row goes stale against the API's
+    independent stale-job monitor while the phase is still healthily running."""
+    import shared_concurrency
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", _FakeBackgroundHeartbeat)
+    beat_activity = mock.Mock()
+    monkeypatch.setattr(acts.activity, "heartbeat", beat_activity)
+
+    async def step():
+        return SimpleNamespace(failure_reason="")
+
+    asyncio.run(acts._run_phase("j1", "a1", "discovery", 40, step, heartbeat=True))
+
+    assert _FakeBackgroundHeartbeat.captured_beat is not None
+    _FakeBackgroundHeartbeat.captured_beat()
+    beat_activity.assert_called_once()
+    jm.heartbeat.assert_called_once_with("j1")
+
+
+def test_finalize_activity_wires_combined_heartbeat(monkeypatch):
+    import shared_concurrency
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = _patch_activity_jobmanager(monkeypatch)
+    jm.get_job.return_value = None
+    monkeypatch.setattr(
+        ax, "finalize_audit_step", mock.AsyncMock(return_value=_finalized_result(True))
+    )
+    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", _FakeBackgroundHeartbeat)
+    beat_activity = mock.Mock()
+    monkeypatch.setattr(acts.activity, "heartbeat", beat_activity)
+
+    asyncio.run(acts.finalize_activity("j1", "a1"))
+
+    assert _FakeBackgroundHeartbeat.captured_beat is not None
+    _FakeBackgroundHeartbeat.captured_beat()
+    beat_activity.assert_called_once()
+    jm.heartbeat.assert_called_once_with("j1")
+
+
+def test_retest_activity_wires_combined_heartbeat(monkeypatch):
+    import shared_concurrency
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = _patch_activity_jobmanager(monkeypatch)
+    jm.get_job.return_value = None
+    monkeypatch.setattr(ax, "run_retest_job", mock.AsyncMock())
+    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", _FakeBackgroundHeartbeat)
+    beat_activity = mock.Mock()
+    monkeypatch.setattr(acts.activity, "heartbeat", beat_activity)
+
+    asyncio.run(acts.retest_activity("j1", "a1", ["f1"]))
+
+    assert _FakeBackgroundHeartbeat.captured_beat is not None
+    _FakeBackgroundHeartbeat.captured_beat()
+    beat_activity.assert_called_once()
+    jm.heartbeat.assert_called_once_with("j1")
+
+
+# ---------------------------------------------------------------------------
 # _run_phase — terminal-write guard and exception handling (direct, no
 # activity wrapper)
 # ---------------------------------------------------------------------------

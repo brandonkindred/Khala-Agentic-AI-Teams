@@ -104,6 +104,41 @@ def _is_job_terminal(manager: Any, job_id: str) -> bool:
     )
 
 
+def _heartbeat_activity_and_job(manager: Any, job_id: str) -> None:
+    """``BackgroundHeartbeat`` callback: pings both Temporal and the job service.
+
+    The API's stale-job monitor (``api/main.py``'s ``start_stale_job_monitor``) is
+    an independent 300-second sweep, completely unrelated to Temporal, that marks
+    any job whose ``last_heartbeat_at`` goes stale as FAILED — it has no way to
+    know a Temporal activity is still healthily running. A long LLM/scan phase's
+    single initial ``RUNNING`` write (the only job-store write for the whole
+    phase, which can run up to ``LLM_PHASE_TIMEOUT``) goes stale well before the
+    phase itself completes, so heartbeating only Temporal (via
+    ``activity.heartbeat``) leaves the job vulnerable to being wrongly marked
+    failed mid-phase. Combined with this module's terminal-write guards (which
+    correctly refuse to let an *abandoned* activity clobber a legitimately
+    decided terminal status), that wrong failure would then also suppress the
+    phase's own later, legitimate completion write — leaving a workflow that
+    actually succeeded stuck showing failed. Heartbeating the job service here
+    keeps ``last_heartbeat_at`` fresh for the whole phase, so the stale monitor
+    never fires on a genuinely alive job in the first place.
+
+    Preconditions:
+        - Called from the ``BackgroundHeartbeat`` thread (or directly).
+    Postconditions:
+        - Always calls ``activity.heartbeat()`` (propagates on Temporal-signaled
+          cancellation, per ``BackgroundHeartbeat``'s contract). A failure
+          heartbeating the job service is logged and swallowed here — a
+          transient job-service hiccup must never suppress the Temporal
+          heartbeat or kill the background loop.
+    """
+    activity.heartbeat()
+    try:
+        manager.heartbeat(job_id)
+    except Exception:
+        logger.warning("Failed to heartbeat job %s", job_id, exc_info=True)
+
+
 async def _best_effort_terminal_fields(audit_id: str) -> Dict[str, Any]:
     """Recover progress/result fields for a terminal write when no fresh result exists.
 
@@ -175,8 +210,11 @@ async def _run_phase(
           fields best-effort recovered from persisted state — see
           :func:`_best_effort_terminal_fields`) so the job is never left stranded
           non-terminal, with a stale partial record, once Temporal gives up retrying.
-        - When ``heartbeat`` is set the step runs under a background heartbeat so a
-          long phase keeps the activity alive and cancellation is deliverable.
+        - When ``heartbeat`` is set the step runs under a background heartbeat
+          (Temporal AND the job service — see :func:`_heartbeat_activity_and_job`)
+          so a long phase keeps the activity alive, cancellation is deliverable,
+          and the job's ``last_heartbeat_at`` stays fresh against the API's
+          independent stale-job monitor.
     """
     from accessibility_audit_team.audit_execution import (
         JOB_STATUS_FAILED,
@@ -194,7 +232,11 @@ async def _run_phase(
         if heartbeat:
             from shared_concurrency import BackgroundHeartbeat
 
-            with BackgroundHeartbeat(activity.heartbeat, _HEARTBEAT_INTERVAL_S, copy_context=True):
+            with BackgroundHeartbeat(
+                lambda: _heartbeat_activity_and_job(manager, job_id),
+                _HEARTBEAT_INTERVAL_S,
+                copy_context=True,
+            ):
                 result = await step()
         else:
             result = await step()
@@ -338,6 +380,10 @@ async def finalize_activity(job_id: str, audit_id: str) -> Dict[str, Any]:
           (guarded against clobbering an already-terminal status, and with
           progress/result fields best-effort recovered from persisted state — see
           :func:`_best_effort_terminal_fields`).
+        - Runs under a background heartbeat (Temporal AND the job service — see
+          :func:`_heartbeat_activity_and_job`) so a long finalize keeps
+          ``last_heartbeat_at`` fresh against the API's independent stale-job
+          monitor.
     """
     from accessibility_audit_team.audit_execution import (
         JOB_STATUS_COMPLETED,
@@ -349,7 +395,11 @@ async def finalize_activity(job_id: str, audit_id: str) -> Dict[str, Any]:
 
     manager = get_job_manager()
     try:
-        with BackgroundHeartbeat(activity.heartbeat, _HEARTBEAT_INTERVAL_S, copy_context=True):
+        with BackgroundHeartbeat(
+            lambda: _heartbeat_activity_and_job(manager, job_id),
+            _HEARTBEAT_INTERVAL_S,
+            copy_context=True,
+        ):
             result = await finalize_audit_step(job_id, audit_id)
     except Exception as exc:
         if _is_last_attempt() and not _is_job_terminal(manager, job_id):
@@ -387,8 +437,11 @@ async def retest_activity(job_id: str, audit_id: str, finding_ids: List[str]) ->
         - ``run_retest_job`` owns the job-store lifecycle (running -> terminal) and
           propagates infrastructure failures so Temporal retries. Returns a status
           dict once the retest reaches a terminal state. Runs under a background
-          heartbeat so a genuinely long retest keeps the activity alive within the
-          workflow's ``heartbeat_timeout`` instead of being timed out mid-run.
+          heartbeat (Temporal AND the job service — see
+          :func:`_heartbeat_activity_and_job`) so a genuinely long retest keeps
+          the activity alive within the workflow's ``heartbeat_timeout`` instead
+          of being timed out mid-run, and keeps ``last_heartbeat_at`` fresh
+          against the API's independent stale-job monitor.
         - An exception raised by ``run_retest_job`` propagates so Temporal retries;
           on the LAST scheduled attempt it also marks the job FAILED first (guarded
           against clobbering an already-terminal status, and with progress/result
@@ -406,7 +459,11 @@ async def retest_activity(job_id: str, audit_id: str, finding_ids: List[str]) ->
 
     manager = get_job_manager()
     try:
-        with BackgroundHeartbeat(activity.heartbeat, _HEARTBEAT_INTERVAL_S, copy_context=True):
+        with BackgroundHeartbeat(
+            lambda: _heartbeat_activity_and_job(manager, job_id),
+            _HEARTBEAT_INTERVAL_S,
+            copy_context=True,
+        ):
             await run_retest_job(job_id, audit_id, finding_ids)
     except Exception as exc:
         if _is_last_attempt() and not _is_job_terminal(manager, job_id):
