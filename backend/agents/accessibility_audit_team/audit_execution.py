@@ -442,8 +442,24 @@ async def run_intake_step(
           ``success=False`` and ``failure_reason`` set when intake fails. Either
           way the state is persisted. An infrastructure failure inside the phase
           propagates.
+        - If intake was already recorded complete under ``audit_id`` (an
+          at-least-once Temporal retry after the prior attempt's persist
+          succeeded but its completion ack was lost), the already-persisted
+          result is returned as-is WITHOUT re-running intake — that work is
+          nondeterministic, and a retry re-running it would overwrite the
+          originally persisted audit plan/coverage matrix with a second,
+          possibly-different one (see :func:`run_discovery_step` for the same
+          contract on the other phases).
     """
     logger.info("Intake step for job %s audit %s", job_id, audit_id)
+
+    existing = await load_audit_state(audit_id)
+    if existing is not None and Phase.INTAKE in existing.completed_phases:
+        logger.info(
+            "Intake step for job %s audit %s already complete; skipping re-run", job_id, audit_id
+        )
+        return existing
+
     audit_request = build_audit_request(request, audit_id)
     result = AccessibilityAuditResult(audit_id=audit_id, current_phase=Phase.INTAKE)
 

@@ -116,6 +116,28 @@ def test_run_intake_step_failure_sets_failure_reason(monkeypatch):
     assert Phase.INTAKE not in result.completed_phases
 
 
+def test_run_intake_step_skips_rerun_when_already_complete(monkeypatch, sample_audit_plan):
+    """An at-least-once Temporal retry after intake already succeeded and
+    persisted (the completion ack to the server was lost) must not re-run the
+    nondeterministic intake LLM call and overwrite the originally persisted
+    audit plan/coverage matrix with a second, possibly-different one."""
+    seeded = AccessibilityAuditResult(
+        audit_id="a1",
+        intake_result=IntakeResult(success=True, audit_plan=sample_audit_plan),
+        completed_phases=[Phase.INTAKE],
+    )
+    asyncio.run(ax.persist_audit_state(seeded))
+    phase_fn = mock.AsyncMock()
+    monkeypatch.setattr(ax, "run_intake_phase", phase_fn)
+
+    result = asyncio.run(ax.run_intake_step("j1", "a1", ax.CreateAuditRequest(web_urls=[])))
+
+    phase_fn.assert_not_called()
+    assert result.audit_id == "a1"
+    assert result.completed_phases == [Phase.INTAKE]
+    assert result.intake_result.audit_plan.audit_id == sample_audit_plan.audit_id
+
+
 # ---------------------------------------------------------------------------
 # run_discovery_step / run_verification_step / run_report_packaging_step
 # ---------------------------------------------------------------------------

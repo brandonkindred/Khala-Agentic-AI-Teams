@@ -1108,15 +1108,18 @@ def test_retest_activity_wires_combined_heartbeat(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_run_phase_skips_terminal_write_when_job_already_terminal_on_fail(monkeypatch):
+def test_run_phase_skips_terminal_write_when_job_becomes_terminal_during_step(monkeypatch):
     """A logical phase failure's terminal write is skipped when a concurrent path
-    (e.g. a timebox timeout racing an abandoned activity) already marked the job
-    terminal — but the returned status still reflects this attempt's own outcome."""
+    (e.g. a timebox timeout racing an abandoned activity) marks the job terminal
+    WHILE step() is still running — but the returned status still reflects this
+    attempt's own outcome. (The job is NOT terminal yet at the upfront check, so
+    the phase still runs; it only becomes terminal by the time the post-step
+    terminal write is considered.)"""
     from accessibility_audit_team import audit_execution as ax
     from accessibility_audit_team.temporal import activities as acts
 
     jm = mock.Mock()
-    jm.get_job.return_value = {"status": ax.JOB_STATUS_COMPLETED}
+    jm.get_job.side_effect = [None, {"status": ax.JOB_STATUS_COMPLETED}]
     monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
 
     out = asyncio.run(
@@ -1127,6 +1130,31 @@ def test_run_phase_skips_terminal_write_when_job_already_terminal_on_fail(monkey
         c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
     ]
     assert not failed_writes
+
+
+def test_run_phase_skips_phase_entirely_when_job_already_terminal_from_start(monkeypatch):
+    """If the job is ALREADY terminal before this attempt even starts (a previous
+    attempt of this activity already decided the outcome, but Temporal never got
+    the completion signal and retries it), the phase work must not run at all —
+    running it again is wasteful and, if it happened to succeed this time, would
+    let the workflow continue while the job row stays stuck on the earlier
+    terminal failure."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_FAILED}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    step = mock.AsyncMock()
+
+    out = asyncio.run(acts._run_phase("j1", "a1", "discovery", 40, step))
+
+    step.assert_not_called()
+    assert out == {"status": "FAIL", "audit_id": "a1", "error": "job already terminal"}
+    running_writes = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_RUNNING
+    ]
+    assert not running_writes
 
 
 def test_run_phase_writes_terminal_fail_when_job_not_yet_terminal(monkeypatch):
@@ -1145,31 +1173,6 @@ def test_run_phase_writes_terminal_fail_when_job_not_yet_terminal(monkeypatch):
         c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
     ]
     assert failed_writes and failed_writes[0].kwargs.get("error") == "boom"
-
-
-def test_run_phase_skips_initial_running_write_when_job_already_terminal(monkeypatch):
-    """A retry of this activity that fires after a previous attempt's terminal
-    write actually landed (but the client lost the ack, so Temporal thinks it
-    needs to retry) must not clobber that terminal status back to RUNNING before
-    re-running the phase — the initial progress write is guarded exactly like the
-    terminal writes are."""
-    from accessibility_audit_team import audit_execution as ax
-    from accessibility_audit_team.temporal import activities as acts
-
-    jm = mock.Mock()
-    jm.get_job.return_value = {"status": ax.JOB_STATUS_FAILED}
-    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
-
-    async def step():
-        return SimpleNamespace(failure_reason="")
-
-    out = asyncio.run(acts._run_phase("j1", "a1", "discovery", 40, step))
-
-    assert out == {"status": "PASS", "audit_id": "a1"}
-    running_writes = [
-        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_RUNNING
-    ]
-    assert not running_writes
 
 
 def test_run_phase_writes_initial_running_when_job_not_terminal(monkeypatch):
@@ -1303,12 +1306,15 @@ def test_run_phase_does_not_mark_failed_when_not_last_attempt(monkeypatch):
     assert not failed
 
 
-def test_run_phase_exception_on_last_attempt_skips_write_when_already_terminal(monkeypatch):
+def test_run_phase_exception_skips_write_when_job_becomes_terminal_during_step(monkeypatch):
+    """As with the logical-failure case, the job is NOT terminal yet at the
+    upfront check (so step() still runs and raises), but becomes terminal by the
+    time the exception handler's own terminal write is considered."""
     from accessibility_audit_team import audit_execution as ax
     from accessibility_audit_team.temporal import activities as acts
 
     jm = mock.Mock()
-    jm.get_job.return_value = {"status": ax.JOB_STATUS_COMPLETED}
+    jm.get_job.side_effect = [None, {"status": ax.JOB_STATUS_COMPLETED}]
     monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
     monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
 
@@ -1322,6 +1328,24 @@ def test_run_phase_exception_on_last_attempt_skips_write_when_already_terminal(m
         c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
     ]
     assert not failed
+
+
+def test_run_phase_exception_propagates_without_running_when_job_already_terminal(monkeypatch):
+    """The upfront short-circuit applies to the exception path too: if the job is
+    already terminal before this attempt starts, step() (and its exception) never
+    runs at all — the phase short-circuits with a FAIL status instead."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_FAILED}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    step = mock.AsyncMock(side_effect=RuntimeError("infra boom"))
+
+    out = asyncio.run(acts._run_phase("j1", "a1", "discovery", 40, step))
+
+    step.assert_not_called()
+    assert out == {"status": "FAIL", "audit_id": "a1", "error": "job already terminal"}
 
 
 # ---------------------------------------------------------------------------
@@ -1552,15 +1576,17 @@ def test_finalize_activity_exception_recovers_progress_and_result_from_persisted
     assert kwargs.get("result") == {"audit_id": "a1", "success": False}
 
 
-def test_finalize_activity_skips_terminal_write_when_already_terminal(monkeypatch):
-    """A concurrent path (e.g. a timebox timeout) already marked the job terminal
-    while this attempt was in flight — the terminal write is skipped so it can't
-    clobber that status, but the returned status still reflects this attempt."""
+def test_finalize_activity_skips_terminal_write_when_job_becomes_terminal_during_run(monkeypatch):
+    """A concurrent path (e.g. a timebox timeout) marks the job terminal WHILE
+    finalize_audit_step is still running — the job is NOT terminal yet at the
+    upfront check (so finalize still runs), but the terminal write is skipped
+    because it becomes terminal by the time that write is considered; the
+    returned status still reflects this attempt's own outcome."""
     from accessibility_audit_team import audit_execution as ax
     from accessibility_audit_team.temporal import activities as acts
 
     jm = _patch_activity_jobmanager(monkeypatch)
-    jm.get_job.return_value = {"status": ax.JOB_STATUS_FAILED}
+    jm.get_job.side_effect = [None, {"status": ax.JOB_STATUS_FAILED}]
     monkeypatch.setattr(
         ax, "finalize_audit_step", mock.AsyncMock(return_value=_finalized_result(True))
     )
@@ -1571,6 +1597,42 @@ def test_finalize_activity_skips_terminal_write_when_already_terminal(monkeypatc
         c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_COMPLETED
     ]
     assert not completed
+
+
+def test_finalize_activity_skips_entirely_when_job_already_failed_from_start(monkeypatch):
+    """If the job is ALREADY terminal before this attempt even starts (a previous
+    finalize attempt already decided the outcome, but Temporal never got the
+    completion signal and retries it), finalize_audit_step must not run again —
+    the existing terminal status is reported back as-is."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = _patch_activity_jobmanager(monkeypatch)
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_FAILED}
+    finalize_step = mock.AsyncMock()
+    monkeypatch.setattr(ax, "finalize_audit_step", finalize_step)
+
+    out = asyncio.run(acts.finalize_activity("j1", "a1"))
+
+    finalize_step.assert_not_called()
+    assert out == {"status": "FAIL", "audit_id": "a1"}
+
+
+def test_finalize_activity_skips_entirely_when_job_already_completed_from_start(monkeypatch):
+    """Same short-circuit, but reflecting the EXISTING COMPLETED status as PASS
+    rather than assuming FAILED."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = _patch_activity_jobmanager(monkeypatch)
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_COMPLETED}
+    finalize_step = mock.AsyncMock()
+    monkeypatch.setattr(ax, "finalize_audit_step", finalize_step)
+
+    out = asyncio.run(acts.finalize_activity("j1", "a1"))
+
+    finalize_step.assert_not_called()
+    assert out == {"status": "PASS", "audit_id": "a1"}
 
 
 def test_retest_activity_delegates_to_run_retest_job(monkeypatch):

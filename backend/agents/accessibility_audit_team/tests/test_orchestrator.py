@@ -185,21 +185,45 @@ async def test_run_retest_persists_updated_state(monkeypatch, sample_findings):
 
 
 @pytest.mark.anyio
-async def test_run_retest_no_findings_persists_state(monkeypatch, sample_findings):
-    """The "nothing to retest" early-return branch must still persist the updated
+async def test_run_retest_no_finding_ids_and_none_pending_persists_state(monkeypatch):
+    """The legitimate "nothing to retest" case (no finding_ids requested, and the
+    audit genuinely has no final findings) must still persist the updated
     summary — otherwise the note never survives a restart/reload, unlike every
     other branch of run_retest."""
     orchestrator = AccessibilityAuditOrchestrator()
     orchestrator._audits["audit_rt"] = AccessibilityAuditResult(
-        audit_id="audit_rt", final_findings=sample_findings
+        audit_id="audit_rt", final_findings=[]
+    )
+    persist = AsyncMock()
+    monkeypatch.setattr(orchestrator, "_persist_audit", persist)
+
+    result = await orchestrator.run_retest("audit_rt", None)
+
+    assert result.summary == "No findings to retest"
+    persist.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_run_retest_unmatched_finding_ids_fails_without_persisting(
+    monkeypatch, sample_findings
+):
+    """A typo'd or stale finding_id that matches nothing is a caller-input error,
+    not a legitimate "nothing to retest" state — it must NOT overwrite the
+    completed audit's persisted summary/state with a no-op notice."""
+    orchestrator = AccessibilityAuditOrchestrator()
+    orchestrator._audits["audit_rt"] = AccessibilityAuditResult(
+        audit_id="audit_rt", final_findings=sample_findings, summary="Audit complete. 3 findings."
     )
     persist = AsyncMock()
     monkeypatch.setattr(orchestrator, "_persist_audit", persist)
 
     result = await orchestrator.run_retest("audit_rt", ["does-not-exist"])
 
-    assert result.summary == "No findings to retest"
-    persist.assert_awaited_once()
+    assert result.success is False
+    assert "does-not-exist" in result.failure_reason
+    persist.assert_not_awaited()
+    # The cached audit's own state must be untouched by the failed request.
+    assert orchestrator._audits["audit_rt"].summary == "Audit complete. 3 findings."
 
 
 def test_get_retest_lock_returns_same_lock_for_same_audit_id():

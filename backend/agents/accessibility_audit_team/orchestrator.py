@@ -445,13 +445,26 @@ class AccessibilityAuditOrchestrator:
                 # Get findings to retest
                 if finding_ids:
                     findings_to_retest = [f for f in result.final_findings if f.id in finding_ids]
+                    if not findings_to_retest:
+                        # None of the caller-supplied ids matched a current finding
+                        # (a typo'd or stale finding_id) — a caller-input error, not
+                        # a legitimate "nothing to retest" state. Report failure
+                        # WITHOUT touching the persisted audit: mutating result.summary
+                        # here would permanently overwrite a completed audit's real
+                        # report summary even though no retest actually ran.
+                        return AccessibilityAuditResult(
+                            audit_id=audit_id,
+                            success=False,
+                            failure_reason=(
+                                f"No matching findings for the supplied finding_ids: {finding_ids}"
+                            ),
+                        )
                 else:
                     findings_to_retest = result.final_findings
-
-                if not findings_to_retest:
-                    result.summary = "No findings to retest"
-                    await self._persist_audit(result)
-                    return result
+                    if not findings_to_retest:
+                        result.summary = "No findings to retest"
+                        await self._persist_audit(result)
+                        return result
 
                 # Run retest phase
                 logger.info("Starting retest phase for audit %s", audit_id)

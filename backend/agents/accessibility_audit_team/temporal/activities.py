@@ -189,13 +189,18 @@ async def _run_phase(
           returning the awaitable phase step (which returns an
           ``AccessibilityAuditResult``).
     Postconditions:
-        - Writes ``RUNNING``/``current_phase``/``progress`` before running the step,
-          UNLESS the job has already reached a terminal status (guarded the same
-          way the terminal writes below are) — otherwise a retry of this activity
-          that fires after a previous attempt's terminal write actually landed
-          (but the client lost the ack, so Temporal thinks it needs to retry)
-          would clobber that terminal status back to RUNNING before re-running
-          the phase.
+        - If the job has already reached a terminal status when this attempt
+          starts — a previous attempt of THIS activity already wrote a logical
+          failure or an infra-exception's last-attempt failure, or a concurrent
+          path like ``mark_timed_out_activity`` did, but Temporal never received
+          the completion signal and retries it — the phase is NOT run at all:
+          re-running it would be wasteful, and if this retry's nondeterministic
+          outcome happened to differ (e.g. now PASS), reporting that to the
+          workflow would let it continue while the job row stays stuck showing
+          the earlier terminal failure. Returns ``{"status": "FAIL", ...}``
+          immediately without touching the job store.
+        - Otherwise writes ``RUNNING``/``current_phase``/``progress`` before
+          running the step.
         - On a *logical* phase failure (``result.failure_reason`` set), the terminal
           job-store write (with the phase's full partial result) is skipped if a
           concurrent path already marked the job terminal (e.g. a timebox timeout
@@ -223,10 +228,13 @@ async def _run_phase(
     )
 
     manager = get_job_manager()
-    if not _is_job_terminal(manager, job_id):
-        manager.update_job(
-            job_id, status=JOB_STATUS_RUNNING, current_phase=phase_name, progress=progress
-        )
+    if _is_job_terminal(manager, job_id):
+        logger.warning("Skipping %s phase for job %s: job is already terminal", phase_name, job_id)
+        return {"status": "FAIL", "audit_id": audit_id, "error": "job already terminal"}
+
+    manager.update_job(
+        job_id, status=JOB_STATUS_RUNNING, current_phase=phase_name, progress=progress
+    )
 
     try:
         if heartbeat:
@@ -369,12 +377,21 @@ async def finalize_activity(job_id: str, audit_id: str) -> Dict[str, Any]:
     Preconditions:
         - Report packaging has persisted state under ``audit_id``.
     Postconditions:
-        - Marks the job ``completed`` (severity counts + full result dump) at 100%,
-          or ``failed`` if the finalized result is unsuccessful. The terminal write
-          is skipped if a concurrent path already marked the job terminal (e.g. a
-          timebox timeout racing an abandoned, still-running activity). Idempotent
-          otherwise: a Temporal retry re-writes the same terminal state. Returns a
-          status dict that always reflects this attempt's own outcome.
+        - If the job has already reached a terminal status when this attempt
+          starts (a previous attempt of finalize already wrote ``completed``/
+          ``failed``, but Temporal never received the completion signal and
+          retries it), ``finalize_audit_step`` is NOT run again — that would be
+          wasteful and, if report packaging's own persisted state changed in the
+          meantime, could disagree with the already-recorded outcome. Returns a
+          status dict reflecting the EXISTING terminal status immediately,
+          without touching the job store or running the heartbeat.
+        - Otherwise marks the job ``completed`` (severity counts + full result
+          dump) at 100%, or ``failed`` if the finalized result is unsuccessful.
+          The terminal write is skipped if a concurrent path already marked the
+          job terminal in the meantime (e.g. a timebox timeout racing an
+          abandoned, still-running activity). Idempotent otherwise: a Temporal
+          retry re-writes the same terminal state. Returns a status dict that
+          always reflects this attempt's own outcome.
         - An exception raised while assembling the result propagates so Temporal
           retries; on the last scheduled attempt it also marks the job FAILED first
           (guarded against clobbering an already-terminal status, and with
@@ -394,6 +411,14 @@ async def finalize_activity(job_id: str, audit_id: str) -> Dict[str, Any]:
     from shared_concurrency import BackgroundHeartbeat
 
     manager = get_job_manager()
+    existing = manager.get_job(job_id)
+    if existing is not None and existing.get("status") in (JOB_STATUS_COMPLETED, JOB_STATUS_FAILED):
+        logger.warning("Skipping finalize for job %s: job is already terminal", job_id)
+        return {
+            "status": "PASS" if existing.get("status") == JOB_STATUS_COMPLETED else "FAIL",
+            "audit_id": audit_id,
+        }
+
     try:
         with BackgroundHeartbeat(
             lambda: _heartbeat_activity_and_job(manager, job_id),
