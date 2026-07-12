@@ -140,6 +140,65 @@ def test_cancellation_trips_stop_controller(monkeypatch) -> None:
     assert run_result["session_id"] == "pt-3"
 
 
+class _StubSession:
+    """Mutable stand-in for a PaperTradingSession with a real enum ``status``."""
+
+    def __init__(self, status) -> None:
+        self.status = status
+        self.terminated_reason = None
+        self.error = None
+        self.completed_at = None
+
+
+def test_mark_stopped_activity_marks_active_session_failed(monkeypatch) -> None:
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus
+    from investment_team.temporal.paper_trading import mark_paper_trading_stopped_activity
+
+    stub = _StubSession(PaperTradingStatus.OPENING)
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", {"pt-9": {"status": "opening"}})
+    monkeypatch.setattr(
+        inv_models.PaperTradingSession, "parse_persisted", staticmethod(lambda raw: stub)
+    )
+
+    result = mark_paper_trading_stopped_activity("pt-9")
+
+    assert result == {"session_id": "pt-9", "status": "failed"}
+    assert stub.status == PaperTradingStatus.FAILED
+    assert stub.terminated_reason == "user_stop"
+    assert stub.completed_at is not None
+
+
+def test_mark_stopped_activity_is_noop_on_terminal_session(monkeypatch) -> None:
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus
+    from investment_team.temporal.paper_trading import mark_paper_trading_stopped_activity
+
+    stub = _StubSession(PaperTradingStatus.COMPLETED)
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", {"pt-10": {"status": "completed"}})
+    monkeypatch.setattr(
+        inv_models.PaperTradingSession, "parse_persisted", staticmethod(lambda raw: stub)
+    )
+
+    result = mark_paper_trading_stopped_activity("pt-10")
+
+    assert result == {"session_id": "pt-10", "status": "completed"}
+    assert stub.terminated_reason is None  # left untouched
+
+
+def test_mark_stopped_activity_missing_session(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.temporal.paper_trading import mark_paper_trading_stopped_activity
+
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", {})
+    assert mark_paper_trading_stopped_activity("nope") == {
+        "session_id": "nope",
+        "status": "unknown",
+    }
+
+
 def test_status_reflects_persisted_session(monkeypatch) -> None:
     from investment_team import models as inv_models
     from investment_team.api import main as api_main

@@ -3367,18 +3367,12 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     # completes in seconds and isn't subject to the "one at a time"
     # invariant.
     if use_live:
-        _active_states = {
-            PaperTradingStatus.OPENING,
-            PaperTradingStatus.WARMING_UP,
-            PaperTradingStatus.LIVE,
-            PaperTradingStatus.RUNNING,  # legacy value — treat as active too
-        }
         with _lock:
             for existing in _paper_trading_sessions.values():
                 existing_session = PaperTradingSession.parse_persisted(existing)
                 if (
                     existing_session.strategy.strategy_id == strategy.strategy_id
-                    and existing_session.status in _active_states
+                    and existing_session.status in _ACTIVE_PT_STATES
                 ):
                     raise HTTPException(
                         status_code=409,
@@ -3414,16 +3408,30 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     # in; otherwise the legacy recent-OHLCV replay path runs. Both execute inside
     # ``run_paper_trading_activity`` on the investment task queue, so a worker
     # crash resumes/records via the persisted session rather than a lost thread.
-    _start_paper_trading(
-        session_id,
-        {
-            "session_id": session_id,
-            "lab_record_id": request.lab_record_id,
-            "use_live": use_live,
-            "request": request.model_dump(mode="json"),
-            "max_hours": request.max_hours,
-        },
-    )
+    # A dispatch failure (Temporal down / worker not connected) must not leave the
+    # session stuck ``running`` — that would block future live starts for this
+    # strategy via the concurrency guard — so roll it forward to ``failed``.
+    try:
+        _start_paper_trading(
+            session_id,
+            {
+                "session_id": session_id,
+                "lab_record_id": request.lab_record_id,
+                "use_live": use_live,
+                "request": request.model_dump(mode="json"),
+                "max_hours": request.max_hours,
+            },
+        )
+    except Exception as exc:
+        _fail_paper_trading_session(
+            session_id, "Failed to start the paper-trading workflow (Temporal unavailable)."
+        )
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to start the paper-trading workflow; Temporal worker unavailable.",
+        ) from exc
 
     return PaperTradingResponse(
         session=running_session,
@@ -3454,6 +3462,37 @@ def _live_paper_enabled() -> bool:
 # controller by session_id and calls ``request_stop()``; the running session
 # polls it between bars. Guarded by ``_lock`` shared with other session state.
 _live_paper_stop_controllers: Dict[str, Any] = {}
+
+# Paper-trading statuses that mean a session is still in flight. Used by the
+# live-session concurrency guard and by ``/stop`` to stay idempotent (a terminal
+# session has a closed workflow, so signalling it would error). ``RUNNING`` is
+# the legacy pre-live value, treated as active too.
+_ACTIVE_PT_STATES = {
+    PaperTradingStatus.OPENING,
+    PaperTradingStatus.WARMING_UP,
+    PaperTradingStatus.LIVE,
+    PaperTradingStatus.RUNNING,
+}
+
+
+def _fail_paper_trading_session(session_id: str, error: str) -> None:
+    """Mark a paper-trading session ``failed`` (best-effort).
+
+    Preconditions:
+        - ``session_id`` may or may not exist in ``_paper_trading_sessions``.
+    Postconditions:
+        - If the session exists, its status is ``FAILED`` with ``error`` and a
+          ``completed_at`` stamp; otherwise a no-op. Never raises.
+    """
+    with _lock:
+        raw = _paper_trading_sessions.get(session_id)
+        if raw is None:
+            return
+        session = PaperTradingSession.parse_persisted(raw)
+        session.status = PaperTradingStatus.FAILED
+        session.error = error
+        session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+        _paper_trading_sessions[session_id] = session
 
 
 # Default fees used when the request omits explicit overrides. Sits at module
@@ -3613,10 +3652,36 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
         )
     session = PaperTradingSession.parse_persisted(raw)
 
+    # Idempotent: a terminal session's workflow is already closed, and Temporal
+    # rejects signals to closed executions — so only signal an in-flight session
+    # and return a terminal one unchanged.
+    if session.status not in _ACTIVE_PT_STATES:
+        return PaperTradingResponse(
+            session=session,
+            message="Session already finished; nothing to stop.",
+        )
+
     # Deliver the stop durably: the ``stop`` signal cancels the running
     # ``PaperTradingWorkflow`` activity, which trips the session's StopController
     # so the live loop ends at the next bar (replacing the old in-process poke).
-    _signal_paper_trading_stop(session_id)
+    # A race where the workflow closes between our read and the signal must not
+    # 500 the (idempotent) stop route, so swallow a closed/not-found signal error
+    # — but let a 503 (Temporal disabled) surface as before.
+    try:
+        _signal_paper_trading_stop(session_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning(
+            "Stop signal for paper-trading session %s failed (workflow likely already "
+            "closed); returning current session.",
+            session_id,
+            exc_info=True,
+        )
+        return PaperTradingResponse(
+            session=session,
+            message="Stop requested. Poll the session to see the final state.",
+        )
 
     session.user_stop_requested_at = datetime.now(tz=timezone.utc).isoformat()
     with _lock:

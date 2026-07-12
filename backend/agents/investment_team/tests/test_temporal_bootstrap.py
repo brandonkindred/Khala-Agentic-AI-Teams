@@ -63,6 +63,7 @@ def test_workflows_and_activities_are_registered() -> None:
     assert {a.__name__ for a in ACTIVITIES} == {
         "run_backtest_activity",
         "run_paper_trading_activity",
+        "mark_paper_trading_stopped_activity",
     }
     assert TASK_QUEUE == "investment-queue"
     assert WORKFLOW_ID_PREFIX == "investment-"

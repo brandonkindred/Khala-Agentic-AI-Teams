@@ -23,6 +23,7 @@ from investment_team.temporal.advisory import (
 )
 from investment_team.temporal.paper_trading import (
     PaperTradingWorkflow,
+    mark_paper_trading_stopped_activity,
     run_paper_trading_activity,
 )
 from investment_team.temporal.workflows import (
@@ -35,7 +36,11 @@ from investment_team.temporal.workflows import (
 # coarse ``investment-queue`` now serves the ad hoc single-backtest workflow and
 # the long-running paper-trading workflow (both coarse, one long activity each).
 WORKFLOWS = [InvestmentBacktestWorkflow, PaperTradingWorkflow]
-ACTIVITIES = [run_backtest_activity, run_paper_trading_activity]
+ACTIVITIES = [
+    run_backtest_activity,
+    run_paper_trading_activity,
+    mark_paper_trading_stopped_activity,
+]
 TASK_QUEUE = "investment-queue"
 WORKFLOW_ID_PREFIX = "investment-"
 
@@ -50,6 +55,7 @@ __all__ = [
     "TASK_QUEUE",
     "WORKFLOWS",
     "WORKFLOW_ID_PREFIX",
+    "mark_paper_trading_stopped_activity",
     "run_backtest_activity",
     "run_paper_trading_activity",
 ]

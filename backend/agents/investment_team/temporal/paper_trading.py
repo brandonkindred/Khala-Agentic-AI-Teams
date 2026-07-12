@@ -155,6 +155,49 @@ def run_paper_trading_activity(payload: dict[str, Any]) -> dict[str, Any]:
     return {"session_id": session_id, "status": status}
 
 
+@activity.defn(name="investment_mark_paper_trading_stopped")
+def mark_paper_trading_stopped_activity(session_id: str) -> dict[str, Any]:
+    """Persist a terminal state for a session stopped before its run began.
+
+    Compensation for the race where ``stop`` is signalled while
+    :func:`run_paper_trading_activity` is still *scheduled* — that activity is
+    cancelled before it can create its StopController / write the session, so
+    without this the session would sit ``running``/``opening`` forever (blocking
+    future live starts). Idempotent: leaves an already-terminal session as-is.
+
+    Preconditions:
+        - ``session_id`` may or may not exist in ``_paper_trading_sessions``.
+    Postconditions:
+        - When the session exists and is not already ``COMPLETED``/``FAILED``, it
+          is marked ``FAILED`` with ``terminated_reason="user_stop"`` and a
+          ``completed_at`` stamp. Returns ``{"session_id", "status"}``.
+    """
+    from investment_team.api.main import _lock, _paper_trading_sessions
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    with _lock:
+        raw = _paper_trading_sessions.get(session_id)
+        if raw is None:
+            return {"session_id": session_id, "status": "unknown"}
+        session = PaperTradingSession.parse_persisted(raw)
+        if session.status in (PaperTradingStatus.COMPLETED, PaperTradingStatus.FAILED):
+            return {"session_id": session_id, "status": session.status.value}
+        from datetime import datetime, timezone
+
+        session.status = PaperTradingStatus.FAILED
+        session.terminated_reason = "user_stop"
+        session.error = "Paper trading stopped before the session started."
+        session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+        _paper_trading_sessions[session_id] = session
+    return {"session_id": session_id, "status": session.status.value}
+
+
+# Bound, retrying policy for the short compensation activity (it only writes the
+# job store, so a transient store error is worth a couple of retries).
+_STOP_COMPENSATION_RETRY = RetryPolicy(maximum_attempts=3)
+_STOP_COMPENSATION_TIMEOUT = timedelta(seconds=30)
+
+
 @workflow.defn(name="InvestmentPaperTradingWorkflow")
 class PaperTradingWorkflow:
     """Durable wrapper around a single paper-trading session.
@@ -181,10 +224,14 @@ class PaperTradingWorkflow:
               wall-clock guard) used to size the activity timeout.
 
         Postconditions:
-            - Returns the activity result (``{"session_id", "status"}``), or
-              ``{"session_id", "status": "stopped"}`` if the ``stop`` signal
-              cancelled the activity before it returned.
+            - Returns the activity result (``{"session_id", "status"}``). On a
+              ``stop`` signal before the activity completes, cancels it, ensures a
+              terminal session state is persisted (via
+              :func:`mark_paper_trading_stopped_activity` — needed when the
+              activity was cancelled before it ever wrote the session), and
+              returns ``{"session_id", "status": "stopped"}``.
         """
+        session_id = payload.get("session_id")
         max_hours = float(payload.get("max_hours") or _DEFAULT_MAX_HOURS)
         self._handle = workflow.start_activity(
             run_paper_trading_activity,
@@ -194,20 +241,38 @@ class PaperTradingWorkflow:
             retry_policy=_PT_RETRY,
             cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
         )
-        try:
-            result = await self._handle
-        except asyncio.CancelledError:
+
+        # Race the activity against a stop signal. ``wait_condition`` wakes on the
+        # signal or on the activity completing (both are workflow events).
+        await workflow.wait_condition(lambda: self._stop_requested or self._handle.done())
+
+        if self._stop_requested and not self._handle.done():
             self._status = "stopped"
-            return {"session_id": payload.get("session_id"), "status": "stopped"}
+            self._handle.cancel()
+            # Persist a terminal state on the normal control-flow path (not inside
+            # an except handler, so we never await after a CancelledError). This
+            # covers the cancel-before-start window where the activity itself never
+            # ran; it is idempotent when the activity already wrote the session.
+            await workflow.execute_activity(
+                mark_paper_trading_stopped_activity,
+                args=[session_id],
+                start_to_close_timeout=_STOP_COMPENSATION_TIMEOUT,
+                retry_policy=_STOP_COMPENSATION_RETRY,
+            )
+            try:
+                await self._handle
+            except asyncio.CancelledError:
+                pass
+            return {"session_id": session_id, "status": "stopped"}
+
+        result = await self._handle
         self._status = str(result.get("status", "completed"))
         return result
 
     @workflow.signal
     def stop(self) -> None:
-        """Request cancellation of the running session (idempotent)."""
+        """Request the session stop (idempotent). The run loop owns the cancel."""
         self._stop_requested = True
-        if self._handle is not None:
-            self._handle.cancel()
 
     @workflow.query
     def status(self) -> str:
