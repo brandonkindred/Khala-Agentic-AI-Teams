@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import job_service_client as _jsc
+from coding_team.models import JobStatus
 from job_service_client import JobServiceClient, get_job_service_client
 from user_profile import ArtifactType, record_association_safe
 
@@ -22,7 +23,11 @@ DEFAULT_CACHE_DIR: Path = Path(os.getenv("AGENT_CACHE", ".agent_cache"))
 # Every status under which a job may still resume on its own. This is the single definition of
 # "active": a paused job (waiting_for_user) is still in flight — its checkout is owned, its issue
 # is being worked — and every liveness/admission consumer must see it.
-NON_TERMINAL_STATUSES: tuple[str, ...] = ("pending", "running", "waiting_for_user")
+NON_TERMINAL_STATUSES: tuple[str, ...] = (
+    JobStatus.PENDING.value,
+    JobStatus.RUNNING.value,
+    JobStatus.WAITING_FOR_USER.value,
+)
 
 
 def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:

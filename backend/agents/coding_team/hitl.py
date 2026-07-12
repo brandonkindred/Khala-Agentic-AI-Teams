@@ -33,9 +33,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
+from coding_team.models import JobStatus
+
 logger = logging.getLogger(__name__)
 
-WAITING_STATUS = "waiting_for_user"
+WAITING_STATUS = JobStatus.WAITING_FOR_USER.value
 
 # Fallback when an agent omits options entirely (should not happen — prompts require context-specific
 # options). Empty list means the UI shows only the always-present "Other (free text)" field, which
@@ -47,12 +49,21 @@ DEFAULT_CLARIFICATION_OPTIONS: List[Dict[str, Any]] = []
 # blended with one context-specific option) and variant IDs recognized by their display label
 # (e.g. id="opt_yes", label="Yes") are both removed rather than silently accepted.
 _GENERIC_OPTION_IDS: frozenset = frozenset({"yes", "no", "not_sure"})
-_GENERIC_OPTION_LABELS: frozenset = frozenset({
-    "yes", "no", "not sure", "not_sure", "not sure / need more info",
-    # "other" variants — a non-compliant LLM may emit {id:"choice_other", label:"Other"};
-    # filtering by label catches these even when the id is not the reserved "other" string.
-    "other", "other (specify)", "other (please specify)", "other (free text)",
-})
+_GENERIC_OPTION_LABELS: frozenset = frozenset(
+    {
+        "yes",
+        "no",
+        "not sure",
+        "not_sure",
+        "not sure / need more info",
+        # "other" variants — a non-compliant LLM may emit {id:"choice_other", label:"Other"};
+        # filtering by label catches these even when the id is not the reserved "other" string.
+        "other",
+        "other (specify)",
+        "other (please specify)",
+        "other (free text)",
+    }
+)
 
 _DEFAULT_ANSWER_WAIT_TIMEOUT_S = 3600.0
 _ANSWER_WAIT_POLL_INTERVAL_S = 5.0
@@ -88,13 +99,21 @@ _TRANSIENT_JOB_READ_ERRORS = (
 # was already done, no changes needed). Single source of truth so every consumer (the publish-defer
 # gate in api/main.py, the all-terminal set below, the resume guard) agrees on which statuses are
 # terminal successes, and a future success status is added in exactly one place.
-TERMINAL_SUCCESS_STATUSES = frozenset({"completed", "completed_with_failures", "already_complete"})
+TERMINAL_SUCCESS_STATUSES = frozenset(
+    {
+        JobStatus.COMPLETED.value,
+        JobStatus.COMPLETED_WITH_FAILURES.value,
+        JobStatus.ALREADY_COMPLETE.value,
+    }
+)
 
 # Job statuses that mean "this job will never resume on its own"; the wait loop must stop polling.
 # The terminal SUCCESS statuses plus the two terminal FAILURE statuses: ``already_complete`` is a
 # terminal success, so a finished already-complete job must not look resumable to is_terminal()
 # consumers (the /resume endpoint and the auto-resume guard).
-_TERMINAL_STATUSES = TERMINAL_SUCCESS_STATUSES | frozenset({"failed", "cancelled"})
+_TERMINAL_STATUSES = TERMINAL_SUCCESS_STATUSES | frozenset(
+    {JobStatus.FAILED.value, JobStatus.CANCELLED.value}
+)
 
 
 def heartbeat_timestamp() -> str:
@@ -142,7 +161,9 @@ def _normalize_options(raw: Any) -> List[Dict[str, Any]]:
                 continue
             norm_key = opt_id.lower()
             if norm_key in seen_ids:
-                logger.warning("Duplicate option id '%s' (case-insensitive) will be dropped", opt_id)
+                logger.warning(
+                    "Duplicate option id '%s' (case-insensitive) will be dropped", opt_id
+                )
                 continue
             seen_ids.add(norm_key)
             options.append(
@@ -170,7 +191,8 @@ def _filter_generic_options(
           ``convert_to_structured_questions`` keeps whatever survives).
     """
     filtered = [
-        o for o in opts
+        o
+        for o in opts
         if o["id"].lower() not in _GENERIC_OPTION_IDS
         and o["label"].lower() not in _GENERIC_OPTION_LABELS
     ]
