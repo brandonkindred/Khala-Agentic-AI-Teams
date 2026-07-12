@@ -21,19 +21,14 @@ for _d in (_backend_dir, _agents_dir):
 # through to structural fallback paths rather than waiting minutes.
 os.environ.setdefault("LLM_MAX_RETRIES", "0")
 # Disable the slow 429 rate-limit backoff so no test can ever sleep the 300s+
-# schedule (this team overrides pytest's rootdir, hiding backend/conftest.py).
+# schedule.
 os.environ.setdefault("LLM_RATE_LIMIT_MAX_RETRIES", "0")
 
-# This team overrides pytest's rootdir (its own pyproject.toml), so
-# backend/conftest.py — and the ``fake_job_client`` fixture it re-exports — is
-# not auto-discovered. Define the fixture locally over the shared in-memory fake.
-from job_service_client_fake import FakeJobServiceClient  # noqa: E402
-
-
-@pytest.fixture
-def fake_job_client() -> FakeJobServiceClient:
-    """Function-scoped in-memory ``JobServiceClient`` substitute."""
-    return FakeJobServiceClient(team="nutrition_meal_planning_team")
+# ``fake_job_client`` is defined in backend/conftest.py (rootdir is the shared
+# backend/ dir — this team has no pyproject.toml/pytest.ini of its own to
+# override it) and inherited here via pytest's normal fixture resolution, the
+# same way road_trip_planning_team's conftest.py picks it up: no import needed,
+# just reference it by name as a fixture parameter below.
 
 
 @pytest.fixture

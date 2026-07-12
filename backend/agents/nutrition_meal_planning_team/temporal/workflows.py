@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import CancelledError as TemporalActivityCancelledError
 
 with workflow.unsafe.imports_passed_through():
     from nutrition_meal_planning_team.temporal.constants import TASK_QUEUE
@@ -54,7 +55,7 @@ NO_RETRY = RetryPolicy(maximum_attempts=1)
 
 def _run_activity(job_id: str, core: Callable[..., None], *core_args: Any) -> Dict[str, Any]:
     """Shared activity body: heartbeat while the core runs; own the job-store
-    failure contract.
+    failure/cancellation contract.
 
     Preconditions:
         - ``job_id`` refers to a job already created in the job store.
@@ -63,14 +64,24 @@ def _run_activity(job_id: str, core: Callable[..., None], *core_args: Any) -> Di
 
     Postconditions:
         - On success returns ``{"job_id": job_id}`` (the core wrote COMPLETED).
-        - If the job was cancelled, swallows the error and returns
-          ``{"job_id": job_id}`` (cancelled is terminal — not retried).
+        - On a genuine Temporal-level cancellation (CLI/UI cancel, or a
+          heartbeat-timeout-triggered cancel — distinct from the app's own
+          ``cancel_job()`` HTTP path), records the row CANCELLED (not FAILED)
+          best-effort and re-raises so Temporal's own workflow history is also
+          correct.
+        - If the app's own ``is_job_cancelled`` reports the job cancelled,
+          swallows the error and returns ``{"job_id": job_id}`` (cancelled is
+          terminal — not retried).
         - On a genuine failure, marks the row FAILED (``ValueError`` →
           ``not_found``) and re-raises so the failure surfaces as a failed
           Temporal workflow (auto-retry bounded by ``NO_RETRY``).
     """
     from nutrition_meal_planning_team.pipeline import mark_job_failed
-    from nutrition_meal_planning_team.shared.job_store import is_job_cancelled
+    from nutrition_meal_planning_team.shared.job_store import (
+        JOB_STATUS_CANCELLED,
+        is_job_cancelled,
+        update_job,
+    )
     from shared_concurrency import BackgroundHeartbeat
 
     try:
@@ -80,14 +91,34 @@ def _run_activity(job_id: str, core: Callable[..., None], *core_args: Any) -> Di
         # heartbeat driver and never touches the pipeline result.
         with BackgroundHeartbeat(activity.heartbeat, HEARTBEAT_INTERVAL_S, copy_context=True):
             core(job_id, *core_args)
+    except TemporalActivityCancelledError:
+        activity.logger.info("Nutrition job %s cancelled by Temporal", job_id)
+        try:
+            update_job(job_id, status=JOB_STATUS_CANCELLED)
+        except Exception:
+            activity.logger.exception("Failed to record cancellation for %s", job_id)
+        raise
     except Exception as exc:
         activity.logger.exception("Nutrition job %s failed", job_id)
-        if is_job_cancelled(job_id):
+        try:
+            cancelled = is_job_cancelled(job_id)
+        except Exception:
+            # Can't confirm cancellation (e.g. job-store outage) — default to
+            # "not cancelled" so the ORIGINAL pipeline exception below still
+            # surfaces rather than being silently discarded by an ambiguous
+            # cancellation check.
+            cancelled = False
+            activity.logger.exception(
+                "Failed to check cancellation for %s; treating as not cancelled", job_id
+            )
+        if cancelled:
             return {"job_id": job_id}
         # Record FAILED best-effort; if the job-store write itself fails, log it
         # but still re-raise the ORIGINAL error so the root cause surfaces.
+        # ``skip_cancel_check`` avoids a second, redundant is_job_cancelled
+        # round trip — this except block already confirmed the job isn't cancelled.
         try:
-            mark_job_failed(job_id, exc)
+            mark_job_failed(job_id, exc, skip_cancel_check=True)
         except Exception:
             activity.logger.exception("Failed to record job failure for %s", job_id)
         raise

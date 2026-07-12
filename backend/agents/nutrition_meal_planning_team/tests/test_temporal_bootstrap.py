@@ -105,9 +105,13 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
     monkeypatch.setattr(worker_mod, "is_temporal_enabled", lambda: True)
     captured: dict = {}
 
-    def _fake_start(team, workflows, activities, *, task_queue):
+    def _fake_start(team, workflows, activities, *, task_queue, max_concurrent_activities=4):
         captured.update(
-            team=team, workflows=workflows, activities=activities, task_queue=task_queue
+            team=team,
+            workflows=workflows,
+            activities=activities,
+            task_queue=task_queue,
+            max_concurrent_activities=max_concurrent_activities,
         )
         return True
 
@@ -119,8 +123,13 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
         "workflows": WORKFLOWS,
         "activities": ACTIVITIES,
         "task_queue": TASK_QUEUE,
+        "max_concurrent_activities": worker_mod.MAX_CONCURRENT_ACTIVITIES,
     }
     assert TASK_QUEUE == "nutrition-meal-planning"
+    # Explicit, not the shared_temporal default of 4: this worker/queue now
+    # serves three job kinds, so the concurrency cap must be a deliberate
+    # choice, not an accidental widening.
+    assert worker_mod.MAX_CONCURRENT_ACTIVITIES == 2
 
 
 def test_startup_backstop_never_raises(monkeypatch):

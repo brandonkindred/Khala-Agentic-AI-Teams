@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from typing import Callable, Optional
+
 
 class FakeResult:
     """Stand-in for an orchestrator response with a ``model_dump``."""
@@ -19,10 +21,23 @@ class FakeResult:
 
 
 class FakeOrchestrator:
-    """Returns a canned result, or raises ``exc`` from every pipeline method."""
+    """Returns a canned result, or raises ``exc`` from every pipeline method.
 
-    def __init__(self, *, exc: Exception | None = None) -> None:
+    If ``cancel_during_meal_plan`` is set, ``get_meal_plan`` unconditionally
+    raises ``OperationCancelled`` (simulating the real orchestrator's
+    ``cancel_check`` firing mid-run) — lets tests exercise
+    ``pipeline.run_meal_plan_core``'s ``except OperationCancelled`` handling in
+    isolation. The real ``cancel_check`` wiring itself (does the orchestrator
+    actually call it, does it skip the LLM call) is covered directly against
+    ``NutritionMealPlanningOrchestrator.get_meal_plan`` in
+    ``test_get_meal_plan_cancel_check.py``.
+    """
+
+    def __init__(
+        self, *, exc: Exception | None = None, cancel_during_meal_plan: bool = False
+    ) -> None:
         self._exc = exc
+        self._cancel_during_meal_plan = cancel_during_meal_plan
 
     def _result(self, client_id: str) -> FakeResult:
         if self._exc is not None:
@@ -35,12 +50,26 @@ class FakeOrchestrator:
     def regenerate_nutrition_plan(self, client_id: str) -> FakeResult:
         return self._result(client_id)
 
-    def get_meal_plan(self, req) -> FakeResult:
+    def get_meal_plan(
+        self, req, *, cancel_check: Optional[Callable[[], bool]] = None
+    ) -> FakeResult:
+        if self._cancel_during_meal_plan:
+            from nutrition_meal_planning_team.orchestrator.agent import OperationCancelled
+
+            raise OperationCancelled(
+                f"meal plan for {req.client_id} cancelled after nutrition-plan generation"
+            )
         return self._result(req.client_id)
 
 
-def patch_orch(monkeypatch, *, exc: Exception | None = None) -> None:
+def patch_orch(
+    monkeypatch, *, exc: Exception | None = None, cancel_during_meal_plan: bool = False
+) -> None:
     """Route ``pipeline.get_orchestrator`` to a ``FakeOrchestrator``."""
     from nutrition_meal_planning_team import pipeline
 
-    monkeypatch.setattr(pipeline, "get_orchestrator", lambda: FakeOrchestrator(exc=exc))
+    monkeypatch.setattr(
+        pipeline,
+        "get_orchestrator",
+        lambda: FakeOrchestrator(exc=exc, cancel_during_meal_plan=cancel_during_meal_plan),
+    )

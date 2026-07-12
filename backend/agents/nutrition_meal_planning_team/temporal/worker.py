@@ -15,12 +15,16 @@ pulled in transitively survive workflow registration).
 
 from __future__ import annotations
 
-import logging
-
 from nutrition_meal_planning_team.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
 from shared_temporal import is_temporal_enabled, start_team_worker
 
-logger = logging.getLogger(__name__)
+# Matches the team's original hand-rolled worker's concurrency cap (a single
+# ThreadPoolExecutor(max_workers=2)). Kept explicit rather than left to
+# shared_temporal.start_team_worker's default of 4: this one worker/queue now
+# serves three LLM-heavy job kinds (nutrition plan, regenerate, meal plan)
+# sharing the same LLM provider rate limits, so the cap is a deliberate
+# capacity choice, not an accidental omission.
+MAX_CONCURRENT_ACTIVITIES = 2
 
 
 def start_nutrition_temporal_worker_thread() -> bool:
@@ -40,4 +44,5 @@ def start_nutrition_temporal_worker_thread() -> bool:
         WORKFLOWS,
         ACTIVITIES,
         task_queue=TASK_QUEUE,
+        max_concurrent_activities=MAX_CONCURRENT_ACTIVITIES,
     )

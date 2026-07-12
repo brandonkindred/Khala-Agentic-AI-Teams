@@ -49,15 +49,39 @@ def _start(workflow_run: Any, job_id: str, arg: Any) -> None:
 
 
 def start_nutrition_plan_workflow(job_id: str, request: dict[str, Any]) -> None:
-    """Start ``NutritionPlanWorkflow`` (``request`` = serialized ``NutritionPlanRequest``)."""
+    """Start ``NutritionPlanWorkflow`` for the given job.
+
+    Preconditions:
+        - ``job_id`` is a job already created in the job store.
+        - ``request`` is the serialized ``NutritionPlanRequest`` (``body.model_dump()``).
+
+    Postconditions:
+        - Delegates to ``_start``; see its contract.
+    """
     _start(NutritionPlanWorkflow.run, job_id, request)
 
 
 def start_regenerate_workflow(job_id: str, client_id: str) -> None:
-    """Start ``NutritionRegenerateWorkflow`` for ``client_id``."""
+    """Start ``NutritionRegenerateWorkflow`` for the given job.
+
+    Preconditions:
+        - ``job_id`` is a job already created in the job store.
+        - ``client_id`` identifies a client whose profile exists.
+
+    Postconditions:
+        - Delegates to ``_start``; see its contract.
+    """
     _start(NutritionRegenerateWorkflow.run, job_id, client_id)
 
 
 def start_meal_plan_workflow(job_id: str, request: dict[str, Any]) -> None:
-    """Start ``NutritionMealPlanWorkflow`` (``request`` = serialized ``MealPlanRequest``)."""
+    """Start ``NutritionMealPlanWorkflow`` for the given job.
+
+    Preconditions:
+        - ``job_id`` is a job already created in the job store.
+        - ``request`` is the serialized ``MealPlanRequest`` (``body.model_dump()``).
+
+    Postconditions:
+        - Delegates to ``_start``; see its contract.
+    """
     _start(NutritionMealPlanWorkflow.run, job_id, request)

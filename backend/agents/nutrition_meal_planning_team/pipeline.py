@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 from nutrition_meal_planning_team.models import MealPlanRequest, NutritionPlanRequest
-from nutrition_meal_planning_team.orchestrator.agent import NutritionMealPlanningOrchestrator
+from nutrition_meal_planning_team.orchestrator.agent import (
+    NutritionMealPlanningOrchestrator,
+    OperationCancelled,
+)
 from nutrition_meal_planning_team.shared.job_store import (
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
@@ -67,20 +70,24 @@ def get_orchestrator() -> NutritionMealPlanningOrchestrator:
     return _orchestrator
 
 
-def mark_job_failed(job_id: str, exc: Exception) -> None:
+def mark_job_failed(job_id: str, exc: Exception, *, skip_cancel_check: bool = False) -> None:
     """Record a terminal FAILED status for a job (no-op if it was cancelled).
 
     Preconditions:
         - ``job_id`` refers to a job already created in the job store.
+        - ``skip_cancel_check``, when True, means the caller has already
+          confirmed (via its own guarded check) that the job is not cancelled —
+          skips this function's own ``is_job_cancelled`` round trip so a single
+          failure path never queries cancellation state twice.
 
     Postconditions:
-        - If the job is cancelled, leaves the row untouched (a cancelled run is
-          terminal, not a failure).
+        - Unless ``skip_cancel_check`` is set, a cancelled job leaves the row
+          untouched (a cancelled run is terminal, not a failure).
         - A ``ValueError`` (e.g. "Profile not found") is recorded with
           ``not_found=True`` so the API surfaces it as a not-found outcome; any
           other exception is recorded as a plain failure with its message.
     """
-    if is_job_cancelled(job_id):
+    if not skip_cancel_check and is_job_cancelled(job_id):
         return
     if isinstance(exc, ValueError):
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc), not_found=True)
@@ -88,13 +95,17 @@ def mark_job_failed(job_id: str, exc: Exception) -> None:
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
 
 
-def run_nutrition_plan_core(job_id: str, request_dict: Dict[str, Any]) -> None:
+def run_nutrition_plan_core(
+    job_id: str, request: Union[NutritionPlanRequest, Dict[str, Any]]
+) -> None:
     """Run the nutrition-plan job with cancel guards + RUNNING/COMPLETED bookkeeping.
 
     Preconditions:
         - ``job_id`` refers to a job already created in the job store.
-        - ``request_dict`` is a serialized ``NutritionPlanRequest``
-          (``body.model_dump()``).
+        - ``request`` is either an already-validated ``NutritionPlanRequest``
+          (thread-dispatch path, which runs in-process and can pass the model
+          directly) or its serialized dict form (Temporal path, crossing the
+          workflow/activity boundary as ``body.model_dump()``).
 
     Postconditions:
         - Writes RUNNING then COMPLETED (with the plan result) on success;
@@ -107,7 +118,9 @@ def run_nutrition_plan_core(job_id: str, request_dict: Dict[str, Any]) -> None:
     if is_job_cancelled(job_id):
         return
     update_job(job_id, status=JOB_STATUS_RUNNING)
-    result = get_orchestrator().get_nutrition_plan(NutritionPlanRequest(**request_dict))
+    if isinstance(request, dict):
+        request = NutritionPlanRequest(**request)
+    result = get_orchestrator().get_nutrition_plan(request)
     if is_job_cancelled(job_id):
         return
     update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
@@ -134,29 +147,43 @@ def run_regenerate_core(job_id: str, client_id: str) -> None:
     update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
 
 
-def run_meal_plan_core(job_id: str, request_dict: Dict[str, Any]) -> None:
+def run_meal_plan_core(job_id: str, request: Union[MealPlanRequest, Dict[str, Any]]) -> None:
     """Run the meal-plan job (nutrition plan → meal generation → guardrail record).
 
     Preconditions:
         - ``job_id`` refers to a job already created in the job store.
-        - ``request_dict`` is a serialized ``MealPlanRequest`` (``body.model_dump()``).
+        - ``request`` is either an already-validated ``MealPlanRequest``
+          (thread-dispatch path) or its serialized dict form (Temporal path,
+          ``body.model_dump()``).
 
     Postconditions:
         - Same RUNNING/COMPLETED + cancel-guard contract as
           ``run_nutrition_plan_core``; delegates the full sequence to the
-          orchestrator's public ``get_meal_plan`` and propagates its exceptions
-          unchanged.
+          orchestrator's public ``get_meal_plan``, passing a ``cancel_check``
+          so a job cancelled between nutrition-plan generation and the
+          meal-planning LLM call fails fast (returns early, writes nothing)
+          instead of still paying for the LLM call.
+        - Propagates any other orchestrator exception unchanged.
     """
     if is_job_cancelled(job_id):
         return
     update_job(job_id, status=JOB_STATUS_RUNNING)
-    result = get_orchestrator().get_meal_plan(MealPlanRequest(**request_dict))
+    if isinstance(request, dict):
+        request = MealPlanRequest(**request)
+    try:
+        result = get_orchestrator().get_meal_plan(
+            request, cancel_check=lambda: is_job_cancelled(job_id)
+        )
+    except OperationCancelled:
+        return
     if is_job_cancelled(job_id):
         return
     update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
 
 
-def run_nutrition_plan_background(job_id: str, request_dict: Dict[str, Any]) -> None:
+def run_nutrition_plan_background(
+    job_id: str, request: Union[NutritionPlanRequest, Dict[str, Any]]
+) -> None:
     """Thread-path runner for a nutrition-plan job: run and swallow failures as FAILED.
 
     Preconditions:
@@ -165,28 +192,53 @@ def run_nutrition_plan_background(job_id: str, request_dict: Dict[str, Any]) -> 
     Postconditions:
         - On orchestrator failure marks the job FAILED (``ValueError`` maps to
           ``not_found=True``) unless it was cancelled, then returns — a daemon
-          thread has no caller to raise to.
+          thread has no caller to raise to. If recording the failure itself
+          raises (e.g. the job service is unreachable), that secondary error is
+          logged and swallowed rather than escaping the daemon thread uncaught.
     """
     try:
-        run_nutrition_plan_core(job_id, request_dict)
+        run_nutrition_plan_core(job_id, request)
     except Exception as exc:
         logger.exception("Nutrition plan job %s failed", job_id)
-        mark_job_failed(job_id, exc)
+        try:
+            mark_job_failed(job_id, exc)
+        except Exception:
+            logger.exception("Failed to record job failure for %s", job_id)
 
 
 def run_regenerate_background(job_id: str, client_id: str) -> None:
-    """Thread-path runner for a regenerate job (see ``run_nutrition_plan_background``)."""
+    """Thread-path runner for a regenerate job.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Same failure-swallowing contract as ``run_nutrition_plan_background``.
+    """
     try:
         run_regenerate_core(job_id, client_id)
     except Exception as exc:
         logger.exception("Nutrition regenerate job %s failed", job_id)
-        mark_job_failed(job_id, exc)
+        try:
+            mark_job_failed(job_id, exc)
+        except Exception:
+            logger.exception("Failed to record job failure for %s", job_id)
 
 
-def run_meal_plan_background(job_id: str, request_dict: Dict[str, Any]) -> None:
-    """Thread-path runner for a meal-plan job (see ``run_nutrition_plan_background``)."""
+def run_meal_plan_background(job_id: str, request: Union[MealPlanRequest, Dict[str, Any]]) -> None:
+    """Thread-path runner for a meal-plan job.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Same failure-swallowing contract as ``run_nutrition_plan_background``.
+    """
     try:
-        run_meal_plan_core(job_id, request_dict)
+        run_meal_plan_core(job_id, request)
     except Exception as exc:
         logger.exception("Meal plan job %s failed", job_id)
-        mark_job_failed(job_id, exc)
+        try:
+            mark_job_failed(job_id, exc)
+        except Exception:
+            logger.exception("Failed to record job failure for %s", job_id)

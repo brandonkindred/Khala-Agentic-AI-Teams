@@ -11,10 +11,12 @@ from __future__ import annotations
 import pytest
 
 from nutrition_meal_planning_team import pipeline
+from nutrition_meal_planning_team.models import MealPlanRequest, NutritionPlanRequest
 from nutrition_meal_planning_team.shared.job_store import (
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
+    JOB_STATUS_RUNNING,
     create_job,
     get_job,
     update_job,
@@ -83,6 +85,32 @@ def test_mark_job_failed_is_noop_when_cancelled():
     assert get_job("job-mc")["status"] == JOB_STATUS_CANCELLED
 
 
+def test_mark_job_failed_skip_cancel_check_writes_failed_even_if_cancelled():
+    """``skip_cancel_check=True`` is for callers that already confirmed the job
+    isn't cancelled (avoiding a redundant is_job_cancelled round trip) — it must
+    not re-derive cancellation state itself."""
+    create_job("job-skip")
+    update_job("job-skip", status=JOB_STATUS_CANCELLED)
+
+    pipeline.mark_job_failed("job-skip", RuntimeError("boom"), skip_cancel_check=True)
+
+    job = get_job("job-skip")
+    assert job["status"] == JOB_STATUS_FAILED
+    assert "boom" in (job.get("error") or "")
+
+
+def test_mark_job_failed_skip_cancel_check_still_applies_not_found_mapping():
+    create_job("job-skip-404")
+
+    pipeline.mark_job_failed(
+        "job-skip-404", ValueError("Profile not found"), skip_cancel_check=True
+    )
+
+    job = get_job("job-skip-404")
+    assert job["status"] == JOB_STATUS_FAILED
+    assert job["not_found"] is True
+
+
 @pytest.mark.parametrize(
     "core, arg",
     [
@@ -106,7 +134,7 @@ def test_core_skips_completed_write_when_cancelled_mid_run(monkeypatch, core, ar
         def regenerate_nutrition_plan(self, client_id: str) -> FakeResult:
             return self._result(client_id)
 
-        def get_meal_plan(self, req) -> FakeResult:
+        def get_meal_plan(self, req, *, cancel_check=None) -> FakeResult:
             return self._result(req.client_id)
 
     monkeypatch.setattr(pipeline, "get_orchestrator", lambda: _CancellingOrch())
@@ -127,3 +155,82 @@ def test_get_orchestrator_returns_singleton(monkeypatch):
     second = pipeline.get_orchestrator()
 
     assert first is second
+
+
+def test_run_meal_plan_core_fails_fast_when_cancelled_mid_run(monkeypatch):
+    """A job cancelled between nutrition-plan generation and the meal-planning
+    LLM call must not write COMPLETED (or FAILED) — it's a clean early return,
+    not a failure. The fake raises ``OperationCancelled`` directly (simulating
+    the orchestrator's own cancel_check firing) without the job store itself
+    ever being marked cancelled, so this exercises the
+    ``except OperationCancelled: return`` branch specifically — not the
+    pre-run ``is_job_cancelled`` guard."""
+    patch_orch(monkeypatch, cancel_during_meal_plan=True)
+    create_job("job-midcancel")
+
+    pipeline.run_meal_plan_core("job-midcancel", {"client_id": "client-1"})
+
+    job = get_job("job-midcancel")
+    assert job["status"] == JOB_STATUS_RUNNING
+    assert job.get("result") is None
+
+
+def test_run_meal_plan_background_swallows_mid_run_cancel(monkeypatch):
+    """The thread path gets the same fail-fast benefit — OperationCancelled from
+    the orchestrator must not be reported as a job failure."""
+    patch_orch(monkeypatch, cancel_during_meal_plan=True)
+    create_job("job-midcancel-bg")
+
+    pipeline.run_meal_plan_background("job-midcancel-bg", {"client_id": "client-1"})
+
+    job = get_job("job-midcancel-bg")
+    assert job["status"] == JOB_STATUS_RUNNING
+
+
+@pytest.mark.parametrize(
+    "core, model_arg",
+    [
+        (pipeline.run_nutrition_plan_core, NutritionPlanRequest(client_id="client-1")),
+        (pipeline.run_meal_plan_core, MealPlanRequest(client_id="client-1")),
+    ],
+)
+def test_core_accepts_an_already_built_model_directly(monkeypatch, core, model_arg):
+    """The thread-dispatch path now passes the original Pydantic model (not a
+    dict) to avoid a pointless serialize/revalidate round trip — the core
+    functions must accept either form."""
+    patch_orch(monkeypatch)
+    create_job("job-model-arg")
+
+    core("job-model-arg", model_arg)
+
+    job = get_job("job-model-arg")
+    assert job["status"] == JOB_STATUS_COMPLETED
+    assert job["result"]["client_id"] == "client-1"
+
+
+@pytest.mark.parametrize(
+    "background, core_attr, arg",
+    [
+        (pipeline.run_nutrition_plan_background, "run_nutrition_plan_core", {"client_id": "c"}),
+        (pipeline.run_regenerate_background, "run_regenerate_core", "c"),
+        (pipeline.run_meal_plan_background, "run_meal_plan_core", {"client_id": "c"}),
+    ],
+)
+def test_background_wrapper_swallows_when_mark_job_failed_itself_raises(
+    monkeypatch, background, core_attr, arg
+):
+    """Mirrors the Temporal-activity hardening: a job-store failure while
+    recording FAILED must not escape the daemon thread uncaught."""
+
+    def _core_boom(*_a, **_k):
+        raise RuntimeError("original pipeline error")
+
+    def _mark_boom(*_a, **_k):
+        raise RuntimeError("job store unavailable")
+
+    monkeypatch.setattr(pipeline, core_attr, _core_boom)
+    monkeypatch.setattr(pipeline, "mark_job_failed", _mark_boom)
+    create_job("job-thread-mm")
+
+    # Must not raise — a daemon thread has no caller to propagate to.
+    background("job-thread-mm", arg)

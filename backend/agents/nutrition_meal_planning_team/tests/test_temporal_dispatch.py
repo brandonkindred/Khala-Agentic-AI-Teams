@@ -146,7 +146,7 @@ def test_plan_regenerate_marks_job_failed_when_dispatch_raises(
 
 
 def test_dispatch_helpers_use_thread_when_disabled(monkeypatch):
-    """Direct unit check of the three helpers' thread fallback + labels/targets."""
+    """Direct unit check of the three helpers' thread fallback + targets."""
     monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: False)
     started: dict = {"calls": []}
 
@@ -159,11 +159,11 @@ def test_dispatch_helpers_use_thread_when_disabled(monkeypatch):
 
     monkeypatch.setattr(api_main.threading, "Thread", _FakeThread)
 
-    assert (
-        api_main._dispatch_nutrition_plan_run("j1", NutritionPlanRequest(client_id="c")) == "thread"
-    )
-    assert api_main._dispatch_regenerate_run("j2", "c") == "thread"
-    assert api_main._dispatch_meal_plan_run("j3", MealPlanRequest(client_id="c")) == "thread"
+    nutrition_body = NutritionPlanRequest(client_id="c")
+    meal_body = MealPlanRequest(client_id="c")
+    assert api_main._dispatch_nutrition_plan_run("j1", nutrition_body) is None
+    assert api_main._dispatch_regenerate_run("j2", "c") is None
+    assert api_main._dispatch_meal_plan_run("j3", meal_body) is None
 
     assert started["started"] is True
     calls = started["calls"]
@@ -173,12 +173,12 @@ def test_dispatch_helpers_use_thread_when_disabled(monkeypatch):
         pipeline.run_meal_plan_background,
     ]
     assert all(c["daemon"] is True for c in calls)
-    # nutrition-plan/meal-plan cross the boundary as dicts; regenerate as client_id.
-    assert calls[0]["args"] == (
-        "j1",
-        {"client_id": "c", "date_range_start": None, "date_range_end": None},
-    )
+    # The thread branch runs in-process, so it receives the original Pydantic
+    # model/client_id directly — no model_dump()/revalidate round trip (only the
+    # Temporal branch, which crosses a process boundary, needs serialization).
+    assert calls[0]["args"] == ("j1", nutrition_body)
     assert calls[1]["args"] == ("j2", "c")
+    assert calls[2]["args"] == ("j3", meal_body)
 
 
 def test_temporal_enabled_false_when_shared_temporal_missing(monkeypatch):

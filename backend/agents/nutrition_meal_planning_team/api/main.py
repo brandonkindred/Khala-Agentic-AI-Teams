@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from fastapi import Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from nutrition_meal_planning_team.postgres import SCHEMA as NUTRITION_POSTGRES_SCHEMA
 from shared_app import create_team_app
@@ -335,7 +336,7 @@ def _temporal_enabled() -> bool:
 
 def _dispatch_job_run(
     job_id: str, arg: Any, *, starter: str, thread_target: Callable[..., None]
-) -> str:
+) -> None:
     """Dispatch a job run via Temporal when enabled, else a daemon thread.
 
     Single implementation shared by the three per-endpoint wrappers below.
@@ -345,38 +346,56 @@ def _dispatch_job_run(
         - ``starter`` names a ``start_*`` function in
           ``nutrition_meal_planning_team.temporal.start_workflow`` and
           ``thread_target`` is the matching ``pipeline.run_*_background`` thread
-          body; ``arg`` is the serialized request dict or the ``client_id`` that
-          both of them accept as the second positional argument.
+          body. ``arg`` is the original Pydantic request model or the plain
+          ``client_id`` str that both accept as their second positional
+          argument — serialized via ``model_dump()`` only when the Temporal
+          branch is actually taken, since that's the only path crossing a
+          process boundary; the in-process thread branch uses ``arg`` as-is.
 
     Postconditions:
-        - Starts exactly one execution path and returns its label ("Temporal" or
-          "thread"). Any failure while starting the workflow propagates to the
-          caller, which marks the job FAILED — a Temporal-enabled run is never
-          silently downgraded to a thread.
+        - Starts exactly one execution path. Any failure while starting the
+          workflow propagates to the caller, which marks the job FAILED — a
+          Temporal-enabled run is never silently downgraded to a thread.
     """
     if _temporal_enabled():
         from nutrition_meal_planning_team.temporal import start_workflow
 
-        getattr(start_workflow, starter)(job_id, arg)
-        return "Temporal"
+        temporal_arg = arg.model_dump() if isinstance(arg, BaseModel) else arg
+        getattr(start_workflow, starter)(job_id, temporal_arg)
+        return
 
     threading.Thread(target=thread_target, args=(job_id, arg), daemon=True).start()
-    return "thread"
 
 
-def _dispatch_nutrition_plan_run(job_id: str, body: NutritionPlanRequest) -> str:
-    """Dispatch a nutrition-plan run (Temporal or thread). See ``_dispatch_job_run``."""
-    return _dispatch_job_run(
+def _dispatch_nutrition_plan_run(job_id: str, body: NutritionPlanRequest) -> None:
+    """Dispatch a nutrition-plan run (Temporal or thread).
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Delegates to ``_dispatch_job_run``; see its contract. Propagates any
+          dispatch failure to the caller.
+    """
+    _dispatch_job_run(
         job_id,
-        body.model_dump(),
+        body,
         starter="start_nutrition_plan_workflow",
         thread_target=run_nutrition_plan_background,
     )
 
 
-def _dispatch_regenerate_run(job_id: str, client_id: str) -> str:
-    """Dispatch a regenerate run (Temporal or thread). See ``_dispatch_job_run``."""
-    return _dispatch_job_run(
+def _dispatch_regenerate_run(job_id: str, client_id: str) -> None:
+    """Dispatch a regenerate run (Temporal or thread).
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Delegates to ``_dispatch_job_run``; see its contract. Propagates any
+          dispatch failure to the caller.
+    """
+    _dispatch_job_run(
         job_id,
         client_id,
         starter="start_regenerate_workflow",
@@ -384,11 +403,19 @@ def _dispatch_regenerate_run(job_id: str, client_id: str) -> str:
     )
 
 
-def _dispatch_meal_plan_run(job_id: str, body: MealPlanRequest) -> str:
-    """Dispatch a meal-plan run (Temporal or thread). See ``_dispatch_job_run``."""
-    return _dispatch_job_run(
+def _dispatch_meal_plan_run(job_id: str, body: MealPlanRequest) -> None:
+    """Dispatch a meal-plan run (Temporal or thread).
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Delegates to ``_dispatch_job_run``; see its contract. Propagates any
+          dispatch failure to the caller.
+    """
+    _dispatch_job_run(
         job_id,
-        body.model_dump(),
+        body,
         starter="start_meal_plan_workflow",
         thread_target=run_meal_plan_background,
     )
