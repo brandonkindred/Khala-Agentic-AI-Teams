@@ -106,9 +106,28 @@ class Soc2AuditWorkflow:
                         retry_policy=LLM_RETRY_POLICY,
                     )
                     for criterion in _TSC_CRITERIA
-                ]
+                ],
+                return_exceptions=True,
             )
-            tsc_results = list(gathered)
+            # asyncio.gather does not cancel sibling activities when one
+            # raises — with return_exceptions=True every criterion still gets
+            # to finish, so a single activity-level failure (e.g. a criterion
+            # exhausting its retries and timing out) doesn't discard results
+            # sibling criteria already produced. tsc_results is assigned here,
+            # before any raise below, so the except block's mark_failed_activity
+            # call still receives whatever completed.
+            tsc_results = []
+            failures: list[tuple[str, BaseException]] = []
+            for criterion, outcome in zip(_TSC_CRITERIA, gathered):
+                if isinstance(outcome, BaseException):
+                    failures.append((criterion, outcome))
+                else:
+                    tsc_results.append(outcome)
+            if failures:
+                summary = "; ".join(f"{criterion}: {exc}" for criterion, exc in failures)
+                raise RuntimeError(
+                    f"{len(failures)} SOC2 criterion audit(s) failed: {summary}"
+                ) from failures[0][1]
 
             return await workflow.execute_activity(
                 _activities.write_report_activity,

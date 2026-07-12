@@ -15,7 +15,10 @@ running, ``write_report_activity`` marks it completed with the result, and
 through ``_update_job_terminal`` so a later write can never silently clobber a
 job that's already reached a terminal status — e.g. a lost activity-completion
 ack causing Temporal to retry/fail an activity whose local job-store write
-already succeeded.
+already succeeded. ``load_repo_activity``'s own ``running`` write goes through
+the mirror-image ``_update_job_unless_terminal``, so a workflow that keeps
+running server-side after the API already wrote a terminal ``failed`` status
+(a lost dispatch ack) can't resurrect that job back to non-terminal.
 """
 
 from __future__ import annotations
@@ -45,18 +48,22 @@ def load_repo_activity(job_id: str, repo_path: str) -> str:
     Preconditions:
         - ``job_id`` is an existing job; ``repo_path`` is an existing directory.
     Postconditions:
-        - Job status is set to ``running``; a context snapshot for ``job_id``
+        - Job status is set to ``running`` (skipped if the job already reached
+          a terminal status — e.g. ``run_audit``'s dispatch-failure path
+          already marked it ``failed`` after a client-side dispatch timeout
+          whose workflow was actually accepted server-side; see
+          ``_update_job_unless_terminal``); a context snapshot for ``job_id``
           exists; returns the resolved absolute repo path. Raises ``ValueError``
           (after logging) if the path is not a directory.
     """
     from soc2_compliance_team import context_snapshot, pipeline
-    from soc2_compliance_team.api.main import _update_job
+    from soc2_compliance_team.api.main import _update_job_unless_terminal
 
     try:
-        _update_job(job_id, status="running", current_stage="Loading repository")
+        _update_job_unless_terminal(job_id, status="running", current_stage="Loading repository")
         context = pipeline.load_context(repo_path)
         context_snapshot.save_snapshot(job_id, context)
-        _update_job(job_id, current_stage="Running TSC audits")
+        _update_job_unless_terminal(job_id, current_stage="Running TSC audits")
         return context.repo_path
     except Exception:
         logger.exception("SOC2 load_repo activity failed for job %s", job_id)

@@ -76,6 +76,34 @@ def test_load_repo_activity_reraises_on_bad_path(monkeypatch: pytest.MonkeyPatch
         ActivityEnvironment().run(amod.load_repo_activity, "job-1", "/nonexistent/soc2-xyz")
 
 
+def test_load_repo_activity_skips_status_write_when_job_already_terminal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """If run_audit's dispatch-failure path already wrote a terminal status
+    (e.g. start_workflow_sync timed out client-side even though Temporal
+    accepted the workflow server-side), this activity's unconditional
+    status="running" write must not resurrect it back to non-terminal — the
+    activity still does its real work (load + snapshot) regardless."""
+    from soc2_compliance_team import context_snapshot
+    from soc2_compliance_team.temporal import activities as amod
+
+    calls = _patch_update_job(monkeypatch)
+    monkeypatch.setattr("soc2_compliance_team.api.main._job_is_terminal", lambda jid: True)
+    saved: Dict[str, Any] = {}
+    monkeypatch.setattr(
+        context_snapshot,
+        "save_snapshot",
+        lambda jid, ctx: saved.update(job_id=jid, ctx=ctx) or "handle",
+    )
+
+    out = ActivityEnvironment().run(amod.load_repo_activity, "job-1", str(tmp_path))
+
+    assert out == str(tmp_path.resolve())
+    assert saved["job_id"] == "job-1"
+    # Neither the status="running" write nor the current_stage advance ran.
+    assert calls == []
+
+
 # ---------------------------------------------------------------------------
 # audit_criterion_activity
 # ---------------------------------------------------------------------------
@@ -339,6 +367,48 @@ def test_workflow_marks_failed_on_activity_error(monkeypatch: pytest.MonkeyPatch
 
     # The except-path fires the terminal failure marker.
     assert any(c["name"] == "mark_failed_activity" for c in fake.calls)
+
+
+def test_workflow_preserves_sibling_results_when_one_criterion_activity_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """asyncio.gather does not cancel sibling activities when one raises; with
+    return_exceptions=True every criterion still gets a chance to finish, so
+    one criterion exhausting its retries (e.g. a timeout) must not discard
+    results the other four already produced — mark_failed_activity should
+    still receive them."""
+    from soc2_compliance_team.temporal import workflows as wmod
+
+    class _OneCriterionFails:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, Any]] = []
+
+        async def __call__(self, activity, args=None, **kwargs):  # noqa: ANN001
+            name = getattr(activity, "__name__", str(activity))
+            self.calls.append({"name": name, "args": args})
+            if name == "load_repo_activity":
+                return args[1]
+            if name == "audit_criterion_activity":
+                criterion = args[1]
+                if criterion == TSCCategory.PRIVACY.value:
+                    raise RuntimeError("privacy audit timed out")
+                return {"category": criterion, "summary": "x", "findings": [], "compliant": True}
+            return None
+
+    fake = _OneCriterionFails()
+    monkeypatch.setattr(wmod.workflow, "execute_activity", fake)
+
+    with pytest.raises(RuntimeError, match="1 SOC2 criterion audit"):
+        asyncio.run(wmod.Soc2AuditWorkflow().run("job-1", "/repo/path"))
+
+    mark_failed_calls = [c for c in fake.calls if c["name"] == "mark_failed_activity"]
+    assert len(mark_failed_calls) == 1
+    tsc_results_arg = mark_failed_calls[0]["args"][3]
+    assert tsc_results_arg is not None
+    assert len(tsc_results_arg) == 4
+    assert all(r["category"] != TSCCategory.PRIVACY.value for r in tsc_results_arg)
+    # write_report_activity must never run — the fan-out itself failed.
+    assert not any(c["name"] == "write_report_activity" for c in fake.calls)
 
 
 def test_workflow_reraises_original_when_mark_failed_also_fails(

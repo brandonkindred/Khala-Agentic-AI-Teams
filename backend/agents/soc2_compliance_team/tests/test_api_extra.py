@@ -170,3 +170,92 @@ def test_temporal_worker_backstop_swallows_errors(monkeypatch: pytest.MonkeyPatc
     with caplog.at_level("WARNING"):
         api_main._start_temporal_worker_backstop()
     assert any("backstop failed to start" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# _job_is_terminal / _update_job_terminal / _update_job_unless_terminal
+# ---------------------------------------------------------------------------
+
+
+def test_job_is_terminal_true_for_completed_and_failed(fake_job_client) -> None:
+    fake_job_client.create_job("t1", status="completed")
+    fake_job_client.create_job("t2", status="failed")
+    assert api_main._job_is_terminal("t1") is True
+    assert api_main._job_is_terminal("t2") is True
+
+
+def test_job_is_terminal_false_for_pending_running_or_missing(fake_job_client) -> None:
+    fake_job_client.create_job("t3", status="pending")
+    fake_job_client.create_job("t4", status="running")
+    assert api_main._job_is_terminal("t3") is False
+    assert api_main._job_is_terminal("t4") is False
+    assert api_main._job_is_terminal("does-not-exist") is False
+
+
+def test_update_job_terminal_applies_when_not_terminal(fake_job_client) -> None:
+    fake_job_client.create_job("g1", status="running")
+    api_main._update_job_terminal("g1", status="completed", result={"status": "completed"})
+    assert fake_job_client.get_job("g1")["status"] == "completed"
+
+
+def test_update_job_terminal_skips_when_already_terminal(fake_job_client, caplog) -> None:
+    """Whichever terminal write lands first must stick — a later one is a no-op."""
+    fake_job_client.create_job("g2", status="completed", result={"status": "completed"})
+    with caplog.at_level("WARNING"):
+        api_main._update_job_terminal("g2", status="failed", error="too late")
+    job = fake_job_client.get_job("g2")
+    assert job["status"] == "completed"
+    assert "error" not in job
+    assert any("already terminal" in r.message for r in caplog.records)
+
+
+def test_job_is_terminal_defaults_to_false_on_read_error(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    class _BoomJM:
+        def get_job(self, job_id):
+            raise RuntimeError("job store down")
+
+    monkeypatch.setattr(api_main, "_job_manager", _BoomJM())
+    with caplog.at_level("WARNING"):
+        assert api_main._job_is_terminal("t5") is False
+    assert any("Could not read job" in r.message for r in caplog.records)
+
+
+def test_update_job_unless_terminal_applies_when_not_terminal(fake_job_client) -> None:
+    fake_job_client.create_job("u1", status="running")
+    api_main._update_job_unless_terminal("u1", current_stage="Loading repository")
+    assert fake_job_client.get_job("u1")["current_stage"] == "Loading repository"
+
+
+def test_update_job_unless_terminal_skips_when_already_terminal(fake_job_client, caplog) -> None:
+    """A workflow that keeps running server-side after run_audit already wrote
+    a terminal ``failed`` status (a lost dispatch ack) must not have its
+    non-terminal ``status="running"`` write resurrect the job."""
+    fake_job_client.create_job("u2", status="failed", error="dispatch timed out")
+    with caplog.at_level("WARNING"):
+        api_main._update_job_unless_terminal(
+            "u2", status="running", current_stage="Loading repository"
+        )
+    job = fake_job_client.get_job("u2")
+    assert job["status"] == "failed"
+    assert "current_stage" not in job
+    assert any("already terminal" in r.message for r in caplog.records)
+
+
+def test_stale_job_threshold_covers_longest_temporal_activity_ceiling() -> None:
+    """The stale-job monitor's threshold must stay comfortably above the
+    decomposed Temporal pipeline's longest schedule-to-close ceiling (the
+    criterion fan-out / report-writing activities can each go up to an hour
+    with no job-row touch) — otherwise it can mark a legitimate long-running
+    audit "failed (stale)" before it finishes, and the terminal-write guard
+    would then treat that false failure as authoritative."""
+    from soc2_compliance_team.temporal import workflows as wmod
+
+    assert (
+        api_main._STALE_JOB_THRESHOLD_SECONDS > wmod.AUDIT_SCHEDULE_TO_CLOSE_TIMEOUT.total_seconds()
+    )
+    assert (
+        api_main._STALE_JOB_THRESHOLD_SECONDS
+        > wmod.REPORT_SCHEDULE_TO_CLOSE_TIMEOUT.total_seconds()
+    )
