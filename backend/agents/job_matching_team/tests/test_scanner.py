@@ -206,6 +206,29 @@ def test_stringified_true_flag_creates_posting():
     assert len(agent.scan(["q"], max_roles=10)) == 1
 
 
+def test_description_is_capped():
+    from job_matching_team.agents.scanner import _MAX_DESCRIPTION_CHARS
+
+    agent = JobScannerAgent(
+        llm_client=_posting_llm(
+            {
+                "http://a.com/1": {
+                    "is_job_posting": True,
+                    "title": "Eng",
+                    "company": "Acme",
+                    "description": "x" * (_MAX_DESCRIPTION_CHARS + 5000),
+                }
+            }
+        ),
+        searcher=FakeSearcher({"q": [SearchResult(title="A", url="http://a.com/1")]}),
+        fetcher=FakeFetcher(),
+    )
+    out = agent.scan(["q"], max_roles=10)
+    # A runaway description is bounded so it can't bloat the DB row, the ranker
+    # prompt, or the scan->rank Temporal payload.
+    assert len(out[0].description) == _MAX_DESCRIPTION_CHARS
+
+
 def test_as_bool_helper():
     assert _as_bool(True) is True
     assert _as_bool(False) is False
