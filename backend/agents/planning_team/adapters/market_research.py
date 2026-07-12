@@ -8,17 +8,15 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from typing import Any, Dict, Optional
 
-import httpx
+from shared_http.job_polling import get_json, poll_until_terminal, post_json
 
 logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT_S = 30.0
 _POLL_INTERVAL_S = 2.0
 _TOTAL_TIMEOUT_S = 600.0
-_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
 def _base_url() -> Optional[str]:
@@ -50,39 +48,39 @@ def request_market_research(
         "human_approved": human_approved,
         "human_feedback": human_feedback,
     }
-    try:
-        with httpx.Client(timeout=_REQUEST_TIMEOUT_S) as client:
-            submit = client.post(f"{root}/market-research/run", json=payload)
-            submit.raise_for_status()
-            job_id = submit.json().get("job_id")
-            if not job_id:
-                logger.warning("Market research submit returned no job_id")
-                return None
 
-            deadline = time.monotonic() + _TOTAL_TIMEOUT_S
-            while True:
-                status = client.get(f"{root}/market-research/status/{job_id}")
-                status.raise_for_status()
-                data = status.json()
-                if data.get("status") in _TERMINAL_STATUSES:
-                    break
-                if time.monotonic() >= deadline:
-                    logger.warning("Market research job %s timed out", job_id)
-                    return None
-                time.sleep(_POLL_INTERVAL_S)
-    except (httpx.HTTPError, httpx.TimeoutException, ValueError) as e:
-        logger.warning("Market research request failed: %s", e)
+    submitted = post_json(
+        f"{root}/market-research/run",
+        payload,
+        timeout=_REQUEST_TIMEOUT_S,
+        log_context="Market research submit",
+    )
+    if not submitted:
+        return None
+    job_id = submitted.get("job_id")
+    if not job_id:
+        logger.warning("Market research submit returned no job_id")
         return None
 
-    if data.get("status") != "completed":
+    result = poll_until_terminal(
+        lambda: get_json(
+            f"{root}/market-research/status/{job_id}",
+            timeout=_REQUEST_TIMEOUT_S,
+            log_context=f"Market research status for {job_id}",
+        ),
+        poll_interval=_POLL_INTERVAL_S,
+        total_timeout=_TOTAL_TIMEOUT_S,
+        log_context=f"market research job {job_id}",
+    )
+    if result.get("status") != "completed":
         logger.warning(
             "Market research job %s ended with status %s: %s",
             job_id,
-            data.get("status"),
-            data.get("error"),
+            result.get("status"),
+            result.get("error"),
         )
         return None
-    return data.get("result") or {}
+    return result.get("result") or {}
 
 
 def market_research_to_evidence(data: Dict[str, Any]) -> Dict[str, Any]:
