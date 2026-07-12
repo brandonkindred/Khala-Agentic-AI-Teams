@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -19,6 +19,36 @@ class CodeEdit(BaseModel):
     )
     old_text: str = Field(description="Exact text to find and replace (must match exactly)")
     new_text: str = Field(description="Replacement text")
+
+
+def parse_code_edits(data: Any) -> List[CodeEdit]:
+    """Build the well-formed :class:`CodeEdit` objects from a parsed model reply.
+
+    Shared by the Build Fix Specialist and the lint-fix tool agent, which both
+    turn a ``{"edits": [...]}`` reply into ``CodeEdit`` objects with the same
+    well-formedness guard.
+
+    Preconditions: ``data`` is the parsed JSON reply (a dict is expected).
+    Postconditions: returns one :class:`CodeEdit` per ``data["edits"]`` entry that
+    is a dict carrying a truthy ``file_path`` and both ``old_text`` and
+    ``new_text``; malformed entries (and a non-dict ``data``) are skipped. Never
+    raises.
+    """
+    edits: List[CodeEdit] = []
+    if not isinstance(data, dict):
+        return edits
+    for e in data.get("edits") or []:
+        if isinstance(e, dict) and e.get("file_path") and "old_text" in e and "new_text" in e:
+            edits.append(
+                CodeEdit(
+                    file_path=e["file_path"],
+                    line_start=e.get("line_start"),
+                    line_end=e.get("line_end"),
+                    old_text=e["old_text"],
+                    new_text=e["new_text"],
+                )
+            )
+    return edits
 
 
 class BuildFixInput(BaseModel):
