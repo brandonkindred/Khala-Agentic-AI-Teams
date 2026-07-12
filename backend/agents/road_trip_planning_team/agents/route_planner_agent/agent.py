@@ -87,6 +87,17 @@ class RoutePlannerAgent:
             logger.warning("RoutePlannerAgent JSON parse/validation failed: %s", e)
             return self._fallback_route(trip, end)
 
+        # The prompt asks the LLM to set recommended_nights=0 for the start/end
+        # stops, but doesn't enforce it — an LLM response that omits the field
+        # for an endpoint defaults to RouteStop's own default of 1, which
+        # ActivitiesExpertAgent (skips endpoints only at recommended_nights==0)
+        # and the composer would then treat as a real overnight stop, adding
+        # extra LLM calls and days for the origin/destination. Enforce the
+        # pass-through contract in code rather than relying on prompt compliance.
+        for stop in stops:
+            if stop.stop_type in ("start", "end"):
+                stop.recommended_nights = 0
+
         if not stops or not self._covers_required_stops(stops, trip, end):
             # Valid JSON that yields no usable stops (e.g. an empty object from a
             # refusal), or that silently drops the start, the end, or a must-visit

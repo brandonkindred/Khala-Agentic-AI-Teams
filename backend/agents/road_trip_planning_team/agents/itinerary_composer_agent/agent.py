@@ -244,16 +244,32 @@ class ItineraryComposerAgent:
             - Returns ``days`` unchanged if non-empty. If empty and
               ``route.ordered_stops`` is non-empty (e.g. every stop is a
               pass-through start/end, via ``RoutePlannerAgent._fallback_route``),
-              returns a list with one synthesized same-day entry instead of an
-              empty list paired with ``total_days >= 1``.
+              returns a list with one synthesized entry. When the start and
+              end locations differ (a one-way trip with no required stops),
+              that entry represents the drive from start to end so the
+              requested destination is never silently dropped from the
+              itinerary; when they're the same (a round trip), it's a same-day
+              entry at that single location.
         """
         if days or not route.ordered_stops:
             return days
+        start, end = route.ordered_stops[0], route.ordered_stops[-1]
+        if end.location and end.location != start.location:
+            return [
+                DayPlan(
+                    day_number=1,
+                    location=end.location,
+                    driving_from=start.location,
+                    driving_distance_miles=end.estimated_driving_miles,
+                    driving_time_hours=end.estimated_driving_hours,
+                    day_summary=f"Drive from {start.location} to {end.location}",
+                )
+            ]
         return [
             DayPlan(
                 day_number=1,
-                location=route.ordered_stops[0].location,
-                day_summary=f"Day trip from {route.ordered_stops[0].location}",
+                location=start.location,
+                day_summary=f"Day trip from {start.location}",
             )
         ]
 

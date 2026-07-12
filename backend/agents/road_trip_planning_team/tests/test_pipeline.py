@@ -267,6 +267,27 @@ def test_plan_route_falls_back_to_default_on_non_numeric_suggested_total_days(
     )
     route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
     assert route.suggested_total_days == sample_plan_request.trip.trip_duration_days
+
+
+def test_plan_route_normalizes_endpoint_recommended_nights(sample_plan_request):
+    # The LLM's start/end stops may omit recommended_nights (RouteStop
+    # defaults to 1) or set it to a nonzero value despite the prompt asking
+    # for pass-through endpoints — the route planner must normalize them to 0
+    # regardless, so ActivitiesExpertAgent/the composer treat them as
+    # pass-through rather than extra overnight stops.
+    llm = _FakeLLM(
+        '{"ordered_stops": ['
+        '{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination", "recommended_nights": 2},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end", "recommended_nights": 1}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+    by_type = {s.stop_type: s for s in route.ordered_stops}
+    assert by_type["start"].recommended_nights == 0
+    assert by_type["end"].recommended_nights == 0
+    assert by_type["destination"].recommended_nights == 2  # non-endpoint stop untouched
     assert route.route_summary == "coastal"  # accepted, not the fallback route
 
 
@@ -548,6 +569,33 @@ def test_compose_itinerary_fallback_synthesizes_a_day_for_pass_through_only_rout
     assert itinerary.total_days == 1
     assert len(itinerary.days) == 1
     assert itinerary.days[0].location == "San Francisco, CA"
+
+
+def test_compose_itinerary_fallback_includes_destination_for_one_way_pass_through_route(
+    sample_plan_request,
+):
+    # A one-way trip (different start/end, no required stops) whose route
+    # fallback produced only pass-through start/end stops must still surface
+    # the requested destination in the synthesized day, not just the origin.
+    route = RoutePlan(
+        ordered_stops=[
+            RouteStop(location="Chicago, IL", stop_type="start", recommended_nights=0),
+            RouteStop(location="Denver, CO", stop_type="end", recommended_nights=0),
+        ],
+        suggested_total_days=1,
+    )
+    itinerary = rtp_pipeline.compose_itinerary(
+        sample_plan_request.trip,
+        TravelerGroupProfile(),
+        route,
+        [StopActivities(location="Chicago, IL"), StopActivities(location="Denver, CO")],
+        LogisticsPlan(),
+        llm=_FakeLLM("nope"),
+    )
+    assert itinerary.total_days == 1
+    assert len(itinerary.days) == 1
+    assert itinerary.days[0].location == "Denver, CO"
+    assert itinerary.days[0].driving_from == "Chicago, IL"
 
 
 # ---------------------------------------------------------------------------
