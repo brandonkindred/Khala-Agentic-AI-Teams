@@ -760,7 +760,7 @@ def _fake_result(success: bool) -> SimpleNamespace:
         failure_reason=None if success else "boom",
         current_phase=SimpleNamespace(value="report_packaging"),
         completed_phases=[SimpleNamespace(value="intake"), SimpleNamespace(value="discovery")],
-        model_dump=lambda: {"audit_id": "audit1", "success": success},
+        model_dump=lambda mode=None: {"audit_id": "audit1", "success": success},
     )
 
 
@@ -887,6 +887,36 @@ def test_run_audit_job_runs_when_no_existing_job_row(monkeypatch):
     asyncio.run(ax.run_audit_job("job1", "audit1", req))
 
     orch.run_audit.assert_awaited_once()
+
+
+def test_run_audit_job_writes_json_safe_result(monkeypatch):
+    """``AccessibilityAuditResult.started_at`` is a raw ``datetime`` by default;
+    ``manager.update_job`` forwards ``result=`` to ``httpx``'s ``json=`` param,
+    which cannot encode ``datetime`` objects. The terminal write must use a
+    JSON-mode dump so the value going into the job store is always plain
+    JSON-serializable data (a string timestamp, not a ``datetime``)."""
+    import json
+
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.models import AccessibilityAuditResult
+
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    orch = mock.Mock()
+    orch.run_audit = mock.AsyncMock(
+        return_value=AccessibilityAuditResult(audit_id="audit1", success=True)
+    )
+    monkeypatch.setattr(ax, "get_orchestrator", lambda: orch)
+
+    req = ax.CreateAuditRequest(web_urls=["https://e.com"])
+    asyncio.run(ax.run_audit_job("job1", "audit1", req))
+
+    completed = [c for c in jm.update_job.call_args_list if c.kwargs.get("status") == "completed"]
+    assert completed
+    result_dict = completed[0].kwargs["result"]
+    json.dumps(result_dict)  # must not raise TypeError on a raw datetime
+    assert isinstance(result_dict["started_at"], str)
 
 
 # ---------------------------------------------------------------------------
@@ -1175,6 +1205,35 @@ def test_run_phase_writes_terminal_fail_when_job_not_yet_terminal(monkeypatch):
     assert failed_writes and failed_writes[0].kwargs.get("error") == "boom"
 
 
+def test_run_phase_fail_branch_writes_json_safe_result(monkeypatch):
+    """The FAIL branch's terminal write passes a real ``AccessibilityAuditResult``
+    (with its raw-``datetime`` ``started_at`` field) through ``model_dump`` — this
+    must be a JSON-mode dump so ``manager.update_job``'s ``result=`` kwarg is
+    always plain JSON-serializable data."""
+    import json
+
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.models import AccessibilityAuditResult
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+
+    async def step():
+        return AccessibilityAuditResult(audit_id="a1", success=False, failure_reason="boom")
+
+    asyncio.run(acts._run_phase("j1", "a1", "discovery", 40, step))
+
+    failed_writes = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed_writes
+    result_dict = failed_writes[0].kwargs["result"]
+    json.dumps(result_dict)  # must not raise TypeError on a raw datetime
+    assert isinstance(result_dict["started_at"], str)
+
+
 def test_run_phase_writes_initial_running_when_job_not_terminal(monkeypatch):
     from accessibility_audit_team import audit_execution as ax
     from accessibility_audit_team.temporal import activities as acts
@@ -1232,7 +1291,7 @@ def test_run_phase_exception_recovers_progress_and_result_from_persisted_state(m
     persisted = SimpleNamespace(
         completed_phases=[SimpleNamespace(value="intake"), SimpleNamespace(value="discovery")],
         total_findings=5,
-        model_dump=lambda: {"audit_id": "a1", "success": False},
+        model_dump=lambda mode=None: {"audit_id": "a1", "success": False},
     )
     monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=persisted))
 
@@ -1387,7 +1446,7 @@ def _phase_fail_result(reason: str) -> SimpleNamespace:
         failure_reason=reason,
         total_findings=0,
         completed_phases=[],
-        model_dump=lambda: {"audit_id": "a1", "success": False},
+        model_dump=lambda mode=None: {"audit_id": "a1", "success": False},
     )
 
 
@@ -1479,7 +1538,7 @@ def _finalized_result(success: bool) -> SimpleNamespace:
         failure_reason="" if success else "boom",
         current_phase=SimpleNamespace(value="report_packaging"),
         completed_phases=[SimpleNamespace(value="intake"), SimpleNamespace(value="discovery")],
-        model_dump=lambda: {"audit_id": "a1", "success": success},
+        model_dump=lambda mode=None: {"audit_id": "a1", "success": success},
     )
 
 
@@ -1499,6 +1558,34 @@ def test_finalize_activity_marks_completed(monkeypatch):
     ]
     assert completed and completed[0].kwargs["findings_count"] == 3
     assert completed[0].kwargs["progress"] == 100
+
+
+def test_finalize_activity_writes_json_safe_result(monkeypatch):
+    """Same JSON-safety contract as ``_run_phase``'s FAIL branch, for the
+    finalize terminal write (a real ``AccessibilityAuditResult`` with a raw
+    ``datetime`` ``started_at``)."""
+    import json
+
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.models import AccessibilityAuditResult
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = _patch_activity_jobmanager(monkeypatch)
+    monkeypatch.setattr(
+        ax,
+        "finalize_audit_step",
+        mock.AsyncMock(return_value=AccessibilityAuditResult(audit_id="a1", success=True)),
+    )
+
+    asyncio.run(acts.finalize_activity("j1", "a1"))
+
+    completed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_COMPLETED
+    ]
+    assert completed
+    result_dict = completed[0].kwargs["result"]
+    json.dumps(result_dict)  # must not raise TypeError on a raw datetime
+    assert isinstance(result_dict["started_at"], str)
 
 
 def test_finalize_activity_marks_failed_when_unsuccessful(monkeypatch):
@@ -1558,7 +1645,7 @@ def test_finalize_activity_exception_recovers_progress_and_result_from_persisted
     persisted = SimpleNamespace(
         completed_phases=[SimpleNamespace(value="report_packaging")],
         total_findings=7,
-        model_dump=lambda: {"audit_id": "a1", "success": False},
+        model_dump=lambda mode=None: {"audit_id": "a1", "success": False},
     )
     monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=persisted))
 
@@ -1728,7 +1815,7 @@ def test_retest_activity_exception_recovers_progress_and_result_from_persisted_s
             SimpleNamespace(value="retest"),
         ],
         total_findings=4,
-        model_dump=lambda: {"audit_id": "a1", "success": True},
+        model_dump=lambda mode=None: {"audit_id": "a1", "success": True},
     )
     monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=persisted))
 
@@ -1765,6 +1852,33 @@ def test_run_retest_job_records_running_then_completed(monkeypatch):
     orch.run_retest.assert_awaited_once_with("a1", ["f1"])
     statuses = [c.kwargs.get("status") for c in jm.update_job.call_args_list]
     assert ax.JOB_STATUS_RUNNING in statuses and "completed" in statuses
+
+
+def test_run_retest_job_writes_json_safe_result(monkeypatch):
+    """Same JSON-safety contract as ``run_audit_job``, for the retest core's
+    terminal write (a real ``AccessibilityAuditResult`` with a raw ``datetime``
+    ``started_at``)."""
+    import json
+
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.models import AccessibilityAuditResult
+
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    orch = mock.Mock()
+    orch.run_retest = mock.AsyncMock(
+        return_value=AccessibilityAuditResult(audit_id="a1", success=True)
+    )
+    monkeypatch.setattr(ax, "get_orchestrator", lambda: orch)
+
+    asyncio.run(ax.run_retest_job("j1", "a1", ["f1"]))
+
+    completed = [c for c in jm.update_job.call_args_list if c.kwargs.get("status") == "completed"]
+    assert completed
+    result_dict = completed[0].kwargs["result"]
+    json.dumps(result_dict)  # must not raise TypeError on a raw datetime
+    assert isinstance(result_dict["started_at"], str)
 
 
 @pytest.mark.parametrize("terminal_status", ["completed", "failed"])

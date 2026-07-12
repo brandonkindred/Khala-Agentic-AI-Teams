@@ -637,6 +637,8 @@ def test_load_audit_state_returns_none_when_absent():
 def test_mark_audit_timed_out_marks_job_and_state(monkeypatch):
     """The timeout helper records the timebox reason on both the job and the
     persisted audit state, listing the phases that did complete."""
+    import json
+
     seeded = AccessibilityAuditResult(audit_id="a1", completed_phases=[Phase.INTAKE])
     monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=seeded))
     jm = mock.Mock()
@@ -652,6 +654,11 @@ def test_mark_audit_timed_out_marks_job_and_state(monkeypatch):
     assert "timed out after 2 hour" in error
     assert "intake" in error
     assert seeded.success is False
+    # started_at is a raw datetime by default; the terminal write must use a
+    # JSON-mode dump so this stays plain JSON-serializable data.
+    result_dict = failed[0].kwargs["result"]
+    json.dumps(result_dict)
+    assert isinstance(result_dict["started_at"], str)
 
 
 def test_mark_audit_timed_out_without_persisted_state(monkeypatch):
@@ -666,6 +673,101 @@ def test_mark_audit_timed_out_without_persisted_state(monkeypatch):
         c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
     ]
     assert failed and "timed out after 1 hour" in failed[0].kwargs["error"]
+
+
+def test_load_audit_state_strict_round_trips_like_load(monkeypatch):
+    """On a clean hit, the strict loader returns the same state as the swallowing one."""
+    result = AccessibilityAuditResult(audit_id="strict_rt", success=True, total_findings=1)
+    asyncio.run(ax.persist_audit_state(result))
+    loaded = asyncio.run(ax._load_audit_state_strict("strict_rt"))
+    assert loaded is not None
+    assert loaded.audit_id == "strict_rt"
+
+
+def test_load_audit_state_strict_returns_none_when_absent():
+    """A genuine store miss (no ref under this key) is a clean None, not an error."""
+    assert asyncio.run(ax._load_audit_state_strict("does_not_exist")) is None
+
+
+def test_load_audit_state_strict_propagates_store_errors(monkeypatch):
+    """Unlike load_audit_state, a transient store error must propagate so the
+    caller (run_intake_step's idempotency check) fails loudly and lets Temporal
+    retry the read, instead of silently treating it as 'no prior state'."""
+    import accessibility_audit_team.artifact_store as store_mod
+
+    def _boom():
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(store_mod, "get_artifact_store", _boom)
+    with pytest.raises(RuntimeError, match="store down"):
+        asyncio.run(ax._load_audit_state_strict("a1"))
+
+
+def test_run_intake_step_skips_rerun_when_already_failed(monkeypatch):
+    """A retry after intake already failed AND persisted (the job-store FAILED
+    write for that failure itself failed, so Temporal retries this activity) must
+    not re-run the nondeterministic intake LLM call and overwrite the original
+    failure with a different one."""
+    seeded = AccessibilityAuditResult(audit_id="a1", success=False, failure_reason="original boom")
+    asyncio.run(ax.persist_audit_state(seeded))
+    phase_fn = mock.AsyncMock()
+    monkeypatch.setattr(ax, "run_intake_phase", phase_fn)
+
+    result = asyncio.run(ax.run_intake_step("j1", "a1", ax.CreateAuditRequest(web_urls=[])))
+
+    phase_fn.assert_not_called()
+    assert result.failure_reason == "original boom"
+
+
+def test_run_discovery_step_skips_rerun_when_already_failed(monkeypatch, sample_audit_plan):
+    seeded = AccessibilityAuditResult(
+        audit_id="a1",
+        intake_result=IntakeResult(success=True, audit_plan=sample_audit_plan),
+        success=False,
+        failure_reason="original discovery boom",
+    )
+    _seed(monkeypatch, seeded)
+    phase_fn = mock.AsyncMock()
+    monkeypatch.setattr(ax, "run_discovery_phase", phase_fn)
+
+    result = asyncio.run(ax.run_discovery_step("j1", "a1"))
+
+    phase_fn.assert_not_called()
+    assert result is seeded
+
+
+def test_run_verification_step_skips_rerun_when_already_failed(monkeypatch, sample_findings):
+    seeded = AccessibilityAuditResult(
+        audit_id="a1",
+        discovery_result=DiscoveryResult(success=True, draft_findings=sample_findings),
+        success=False,
+        failure_reason="original verification boom",
+    )
+    _seed(monkeypatch, seeded)
+    phase_fn = mock.AsyncMock()
+    monkeypatch.setattr(ax, "run_verification_phase", phase_fn)
+
+    result = asyncio.run(ax.run_verification_step("j1", "a1", {}))
+
+    phase_fn.assert_not_called()
+    assert result is seeded
+
+
+def test_run_report_packaging_step_skips_rerun_when_already_failed(monkeypatch, sample_findings):
+    seeded = AccessibilityAuditResult(
+        audit_id="a1",
+        verification_result=VerificationResult(success=True, verified_findings=sample_findings),
+        success=False,
+        failure_reason="original report boom",
+    )
+    _seed(monkeypatch, seeded)
+    phase_fn = mock.AsyncMock()
+    monkeypatch.setattr(ax, "run_report_packaging_phase", phase_fn)
+
+    result = asyncio.run(ax.run_report_packaging_step("j1", "a1"))
+
+    phase_fn.assert_not_called()
+    assert result is seeded
 
 
 def test_persist_and_load_swallow_store_errors(monkeypatch):

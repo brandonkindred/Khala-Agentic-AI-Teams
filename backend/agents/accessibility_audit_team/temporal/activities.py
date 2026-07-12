@@ -169,7 +169,7 @@ async def _best_effort_terminal_fields(audit_id: str) -> Dict[str, Any]:
             [p.value for p in loaded.completed_phases] if loaded is not None else []
         ),
         "findings_count": loaded.total_findings if loaded is not None else 0,
-        "result": loaded.model_dump() if loaded is not None else None,
+        "result": loaded.model_dump(mode="json") if loaded is not None else None,
     }
 
 
@@ -268,7 +268,7 @@ async def _run_phase(
                 progress=100,
                 completed_phases=[p.value for p in result.completed_phases],
                 findings_count=result.total_findings,
-                result=result.model_dump(),
+                result=result.model_dump(mode="json"),
                 error=result.failure_reason,
             )
         return {"status": "FAIL", "audit_id": audit_id, "error": result.failure_reason}
@@ -445,7 +445,7 @@ async def finalize_activity(job_id: str, audit_id: str) -> Dict[str, Any]:
             current_phase=result.current_phase.value,
             completed_phases=[p.value for p in result.completed_phases],
             findings_count=result.total_findings,
-            result=result.model_dump(),
+            result=result.model_dump(mode="json"),
             error=None if result.success else result.failure_reason,
         )
     return {"status": "PASS" if result.success else "FAIL", "audit_id": audit_id}

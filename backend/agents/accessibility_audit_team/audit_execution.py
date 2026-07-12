@@ -217,7 +217,7 @@ async def run_audit_job(job_id: str, audit_id: str, request: CreateAuditRequest)
         current_phase=result.current_phase.value,
         completed_phases=[p.value for p in result.completed_phases],
         findings_count=result.total_findings,
-        result=result.model_dump(),
+        result=result.model_dump(mode="json"),
         error=None if result.success else result.failure_reason,
     )
 
@@ -384,6 +384,37 @@ async def load_audit_state(audit_id: str) -> Optional[AccessibilityAuditResult]:
     return None
 
 
+async def _load_audit_state_strict(audit_id: str) -> Optional[AccessibilityAuditResult]:
+    """Load audit state, propagating a genuine store/deserialization error.
+
+    Unlike :func:`load_audit_state` (which swallows any failure to ``None``, safe
+    for callers that treat a missing/unreadable state as a hard precondition
+    failure and raise regardless), a swallowed transient error is UNSAFE for a
+    caller using the result to decide "has this already run" — e.g.
+    ``run_intake_step``'s idempotency check. A transient store hiccup masquerading
+    as "no prior state" would make that check wrongly conclude intake has never
+    run and re-execute the nondeterministic LLM call, overwriting the originally
+    persisted audit plan with a second, possibly-different one.
+
+    Preconditions:
+        - ``audit_id`` is the API-supplied audit id used as the persistence key.
+    Postconditions:
+        - Returns the persisted ``AccessibilityAuditResult``, or ``None`` ONLY when
+          the store cleanly has nothing under this key. Any other failure (network
+          error, deserialization error) propagates so the caller can fail loudly
+          and let Temporal retry the read, instead of silently proceeding as if no
+          prior state existed.
+    """
+    from .artifact_store import get_artifact_store
+
+    store = get_artifact_store()
+    ref = f"audit_state_{audit_id}"
+    content = await store.retrieve(ref)
+    if not content:
+        return None
+    return AccessibilityAuditResult.model_validate_json(content)
+
+
 def finalize_audit_result(
     result: AccessibilityAuditResult, report_result: ReportPackagingResult
 ) -> AccessibilityAuditResult:
@@ -442,21 +473,27 @@ async def run_intake_step(
           ``success=False`` and ``failure_reason`` set when intake fails. Either
           way the state is persisted. An infrastructure failure inside the phase
           propagates.
-        - If intake was already recorded complete under ``audit_id`` (an
-          at-least-once Temporal retry after the prior attempt's persist
-          succeeded but its completion ack was lost), the already-persisted
-          result is returned as-is WITHOUT re-running intake — that work is
-          nondeterministic, and a retry re-running it would overwrite the
-          originally persisted audit plan/coverage matrix with a second,
-          possibly-different one (see :func:`run_discovery_step` for the same
-          contract on the other phases).
+        - If intake was already recorded complete OR already failed and persisted
+          under ``audit_id`` (an at-least-once Temporal retry after the prior
+          attempt's persist succeeded but its completion ack was lost), the
+          already-persisted result is returned as-is WITHOUT re-running intake —
+          that work is nondeterministic, and a retry re-running it would overwrite
+          the originally persisted audit plan/coverage matrix (or the original
+          failure) with a second, possibly-different one (see
+          :func:`run_discovery_step` for the same contract on the other phases).
+          The existence check uses :func:`_load_audit_state_strict`: a transient
+          store-read error here must propagate (so Temporal retries the read)
+          rather than being swallowed to "no prior state", which would trigger an
+          unwanted re-run.
     """
     logger.info("Intake step for job %s audit %s", job_id, audit_id)
 
-    existing = await load_audit_state(audit_id)
-    if existing is not None and Phase.INTAKE in existing.completed_phases:
+    existing = await _load_audit_state_strict(audit_id)
+    if existing is not None and (
+        Phase.INTAKE in existing.completed_phases or existing.failure_reason
+    ):
         logger.info(
-            "Intake step for job %s audit %s already complete; skipping re-run", job_id, audit_id
+            "Intake step for job %s audit %s already attempted; skipping re-run", job_id, audit_id
         )
         return existing
 
@@ -498,12 +535,13 @@ async def run_discovery_step(job_id: str, audit_id: str) -> AccessibilityAuditRe
     Postconditions:
         - Returns the audit result with the discovery result attached (``DISCOVERY``
           recorded) on success, or ``success=False`` on a logical discovery failure.
-        - If discovery was already recorded complete (an at-least-once Temporal
-          retry after the prior attempt's persist succeeded but its completion ack
-          was lost), the already-persisted result is returned as-is WITHOUT
-          re-running the scans/LLM calls — that work is nondeterministic and can
-          create side-effecting artifacts, so a retry re-running it could silently
-          change the audit's findings.
+        - If discovery was already recorded complete, OR already failed and
+          persisted (e.g. the job-store FAILED write for that failure itself
+          failed, so Temporal retries this activity), the already-persisted
+          result is returned as-is WITHOUT re-running the scans/LLM calls — that
+          work is nondeterministic and can create side-effecting artifacts, so a
+          retry re-running it could silently change the audit's findings or
+          overwrite the original failure with a different one.
         - Raises ``RuntimeError`` if the persisted intake state / audit plan is
           missing (an infrastructure/plumbing failure, surfaced for Temporal retry).
     """
@@ -512,9 +550,11 @@ async def run_discovery_step(job_id: str, audit_id: str) -> AccessibilityAuditRe
     if result is None or result.intake_result is None or result.intake_result.audit_plan is None:
         raise RuntimeError(f"discovery step: intake state/audit plan missing for {audit_id}")
 
-    if Phase.DISCOVERY in result.completed_phases:
+    if Phase.DISCOVERY in result.completed_phases or result.failure_reason:
         logger.info(
-            "Discovery step for job %s audit %s already complete; skipping re-run", job_id, audit_id
+            "Discovery step for job %s audit %s already attempted; skipping re-run",
+            job_id,
+            audit_id,
         )
         return result
 
@@ -555,9 +595,8 @@ async def run_verification_step(
         - Returns the audit result with the verification result attached
           (``VERIFICATION`` recorded) on success, or ``success=False`` on a logical
           verification failure.
-        - If verification was already recorded complete (an at-least-once Temporal
-          retry after the prior attempt's persist succeeded but its completion ack
-          was lost), the already-persisted result is returned as-is WITHOUT
+        - If verification was already recorded complete, OR already failed and
+          persisted, the already-persisted result is returned as-is WITHOUT
           re-running verification — see :func:`run_discovery_step` for why.
         - Raises ``RuntimeError`` if the persisted discovery state is missing.
     """
@@ -566,9 +605,9 @@ async def run_verification_step(
     if result is None or result.discovery_result is None:
         raise RuntimeError(f"verification step: discovery state missing for {audit_id}")
 
-    if Phase.VERIFICATION in result.completed_phases:
+    if Phase.VERIFICATION in result.completed_phases or result.failure_reason:
         logger.info(
-            "Verification step for job %s audit %s already complete; skipping re-run",
+            "Verification step for job %s audit %s already attempted; skipping re-run",
             job_id,
             audit_id,
         )
@@ -609,10 +648,9 @@ async def run_report_packaging_step(job_id: str, audit_id: str) -> Accessibility
           (``REPORT_PACKAGING`` recorded) on success, or ``success=False`` on a
           logical report-packaging failure. Final assembly (severity counts /
           summary / ``success``) is deferred to :func:`finalize_audit_step`.
-        - If report packaging was already recorded complete (an at-least-once
-          Temporal retry after the prior attempt's persist succeeded but its
-          completion ack was lost), the already-persisted result is returned
-          as-is WITHOUT re-running it — see :func:`run_discovery_step` for why.
+        - If report packaging was already recorded complete, OR already failed
+          and persisted, the already-persisted result is returned as-is WITHOUT
+          re-running it — see :func:`run_discovery_step` for why.
         - Raises ``RuntimeError`` if the persisted verification state is missing.
     """
     logger.info("Report-packaging step for job %s audit %s", job_id, audit_id)
@@ -620,9 +658,9 @@ async def run_report_packaging_step(job_id: str, audit_id: str) -> Accessibility
     if result is None or result.verification_result is None:
         raise RuntimeError(f"report packaging step: verification state missing for {audit_id}")
 
-    if Phase.REPORT_PACKAGING in result.completed_phases:
+    if Phase.REPORT_PACKAGING in result.completed_phases or result.failure_reason:
         logger.info(
-            "Report-packaging step for job %s audit %s already complete; skipping re-run",
+            "Report-packaging step for job %s audit %s already attempted; skipping re-run",
             job_id,
             audit_id,
         )
@@ -711,7 +749,7 @@ async def mark_audit_timed_out(job_id: str, audit_id: str, timebox_hours: int) -
         progress=100,
         completed_phases=completed,
         findings_count=result.total_findings if result is not None else 0,
-        result=result.model_dump() if result is not None else None,
+        result=result.model_dump(mode="json") if result is not None else None,
     )
 
 
@@ -740,7 +778,7 @@ async def run_retest_job(job_id: str, audit_id: str, finding_ids: List[str]) -> 
         job_id,
         status=JOB_STATUS_COMPLETED if result.success else JOB_STATUS_FAILED,
         progress=100,
-        result=result.model_dump(),
+        result=result.model_dump(mode="json"),
         error=None if result.success else result.failure_reason,
     )
 
