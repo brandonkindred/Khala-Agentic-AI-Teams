@@ -298,6 +298,11 @@ class SocialMediaMarketingOrchestrator:
     ) -> ContentPlan:
         required_posts = goals.cadence_posts_per_day * goals.duration_days
 
+        # ``_llm_client`` is an optional dependency-injection seam, deliberately not
+        # set in ``__init__``: tests (or future wiring) may assign ``self._llm_client``
+        # to enable the LLM rerank of retrieved exemplars. When absent it resolves to
+        # None, and ``find_relevant_winning_posts`` simply skips the optional rerank and
+        # returns keyword-matched exemplars -- retrieval still works, it is not broken.
         exemplars = _retrieve_exemplars(proposal, goals, getattr(self, "_llm_client", None))
 
         candidates: List[ConceptIdea] = []

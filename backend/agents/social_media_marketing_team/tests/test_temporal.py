@@ -783,7 +783,9 @@ def test_finalize_last_attempt_recheck_failure_still_marks_failed(
     monkeypatch.setattr(api_main, "_job_manager", _BrokenManager())
     # Isolate the failure to the completion re-check: skip the pre-write performance
     # read (which also uses the now-broken _job_manager).
-    monkeypatch.setattr(amod, "_build_performance", lambda *a, **k: None)
+    monkeypatch.setattr(
+        amod, "_create_performance_snapshot_from_observations", lambda *a, **k: None
+    )
     monkeypatch.setattr(amod, "_is_last_attempt", lambda: True)
     monkeypatch.setattr(
         amod, "_fail_activity", lambda job_id, exc, phase: marked.update(job=job_id, phase=phase)
@@ -1146,6 +1148,30 @@ def test_workflow_drain_out_branch_runs_legacy_activity(
     asyncio.run(wf.run("job-1", _req()))
 
     assert order == ["run_team_job_activity"]
+
+
+def test_workflow_rejects_empty_request_dict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The documented precondition is enforced: an empty payload fails non-retryably."""
+    from temporalio.exceptions import ApplicationError
+
+    wmod, _order = _fake_workflow(monkeypatch, patched=True)
+
+    wf = wmod.SocialMarketingTeamWorkflow()
+    with pytest.raises(ApplicationError) as exc:
+        asyncio.run(wf.run("job-1", {}))
+    assert exc.value.non_retryable is True
+
+
+def test_workflow_rejects_empty_job_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing job id is a caller/upstream defect, not a transient fault."""
+    from temporalio.exceptions import ApplicationError
+
+    wmod, _order = _fake_workflow(monkeypatch, patched=True)
+
+    wf = wmod.SocialMarketingTeamWorkflow()
+    with pytest.raises(ApplicationError) as exc:
+        asyncio.run(wf.run("", _req(human_approved_for_testing=True)))
+    assert exc.value.non_retryable is True
 
 
 # ---------------------------------------------------------------------------

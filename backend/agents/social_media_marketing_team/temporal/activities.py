@@ -156,7 +156,7 @@ def _consensus_models(consensus: Dict[str, Any]) -> tuple[Any, Any, str]:
     )
 
 
-def _build_orchestrator(request: Any) -> Any:
+def _create_orchestrator_for_request(request: Any) -> Any:
     """Construct the orchestrator for a request (shared with thread mode).
 
     Preconditions:
@@ -170,7 +170,7 @@ def _build_orchestrator(request: Any) -> Any:
     return SocialMediaMarketingOrchestrator(llm_model_name=request.llm_model_name)
 
 
-def _build_performance(job_id: str, campaign_name: str) -> Any:
+def _create_performance_snapshot_from_observations(job_id: str, campaign_name: str) -> Any:
     """Build the performance snapshot from stored observations (as ``_run_team_job``).
 
     Preconditions:
@@ -258,7 +258,7 @@ def consensus_stage_activity(job_id: str, request_dict: Dict[str, Any]) -> Dict[
             cadence_posts_per_day=request.cadence_posts_per_day,
             duration_days=request.duration_days,
         )
-        orchestrator = _build_orchestrator(request)
+        orchestrator = _create_orchestrator_for_request(request)
         proposal = orchestrator.build_consensus_proposal(goals)
         return ConsensusStageResult(
             proposal=proposal.model_dump(mode="json"),
@@ -305,8 +305,10 @@ def content_plan_stage_activity(
     )
 
     def _body() -> Dict[str, Any]:
-        orchestrator = _build_orchestrator(request)
-        performance = _build_performance(job_id, f"{brand_name} multi-platform growth sprint")
+        orchestrator = _create_orchestrator_for_request(request)
+        performance = _create_performance_snapshot_from_observations(
+            job_id, f"{brand_name} multi-platform growth sprint"
+        )
         winners = orchestrator._load_winners(request.brand_id, proposal, goals)
         content_plan = orchestrator._plan_content(proposal, goals, performance, winners=winners)
         return ContentPlanStageResult(
@@ -346,7 +348,7 @@ def platform_stage_activity(
     content_plan = ContentPlan.model_validate(content["content_plan"])
 
     def _body() -> Dict[str, Any]:
-        orchestrator = _build_orchestrator(request)
+        orchestrator = _create_orchestrator_for_request(request)
         plans = orchestrator.build_platform_plans(
             goals, proposal.campaign_name, len(content_plan.approved_ideas)
         )
@@ -386,7 +388,7 @@ def experiment_stage_activity(
     content_plan = ContentPlan.model_validate(content["content_plan"])
 
     def _body() -> Dict[str, Any]:
-        orchestrator = _build_orchestrator(request)
+        orchestrator = _create_orchestrator_for_request(request)
         experiment = orchestrator.build_experiment(
             proposal.campaign_name, content_plan.approved_ideas
         )
@@ -486,9 +488,11 @@ def finalize_stage_activity(
         experiment_dto = ExperimentStageResult.model_validate(experiment or {})
         if experiment_dto.experiment_plan is not None:
             experiment_plan = ExperimentPlan.model_validate(experiment_dto.experiment_plan)
-        performance = _build_performance(job_id, f"{brand_name} multi-platform growth sprint")
+        performance = _create_performance_snapshot_from_observations(
+            job_id, f"{brand_name} multi-platform growth sprint"
+        )
 
-    orchestrator = _build_orchestrator(request)
+    orchestrator = _create_orchestrator_for_request(request)
     output = orchestrator.assemble_team_output(
         proposal,
         human_review,

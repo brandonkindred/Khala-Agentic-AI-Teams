@@ -260,7 +260,9 @@ def test_ingest_performance_result_is_non_dict(fake_jobs, fake_bank) -> None:
     "social_media_marketing_team.api.main._fetch_and_validate_brand",
     return_value=_MOCK_BRAND_CTX,
 )
-def test_revise_endpoint_uses_dispatched_brand_summary(_mock, fake_jobs) -> None:
+def test_revise_endpoint_uses_dispatched_brand_summary(
+    _mock, fake_jobs, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Cover the revise endpoint when dispatch is mocked (no inline thread)."""
     payload = {
         "client_id": "c",
@@ -277,18 +279,15 @@ def test_revise_endpoint_uses_dispatched_brand_summary(_mock, fake_jobs) -> None
         request_payload=payload,
     )
 
-    monkeypatch = pytest.MonkeyPatch()
-    try:
-        monkeypatch.setattr(api_main, "_dispatch_job", lambda *a, **k: "DISPATCHED")
-        client = TestClient(app)
-        resp = client.post(
-            "/social-marketing/revise/rev-mock",
-            json={"feedback": "make it pop", "approved_for_testing": True},
-        )
-        assert resp.status_code == 200
-        assert "DISPATCHED" in resp.json()["message"]
-    finally:
-        monkeypatch.undo()
+    # Use the injected ``monkeypatch`` fixture so pytest handles teardown/cleanup.
+    monkeypatch.setattr(api_main, "_dispatch_job", lambda *a, **k: "DISPATCHED")
+    client = TestClient(app)
+    resp = client.post(
+        "/social-marketing/revise/rev-mock",
+        json={"feedback": "make it pop", "approved_for_testing": True},
+    )
+    assert resp.status_code == 200
+    assert "DISPATCHED" in resp.json()["message"]
 
 
 # ---------------------------------------------------------------------------

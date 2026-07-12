@@ -50,9 +50,7 @@ def test_run_trend_job_updates_cached_digest(monkeypatch: pytest.MonkeyPatch) ->
     assert ts.get_latest_digest() is digest
 
 
-def test_run_trend_job_swallows_exceptions(
-    monkeypatch: pytest.MonkeyPatch, caplog
-) -> None:
+def test_run_trend_job_swallows_exceptions(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     """Any failure during trend discovery is logged, not raised."""
 
     def _bad_search():

@@ -83,6 +83,11 @@ def _startup() -> None:
             start_social_marketing_temporal_worker_thread,
         )
 
+        # The worker runs on a daemon thread whose lifecycle is owned by the
+        # shared_temporal worker registry (per-team idempotency), not this hook, so we
+        # intentionally do not retain the thread here. Graceful drain of in-flight
+        # activities is not managed at this backstop; the daemon exits with the
+        # process. Nothing to join on the on_shutdown hook.
         start_social_marketing_temporal_worker_thread()
     except ImportError as exc:
         logger.warning("social marketing Temporal worker module unavailable: %s", exc)
@@ -347,6 +352,17 @@ def _dispatch_job(job_id: str, request: RunMarketingTeamRequest, brand_ctx: Bran
     except ImportError as exc:
         logger.warning(
             "Temporal modules unavailable for job %s; falling back to thread mode: %s",
+            job_id,
+            exc,
+        )
+    except Exception as exc:
+        # A runtime Temporal failure (client connect timeout, workflow-start /
+        # registration error, serialization error) must not crash the dispatch
+        # endpoint: fall back to thread mode so the job still runs, mirroring the
+        # missing-module path above. ImportError is handled separately so a genuinely
+        # absent dependency logs distinctly from a transient runtime fault.
+        logger.warning(
+            "Temporal dispatch failed for job %s; falling back to thread mode: %s",
             job_id,
             exc,
         )

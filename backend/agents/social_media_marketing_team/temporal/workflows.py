@@ -24,6 +24,7 @@ from typing import Any, Dict, Mapping
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from social_media_marketing_team.temporal import activities as _activities
@@ -93,7 +94,9 @@ class SocialMarketingTeamWorkflow:
 
         Preconditions:
             - ``job_id`` identifies a created job record; ``request_dict`` is a
-              serialized ``RunMarketingTeamRequest``.
+              serialized ``RunMarketingTeamRequest`` (enforced below -- a violation is
+              a caller/upstream defect, raised non-retryably rather than silently
+              scheduling activities with an empty payload).
         Postconditions:
             - On success each phase runs once and the finalize activity completes the
               job store. A ``FAIL`` status from any stage (job already failed)
@@ -102,6 +105,15 @@ class SocialMarketingTeamWorkflow:
               finalize. Histories recorded before the per-phase decomposition replay
               the original single-activity path (via ``workflow.patched``).
         """
+        # Enforce the documented precondition (DbC): a missing job id or request payload
+        # is an upstream/caller bug, not a transient fault, so fail the workflow
+        # non-retryably instead of dispatching activities that would fail opaquely.
+        if not job_id or not request_dict:
+            raise ApplicationError(
+                "SocialMarketingTeamWorkflow.run requires a non-empty job_id and request_dict",
+                non_retryable=True,
+            )
+
         if not workflow.patched("social-per-phase-activities"):
             # Drain-out branch: replays of pre-decomposition histories must
             # re-schedule the original monolithic activity deterministically.
@@ -129,7 +141,11 @@ class SocialMarketingTeamWorkflow:
         # as an explicit ``approved`` flag so the activity never re-derives it. An
         # unapproved run finalizes NEEDS_REVISION without the downstream stages,
         # matching orchestrator.run's early return.
-        approved = bool(request_dict.get("human_approved_for_testing"))
+        # Explicit identity check, not truthiness: the field is a typed bool on
+        # ``RunMarketingTeamRequest`` (so ``model_dump`` yields a real bool), and
+        # ``is True`` refuses to treat any stray truthy payload value -- e.g. the
+        # string "false" -- as approval at this security-relevant gate.
+        approved = request_dict.get("human_approved_for_testing") is True
         if not approved:
             await workflow.execute_activity(
                 _activities.finalize_stage_activity,

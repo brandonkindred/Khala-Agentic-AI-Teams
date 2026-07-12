@@ -135,7 +135,11 @@ def test_metric_lookup_handles_dicts_and_objects() -> None:
             self.name = name
             self.value = value
 
-    metrics = [_Metric("likes", 10), {"name": "shares", "value": 5}, {"name": "noisy", "value": "x"}]
+    metrics = [
+        _Metric("likes", 10),
+        {"name": "shares", "value": 5},
+        {"name": "noisy", "value": "x"},
+    ]
     assert api_main._metric_lookup(metrics, "likes") == pytest.approx(10.0)
     assert api_main._metric_lookup(metrics, "shares") == pytest.approx(5.0)
     # value is non-numeric -> coerced to 0.0
@@ -246,9 +250,7 @@ def test_linked_goals_from_job_returns_empty_for_missing() -> None:
     assert api_main._linked_goals_from_job({"result": {}}, "x") == []
     assert api_main._linked_goals_from_job({"result": {"content_plan": None}}, "x") == []
     assert (
-        api_main._linked_goals_from_job(
-            {"result": {"content_plan": {"approved_ideas": []}}}, "x"
-        )
+        api_main._linked_goals_from_job({"result": {"content_plan": {"approved_ideas": []}}}, "x")
         == []
     )
 
@@ -298,9 +300,7 @@ def test_auto_ingest_handles_empty_observations(fake_jobs) -> None:
     assert api_main._auto_ingest_winning_posts({}, "job-x", None) == 0
 
 
-def test_auto_ingest_save_failure_is_non_fatal(
-    monkeypatch: pytest.MonkeyPatch, caplog
-) -> None:
+def test_auto_ingest_save_failure_is_non_fatal(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     """``save_winning_post`` raising should not crash the loop and the
     counter should reflect only successful inserts."""
 
@@ -329,15 +329,11 @@ def test_auto_ingest_save_failure_is_non_fatal(
     monkeypatch.setattr(shared_mod, "save_winning_post", _bad_save)
 
     with caplog.at_level("WARNING"):
-        count = api_main._auto_ingest_winning_posts(
-            {}, "job-x", [_Obs(0.9), _Obs(0.9)]
-        )
+        count = api_main._auto_ingest_winning_posts({}, "job-x", [_Obs(0.9), _Obs(0.9)])
 
     assert count == 0
     assert calls["n"] == 2
-    assert any(
-        "Winning posts bank auto-ingest failed" in r.message for r in caplog.records
-    )
+    assert any("Winning posts bank auto-ingest failed" in r.message for r in caplog.records)
 
 
 def test_auto_ingest_skips_low_score(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -400,9 +396,7 @@ def test_auto_ingest_persists_high_score_and_handles_platform_enum(
     job = {
         "result": {
             "content_plan": {
-                "approved_ideas": [
-                    {"title": "Winning idea", "linked_goals": ["awareness"]}
-                ]
+                "approved_ideas": [{"title": "Winning idea", "linked_goals": ["awareness"]}]
             }
         }
     }
@@ -928,9 +922,7 @@ def test_create_winning_post_503_when_module_unavailable(
     assert resp.status_code == 503
 
 
-def test_create_winning_post_save_failure_503(
-    fake_jobs, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_create_winning_post_save_failure_503(fake_jobs, monkeypatch: pytest.MonkeyPatch) -> None:
     def _bad_save(**kwargs):
         raise RuntimeError("pg dead")
 
@@ -959,9 +951,7 @@ def test_list_winning_posts_503_when_save_layer_fails(
     assert resp.status_code == 503
 
 
-def test_list_winning_posts_clamps_limit(
-    fake_jobs, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_list_winning_posts_clamps_limit(fake_jobs, monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
 
     def _list(limit, offset):
@@ -986,9 +976,7 @@ def test_list_winning_posts_clamps_limit(
     assert seen["offset"] == 2
 
 
-def test_get_winning_post_503_when_layer_fails(
-    fake_jobs, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_get_winning_post_503_when_layer_fails(fake_jobs, monkeypatch: pytest.MonkeyPatch) -> None:
     def _bad(_id):
         raise RuntimeError("pg dead")
 
@@ -1023,9 +1011,7 @@ def test_delete_winning_post_503_when_layer_fails(
     assert resp.status_code == 503
 
 
-def test_delete_winning_post_404_when_missing(
-    fake_jobs, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_delete_winning_post_404_when_missing(fake_jobs, monkeypatch: pytest.MonkeyPatch) -> None:
     import social_media_marketing_team.shared as shared_mod
 
     monkeypatch.setattr(shared_mod, "delete_winning_post", lambda _id: False)
@@ -1034,9 +1020,7 @@ def test_delete_winning_post_404_when_missing(
     assert resp.status_code == 404
 
 
-def test_delete_winning_post_200_when_removed(
-    fake_jobs, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_delete_winning_post_200_when_removed(fake_jobs, monkeypatch: pytest.MonkeyPatch) -> None:
     import social_media_marketing_team.shared as shared_mod
 
     monkeypatch.setattr(shared_mod, "delete_winning_post", lambda _id: True)
@@ -1051,9 +1035,7 @@ def test_delete_winning_post_200_when_removed(
 # ---------------------------------------------------------------------------
 
 
-def test_run_team_job_failure_marks_job_failed(
-    fake_jobs, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_team_job_failure_marks_job_failed(fake_jobs, monkeypatch: pytest.MonkeyPatch) -> None:
     req = api_main.RunMarketingTeamRequest(
         client_id="c",
         brand_id="b",
@@ -1197,5 +1179,43 @@ def test_dispatch_job_import_error_falls_back_to_thread(
 
     monkeypatch.setattr(builtins, "__import__", _bad_import)
     msg = api_main._dispatch_job("job-3", req, _MOCK_BRAND_CTX)
+    assert "Poll GET" in msg
+    assert started["n"] == 1
+
+
+def test_dispatch_job_runtime_error_falls_back_to_thread(
+    fake_jobs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ImportError Temporal failure (e.g. connect timeout) falls back to thread mode."""
+    req = api_main.RunMarketingTeamRequest(client_id="c", brand_id="b", llm_model_name="m")
+
+    started = {"n": 0}
+
+    class _InlineThread:
+        def __init__(self, target, args=(), kwargs=None, daemon=False, name=""):
+            started["n"] += 1
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(api_main.threading, "Thread", _InlineThread)
+
+    def _raise_enabled():
+        raise RuntimeError("temporal frontend connection timeout")
+
+    import sys
+
+    fake_client_mod = type(sys)("social_media_marketing_team.temporal.client")
+    fake_client_mod.is_temporal_enabled = _raise_enabled  # type: ignore[attr-defined]
+    fake_start_mod = type(sys)("social_media_marketing_team.temporal.start_workflow")
+    fake_start_mod.start_team_job_workflow = lambda *a, **k: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "social_media_marketing_team.temporal.client", fake_client_mod)
+    monkeypatch.setitem(
+        sys.modules,
+        "social_media_marketing_team.temporal.start_workflow",
+        fake_start_mod,
+    )
+
+    msg = api_main._dispatch_job("job-4", req, _MOCK_BRAND_CTX)
     assert "Poll GET" in msg
     assert started["n"] == 1
