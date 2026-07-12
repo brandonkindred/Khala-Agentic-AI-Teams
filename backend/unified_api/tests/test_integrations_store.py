@@ -262,6 +262,27 @@ def test_set_github_config_blank_webhook_secret_preserves_existing(
     assert creds[("github", "webhook_secret")] == "whsec_abc"
 
 
+def test_set_github_config_blank_owner_repo_clears_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """owner/repo are authoritative: a later save with blank owner/repo clears the legacy
+    default so it can't keep steering execution invisibly (the dashboard no longer exposes
+    those fields and submits them blank). repo_path, an operator setting with no dashboard
+    field, is still preserved on blank."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    _install_inmemory_github_credentials(store, monkeypatch)
+
+    store.set_github_config(enabled=True, owner="acme", repo="widget", repo_path="/srv/checkout")
+    cfg = store.get_github_config_meta()
+    assert cfg["owner"] == "acme" and cfg["repo"] == "widget" and cfg["repo_path"] == "/srv/checkout"
+
+    # A dashboard-style save (enabled + label, blank owner/repo/repo_path).
+    store.set_github_config(enabled=True, owner="", repo="", default_label="ready", repo_path="")
+    cfg = store.get_github_config_meta()
+    assert cfg["owner"] == ""  # cleared, not resurrected
+    assert cfg["repo"] == ""
+    assert cfg["default_label"] == "ready"
+    assert cfg["repo_path"] == "/srv/checkout"  # preserved (no dashboard field submits it)
+
+
 def test_get_github_webhook_secret_env_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """With no stored secret, GITHUB_WEBHOOK_SECRET is used; absent both → None."""
     store, _ = _reload_modules(tmp_path, monkeypatch)

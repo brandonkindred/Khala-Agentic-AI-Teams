@@ -85,9 +85,7 @@ def test_load_winners_returns_empty_for_empty_brand_id() -> None:
     assert SocialMediaMarketingOrchestrator._load_winners("", proposal, goals) == []
 
 
-def test_load_winners_swallows_import_failure(
-    monkeypatch: pytest.MonkeyPatch, caplog
-) -> None:
+def test_load_winners_swallows_import_failure(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     """The lazy import of ``find_relevant_winners`` is wrapped in a try/except;
     a missing symbol must be swallowed and return []."""
     proposal = CampaignProposal(
@@ -291,19 +289,25 @@ def test_find_returns_empty_when_query_keywords_are_only_whitespace(
     """Lines 232-234: query_keywords lowercased -> empty set -> [] returned."""
     from social_media_marketing_team.shared import winning_posts_bank as wpb
 
-    db: dict[str, Any] = {"posts": {"id1": {
-        "id": "id1",
-        "title": "T",
-        "body": "",
-        "platform": "",
-        "keywords": ["topic"],
-        "metrics": {},
-        "engagement_score": 0.5,
-        "linked_goals": [],
-        "summary": "",
-        "source_job_id": None,
-        "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc),
-    }}}
+    db: dict[str, Any] = {
+        "posts": {
+            "id1": {
+                "id": "id1",
+                "title": "T",
+                "body": "",
+                "platform": "",
+                "keywords": ["topic"],
+                "metrics": {},
+                "engagement_score": 0.5,
+                "linked_goals": [],
+                "summary": "",
+                "source_job_id": None,
+                "created_at": __import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc
+                ),
+            }
+        }
+    }
 
     from social_media_marketing_team.tests.test_winning_posts_bank import _FakeConn
 
@@ -362,9 +366,7 @@ def test_find_llm_rerank_handles_non_integer_indices(
     for _ in range(6):
         wpb.save_winning_post(title="t", body="b", keywords=["growth"], llm_client=llm)
 
-    out = wpb.find_relevant_winning_posts(
-        ["growth"], limit=2, rerank_context="ctx", llm_client=llm
-    )
+    out = wpb.find_relevant_winning_posts(["growth"], limit=2, rerank_context="ctx", llm_client=llm)
     # Either reranked (non-int skipped, others used) or keyword fallback;
     # but in any case some results were produced.
     assert len(out) <= 2

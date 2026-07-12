@@ -21,8 +21,10 @@ from .models import (
     CampaignStatus,
     ConceptIdea,
     ContentPlan,
+    ExperimentPlan,
     HumanReview,
     Platform,
+    PlatformExecutionPlan,
     TeamOutput,
 )
 
@@ -129,9 +131,7 @@ class SocialMediaMarketingOrchestrator:
             "Validate repeatable content themes that improve engagement and follower growth."
         )
         if goals.brand_objectives:
-            objective = (
-                f"{objective} Ground strategy in brand objectives: {goals.brand_objectives}"
-            )
+            objective = f"{objective} Ground strategy in brand objectives: {goals.brand_objectives}"
 
         proposal = CampaignProposal(
             campaign_name=f"{goals.brand_name} multi-platform growth sprint",
@@ -221,6 +221,21 @@ class SocialMediaMarketingOrchestrator:
         )
         return proposal
 
+    def build_consensus_proposal(self, goals: BrandGoals) -> CampaignProposal:
+        """Build the initial proposal and drive it through the consensus loop.
+
+        The collaboration phase of the pipeline, exposed as a single call so both
+        thread mode (``run``) and the Temporal ``consensus_stage_activity`` share
+        one implementation.
+
+        Preconditions:
+            - ``goals`` is a fully populated ``BrandGoals``.
+        Postconditions:
+            - Returns a ``CampaignProposal`` whose ``consensus_score`` reflects the
+              final collaboration round (consensus reached or max rounds exhausted).
+        """
+        return self._reach_consensus(self._build_initial_proposal(goals))
+
     @staticmethod
     def _calibrate_probabilities(
         ideas: List[ConceptIdea], performance: CampaignPerformanceSnapshot | None
@@ -283,6 +298,11 @@ class SocialMediaMarketingOrchestrator:
     ) -> ContentPlan:
         required_posts = goals.cadence_posts_per_day * goals.duration_days
 
+        # ``_llm_client`` is an optional dependency-injection seam, deliberately not
+        # set in ``__init__``: tests (or future wiring) may assign ``self._llm_client``
+        # to enable the LLM rerank of retrieved exemplars. When absent it resolves to
+        # None, and ``find_relevant_winning_posts`` simply skips the optional rerank and
+        # returns keyword-matched exemplars -- retrieval still works, it is not broken.
         exemplars = _retrieve_exemplars(proposal, goals, getattr(self, "_llm_client", None))
 
         candidates: List[ConceptIdea] = []
@@ -333,15 +353,59 @@ class SocialMediaMarketingOrchestrator:
             approved_ideas=approved[:required_posts],
         )
 
-    def run(
-        self,
-        goals: BrandGoals,
-        human_review: HumanReview,
-        performance: CampaignPerformanceSnapshot | None = None,
-        brand_id: str = "",
-    ) -> TeamOutput:
-        proposal = self._reach_consensus(self._build_initial_proposal(goals))
+    def build_platform_plans(
+        self, goals: BrandGoals, campaign_name: str, num_ideas: int
+    ) -> List[PlatformExecutionPlan]:
+        """Fan out the content plan to every platform specialist.
 
+        Preconditions:
+            - ``goals`` is a fully populated ``BrandGoals``; ``num_ideas >= 0``.
+        Postconditions:
+            - Returns one ``PlatformExecutionPlan`` per configured platform
+              specialist, in specialist order.
+        """
+        if num_ideas < 0:
+            raise ValueError(f"build_platform_plans: num_ideas must be >= 0, got {num_ideas}")
+        return [
+            specialist.create_execution_plan(goals, campaign_name, num_ideas)
+            for specialist in self.platform_specialists
+        ]
+
+    def build_experiment(self, campaign_name: str, ideas: List[ConceptIdea]) -> ExperimentPlan:
+        """Design the control/variant experiment plan for the approved ideas.
+
+        Preconditions:
+            - ``ideas`` is the list of approved concept ideas (possibly empty).
+        Postconditions:
+            - Returns an ``ExperimentPlan`` with control/variant arms.
+        """
+        return self.experiment_designer.build_experiment_plan(campaign_name, ideas)
+
+    def assemble_team_output(
+        self,
+        proposal: CampaignProposal,
+        human_review: HumanReview,
+        content_plan: ContentPlan | None = None,
+        platform_plans: List[PlatformExecutionPlan] | None = None,
+        experiment_plan: ExperimentPlan | None = None,
+        performance: CampaignPerformanceSnapshot | None = None,
+        winners_retrieved: int = 0,
+    ) -> TeamOutput:
+        """Assemble the final ``TeamOutput`` for either pipeline outcome.
+
+        Single source of truth for the two return branches so thread mode and the
+        Temporal ``finalize_stage_activity`` produce identical results.
+
+        Preconditions:
+            - When ``human_review.approved`` is False the downstream artifacts
+              (``content_plan``/``platform_plans``/``experiment_plan``) are ignored.
+            - When ``human_review.approved`` is True, ``content_plan`` and
+              ``experiment_plan`` must be provided (enforced below). A missing
+              artifact on the approved path is a caller bug, not a recoverable state.
+        Postconditions:
+            - Returns a ``NEEDS_REVISION`` output (proposal only) when not approved,
+              otherwise an ``APPROVED_FOR_TESTING`` output carrying the full plan.
+        """
         if not human_review.approved:
             return TeamOutput(
                 status=CampaignStatus.NEEDS_REVISION,
@@ -350,27 +414,74 @@ class SocialMediaMarketingOrchestrator:
                 llm_model_name=self.llm_model_name,
             )
 
-        winners = self._load_winners(brand_id, proposal, goals)
-        content_plan = self._plan_content(proposal, goals, performance, winners=winners)
-        platform_plans = [
-            specialist.create_execution_plan(
-                goals, proposal.campaign_name, len(content_plan.approved_ideas)
+        # Enforce the documented precondition (Design by Contract): an
+        # APPROVED_FOR_TESTING output must carry the full plan. Silently emitting a
+        # TeamOutput with a null content_plan/experiment_plan would let an invalid
+        # state propagate to callers and the job store. Raise explicitly (not
+        # ``assert``) so the check survives ``python -O``.
+        if content_plan is None:
+            raise ValueError(
+                "assemble_team_output: content_plan is required when human_review.approved is True"
             )
-            for specialist in self.platform_specialists
-        ]
-        experiment_plan = self.experiment_designer.build_experiment_plan(
-            proposal.campaign_name,
-            content_plan.approved_ideas,
-        )
+        if experiment_plan is None:
+            raise ValueError(
+                "assemble_team_output: experiment_plan is required when human_review.approved is True"
+            )
 
         return TeamOutput(
             status=CampaignStatus.APPROVED_FOR_TESTING,
             proposal=proposal,
             human_feedback=human_review.feedback or "Approved for campaign testing.",
             content_plan=content_plan,
-            platform_execution_plans=platform_plans,
+            platform_execution_plans=platform_plans or [],
             llm_model_name=self.llm_model_name,
             experiment_plan=experiment_plan,
             ingested_performance=(performance.observations if performance else []),
+            winners_retrieved=winners_retrieved,
+        )
+
+    def run(
+        self,
+        goals: BrandGoals,
+        human_review: HumanReview,
+        performance: CampaignPerformanceSnapshot | None = None,
+        brand_id: str = "",
+    ) -> TeamOutput:
+        """Execute the full marketing-team pipeline (thread mode).
+
+        Composes the public phase methods (``build_consensus_proposal`` ->
+        ``_load_winners`` -> ``_plan_content`` -> ``build_platform_plans`` ->
+        ``build_experiment`` -> ``assemble_team_output``) into a single ``TeamOutput``.
+        The Temporal path runs the same phase methods across separate activities, so
+        the two modes stay in parity.
+
+        Preconditions:
+            - ``goals`` is a fully populated ``BrandGoals``; ``brand_id`` identifies the
+              brand for Winning-Posts-Bank retrieval (empty disables it).
+        Postconditions:
+            - When ``human_review.approved`` is False, returns early with a
+              ``NEEDS_REVISION`` output carrying only the consensus proposal.
+            - Otherwise returns an ``APPROVED_FOR_TESTING`` output with the content
+              plan, per-platform plans, experiment plan, and any ingested performance.
+        """
+        proposal = self.build_consensus_proposal(goals)
+
+        if not human_review.approved:
+            return self.assemble_team_output(proposal, human_review)
+
+        winners = self._load_winners(brand_id, proposal, goals)
+        content_plan = self._plan_content(proposal, goals, performance, winners=winners)
+        platform_plans = self.build_platform_plans(
+            goals, proposal.campaign_name, len(content_plan.approved_ideas)
+        )
+        experiment_plan = self.build_experiment(proposal.campaign_name, content_plan.approved_ideas)
+
+        return self.assemble_team_output(
+            proposal,
+            human_review,
+            content_plan=content_plan,
+            platform_plans=platform_plans,
+            experiment_plan=experiment_plan,
+            performance=performance,
             winners_retrieved=len(winners),
         )

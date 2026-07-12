@@ -13,20 +13,16 @@ from job_service_client import (
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     JobServiceClient,
+    get_job_service_client,
 )
 from user_profile import ArtifactType, record_association_safe
 
 logger = logging.getLogger(__name__)
 
-_client_instance: Optional[JobServiceClient] = None
-
 
 def _client() -> JobServiceClient:
-    """Return the process-wide `JobServiceClient` singleton for the Planning team."""
-    global _client_instance
-    if _client_instance is None:
-        _client_instance = JobServiceClient(team="planning_team")
-    return _client_instance
+    """Return the process-wide cached `JobServiceClient` for the Planning team."""
+    return get_job_service_client(team="planning_team")
 
 
 def create_job(job_id: str, repo_path: str, **fields: Any) -> None:

@@ -62,17 +62,52 @@ from .trend_scheduler import get_latest_digest, run_trend_job, start_scheduler, 
 # ---------------------------------------------------------------------------
 
 
+logger = logging.getLogger(__name__)
+
+
+def _startup() -> None:
+    """Start the trend scheduler and (best-effort) the Temporal worker backstop.
+
+    The team_service entrypoint normally starts the worker via
+    ``TEAM_TEMPORAL_WORKER_MODULE`` / ``TEAM_TEMPORAL_WORKER_FUNC``; this lifespan
+    hook is the standalone / all-in-one (supervisord) backstop so Temporal mode is
+    active there too. A no-op when Temporal is disabled.
+
+    Postconditions:
+        - The trend scheduler is started; the Temporal worker thread is started when
+          Temporal is enabled. A worker-start failure is logged, never fatal.
+    """
+    start_scheduler()
+    try:
+        from social_media_marketing_team.temporal.worker import (
+            start_social_marketing_temporal_worker_thread,
+        )
+
+        # The worker runs on a daemon thread whose lifecycle is owned by the
+        # shared_temporal worker registry (per-team idempotency), not this hook, so we
+        # intentionally do not retain the thread here. Graceful drain of in-flight
+        # activities is not managed at this backstop; the daemon exits with the
+        # process. Nothing to join on the on_shutdown hook.
+        start_social_marketing_temporal_worker_thread()
+    except ImportError as exc:
+        logger.warning("social marketing Temporal worker module unavailable: %s", exc)
+    except Exception:
+        logger.warning(
+            "social marketing Temporal worker start (lifespan backstop) failed",
+            exc_info=True,
+        )
+
+
 app = create_team_app(
     service_name="social-media-marketing-team",
     team_key="social_marketing",
     title="Social Media Marketing Team API",
     version="1.0.0",
     postgres_schema=SCHEMA,
-    on_startup=start_scheduler,
+    on_startup=_startup,
     on_shutdown=stop_scheduler,
 )
 
-logger = logging.getLogger(__name__)
 try:
     _job_manager = JobServiceClient(team="social_media_marketing_team")
     _stale_monitor_stop = start_stale_job_monitor(
@@ -96,6 +131,19 @@ def _now() -> str:
 
 
 def _update_job(job_id: str, **fields) -> None:
+    """Patch a job row via the job service.
+
+    Preconditions:
+        - ``job_id`` is a known job id.
+    Postconditions:
+        - Applies ``fields`` to the job when the job manager initialized; when
+          module-level init failed (``_job_manager is None``) this logs an error
+          and returns without raising, so a misconfigured store degrades a single
+          update rather than crashing the caller's thread.
+    """
+    if _job_manager is None:
+        logger.error("Job manager not initialized; cannot update job %s", job_id)
+        return
     _job_manager.update_job(job_id, **fields)
 
 
@@ -274,7 +322,9 @@ def _run_team_job(job_id: str, request: RunMarketingTeamRequest, brand_ctx: Bran
             current_stage="completed",
             progress=100,
             eta_hint="done",
-            result=result.model_dump(),
+            # mode="json" so Platform-enum-keyed dicts (channel_mix_strategy) become
+            # JSON-native string keys, matching the Temporal path's serialization.
+            result=result.model_dump(mode="json"),
         )
     except Exception as exc:
         logger.exception("Social marketing team job %s failed", job_id)
@@ -299,8 +349,23 @@ def _dispatch_job(job_id: str, request: RunMarketingTeamRequest, brand_ctx: Bran
         if is_temporal_enabled():
             start_team_job_workflow(job_id, request.model_dump())
             return f"(Temporal). Poll GET /social-marketing/status/{job_id} for updates."
-    except ImportError:
-        pass
+    except ImportError as exc:
+        logger.warning(
+            "Temporal modules unavailable for job %s; falling back to thread mode: %s",
+            job_id,
+            exc,
+        )
+    except Exception as exc:
+        # A runtime Temporal failure (client connect timeout, workflow-start /
+        # registration error, serialization error) must not crash the dispatch
+        # endpoint: fall back to thread mode so the job still runs, mirroring the
+        # missing-module path above. ImportError is handled separately so a genuinely
+        # absent dependency logs distinctly from a transient runtime fault.
+        logger.warning(
+            "Temporal dispatch failed for job %s; falling back to thread mode: %s",
+            job_id,
+            exc,
+        )
 
     thread = threading.Thread(target=_run_team_job, args=(job_id, request, brand_ctx), daemon=True)
     thread.start()
@@ -436,7 +501,7 @@ def ingest_performance(job_id: str, payload: PerformanceIngestRequest) -> Perfor
     job = _job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    observations = job.get("performance_observations", [])
+    observations = list(job.get("performance_observations", []))
     observations.extend([obs.model_dump() for obs in payload.observations])
     _job_manager.update_job(job_id, performance_observations=observations, last_updated_at=_now())
 
@@ -597,8 +662,9 @@ def resume_marketing_job(job_id: str) -> RunMarketingTeamResponse:
         )
 
     request = RunMarketingTeamRequest(**payload)
+    brand_ctx = _fetch_and_validate_brand(request.client_id, request.brand_id)
     _job_manager.update_job(job_id, status=JOB_STATUS_RUNNING, error=None, current_stage="resuming")
-    dispatch_msg = _dispatch_job(job_id, request)
+    dispatch_msg = _dispatch_job(job_id, request, brand_ctx)
     return RunMarketingTeamResponse(
         job_id=job_id, status="running", message=f"Job resumed. {dispatch_msg}"
     )
@@ -622,6 +688,7 @@ def restart_marketing_job(job_id: str) -> RunMarketingTeamResponse:
         )
 
     request = RunMarketingTeamRequest(**payload)
+    brand_ctx = _fetch_and_validate_brand(request.client_id, request.brand_id)
     _job_manager.update_job(
         job_id,
         status=JOB_STATUS_PENDING,
@@ -629,7 +696,7 @@ def restart_marketing_job(job_id: str) -> RunMarketingTeamResponse:
         progress=0,
         current_stage="restart_queued",
     )
-    dispatch_msg = _dispatch_job(job_id, request)
+    dispatch_msg = _dispatch_job(job_id, request, brand_ctx)
     return RunMarketingTeamResponse(
         job_id=job_id, status="running", message=f"Job restarted. {dispatch_msg}"
     )
@@ -668,13 +735,22 @@ def get_latest_trends() -> TrendLatestResponse:
 
 
 def _bank_503(exc: Exception) -> HTTPException:
-    """Translate bank-layer errors into an explicit 503 at the CRUD boundary."""
+    """Translate bank-layer errors into an explicit 503 at the CRUD boundary.
+
+    The raw exception (type + message, which may carry connection strings, paths,
+    or other internal detail) is logged server-side only; the client sees a fixed,
+    non-sensitive message so the 503 body never discloses internal configuration.
+
+    Preconditions:
+        - Called from a bank-CRUD ``except`` handler for ``exc``.
+    Postconditions:
+        - Returns a 503 ``HTTPException`` with a static detail; logs ``exc`` with a
+          traceback for operators.
+    """
+    logger.warning("Winning posts bank layer unavailable", exc_info=exc)
     return HTTPException(
         status_code=503,
-        detail=(
-            "Winning posts bank unavailable "
-            f"(is POSTGRES_HOST configured?): {type(exc).__name__}: {exc}"
-        ),
+        detail="Winning posts bank unavailable (is POSTGRES_HOST configured?). Please retry shortly.",
     )
 
 
