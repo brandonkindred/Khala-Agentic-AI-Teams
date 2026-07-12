@@ -93,19 +93,25 @@ class RoutePlannerAgent:
         # accepted route just because the *other* stops satisfy coverage.
         stops = [s for s in stops if s.location and s.location.strip()]
 
-        # The prompt asks the LLM to set recommended_nights=0 for the start/end
-        # stops, but doesn't enforce it — an LLM response that omits the field
-        # for an endpoint defaults to RouteStop's own default of 1, which
-        # ActivitiesExpertAgent (skips endpoints only at recommended_nights==0)
-        # and the composer would then treat as a real overnight stop, adding
-        # extra LLM calls and days for the origin/destination. Normalize by
-        # *position* (the first/last stop), not the stop_type label — the LLM
-        # can mislabel an interior stop's stop_type as "start"/"end" while the
-        # actual boundary stops are elsewhere in the list, and keying off the
-        # label would then wrongly zero out a real must-visit stop's nights.
+        # The prompt asks the LLM to set recommended_nights=0 and
+        # stop_type="start"/"end" for the boundary stops, but doesn't enforce
+        # either — an LLM response that omits recommended_nights for an
+        # endpoint defaults to RouteStop's own default of 1, and downstream
+        # endpoint skipping (ActivitiesExpertAgent, _build_fallback_itinerary)
+        # requires *both* recommended_nights==0 and stop_type in
+        # ("start", "end") to treat a stop as pass-through — normalizing only
+        # nights would leave a mislabeled endpoint (e.g. still "destination")
+        # generating a real activities LLM call and itinerary day. Normalize
+        # both by *position* (the first/last stop), not the existing
+        # stop_type label — the LLM can mislabel an interior stop's stop_type
+        # as "start"/"end" while the actual boundary stops are elsewhere in
+        # the list, and keying off the label would then wrongly zero out a
+        # real must-visit stop's nights.
         if stops:
             stops[0].recommended_nights = 0
+            stops[0].stop_type = "start"
             stops[-1].recommended_nights = 0
+            stops[-1].stop_type = "end"
 
         if not stops or not self._covers_required_stops(stops, trip, end):
             # Valid JSON that yields no usable stops (e.g. an empty object from a
@@ -126,14 +132,23 @@ class RoutePlannerAgent:
         except (TypeError, ValueError):
             parsed_days = trip.trip_duration_days or 7
 
-        return RoutePlan(
-            ordered_stops=stops,
-            total_driving_miles=data.get("total_driving_miles"),
-            total_driving_hours=data.get("total_driving_hours"),
-            route_summary=data.get("route_summary", ""),
-            # max(1, ...): the parsed/defaulted value could still be 0 or negative.
-            suggested_total_days=max(1, parsed_days),
-        )
+        try:
+            return RoutePlan(
+                ordered_stops=stops,
+                total_driving_miles=data.get("total_driving_miles"),
+                total_driving_hours=data.get("total_driving_hours"),
+                route_summary=data.get("route_summary", ""),
+                # max(1, ...): the parsed/defaulted value could still be 0 or negative.
+                suggested_total_days=max(1, parsed_days),
+            )
+        except Exception as e:
+            # A schema-invalid top-level field (e.g. route_summary returned as
+            # a list instead of a string) raises pydantic.ValidationError here
+            # even though ordered_stops itself validated and covers every
+            # required stop — fall back rather than let a good route get
+            # discarded by a bad sibling field.
+            logger.warning("RoutePlannerAgent RoutePlan validation failed: %s", e)
+            return self._fallback_route(trip, end)
 
     def _covers_required_stops(self, stops: list[RouteStop], trip: TripRequest, end: str) -> bool:
         """Return True if the route is bounded by start/end and covers every required stop.

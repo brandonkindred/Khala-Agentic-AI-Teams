@@ -311,6 +311,47 @@ def test_plan_route_normalizes_by_position_not_stop_type_label(sample_plan_reque
     assert by_location["Los Angeles, CA"].recommended_nights == 0  # the true last stop
 
 
+def test_plan_route_normalizes_endpoint_stop_type_by_position(sample_plan_request):
+    # Downstream endpoint skipping (ActivitiesExpertAgent, the fallback
+    # composer) requires both recommended_nights==0 AND stop_type in
+    # ("start", "end") to treat a stop as pass-through. If the LLM leaves the
+    # true first/last stop's stop_type as "destination" (or anything other
+    # than start/end), zeroing only recommended_nights isn't enough — the
+    # stop_type must be normalized too, by position.
+    llm = _FakeLLM(
+        '{"ordered_stops": ['
+        '{"location": "San Francisco, CA", "stop_type": "destination"},'
+        ' {"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "destination"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+    assert route.ordered_stops[0].stop_type == "start"
+    assert route.ordered_stops[-1].stop_type == "end"
+
+
+def test_plan_route_falls_back_when_route_summary_has_wrong_type(sample_plan_request):
+    # RoutePlan.route_summary is typed as str — an LLM response with a
+    # schema-valid, coverage-complete route but a wrong-typed top-level field
+    # (route_summary as a list instead of a string) must still degrade to the
+    # fallback route rather than let RoutePlan(...)'s pydantic.ValidationError
+    # propagate and crash the whole step.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": ["coastal", "scenic"], "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert isinstance(route, RoutePlan)
+    locations = [s.location for s in route.ordered_stops]
+    assert "San Francisco, CA" in locations
+    assert "Yosemite" in locations
+    assert "Los Angeles, CA" in locations
+    assert route.route_summary == ""  # fallback route, not the LLM's invalid summary
+
+
 def test_plan_route_filters_blank_location_stop_from_llm_response(sample_plan_request):
     # A blank-location stop in an otherwise-valid LLM response must be
     # dropped from the accepted route, not left in ordered_stops just because
