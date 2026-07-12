@@ -211,6 +211,26 @@ def test_get_retest_lock_returns_same_lock_for_same_audit_id():
     assert lock1 is not lock3
 
 
+def test_get_retest_lock_is_evicted_once_unreferenced():
+    """``_retest_locks`` is a WeakValueDictionary: once nothing holds/awaits the
+    lock for a given audit_id (no in-flight ``async with self._get_retest_lock(...)``
+    block), the entry is garbage-collected rather than retained forever — otherwise
+    a long-running orchestrator process would grow ``_retest_locks`` without bound
+    as more distinct audits are retested over its lifetime."""
+    import gc
+
+    orchestrator = AccessibilityAuditOrchestrator()
+    lock1 = orchestrator._get_retest_lock("audit_z")
+    assert "audit_z" in orchestrator._retest_locks
+
+    del lock1
+    gc.collect()
+    assert "audit_z" not in orchestrator._retest_locks
+
+    lock2 = orchestrator._get_retest_lock("audit_z")
+    assert isinstance(lock2, asyncio.Lock)
+
+
 @pytest.mark.anyio
 async def test_run_retest_serializes_concurrent_calls_for_same_audit(monkeypatch, sample_findings):
     """Two concurrent run_retest calls for the same audit_id must not interleave:

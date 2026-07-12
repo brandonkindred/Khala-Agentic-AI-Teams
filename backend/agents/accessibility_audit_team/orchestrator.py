@@ -17,6 +17,7 @@ QCR ensures Lane A doesn't dump garbage into Lane B.
 
 import asyncio
 import logging
+import weakref
 from typing import Any, Dict, List, Optional
 
 from .agents import (
@@ -101,7 +102,12 @@ class AccessibilityAuditOrchestrator:
 
         # Per-audit_id locks serializing run_retest against the shared cached
         # AccessibilityAuditResult instance in self._audits — see _get_retest_lock.
-        self._retest_locks: Dict[str, asyncio.Lock] = {}
+        # A WeakValueDictionary so a lock is evicted once no in-flight run_retest
+        # call holds/awaits it, rather than retaining one entry forever per
+        # distinct audit_id ever retested over this orchestrator's lifetime.
+        self._retest_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
+            weakref.WeakValueDictionary()
+        )
 
     async def run_audit(
         self,
@@ -346,10 +352,17 @@ class AccessibilityAuditOrchestrator:
             - Called from the event loop this orchestrator instance's coroutines run
               on.
         Postconditions:
-            - Returns the same ``asyncio.Lock`` for repeated calls with the same
-              ``audit_id``. Safe without additional synchronization: the
+            - Returns the same ``asyncio.Lock`` for repeated/concurrent calls with
+              the same ``audit_id``. Safe without additional synchronization: the
               check-then-create below has no ``await`` in it, and Python's event
               loop is single-threaded, so no other coroutine can interleave here.
+            - Because ``_retest_locks`` is a ``WeakValueDictionary``, the returned
+              lock is kept alive only by callers currently inside
+              ``async with self._get_retest_lock(audit_id):`` (that statement holds
+              a strong reference for the block's duration). Once every such block
+              for a given ``audit_id`` has exited, the entry is garbage-collected
+              automatically — ``_retest_locks`` does not grow without bound over the
+              orchestrator's lifetime as more distinct audits are retested.
         """
         lock = self._retest_locks.get(audit_id)
         if lock is None:

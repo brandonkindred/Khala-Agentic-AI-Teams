@@ -1034,6 +1034,74 @@ def test_run_phase_marks_failed_on_last_attempt_exception(monkeypatch):
     assert failed and failed[0].kwargs.get("error") == "infra boom"
 
 
+def test_run_phase_exception_recovers_progress_and_result_from_persisted_state(monkeypatch):
+    """The exception branch has no fresh ``AccessibilityAuditResult`` to report
+    from (``step`` raised before returning one), so it must recover
+    progress/completed_phases/findings_count/result from whatever was last
+    durably persisted — otherwise the terminal write leaves those fields stale
+    from the phase's earlier RUNNING write instead of reflecting reality."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+
+    persisted = SimpleNamespace(
+        completed_phases=[SimpleNamespace(value="intake"), SimpleNamespace(value="discovery")],
+        total_findings=5,
+        model_dump=lambda: {"audit_id": "a1", "success": False},
+    )
+    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=persisted))
+
+    async def step():
+        raise RuntimeError("infra boom")
+
+    with pytest.raises(RuntimeError, match="infra boom"):
+        asyncio.run(acts._run_phase("j1", "a1", "verification", 60, step))
+
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed
+    kwargs = failed[0].kwargs
+    assert kwargs.get("progress") == 100
+    assert kwargs.get("completed_phases") == ["intake", "discovery"]
+    assert kwargs.get("findings_count") == 5
+    assert kwargs.get("result") == {"audit_id": "a1", "success": False}
+
+
+def test_run_phase_exception_defaults_when_nothing_persisted(monkeypatch):
+    """When no state was ever persisted (e.g. intake itself failed before its
+    first successful write), the recovered fields fall back to terminal-but-empty
+    defaults rather than raising or omitting them."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=None))
+
+    async def step():
+        raise RuntimeError("infra boom")
+
+    with pytest.raises(RuntimeError, match="infra boom"):
+        asyncio.run(acts._run_phase("j1", "a1", "intake", 20, step))
+
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed
+    kwargs = failed[0].kwargs
+    assert kwargs.get("progress") == 100
+    assert kwargs.get("completed_phases") == []
+    assert kwargs.get("findings_count") == 0
+    assert kwargs.get("result") is None
+
+
 def test_run_phase_does_not_mark_failed_when_not_last_attempt(monkeypatch):
     """Temporal will retry a non-final attempt, so the job is left non-terminal
     (RUNNING) rather than marked FAILED prematurely."""
@@ -1269,6 +1337,41 @@ def test_finalize_activity_propagates_exception_and_marks_failed_on_last_attempt
         c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
     ]
     assert failed and failed[0].kwargs.get("error") == "store down"
+
+
+def test_finalize_activity_exception_recovers_progress_and_result_from_persisted_state(monkeypatch):
+    """Same recovery contract as ``_run_phase``: ``finalize_audit_step`` raised
+    before returning a fresh result, so the terminal write must recover
+    progress/completed_phases/findings_count/result from persisted state instead
+    of omitting them."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = _patch_activity_jobmanager(monkeypatch)
+    jm.get_job.return_value = None
+    monkeypatch.setattr(
+        ax, "finalize_audit_step", mock.AsyncMock(side_effect=RuntimeError("store down"))
+    )
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+    persisted = SimpleNamespace(
+        completed_phases=[SimpleNamespace(value="report_packaging")],
+        total_findings=7,
+        model_dump=lambda: {"audit_id": "a1", "success": False},
+    )
+    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=persisted))
+
+    with pytest.raises(RuntimeError, match="store down"):
+        asyncio.run(acts.finalize_activity("j1", "a1"))
+
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed
+    kwargs = failed[0].kwargs
+    assert kwargs.get("progress") == 100
+    assert kwargs.get("completed_phases") == ["report_packaging"]
+    assert kwargs.get("findings_count") == 7
+    assert kwargs.get("result") == {"audit_id": "a1", "success": False}
 
 
 def test_finalize_activity_skips_terminal_write_when_already_terminal(monkeypatch):

@@ -104,6 +104,40 @@ def _is_job_terminal(manager: Any, job_id: str) -> bool:
     )
 
 
+async def _best_effort_terminal_fields(audit_id: str) -> Dict[str, Any]:
+    """Recover progress/result fields for a terminal write when no fresh result exists.
+
+    An exception raised by a phase ``step`` (or by ``finalize_audit_step``) means
+    the caller never got an ``AccessibilityAuditResult`` back to report from — so,
+    unlike the logical-failure branch, it can't include the phase's own
+    ``completed_phases``/``findings_count``/``result`` in the terminal job-store
+    write. This reloads the last durably-persisted state (mirrors
+    ``mark_audit_timed_out``'s recovery pattern) so an exception-terminated job
+    still reflects the best-known progress instead of leaving those fields stale
+    from the phase's earlier ``RUNNING`` write.
+
+    Preconditions:
+        - ``audit_id`` is the API-supplied audit id used as the persistence key.
+    Postconditions:
+        - Returns ``{"progress": 100, "completed_phases": [...], "findings_count":
+          int, "result": dict | None}``, populated from the persisted audit state
+          when one exists, or terminal-but-empty defaults (``[]``/``0``/``None``)
+          when nothing was ever persisted (e.g. intake failed before its first
+          successful write).
+    """
+    from accessibility_audit_team.audit_execution import load_audit_state
+
+    loaded = await load_audit_state(audit_id)
+    return {
+        "progress": 100,
+        "completed_phases": (
+            [p.value for p in loaded.completed_phases] if loaded is not None else []
+        ),
+        "findings_count": loaded.total_findings if loaded is not None else 0,
+        "result": loaded.model_dump() if loaded is not None else None,
+    }
+
+
 async def _run_phase(
     job_id: str,
     audit_id: str,
@@ -131,8 +165,10 @@ async def _run_phase(
         - An exception RAISED by ``step`` (an infrastructure/plumbing failure, as
           opposed to a returned ``failure_reason``) propagates so Temporal retries;
           on the LAST scheduled attempt it also marks the job FAILED first (guarded
-          against clobbering an already-terminal status) so the job is never left
-          stranded non-terminal once Temporal gives up retrying.
+          against clobbering an already-terminal status, and with progress/result
+          fields best-effort recovered from persisted state — see
+          :func:`_best_effort_terminal_fields`) so the job is never left stranded
+          non-terminal, with a stale partial record, once Temporal gives up retrying.
         - When ``heartbeat`` is set the step runs under a background heartbeat so a
           long phase keeps the activity alive and cancellation is deliverable.
     """
@@ -158,7 +194,11 @@ async def _run_phase(
     except Exception as exc:
         if _is_last_attempt() and not _is_job_terminal(manager, job_id):
             manager.update_job(
-                job_id, status=JOB_STATUS_FAILED, current_phase=phase_name, error=str(exc)
+                job_id,
+                status=JOB_STATUS_FAILED,
+                current_phase=phase_name,
+                error=str(exc),
+                **await _best_effort_terminal_fields(audit_id),
             )
         raise
 
@@ -288,7 +328,9 @@ async def finalize_activity(job_id: str, audit_id: str) -> Dict[str, Any]:
           status dict that always reflects this attempt's own outcome.
         - An exception raised while assembling the result propagates so Temporal
           retries; on the last scheduled attempt it also marks the job FAILED first
-          (guarded against clobbering an already-terminal status).
+          (guarded against clobbering an already-terminal status, and with
+          progress/result fields best-effort recovered from persisted state — see
+          :func:`_best_effort_terminal_fields`).
     """
     from accessibility_audit_team.audit_execution import (
         JOB_STATUS_COMPLETED,
@@ -305,7 +347,11 @@ async def finalize_activity(job_id: str, audit_id: str) -> Dict[str, Any]:
     except Exception as exc:
         if _is_last_attempt() and not _is_job_terminal(manager, job_id):
             manager.update_job(
-                job_id, status=JOB_STATUS_FAILED, current_phase="finalize", error=str(exc)
+                job_id,
+                status=JOB_STATUS_FAILED,
+                current_phase="finalize",
+                error=str(exc),
+                **await _best_effort_terminal_fields(audit_id),
             )
         raise
 
