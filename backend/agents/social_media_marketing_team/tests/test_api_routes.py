@@ -752,7 +752,11 @@ def test_revise_endpoint_404_unknown(fake_jobs) -> None:
     assert resp.status_code == 404
 
 
-def test_revise_endpoint_no_request_payload_400(fake_jobs) -> None:
+def test_revise_endpoint_400_when_original_run_payload_missing(fake_jobs) -> None:
+    # The job was created without a stored ``request_payload`` (the original run's
+    # request), so revise has nothing to rebuild the run from and returns 400. The
+    # revise request body itself (feedback/approved_for_testing) is valid and present
+    # -- the missing piece is the *original run payload* on the job record.
     fake_jobs.create_job(
         "rev-no-payload",
         status="completed",
