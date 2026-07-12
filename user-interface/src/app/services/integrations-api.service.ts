@@ -9,6 +9,7 @@ import type {
   GitHubConfigUpdate,
   GitHubIssueItem,
   GitHubPullRequestItem,
+  GitHubRepoItem,
   GoogleBrowserLoginCredentialsBody,
   GoogleBrowserLoginStatusResponse,
   IntegrationListItem,
@@ -141,11 +142,36 @@ export class IntegrationsApiService {
     return this.http.delete<GitHubConfigResponse>(`${this.baseUrl}/github`, this.SKIP_NOTIFY);
   }
 
-  /** GET /api/integrations/github/issues */
-  getGitHubIssues(label?: string): Observable<GitHubIssueItem[]> {
+  /**
+   * GET /api/integrations/github/repos — every repository the stored PAT can
+   * access (the token's own authorization configuration is the source of truth).
+   *
+   * Unlike the `/github` config methods above, this deliberately omits
+   * `SKIP_NOTIFY`: the repo list is a prerequisite for the coding-team and
+   * code-review pages, so a failure should surface through the global error
+   * toast rather than fail silently and leave those pages ambiguously empty.
+   */
+  getGitHubRepos(): Observable<GitHubRepoItem[]> {
+    return this.http.get<GitHubRepoItem[]>(`${this.baseUrl}/github/repos`);
+  }
+
+  /**
+   * GET /api/integrations/github/issues — open issues for one accessible repo.
+   * Omitting `owner`/`repo` falls back to the backend's legacy configured default.
+   */
+  getGitHubIssues(options: { label?: string; owner?: string; repo?: string } = {}): Observable<GitHubIssueItem[]> {
     const params: Record<string, string> = {};
-    if (label) {
-      params['label'] = label;
+    if (options.label) {
+      params['label'] = options.label;
+    }
+    // Send whichever of owner/repo is provided rather than dropping both when only one is
+    // set — a partial pair is a caller error the backend rejects with a 400, and silently
+    // falling back to the configured default would mask it.
+    if (options.owner) {
+      params['owner'] = options.owner;
+    }
+    if (options.repo) {
+      params['repo'] = options.repo;
     }
     return this.http.get<GitHubIssueItem[]>(`${this.baseUrl}/github/issues`, { params });
   }
@@ -155,9 +181,20 @@ export class IntegrationsApiService {
     return this.http.post<RunGitHubIssueResponse>(`${this.baseUrl}/github/run-issue`, body);
   }
 
-  /** GET /api/integrations/github/pulls */
-  getGitHubPullRequests(): Observable<GitHubPullRequestItem[]> {
-    return this.http.get<GitHubPullRequestItem[]>(`${this.baseUrl}/github/pulls`);
+  /**
+   * GET /api/integrations/github/pulls — open PRs for one accessible repo.
+   * Omitting `owner`/`repo` falls back to the backend's legacy configured default.
+   */
+  getGitHubPullRequests(options: { owner?: string; repo?: string } = {}): Observable<GitHubPullRequestItem[]> {
+    const params: Record<string, string> = {};
+    // Pass through a partial pair so the backend's 400 surfaces (see getGitHubIssues).
+    if (options.owner) {
+      params['owner'] = options.owner;
+    }
+    if (options.repo) {
+      params['repo'] = options.repo;
+    }
+    return this.http.get<GitHubPullRequestItem[]>(`${this.baseUrl}/github/pulls`, { params });
   }
 
   /** POST /api/integrations/github/review-pr */
@@ -166,13 +203,23 @@ export class IntegrationsApiService {
   }
 
   /**
-   * GET /api/integrations/github/reviews — persisted code-review history for the
-   * configured repository (optionally filtered to one PR), newest-first.
+   * GET /api/integrations/github/reviews — persisted code-review history for one
+   * accessible repository (optionally filtered to one PR), newest-first.
+   * Omitting `owner`/`repo` falls back to the backend's legacy configured default.
    */
-  getGitHubReviewHistory(prNumber?: number): Observable<CodeReviewRunItem[]> {
+  getGitHubReviewHistory(
+    options: { prNumber?: number; owner?: string; repo?: string } = {},
+  ): Observable<CodeReviewRunItem[]> {
     const params: Record<string, string> = {};
-    if (prNumber !== undefined) {
-      params['pr_number'] = String(prNumber);
+    if (options.prNumber !== undefined) {
+      params['pr_number'] = String(options.prNumber);
+    }
+    // Pass through a partial pair so the backend's 400 surfaces (see getGitHubIssues).
+    if (options.owner) {
+      params['owner'] = options.owner;
+    }
+    if (options.repo) {
+      params['repo'] = options.repo;
     }
     return this.http.get<CodeReviewRunItem[]>(`${this.baseUrl}/github/reviews`, { params });
   }

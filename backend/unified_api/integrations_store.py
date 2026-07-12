@@ -668,9 +668,16 @@ def set_github_config(
 ) -> None:
     """Persist GitHub config. PAT and webhook secret go encrypted to Postgres; rest to JSON.
 
-    Preconditions: all arguments are strings (``enabled`` a bool). Blank ``owner``/``repo``/
-        ``repo_path`` mean "preserve existing"; blank ``personal_access_token``/
-        ``webhook_secret`` mean "leave the stored credential untouched".
+    Preconditions: all arguments are strings (``enabled`` a bool). Blank
+        ``personal_access_token``/``webhook_secret`` mean "leave the stored credential
+        untouched" (they can't be re-typed once stored). The plain-config fields
+        ``owner``/``repo``/``default_label`` are AUTHORITATIVE — the given value is written
+        verbatim, so a blank clears the field. This is deliberate: repository access is now
+        defined by the PAT itself and the owner/repo default is legacy/optional, so it must
+        be clearable (the dashboard, which no longer exposes those fields, submits them
+        blank — a save must not silently resurrect a stale hidden default). Blank
+        ``repo_path`` still "preserves existing": it is an operator infrastructure setting
+        with no dashboard field, so a routine save must not wipe a pinned checkout.
     Postconditions: the non-blank PAT and webhook secret are written encrypted via
         ``set_credential``; the JSON settings (enabled/owner/repo/default_label/repo_path)
         are rewritten atomically under ``_LOCK``. Returns ``None``. Raises only if the
@@ -687,8 +694,8 @@ def set_github_config(
         existing = data.get("github") or {}
         data["github"] = {
             "enabled": enabled,
-            "owner": owner.strip() or existing.get("owner", ""),
-            "repo": repo.strip() or existing.get("repo", ""),
+            "owner": owner.strip(),
+            "repo": repo.strip(),
             "default_label": default_label.strip(),
             "repo_path": repo_path.strip() or existing.get("repo_path", ""),
         }
