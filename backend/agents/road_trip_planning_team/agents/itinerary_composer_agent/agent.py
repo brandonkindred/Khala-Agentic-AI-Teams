@@ -211,7 +211,15 @@ class ItineraryComposerAgent:
         group_profile: TravelerGroupProfile,
         logistics: LogisticsPlan,
     ) -> TripItinerary:
-        """Minimal fallback itinerary if LLM fails."""
+        """Minimal fallback itinerary if LLM fails.
+
+        Postconditions:
+            - Returns a ``TripItinerary`` whose ``days`` is never empty: if every
+              route stop is a pass-through start/end (e.g. a start-only trip with
+              no required stops, via ``RoutePlannerAgent._fallback_route``), a
+              single same-day entry at the start location is synthesized instead
+              of leaving ``days=[]`` while ``total_days >= 1``.
+        """
         days = []
         day_num = 1
         for stop in route.ordered_stops:
@@ -246,6 +254,18 @@ class ItineraryComposerAgent:
                     )
                 )
                 day_num += 1
+
+        if not days and route.ordered_stops:
+            # Every stop was a pass-through start/end (e.g. a start-only trip with
+            # no required stops) — synthesize one same-day entry rather than
+            # returning an itinerary with total_days >= 1 but no days to show.
+            days.append(
+                DayPlan(
+                    day_number=1,
+                    location=route.ordered_stops[0].location,
+                    day_summary=f"Day trip from {route.ordered_stops[0].location}",
+                )
+            )
 
         return TripItinerary(
             title="Road Trip Itinerary",

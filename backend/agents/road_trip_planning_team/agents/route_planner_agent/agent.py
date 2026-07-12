@@ -86,11 +86,12 @@ class RoutePlannerAgent:
             logger.warning("RoutePlannerAgent JSON parse/validation failed: %s", e)
             return self._fallback_route(trip, end)
 
-        if not stops or not self._covers_required_stops(stops, trip):
+        if not stops or not self._covers_required_stops(stops, trip, end):
             # Valid JSON that yields no usable stops (e.g. an empty object from a
-            # refusal) or that silently drops a must-visit stop — fall back to a
-            # route covering start → required stops → end rather than composing an
-            # itinerary that is empty or missing a required stop.
+            # refusal), or that silently drops the start, the end, or a must-visit
+            # stop — fall back to a route covering start → required stops → end
+            # rather than composing an itinerary that is empty or missing a
+            # requested location.
             logger.warning("RoutePlannerAgent route missing required stops; using fallback route")
             return self._fallback_route(trip, end)
 
@@ -102,23 +103,27 @@ class RoutePlannerAgent:
             suggested_total_days=data.get("suggested_total_days", trip.trip_duration_days or 7),
         )
 
-    def _covers_required_stops(self, stops: list[RouteStop], trip: TripRequest) -> bool:
-        """Return True if every ``trip.required_stops`` location is represented.
+    def _covers_required_stops(self, stops: list[RouteStop], trip: TripRequest, end: str) -> bool:
+        """Return True if the start, every required stop, and the end are represented.
 
         Matching is case-insensitive and bidirectional-substring (a required
         ``"Yosemite"`` matches a planned ``"Yosemite National Park"`` and vice
         versa) to tolerate the LLM naming a stop more or less verbosely than the
-        request.
+        request. Checking the start/end too catches a route that covers every
+        required stop but truncates the actual origin or destination.
 
         Preconditions:
             - ``stops`` is the parsed, non-empty route.
+            - ``end`` is the resolved end location (``trip.end_location`` or the
+              start location for a round trip).
 
         Postconditions:
-            - Returns True when no required stop is missing (trivially True when
-              there are no required stops).
+            - Returns True when the start, the end, and every required stop are
+              present (trivially True for start/end when there are no required
+              stops, since a route always has at least a start and an end).
         """
         planned = [s.location.lower() for s in stops if s.location]
-        for req in trip.required_stops:
+        for req in [trip.start_location, *trip.required_stops, end]:
             r = req.lower()
             if not any(r in p or p in r for p in planned):
                 return False

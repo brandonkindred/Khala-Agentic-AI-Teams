@@ -222,9 +222,23 @@ def mark_road_trip_failed_activity(job_id: str, error: str) -> None:
         - ``error`` is the stringified failure cause.
 
     Postconditions:
-        - Sets the job-store row to FAILED with ``error``. Idempotent — safe to
-          re-run on a workflow retry.
+        - Sets the job-store row to FAILED with ``error``, unless the row is
+          already COMPLETED — Temporal activities are at-least-once, so
+          ``persist_itinerary_activity`` may have already durably written the
+          result even if its completion signal to the workflow was lost (e.g. a
+          worker crash), leaving a subsequent retry-exhaustion to reach this
+          handler. In that case this is a no-op so a genuinely successful run is
+          never clobbered with FAILED. Otherwise idempotent — safe to re-run on
+          a workflow retry.
     """
-    from road_trip_planning_team.shared.job_store import JOB_STATUS_FAILED, update_job
+    from road_trip_planning_team.shared.job_store import (
+        JOB_STATUS_COMPLETED,
+        JOB_STATUS_FAILED,
+        get_job,
+        update_job,
+    )
 
+    job = get_job(job_id)
+    if job is not None and job.get("status") == JOB_STATUS_COMPLETED:
+        return
     update_job(job_id, status=JOB_STATUS_FAILED, error=error)

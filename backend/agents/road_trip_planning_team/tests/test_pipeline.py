@@ -64,17 +64,18 @@ def test_profile_travelers_falls_back_on_bad_json(sample_plan_request):
 
 
 def test_plan_route_parses_llm_json(sample_plan_request):
-    # The LLM route must cover the required stop (Yosemite) or the coverage guard
-    # substitutes the fallback.
+    # The LLM route must cover the start, the required stop (Yosemite), and the
+    # end, or the coverage guard substitutes the fallback.
     llm = _FakeLLM(
-        '{"ordered_stops": [{"location": "SF", "stop_type": "start"},'
-        ' {"location": "Yosemite", "stop_type": "destination"}],'
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
         ' "route_summary": "coastal", "suggested_total_days": 3}'
     )
     route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
     assert isinstance(route, RoutePlan)
     assert route.route_summary == "coastal"
-    assert route.ordered_stops[0].location == "SF"
+    assert route.ordered_stops[0].location == "San Francisco, CA"
 
 
 def test_plan_route_falls_back_on_bad_json(sample_plan_request):
@@ -128,6 +129,21 @@ def test_plan_route_falls_back_when_required_stop_missing(sample_plan_request):
     locations = [s.location for s in route.ordered_stops]
     assert "Yosemite" in locations  # fallback restored the required stop
     assert route.route_summary == ""  # fallback route, not the LLM's "wrong" summary
+
+
+def test_plan_route_falls_back_when_endpoint_missing(sample_plan_request):
+    # A route covering every required stop but truncating the actual start or end
+    # location must also be replaced by the fallback — the origin/destination and
+    # driving legs can't silently disappear even when required_stops is satisfied.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "Yosemite", "stop_type": "destination"}],'
+        ' "route_summary": "truncated", "suggested_total_days": 2}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    locations = [s.location for s in route.ordered_stops]
+    assert "San Francisco, CA" in locations  # fallback restored the start
+    assert "Los Angeles, CA" in locations  # fallback restored the end
+    assert route.route_summary == ""  # fallback route, not the LLM's "truncated" summary
 
 
 def test_fallback_route_endpoints_are_pass_through(sample_plan_request):
@@ -301,6 +317,32 @@ def test_compose_itinerary_falls_back_on_bad_json(sample_plan_request):
     )
     assert isinstance(itinerary, TripItinerary)
     assert itinerary.total_days == 2  # derived from route.suggested_total_days
+
+
+def test_compose_itinerary_fallback_synthesizes_a_day_for_pass_through_only_route(
+    sample_plan_request,
+):
+    # A start-only trip (no required stops) whose route fallback produced only
+    # pass-through start/end stops, combined with the composer's own LLM also
+    # failing, must not yield days=[] while total_days >= 1.
+    route = RoutePlan(
+        ordered_stops=[
+            RouteStop(location="San Francisco, CA", stop_type="start", recommended_nights=0),
+            RouteStop(location="San Francisco, CA", stop_type="end", recommended_nights=0),
+        ],
+        suggested_total_days=1,
+    )
+    itinerary = rtp_pipeline.compose_itinerary(
+        sample_plan_request.trip,
+        TravelerGroupProfile(),
+        route,
+        [StopActivities(location="San Francisco, CA")],
+        LogisticsPlan(),
+        llm=_FakeLLM("nope"),
+    )
+    assert itinerary.total_days == 1
+    assert len(itinerary.days) == 1
+    assert itinerary.days[0].location == "San Francisco, CA"
 
 
 # ---------------------------------------------------------------------------

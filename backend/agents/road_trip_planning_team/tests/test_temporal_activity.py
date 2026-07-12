@@ -81,6 +81,22 @@ def test_mark_failed_activity_records_failed(sample_trip_body):
     assert "pipeline exploded" in (job.get("error") or "")
 
 
+def test_mark_failed_activity_does_not_clobber_completed_job(sample_trip_body):
+    # Temporal activities are at-least-once: persist_itinerary_activity may have
+    # already durably written COMPLETED even if its completion signal to the
+    # workflow was lost, leaving a subsequent retry-exhaustion to reach this
+    # handler. It must no-op rather than overwrite the already-successful result.
+    create_job("job-already-done", request=sample_trip_body)
+    itinerary = TripItinerary(title="Already Done", total_days=1).model_dump()
+    _run(acts.persist_itinerary_activity, "job-already-done", itinerary)
+
+    _run(acts.mark_road_trip_failed_activity, "job-already-done", "stale failure")
+
+    job = get_job("job-already-done")
+    assert job["status"] == JOB_STATUS_COMPLETED
+    assert job["result"]["title"] == "Already Done"
+
+
 # ---------------------------------------------------------------------------
 # Specialist activities — each reconstructs typed inputs and returns a dict
 # ---------------------------------------------------------------------------
