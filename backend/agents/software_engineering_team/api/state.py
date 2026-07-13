@@ -6,8 +6,10 @@ route modules reuse. Imports nothing from the route or background modules, so it
 never participates in an import cycle.
 
 Invariants:
-    - ``_active_orchestrator_threads`` is the one registry object; callers mutate
-      it in place (never rebind) so background threads and routes see the same map.
+    - The orchestrator-thread registry itself lives in
+      ``shared_run_thread_registry.RunThreadRegistry``; ``_active_orchestrator_threads`` is a
+      back-compat alias onto its live internal map, so background threads and routes see the same
+      map regardless of whether they go through the registry or poke the alias directly.
 """
 
 import logging
@@ -24,6 +26,7 @@ from pydantic import ValidationError
 
 from shared_concurrency import BackgroundHeartbeat
 from shared_hitl.progress import coerce_progress
+from shared_run_thread_registry import RunThreadRegistry
 from software_engineering_team.api.models import (
     CurrentActivityEntry,
     TaskStateEntry,
@@ -107,13 +110,9 @@ def create_project_workspace(project_name: str, spec_content: bytes) -> Path:
 
 
 # Track active orchestrator threads so we can detect when a server restart killed one
-_active_orchestrator_threads: Dict[str, threading.Thread] = {}
-
-
-def _is_orchestrator_alive(job_id: str) -> bool:
-    """Return True if an orchestrator thread is still running for this job."""
-    thread = _active_orchestrator_threads.get(job_id)
-    return thread is not None and thread.is_alive()
+_registry = RunThreadRegistry()
+_active_orchestrator_threads = _registry.threads
+_is_orchestrator_alive = _registry.is_alive
 
 
 def _preflight_sprint_scope(sprint_id: Optional[str]) -> None:

@@ -2,8 +2,8 @@
 
 Each ``_run_*_background`` is the ``threading.Thread`` target a route spawns to
 drive a long-running orchestrator/team off the request thread. They register in
-the shared thread registry (``state._active_orchestrator_threads``) and persist
-terminal state via the job store.
+the shared thread registry (``state._registry``) and persist terminal state via
+the job store.
 
 Preconditions:
     - Called as a thread target with a valid ``job_id`` naming an existing job.
@@ -13,10 +13,9 @@ Postconditions:
 """
 
 import logging
-import threading
 from typing import Any, Dict, List, Optional
 
-from software_engineering_team.api.state import _active_orchestrator_threads
+from software_engineering_team.api.state import _registry
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_FAILED,
     update_job,
@@ -35,7 +34,7 @@ def _run_orchestrator_background(
     sprint_id: Optional[str] = None,
 ) -> None:
     """Run orchestrator in background thread."""
-    _active_orchestrator_threads[job_id] = threading.current_thread()
+    _registry.register(job_id)
     try:  # pragma: no cover  # integration-only: delegates into run_orchestrator (LLM + git + subprocess)
         from orchestrator import run_orchestrator
 
@@ -53,7 +52,7 @@ def _run_orchestrator_background(
         logger.exception("Orchestrator failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
     finally:  # pragma: no cover  # integration-only: paired with integration-only try block
-        _active_orchestrator_threads.pop(job_id, None)
+        _registry.clear(job_id)
 
 
 def _run_retry_background(job_id: str) -> None:
