@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import json
-
-from strands import Agent
-
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import DeploymentStrategyAgentInput, DeploymentStrategyAgentOutput
 from .prompts import DEPLOYMENT_STRATEGY_PROMPT
@@ -30,14 +27,11 @@ class DeploymentStrategyAgent:
             f"acceptance_criteria={spec.acceptance_criteria}\n"
             f"nfr={spec.non_functional_requirements}\n"
         )
-        data = json.loads(
-            str(
-                Agent(model=self._model)(
-                    DEPLOYMENT_STRATEGY_PROMPT + "\n\n---\n\n" + context,
-                    temperature=0.1,
-                    think=True,
-                )
-            ).strip()
+        data = complete_json_with_continuation(
+            self._model,
+            DEPLOYMENT_STRATEGY_PROMPT + "\n\n---\n\n" + context,
+            temperature=0.1,
+            think=True,
         )
         return DeploymentStrategyAgentOutput(
             artifacts=data.get("artifacts") or {},
