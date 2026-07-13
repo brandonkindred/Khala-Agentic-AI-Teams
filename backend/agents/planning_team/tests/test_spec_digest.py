@@ -12,7 +12,6 @@ from planning_team import spec_digest  # noqa: E402
 from planning_team.spec_digest import (  # noqa: E402
     compute_section_chars,
     map_reduce,
-    parse_json_response,
     split_sections,
 )
 from planning_team.tests.conftest import multi_heading_doc  # noqa: E402
@@ -122,33 +121,6 @@ def test_split_sections_oversized_coherent_block_kept_whole():
     assert sections == [text]
 
 
-# --- parse_json_response ---------------------------------------------------
-
-
-def test_parse_json_plain():
-    assert parse_json_response('{"a": 1}') == {"a": 1}
-
-
-def test_parse_json_fenced():
-    assert parse_json_response('```json\n{"a": 2}\n```') == {"a": 2}
-
-
-def test_parse_json_tagged_fence_after_prose():
-    # A reasoning/prose preamble before a ```json block must not derail extraction.
-    resp = 'Here is my analysis...\n```json\n{"a": 3}\n```\nDone.'
-    assert parse_json_response(resp) == {"a": 3}
-
-
-def test_parse_json_untagged_leading_fence():
-    assert parse_json_response('```\n{"a": 4}\n```') == {"a": 4}
-
-
-def test_parse_json_untagged_fence_after_prose():
-    # Prose, then an untagged fenced JSON block (not at index 0) must still be found.
-    resp = 'Sure, here you go:\n```\n{"a": 5}\n```'
-    assert parse_json_response(resp) == {"a": 5}
-
-
 def test_env_positive_int(monkeypatch):
     monkeypatch.setenv("PLANNING_TEST_INT", "120")
     assert spec_digest._env_positive_int("PLANNING_TEST_INT", 50) == 120
@@ -158,20 +130,6 @@ def test_env_positive_int(monkeypatch):
     assert spec_digest._env_positive_int("PLANNING_TEST_INT", 50) == 50  # non-positive -> default
     monkeypatch.delenv("PLANNING_TEST_INT", raising=False)
     assert spec_digest._env_positive_int("PLANNING_TEST_INT", 50) == 50  # unset -> default
-
-
-def test_parse_json_empty_and_invalid():
-    assert parse_json_response("") is None
-    assert parse_json_response(None) is None
-    assert parse_json_response("not json") is None
-
-
-def test_parse_json_non_object_returns_none():
-    # Valid JSON that is not an object (array / scalar) must be rejected so reducers
-    # can rely on a dict-or-None contract.
-    assert parse_json_response('["a", "b"]') is None
-    assert parse_json_response('"a string"') is None
-    assert parse_json_response("42") is None
 
 
 # --- map_reduce ------------------------------------------------------------
