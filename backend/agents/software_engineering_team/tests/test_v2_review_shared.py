@@ -29,9 +29,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from unittest.mock import MagicMock
 
 from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
 from software_engineering_team.shared.v2_models import ReviewIssue
 from software_engineering_team.shared.v2_review import (
     ReviewConfig,
+    _lint_passed,
     run_microtask_review,
     run_review,
 )
@@ -95,7 +97,7 @@ def _build_config(
 def _noop_runners() -> Dict[str, Any]:
     """Stub runners that return no issues and never touch an LLM/agent."""
     return {
-        "llm_review_fn": lambda *, llm, task, files: [],
+        "llm_review_fn": lambda *, llm, task, files, **kw: [],
         "qa_agent_fn": lambda *, qa_agent, files, language, task_description, task_id, context="": [],
         "security_agent_fn": lambda *, security_agent, files, language, task_description, task_id, context="": [],
         "build_verify_fn": _build_verify_fn,
@@ -137,6 +139,19 @@ def test_run_review_lint_agent_raises_is_logged_not_raised(tmp_path: Path) -> No
         **_noop_runners(),
     )
     assert result.passed  # lint failure was swallowed; no blocking issue
+
+
+def test_lint_passed_defends_missing_execution_result() -> None:
+    """A lint-tool result lacking ``execution_result`` entirely (not just a
+    falsy inner ``.success``) must not raise -- only the innermost lookup was
+    previously getattr-guarded, so ``lint_result.execution_result`` itself
+    could raise AttributeError for a differently-shaped lint tool return."""
+    assert _lint_passed(SimpleNamespace()) is True  # nothing to report -> assume success
+    assert _lint_passed(SimpleNamespace(passed=False)) is False
+    assert _lint_passed(SimpleNamespace(execution_result=SimpleNamespace(success=False))) is False
+    assert _lint_passed(SimpleNamespace(execution_result=SimpleNamespace(success=True))) is True
+    # execution_result present but success looked up via getattr default too.
+    assert _lint_passed(SimpleNamespace(execution_result=SimpleNamespace())) is True
 
 
 def test_run_review_lint_fail_with_remap_blocks(tmp_path: Path) -> None:
@@ -380,7 +395,7 @@ def test_microtask_code_review_agent_path_and_raise(tmp_path: Path) -> None:
         code_review_agent=cr_agent,
         detail_callback=details.append,
         language="python",
-        llm_review_fn=lambda *, llm, task, files: [
+        llm_review_fn=lambda *, llm, task, files, **kw: [
             ReviewIssue(source="code_review", severity="low", description="llm")
         ],
         qa_agent_fn=lambda **kw: [],
@@ -401,7 +416,7 @@ def test_microtask_code_review_agent_path_and_raise(tmp_path: Path) -> None:
         files={"x.py": "code"},
         code_review_agent=cr_agent,
         language="python",
-        llm_review_fn=lambda *, llm, task, files: [
+        llm_review_fn=lambda *, llm, task, files, **kw: [
             ReviewIssue(source="code_review", severity="low", description="llm")
         ],
         qa_agent_fn=lambda **kw: [],
@@ -409,6 +424,57 @@ def test_microtask_code_review_agent_path_and_raise(tmp_path: Path) -> None:
         build_verify_fn=_build_verify_fn,
     )
     assert any(i.description == "llm" for i in result2.issues)
+
+
+def test_code_review_agent_receives_architecture_and_spec_content(tmp_path: Path) -> None:
+    """``architecture``/``spec_content`` passed to ``run_microtask_review`` reach the
+    ``CodeReviewInput`` built for the external code-review agent, and default to
+    ``None``/``""`` when omitted (backward compatible with existing callers)."""
+    config = _build_config()
+    architecture = SystemArchitecture(overview="layered architecture")
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        code_review_agent=cr_agent,
+        language="python",
+        review_context=ReviewContext(
+            architecture=architecture, spec_content="the full project spec"
+        ),
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+    )
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.architecture is architecture
+    assert cr_input.spec_content == "the full project spec"
+
+    cr_agent.run.reset_mock()
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        code_review_agent=cr_agent,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+    )
+    cr_input_default = cr_agent.run.call_args.args[0]
+    assert cr_input_default.architecture is None
+    assert cr_input_default.spec_content == ""
 
 
 def test_microtask_qa_and_security_with_detail_callback(tmp_path: Path) -> None:
@@ -427,7 +493,7 @@ def test_microtask_qa_and_security_with_detail_callback(tmp_path: Path) -> None:
         security_agent=MagicMock(),
         detail_callback=details.append,
         language="python",
-        llm_review_fn=lambda *, llm, task, files: [],
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
         qa_agent_fn=lambda *, qa_agent, files, language, task_description, task_id, context="": [
             ReviewIssue(source="qa", severity="low", description="bug")
         ],

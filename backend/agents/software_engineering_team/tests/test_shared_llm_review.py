@@ -136,6 +136,47 @@ def test_run_llm_review_chunks_large_file_and_skips_failing_chunk(caplog):
     )
 
 
+def test_run_llm_review_forwards_architecture_context_and_spec_content():
+    """``architecture_context``/``spec_content`` reach the prompt when the
+    template references them; omitting them defaults to '(none provided)' so
+    the fallback reviewer is never silently missing the caller's context."""
+    prompts: list[str] = []
+
+    def invoke(prompt: str) -> str:
+        prompts.append(prompt)
+        return "raw"
+
+    prompt_with_context = "{architecture_context}|{spec_content}|{requirements}|{code}"
+
+    run_llm_review(
+        task=_task(),
+        files={"x.py": "code"},
+        prompt_template=prompt_with_context,
+        parse_template=lambda _raw: {"issues": []},
+        issue_factory=_Issue,
+        invoke_model=invoke,
+        max_chars=60_000,
+        warn_threshold=20,
+        architecture_context="Layered service architecture.",
+        spec_content="All endpoints require auth.",
+    )
+    assert "Layered service architecture." in prompts[0]
+    assert "All endpoints require auth." in prompts[0]
+
+    prompts.clear()
+    run_llm_review(
+        task=_task(),
+        files={"x.py": "code"},
+        prompt_template=prompt_with_context,
+        parse_template=lambda _raw: {"issues": []},
+        issue_factory=_Issue,
+        invoke_model=invoke,
+        max_chars=60_000,
+        warn_threshold=20,
+    )
+    assert "(none provided)" in prompts[0]
+
+
 def test_run_llm_review_preserves_header_on_oversized_single_line():
     """A single source line longer than the cap (a minified bundle) is hard-split,
     and every prompt keeps the ### path ### header so a finding in any tail piece

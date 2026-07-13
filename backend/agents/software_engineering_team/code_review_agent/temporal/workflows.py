@@ -2,17 +2,19 @@
 
 ``CodeReviewWorkflow`` reproduces ``coordinator.run_coordinator`` as a durable,
 resumable computation. It orchestrates the review as a sequence of activities —
-prepare → map fan-out → false-positive verify → deterministic gate → (conditional)
-narrative synthesis — so a worker restart mid-review re-runs only the unfinished
-activities instead of re-reviewing the whole submission.
+prepare → map fan-out → false-positive verify → architecture-consistency /
+redundancy pass → deterministic gate → (conditional) narrative synthesis — so a
+worker restart mid-review re-runs only the unfinished activities instead of
+re-reviewing the whole submission.
 
 The verdict is behavior-identical to thread mode because every phase calls the
 same underlying coordinator functions (through :mod:`.activities`): the map unit
 is ``mapping._cached_review_chunk``, verification is
-``false_positive_filter.filter_false_positives``, the gate is
-``coordinator._dedupe_issues`` + ``_reconcile_approval``, and the narrative is
-``synthesis.synthesize_review_findings`` with the same deterministic-concat
-fallback.
+``false_positive_filter.filter_false_positives``, the additive architecture pass
+is ``architecture_consistency_pass.find_architecture_and_redundancy_issues``, the
+gate is ``coordinator._dedupe_issues`` + ``_reconcile_approval``, and the
+narrative is ``synthesis.synthesize_review_findings`` with the same
+deterministic-concat fallback.
 
 Sandbox note: activity and constant imports are wrapped in
 ``workflow.unsafe.imports_passed_through()``; the workflow body itself performs
@@ -55,6 +57,19 @@ _LLM_RETRY = RetryPolicy(
 # Marker type carried on the ``ApplicationError`` the total-failure guard raises,
 # so the sync dispatcher can translate it back into ``CodeReviewUnavailableError``.
 CODE_REVIEW_UNAVAILABLE_TYPE = "CodeReviewUnavailableError"
+
+# Replay-compatibility gate for inserting the architecture-consistency activity
+# between verification and finalization (see ``run``). A ``CodeReviewWorkflow``
+# history recorded before this activity existed has no marker for it, so
+# ``workflow.patched`` returns False on replay and that history's original
+# finalize-next sequence is reproduced exactly; a new execution records the
+# marker and always takes the new path. Mirrors ``planning_team.temporal.
+# workflows._PER_PHASE_PATCH``'s identical rationale.
+# TODO: Remove this gate (and always run the architecture pass unconditionally)
+# once no pre-migration CodeReviewWorkflow histories remain open (confirm via
+# the Temporal UI), then deprecate the marker with
+# ``workflow.deprecate_patch(_ARCHITECTURE_PASS_PATCH)`` before deleting it.
+_ARCHITECTURE_PASS_PATCH = "code-review-architecture-consistency-pass"
 
 
 @workflow.defn(name="CodeReviewWorkflow")
@@ -196,6 +211,25 @@ class CodeReviewWorkflow:
             retry_policy=_LLM_RETRY,
         )
 
+        has_architecture_findings = False
+        if workflow.patched(_ARCHITECTURE_PASS_PATCH):
+            # Architecture-consistency / cross-codebase-redundancy pass: additive,
+            # once per submission (not once per chunk), matching thread mode's
+            # run_coordinator (see coordinator.py's identical call ordering — after
+            # false-positive verification, before the final dedupe/gate). Gated by
+            # workflow.patched so a pre-migration history (recorded before this
+            # activity existed) replays its original finalize-next sequence exactly.
+            architecture_findings = await workflow.execute_activity(
+                A.find_architecture_and_redundancy_activity,
+                args=[review_input],
+                task_queue=TASK_QUEUE,
+                start_to_close_timeout=timedelta(minutes=30),
+                retry_policy=_LLM_RETRY,
+            )
+            if architecture_findings:
+                verified = [*verified, *architecture_findings]
+                has_architecture_findings = True
+
         self._advance("finalizing", 0.95)
         gate = await workflow.execute_activity(
             A.finalize_review_activity,
@@ -208,7 +242,7 @@ class CodeReviewWorkflow:
         gated_issues: List[Dict[str, Any]] = gate["issues"]
 
         summary, notes = await self._narrative(
-            review_input, approved, gated_issues, summaries, spec_notes
+            review_input, approved, gated_issues, summaries, spec_notes, has_architecture_findings
         )
 
         self._advance("done", 1.0)
@@ -226,14 +260,17 @@ class CodeReviewWorkflow:
         issues: List[Dict[str, Any]],
         summaries: List[str],
         spec_notes: List[str],
+        has_architecture_findings: bool = False,
     ) -> tuple[str, str]:
         """Produce the merged ``(summary, spec_compliance_notes)``.
 
-        Mirrors ``coordinator._merge_narrative``: a single sub-review is used
-        verbatim (no synthesis call); more than one attempts a synthesis activity
-        and falls back to deterministic concatenation on failure.
+        Mirrors ``coordinator._merge_narrative``: a single sub-review with no
+        architecture findings is used verbatim (no synthesis call); otherwise
+        attempts a synthesis activity and falls back to deterministic
+        concatenation on failure, so a blocking architecture finding is never
+        silently absent from the narrative attached to a single-chunk review.
         """
-        if len(summaries) == 1:
+        if len(summaries) == 1 and not has_architecture_findings:
             return summaries[0], (spec_notes[0] if spec_notes else "")
 
         synth = await workflow.execute_activity(

@@ -53,8 +53,13 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
     from investment_team.api import main as api_main
 
     for attr in (
-        "_profiles", "_proposals", "_strategies", "_validations",
-        "_backtests", "_strategy_lab_records", "_paper_trading_sessions",
+        "_profiles",
+        "_proposals",
+        "_strategies",
+        "_validations",
+        "_backtests",
+        "_strategy_lab_records",
+        "_paper_trading_sessions",
         "_advisor_sessions",
     ):
         monkeypatch.setattr(api_main, attr, _InMemoryDict())
@@ -73,25 +78,47 @@ def _winning_record():
     )
 
     strat = StrategySpec(
-        strategy_id="strat-w", authored_by="x", asset_class="equities",
-        hypothesis="h", signal_definition="s", timeframe="1d",
+        strategy_id="strat-w",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
         strategy_code="def x(): pass",
     )
     cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
     result = BacktestResult(
-        total_return_pct=10.0, annualized_return_pct=20.0, volatility_pct=10.0,
-        sharpe_ratio=1.0, max_drawdown_pct=5.0, win_rate_pct=60.0, profit_factor=2.0,
-        calmar_ratio=0.0, deflated_sharpe=0.0, sortino_ratio=0.0,
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     bt = BacktestRecord(
-        backtest_id="bt-w", strategy_id="strat-w", strategy=strat, config=cfg,
-        submitted_by="x", submitted_at="2024-01-01T00:00:00Z",
-        completed_at="2024-01-01T01:00:00Z", result=result, trades=[],
+        backtest_id="bt-w",
+        strategy_id="strat-w",
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
     )
     return StrategyLabRecord(
-        lab_record_id="lab-w", strategy=strat, backtest=bt, is_winning=True,
-        strategy_rationale="r", analysis_narrative="n",
-        created_at="2024-01-01T01:00:00Z", strategy_code="def x(): pass",
+        lab_record_id="lab-w",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+        strategy_code="def x(): pass",
     )
 
 
@@ -107,8 +134,12 @@ def test_run_backtest_route_returns_pending_job(
     from investment_team.models import StrategySpec
 
     strategy = StrategySpec(
-        strategy_id="s-rb", authored_by="x", asset_class="equities",
-        hypothesis="h", signal_definition="s", timeframe="1d",
+        strategy_id="s-rb",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
     )
     api_main._strategies["s-rb"] = strategy
 
@@ -181,30 +212,51 @@ def test_run_paper_trading_background_marks_failed_on_empty_market_data(
     )
 
     strategy = StrategySpec(
-        strategy_id="s", authored_by="x", asset_class="equities",
-        hypothesis="h", signal_definition="s", timeframe="1d",
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
         strategy_code="def x(): pass",
     )
     bt = BacktestRecord(
-        backtest_id="bt-p", strategy_id="s", strategy=strategy,
-        config=BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0),
-        submitted_by="x", submitted_at="2024-01-01T00:00:00Z",
+        backtest_id="bt-p",
+        strategy_id="s",
+        strategy=strategy,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
         completed_at="2024-01-01T01:00:00Z",
         result=BacktestResult(
-            total_return_pct=10.0, annualized_return_pct=20.0, volatility_pct=10.0,
-            sharpe_ratio=1.0, max_drawdown_pct=5.0, win_rate_pct=60.0, profit_factor=2.0,
-            calmar_ratio=0.0, deflated_sharpe=0.0, sortino_ratio=0.0,
+            total_return_pct=10.0,
+            annualized_return_pct=20.0,
+            volatility_pct=10.0,
+            sharpe_ratio=1.0,
+            max_drawdown_pct=5.0,
+            win_rate_pct=60.0,
+            profit_factor=2.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
         ),
         trades=[],
     )
 
     # Pre-create a "running" session in the store.
     running = PaperTradingSession(
-        session_id="pt-empty", lab_record_id="lab-w", strategy=strategy,
-        status=PaperTradingStatus.RUNNING, initial_capital=100_000.0,
-        current_capital=100_000.0, symbols_traded=[],
+        session_id="pt-empty",
+        lab_record_id="lab-w",
+        strategy=strategy,
+        status=PaperTradingStatus.RUNNING,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
         data_source="yahoo_finance",
-        data_period_start="", data_period_end="",
+        data_period_start="",
+        data_period_end="",
         started_at="2024-01-01T00:00:00Z",
     )
     api_main._paper_trading_sessions["pt-empty"] = running
@@ -215,9 +267,15 @@ def test_run_paper_trading_background_marks_failed_on_empty_market_data(
     monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketService({}))
 
     api_main._run_paper_trading_background(
-        "pt-empty", "lab-w", strategy, "def x(): pass", bt,
-        lookback_days=30, initial_capital=100_000.0,
-        transaction_cost_bps=5.0, slippage_bps=2.0,
+        "pt-empty",
+        "lab-w",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
     )
 
     # Worker updated the session to FAILED.
@@ -241,27 +299,49 @@ def test_run_paper_trading_background_crashes_into_failed(
     )
 
     strategy = StrategySpec(
-        strategy_id="s", authored_by="x", asset_class="equities",
-        hypothesis="h", signal_definition="s", timeframe="1d",
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
         strategy_code="def x(): pass",
     )
     bt = BacktestRecord(
-        backtest_id="bt-p", strategy_id="s", strategy=strategy,
-        config=BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0),
-        submitted_by="x", submitted_at="2024-01-01T00:00:00Z",
+        backtest_id="bt-p",
+        strategy_id="s",
+        strategy=strategy,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
         completed_at="2024-01-01T01:00:00Z",
         result=BacktestResult(
-            total_return_pct=10.0, annualized_return_pct=20.0, volatility_pct=10.0,
-            sharpe_ratio=1.0, max_drawdown_pct=5.0, win_rate_pct=60.0, profit_factor=2.0,
-            calmar_ratio=0.0, deflated_sharpe=0.0, sortino_ratio=0.0,
+            total_return_pct=10.0,
+            annualized_return_pct=20.0,
+            volatility_pct=10.0,
+            sharpe_ratio=1.0,
+            max_drawdown_pct=5.0,
+            win_rate_pct=60.0,
+            profit_factor=2.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
         ),
         trades=[],
     )
     running = PaperTradingSession(
-        session_id="pt-crash", lab_record_id="lab-w", strategy=strategy,
-        status=PaperTradingStatus.RUNNING, initial_capital=100_000.0,
-        current_capital=100_000.0, symbols_traded=[],
-        data_source="yahoo_finance", data_period_start="", data_period_end="",
+        session_id="pt-crash",
+        lab_record_id="lab-w",
+        strategy=strategy,
+        status=PaperTradingStatus.RUNNING,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="yahoo_finance",
+        data_period_start="",
+        data_period_end="",
         started_at="2024-01-01T00:00:00Z",
     )
     api_main._paper_trading_sessions["pt-crash"] = running
@@ -275,9 +355,15 @@ def test_run_paper_trading_background_crashes_into_failed(
     monkeypatch.setattr(mds, "MarketDataService", lambda: _Broken())
 
     api_main._run_paper_trading_background(
-        "pt-crash", "lab-w", strategy, "def x(): pass", bt,
-        lookback_days=30, initial_capital=100_000.0,
-        transaction_cost_bps=5.0, slippage_bps=2.0,
+        "pt-crash",
+        "lab-w",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
     )
     updated = api_main._paper_trading_sessions.get("pt-crash")
     assert updated.status == PaperTradingStatus.FAILED
@@ -297,9 +383,7 @@ def test_stop_live_paper_trading_404_when_session_missing(
     assert resp.status_code == 404
 
 
-def test_stop_live_paper_trading_happy_path(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
+def test_stop_live_paper_trading_happy_path(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     """Stop endpoint must invoke the StopController and stamp the session."""
     from investment_team.api import main as api_main
     from investment_team.models import (
@@ -311,16 +395,26 @@ def test_stop_live_paper_trading_happy_path(
     monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
 
     strategy = StrategySpec(
-        strategy_id="s", authored_by="x", asset_class="equities",
-        hypothesis="h", signal_definition="s", timeframe="1d",
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
         strategy_code="def x(): pass",
     )
     session = PaperTradingSession(
-        session_id="pt-live", lab_record_id="lab-w", strategy=strategy,
-        status=PaperTradingStatus.LIVE, initial_capital=100_000.0,
-        current_capital=100_000.0, symbols_traded=["AAA"],
-        data_source="live:binance", data_period_start="2024-01-01",
-        data_period_end="2024-06-01", started_at="2024-06-01T00:00:00Z",
+        session_id="pt-live",
+        lab_record_id="lab-w",
+        strategy=strategy,
+        status=PaperTradingStatus.LIVE,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=["AAA"],
+        data_source="live:binance",
+        data_period_start="2024-01-01",
+        data_period_end="2024-06-01",
+        started_at="2024-06-01T00:00:00Z",
     )
     api_main._paper_trading_sessions["pt-live"] = session
 
@@ -340,6 +434,305 @@ def test_stop_live_paper_trading_happy_path(
     # Session was updated with a user_stop_requested_at timestamp.
     updated = api_main._paper_trading_sessions.get("pt-live")
     assert updated.user_stop_requested_at is not None
+
+
+def _live_session(session_id, strategy, status):
+    from investment_team.models import PaperTradingSession
+
+    return PaperTradingSession(
+        session_id=session_id,
+        lab_record_id="lab-w",
+        strategy=strategy,
+        status=status,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=["AAA"],
+        data_source="live:binance",
+        data_period_start="2024-01-01",
+        data_period_end="2024-06-01",
+        started_at="2024-06-01T00:00:00Z",
+    )
+
+
+def test_stop_idempotent_for_terminal_session_does_not_signal(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A terminal session has a closed workflow — /stop must not signal it (which
+    would 500) and must return the session unchanged."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, StrategySpec
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    api_main._paper_trading_sessions["pt-done"] = _live_session(
+        "pt-done", strategy, PaperTradingStatus.COMPLETED
+    )
+    signalled: List[str] = []
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", lambda sid: signalled.append(sid))
+
+    resp = api_client.post("/strategy-lab/paper-trade/pt-done/stop")
+
+    assert resp.status_code == 200
+    assert signalled == []  # terminal session → no signal sent
+
+
+def test_stop_swallows_closed_workflow_rpc_error(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A race where the workflow closes before the signal lands (a real
+    temporalio RPCError with status=NOT_FOUND) must not 500 the idempotent stop
+    route — it's treated as an already-finished session."""
+    from temporalio.service import RPCError, RPCStatusCode
+
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, StrategySpec
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    api_main._paper_trading_sessions["pt-race"] = _live_session(
+        "pt-race", strategy, PaperTradingStatus.LIVE
+    )
+
+    def _boom(session_id):
+        raise RPCError("workflow execution already completed", RPCStatusCode.NOT_FOUND, b"")
+
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _boom)
+
+    resp = api_client.post("/strategy-lab/paper-trade/pt-race/stop")
+
+    assert resp.status_code == 200  # not a 500 (nor a 502)
+    assert "already finished" in resp.json()["message"]
+
+
+def test_stop_surfaces_genuine_signal_delivery_failure(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A genuine delivery failure (client not connected, RPC timeout, any other
+    RPC error) must NOT be swallowed as a false success on a live-trading kill
+    switch — it must surface as a real error."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, StrategySpec
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    api_main._paper_trading_sessions["pt-race"] = _live_session(
+        "pt-race", strategy, PaperTradingStatus.LIVE
+    )
+
+    def _boom(session_id):
+        raise RuntimeError("Temporal client not available; is the team's worker running?")
+
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _boom)
+
+    resp = api_client.post("/strategy-lab/paper-trade/pt-race/stop")
+
+    assert resp.status_code == 502
+    assert "pt-race" in resp.json()["detail"]
+
+
+def test_run_paper_trading_marks_failed_when_dispatch_raises_http(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A 503 from dispatch must roll the just-created session forward to FAILED so
+    it can't orphan the live concurrency guard."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    def _boom(session_id, payload):
+        raise api_main.HTTPException(status_code=503, detail="Temporal unavailable")
+
+    monkeypatch.setattr(api_main, "_start_paper_trading", _boom)
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 503
+    sessions = [
+        PaperTradingSession.parse_persisted(s) for s in api_main._paper_trading_sessions.values()
+    ]
+    assert sessions and all(s.status == PaperTradingStatus.FAILED for s in sessions)
+
+
+def test_run_paper_trading_wraps_runtime_dispatch_error_as_503(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    def _boom(session_id, payload):
+        raise RuntimeError("worker client not connected")
+
+    monkeypatch.setattr(api_main, "_start_paper_trading", _boom)
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 503
+    sessions = [
+        PaperTradingSession.parse_persisted(s) for s in api_main._paper_trading_sessions.values()
+    ]
+    assert sessions and all(s.status == PaperTradingStatus.FAILED for s in sessions)
+
+
+def test_run_paper_trading_dispatch_failure_attempts_best_effort_stop_signal(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A dispatch-ack timeout doesn't prove the workflow never started (the sync
+    bridge's wait only bounds our own wait) — the route must best-effort signal
+    the deterministic workflow id to stop it if it did start server-side, so it
+    can't be orphaned unstoppable."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    def _boom(session_id, payload):
+        raise RuntimeError("ack timeout")
+
+    monkeypatch.setattr(api_main, "_start_paper_trading", _boom)
+    signalled: List[str] = []
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", lambda sid: signalled.append(sid))
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 503
+    assert len(signalled) == 1  # best-effort stop attempted for the session_id minted
+
+
+def test_run_paper_trading_dispatch_failure_swallows_signal_error(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """The best-effort stop-signal attempt must itself never break the
+    dispatch-failure response — a workflow that never started has nothing to
+    signal, so a signal failure here is expected and harmless."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    monkeypatch.setattr(
+        api_main, "_start_paper_trading", lambda sid, payload: (_ for _ in ()).throw(RuntimeError())
+    )
+
+    def _signal_boom(session_id):
+        raise RuntimeError("Temporal client not available")
+
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _signal_boom)
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 503  # the original dispatch failure, not the signal failure
+    sessions = [
+        PaperTradingSession.parse_persisted(s) for s in api_main._paper_trading_sessions.values()
+    ]
+    assert sessions and all(s.status == PaperTradingStatus.FAILED for s in sessions)
+
+
+def test_max_hours_rejects_absurd_values(api_client) -> None:
+    """An unbounded max_hours would overflow timedelta construction inside
+    workflow code; the field must reject values above the documented cap."""
+    from investment_team.api import main as api_main
+
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    resp = api_client.post(
+        "/strategy-lab/paper-trade",
+        json={"lab_record_id": "lab-w", "max_hours": 1e12},
+    )
+
+    assert resp.status_code == 422
+
+
+def test_fail_paper_trading_session_is_idempotent_on_completed(monkeypatch) -> None:
+    """Must not clobber a session that already reached a real terminal outcome
+    concurrently (e.g. the workflow actually completed while the dispatch-error
+    handler was deciding to mark it failed)."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus, StrategySpec
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    completed = _live_session("pt-done", strategy, PaperTradingStatus.COMPLETED)
+    completed.error = None
+    store = {"pt-done": completed}
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", store)
+
+    api_main._fail_paper_trading_session("pt-done", "should not apply")
+
+    result = PaperTradingSession.parse_persisted(store["pt-done"])
+    assert result.status == PaperTradingStatus.COMPLETED
+    assert result.error is None
+
+
+def test_fail_paper_trading_session_marks_active_session_failed(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus, StrategySpec
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    live = _live_session("pt-live2", strategy, PaperTradingStatus.LIVE)
+    store = {"pt-live2": live}
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", store)
+
+    api_main._fail_paper_trading_session("pt-live2", "dispatch failed")
+
+    result = PaperTradingSession.parse_persisted(store["pt-live2"])
+    assert result.status == PaperTradingStatus.FAILED
+    assert result.error == "dispatch failed"
+
+
+def test_fail_paper_trading_session_handles_unparseable_data(monkeypatch) -> None:
+    """A malformed persisted record must not raise — the documented "Never
+    raises" postcondition must actually hold."""
+    from investment_team.api import main as api_main
+
+    store = {"pt-bad": {"not": "a valid session shape"}}
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", store)
+
+    api_main._fail_paper_trading_session("pt-bad", "irrelevant")  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -365,11 +758,17 @@ def test_run_paper_trading_409_when_live_session_already_active(
 
     # Pre-seed an active session for the same strategy_id.
     active = PaperTradingSession(
-        session_id="pt-existing", lab_record_id="lab-w", strategy=record.strategy,
-        status=PaperTradingStatus.LIVE, initial_capital=100_000.0,
-        current_capital=100_000.0, symbols_traded=["AAA"],
-        data_source="live:binance", data_period_start="2024-01-01",
-        data_period_end="2024-06-01", started_at="2024-06-01T00:00:00Z",
+        session_id="pt-existing",
+        lab_record_id="lab-w",
+        strategy=record.strategy,
+        status=PaperTradingStatus.LIVE,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=["AAA"],
+        data_source="live:binance",
+        data_period_start="2024-01-01",
+        data_period_end="2024-06-01",
+        started_at="2024-06-01T00:00:00Z",
     )
     api_main._paper_trading_sessions["pt-existing"] = active
 
@@ -428,21 +827,34 @@ def _step_strategy_and_record():
     )
 
     strategy = StrategySpec(
-        strategy_id="s-step", authored_by="x", asset_class="equities",
-        hypothesis="h", signal_definition="s", timeframe="1d",
+        strategy_id="s-step",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
         strategy_code="def x(): pass",
     )
     bt = BacktestRecord(
-        backtest_id="bt-step", strategy_id="s-step", strategy=strategy,
+        backtest_id="bt-step",
+        strategy_id="s-step",
+        strategy=strategy,
         config=BacktestConfig(
             start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
         ),
-        submitted_by="x", submitted_at="2024-01-01T00:00:00Z",
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
         completed_at="2024-01-01T01:00:00Z",
         result=BacktestResult(
-            total_return_pct=10.0, annualized_return_pct=20.0, volatility_pct=10.0,
-            sharpe_ratio=1.0, max_drawdown_pct=5.0, win_rate_pct=60.0,
-            profit_factor=2.0, calmar_ratio=0.0, deflated_sharpe=0.0,
+            total_return_pct=10.0,
+            annualized_return_pct=20.0,
+            volatility_pct=10.0,
+            sharpe_ratio=1.0,
+            max_drawdown_pct=5.0,
+            win_rate_pct=60.0,
+            profit_factor=2.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
             sortino_ratio=0.0,
         ),
         trades=[],
@@ -478,11 +890,17 @@ def test_run_paper_trading_step_happy_path(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(mds, "MarketDataService", lambda: fake_market)
 
     expected_session = PaperTradingSession(
-        session_id="pt-step-1", lab_record_id="", strategy=strategy,
-        status=PaperTradingStatus.COMPLETED, initial_capital=100_000.0,
-        current_capital=110_000.0, symbols_traded=["AAA", "BBB"],
-        data_source="fake", data_period_start="2024-01-01",
-        data_period_end="2024-06-01", started_at="2024-06-01T00:00:00Z",
+        session_id="pt-step-1",
+        lab_record_id="",
+        strategy=strategy,
+        status=PaperTradingStatus.COMPLETED,
+        initial_capital=100_000.0,
+        current_capital=110_000.0,
+        symbols_traded=["AAA", "BBB"],
+        data_source="fake",
+        data_period_start="2024-01-01",
+        data_period_end="2024-06-01",
+        started_at="2024-06-01T00:00:00Z",
         verdict=PaperTradingVerdict.READY_FOR_LIVE,
     )
 
@@ -604,10 +1022,16 @@ def test_run_paper_trading_background_happy_path(
 
     strategy, bt = _step_strategy_and_record()
     running = PaperTradingSession(
-        session_id="pt-ok", lab_record_id="lab-ok", strategy=strategy,
-        status=PaperTradingStatus.RUNNING, initial_capital=100_000.0,
-        current_capital=100_000.0, symbols_traded=[],
-        data_source="yahoo_finance", data_period_start="", data_period_end="",
+        session_id="pt-ok",
+        lab_record_id="lab-ok",
+        strategy=strategy,
+        status=PaperTradingStatus.RUNNING,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="yahoo_finance",
+        data_period_start="",
+        data_period_end="",
         started_at="2024-01-01T00:00:00Z",
     )
     api_main._paper_trading_sessions["pt-ok"] = running
@@ -621,11 +1045,16 @@ def test_run_paper_trading_background_happy_path(
     # Returned session has a different (placeholder) session_id/lab_record_id
     # so the test can verify the worker overrides them with the caller's IDs.
     returned = PaperTradingSession(
-        session_id="placeholder", lab_record_id="placeholder",
-        strategy=strategy, status=PaperTradingStatus.COMPLETED,
-        initial_capital=100_000.0, current_capital=120_000.0,
-        symbols_traded=["AAA"], data_source="fake",
-        data_period_start="2024-01-01", data_period_end="2024-06-01",
+        session_id="placeholder",
+        lab_record_id="placeholder",
+        strategy=strategy,
+        status=PaperTradingStatus.COMPLETED,
+        initial_capital=100_000.0,
+        current_capital=120_000.0,
+        symbols_traded=["AAA"],
+        data_source="fake",
+        data_period_start="2024-01-01",
+        data_period_end="2024-06-01",
         started_at="2024-06-01T00:00:00Z",
         verdict=PaperTradingVerdict.READY_FOR_LIVE,
     )
@@ -639,9 +1068,15 @@ def test_run_paper_trading_background_happy_path(
     monkeypatch.setattr(pta, "PaperTradingAgent", lambda: _FakeAgent())
 
     api_main._run_paper_trading_background(
-        "pt-ok", "lab-ok", strategy, "def x(): pass", bt,
-        lookback_days=30, initial_capital=100_000.0,
-        transaction_cost_bps=5.0, slippage_bps=2.0,
+        "pt-ok",
+        "lab-ok",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
     )
 
     persisted = api_main._paper_trading_sessions.get("pt-ok")

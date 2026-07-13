@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional
 from strands import Agent
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import SystemArchitecture, Task
+from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.phases.execution import (
     GatedExecutionConfig,
     GateOutcome,
@@ -151,6 +151,7 @@ def _code_review_gate(
     files: Dict[str, str],
     deps: ReviewDependencies,
     detail_callback: Callable[[str], None],
+    review_context: Optional[ReviewContext] = None,
 ) -> GateOutcome:
     """Run the frontend code-review gate (build + lint + code review agents only)."""
     from .review import run_microtask_review
@@ -168,6 +169,7 @@ def _code_review_gate(
         linting_tool_agent=deps.linting_tool_agent,
         tool_agents=deps.tool_agents,
         detail_callback=detail_callback,
+        review_context=review_context,
     )
     return GateOutcome(passed=r.passed, issues=r.issues, summary=r.summary)
 
@@ -277,6 +279,7 @@ def run_execution_with_review_gates(
     planning_result: PlanningResult,
     repo_path: Path,
     architecture: Optional[SystemArchitecture] = None,
+    spec_content: str = "",
     existing_code: str = "",
     tool_runners: Optional[Dict[ToolAgentKind, ToolAgentRunner]] = None,
     progress_callback: Optional[Callable[[int, int, int, str, str, str], None]] = None,
@@ -313,6 +316,7 @@ def run_execution_with_review_gates(
         planning_result=planning_result,
         repo_path=repo_path,
         architecture=architecture,
+        spec_content=spec_content,
         existing_code=existing_code,
         tool_runners=tool_runners,
         progress_callback=progress_callback,

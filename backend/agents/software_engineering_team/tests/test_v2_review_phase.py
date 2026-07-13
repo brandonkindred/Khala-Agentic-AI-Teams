@@ -71,6 +71,44 @@ def test_run_llm_review_parses_issues(monkeypatch):
     assert len(issues) == 1
 
 
+def test_run_llm_review_forwards_review_context(monkeypatch):
+    """The LLM fallback reviewer (used when no external code_review_agent is
+    configured, or it fails) also sees architecture/spec_content -- previously
+    only the external agent path received this context, so a deployment
+    relying on the fallback never saw it despite callers passing review_context."""
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
+    from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
+
+    prompts: list[str] = []
+
+    class _RecordingAgent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            prompts.append(prompt)
+            return "## PASSED ##\ntrue\n## END PASSED ##\n## ISSUES ##\n## END ISSUES ##\n## SUMMARY ##\nok\n## END SUMMARY ##\n"
+
+    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _RecordingAgent())
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    architecture = SystemArchitecture(overview="Layered service architecture.")
+    review_context = ReviewContext(
+        architecture=architecture, spec_content="All endpoints require auth."
+    )
+
+    _run_llm_review(
+        llm=DummyLLMClient(),
+        task=_task(),
+        files={"x.py": "code"},
+        review_context=review_context,
+    )
+    assert "Layered service architecture." in prompts[0]
+    assert "All endpoints require auth." in prompts[0]
+
+
 def test_run_llm_review_chunks_large_file_without_dropping_tail(monkeypatch):
     """A file larger than one prompt budget is reviewed in function-aware
     chunks, so its tail is seen by the reviewer instead of being truncated."""
@@ -689,6 +727,55 @@ def test_run_review_passes_files_dict_unmodified(monkeypatch, tmp_path: Path):
     assert captured["code"] == ""
 
 
+def test_run_review_forwards_architecture_and_spec_content(monkeypatch, tmp_path: Path):
+    """``run_review``'s ``architecture``/``spec_content`` reach the code-review
+    agent's input, and default to ``None``/``""`` when omitted."""
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import run_review
+    from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
+
+    monkeypatch.setattr(
+        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
+    )
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    captured: dict = {}
+
+    def _capture(inp, **kw):
+        captured["architecture"] = inp.architecture
+        captured["spec_content"] = inp.spec_content
+        return MagicMock(issues=[])
+
+    cr_agent = MagicMock()
+    cr_agent.run.side_effect = _capture
+    architecture = SystemArchitecture(overview="layered architecture")
+
+    run_review(
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        review_context=ReviewContext(
+            architecture=architecture, spec_content="the full project spec"
+        ),
+    )
+    assert captured["architecture"] is architecture
+    assert captured["spec_content"] == "the full project spec"
+
+    cr_agent.run.reset_mock(side_effect=True)
+    cr_agent.run.side_effect = _capture
+    run_review(
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+    )
+    assert captured["architecture"] is None
+    assert captured["spec_content"] == ""
+
+
 def test_run_review_code_review_agent_raises_falls_back_to_llm(monkeypatch, tmp_path: Path):
     """If code_review_agent fails, we still call LLM fallback."""
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod
@@ -994,9 +1081,7 @@ def test_run_review_qa_failure_does_not_drop_other_steps_issues(monkeypatch, tmp
     assert any(i.source == "qa" and i.severity == "high" for i in result.issues)
 
 
-def test_run_review_security_failure_does_not_drop_other_steps_issues(
-    monkeypatch, tmp_path: Path
-):
+def test_run_review_security_failure_does_not_drop_other_steps_issues(monkeypatch, tmp_path: Path):
     """A security step that fails outright (bypassing the shared per-chunk containment inside
     ``_run_security_agent``) must not swallow the code-review/QA findings collected in the same
     fan-out — each step's failure is contained to a synthetic issue for that step alone."""
