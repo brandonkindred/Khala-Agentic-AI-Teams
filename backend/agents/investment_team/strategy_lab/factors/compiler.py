@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Tuple
 from pydantic import BaseModel
 
 from ..indicators.registry_metadata import lookback_for
-from ..indicators.template_bodies import render_adx_body, render_macd_body
+from ..indicators.template_bodies import render_adx_body, render_macd_body, render_vwap_body
 from .models import (
     ADX,
     ATR,
@@ -239,16 +239,7 @@ if _rng == 0:
     return 50.0
 return 100.0 * (bars[-1].close - _lo) / _rng
 """,
-    VWAP: """\
-if len(bars) < {period}:
-    return NAN
-_w = bars[-{period}:]
-_num = sum(((b.high + b.low + b.close) / 3.0) * b.volume for b in _w)
-_den = sum(b.volume for b in _w)
-if _den == 0:
-    return sum(b.close for b in _w) / {period}
-return _num / _den
-""",
+    VWAP: render_vwap_body(bars_var="bars", missing="NAN"),
     MomentumK: """\
 if len(bars) < {k} + 1:
     return NAN

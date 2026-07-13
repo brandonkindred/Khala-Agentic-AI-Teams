@@ -285,19 +285,26 @@ def render_macd_body(
 _ADX_BODY = """\
 if len(%BARS%) < 2 * {period} + 1:
     return %MISSING%
+# Slice to the trailing window BEFORE the DM/TR loop — only the last
+# {period} triples are ever read (via the ``[-{period}:]`` slices below), so
+# scanning the full retrieved history first was pure waste: O(len(%BARS%))
+# work for an O(period) result. The 2 * {period} + 1 margin (rather than the
+# minimal {period} + 1) keeps this slice exactly as large as the warm-up
+# gate above, so the change is a pure perf fix — byte-identical output.
+_window = %BARS%[-(2 * {period} + 1):]
 _plus = []
 _minus = []
 _trs = []
-for _i in range(1, len(%BARS%)):
-    _up = %BARS%[_i].high - %BARS%[_i - 1].high
-    _dn = %BARS%[_i - 1].low - %BARS%[_i].low
+for _i in range(1, len(_window)):
+    _up = _window[_i].high - _window[_i - 1].high
+    _dn = _window[_i - 1].low - _window[_i].low
     _plus.append(_up if _up > _dn and _up > 0 else 0.0)
     _minus.append(_dn if _dn > _up and _dn > 0 else 0.0)
-    _pc = %BARS%[_i - 1].close
+    _pc = _window[_i - 1].close
     _trs.append(max(
-        %BARS%[_i].high - %BARS%[_i].low,
-        abs(%BARS%[_i].high - _pc),
-        abs(%BARS%[_i].low - _pc),
+        _window[_i].high - _window[_i].low,
+        abs(_window[_i].high - _pc),
+        abs(_window[_i].low - _pc),
     ))
 _tr_sum = sum(_trs[-{period}:])
 if _tr_sum == 0:
@@ -313,3 +320,27 @@ return 100.0 * abs(_plus_di - _minus_di) / (_plus_di + _minus_di)
 def render_adx_body(*, bars_var: str, missing: str) -> str:
     """Render the canonical ADX helper body (``{period}`` left as a placeholder)."""
     return _ADX_BODY.replace("%BARS%", bars_var).replace("%MISSING%", missing)
+
+
+# ---------------------------------------------------------------------------
+# VWAP — rolling window over the trailing ``period`` bars. Unified semantics:
+# the factors DSL's VWAP has always been rolling; synthesis's was cumulative-
+# over-all-history before the commit that added a ``period`` param to
+# synthesis's VWAP (an explicit, intentional behavior change).
+# ---------------------------------------------------------------------------
+
+_VWAP_BODY = """\
+if len(%BARS%) < {period}:
+    return %MISSING%
+_w = %BARS%[-{period}:]
+_num = sum(((b.high + b.low + b.close) / 3.0) * b.volume for b in _w)
+_den = sum(b.volume for b in _w)
+if _den == 0:
+    return sum(b.close for b in _w) / {period}
+return _num / _den
+"""
+
+
+def render_vwap_body(*, bars_var: str, missing: str) -> str:
+    """Render the canonical rolling-window VWAP helper body (``{period}`` left as a placeholder)."""
+    return _VWAP_BODY.replace("%BARS%", bars_var).replace("%MISSING%", missing)

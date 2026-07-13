@@ -227,16 +227,16 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     IndicatorDescriptor(
         name="vwap",
         registry_method="vwap",
+        # Rolling window, unified with the factors DSL's VWAP node (which has
+        # always taken a ``period``). Synthesis's VWAP was cumulative-over-
+        # all-history before this — an explicit, intentional behavior change
+        # for synthesis-compiled strategies referencing VWAP.
         required={},
-        optional={},
+        optional={"period": (20, _int_in(2, 400))},
         allow_source=False,
         output_range=None,
-        # Cumulative sum has no strict warm-up; floored to MIN_WINDOW so a
-        # 1-bar VWAP (uninformative) never gates a strategy's entry logic.
-        # Superseded by a period-based formula once VWAP gains a rolling
-        # ``period`` param (see the follow-up commit unifying VWAP semantics).
-        lookback=lambda p: MIN_WINDOW,
-        emit_args=(),
+        lookback=lambda p: int(p.get("period", 20)),
+        emit_args=(("period", "int", "period"),),
     ),
     IndicatorDescriptor(
         name="donchian",
@@ -279,7 +279,8 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
         optional={},
         allow_source=False,
         output_range=None,
-        # Cumulative like VWAP — no strict warm-up; floored to MIN_WINDOW.
+        # Cumulative over all history (unlike VWAP, which is now a rolling
+        # window) — no strict warm-up; floored to MIN_WINDOW.
         lookback=lambda p: MIN_WINDOW,
         emit_args=(),
     ),

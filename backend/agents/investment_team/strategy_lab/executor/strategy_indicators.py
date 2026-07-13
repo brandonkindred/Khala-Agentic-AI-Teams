@@ -375,7 +375,10 @@ _INDICATOR_PARAM_VALIDATORS: dict[str, dict[str, "object"]] = {
         "d_period": _int_in(1, 100),
         "output": _one_of("k", "d"),
     },
-    "vwap": {},
+    # ``ctx.indicator("vwap", ...)`` accepts a rolling ``period`` (unified with
+    # the factors DSL and synthesis's compiled ``vwap`` helper); the standalone
+    # ``vwap()`` scalar function below is unaffected and stays cumulative.
+    "vwap": {"period": _int_in(2, 400)},
     "donchian": {
         "period": _int_in(2, 400),
         "band": _one_of("upper", "middle", "lower"),
@@ -580,7 +583,7 @@ def indicator_value(
     if name == "williams_r":
         return resolve_indicator(reg, name, ohlc, period=int(params.get("period", 14)))
     if name == "vwap":
-        return resolve_indicator(reg, name, ohlc)
+        return resolve_indicator(reg, name, ohlc, period=int(params.get("period", 20)))
 
     # ``name`` passed the ``_VALID_INDICATORS`` precondition above, so reaching
     # here means a name was added to that table without a dispatch branch. Fail

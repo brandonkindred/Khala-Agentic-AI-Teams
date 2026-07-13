@@ -212,7 +212,7 @@ def test_indicator_value_rejects_unexpected_param() -> None:
     with pytest.raises(ValueError, match="unexpected param"):
         indicator_value("rsi", bars, perod=14)
     with pytest.raises(ValueError, match="unexpected param"):
-        indicator_value("vwap", bars, period=14)  # vwap takes no params
+        indicator_value("vwap", bars, periodd=14)  # vwap takes only 'period'
     with pytest.raises(ValueError, match="unexpected param"):
         indicator_value("macd", bars, fast=12, slo=26)
     # Correctly-spelled params still compute.

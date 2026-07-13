@@ -42,7 +42,7 @@ from ..indicators.registry_metadata import (
     MIN_WINDOW,
     lookback_for,
 )
-from ..indicators.template_bodies import render_adx_body, render_macd_body
+from ..indicators.template_bodies import render_adx_body, render_macd_body, render_vwap_body
 from ..runtime_window import STREAMING_WINDOW_BARS
 from ..spec_dsl import (
     _INDICATOR_PARAM_SPECS,
@@ -81,11 +81,14 @@ _INDICATOR_METHOD_NAME: dict[str, str] = dict(INDICATOR_HELPER_NAME)
 # Single source: ``indicators.registry_metadata.MIN_WINDOW``.
 _MIN_WINDOW: int = MIN_WINDOW
 
-# VWAP (and OBV) request the deepest retained history. Both are
-# cumulative-over-the-series, not rolling, so a smaller request would
-# silently change signal semantics; this mirrors the harness retention
-# ceiling in ``StrategyContext._ingest_bar`` via the shared constant.
-_VWAP_HISTORY: int = STREAMING_WINDOW_BARS
+# OBV requests the deepest retained history — it's cumulative-over-the-series,
+# not rolling, so a smaller request would silently change signal semantics;
+# this mirrors the harness retention ceiling in ``StrategyContext._ingest_bar``
+# via the shared constant. VWAP no longer needs this: it now takes a rolling
+# ``period`` (unified with the factors DSL's VWAP, which has always been
+# rolling), so its history request is just its own lookback like every other
+# windowed indicator.
+_OBV_HISTORY: int = STREAMING_WINDOW_BARS
 
 
 def compile_strategy(spec: Any) -> str:
@@ -247,13 +250,14 @@ def _history_depth_for(ref: IndicatorRef) -> int:
     """Return the depth to request from ``ctx.history(symbol, n)``.
 
     Pre:  ``ref.name`` is one of the supported indicator names.
-    Post: for non-cumulative indicators, equals :func:`_lookback_for`.
-          For the cumulative-style indicators (VWAP, OBV), returns
-          ``_VWAP_HISTORY`` so the helper sees the deepest history the
-          harness retains.
+    Post: for non-cumulative indicators (which, since VWAP's rolling-window
+          unification, is every indicator but OBV), equals
+          :func:`_lookback_for`. OBV is still cumulative-over-the-series, so
+          it returns ``_OBV_HISTORY`` so the helper sees the deepest history
+          the harness retains.
     """
-    if ref.name in ("vwap", "obv"):
-        return _VWAP_HISTORY
+    if ref.name == "obv":
+        return _OBV_HISTORY
     return _lookback_for(ref)
 
 
@@ -373,6 +377,8 @@ _MACD_HELPER_BODY: str = render_macd_body(
 ).format(fast="fast", slow="slow", signal="signal")
 
 _ADX_HELPER_BODY: str = render_adx_body(bars_var="history", missing="None").format(period="period")
+
+_VWAP_HELPER_BODY: str = render_vwap_body(bars_var="history", missing="None").format(period="period")
 
 _HELPER_BODIES: dict[str, str] = {
     "sma": textwrap.dedent(
@@ -497,17 +503,8 @@ _HELPER_BODIES: dict[str, str] = {
             return sum(k_vals) / d_period
         """
     ),
-    "vwap": textwrap.dedent(
-        """\
-        def vwap(self, history):
-            if not history:
-                return None
-            num = sum(((b.high + b.low + b.close) / 3.0) * b.volume for b in history)
-            den = sum(b.volume for b in history)
-            if den == 0:
-                return sum(b.close for b in history) / len(history)
-            return num / den
-        """
+    "vwap": (
+        "def vwap(self, history, period=20):\n" + textwrap.indent(_VWAP_HELPER_BODY, "    ")
     ),
     "donchian_channels": textwrap.dedent(
         """\
