@@ -22,6 +22,15 @@ from shared_temporal import start_workflow_sync
 
 logger = logging.getLogger(__name__)
 
+# Bounds the caller-supplied ``key`` portion of an advisory workflow id.
+# ``key`` is a request-derived value (e.g. a client-supplied ``user_id``) with
+# no length limit of its own; Temporal servers reject workflow ids past a
+# configured maximum (commonly ~1000 bytes), so an unbounded key could turn a
+# routine dispatch into a hard runtime failure. 200 chars leaves generous room
+# for the prefix/op/uuid suffix while still being far larger than any
+# legitimate id these routes pass.
+_ADVISORY_KEY_MAX_LEN = 200
+
 # The Strategy Lab run is now started via
 # ``investment_team.strategy_lab.temporal.start_workflow.start_strategy_lab_batch_workflow``
 # (the fine-grained ``StrategyLabBatchWorkflow`` on ``strategy-lab-queue``); the
@@ -134,7 +143,10 @@ def execute_advisory_workflow(op: str, payload: dict[str, Any], *, key: str) -> 
         - ``key`` is a caller-supplied label for this logical operation
           (proposal/strategy/session id, or a request-derived key) used only for
           the workflow id's human-readable prefix — it is NOT relied on for
-          uniqueness (see below).
+          uniqueness (see below), and is truncated to
+          :data:`_ADVISORY_KEY_MAX_LEN` before use so an unbounded caller value
+          (e.g. a long ``user_id``) can't push the workflow id past Temporal's
+          server-side length limit.
         - Temporal is enabled and the advisory worker is running.
 
     Postconditions:
@@ -178,7 +190,9 @@ def execute_advisory_workflow(op: str, payload: dict[str, Any], *, key: str) -> 
     workflow_cls = workflows.get(op)
     if workflow_cls is None:
         raise ValueError(f"unknown advisory op: {op}")
-    workflow_id = f"{ADVISORY_WORKFLOW_ID_PREFIX}{op}-{key}-{uuid.uuid4().hex[:8]}"
+    workflow_id = (
+        f"{ADVISORY_WORKFLOW_ID_PREFIX}{op}-{key[:_ADVISORY_KEY_MAX_LEN]}-{uuid.uuid4().hex[:8]}"
+    )
     # The activity's own start_to_close_timeout already bounds a single attempt
     # (_ADVISORY_RETRY caps retries at 1); give the execute-and-wait call a
     # modest buffer above that ceiling rather than the shared 300s default, so

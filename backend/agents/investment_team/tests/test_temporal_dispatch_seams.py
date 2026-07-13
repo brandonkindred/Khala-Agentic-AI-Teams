@@ -168,6 +168,29 @@ def test_execute_advisory_workflow_mints_unique_id_per_call(monkeypatch) -> None
     assert ids[0] != ids[1]
 
 
+def test_execute_advisory_workflow_truncates_long_key(monkeypatch) -> None:
+    """An unbounded caller-supplied key (e.g. a long client-provided user_id)
+    must not push the workflow id past Temporal's server-side length limit."""
+    import shared_temporal
+    from investment_team.temporal import start_workflow as sw
+
+    captured = {}
+
+    def _fake_exec(run, payload, *, workflow_id, task_queue, execute_timeout_s=None):
+        captured["workflow_id"] = workflow_id
+        return {"ok": 1}
+
+    monkeypatch.setattr(shared_temporal, "execute_workflow_sync", _fake_exec)
+
+    huge_key = "u" * 5_000
+    sw.execute_advisory_workflow("advisor_start", {}, key=huge_key)
+
+    assert len(captured["workflow_id"]) < 300
+    assert captured["workflow_id"].startswith(
+        f"investment-adv-advisor_start-{huge_key[: sw._ADVISORY_KEY_MAX_LEN]}-"
+    )
+
+
 def test_execute_advisory_workflow_unknown_op_raises() -> None:
     from investment_team.temporal import start_workflow as sw
 
