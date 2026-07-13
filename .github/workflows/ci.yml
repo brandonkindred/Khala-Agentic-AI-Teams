@@ -87,6 +87,7 @@ jobs:
               - 'backend/agents/shared_dev_models/**'
               - 'backend/agents/shared_git/**'
               - 'backend/agents/shared_hitl/**'
+              - 'backend/agents/shared_run_thread_registry/**'
               - 'backend/agents/llm_service/**'
               - 'backend/agents/event_bus/**'
               - 'backend/agents/artifact_registry/**'
@@ -610,11 +611,12 @@ jobs:
 
   # shared-infra: the neutral packages extracted from software_engineering_team
   # (command runner + error parsing, repo context, LLM recovery, dev models,
-  # shared_git) plus the coding_team_service composition root. Their unit tests
-  # live in the SE and coding_team suites, which now ALSO record shared coverage
-  # into per-suite data-file artifacts (see the `emit_shared_cov` entries in
-  # test-backend). This job re-runs NOTHING — it downloads those artifacts,
-  # `coverage combine`s them, and gates the moved code at the repo's 90% floor.
+  # shared_git, shared_hitl, shared_run_thread_registry) plus the coding_team_service
+  # composition root. Their unit tests live in the SE and coding_team suites, which now
+  # ALSO record shared coverage into per-suite data-file artifacts (see the
+  # `emit_shared_cov` entries in test-backend). This job re-runs NOTHING — it downloads
+  # those artifacts, `coverage combine`s them, and gates the moved code at the repo's
+  # 90% floor.
   # Both suites contribute: neither alone reaches 90% on shared_git /
   # coding_team_service / shared_llm_recovery, so the matrix builder couples them.
   # shared_git/git_utils.py is omitted with the same integration-heavy rationale
@@ -661,7 +663,7 @@ jobs:
       # still wins over --include, so shared_git/git_utils.py stays excluded.
       - run: >-
           coverage report --rcfile=shared_infra.coveragerc
-          --include='*/shared_command_runner/*,*/shared_repo_context/*,*/shared_llm_recovery/*,*/shared_dev_models/*,*/shared_git/*,*/shared_hitl/*,*/coding_team_service/*'
+          --include='*/shared_command_runner/*,*/shared_repo_context/*,*/shared_llm_recovery/*,*/shared_dev_models/*,*/shared_git/*,*/shared_hitl/*,*/shared_run_thread_registry/*,*/coding_team_service/*'
           --show-missing
           --fail-under=90
 
@@ -820,6 +822,7 @@ jobs:
               --cov=shared_dev_models \
               --cov=shared_git \
               --cov=shared_hitl \
+              --cov=shared_run_thread_registry \
               --cov=coding_team_service \
               $COV_CONFIG_ARG \
               --cov-report=term-missing \
