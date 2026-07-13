@@ -63,7 +63,10 @@ def _as_model(model_cls: Any, raw: Any) -> Any:
         Propagates unchanged whatever ``parse_persisted``/``model_validate``
         raises on malformed ``raw`` — callers that need a typed
         ``ApplicationError`` for corrupted persisted data wrap their own
-        ``_as_model`` call (see ``run_paper_trading_activity``'s preamble).
+        parse/coerce call in a try/except (see
+        ``paper_trading.run_paper_trading_activity``'s preamble for the same
+        pattern applied directly to ``StrategyLabRecord.parse_persisted``,
+        outside this helper).
     """
     if raw is None or isinstance(raw, model_cls):
         return raw
