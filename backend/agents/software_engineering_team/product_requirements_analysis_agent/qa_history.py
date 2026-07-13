@@ -192,8 +192,6 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
                 block_lines.append(next_line)
                 if next_line.strip().startswith("**Answer:**"):
                     answer = next_line.replace("**Answer:**", "").strip()
-                elif next_line.strip().startswith("**Rationale:**"):
-                    next_line.replace("**Rationale:**", "").strip()
                 i += 1
             full_block_text = "\n".join(block_lines)
             if question_text or answer:
