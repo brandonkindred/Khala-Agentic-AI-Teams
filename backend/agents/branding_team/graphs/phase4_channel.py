@@ -20,7 +20,7 @@ from branding_team.agents import (
     make_social_guide,
     make_website_guide,
 )
-from branding_team.graphs.shared import build_agent
+from branding_team.graphs.shared import build_agent, build_fan_out_fan_in
 
 
 def build_phase4_graph() -> Graph:
@@ -49,23 +49,6 @@ def build_phase4_graph() -> Graph:
     """
     builder = GraphBuilder()
 
-    # --- fan-out: independent channel / experience nodes ---
-    experience = builder.add_node(
-        make_brand_experience_principler(), node_id="brand_experience_principler"
-    )
-    website = builder.add_node(make_website_guide(), node_id="website_guide")
-    social = builder.add_node(make_social_guide(), node_id="social_guide")
-    email = builder.add_node(make_email_guide(), node_id="email_guide")
-    events = builder.add_node(make_events_guide(), node_id="events_guide")
-    partnerships = builder.add_node(make_partnerships_guide(), node_id="partnerships_guide")
-    internal = builder.add_node(make_internal_guide(), node_id="internal_guide")
-    architecture = builder.add_node(
-        make_brand_architecture_builder(), node_id="brand_architecture_builder"
-    )
-    in_action = builder.add_node(
-        make_brand_in_action_illustrator(), node_id="brand_in_action_illustrator"
-    )
-
     # --- fan-in: compositor assembles all channel outputs ---
     compositor = builder.add_node(
         build_agent(
@@ -89,30 +72,21 @@ def build_phase4_graph() -> Graph:
         node_id="channel_compositor",
     )
 
-    # --- edges: every entry node feeds into the compositor ---
-    entry_nodes = [
-        experience,
-        website,
-        social,
-        email,
-        events,
-        partnerships,
-        internal,
-        architecture,
-        in_action,
-    ]
-    for node in entry_nodes:
-        builder.add_edge(node, compositor)
-
-    # --- all fan-out nodes are entry points (parallel start) ---
-    builder.set_entry_point("brand_experience_principler")
-    builder.set_entry_point("website_guide")
-    builder.set_entry_point("social_guide")
-    builder.set_entry_point("email_guide")
-    builder.set_entry_point("events_guide")
-    builder.set_entry_point("partnerships_guide")
-    builder.set_entry_point("internal_guide")
-    builder.set_entry_point("brand_architecture_builder")
-    builder.set_entry_point("brand_in_action_illustrator")
+    # --- fan-out: independent channel / experience nodes, wired into compositor ---
+    build_fan_out_fan_in(
+        builder,
+        [
+            ("brand_experience_principler", make_brand_experience_principler),
+            ("website_guide", make_website_guide),
+            ("social_guide", make_social_guide),
+            ("email_guide", make_email_guide),
+            ("events_guide", make_events_guide),
+            ("partnerships_guide", make_partnerships_guide),
+            ("internal_guide", make_internal_guide),
+            ("brand_architecture_builder", make_brand_architecture_builder),
+            ("brand_in_action_illustrator", make_brand_in_action_illustrator),
+        ],
+        compositor,
+    )
 
     return builder.build()
