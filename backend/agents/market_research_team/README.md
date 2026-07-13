@@ -56,6 +56,29 @@ The response is `{ "job_id": "...", "status": "pending" }`. Poll
 `GET /market-research/status/{job_id}` until `status` is `completed`;
 the `TeamOutput` is then in the `result` field.
 
+## Execution model
+
+The pipeline runs the same DAG in two modes from one shared per-stage seam
+(`MarketResearchOrchestrator`'s `ingest` / `ux_one` / `psychology` /
+`consistency` / `viability` / `scripts` / `assemble` methods):
+
+- **Thread mode** (default; `TEMPORAL_ADDRESS` unset): `orchestrator.run` fans
+  the UX stage out one call per transcript with a bounded thread pool.
+- **Temporal mode** (`TEMPORAL_ADDRESS` set): `MarketResearchWorkflow`
+  orchestrates the DAG as a graph of durable, individually-retryable activities
+  (`temporal/activities.py`) — a single-shot prepare/ingest/finalize plus one
+  `ux_one` activity per transcript and the psychology/consistency/viability/
+  scripts specialist stages, each visible in the Temporal UI. Job-store status
+  is owned by prepare (RUNNING), finalize (COMPLETED), and mark-failed (FAILED).
+  To keep (potentially large) transcript bodies out of Temporal workflow
+  history, `ingest` persists them to a per-job transcript store on the shared
+  `AGENT_CACHE` volume (`shared/transcript_store.py`) and passes only
+  lightweight refs through the workflow; each `ux_one` loads its own transcript
+  from the store, which finalize/mark-failed clear at the end of the run.
+
+Both modes share the specialist agents in `agents.py`, so they produce the same
+`TeamOutput`.
+
 ## Khala platform
 
 This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
