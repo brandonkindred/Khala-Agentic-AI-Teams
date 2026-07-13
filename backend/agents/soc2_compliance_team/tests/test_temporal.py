@@ -31,7 +31,7 @@ def _patch_update_job(monkeypatch: pytest.MonkeyPatch) -> List[Dict[str, Any]]:
     def _fake(job_id: str, **fields: Any) -> None:
         calls.append({"job_id": job_id, **fields})
 
-    monkeypatch.setattr("soc2_compliance_team.api.main._update_job", _fake)
+    monkeypatch.setattr("soc2_compliance_team.job_store._update_job", _fake)
     return calls
 
 
@@ -89,7 +89,7 @@ def test_load_repo_activity_skips_status_write_when_job_already_terminal(
     from soc2_compliance_team.temporal import activities as amod
 
     calls = _patch_update_job(monkeypatch)
-    monkeypatch.setattr("soc2_compliance_team.api.main._job_is_terminal", lambda jid: True)
+    monkeypatch.setattr("soc2_compliance_team.job_store._job_is_terminal", lambda jid: True)
     saved: Dict[str, Any] = {}
     monkeypatch.setattr(
         context_snapshot,
@@ -231,6 +231,35 @@ def test_write_report_activity_persists_completed(monkeypatch: pytest.MonkeyPatc
     assert deleted == ["job-1"]
 
 
+def test_write_report_activity_skips_stage_write_when_job_already_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirrors ``load_repo_activity``'s equivalent guard: if the job already
+    reached a terminal status (e.g. run_audit's dispatch-failure path marked
+    it ``failed`` even though the workflow actually started server-side), the
+    ``current_stage="Writing report"`` write must not resurrect it back to
+    non-terminal. The final ``_update_job_terminal`` completion write is
+    separately guarded and would itself be skipped too — this test only
+    exercises the stage write, so ``write_report`` raises immediately after."""
+    from soc2_compliance_team import pipeline
+    from soc2_compliance_team.temporal import activities as amod
+
+    calls = _patch_update_job(monkeypatch)
+    monkeypatch.setattr("soc2_compliance_team.job_store._job_is_terminal", lambda jid: True)
+
+    def _boom(rp, tsc):
+        raise RuntimeError("should not reach report synthesis in this test")
+
+    # If the stage write were unguarded it would still just append to `calls`
+    # regardless of terminal status — the assertion below is what matters.
+    monkeypatch.setattr(pipeline, "write_report", _boom)
+
+    with pytest.raises(RuntimeError):
+        ActivityEnvironment().run(amod.write_report_activity, "job-1", "/repo", [])
+
+    assert calls == []
+
+
 def test_write_report_activity_reraises_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     from soc2_compliance_team import pipeline
     from soc2_compliance_team.temporal import activities as amod
@@ -306,7 +335,7 @@ def test_mark_failed_activity_reraises_job_store_error(monkeypatch: pytest.Monke
     def _boom(job_id, **fields):
         raise RuntimeError("job store down")
 
-    monkeypatch.setattr("soc2_compliance_team.api.main._update_job", _boom)
+    monkeypatch.setattr("soc2_compliance_team.job_store._update_job", _boom)
     with pytest.raises(RuntimeError, match="job store down"):
         ActivityEnvironment().run(amod.mark_failed_activity, "job-1", "/repo", "kaboom")
     # Snapshot cleanup still ran before the re-raise.

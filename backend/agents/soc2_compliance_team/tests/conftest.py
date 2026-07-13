@@ -6,6 +6,24 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from soc2_compliance_team.models import RepoContext  # noqa: E402
+
+
+def default_repo_context(**overrides: Any) -> RepoContext:
+    """A minimal, valid ``RepoContext`` for tests that don't care about its
+    specific contents — shared by ``test_agents.py`` and ``test_pipeline.py``
+    so the default fixture only needs to change in one place."""
+    base = RepoContext(
+        repo_path="/repo",
+        code_summary="print('hi')",
+        readme_content="# Title",
+        file_list=["main.py", "README.md"],
+        tech_stack_hint="Python",
+    )
+    for k, v in overrides.items():
+        setattr(base, k, v)
+    return base
+
 
 class FakeLLM:
     """Minimal LLM stand-in returning a canned JSON dict per call.

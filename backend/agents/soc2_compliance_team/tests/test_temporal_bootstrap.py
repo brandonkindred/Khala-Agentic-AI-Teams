@@ -19,6 +19,8 @@ import importlib
 import sys
 import unittest.mock as mock
 
+import pytest
+
 
 @contextlib.contextmanager
 def _purged(prefix: str):
@@ -152,7 +154,7 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
     assert worker_mod.MAX_CONCURRENT_ACTIVITIES >= 5
 
 
-def test_start_audit_workflow_delegates_to_shared_bridge(monkeypatch):
+def test_start_audit_workflow_delegates_to_shared_bridge(monkeypatch, tmp_path):
     """The team wrapper forwards to ``shared_temporal.start_workflow_sync`` with
     the SOC2 workflow id + task queue."""
     from soc2_compliance_team.temporal import Soc2AuditWorkflow
@@ -167,12 +169,27 @@ def test_start_audit_workflow_delegates_to_shared_bridge(monkeypatch):
 
     monkeypatch.setattr(sw, "start_workflow_sync", _fake_start_workflow_sync)
 
-    sw.start_audit_workflow("job-abc", "/repo/path")
+    repo_path = str(tmp_path)
+    sw.start_audit_workflow("job-abc", repo_path)
 
     assert captured["workflow_run"] is Soc2AuditWorkflow.run
-    assert captured["args"] == ("job-abc", "/repo/path")
+    assert captured["args"] == ("job-abc", repo_path)
     assert captured["workflow_id"] == "soc2-audit-job-abc"
     assert captured["task_queue"] == "soc2_compliance-queue"
+
+
+def test_start_audit_workflow_rejects_empty_job_id(tmp_path):
+    from soc2_compliance_team.temporal import start_workflow as sw
+
+    with pytest.raises(ValueError, match="job_id"):
+        sw.start_audit_workflow("", str(tmp_path))
+
+
+def test_start_audit_workflow_rejects_nonexistent_repo_path():
+    from soc2_compliance_team.temporal import start_workflow as sw
+
+    with pytest.raises(ValueError, match="repo_path"):
+        sw.start_audit_workflow("job-abc", "/nonexistent/path/soc2-xyz")
 
 
 def test_soc2_registered_in_teams_registry():

@@ -116,8 +116,12 @@ def snapshot_path(job_id: str) -> Path:
 
     Preconditions:
         - ``job_id`` is a non-empty, filesystem-safe id (a UUID from the API).
+          Enforced with an explicit raise, not a bare ``assert``, since
+          this precondition must hold even when Python runs with ``-O``
+          (assertions stripped).
     """
-    assert job_id, "job_id must be non-empty"
+    if not job_id:
+        raise ValueError("job_id must be non-empty")
     return _snapshot_dir() / f"{job_id}.json"
 
 

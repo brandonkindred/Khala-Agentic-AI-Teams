@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from soc2_compliance_team import job_store
 from soc2_compliance_team.api import main as api_main
 from soc2_compliance_team.api.main import app
 
@@ -28,7 +29,7 @@ def test_is_temporal_enabled_false_on_import_error(monkeypatch: pytest.MonkeyPat
 
 @pytest.fixture(autouse=True)
 def _patched(monkeypatch: pytest.MonkeyPatch, fake_job_client):
-    monkeypatch.setattr(api_main, "_job_manager", fake_job_client)
+    monkeypatch.setattr(job_store, "_job_manager", fake_job_client)
     return fake_job_client
 
 
@@ -99,7 +100,7 @@ def test_dispatch_marks_failed_on_error(monkeypatch: pytest.MonkeyPatch, tmp_pat
     monkeypatch.setattr("soc2_compliance_team.temporal.start_workflow.start_audit_workflow", _boom)
 
     updates: list = []
-    monkeypatch.setattr(api_main, "_update_job", lambda job_id, **fields: updates.append(fields))
+    monkeypatch.setattr(job_store, "_update_job", lambda job_id, **fields: updates.append(fields))
 
     r = client.post("/soc2-audit/run", json={"repo_path": str(tmp_path)})
     assert r.status_code == 503
@@ -122,7 +123,7 @@ def test_dispatch_503_survives_job_store_failure(
     def _update_boom(job_id, **fields):
         raise RuntimeError("job store down")
 
-    monkeypatch.setattr(api_main, "_update_job", _update_boom)
+    monkeypatch.setattr(job_store, "_update_job", _update_boom)
 
     r = client.post("/soc2-audit/run", json={"repo_path": str(tmp_path)})
     assert r.status_code == 503

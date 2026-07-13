@@ -5,23 +5,26 @@ Each ``@activity.defn`` wraps one stage of the decomposed audit pipeline
 report synthesis — plus a terminal failure marker. Activities are plain sync
 functions run in the worker's thread pool. The ``@activity.defn`` decorator
 needs ``temporalio.activity`` at module level; every domain-heavy import
-(``pipeline``, ``context_snapshot``, ``models``, the ``api.main`` job-store
-helpers) is deferred to each function's body instead, so the module stays
-cheap for the temporalio sandbox to replay. Pydantic models cross the
-activity boundary as ``model_dump(mode="json")`` dicts and are reconstructed
-with ``model_validate``.
+(``pipeline``, ``context_snapshot``, ``models``, the ``job_store`` helpers) is
+deferred to each function's body instead, so the module stays cheap for the
+temporalio sandbox to replay. Pydantic models cross the activity boundary as
+``model_dump(mode="json")`` dicts and are reconstructed with ``model_validate``.
 
-The activities own the durable job-store bookkeeping (via the ``JobServiceClient``
-in :mod:`soc2_compliance_team.api.main`): ``load_repo_activity`` marks the job
-running, ``write_report_activity`` marks it completed with the result, and
-``mark_failed_activity`` marks it failed. Terminal (completed/failed) writes go
-through ``_update_job_terminal`` so a later write can never silently clobber a
-job that's already reached a terminal status — e.g. a lost activity-completion
-ack causing Temporal to retry/fail an activity whose local job-store write
-already succeeded. ``load_repo_activity``'s own ``running`` write goes through
-the mirror-image ``_update_job_unless_terminal``, so a workflow that keeps
-running server-side after the API already wrote a terminal ``failed`` status
-(a lost dispatch ack) can't resurrect that job back to non-terminal.
+The activities own the durable job-store bookkeeping via
+:mod:`soc2_compliance_team.job_store` — deliberately not ``api.main``:
+importing the API module would pull the FastAPI ``app`` and its stale-job
+monitor thread into this worker process, which should only run activities.
+``load_repo_activity`` marks the job running, ``write_report_activity`` marks
+it completed with the result, and ``mark_failed_activity`` marks it failed.
+Terminal (completed/failed) writes go through ``_update_job_terminal`` so a
+later write can never silently clobber a job that's already reached a
+terminal status — e.g. a lost activity-completion ack causing Temporal to
+retry/fail an activity whose local job-store write already succeeded.
+Non-terminal writes (``load_repo_activity``'s ``running``,
+``write_report_activity``'s ``current_stage``) go through the mirror-image
+``_update_job_unless_terminal``, so a workflow that keeps running server-side
+after the API already wrote a terminal ``failed`` status (a lost dispatch ack)
+can't resurrect that job back to non-terminal.
 """
 
 from __future__ import annotations
@@ -60,7 +63,7 @@ def load_repo_activity(job_id: str, repo_path: str) -> str:
           (after logging) if the path is not a directory.
     """
     from soc2_compliance_team import context_snapshot, pipeline
-    from soc2_compliance_team.api.main import _update_job_unless_terminal
+    from soc2_compliance_team.job_store import _update_job_unless_terminal
 
     try:
         _update_job_unless_terminal(job_id, status="running", current_stage="Loading repository")
@@ -128,18 +131,25 @@ def write_report_activity(
         - Writes the assembled ``SOC2AuditResult`` to the job store with status
           ``completed`` (via ``_update_job_terminal``, so this can't clobber a
           job already marked ``failed`` by a concurrent
-          ``mark_failed_activity``) and returns it as a JSON-native dict.
+          ``mark_failed_activity``) and returns it as a JSON-native dict. The
+          preceding ``current_stage="Writing report"`` write goes through
+          ``_update_job_unless_terminal`` (not a bare write) for the same
+          reason ``load_repo_activity``'s ``running`` write does: a job
+          already marked ``failed`` by ``run_audit``'s dispatch-failure path
+          (see :mod:`soc2_compliance_team.job_store`) must not have its stage
+          resurrected by a workflow that actually started server-side despite
+          the client-side dispatch timeout.
           Raises (after logging) if report synthesis fails — the workflow's
           own except-block then calls ``mark_failed_activity`` with these
           ``tsc_results`` preserved, rather than this activity persisting a
           failure itself.
     """
     from soc2_compliance_team import context_snapshot, pipeline
-    from soc2_compliance_team.api.main import _update_job, _update_job_terminal
+    from soc2_compliance_team.job_store import _update_job_terminal, _update_job_unless_terminal
     from soc2_compliance_team.models import TSCAuditResult
 
     try:
-        _update_job(job_id, current_stage="Writing report")
+        _update_job_unless_terminal(job_id, current_stage="Writing report")
         results = [TSCAuditResult.model_validate(d) for d in tsc_results]
         compliance_report, next_steps_document = pipeline.write_report(repo_path, results)
         audit = pipeline.assemble_result(repo_path, results, compliance_report, next_steps_document)
@@ -188,7 +198,7 @@ def mark_failed_activity(
           propagates even if this activity's retries are exhausted.
     """
     from soc2_compliance_team import context_snapshot, pipeline
-    from soc2_compliance_team.api.main import _update_job_terminal
+    from soc2_compliance_team.job_store import _update_job_terminal
     from soc2_compliance_team.models import TSCAuditResult
 
     context_snapshot.delete_snapshot(job_id)

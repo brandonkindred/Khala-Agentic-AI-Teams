@@ -1,7 +1,8 @@
 """Unit tests for the SOC2 audit API.
 
-Patches the module-level ``_job_manager`` to the in-memory ``fake_job_client``
-fixture so these tests run hermetically in the default ``test-backend`` lane.
+Patches ``job_store``'s module-level ``_job_manager`` to the in-memory
+``fake_job_client`` fixture so these tests run hermetically in the default
+``test-backend`` lane.
 """
 
 import time
@@ -11,6 +12,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from soc2_compliance_team import job_store
 from soc2_compliance_team.api import main as api_main
 from soc2_compliance_team.api.main import app
 from soc2_compliance_team.models import SOC2AuditResult
@@ -20,7 +22,7 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def _patched(monkeypatch: pytest.MonkeyPatch, fake_job_client):
-    monkeypatch.setattr(api_main, "_job_manager", fake_job_client)
+    monkeypatch.setattr(job_store, "_job_manager", fake_job_client)
     # Force the threaded branch in `run_audit` — Temporal isn't available in
     # unit tests, and `start_audit_workflow` would raise without a client.
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)

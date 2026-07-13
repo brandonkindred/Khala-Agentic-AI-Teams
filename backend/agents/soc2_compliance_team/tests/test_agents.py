@@ -23,30 +23,12 @@ from soc2_compliance_team.agents import (
 )
 from soc2_compliance_team.models import (
     FindingSeverity,
-    RepoContext,
     TSCAuditResult,
     TSCCategory,
 )
 
 from .conftest import FakeLLM as _FakeLLM
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _ctx(**overrides: Any) -> RepoContext:
-    base = RepoContext(
-        repo_path="/repo",
-        code_summary="print('hi')",
-        readme_content="# Title",
-        file_list=["main.py", "README.md"],
-        tech_stack_hint="Python",
-    )
-    for k, v in overrides.items():
-        setattr(base, k, v)
-    return base
-
+from .conftest import default_repo_context as _ctx
 
 # ---------------------------------------------------------------------------
 # _parse_finding

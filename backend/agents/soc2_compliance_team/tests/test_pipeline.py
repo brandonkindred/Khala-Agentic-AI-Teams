@@ -24,16 +24,7 @@ from soc2_compliance_team.models import (
 )
 
 from .conftest import FakeLLM as _FakeLLM
-
-
-def _ctx() -> RepoContext:
-    return RepoContext(
-        repo_path="/repo",
-        code_summary="print('hi')",
-        readme_content="# Title",
-        file_list=["main.py"],
-        tech_stack_hint="Python",
-    )
+from .conftest import default_repo_context as _ctx
 
 
 def _patch_llm(monkeypatch: pytest.MonkeyPatch, response: Dict[str, Any]) -> _FakeLLM:

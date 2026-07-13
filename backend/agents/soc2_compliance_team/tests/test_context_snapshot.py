@@ -84,7 +84,7 @@ def test_snapshot_path_falls_back_to_tempdir(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_snapshot_path_requires_job_id(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="job_id"):
         context_snapshot.snapshot_path("")
 
 
