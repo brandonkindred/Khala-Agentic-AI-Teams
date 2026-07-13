@@ -55,7 +55,18 @@ class LogisticsAgent:
         group_profile: TravelerGroupProfile,
         trip: TripRequest,
     ) -> LogisticsPlan:
-        """Generate logistics plan for the road trip."""
+        """Generate logistics plan for the road trip.
+
+        Preconditions:
+            - ``route`` is the ``RoutePlan`` from ``plan_route``; ``group_profile``
+              the profile from ``profile_travelers``; ``trip`` the original request.
+
+        Postconditions:
+            - Returns a ``LogisticsPlan`` derived from the route's overnight stops.
+              Never raises: on LLM/parse/validation failure, returns a minimal
+              fallback with generic packing suggestions and travel tips rather
+              than propagating the error.
+        """
         overnight_stops = [s for s in route.ordered_stops if s.recommended_nights > 0]
         stops_summary = "\n".join(
             f"  - {s.location}: {s.recommended_nights} night(s), driving ~{s.estimated_driving_hours or '?'} hrs from {s.driving_from or 'previous stop'}"
@@ -79,16 +90,18 @@ class LogisticsAgent:
             result = self._agent(prompt)
             raw = str(result).strip()
             data = json.loads(raw)
+            return LogisticsPlan(
+                stop_logistics=data.get("stop_logistics") or [],
+                packing_suggestions=data.get("packing_suggestions") or [],
+                travel_tips=data.get("travel_tips") or [],
+                budget_estimate=data.get("budget_estimate") or "",
+            )
         except Exception as e:
-            logger.warning("LogisticsAgent JSON parse failed: %s", e)
+            # Covers both a malformed LLM response (JSON parse failure) and a
+            # syntactically-valid-but-schema-invalid logistics field (pydantic
+            # ValidationError) — either way, fall back rather than raise.
+            logger.warning("LogisticsAgent JSON parse/validation failed: %s", e)
             return LogisticsPlan(
                 packing_suggestions=["Sunscreen", "Snacks", "Water bottles", "First aid kit"],
                 travel_tips=["Start driving early to beat traffic", "Download offline maps"],
             )
-
-        return LogisticsPlan(
-            stop_logistics=data.get("stop_logistics") or [],
-            packing_suggestions=data.get("packing_suggestions") or [],
-            travel_tips=data.get("travel_tips") or [],
-            budget_estimate=data.get("budget_estimate") or "",
-        )
