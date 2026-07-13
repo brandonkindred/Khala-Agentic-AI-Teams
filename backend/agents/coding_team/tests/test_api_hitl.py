@@ -69,6 +69,19 @@ def test_status_surfaces_pending_questions(monkeypatch):
     assert body["pending_questions"][0]["options"][0]["is_default"] is True
 
 
+def test_status_skips_non_dict_pending_question(monkeypatch):
+    # A corrupted (non-dict) pending_questions entry is skipped rather than 500'ing: the status
+    # route now materializes via pending_questions_from_raw, which defensively filters non-dicts.
+    monkeypatch.setattr(
+        api, "get_job", lambda jid: _job(pending_questions=["oops-not-a-dict", _PENDING[0]])
+    )
+    r = client.get("/status/j1")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["pending_questions"]) == 1
+    assert body["pending_questions"][0]["id"] == "q1"
+
+
 # --------------------------------------------------------------------------- /run/{id}/answers
 
 

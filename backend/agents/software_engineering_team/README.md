@@ -467,21 +467,22 @@ The `devops_team/` package is the contract-first, multi-agent DevOps engineering
 | **PolicyAsCodeToolAgent** | Runs `checkov`/`tfsec` policy scanners (skips if not installed) |
 | **CICDLintPipelineValidationToolAgent** | Validates workflow YAML syntax and required gate presence |
 | **DeploymentDryRunPlanToolAgent** | Runs `helm lint/template` for Kubernetes manifests |
-| **GitOperationsToolAgent** | Reused from existing codebase; DevOpsTeamLeadAgent has merge authority |
 
-#### Git ownership (three distinct owners)
+#### Git ownership (two distinct owners)
 
-Git work is split across three intentionally separate owners — they serve
+Git work is split across two intentionally separate owners — they serve
 different contracts and are **not** merged into one:
 
-- **`git_operations_tool_agent/GitOperationsToolAgent`** — policy-driven
-  branch/commit/merge with approval tokens, scope guard, and branch-name policy.
-  Used by the main SE backend workflow; `DevOpsTeamLeadAgent` holds merge authority.
 - **`shared/tool_agent_git_branch.py::GitBranchManagementToolAgent`** — the
   code-v2 deliver-phase git tool (duck-typed `ToolAgentPhaseInput` contract). A
   single shared implementation used by both code-v2 stacks (no per-tree
   re-export packages).
 - **`git_setup_agent/`** — the one repository-setup path (init/scaffold).
+
+The `DevOpsTeamLeadAgent` delivers its infrastructure changes through the same
+shared delivery helper the code-v2 teams use — `shared/deliver_utils.py`
+(`deliver_inline_merge`) — which cuts a feature branch, commits, and merges into
+`development`, reporting the real branch/commit/merge outcome.
 
 ### Workflow Phases
 
@@ -548,9 +549,9 @@ git_operations:
       message: "feat(devops): add billing-service ci/cd workflow [DO-2207]"
   merge:
     target_branch: development
-    strategy: squash
+    strategy: merge
     merge_commit_hash: 7f4d932
-    status: success
+    status: merged
 handoff:
   prod_approval_required: true
   runbook_updated: true
