@@ -37,17 +37,18 @@ def test_clamp_max_parallel_caps_to_env_ceiling(monkeypatch, caplog) -> None:
     import logging
 
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import config
 
-    monkeypatch.setattr(api_main, "_MAX_CONCURRENT_CYCLES", 2)
+    monkeypatch.setattr(config, "MAX_CONCURRENT_CYCLES", 2)
     assert api_main._clamp_max_parallel(1) == 1  # below cap → unchanged
     assert api_main._clamp_max_parallel(2) == 2  # at cap → unchanged
-    with caplog.at_level(logging.INFO, logger=api_main.logger.name):
+    with caplog.at_level(logging.INFO, logger=config.logger.name):
         assert api_main._clamp_max_parallel(5) == 2  # above cap → clamped + logged
     assert any("concurrency capped to 2" in r.getMessage() for r in caplog.records)
 
-    # Default (cap == _MAX_PARALLEL) imposes no extra constraint up to the schema max.
-    monkeypatch.setattr(api_main, "_MAX_CONCURRENT_CYCLES", api_main._MAX_PARALLEL)
-    assert api_main._clamp_max_parallel(api_main._MAX_PARALLEL) == api_main._MAX_PARALLEL
+    # Default (cap == MAX_PARALLEL) imposes no extra constraint up to the schema max.
+    monkeypatch.setattr(config, "MAX_CONCURRENT_CYCLES", config.MAX_PARALLEL)
+    assert api_main._clamp_max_parallel(config.MAX_PARALLEL) == config.MAX_PARALLEL
 
 
 def test_run_strategy_lab_request_default_within_cap() -> None:
@@ -115,33 +116,33 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_env_positive_int_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    from investment_team.api.main import _env_positive_int
+    from investment_team.strategy_lab.config import env_positive_int
 
     monkeypatch.delenv("MY_TEST_INT", raising=False)
-    assert _env_positive_int("MY_TEST_INT", 7) == 7
+    assert env_positive_int("MY_TEST_INT", 7) == 7
 
 
 def test_env_positive_int_returns_default_on_non_integer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from investment_team.api.main import _env_positive_int
+    from investment_team.strategy_lab.config import env_positive_int
 
     monkeypatch.setenv("MY_TEST_INT", "not-a-number")
-    assert _env_positive_int("MY_TEST_INT", 5) == 5
+    assert env_positive_int("MY_TEST_INT", 5) == 5
 
 
 def test_env_positive_int_returns_default_on_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    from investment_team.api.main import _env_positive_int
+    from investment_team.strategy_lab.config import env_positive_int
 
     monkeypatch.setenv("MY_TEST_INT", "0")
-    assert _env_positive_int("MY_TEST_INT", 3) == 3
+    assert env_positive_int("MY_TEST_INT", 3) == 3
 
 
 def test_env_positive_int_returns_parsed_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    from investment_team.api.main import _env_positive_int
+    from investment_team.strategy_lab.config import env_positive_int
 
     monkeypatch.setenv("MY_TEST_INT", "42")
-    assert _env_positive_int("MY_TEST_INT", 1) == 42
+    assert env_positive_int("MY_TEST_INT", 1) == 42
 
 
 # ---------------------------------------------------------------------------
@@ -841,25 +842,25 @@ def test_recover_orphaned_paper_trading_sessions_marks_running_as_failed(
 
 
 def test_load_run_from_job_service_returns_none_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
     class _Broken:
         def get_job(self, *a, **k):
             raise RuntimeError("backend down")
 
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
-    assert api_main._load_run_from_job_service("run-x") is None
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Broken())
+    assert run_state.load_run_from_job_service("run-x") is None
 
 
 def test_load_run_from_job_service_returns_data(monkeypatch: pytest.MonkeyPatch) -> None:
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
     class _Ok:
         def get_job(self, jid):
             return {"job_id": jid, "status": "completed", "data": {"foo": 1}}
 
-    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Ok())
-    out = api_main._load_run_from_job_service("run-y")
+    monkeypatch.setattr(run_state, "get_lab_run_job_client", lambda: _Ok())
+    out = run_state.load_run_from_job_service("run-y")
     assert out is not None
     assert out["foo"] == 1
     assert out["run_id"] == "run-y"
