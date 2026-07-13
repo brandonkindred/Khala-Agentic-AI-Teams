@@ -14,6 +14,7 @@ from software_engineering_team.shared.git_utils import (
     create_feature_branch,
     ensure_development_branch,
     ensure_files_committed_on_main,
+    get_head_sha,
     initialize_new_repo,
     write_files_and_commit,
 )
@@ -35,10 +36,37 @@ def init_git_repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=False)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
     # Rename to main
-    subprocess.run(
-        ["git", "branch", "-M", "main"], cwd=tmp_path, capture_output=True, check=False
-    )
+    subprocess.run(["git", "branch", "-M", "main"], cwd=tmp_path, capture_output=True, check=False)
     return tmp_path
+
+
+def test_get_head_sha_non_git(tmp_path: Path):
+    ok, msg = get_head_sha(tmp_path)
+    assert ok is False
+    assert "Not a git repository" in msg
+
+
+def test_get_head_sha_returns_head(init_git_repo: Path):
+    ok, sha = get_head_sha(init_git_repo)
+    assert ok is True
+    assert len(sha) == 40
+    expected = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=init_git_repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    assert sha == expected
+
+
+def test_get_head_sha_no_commits(tmp_path: Path):
+    # A freshly-initialized repo has a .git dir but no HEAD commit, so rev-parse
+    # fails and the helper reports failure rather than a garbage SHA.
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=False)
+    ok, msg = get_head_sha(tmp_path)
+    assert ok is False
+    assert "rev-parse failed" in msg
 
 
 def test_clear_disposable_files_no_match():
@@ -81,9 +109,7 @@ def test_ensure_development_branch_existing(init_git_repo: Path):
         capture_output=True,
         check=False,
     )
-    subprocess.run(
-        ["git", "checkout", "main"], cwd=init_git_repo, capture_output=True, check=False
-    )
+    subprocess.run(["git", "checkout", "main"], cwd=init_git_repo, capture_output=True, check=False)
     ok, msg = ensure_development_branch(init_git_repo)
     assert ok is True
     assert "existing" in msg or "development" in msg
@@ -119,9 +145,7 @@ def test_ensure_files_committed_on_main_new_file(init_git_repo: Path):
         capture_output=True,
         check=False,
     )
-    subprocess.run(
-        ["git", "checkout", "main"], cwd=init_git_repo, capture_output=True, check=False
-    )
+    subprocess.run(["git", "checkout", "main"], cwd=init_git_repo, capture_output=True, check=False)
     (init_git_repo / "NEWFILE.md").write_text("hello")
     ok, _msg = ensure_files_committed_on_main(init_git_repo, ["NEWFILE.md"])
     assert ok is True
@@ -135,9 +159,7 @@ def test_ensure_files_committed_on_main_missing_file(init_git_repo: Path):
         capture_output=True,
         check=False,
     )
-    subprocess.run(
-        ["git", "checkout", "main"], cwd=init_git_repo, capture_output=True, check=False
-    )
+    subprocess.run(["git", "checkout", "main"], cwd=init_git_repo, capture_output=True, check=False)
     ok, _msg = ensure_files_committed_on_main(init_git_repo, ["nonexistent.md"])
     assert ok is True
 

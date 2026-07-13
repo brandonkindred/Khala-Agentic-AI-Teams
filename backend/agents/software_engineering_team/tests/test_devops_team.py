@@ -24,6 +24,7 @@ from devops_team.task_clarifier import DevOpsTaskClarifierAgent, DevOpsTaskClari
 
 from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared import llm as llm_mod
+from software_engineering_team.shared.git_utils import initialize_new_repo
 
 
 class _StubClient(DummyLLMClient):
@@ -1096,22 +1097,8 @@ class TestDevOpsTeamLeadAgentIntegration:
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
-            subprocess.run(["git", "init"], cwd=path, capture_output=True, check=False)
-            subprocess.run(
-                ["git", "config", "user.email", "t@t.com"],
-                cwd=path,
-                capture_output=True,
-                check=False,
-            )
-            subprocess.run(
-                ["git", "config", "user.name", "T"], cwd=path, capture_output=True, check=False
-            )
-            subprocess.run(
-                ["git", "config", "commit.gpgsign", "false"],
-                cwd=path,
-                capture_output=True,
-                check=False,
-            )
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
             result = agent.run_workflow(
                 repo_path=path,
                 task_description="Add backend deployment automation",
@@ -1124,8 +1111,16 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert result.completion_package is not None
         assert result.completion_package.status == "completed"
         assert result.completion_package.task_id == "devops-backend"
-        assert result.completion_package.git_operations.branch_created
         assert result.completion_package.handoff is not None
+        # Real delivery: a feature branch was actually created and merged into
+        # development, with real SHAs rather than fabricated placeholders.
+        gitops = result.completion_package.git_operations
+        assert gitops.branch_created.startswith("feature/")
+        assert gitops.merge is not None
+        assert gitops.merge.status == "merged"
+        assert gitops.merge.target_branch == "development"
+        assert len(gitops.merge.merge_commit_hash) == 40
+        assert gitops.commits and gitops.commits[0].hash == gitops.merge.merge_commit_hash
 
     def test_happy_path_direct_run(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()
@@ -1294,14 +1289,16 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert "manual_prod_approval" in pkg.release_readiness.required_approvals
 
     def test_completion_package_has_git_operations(self) -> None:
+        # A model-only run (``run`` → write_changes=False) performs no git work,
+        # so the completion package honestly reports an empty git-operations record
+        # instead of fabricating a branch/commit/merge that never happened.
         mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         spec = _base_task_spec()
         pkg = agent.run(spec)
-        assert pkg.git_operations.branch_created.startswith("feature/")
-        assert len(pkg.git_operations.commits) >= 1
-        assert pkg.git_operations.merge is not None
-        assert pkg.git_operations.merge.target_branch == "development"
+        assert pkg.git_operations.branch_created == ""
+        assert pkg.git_operations.commits == []
+        assert pkg.git_operations.merge is None
 
     def test_completion_package_files_changed(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()
@@ -1322,22 +1319,8 @@ class TestDevOpsTeamLeadAgentIntegration:
         mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
-            subprocess.run(["git", "init"], cwd=tmp, capture_output=True, check=False)
-            subprocess.run(
-                ["git", "config", "user.email", "t@t.com"],
-                cwd=tmp,
-                capture_output=True,
-                check=False,
-            )
-            subprocess.run(
-                ["git", "config", "user.name", "T"], cwd=tmp, capture_output=True, check=False
-            )
-            subprocess.run(
-                ["git", "config", "commit.gpgsign", "false"],
-                cwd=tmp,
-                capture_output=True,
-                check=False,
-            )
+            init_ok, _ = initialize_new_repo(Path(tmp))
+            assert init_ok
             result = agent.run_workflow(
                 repo_path=Path(tmp),
                 task_description="Deploy",
@@ -1350,6 +1333,111 @@ class TestDevOpsTeamLeadAgentIntegration:
             result.failure_reason or ""
         ) or "Docker build failed" in (result.failure_reason or "")
 
+    def test_completion_package_git_operations_real_merge(self) -> None:
+        """A real ``run_workflow`` delivers the artifacts by cutting a feature
+        branch, merging it into development, and deleting it — the reported
+        metadata reflects the actual git state (real SHA equal to development's
+        HEAD), not fabricated placeholders."""
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            result = agent.run_workflow(
+                repo_path=path,
+                task_description="Add backend deployment automation",
+                requirements="Include prod approval gate and rollback plan",
+                build_verifier=MagicMock(return_value=(True, "")),
+                task_id="devops-real-merge",
+            )
+            branches = subprocess.run(
+                ["git", "branch"], cwd=path, capture_output=True, text=True, check=False
+            ).stdout
+            dev_head = subprocess.run(
+                ["git", "rev-parse", "development"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+        assert result.success
+        gitops = result.completion_package.git_operations
+        assert gitops.branch_created.startswith("feature/")
+        assert gitops.merge is not None and gitops.merge.status == "merged"
+        # The reported merge SHA is exactly what development now points at.
+        assert gitops.merge.merge_commit_hash == dev_head
+        # The feature branch was cleaned up after the merge.
+        assert "feature/" not in branches
+
+    def test_delivery_merge_failure_blocks(self, monkeypatch) -> None:
+        """When the real merge fails, the pipeline reports failure and a blocked
+        completion package with an honest ``merge.status == "failed"`` — it does
+        not claim success on a merge that never landed."""
+        import devops_team.orchestrator as orch
+
+        monkeypatch.setattr(orch, "merge_branch", lambda *a, **k: (False, "merge conflict"))
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        with tempfile.TemporaryDirectory() as tmp:
+            init_ok, _ = initialize_new_repo(Path(tmp))
+            assert init_ok
+            result = agent.run_workflow(
+                repo_path=Path(tmp),
+                task_description="Add backend deployment automation",
+                requirements="Include prod approval gate and rollback plan",
+                build_verifier=MagicMock(return_value=(True, "")),
+                task_id="devops-merge-fail",
+            )
+        assert not result.success
+        assert "merge" in (result.failure_reason or "").lower()
+        assert result.completion_package is not None
+        assert result.completion_package.status == "blocked"
+        assert result.completion_package.git_operations.merge is not None
+        assert result.completion_package.git_operations.merge.status == "failed"
+
+    def test_delivery_development_branch_failure(self, monkeypatch) -> None:
+        """A failure preparing the development branch aborts the run with an
+        honest failure reason rather than committing to the wrong branch."""
+        import devops_team.orchestrator as orch
+
+        monkeypatch.setattr(orch, "ensure_development_branch", lambda *a, **k: (False, "no base"))
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        with tempfile.TemporaryDirectory() as tmp:
+            init_ok, _ = initialize_new_repo(Path(tmp))
+            assert init_ok
+            result = agent.run_workflow(
+                repo_path=Path(tmp),
+                task_description="Add backend deployment automation",
+                requirements="Include prod approval gate and rollback plan",
+                build_verifier=MagicMock(return_value=(True, "")),
+                task_id="devops-dev-branch-fail",
+            )
+        assert not result.success
+        assert "development" in (result.failure_reason or "")
+
+    def test_delivery_feature_branch_failure(self, monkeypatch) -> None:
+        """A failure creating the feature branch aborts the run rather than
+        writing changes onto whatever branch happens to be checked out."""
+        import devops_team.orchestrator as orch
+
+        monkeypatch.setattr(orch, "create_feature_branch", lambda *a, **k: (False, "boom"))
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        with tempfile.TemporaryDirectory() as tmp:
+            init_ok, _ = initialize_new_repo(Path(tmp))
+            assert init_ok
+            result = agent.run_workflow(
+                repo_path=Path(tmp),
+                task_description="Add backend deployment automation",
+                requirements="Include prod approval gate and rollback plan",
+                build_verifier=MagicMock(return_value=(True, "")),
+                task_id="devops-feat-branch-fail",
+            )
+        assert not result.success
+        assert "feature branch" in (result.failure_reason or "")
+
 
 # ===========================================================================
 # COMPATIBILITY / MIGRATION TESTS
@@ -1361,22 +1449,8 @@ class TestBackwardCompatibility:
         mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
-            subprocess.run(["git", "init"], cwd=tmp, capture_output=True, check=False)
-            subprocess.run(
-                ["git", "config", "user.email", "t@t.com"],
-                cwd=tmp,
-                capture_output=True,
-                check=False,
-            )
-            subprocess.run(
-                ["git", "config", "user.name", "T"], cwd=tmp, capture_output=True, check=False
-            )
-            subprocess.run(
-                ["git", "config", "commit.gpgsign", "false"],
-                cwd=tmp,
-                capture_output=True,
-                check=False,
-            )
+            init_ok, _ = initialize_new_repo(Path(tmp))
+            assert init_ok
             result = agent.run_workflow(
                 repo_path=Path(tmp),
                 task_description="Add CI/CD",

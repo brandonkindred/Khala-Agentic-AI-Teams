@@ -334,6 +334,27 @@ def commit_working_tree(repo_path: str | Path, message: str) -> Tuple[bool, str]
     return True, "Committed"
 
 
+def get_head_sha(repo_path: str | Path) -> Tuple[bool, str]:
+    """Return the full SHA of the current HEAD commit.
+
+    Preconditions:
+        - ``repo_path`` refers to a git repository with at least one commit.
+    Postconditions:
+        - On success returns ``(True, <40-char hex sha>)`` — the commit the
+          repository's HEAD currently resolves to.
+        - On failure (not a repo, or ``rev-parse`` errors) returns
+          ``(False, message)`` and never a partial/garbage SHA. ``merge_stderr``
+          is disabled so a stderr advisory on success cannot pollute the SHA.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return False, "Not a git repository"
+    code, out = _run_git(path, ["git", "rev-parse", "HEAD"], merge_stderr=False)
+    if code != 0:
+        return False, f"rev-parse failed: {out}"
+    return True, out.strip()
+
+
 def commit_paths(repo_path: str | Path, paths: List[str], message: str) -> Tuple[bool, str]:
     """
     Stage and commit ONLY the given repo-relative paths.
