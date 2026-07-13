@@ -887,6 +887,31 @@ async def run_retest_job(job_id: str, audit_id: str, finding_ids: List[str]) -> 
         - If the job is already terminal, this is a no-op (idempotent Temporal retry).
         - Otherwise the job ends in ``completed``/``failed``; an infrastructure
           exception propagates (last persisted state is ``running``).
+
+    Unlike :func:`run_audit_job`, this deliberately does NOT add a persisted-state
+    reconciliation guard (checking the artifact store for an already-completed
+    retest before re-running, the way ``run_audit_job`` checks ``persisted.success
+    or persisted.failure_reason``). That check doesn't transfer to retest: the
+    audit-level ``success``/``failure_reason`` flags are set once at the end of the
+    *original* audit pipeline and stay true for the rest of the audit's life —
+    including before any retest has ever run. Since this function can be invoked
+    many times against the same ``audit_id`` (one call per retest request, each
+    its own ``job_id``), a guard using those flags would treat every subsequent
+    retest job as already-complete from the moment the original audit finished,
+    reconcile from the stale pre-retest state, and never actually invoke
+    ``orchestrator.run_retest()`` — silently disabling retesting rather than
+    closing a race. There is no audit-state marker scoped to *this specific*
+    retest job (``Phase.RETEST in completed_phases`` is audit-level and stays
+    true after the first retest ever run), so a correct guard would need a
+    job-scoped idempotency token that doesn't exist yet.
+
+    The residual risk this leaves — a Temporal retry re-running the retest phase
+    after ``orchestrator.run_retest()`` already persisted its result but the
+    terminal ``update_job`` write below was lost — is a bounded, accepted
+    tradeoff: the ``Phase.RETEST`` duplicate-entry risk is separately guarded (see
+    ``orchestrator.run_retest``), so a retry's only cost is wasted (not corrupted)
+    LLM/scan work, and ``_RETEST_RETRY_POLICY`` caps the retry budget at 2
+    attempts specifically to bound that cost.
     """
     manager = get_job_manager()
     existing = manager.get_job(job_id)
