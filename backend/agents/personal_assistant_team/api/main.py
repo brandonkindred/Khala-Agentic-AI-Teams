@@ -61,7 +61,9 @@ app.add_middleware(
 
 
 @app.exception_handler(LLMNotConfiguredError)
-async def _llm_not_configured_handler(_request: Request, exc: LLMNotConfiguredError) -> JSONResponse:
+async def _llm_not_configured_handler(
+    _request: Request, exc: LLMNotConfiguredError
+) -> JSONResponse:
     """Surface a missing LLM provider as a clean 503 instead of a 500/degraded 200.
 
     The lazy LLM client (see ``shared/llm.py``) defers provider resolution to the
@@ -74,6 +76,7 @@ async def _llm_not_configured_handler(_request: Request, exc: LLMNotConfiguredEr
         status_code=503,
         content={"detail": str(exc), "error": "llm_not_configured"},
     )
+
 
 # Serve static files
 STATIC_DIR = Path(__file__).parent / "static"
@@ -108,6 +111,15 @@ async def serve_ui():
 # the service can start (and serve health checks / the /llm-config setup flow)
 # even when no provider is configured yet — a missing provider then fails an
 # individual agent run rather than crashing container startup at import time.
+#
+# Bound once at module import, not re-resolved per request: this is the
+# correct model for a long-lived service process (this module's own age-old
+# pattern, unchanged by introducing ``core.py`` — see ``agent_provisioning_team``
+# and ``ai_systems_team`` for the same module-scope-orchestrator convention).
+# ``core.reset_orchestrator()`` is a test-support hook for ``core.py``'s OWN
+# test suite (isolating ``get_orchestrator()``'s singleton logic); it is never
+# called by production code, so it never needs to invalidate an
+# already-imported consumer module's own cached references.
 orchestrator = get_orchestrator()
 llm = orchestrator.llm
 credential_store = orchestrator.credential_store
