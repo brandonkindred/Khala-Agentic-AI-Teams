@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
+from shared.gate_report import GateReport
 
 
 class FeedbackItem(BaseModel):
@@ -103,7 +104,7 @@ class CopyEditorInput(BaseModel):
     )
 
 
-class CopyEditorOutput(BaseModel):
+class CopyEditorOutput(GateReport):
     """Output from the blog copy editor agent."""
 
     approved: bool = Field(
