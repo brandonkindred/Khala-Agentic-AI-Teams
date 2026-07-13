@@ -15,8 +15,6 @@ if TYPE_CHECKING:
     from blog_copy_editor_agent import BlogCopyEditorAgent
     from blog_writer_agent import BlogWriterAgent
 
-import json
-import re
 from typing import Any as _Any
 
 from shared.content_plan import (
@@ -26,6 +24,8 @@ from shared.content_plan import (
     TitleCandidate,
 )
 from strands import Agent
+
+from llm_service import extract_json_from_response
 
 from .models import (
     ApprovalResult,
@@ -236,12 +236,11 @@ class BlogPublicationAgent:
             latest_feedback=latest_feedback,
         )
 
-        agent = Agent(model=self._model, system_prompt="You help analyze rejection feedback for blog posts.")
+        agent = Agent(
+            model=self._model, system_prompt="You help analyze rejection feedback for blog posts."
+        )
         result = agent(prompt + "\n\nRespond with valid JSON only, no markdown fences.")
-        raw = str(result).strip()
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        data = json.loads(raw)
+        data = extract_json_from_response(str(result).strip())
 
         ready_to_revise = bool(data.get("ready_to_revise", False))
         questions = data.get("questions") or []
@@ -288,15 +287,15 @@ class BlogPublicationAgent:
 
         human_feedback_text = "\n".join(f"- {f}" for f in meta.rejection_feedback)
 
-        convert_agent = Agent(model=self._model, system_prompt="You convert rejection feedback into structured editor feedback.")
+        convert_agent = Agent(
+            model=self._model,
+            system_prompt="You convert rejection feedback into structured editor feedback.",
+        )
         convert_result = convert_agent(
             CONVERT_FEEDBACK_TO_EDITOR_PROMPT.format(feedback=human_feedback_text)
             + "\n\nRespond with valid JSON only, no markdown fences."
         )
-        convert_raw = str(convert_result).strip()
-        convert_raw = re.sub(r"^```(?:json)?\s*", "", convert_raw)
-        convert_raw = re.sub(r"\s*```$", "", convert_raw)
-        data = json.loads(convert_raw)
+        data = extract_json_from_response(str(convert_result).strip())
 
         feedback_data = data.get("feedback_items") or []
         human_feedback_items: list[FeedbackItem] = []

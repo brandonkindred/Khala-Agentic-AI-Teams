@@ -1,124 +1,971 @@
 """Unit tests for the neutral pipeline core.
 
-Covers the graph-output translation (`_translate_itinerary_keys`) and the
-`run_pipeline` parse + fallback paths directly — the rest of the suite stubs
-`run_pipeline`, so this is where the key-translation logic (the most bug-prone
-part of the module) is exercised. Pure functions + a mocked graph, so no job
-service or Postgres is needed.
+Exercises the five per-step specialist functions (each wrapping a typed agent
+class, driven through its ``llm=None`` injection seam), the ``run_pipeline``
+chaining, and the RUNNING/COMPLETED/FAILED job-store bookkeeping. A fake callable
+model stands in for the Strands agent, so no LLM, job service, or Postgres is
+needed for the step tests.
 """
 
 from __future__ import annotations
 
 import json
 
+import pytest
+
 from road_trip_planning_team import pipeline as rtp_pipeline
-from road_trip_planning_team.models import TripItinerary
+from road_trip_planning_team.models import (
+    LogisticsPlan,
+    RoutePlan,
+    RouteStop,
+    StopActivities,
+    TravelerGroupProfile,
+    TripItinerary,
+    TripRequest,
+)
+from road_trip_planning_team.shared.job_store import (
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_RUNNING,
+    create_job,
+    get_job,
+)
 
 
-def test_translate_top_level_and_route_summary_renames():
-    data = {"summary": "A great trip", "packing_list": ["boots"], "route_summary": "SF → LA"}
-    out = rtp_pipeline._translate_itinerary_keys(data)
-    assert out["overview"] == "A great trip"
-    assert "summary" not in out
-    assert out["packing_suggestions"] == ["boots"]
-    assert out["route_summary"] == ["SF → LA"]  # str coerced to list
+class _FakeLLM:
+    """Callable stand-in for a Strands agent: returns a fixed response string.
 
-
-def test_translate_does_not_overwrite_model_native_keys():
-    data = {"summary": "graph", "overview": "native"}
-    out = rtp_pipeline._translate_itinerary_keys(data)
-    # Model-native key wins and the graph-native alias is left untouched (the
-    # rename is guarded on the target key being absent).
-    assert out["overview"] == "native"
-    assert out["summary"] == "graph"
-
-
-def test_translate_per_day_driving_activities_meals_accommodation():
-    data = {
-        "days": [
-            {
-                "date_label": "Day 1",
-                "day_notes": "scenic",
-                "driving": {"from_location": "SF", "miles": 180, "hours": 3.5},
-                "activities": [
-                    {"time": "morning", "name": "Coffee"},
-                    {"time": "afternoon", "name": "Hike"},
-                    {"time": "dinner", "name": "Tacos"},
-                    {"name": "Unspecified"},
-                ],
-                "meals": [{"venue": "Diner", "notes": "cheap", "meal_type": "breakfast"}],
-                "accommodation": {"type": "hotel", "notes": "book early"},
-            },
-            "not-a-dict",  # skipped without error
-        ]
-    }
-    out = rtp_pipeline._translate_itinerary_keys(data)
-    day = out["days"][0]
-    assert day["date"] == "Day 1"
-    assert day["day_summary"] == "scenic"
-    assert day["driving_from"] == "SF"
-    assert day["driving_distance_miles"] == 180
-    assert day["driving_time_hours"] == 3.5
-    assert [a["name"] for a in day["morning_activities"]] == ["Coffee"]
-    assert [a["name"] for a in day["afternoon_activities"]] == ["Hike", "Unspecified"]
-    assert [a["name"] for a in day["evening_activities"]] == ["Tacos"]
-    assert day["meals"][0] == {
-        "name": "Diner",
-        "description": "cheap",
-        "activity_type": "breakfast",
-    }
-    assert day["accommodation"]["accommodation_type"] == "hotel"
-    assert day["accommodation"]["booking_tips"] == "book early"
-
-
-def test_run_pipeline_parses_translated_graph_output(monkeypatch, sample_plan_request):
-    """run_pipeline extracts + translates a successful graph run into a TripItinerary.
-
-    Mock contract: build_trip_graph/invoke_graph_sync are stubbed to opaque
-    objects (their identity is irrelevant), and extract_node_text returns the
-    composer node's text — prose wrapping a valid itinerary JSON object — which
-    run_pipeline must slice, json.loads, key-translate, and validate.
+    Matches the ``self._agent(prompt)`` call the specialist agents make, so a
+    test can drive the real parsing/fallback logic without an LLM.
     """
-    composer_json = json.dumps(
-        {
-            "title": "SF to LA",
-            "summary": "Coastal cruise",
-            "total_days": 2,
-            "days": [
-                {"date_label": "Day 1", "activities": [{"time": "morning", "name": "Coffee"}]}
-            ],
-        }
-    )
-    monkeypatch.setattr(rtp_pipeline, "build_trip_graph", lambda: object())
-    monkeypatch.setattr(rtp_pipeline, "invoke_graph_sync", lambda graph, task: object())
-    monkeypatch.setattr(
-        rtp_pipeline, "extract_node_text", lambda result, node_id: f"prose... {composer_json}"
-    )
 
-    itinerary = rtp_pipeline.run_pipeline(sample_plan_request)
+    def __init__(self, response: str) -> None:
+        self._response = response
 
+    def __call__(self, prompt: str) -> str:
+        return self._response
+
+
+# ---------------------------------------------------------------------------
+# Per-step functions — happy path (LLM JSON parsed) + fallback (bad JSON)
+# ---------------------------------------------------------------------------
+
+
+def test_profile_travelers_parses_llm_json(sample_plan_request):
+    llm = _FakeLLM('{"group_description": "family of hikers", "activity_pace": "active"}')
+    profile = rtp_pipeline.profile_travelers(sample_plan_request.trip, llm=llm)
+    assert isinstance(profile, TravelerGroupProfile)
+    assert profile.group_description == "family of hikers"
+    assert profile.activity_pace == "active"
+
+
+def test_profile_travelers_falls_back_on_bad_json(sample_plan_request):
+    profile = rtp_pipeline.profile_travelers(sample_plan_request.trip, llm=_FakeLLM("not json"))
+    assert isinstance(profile, TravelerGroupProfile)
+    # Fallback derives interests from the travelers (Alice → hiking).
+    assert "hiking" in profile.combined_interests
+
+
+def test_profile_travelers_falls_back_on_schema_invalid_json(sample_plan_request):
+    # Syntactically valid JSON with a schema-invalid field (a string where
+    # age_groups_present expects a list) must also fall back — a pydantic
+    # ValidationError from model_validate must not bypass the fallback.
+    llm = _FakeLLM('{"group_description": "family", "age_groups_present": "not-a-list"}')
+    profile = rtp_pipeline.profile_travelers(sample_plan_request.trip, llm=llm)
+    assert isinstance(profile, TravelerGroupProfile)
+    # Fallback derives interests from the travelers (Alice → hiking), not the
+    # LLM's (invalid) response.
+    assert "hiking" in profile.combined_interests
+
+
+def test_profile_travelers_fallback_carries_needs_into_dedicated_fields():
+    # The fallback can't categorize a traveler's raw needs (dietary vs.
+    # accessibility vs. other) without the LLM, but must not silently drop
+    # them — ActivitiesExpertAgent's prompt reads food_requirements/
+    # accessibility_requirements directly, not combined_needs.
+    trip = TripRequest(
+        start_location="San Francisco, CA",
+        travelers=[{"name": "Alice", "needs": ["vegetarian", "wheelchair accessible"]}],
+    )
+    profile = rtp_pipeline.profile_travelers(trip, llm=_FakeLLM("not json"))
+    assert "vegetarian" in profile.food_requirements
+    assert "wheelchair accessible" in profile.accessibility_requirements
+
+
+def test_plan_route_parses_llm_json(sample_plan_request):
+    # The LLM route must cover the start, the required stop (Yosemite), and the
+    # end, or the coverage guard substitutes the fallback.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert isinstance(route, RoutePlan)
+    assert route.route_summary == "coastal"
+    assert route.ordered_stops[0].location == "San Francisco, CA"
+
+
+def test_plan_route_falls_back_on_bad_json(sample_plan_request):
+    route = rtp_pipeline.plan_route(
+        sample_plan_request.trip, TravelerGroupProfile(), llm=_FakeLLM("x")
+    )
+    assert isinstance(route, RoutePlan)
+    locations = [s.location for s in route.ordered_stops]
+    assert "San Francisco, CA" in locations
+    assert "Yosemite" in locations
+
+
+def test_plan_route_falls_back_on_schema_invalid_stop(sample_plan_request):
+    # Syntactically valid JSON with a schema-invalid stop (wrong field type) must
+    # also fall back — a pydantic ValidationError here must not bypass the
+    # documented fallback contract and crash the step.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "SF", "recommended_nights": "not-a-number"}],'
+        ' "route_summary": "coastal"}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert isinstance(route, RoutePlan)
+    locations = [s.location for s in route.ordered_stops]
+    assert "San Francisco, CA" in locations
+    assert "Yosemite" in locations
+    assert route.route_summary == ""  # fallback route, not the LLM's "coastal" summary
+
+
+def test_plan_route_falls_back_when_json_omits_stops(sample_plan_request):
+    # Valid JSON that omits ordered_stops (e.g. a `{}` refusal) must still yield a
+    # route covering start → required stops → end, not an empty route that would
+    # compose into an itinerary with no days.
+    route = rtp_pipeline.plan_route(
+        sample_plan_request.trip, TravelerGroupProfile(), llm=_FakeLLM("{}")
+    )
+    assert isinstance(route, RoutePlan)
+    locations = [s.location for s in route.ordered_stops]
+    assert "San Francisco, CA" in locations
+    assert "Yosemite" in locations
+    assert "Los Angeles, CA" in locations
+
+
+def test_plan_route_falls_back_when_required_stop_missing(sample_plan_request):
+    # A non-empty route that drops a required stop (Yosemite) must be replaced by
+    # the fallback so a must-visit stop can't silently vanish from the itinerary.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "Reno, NV", "stop_type": "destination"}],'
+        ' "route_summary": "wrong", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    locations = [s.location for s in route.ordered_stops]
+    assert "Yosemite" in locations  # fallback restored the required stop
+    assert route.route_summary == ""  # fallback route, not the LLM's "wrong" summary
+
+
+def test_plan_route_falls_back_when_endpoint_missing(sample_plan_request):
+    # A route covering every required stop but truncating the actual start or end
+    # location must also be replaced by the fallback — the origin/destination and
+    # driving legs can't silently disappear even when required_stops is satisfied.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "Yosemite", "stop_type": "destination"}],'
+        ' "route_summary": "truncated", "suggested_total_days": 2}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    locations = [s.location for s in route.ordered_stops]
+    assert "San Francisco, CA" in locations  # fallback restored the start
+    assert "Los Angeles, CA" in locations  # fallback restored the end
+    assert route.route_summary == ""  # fallback route, not the LLM's "truncated" summary
+
+
+def test_plan_route_rejects_short_substring_false_positive():
+    # A required stop "LA" must not be considered "covered" just because the
+    # bare substring "la" appears mid-word inside an unrelated planned stop
+    # like "Atlanta, GA" (previously: raw substring containment treated this
+    # as a match, silently dropping the real required stop from the route).
+    trip = TripRequest(
+        start_location="Chicago, IL",
+        required_stops=["LA"],
+        end_location="Chicago, IL",
+        travelers=[{"name": "Alice"}],
+    )
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "Chicago, IL", "stop_type": "start"},'
+        ' {"location": "Atlanta, GA", "stop_type": "destination"},'
+        ' {"location": "Chicago, IL", "stop_type": "end"}],'
+        ' "route_summary": "wrong", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=llm)
+    locations = [s.location for s in route.ordered_stops]
+    assert "LA" in locations  # fallback restored the real required stop
+    assert route.route_summary == ""  # fallback route, not the LLM's "wrong" summary
+
+
+def test_plan_route_accepts_initials_abbreviation():
+    # A required stop "SF" must be accepted against a planned "San Francisco, CA"
+    # via initials matching, without unnecessarily discarding a valid LLM route.
+    trip = TripRequest(
+        start_location="LA",
+        required_stops=["SF"],
+        end_location="LA",
+        travelers=[{"name": "Alice"}],
+    )
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "LA", "stop_type": "start"},'
+        ' {"location": "San Francisco, CA", "stop_type": "destination"},'
+        ' {"location": "LA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # LLM route accepted, no fallback
+    locations = [s.location for s in route.ordered_stops]
+    assert "San Francisco, CA" in locations
+
+
+def test_plan_route_matches_locations_differing_only_by_punctuation():
+    # The request's "Los Angeles, CA" and the LLM's "Los Angeles CA" (no
+    # comma) describe the same place, but the comma breaks raw contiguous
+    # substring containment — matching must normalize to alphanumeric tokens
+    # first so a formatting-only difference doesn't discard an otherwise
+    # valid LLM route.
+    trip = TripRequest(
+        start_location="San Francisco, CA",
+        required_stops=[],
+        end_location="Los Angeles, CA",
+        travelers=[{"name": "Alice"}],
+    )
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Los Angeles CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+
+
+def test_plan_route_ignores_blank_required_stop(sample_plan_request):
+    # A blank entry in required_stops carries no location to verify — it must
+    # be skipped rather than change whether the route is accepted or falls back.
+    trip = TripRequest(
+        start_location="San Francisco, CA",
+        required_stops=["Yosemite", ""],
+        end_location="Los Angeles, CA",
+        travelers=[{"name": "Alice"}],
+    )
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted despite the blank entry
+
+
+def test_fallback_route_skips_blank_required_stops():
+    # A blank entry in required_stops must not become an empty-location
+    # destination stop in the fallback route — matching _covers_required_stops's
+    # own blank-entry skip, so downstream steps never see an empty location.
+    trip = TripRequest(
+        start_location="San Francisco, CA",
+        required_stops=["Yosemite", ""],
+        end_location="Los Angeles, CA",
+        travelers=[{"name": "Alice"}],
+    )
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=_FakeLLM("x"))
+    locations = [s.location for s in route.ordered_stops]
+    assert "" not in locations
+    assert "Yosemite" in locations
+
+
+def test_plan_route_falls_back_when_stops_are_in_wrong_order(sample_plan_request):
+    # A route containing every required location but not actually starting or
+    # ending at the right place (e.g. Yosemite listed first) must fall back —
+    # membership alone isn't enough; the route must be positionally bounded by
+    # the actual start and end.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "wrong order", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == ""  # fallback route, not the LLM's "wrong order"
+    locations = [s.location for s in route.ordered_stops]
+    assert locations[0] == "San Francisco, CA"
+    assert locations[-1] == "Los Angeles, CA"
+
+
+def test_plan_route_falls_back_when_round_trip_never_returns():
+    # A round trip (no explicit end_location -> back to start) whose route
+    # only visits the start once, with no return leg, must fall back — the
+    # end must positionally match the route's last stop, not just appear
+    # anywhere (which the single start-position occurrence would satisfy).
+    trip = TripRequest(
+        start_location="San Francisco, CA",
+        required_stops=["Yosemite"],
+        travelers=[{"name": "Alice"}],
+    )
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination"}],'
+        ' "route_summary": "no return", "suggested_total_days": 2}'
+    )
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == ""  # fallback route, not the LLM's "no return"
+    locations = [s.location for s in route.ordered_stops]
+    assert locations[-1] == "San Francisco, CA"
+
+
+def test_plan_route_normalizes_by_position_not_stop_type_label(sample_plan_request):
+    # The LLM might mislabel an interior stop's stop_type as "start"/"end"
+    # while the actual first/last positions are correct — normalization must
+    # key off position, not the label, or a real must-visit stop gets wrongly
+    # zeroed out and skipped as pass-through.
+    llm = _FakeLLM(
+        '{"ordered_stops": ['
+        '{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "end", "recommended_nights": 2},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+    by_location = {s.location: s for s in route.ordered_stops}
+    assert by_location["Yosemite"].recommended_nights == 2  # mislabeled "end", not zeroed
+    assert by_location["Los Angeles, CA"].recommended_nights == 0  # the true last stop
+
+
+def test_plan_route_preserves_destination_labeled_endpoint(sample_plan_request):
+    # An endpoint the LLM explicitly labels "destination" (not "start"/"end")
+    # is a real requested stay — e.g. a one-way trip whose whole point is
+    # spending time at the destination — not a pass-through. Endpoint
+    # normalization must trust the LLM's own stop_type classification rather
+    # than overriding it based on position alone: it should only zero nights
+    # when the true first/last stop's own label already says "start"/"end".
+    llm = _FakeLLM(
+        '{"ordered_stops": ['
+        '{"location": "San Francisco, CA", "stop_type": "destination", "recommended_nights": 1},'
+        ' {"location": "Yosemite", "stop_type": "destination", "recommended_nights": 1},'
+        ' {"location": "Los Angeles, CA", "stop_type": "destination", "recommended_nights": 3}],'
+        ' "route_summary": "coastal", "suggested_total_days": 5}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+    # Neither the label nor the nights were overridden for either endpoint.
+    assert route.ordered_stops[0].stop_type == "destination"
+    assert route.ordered_stops[0].recommended_nights == 1
+    assert route.ordered_stops[-1].stop_type == "destination"
+    assert route.ordered_stops[-1].recommended_nights == 3
+
+
+def test_plan_route_normalizes_endpoint_nights_when_label_already_says_so(sample_plan_request):
+    # The complementary case: when the LLM's own stop_type for the true
+    # first/last stop already says "start"/"end" but omits recommended_nights
+    # (defaulting to RouteStop's own default of 1), normalization still zeroes
+    # it — this is the genuine pass-through case the prompt asks for, just
+    # under-specified by the LLM.
+    llm = _FakeLLM(
+        '{"ordered_stops": ['
+        '{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination", "recommended_nights": 2},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+    assert route.ordered_stops[0].recommended_nights == 0
+    assert route.ordered_stops[-1].recommended_nights == 0
+    assert route.ordered_stops[1].recommended_nights == 2  # interior stop untouched
+
+
+def test_plan_route_preserves_required_stop_that_is_also_the_endpoint():
+    # If a required stop and the route's end_location name the same place,
+    # the LLM may collapse it into a single terminal stop object. Endpoint
+    # normalization must not force that stop into a zero-night pass-through
+    # — the caller explicitly listed it as required, meaning they want it
+    # visited (activities + a real day), not just driven through.
+    trip = TripRequest(
+        start_location="San Francisco, CA",
+        required_stops=["Los Angeles, CA"],
+        end_location="Los Angeles, CA",
+        travelers=[{"name": "Alice"}],
+    )
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+    assert route.ordered_stops[-1].recommended_nights != 0
+
+
+def test_plan_route_falls_back_when_route_summary_has_wrong_type(sample_plan_request):
+    # RoutePlan.route_summary is typed as str — an LLM response with a
+    # schema-valid, coverage-complete route but a wrong-typed top-level field
+    # (route_summary as a list instead of a string) must still degrade to the
+    # fallback route rather than let RoutePlan(...)'s pydantic.ValidationError
+    # propagate and crash the whole step.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": ["coastal", "scenic"], "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert isinstance(route, RoutePlan)
+    locations = [s.location for s in route.ordered_stops]
+    assert "San Francisco, CA" in locations
+    assert "Yosemite" in locations
+    assert "Los Angeles, CA" in locations
+    assert route.route_summary == ""  # fallback route, not the LLM's invalid summary
+
+
+def test_plan_route_filters_blank_location_stop_from_llm_response(sample_plan_request):
+    # A blank-location stop in an otherwise-valid LLM response must be
+    # dropped from the accepted route, not left in ordered_stops just because
+    # coverage still passes via the other stops.
+    llm = _FakeLLM(
+        '{"ordered_stops": ['
+        '{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "", "stop_type": "destination"},'
+        ' {"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+    locations = [s.location for s in route.ordered_stops]
+    assert "" not in locations
+    assert "Yosemite" in locations
+
+
+def test_fallback_route_threads_driving_from_between_stops():
+    # Each stop after the start must carry driving_from set to the previous
+    # stop's location, so the composer's fallback itinerary can show each
+    # leg's origin instead of an unknown driving_from.
+    trip = TripRequest(
+        start_location="San Francisco, CA",
+        required_stops=["Yosemite"],
+        end_location="Los Angeles, CA",
+        travelers=[{"name": "Alice"}],
+    )
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=_FakeLLM("x"))
+    by_location = {s.location: s for s in route.ordered_stops}
+    assert by_location["San Francisco, CA"].driving_from is None
+    assert by_location["Yosemite"].driving_from == "San Francisco, CA"
+    assert by_location["Los Angeles, CA"].driving_from == "Yosemite"
+
+
+def test_plan_route_normalizes_zero_suggested_total_days(sample_plan_request):
+    # An LLM response with an explicit suggested_total_days: 0 must be
+    # normalized to >= 1 — dict.get's default only applies when the key is
+    # missing, not when it's present-but-falsy.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 0}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.suggested_total_days >= 1
+
+
+def test_plan_route_normalizes_numeric_string_suggested_total_days(sample_plan_request):
+    # An LLM response with suggested_total_days as a numeric string (e.g. "3")
+    # must not crash — max() compares raw types and raises TypeError on int
+    # vs str, even though pydantic would happily coerce the same string for an
+    # int field. Must parse it rather than pass it through unguarded.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": "3"}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.suggested_total_days == 3
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+
+
+def test_plan_route_falls_back_to_default_on_non_numeric_suggested_total_days(
+    sample_plan_request,
+):
+    # A non-numeric, non-coercible suggested_total_days (e.g. a stray word)
+    # must degrade to the same default dict.get would use for a missing key,
+    # not crash the whole route step.
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": "a few"}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.suggested_total_days == sample_plan_request.trip.trip_duration_days
+
+
+def test_plan_route_normalizes_endpoint_recommended_nights(sample_plan_request):
+    # The LLM's start/end stops may omit recommended_nights (RouteStop
+    # defaults to 1) or set it to a nonzero value despite the prompt asking
+    # for pass-through endpoints — the route planner must normalize them to 0
+    # regardless, so ActivitiesExpertAgent/the composer treat them as
+    # pass-through rather than extra overnight stops.
+    llm = _FakeLLM(
+        '{"ordered_stops": ['
+        '{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination", "recommended_nights": 2},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end", "recommended_nights": 1}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+    by_type = {s.stop_type: s for s in route.ordered_stops}
+    assert by_type["start"].recommended_nights == 0
+    assert by_type["end"].recommended_nights == 0
+    assert by_type["destination"].recommended_nights == 2  # non-endpoint stop untouched
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+
+
+def test_fallback_route_endpoints_are_pass_through(sample_plan_request):
+    # Fallback endpoints must be pass-through (recommended_nights=0) so the
+    # activities/composer steps don't turn the start and end into extra days.
+    route = rtp_pipeline.plan_route(
+        sample_plan_request.trip, TravelerGroupProfile(), llm=_FakeLLM("x")
+    )
+    by_type = {s.stop_type: s for s in route.ordered_stops}
+    assert by_type["start"].recommended_nights == 0
+    assert by_type["end"].recommended_nights == 0
+    dests = [s for s in route.ordered_stops if s.stop_type == "destination"]
+    assert dests and all(s.recommended_nights == 1 for s in dests)
+
+
+def test_fallback_route_never_yields_zero_days():
+    # No explicit duration and no required stops (a minimal start→end trip, the
+    # only fields the API requires) must not degrade suggested_total_days to 0.
+    trip = TripRequest(start_location="San Francisco, CA", travelers=[{"name": "Alice"}])
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=_FakeLLM("x"))
+    assert route.suggested_total_days >= 1
+
+
+def test_run_pipeline_propagates_step_failure(monkeypatch):
+    # Once every specialist agent provably degrades internally (never raises),
+    # an exception escaping a step is a genuine bug, not a normal degraded-LLM
+    # outcome — run_pipeline no longer has an outer except to swallow it (see
+    # its own docstring). run_plan_background (thread mode's actual entry
+    # point) owns converting this into a FAILED job; see
+    # test_run_plan_background_marks_failed_when_a_step_raises.
+    trip = TripRequest(start_location="San Francisco, CA", travelers=[{"name": "Alice"}])
+    from road_trip_planning_team.models import PlanTripRequest
+
+    def _boom(_trip):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(rtp_pipeline, "profile_travelers", _boom)
+
+    with pytest.raises(ValueError, match="boom"):
+        rtp_pipeline.run_pipeline(PlanTripRequest(trip=trip))
+
+
+def test_recommend_activities_parses_and_skips_passthrough(sample_plan_request):
+    route = RoutePlan(
+        ordered_stops=[
+            RouteStop(location="SF", stop_type="start", recommended_nights=0),
+            RouteStop(location="Yosemite", stop_type="destination", recommended_nights=1),
+        ]
+    )
+    llm = _FakeLLM('{"activities": [{"name": "Hike"}], "dining": [], "tips": ["bring water"]}')
+    result = rtp_pipeline.recommend_activities(
+        route, TravelerGroupProfile(), sample_plan_request.trip, llm=llm
+    )
+    assert [r.location for r in result] == ["SF", "Yosemite"]
+    # SF is a pass-through start (0 nights) → empty entry, no LLM call recorded.
+    assert result[0].activities == []
+    assert result[1].activities == [{"name": "Hike"}]
+    assert result[1].tips == ["bring water"]
+
+
+def test_recommend_activities_raises_on_empty_ordered_stops(sample_plan_request):
+    # ActivitiesExpertAgent.run's documented precondition (non-empty
+    # route.ordered_stops) is enforced with an explicit raise, not silently
+    # tolerated — RoutePlannerAgent guarantees this never happens in normal
+    # operation, so a violation here is a genuine caller-contract bug.
+    with pytest.raises(ValueError, match="non-empty route.ordered_stops"):
+        rtp_pipeline.recommend_activities(
+            RoutePlan(ordered_stops=[]),
+            TravelerGroupProfile(),
+            sample_plan_request.trip,
+            llm=_FakeLLM("{}"),
+        )
+
+
+def test_recommend_activities_falls_back_on_schema_invalid_json(sample_plan_request):
+    # Syntactically valid JSON with a schema-invalid field (a string where tips
+    # expects a list) must also fall back — a pydantic ValidationError from
+    # StopActivities construction must not bypass the per-stop fallback.
+    route = RoutePlan(ordered_stops=[RouteStop(location="Yosemite", recommended_nights=1)])
+    llm = _FakeLLM('{"activities": [], "dining": [], "tips": "not-a-list"}')
+    result = rtp_pipeline.recommend_activities(
+        route, TravelerGroupProfile(), sample_plan_request.trip, llm=llm
+    )
+    assert result[0].location == "Yosemite"
+    assert result[0].activities == []  # degraded fallback, not a raised error
+
+
+def test_plan_logistics_parses_llm_json(sample_plan_request):
+    route = RoutePlan(ordered_stops=[RouteStop(location="Yosemite", recommended_nights=1)])
+    llm = _FakeLLM(
+        '{"stop_logistics": [], "packing_suggestions": ["boots"],'
+        ' "travel_tips": ["start early"], "budget_estimate": "$800"}'
+    )
+    logistics = rtp_pipeline.plan_logistics(
+        route, TravelerGroupProfile(), sample_plan_request.trip, llm=llm
+    )
+    assert isinstance(logistics, LogisticsPlan)
+    assert logistics.packing_suggestions == ["boots"]
+    assert logistics.budget_estimate == "$800"
+
+
+def test_plan_logistics_falls_back_on_bad_json(sample_plan_request):
+    logistics = rtp_pipeline.plan_logistics(
+        RoutePlan(), TravelerGroupProfile(), sample_plan_request.trip, llm=_FakeLLM("boom")
+    )
+    assert isinstance(logistics, LogisticsPlan)
+    assert logistics.packing_suggestions  # non-empty fallback list
+
+
+def test_plan_logistics_falls_back_on_schema_invalid_json(sample_plan_request):
+    # Syntactically valid JSON with a schema-invalid field (a string where
+    # packing_suggestions expects a list) must also fall back — a pydantic
+    # ValidationError from LogisticsPlan construction must not bypass it.
+    llm = _FakeLLM('{"packing_suggestions": "not-a-list", "budget_estimate": "$1"}')
+    logistics = rtp_pipeline.plan_logistics(
+        RoutePlan(), TravelerGroupProfile(), sample_plan_request.trip, llm=llm
+    )
+    assert isinstance(logistics, LogisticsPlan)
+    assert logistics.packing_suggestions  # degraded fallback list, not "$1" budget
+    assert logistics.budget_estimate != "$1"
+
+
+def test_compose_itinerary_parses_llm_json(sample_plan_request):
+    route = RoutePlan(
+        ordered_stops=[RouteStop(location="Yosemite", recommended_nights=1)], suggested_total_days=2
+    )
+    llm = _FakeLLM(
+        json.dumps(
+            {
+                "title": "SF to LA",
+                "overview": "coastal cruise",
+                "total_days": 2,
+                "days": [
+                    {
+                        "day_number": 1,
+                        "location": "Yosemite",
+                        "morning_activities": [{"name": "Hike"}],
+                    }
+                ],
+            }
+        )
+    )
+    itinerary = rtp_pipeline.compose_itinerary(
+        sample_plan_request.trip,
+        TravelerGroupProfile(),
+        route,
+        [StopActivities(location="Yosemite")],
+        LogisticsPlan(),
+        llm=llm,
+    )
     assert isinstance(itinerary, TripItinerary)
     assert itinerary.title == "SF to LA"
-    assert itinerary.overview == "Coastal cruise"
-    assert itinerary.days[0].date == "Day 1"
-    assert itinerary.days[0].morning_activities[0].name == "Coffee"
+    assert itinerary.days[0].morning_activities[0].name == "Hike"
 
 
-def test_run_pipeline_falls_back_when_output_unparseable(monkeypatch, sample_plan_request):
-    """run_pipeline returns a minimal fallback itinerary when the graph output
-    has no parseable JSON.
-
-    Mock contract: extract_node_text returns text with no ``{`` so the parse
-    branch is skipped and the fallback (title/overview/total_days derived from
-    the request) is returned instead of raising.
-    """
-    monkeypatch.setattr(rtp_pipeline, "build_trip_graph", lambda: object())
-    monkeypatch.setattr(rtp_pipeline, "invoke_graph_sync", lambda graph, task: object())
-    monkeypatch.setattr(rtp_pipeline, "extract_node_text", lambda result, node_id: "no json here")
-
-    itinerary = rtp_pipeline.run_pipeline(sample_plan_request)
-
+def test_compose_itinerary_falls_back_on_bad_json(sample_plan_request):
+    route = RoutePlan(
+        ordered_stops=[RouteStop(location="Yosemite", recommended_nights=1)], suggested_total_days=2
+    )
+    itinerary = rtp_pipeline.compose_itinerary(
+        sample_plan_request.trip,
+        TravelerGroupProfile(),
+        route,
+        [StopActivities(location="Yosemite")],
+        LogisticsPlan(travel_tips=["t"]),
+        llm=_FakeLLM("nope"),
+    )
     assert isinstance(itinerary, TripItinerary)
-    assert itinerary.title == "Road Trip: San Francisco, CA to Los Angeles, CA"
-    assert "parsing failed" in itinerary.overview
+    assert itinerary.total_days == 2  # derived from route.suggested_total_days
+
+
+def test_compose_itinerary_falls_back_on_schema_invalid_json(sample_plan_request):
+    # Syntactically valid JSON with a schema-invalid field (a string where
+    # day_tips expects a list) must also fall back — a pydantic ValidationError
+    # from DayPlan construction must not bypass the fallback.
+    route = RoutePlan(
+        ordered_stops=[RouteStop(location="Yosemite", recommended_nights=1)], suggested_total_days=2
+    )
+    llm = _FakeLLM(
+        json.dumps({"title": "Bad", "days": [{"day_number": 1, "day_tips": "not-a-list"}]})
+    )
+    itinerary = rtp_pipeline.compose_itinerary(
+        sample_plan_request.trip,
+        TravelerGroupProfile(),
+        route,
+        [StopActivities(location="Yosemite")],
+        LogisticsPlan(travel_tips=["t"]),
+        llm=llm,
+    )
+    assert isinstance(itinerary, TripItinerary)
+    assert itinerary.title == "Road Trip Itinerary"  # fallback title, not the LLM's "Bad"
+    assert itinerary.total_days == 2  # derived from route.suggested_total_days
+
+
+def test_compose_itinerary_synthesizes_a_day_when_llm_returns_empty_days(sample_plan_request):
+    # A valid LLM response with an empty "days" array must not slip through as
+    # total_days >= 1 with no days to show — _ensure_nonempty_days normalizes
+    # this on the success path too, not just the fallback path.
+    route = RoutePlan(
+        ordered_stops=[RouteStop(location="Yosemite", recommended_nights=1)], suggested_total_days=2
+    )
+    llm = _FakeLLM(json.dumps({"title": "Trip", "total_days": 2, "days": []}))
+    itinerary = rtp_pipeline.compose_itinerary(
+        sample_plan_request.trip,
+        TravelerGroupProfile(),
+        route,
+        [StopActivities(location="Yosemite")],
+        LogisticsPlan(),
+        llm=llm,
+    )
+    assert itinerary.title == "Trip"  # LLM response otherwise accepted, not a fallback
     assert itinerary.total_days == 2
+    assert len(itinerary.days) == 1
+    assert itinerary.days[0].location == "Yosemite"
+
+
+def test_compose_itinerary_aligns_activities_positionally_for_duplicate_locations(
+    sample_plan_request,
+):
+    # Two stops sharing the same location name (e.g. two "Springfield" stops)
+    # must each keep their own activities — a location-keyed lookup would
+    # misattribute both to whichever StopActivities came first in the list.
+    route = RoutePlan(
+        ordered_stops=[
+            RouteStop(location="Springfield", stop_type="destination", recommended_nights=1),
+            RouteStop(location="Springfield", stop_type="destination", recommended_nights=1),
+        ],
+        suggested_total_days=2,
+    )
+    activities_per_stop = [
+        StopActivities(location="Springfield", activities=[{"name": "First Springfield stop"}]),
+        StopActivities(location="Springfield", activities=[{"name": "Second Springfield stop"}]),
+    ]
+    captured_prompts: list[str] = []
+
+    class _CapturingLLM:
+        def __call__(self, prompt: str) -> str:
+            captured_prompts.append(prompt)
+            return "not json"  # force fallback; only the captured prompt matters
+
+    rtp_pipeline.compose_itinerary(
+        sample_plan_request.trip,
+        TravelerGroupProfile(),
+        route,
+        activities_per_stop,
+        LogisticsPlan(),
+        llm=_CapturingLLM(),
+    )
+    prompt = captured_prompts[0]
+    # A location-keyed lookup would have attributed "First Springfield stop" to
+    # both entries and never surfaced "Second Springfield stop" at all.
+    first_idx = prompt.index("First Springfield stop")
+    second_idx = prompt.index("Second Springfield stop")
+    assert first_idx < second_idx
+
+
+def test_compose_itinerary_fallback_synthesizes_a_day_for_pass_through_only_route(
+    sample_plan_request,
+):
+    # A start-only trip (no required stops) whose route fallback produced only
+    # pass-through start/end stops, combined with the composer's own LLM also
+    # failing, must not yield days=[] while total_days >= 1.
+    route = RoutePlan(
+        ordered_stops=[
+            RouteStop(location="San Francisco, CA", stop_type="start", recommended_nights=0),
+            RouteStop(location="San Francisco, CA", stop_type="end", recommended_nights=0),
+        ],
+        suggested_total_days=1,
+    )
+    itinerary = rtp_pipeline.compose_itinerary(
+        sample_plan_request.trip,
+        TravelerGroupProfile(),
+        route,
+        [StopActivities(location="San Francisco, CA")],
+        LogisticsPlan(),
+        llm=_FakeLLM("nope"),
+    )
+    assert itinerary.total_days == 1
+    assert len(itinerary.days) == 1
+    assert itinerary.days[0].location == "San Francisco, CA"
+
+
+def test_compose_itinerary_fallback_includes_destination_for_one_way_pass_through_route(
+    sample_plan_request,
+):
+    # A one-way trip (different start/end, no required stops) whose route
+    # fallback produced only pass-through start/end stops must still surface
+    # the requested destination in the synthesized day, not just the origin.
+    route = RoutePlan(
+        ordered_stops=[
+            RouteStop(location="Chicago, IL", stop_type="start", recommended_nights=0),
+            RouteStop(location="Denver, CO", stop_type="end", recommended_nights=0),
+        ],
+        suggested_total_days=1,
+    )
+    itinerary = rtp_pipeline.compose_itinerary(
+        sample_plan_request.trip,
+        TravelerGroupProfile(),
+        route,
+        [StopActivities(location="Chicago, IL"), StopActivities(location="Denver, CO")],
+        LogisticsPlan(),
+        llm=_FakeLLM("nope"),
+    )
+    assert itinerary.total_days == 1
+    assert len(itinerary.days) == 1
+    assert itinerary.days[0].location == "Denver, CO"
+    assert itinerary.days[0].driving_from == "Chicago, IL"
+
+
+def test_compose_itinerary_fallback_preserves_final_leg(sample_plan_request):
+    # A normal one-way trip with a required stop (SF -> Yosemite -> LA) whose
+    # end stop is pass-through (recommended_nights=0, per RoutePlannerAgent's
+    # own endpoint normalization) must still surface LA as an arrival day in
+    # the composer's fallback rather than silently dropping the final leg
+    # after the last real overnight stop (Yosemite).
+    route = RoutePlan(
+        ordered_stops=[
+            RouteStop(location="San Francisco, CA", stop_type="start", recommended_nights=0),
+            RouteStop(location="Yosemite", stop_type="destination", recommended_nights=1),
+            RouteStop(location="Los Angeles, CA", stop_type="end", recommended_nights=0),
+        ],
+        suggested_total_days=2,
+    )
+    itinerary = rtp_pipeline.compose_itinerary(
+        sample_plan_request.trip,
+        TravelerGroupProfile(),
+        route,
+        [
+            StopActivities(location="San Francisco, CA"),
+            StopActivities(location="Yosemite"),
+            StopActivities(location="Los Angeles, CA"),
+        ],
+        LogisticsPlan(),
+        llm=_FakeLLM("nope"),
+    )
+    locations = [d.location for d in itinerary.days]
+    assert "Yosemite" in locations
+    assert locations[-1] == "Los Angeles, CA"
+
+
+# ---------------------------------------------------------------------------
+# run_pipeline chaining + job-store bookkeeping
+# ---------------------------------------------------------------------------
+
+
+def test_run_pipeline_chains_all_steps_in_order(monkeypatch, sample_plan_request):
+    calls: list[str] = []
+    profile = TravelerGroupProfile(group_description="fam")
+    route = RoutePlan(route_summary="loop")
+    activities = [StopActivities(location="Yosemite")]
+    logistics = LogisticsPlan(budget_estimate="$900")
+    final = TripItinerary(title="Final", total_days=2)
+    captured: dict = {}
+
+    def _profile(trip):
+        calls.append("profile")
+        return profile
+
+    def _route(trip, p):
+        calls.append("route")
+        return route
+
+    def _activities(r, p, trip):
+        calls.append("activities")
+        return activities
+
+    def _logistics(r, p, trip):
+        calls.append("logistics")
+        return logistics
+
+    def _compose(trip, p, r, a, lg):
+        calls.append("compose")
+        captured.update(profile=p, route=r, activities=a, logistics=lg)
+        return final
+
+    monkeypatch.setattr(rtp_pipeline, "profile_travelers", _profile)
+    monkeypatch.setattr(rtp_pipeline, "plan_route", _route)
+    monkeypatch.setattr(rtp_pipeline, "recommend_activities", _activities)
+    monkeypatch.setattr(rtp_pipeline, "plan_logistics", _logistics)
+    monkeypatch.setattr(rtp_pipeline, "compose_itinerary", _compose)
+
+    out = rtp_pipeline.run_pipeline(sample_plan_request)
+
+    assert out is final
+    assert calls == ["profile", "route", "activities", "logistics", "compose"]
+    # The composer receives every upstream step's typed output.
+    assert captured["profile"] is profile
+    assert captured["route"] is route
+    assert captured["activities"] is activities
+    assert captured["logistics"] is logistics
+
+
+def test_run_plan_background_marks_failed_when_a_step_raises(monkeypatch, sample_plan_request):
+    """A step raising an unexpected error (e.g. a genuine bug, not a normal
+    degraded-LLM outcome — every specialist already degrades those internally)
+    must still reach a terminal state: it propagates through run_pipeline and
+    run_plan_core, and is converted to FAILED at the run_plan_background
+    boundary (a daemon thread has no caller to raise to)."""
+    create_job("job-step-raises", request={"trip": {}})
+
+    def _boom(_trip):
+        raise ValueError("schema-invalid LLM response")
+
+    monkeypatch.setattr(rtp_pipeline, "profile_travelers", _boom)
+
+    rtp_pipeline.run_plan_background("job-step-raises", sample_plan_request)
+
+    job = get_job("job-step-raises")
+    assert job["status"] == JOB_STATUS_FAILED
+    assert "schema-invalid LLM response" in (job.get("error") or "")
+
+
+def test_run_plan_core_writes_running_then_completed(monkeypatch, sample_plan_request):
+    create_job("job-core", request={"trip": {}})
+    canned = TripItinerary(title="Core", total_days=1)
+    captured: dict = {}
+
+    def _fake_run_pipeline(body):
+        # Snapshot the job's status as of the pipeline call, before
+        # run_plan_core writes COMPLETED — proves RUNNING was actually written
+        # first rather than skipped straight to COMPLETED.
+        captured["status_during_pipeline"] = get_job("job-core")["status"]
+        return canned
+
+    monkeypatch.setattr(rtp_pipeline, "run_pipeline", _fake_run_pipeline)
+
+    rtp_pipeline.run_plan_core("job-core", sample_plan_request)
+
+    assert captured["status_during_pipeline"] == JOB_STATUS_RUNNING
+    job = get_job("job-core")
+    assert job["status"] == JOB_STATUS_COMPLETED
+    assert job["result"]["title"] == "Core"
+
+
+def test_run_plan_background_marks_failed_on_error(monkeypatch, sample_plan_request):
+    create_job("job-bg", request={"trip": {}})
+
+    def _boom(_body):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(rtp_pipeline, "run_pipeline", _boom)
+
+    # A daemon-thread runner has no caller to raise to — it must swallow + record.
+    rtp_pipeline.run_plan_background("job-bg", sample_plan_request)
+
+    job = get_job("job-bg")
+    assert job["status"] == JOB_STATUS_FAILED
+    assert "kaboom" in (job.get("error") or "")

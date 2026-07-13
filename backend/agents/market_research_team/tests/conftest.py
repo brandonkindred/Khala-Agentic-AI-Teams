@@ -82,6 +82,17 @@ SAMPLE_CONSISTENCY_JSON = json.dumps(
 
 
 @pytest.fixture(autouse=True)
+def _isolated_transcript_store(monkeypatch, tmp_path):
+    """Point the per-job transcript store at a per-test temp dir.
+
+    The Temporal ingest/ux_one activities persist/load transcripts under
+    ``$AGENT_CACHE/market_research_team/transcripts``; isolating ``AGENT_CACHE``
+    per test keeps those writes out of the CWD and free of cross-test bleed.
+    """
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
 def _patched_market_research_job_client(monkeypatch, fake_job_client):
     """Route the team's job_store ``_client`` factory through the in-memory fake.
 
@@ -98,61 +109,47 @@ def _patched_market_research_job_client(monkeypatch, fake_job_client):
 
 @pytest.fixture(autouse=True)
 def _mock_strands(monkeypatch):
-    """Patch Strands agent construction and graph invocation for all tests.
+    """Patch Strands agent construction + calls for all tests.
 
-    Mocks at two levels:
-    1. agents module: _build_strands_agent and _call_agent (used by agent classes)
-    2. orchestrator module: invoke_graph_sync and extract_node_text (used by graph orchestration)
+    The orchestrator and Temporal activities drive the specialist ``agents.py``
+    dataclass agents directly (the Strands graph was retired), so mocking the
+    two agent-level seams — ``_build_strands_agent`` (construction) and
+    ``_call_agent`` (the LLM round-trip) — fully decouples the suite from any
+    real LLM provider. ``_fake_call_agent`` routes to canned JSON by prompt
+    keyword so each stage gets schema-valid output.
     """
-    # --- Patch agent-level construction (agents.py still uses these) ---
     monkeypatch.setattr(
         "market_research_team.agents._build_strands_agent",
         lambda *args, **kwargs: MagicMock(),
     )
 
     def _fake_call_agent(agent, prompt):
-        """Return mock JSON based on prompt keywords."""
+        """Return mock JSON based on prompt keywords.
+
+        Each stage is keyed on a phrase that appears ONLY in that stage's own
+        INSTRUCTION text, never in the stage-output data that gets embedded into
+        a downstream prompt. Substring keys on shared words are fragile: the
+        viability prompt reasons over "market signals" (would trip a psychology
+        key) and embeds the consistency signal name "Cross-interview theme
+        consistency"; the psychology/consistency/viability prompts all embed
+        insight ``source`` names like "inline_transcript_1" (would trip a
+        "transcript" key). So route on the unique instruction phrases instead —
+        "user interview transcript" (UX), "user psychology" (psychology),
+        "cross-interview consistency" (consistency), "viability"/"verdict"
+        (viability), "research artifacts"/"interview script" (scripts).
+        """
         prompt_lower = prompt.lower()
-        if "transcript" in prompt_lower and "analyze" in prompt_lower:
-            return SAMPLE_INSIGHT_JSON
-        if (
-            "psychology" in prompt_lower
-            or "adoption" in prompt_lower
-            or "market signals" in prompt_lower
-        ):
-            return SAMPLE_SIGNALS_JSON
+        if "cross-interview consistency" in prompt_lower:
+            return SAMPLE_CONSISTENCY_JSON
         if "viability" in prompt_lower or "verdict" in prompt_lower:
             return SAMPLE_VIABILITY_JSON
+        if "user psychology" in prompt_lower:
+            return SAMPLE_SIGNALS_JSON
+        if "user interview transcript" in prompt_lower:
+            return SAMPLE_INSIGHT_JSON
         if "research artifacts" in prompt_lower or "interview script" in prompt_lower:
             return SAMPLE_SCRIPTS_JSON
-        if "consistency" in prompt_lower or "cross-interview" in prompt_lower:
-            return SAMPLE_CONSISTENCY_JSON
         # Fallback
         return SAMPLE_INSIGHT_JSON
 
     monkeypatch.setattr("market_research_team.agents._call_agent", _fake_call_agent)
-
-    # --- Patch graph invocation (orchestrator uses invoke_graph_sync + extract_node_text) ---
-    monkeypatch.setattr(
-        "market_research_team.orchestrator.invoke_graph_sync",
-        lambda graph, task: MagicMock(),  # Graph result object (extract_node_text is also mocked)
-    )
-
-    def _fake_extract_node_text(result, node_id):
-        """Return sample JSON for each graph node."""
-        if node_id == "ux_research":
-            return SAMPLE_INSIGHT_JSON
-        if node_id == "psychology":
-            return SAMPLE_SIGNALS_JSON
-        if node_id == "consistency":
-            return SAMPLE_CONSISTENCY_JSON
-        if node_id == "viability_synthesis":
-            return SAMPLE_VIABILITY_JSON
-        if node_id == "scripts":
-            return SAMPLE_SCRIPTS_JSON
-        return ""
-
-    monkeypatch.setattr(
-        "market_research_team.orchestrator.extract_node_text",
-        _fake_extract_node_text,
-    )
