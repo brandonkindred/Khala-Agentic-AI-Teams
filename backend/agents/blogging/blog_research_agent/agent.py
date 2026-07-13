@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import ast
 import contextvars
-import json
 import logging
-import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, List, Optional, Tuple
 
@@ -13,7 +10,7 @@ from strands import Agent
 
 logger = logging.getLogger(__name__)
 
-from llm_service import compact_text  # noqa: E402
+from llm_service import LLMJsonParseError, compact_text, extract_json_from_response  # noqa: E402
 from shared_concurrency import parallel_map  # noqa: E402
 
 from .agent_cache import AgentCache  # noqa: E402
@@ -84,10 +81,7 @@ class ResearchAgent:
             system_prompt="You are a research assistant. Respond with valid JSON only.",
         )
         result = agent(prompt + "\n\nRespond with valid JSON only, no markdown fences.")
-        raw = str(result).strip()
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        return json.loads(raw)
+        return extract_json_from_response(str(result).strip())
 
     # Public API ---------------------------------------------------------
 
@@ -638,27 +632,12 @@ class ResearchAgent:
         self._report_llm("Synthesizing overview...", 0.78)
         try:
             data = self._call_json(prompt)
-        except (
-            json.JSONDecodeError,
-            TypeError,
-        ) as e:  # pragma: no cover - parse-failure fallback in overview synthesis; covered by integration tests with a flaky model.
+        except LLMJsonParseError as e:  # pragma: no cover - parse-failure fallback in overview synthesis; covered by integration tests with a flaky model.
             logger.warning(
                 "Overview synthesis: LLM returned invalid or empty JSON (%s). Using fallback.",
                 str(e),
             )
             return None
-        except ValueError as e:  # pragma: no cover - Ollama-specific "could not parse JSON" prefix repair path; reached only with a real Ollama backend.
-            # LLM may return prose/markdown instead of JSON; treat as analysis
-            msg = str(e)
-            prefix = "Could not parse JSON from Ollama response: "
-            if msg.startswith(prefix):
-                try:
-                    raw = ast.literal_eval(msg[len(prefix) :])
-                    data = {"analysis": raw, "outline": []}
-                except (ValueError, SyntaxError):
-                    raise
-            else:
-                raise
 
         # Some LLM implementations may just return a string analysis;
         # we support both dict and string responses here.

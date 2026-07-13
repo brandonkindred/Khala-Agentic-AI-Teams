@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from strands import Agent
+
+from llm_service import LLMJsonParseError, extract_json_from_response
 
 from .models import FactCheckReport
 from .prompts import FACT_CHECK_PROMPT
@@ -89,7 +90,9 @@ class BlogFactCheckAgent:
         if on_llm_request:
             on_llm_request("Checking facts and claims...")
 
-        agent = Agent(model=self._model, system_prompt=FACT_CHECK_PROMPT.split("{draft}")[0].strip())
+        agent = Agent(
+            model=self._model, system_prompt=FACT_CHECK_PROMPT.split("{draft}")[0].strip()
+        )
 
         data = None
         for attempt in range(_MAX_JSON_RETRIES):
@@ -102,12 +105,9 @@ class BlogFactCheckAgent:
             current_prompt += "\n\nRespond with valid JSON only, no markdown fences."
             try:
                 result = agent(current_prompt)
-                raw = str(result).strip()
-                raw = re.sub(r"^```(?:json)?\s*", "", raw)
-                raw = re.sub(r"\s*```$", "", raw)
-                data = json.loads(raw)
+                data = extract_json_from_response(str(result).strip())
                 break
-            except (json.JSONDecodeError, TypeError) as e:
+            except LLMJsonParseError as e:
                 logger.warning(
                     "Fact-check JSON parse failed (attempt %d/%d): %s",
                     attempt + 1,
