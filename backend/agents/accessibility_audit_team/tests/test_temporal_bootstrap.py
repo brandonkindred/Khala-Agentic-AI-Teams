@@ -357,7 +357,12 @@ def test_workflow_timebox_marks_timed_out_when_budget_exceeded(monkeypatch):
         calls.append(name)
         if name == "mark_timed_out_activity":
             return {"status": "TIMEOUT", "audit_id": "a1"}
-        await asyncio.sleep(3600)  # phase never completes -> the timer wins
+        # Never resolves on its own -> the timer wins the race. Wrapped in the
+        # asyncio.wait_for below (not a real-time asyncio.sleep) so a future
+        # regression in the workflow's phase-cancellation logic fails this test
+        # fast with a TimeoutError instead of hanging the suite — this repo has
+        # no pytest-timeout plugin to catch a runaway test at a higher level.
+        await asyncio.Future()
 
     async def fake_sleep(_duration):
         return  # timebox fires immediately
@@ -367,7 +372,7 @@ def test_workflow_timebox_marks_timed_out_when_budget_exceeded(monkeypatch):
     monkeypatch.setattr(wf.workflow, "sleep", fake_sleep)
 
     payload = {"job_id": "j1", "audit_id": "a1", "request": {"timebox_hours": 1, "tech_stack": {}}}
-    out = asyncio.run(wf.AccessibilityAuditWorkflow().run(payload))
+    out = asyncio.run(asyncio.wait_for(wf.AccessibilityAuditWorkflow().run(payload), timeout=5))
     assert out["status"] == "TIMEOUT"
     assert "mark_timed_out_activity" in calls
     assert "intake_activity" in calls  # a phase was started before the timeout
@@ -385,14 +390,14 @@ def test_workflow_timebox_completes_when_within_budget(monkeypatch):
         return {"status": "PASS", "audit_id": "a1"}
 
     async def fake_sleep(_duration):
-        await asyncio.sleep(3600)  # timer never fires within the test
+        await asyncio.Future()  # timer never fires within the test
 
     monkeypatch.setattr(wf.workflow, "execute_activity", fake_execute)
     monkeypatch.setattr(wf.workflow, "patched", lambda _id: True)
     monkeypatch.setattr(wf.workflow, "sleep", fake_sleep)
 
     payload = {"job_id": "j1", "audit_id": "a1", "request": {"timebox_hours": 2, "tech_stack": {}}}
-    out = asyncio.run(wf.AccessibilityAuditWorkflow().run(payload))
+    out = asyncio.run(asyncio.wait_for(wf.AccessibilityAuditWorkflow().run(payload), timeout=5))
     assert out == {"status": "PASS", "audit_id": "a1"}
     assert "mark_timed_out_activity" not in calls
     assert calls[-1] == "finalize_activity"
@@ -408,7 +413,7 @@ def test_workflow_applies_default_timebox_when_unset(monkeypatch):
 
     async def fake_sleep(duration):
         captured["sleep_duration"] = duration
-        await asyncio.sleep(3600)  # timer never actually fires within the test
+        await asyncio.Future()  # timer never actually fires within the test
 
     async def fake_execute(activity, *args, **kwargs):
         return {"status": "PASS", "audit_id": "a1"}
@@ -418,7 +423,7 @@ def test_workflow_applies_default_timebox_when_unset(monkeypatch):
     monkeypatch.setattr(wf.workflow, "sleep", fake_sleep)
 
     payload = {"job_id": "j1", "audit_id": "a1", "request": {"tech_stack": {}}}
-    out = asyncio.run(wf.AccessibilityAuditWorkflow().run(payload))
+    out = asyncio.run(asyncio.wait_for(wf.AccessibilityAuditWorkflow().run(payload), timeout=5))
     assert out == {"status": "PASS", "audit_id": "a1"}
     assert captured["sleep_duration"] == timedelta(hours=wf.DEFAULT_TIMEBOX_HOURS)
 
@@ -432,7 +437,7 @@ def test_workflow_explicit_zero_timebox_remains_unbounded(monkeypatch):
 
     async def fake_sleep(duration):
         sleep_called(duration)
-        await asyncio.sleep(3600)
+        await asyncio.Future()
 
     async def fake_execute(activity, *args, **kwargs):
         return {"status": "PASS", "audit_id": "a1"}
@@ -442,7 +447,7 @@ def test_workflow_explicit_zero_timebox_remains_unbounded(monkeypatch):
     monkeypatch.setattr(wf.workflow, "sleep", fake_sleep)
 
     payload = {"job_id": "j1", "audit_id": "a1", "request": {"timebox_hours": 0, "tech_stack": {}}}
-    out = asyncio.run(wf.AccessibilityAuditWorkflow().run(payload))
+    out = asyncio.run(asyncio.wait_for(wf.AccessibilityAuditWorkflow().run(payload), timeout=5))
     assert out == {"status": "PASS", "audit_id": "a1"}
     sleep_called.assert_not_called()
 
@@ -489,6 +494,11 @@ def test_pattern_a_exports_in_sync():
     from accessibility_audit_team.temporal import constants
 
     assert t.WORKFLOWS == [t.AccessibilityAuditWorkflow, t.AccessibilityRetestWorkflow]
+    # temporalio (1.30.0, pinned here) has no public accessor for an
+    # @activity.defn-decorated callable's registered name; this private API is
+    # the same one blogging/tests/test_temporal_pattern_a.py and
+    # ai_systems_team/tests/test_temporal.py already rely on for the identical
+    # exports-in-sync guard.
     names = {activity._Definition.must_from_callable(a).name for a in t.ACTIVITIES}
     assert names == {
         constants.ACTIVITY_INTAKE,
