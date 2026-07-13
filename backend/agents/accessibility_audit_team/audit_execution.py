@@ -201,6 +201,16 @@ async def run_audit_job(job_id: str, audit_id: str, request: CreateAuditRequest)
           terminal ``update_job`` below already landed (e.g. the retry was triggered
           by a job-store network blip on that same call) a no-op instead of
           re-executing the full (up to 2h) audit.
+        - If the job is NOT yet terminal but the artifact store already has a
+          terminal ``AccessibilityAuditResult`` for ``audit_id`` (``success`` or
+          ``failure_reason`` set — i.e. ``orchestrator.run_audit`` itself already
+          completed and persisted, but the terminal ``update_job`` write below was
+          lost on a prior attempt), reconciles the job from that persisted result
+          instead of re-running the audit. This path is only reachable via the
+          legacy ``run_pipeline_activity`` (the sole caller subject to Temporal
+          retry; the FastAPI background-task path has no retry at all), but
+          without it a retry there would silently redo up to two hours of
+          already-completed LLM/scan work.
         - Otherwise, on success/logical-failure the job ends in ``completed``/``failed``.
         - On an infrastructure exception the exception propagates to the caller
           (the job's last persisted state is ``running``).
@@ -213,6 +223,21 @@ async def run_audit_job(job_id: str, audit_id: str, request: CreateAuditRequest)
     existing = manager.get_job(job_id)
     if existing is not None and existing.get("status") in (JOB_STATUS_COMPLETED, JOB_STATUS_FAILED):
         return
+
+    persisted = await load_audit_state(audit_id)
+    if persisted is not None and (persisted.success or persisted.failure_reason):
+        manager.update_job(
+            job_id,
+            status=JOB_STATUS_COMPLETED if persisted.success else JOB_STATUS_FAILED,
+            progress=100,
+            current_phase=persisted.current_phase.value,
+            completed_phases=[p.value for p in persisted.completed_phases],
+            findings_count=persisted.total_findings,
+            result=persisted.model_dump(mode="json"),
+            error=None if persisted.success else persisted.failure_reason,
+        )
+        return
+
     manager.update_job(job_id, status=JOB_STATUS_RUNNING, current_phase="discovery", progress=20)
     audit_request = build_audit_request(request, audit_id)
     result = await get_orchestrator().run_audit(audit_request, request.tech_stack)

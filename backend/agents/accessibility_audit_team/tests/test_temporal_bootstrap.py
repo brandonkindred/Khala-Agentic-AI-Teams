@@ -869,6 +869,74 @@ def test_run_audit_job_is_idempotent_on_retry_after_terminal(monkeypatch, termin
     jm.update_job.assert_not_called()
 
 
+@pytest.mark.parametrize("success", [True, False])
+def test_run_audit_job_reconciles_from_persisted_terminal_state_without_rerunning(
+    monkeypatch, success
+):
+    """Only the legacy run_pipeline_activity subjects run_audit_job to a Temporal
+    retry (the FastAPI background-task path never retries). If a prior attempt's
+    orchestrator.run_audit() already completed (success or logical failure) and
+    persisted its audit_state, but the terminal update_job write below was lost,
+    a retry must reconcile the job from that persisted result instead of
+    silently re-running the audit — this path can re-run up to two hours of
+    already-completed work otherwise."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.models import AccessibilityAuditResult, Phase
+
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_RUNNING}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    persisted = AccessibilityAuditResult(
+        audit_id="audit1",
+        success=success,
+        failure_reason="" if success else "discovery boom",
+        current_phase=Phase.REPORT_PACKAGING,
+        completed_phases=[Phase.INTAKE, Phase.DISCOVERY],
+        total_findings=3,
+    )
+    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=persisted))
+    orch = mock.Mock()
+    orch.run_audit = mock.AsyncMock(side_effect=AssertionError("must not re-run"))
+    monkeypatch.setattr(ax, "get_orchestrator", lambda: orch)
+
+    req = ax.CreateAuditRequest(web_urls=["https://e.com"])
+    asyncio.run(ax.run_audit_job("job1", "audit1", req))
+
+    orch.run_audit.assert_not_awaited()
+    completed = [
+        c
+        for c in jm.update_job.call_args_list
+        if c.kwargs.get("status") == (ax.JOB_STATUS_COMPLETED if success else ax.JOB_STATUS_FAILED)
+    ]
+    assert completed
+    assert completed[0].kwargs.get("findings_count") == 3
+    assert completed[0].kwargs.get("completed_phases") == ["intake", "discovery"]
+
+
+def test_run_audit_job_runs_when_persisted_state_is_not_terminal(monkeypatch):
+    """A persisted-but-still-in-progress audit_state (neither success nor
+    failure_reason set — e.g. only intake has completed so far) must not be
+    mistaken for a terminal result; the audit still runs."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.models import AccessibilityAuditResult, Phase
+
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_RUNNING}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    in_progress = AccessibilityAuditResult(
+        audit_id="audit1", current_phase=Phase.DISCOVERY, completed_phases=[Phase.INTAKE]
+    )
+    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=in_progress))
+    orch = mock.Mock()
+    orch.run_audit = mock.AsyncMock(return_value=_fake_result(True))
+    monkeypatch.setattr(ax, "get_orchestrator", lambda: orch)
+
+    req = ax.CreateAuditRequest(web_urls=["https://e.com"])
+    asyncio.run(ax.run_audit_job("job1", "audit1", req))
+
+    orch.run_audit.assert_awaited_once()
+
+
 def test_run_audit_job_rejects_blank_ids():
     """The documented precondition (non-empty job_id/audit_id) is enforced at runtime."""
     from accessibility_audit_team import audit_execution as ax
