@@ -2441,3 +2441,40 @@ def test_coordinator_builds_codebase_index_once_and_shares_it(monkeypatch) -> No
 
     assert len(build_calls) == 1, "CodebaseIndex.from_input should be called exactly once"
     assert received_indexes == [build_calls[0], build_calls[0]]
+
+
+def test_single_chunk_summary_reflects_architecture_findings(monkeypatch) -> None:
+    """A single-chunk review whose only new findings come from the
+    architecture-consistency pass must not silently drop them from the
+    narrative: with exactly one map summary the coordinator would otherwise
+    return that chunk's summary verbatim, which said nothing about a finding
+    the map phase never saw."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent.models import CodeReviewIssue
+
+    arch_issue = CodeReviewIssue(
+        severity="high",
+        category="architecture",
+        file_path="a.py",
+        description="Duplicates the existing `Widget` service.",
+    )
+    monkeypatch.setattr(
+        coord, "find_architecture_and_redundancy_issues", lambda *a, **kw: [arch_issue]
+    )
+
+    synth_calls: list = []
+    original_synthesize = coord.synthesize_review_findings
+
+    def _spy(*args, **kwargs):
+        synth_calls.append(True)
+        return original_synthesize(*args, **kwargs)
+
+    monkeypatch.setattr(coord, "synthesize_review_findings", _spy)
+
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+
+    assert synth_calls, "synthesis must run so the narrative reflects the architecture finding"
+    assert any(i.description == arch_issue.description for i in result.issues)

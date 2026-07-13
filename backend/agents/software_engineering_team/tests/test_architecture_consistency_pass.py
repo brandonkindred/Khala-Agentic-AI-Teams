@@ -514,6 +514,38 @@ def test_coordinator_skips_pass_with_no_architecture() -> None:
     assert result.approved
 
 
+def test_run_pass_shrinks_code_budget_by_arch_doc_reserve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The inline code budget must shrink by however much
+    ``CODE_REVIEW_ARCH_DOC_CHARS`` exceeds what
+    ``compute_code_review_map_chunk_chars`` already reserved for an
+    architecture excerpt, so a generous document budget cannot silently push
+    the combined prompt past the model's context-derived ceiling."""
+    import code_review_agent.architecture_consistency_pass as pass_mod
+
+    captured: Dict[str, Any] = {}
+    original_build_prompt = pass_mod._build_prompt
+
+    def _spy(index, architecture, max_inline_chars, max_arch_doc_chars):
+        captured["max_inline_chars"] = max_inline_chars
+        captured["max_arch_doc_chars"] = max_arch_doc_chars
+        return original_build_prompt(index, architecture, max_inline_chars, max_arch_doc_chars)
+
+    monkeypatch.setattr(pass_mod, "_build_prompt", _spy)
+    monkeypatch.setattr(pass_mod, "compute_code_review_map_chunk_chars", lambda llm: 20_000)
+    monkeypatch.setattr(pass_mod, "compute_code_review_arch_overview_chars", lambda llm: 1_000)
+    monkeypatch.setenv("CODE_REVIEW_ARCH_DOC_CHARS", "9000")
+
+    class _EmptyClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return {"findings": []}
+
+    find_architecture_and_redundancy_issues(_EmptyClient(), _input(architecture=_arch()))
+
+    assert captured["max_arch_doc_chars"] == 9000
+    # 20_000 - max(9_000 - 1_000, 0) == 12_000
+    assert captured["max_inline_chars"] == 12_000
+
+
 def test_arch_doc_abs_chars_default_is_generous() -> None:
     """Sanity check the default cap: generous relative to the per-chunk overview
     excerpt cap, since this pass pays its cost once per submission, not per chunk.

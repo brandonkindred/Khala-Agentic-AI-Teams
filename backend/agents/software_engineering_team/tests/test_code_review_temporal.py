@@ -160,12 +160,13 @@ def _run_activity_pipeline(review_input: CodeReviewInput) -> CodeReviewOutput:
         payload, issues, bool(payload.get("skip_false_positive_filter", False))
     )
     architecture_findings = A.find_architecture_and_redundancy_activity(payload)
+    has_architecture_findings = bool(architecture_findings)
     if architecture_findings:
         verified = [*verified, *architecture_findings]
     gate = A.finalize_review_activity(
         verified, not_reviewed, prep["skipped_issues"], approved_flags
     )
-    if len(summaries) == 1:
+    if len(summaries) == 1 and not has_architecture_findings:
         summary, notes = summaries[0], (spec_notes[0] if spec_notes else "")
     else:
         synth = A.synthesize_findings_activity(

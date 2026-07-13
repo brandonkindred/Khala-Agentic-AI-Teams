@@ -211,6 +211,7 @@ class CodeReviewWorkflow:
             retry_policy=_LLM_RETRY,
         )
 
+        has_architecture_findings = False
         if workflow.patched(_ARCHITECTURE_PASS_PATCH):
             # Architecture-consistency / cross-codebase-redundancy pass: additive,
             # once per submission (not once per chunk), matching thread mode's
@@ -227,6 +228,7 @@ class CodeReviewWorkflow:
             )
             if architecture_findings:
                 verified = [*verified, *architecture_findings]
+                has_architecture_findings = True
 
         self._advance("finalizing", 0.95)
         gate = await workflow.execute_activity(
@@ -240,7 +242,7 @@ class CodeReviewWorkflow:
         gated_issues: List[Dict[str, Any]] = gate["issues"]
 
         summary, notes = await self._narrative(
-            review_input, approved, gated_issues, summaries, spec_notes
+            review_input, approved, gated_issues, summaries, spec_notes, has_architecture_findings
         )
 
         self._advance("done", 1.0)
@@ -258,14 +260,17 @@ class CodeReviewWorkflow:
         issues: List[Dict[str, Any]],
         summaries: List[str],
         spec_notes: List[str],
+        has_architecture_findings: bool = False,
     ) -> tuple[str, str]:
         """Produce the merged ``(summary, spec_compliance_notes)``.
 
-        Mirrors ``coordinator._merge_narrative``: a single sub-review is used
-        verbatim (no synthesis call); more than one attempts a synthesis activity
-        and falls back to deterministic concatenation on failure.
+        Mirrors ``coordinator._merge_narrative``: a single sub-review with no
+        architecture findings is used verbatim (no synthesis call); otherwise
+        attempts a synthesis activity and falls back to deterministic
+        concatenation on failure, so a blocking architecture finding is never
+        silently absent from the narrative attached to a single-chunk review.
         """
-        if len(summaries) == 1:
+        if len(summaries) == 1 and not has_architecture_findings:
             return summaries[0], (spec_notes[0] if spec_notes else "")
 
         synth = await workflow.execute_activity(

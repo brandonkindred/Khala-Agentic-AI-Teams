@@ -47,6 +47,7 @@ from strands import Agent
 from llm_service import LLMClient
 from shared_env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import (
+    compute_code_review_arch_overview_chars,
     compute_code_review_map_chunk_chars,
     parse_env_int,
 )
@@ -374,8 +375,14 @@ def _run_pass(
         return []
 
     model = resolve_code_review_model(llm)
-    max_inline_chars = compute_code_review_map_chunk_chars(llm)
     max_arch_doc_chars = parse_env_int("CODE_REVIEW_ARCH_DOC_CHARS", _ARCH_DOC_ABS_CHARS, 2_000)
+    # ``compute_code_review_map_chunk_chars`` already reserves room for a small architecture
+    # excerpt (``compute_code_review_arch_overview_chars``) inside its context-derived budget;
+    # this pass inlines the much larger full architecture document instead, so shrink the code
+    # budget by the extra the document consumes beyond that reservation, keeping the combined
+    # prompt within the same context-derived ceiling instead of silently overflowing it.
+    extra_arch_reserve = max(max_arch_doc_chars - compute_code_review_arch_overview_chars(llm), 0)
+    max_inline_chars = max(compute_code_review_map_chunk_chars(llm) - extra_arch_reserve, 2_000)
 
     prompt = _build_prompt(index, architecture, max_inline_chars, max_arch_doc_chars)
     agent = Agent(

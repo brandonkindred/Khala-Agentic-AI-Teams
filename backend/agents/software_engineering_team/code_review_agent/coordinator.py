@@ -320,6 +320,7 @@ def _merge_narrative(
     approved: bool,
     issues: List[CodeReviewIssue],
     outcome: "_ChunkOutcome",
+    has_architecture_findings: bool = False,
 ) -> Tuple[str, str]:
     """Produce the merged ``(summary, spec_compliance_notes)`` for the review.
 
@@ -330,31 +331,35 @@ def _merge_narrative(
           results from ``_reconcile_approval``; this function only shapes prose
           and never reconsults or mutates them.
         - ``outcome.summaries`` holds one entry per successful sub-review.
+        - ``has_architecture_findings`` is True when the architecture-consistency
+          pass (which runs outside the map phase) added findings not reflected
+          in any ``outcome.summaries`` entry.
 
     Postconditions:
-        - With exactly one sub-review, returns that sub-review's summary/notes
-          verbatim and makes no synthesis LLM call.
-        - With more than one sub-review, attempts a single findings-only
-          synthesis pass; on any failure (``None``) falls back to the
+        - With exactly one sub-review and no architecture findings, returns
+          that sub-review's summary/notes verbatim and makes no synthesis LLM
+          call.
+        - Otherwise attempts a single findings-only synthesis pass so the
+          narrative reflects every source of ``issues`` (including the
+          architecture pass); on any failure (``None``) falls back to the
           ``"\\n\\n"``-joined per-pass summaries/notes.
     """
-    if len(outcome.summaries) == 1:
+    if len(outcome.summaries) == 1 and not has_architecture_findings:
         return outcome.summaries[0], (outcome.spec_notes[0] if outcome.spec_notes else "")
 
     concatenated_summary = "\n\n".join(s for s in outcome.summaries if s.strip())
     concatenated_notes = "\n\n".join(n for n in outcome.spec_notes if n.strip())
 
-    if len(outcome.summaries) > 1:
-        synthesized = synthesize_review_findings(
-            llm,
-            input_data=input_data,
-            approved=approved,
-            issues=issues,
-            chunk_summaries=outcome.summaries,
-            chunk_spec_notes=outcome.spec_notes,
-        )
-        if synthesized is not None:
-            return synthesized.summary, synthesized.spec_compliance_notes
+    synthesized = synthesize_review_findings(
+        llm,
+        input_data=input_data,
+        approved=approved,
+        issues=issues,
+        chunk_summaries=outcome.summaries,
+        chunk_spec_notes=outcome.spec_notes,
+    )
+    if synthesized is not None:
+        return synthesized.summary, synthesized.spec_compliance_notes
 
     return concatenated_summary, concatenated_notes
 
@@ -611,7 +616,14 @@ def run_coordinator(
     all_llm_approved = bool(outcome.approved_flags) and all(outcome.approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
 
-    merged_summary, spec_notes = _merge_narrative(llm, input_data, approved, deduped, outcome)
+    merged_summary, spec_notes = _merge_narrative(
+        llm,
+        input_data,
+        approved,
+        deduped,
+        outcome,
+        has_architecture_findings=bool(architecture_findings),
+    )
 
     logger.info(
         "CodeReviewCoordinator: done, approved=%s, issues=%s, chunks=%s (sub-reviews=%s)",
