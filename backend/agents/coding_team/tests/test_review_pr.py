@@ -2614,6 +2614,8 @@ def _run_review_with(review_app, issues: list[Any]) -> dict[str, Any]:
 
 class TestPreExistingFindings:
     def test_preexisting_finding_is_not_commented_but_stored_as_proposal(self, review_app) -> None:
+        """A pre_existing-tagged finding drives no PR comment/event and is stored as
+        a proposal instead; the real PR finding still posts and drives REQUEST_CHANGES."""
         gh = review_app["github"]["client"]
         job = _run_review_with(
             review_app,
@@ -2649,6 +2651,8 @@ class TestPreExistingFindings:
         assert p["issue_url"] is None
 
     def test_only_preexisting_findings_reads_as_clean_pr(self, review_app) -> None:
+        """When every finding is pre-existing, the PR itself reads as clean: a COMMENT
+        event and a +1 reaction, while the finding still surfaces as a proposal."""
         gh = review_app["github"]["client"]
         job = _run_review_with(
             review_app,
@@ -2668,6 +2672,7 @@ class TestPreExistingFindings:
         assert len(summary["pending_issue_proposals"]) == 1
 
     def test_status_text_mentions_preexisting_count(self, review_app) -> None:
+        """The job's status text reports how many pre-existing bugs were found."""
         job = _run_review_with(
             review_app,
             [
@@ -2718,6 +2723,7 @@ class TestPreExistingFindings:
         assert summary["pending_issue_proposals"] == []
 
     def test_create_issues_files_selected_proposal(self, review_app) -> None:
+        """Only the requested proposal is filed; unselected proposals stay unfiled."""
         gh = review_app["github"]["client"]
         job = _run_review_with(
             review_app,
@@ -2771,6 +2777,7 @@ class TestPreExistingFindings:
         assert "https://***@" in title
 
     def test_create_issues_is_idempotent(self, review_app) -> None:
+        """Filing the same proposal twice opens exactly one GitHub issue."""
         gh = review_app["github"]["client"]
         job = _run_review_with(
             review_app,
@@ -2785,6 +2792,7 @@ class TestPreExistingFindings:
         assert len(gh.created_issues) == 1
 
     def test_create_issues_ignores_unknown_proposal_id(self, review_app) -> None:
+        """A proposal id that doesn't exist on the review is silently ignored."""
         gh = review_app["github"]["client"]
         job = _run_review_with(
             review_app,
@@ -2798,6 +2806,7 @@ class TestPreExistingFindings:
         assert gh.created_issues == []
 
     def test_create_issues_unknown_job_returns_404(self, review_app) -> None:
+        """Filing issues for a job id that names no review returns 404."""
         resp = review_app["client"].post(
             "/reviews/does-not-exist/issues", json={"proposal_ids": ["p0"]}
         )
@@ -2806,6 +2815,7 @@ class TestPreExistingFindings:
     def test_create_issues_missing_token_returns_400(
         self, review_app, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Filing issues with no GitHub token configured returns 400."""
         job = _run_review_with(
             review_app,
             [_FakeReviewIssue("high", line=2, file_path="legacy.py", pre_existing=True)],
@@ -2817,6 +2827,7 @@ class TestPreExistingFindings:
         assert resp.status_code == 400
 
     def test_create_issues_github_error_returns_502(self, review_app) -> None:
+        """A GitHub API failure while filing an issue surfaces as 502."""
         gh = review_app["github"]["client"]
         gh.create_issue_fail = True
         job = _run_review_with(
@@ -2829,6 +2840,8 @@ class TestPreExistingFindings:
         assert resp.status_code == 502
 
     def test_create_issues_matching_owner_repo_succeeds(self, review_app) -> None:
+        """A request whose owner/repo matches the reviewed repository (case-
+        insensitively) succeeds."""
         gh = review_app["github"]["client"]
         job = _run_review_with(
             review_app,
@@ -2843,6 +2856,8 @@ class TestPreExistingFindings:
         assert len(gh.created_issues) == 1
 
     def test_create_issues_wrong_owner_repo_returns_409(self, review_app) -> None:
+        """A request whose owner/repo doesn't match the reviewed repository returns
+        409 and opens no issue."""
         gh = review_app["github"]["client"]
         job = _run_review_with(
             review_app,
@@ -2861,6 +2876,8 @@ class TestCreateReviewIssuesUnit:
     """Direct unit tests for create_review_issues / its context loader."""
 
     def test_review_store_fallback_when_job_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When the in-memory job has aged out, the durable review row's proposals
+        are used to file an issue instead."""
         from coding_team.api import main as api_main
         from coding_team.api import pr_review
 
@@ -2911,6 +2928,7 @@ class TestCreateReviewIssuesUnit:
         assert out["proposals"][0]["issue_url"] == "u11"
 
     def test_raises_review_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Neither store knowing the job id raises ReviewNotFoundError."""
         from coding_team.api import main as api_main
         from coding_team.api import pr_review
 
@@ -2920,6 +2938,8 @@ class TestCreateReviewIssuesUnit:
             pr_review.create_review_issues("missing", ["p0"], token="t")
 
     def test_partial_failure_persists_progress(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When one proposal's GitHub call fails, the other's successful creation is
+        still persisted rather than lost."""
         from coding_team.api import main as api_main
         from coding_team.api import pr_review
 
@@ -2973,6 +2993,8 @@ class TestCreateReviewIssuesUnit:
     def test_malformed_proposals_field_yields_no_candidates(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """A non-list pending_issue_proposals field degrades to no candidates rather
+        than raising."""
         from coding_team.api import main as api_main
         from coding_team.api import pr_review
 
@@ -2990,6 +3012,8 @@ class TestCreateReviewIssuesUnit:
     def test_skips_already_filed_proposal_within_one_call(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """A proposal already carrying an issue_url is skipped even when explicitly
+        requested again alongside a genuinely unfiled one."""
         from coding_team.api import main as api_main
         from coding_team.api import pr_review
 
@@ -3109,6 +3133,8 @@ class TestCreateReviewIssuesUnit:
         assert "p1" in logged and "boom-b" in logged
 
     def test_persist_swallows_store_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A failure persisting the updated proposals never fails the request — the
+        GitHub issue already exists regardless of whether the local record updates."""
         from coding_team.api import main as api_main
         from coding_team.api import pr_review
 
@@ -3143,6 +3169,8 @@ class TestCreateReviewIssuesUnit:
         assert out["created"][0]["issue_url"] == "u1"
 
     def test_repo_mismatch_raises_before_any_issue(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A mismatched expected owner/repo raises RepoMismatchError before the
+        GitHub client is ever constructed."""
         from coding_team.api import main as api_main
         from coding_team.api import pr_review
 
@@ -3165,6 +3193,7 @@ class TestCreateReviewIssuesUnit:
             )
 
     def test_repo_match_is_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Expected owner/repo are compared case-insensitively, as GitHub treats them."""
         from coding_team.api import main as api_main
         from coding_team.api import pr_review
 
