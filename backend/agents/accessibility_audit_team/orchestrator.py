@@ -427,15 +427,35 @@ class AccessibilityAuditOrchestrator:
         audit_id: str,
         finding_ids: List[str] = None,
     ) -> AccessibilityAuditResult:
-        """
-        Run retest phase for specific findings or all findings.
+        """Re-verify fixed findings for an existing audit, persisting the updated state.
 
-        Args:
-            audit_id: The audit identifier
-            finding_ids: Optional list of specific finding IDs to retest
-
-        Returns:
-            Updated AccessibilityAuditResult
+        Preconditions:
+            - ``audit_id`` refers to an audit with persisted state (in this
+              process's cache or the artifact store) whose ``final_findings`` are
+              populated; ``finding_ids``, when given, is a list of finding ids to
+              restrict the retest to (empty/``None`` retests every open finding).
+        Postconditions:
+            - Returns ``success=False`` with a ``failure_reason`` (audit not
+              found; or, when ``finding_ids`` was supplied, none of the ids
+              matched a current finding) WITHOUT persisting anything — a
+              caller-input error must never overwrite the audit's real stored
+              state with a no-op notice.
+            - When there is nothing to retest but the request itself was
+              legitimate (no ``finding_ids`` and the audit already has zero
+              ``final_findings``), returns a copy of the loaded result with an
+              informational summary, likewise without persisting — see
+              :func:`finalize_audit_result`'s sibling reasoning for why a no-op
+              must not mutate stored state.
+            - Otherwise runs the retest phase, updates ``final_findings`` from
+              ``retest_result.updated_findings``, records ``Phase.RETEST`` in
+              ``completed_phases`` (idempotently — a retry does not duplicate the
+              entry), persists the result to the artifact store (so a
+              cross-process reader, e.g. the API process reloading via
+              ``get_audit_state``, or a restart, sees the retested findings
+              instead of the stale pre-retest snapshot), and returns it.
+            - Concurrent calls for the same ``audit_id`` are serialized via
+              ``_get_retest_lock`` so one call's in-place mutation of the shared
+              cached object can't interleave with another's.
         """
         async with self._get_retest_lock(audit_id):
             # Refresh from the store BEFORE trusting any in-process cache: in a

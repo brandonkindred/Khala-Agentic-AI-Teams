@@ -11,9 +11,15 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+if TYPE_CHECKING:
+    # Only for the _build_llm_client return-type annotation below — importing
+    # ``strands`` for real stays inside that function's body (this module must
+    # not gain heavier import-time dependencies; see the module docstring).
+    from strands import Agent
 
 from job_service_client import (
     JOB_STATUS_COMPLETED,
@@ -272,7 +278,7 @@ async def execute_audit_job(job_id: str, audit_id: str, request: CreateAuditRequ
 # ---------------------------------------------------------------------------
 
 
-def _build_llm_client() -> object:
+def _build_llm_client() -> "Agent":
     """Build a fresh Strands ``Agent`` LLM client for one phase's agents.
 
     A per-call client (rather than the shared ``get_orchestrator().llm_client``)

@@ -56,15 +56,20 @@ _PHASE_RETRY_POLICY = RetryPolicy(
 #: completed-phases/failure_reason short-circuit — it persists the retested audit
 #: (appending ``Phase.RETEST`` and overwriting ``final_findings``) *before*
 #: ``retest_activity`` writes its own terminal job-store status. If that terminal
-#: write then fails, a retry under ``_PHASE_RETRY_POLICY`` would find the job still
-#: RUNNING and re-run the retest phase against the already-updated findings,
-#: duplicating LLM/scan work and the ``completed_phases`` entry. A single-attempt
-#: policy avoids the unsafe retry entirely; a failed retest surfaces to the caller,
-#: who can issue a fresh retest request instead of Temporal silently redoing one.
+#: write then fails, a retry would find the job still RUNNING and re-run the
+#: retest phase against the already-updated findings, duplicating LLM/scan work.
+#: The ``completed_phases`` half of that risk is separately closed (the append is
+#: guarded with ``if Phase.RETEST not in result.completed_phases``), so a retry's
+#: only remaining cost is wasted duplicate work, not corrupted state — the retest
+#: naturally reconverges to the same result if the underlying findings haven't
+#: changed. A bounded, small retry budget (not the phases' 3) trades a little of
+#: that waste for automatic recovery from a single transient blip, rather than
+#: leaving a failed retest stranded with no recovery until the caller notices and
+#: manually re-submits.
 _RETEST_RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=5),
     maximum_interval=timedelta(minutes=2),
-    maximum_attempts=1,
+    maximum_attempts=2,
 )
 
 # --- Legacy single-activity path (rollout compatibility only) --------------

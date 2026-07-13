@@ -313,15 +313,17 @@ def test_workflow_unpatched_replays_legacy(monkeypatch):
 
 
 def test_retest_workflow_runs_retest_activity(monkeypatch):
-    """The retest workflow drives exactly one retest activity with a single-attempt
-    retry policy — unlike the pipeline phases, ``run_retest`` has no
+    """The retest workflow drives the retest activity with a small, bounded retry
+    policy — unlike the pipeline phases, ``run_retest`` has no
     completed-phases/failure_reason short-circuit, so a Temporal-level retry after
-    the terminal job-store write fails would re-run the (already-applied) retest
-    against the updated findings. ``_RETEST_RETRY_POLICY`` has ``maximum_attempts=1``
-    to avoid that unsafe retry entirely."""
+    the terminal job-store write fails re-runs the (already-applied) retest
+    against the updated findings. That's wasted duplicate work (not corruption —
+    the completed_phases duplicate-entry risk is separately guarded), so
+    ``_RETEST_RETRY_POLICY`` allows one retry (not the phases' 3) rather than
+    zero, trading a little waste for automatic recovery from a transient blip."""
     from accessibility_audit_team.temporal import workflows as wf
 
-    assert wf._RETEST_RETRY_POLICY.maximum_attempts == 1
+    assert wf._RETEST_RETRY_POLICY.maximum_attempts == 2
 
     captured: dict = {}
 
