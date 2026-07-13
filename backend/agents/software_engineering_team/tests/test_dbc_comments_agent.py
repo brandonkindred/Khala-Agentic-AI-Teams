@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from software_engineering_team.shared import llm as llm_mod
 from software_engineering_team.technical_writers.dbc_comments_agent import agent as dbc_mod
 from software_engineering_team.technical_writers.dbc_comments_agent.agent import (
     DbcCommentsAgent,
@@ -14,33 +15,8 @@ from software_engineering_team.technical_writers.dbc_comments_agent.models impor
 )
 
 
-class _FakeAgent:
-    def __init__(self, payload=None, raise_exc=None):
-        self._payload = payload
-        self._raise = raise_exc
-        self.calls = []
-
-    def __call__(self, prompt):
-        self.calls.append(prompt)
-        if self._raise:
-            raise self._raise
-        return json.dumps(self._payload or {})
-
-
-def _build_agent(monkeypatch, fake):
-    monkeypatch.setattr(dbc_mod, "Agent", lambda *a, **kw: fake)
-    monkeypatch.setattr(dbc_mod, "get_strands_model", lambda _k=None, **_kw: object())
-    return DbcCommentsAgent()
-
-
-def test_dbc_init_uses_strands_model(monkeypatch) -> None:
-    monkeypatch.setattr(dbc_mod, "get_strands_model", lambda key, **_kw: object())
-    monkeypatch.setattr(dbc_mod, "Agent", lambda *a, **kw: object())
-    a = DbcCommentsAgent()
-    assert a._agent is not None
-
-
-def test_dbc_init_accepts_strands_model_instance(monkeypatch) -> None:
+def _strands_model_double():
+    """Minimal double satisfying the Strands ``Model`` protocol for isinstance checks."""
     from strands.models.model import Model as StrandsModel
 
     class _M(StrandsModel):
@@ -59,13 +35,46 @@ def test_dbc_init_accepts_strands_model_instance(monkeypatch) -> None:
         async def stream(self, *a, **kw):  # pragma: no cover
             yield {}
 
-    monkeypatch.setattr(dbc_mod, "Agent", lambda *a, **kw: "agent")
-    a = DbcCommentsAgent(llm_client=_M())
-    assert a._agent == "agent"
+    return _M()
+
+
+class _FakeCompleteJson:
+    """Stand-in for complete_json_with_continuation used to unit-test DbcCommentsAgent
+    without exercising the real parsing/recovery logic (that's covered separately in
+    test_shared_llm.py)."""
+
+    def __init__(self, payload=None, raise_exc=None):
+        self._payload = payload
+        self._raise = raise_exc
+        self.calls = []
+
+    def __call__(self, model, prompt, *, system_prompt=None, **kwargs):
+        self.calls.append(prompt)
+        if self._raise:
+            raise self._raise
+        return self._payload or {}
+
+
+def _build_agent(monkeypatch, fake):
+    monkeypatch.setattr(dbc_mod, "complete_json_with_continuation", fake)
+    monkeypatch.setattr(dbc_mod, "get_strands_model", lambda _k=None, **_kw: object())
+    return DbcCommentsAgent()
+
+
+def test_dbc_init_uses_strands_model(monkeypatch) -> None:
+    monkeypatch.setattr(dbc_mod, "get_strands_model", lambda key, **_kw: object())
+    a = DbcCommentsAgent()
+    assert a._model is not None
+
+
+def test_dbc_init_accepts_strands_model_instance(monkeypatch) -> None:
+    m = _strands_model_double()
+    a = DbcCommentsAgent(llm_client=m)
+    assert a._model is m
 
 
 def test_dbc_run_empty_code_returns_compliant(monkeypatch) -> None:
-    fake = _FakeAgent()
+    fake = _FakeCompleteJson()
     a = _build_agent(monkeypatch, fake)
     out = a.run(DbcCommentsInput(code="   "))
     assert out.already_compliant is True
@@ -74,7 +83,7 @@ def test_dbc_run_empty_code_returns_compliant(monkeypatch) -> None:
 
 
 def test_dbc_run_already_compliant(monkeypatch) -> None:
-    fake = _FakeAgent(
+    fake = _FakeCompleteJson(
         {
             "files": {},
             "already_compliant": True,
@@ -94,7 +103,7 @@ def test_dbc_run_already_compliant(monkeypatch) -> None:
 
 
 def test_dbc_run_with_files_changed(monkeypatch) -> None:
-    fake = _FakeAgent(
+    fake = _FakeCompleteJson(
         {
             "files": {"a.py": "# x\ndef f():\n    pass\n"},
             "already_compliant": False,
@@ -114,7 +123,7 @@ def test_dbc_run_with_files_changed(monkeypatch) -> None:
 
 
 def test_dbc_run_llm_exception_fails_open(monkeypatch) -> None:
-    fake = _FakeAgent(raise_exc=RuntimeError("oops"))
+    fake = _FakeCompleteJson(raise_exc=RuntimeError("oops"))
     a = _build_agent(monkeypatch, fake)
     statuses = []
     out = a.run(
@@ -126,8 +135,21 @@ def test_dbc_run_llm_exception_fails_open(monkeypatch) -> None:
     assert any(s == DbcCommentsStatus.FAILED for s, _ in statuses)
 
 
+def test_dbc_run_non_dict_top_level_json_fails_open(monkeypatch) -> None:
+    """A recovered-but-non-object top-level JSON value (e.g. a fenced `[]`) must
+    take the fail-open path, not crash with AttributeError on data.get(...)."""
+
+    def _returns_list(model, prompt, *, system_prompt=None, **kwargs):
+        return []
+
+    a = _build_agent(monkeypatch, _returns_list)
+    out = a.run(DbcCommentsInput(code="def f(): pass"))
+    assert out.already_compliant is True
+    assert "DbC review skipped" in out.summary
+
+
 def test_dbc_run_non_dict_files(monkeypatch) -> None:
-    fake = _FakeAgent({"files": "not a dict", "already_compliant": False})
+    fake = _FakeCompleteJson({"files": "not a dict", "already_compliant": False})
     a = _build_agent(monkeypatch, fake)
     out = a.run(DbcCommentsInput(code="def f(): pass"))
     # Falls back to compliant since no actionable files
@@ -136,19 +158,14 @@ def test_dbc_run_non_dict_files(monkeypatch) -> None:
 
 
 def test_dbc_run_filters_invalid_file_entries(monkeypatch) -> None:
-    """Bypasses JSON serialization to verify the post-parse filter directly."""
-
-    class _RawFake:
-        def __call__(self, prompt):
-            # Return a raw JSON string that the agent will json.loads(); then
-            # the filter strips empty content. We can't put non-string keys in
-            # JSON so we rely on empty-content filtering and non-string values.
-            return (
-                '{"files": {"good.py": "code", "empty.py": "   ", "bad.py": 123},'
-                ' "already_compliant": false, "summary": "ok"}'
-            )
-
-    fake = _RawFake()
+    """Verifies the post-parse filter strips empty/non-string content directly."""
+    fake = _FakeCompleteJson(
+        {
+            "files": {"good.py": "code", "empty.py": "   ", "bad.py": 123},
+            "already_compliant": False,
+            "summary": "ok",
+        }
+    )
     a = _build_agent(monkeypatch, fake)
     out = a.run(DbcCommentsInput(code="def f(): pass"))
     assert set(out.files.keys()) == {"good.py"}
@@ -156,7 +173,7 @@ def test_dbc_run_filters_invalid_file_entries(monkeypatch) -> None:
 
 def test_dbc_run_safety_override(monkeypatch) -> None:
     """LLM says not compliant but returned no files -> override to compliant."""
-    fake = _FakeAgent({"files": {}, "already_compliant": False, "summary": ""})
+    fake = _FakeCompleteJson({"files": {}, "already_compliant": False, "summary": ""})
     a = _build_agent(monkeypatch, fake)
     out = a.run(DbcCommentsInput(code="def f(): pass"))
     assert out.already_compliant is True
@@ -164,7 +181,7 @@ def test_dbc_run_safety_override(monkeypatch) -> None:
 
 
 def test_dbc_run_compliant_no_summary_default_praise(monkeypatch) -> None:
-    fake = _FakeAgent(
+    fake = _FakeCompleteJson(
         {
             "files": {},
             "already_compliant": True,
@@ -179,7 +196,7 @@ def test_dbc_run_compliant_no_summary_default_praise(monkeypatch) -> None:
 def test_dbc_run_with_architecture_context(monkeypatch) -> None:
     from software_engineering_team.shared.models import SystemArchitecture
 
-    fake = _FakeAgent({"files": {}, "already_compliant": True, "summary": "ok"})
+    fake = _FakeCompleteJson({"files": {}, "already_compliant": True, "summary": "ok"})
     a = _build_agent(monkeypatch, fake)
     arch = SystemArchitecture(overview="big picture")
     out = a.run(
@@ -195,7 +212,7 @@ def test_dbc_run_with_architecture_context(monkeypatch) -> None:
 
 
 def test_dbc_status_callbacks_fire(monkeypatch) -> None:
-    fake = _FakeAgent({"files": {}, "already_compliant": True, "summary": "ok"})
+    fake = _FakeCompleteJson({"files": {}, "already_compliant": True, "summary": "ok"})
     a = _build_agent(monkeypatch, fake)
     seen = []
     a.run(
@@ -204,3 +221,20 @@ def test_dbc_status_callbacks_fire(monkeypatch) -> None:
     )
     assert DbcCommentsStatus.STARTING in seen
     assert DbcCommentsStatus.COMPLETE in seen
+
+
+def test_dbc_run_recovers_fenced_json_response(monkeypatch) -> None:
+    """End-to-end (no complete_json_with_continuation mocking): a markdown-fenced
+    LLM response is recovered instead of raising, exercising the real
+    extract_json_from_response fallback through the shared helper."""
+
+    class _FencedAgent:
+        def __call__(self, prompt, **kwargs):
+            payload = {"files": {}, "already_compliant": True, "summary": "fenced ok"}
+            return "```json\n" + json.dumps(payload) + "\n```"
+
+    monkeypatch.setattr(llm_mod, "Agent", lambda *a, **kw: _FencedAgent())
+    a = DbcCommentsAgent(llm_client=_strands_model_double())
+    out = a.run(DbcCommentsInput(code="def f(): pass"))
+    assert out.already_compliant is True
+    assert "fenced" in out.summary

@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from typing import List
-
-from strands import Agent
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import (
     ClarificationGap,
@@ -109,14 +107,11 @@ class DevOpsTaskClarifierAgent:
             f"acceptance_criteria={spec.acceptance_criteria}\n"
             f"rollback={spec.rollback_requirements}\n"
         )
-        data = json.loads(
-            str(
-                Agent(model=self._model)(
-                    DEVOPS_TASK_CLARIFIER_PROMPT + "\n\n---\n\n" + context,
-                    temperature=0.0,
-                    think=True,
-                )
-            ).strip()
+        data = complete_json_with_continuation(
+            self._model,
+            DEVOPS_TASK_CLARIFIER_PROMPT + "\n\n---\n\n" + context,
+            temperature=0.0,
+            think=True,
         )
         return DevOpsTaskClarifierOutput(
             approved_for_execution=bool(data.get("approved_for_execution", True)),
