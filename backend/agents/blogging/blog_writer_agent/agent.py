@@ -233,6 +233,13 @@ class BlogWriterAgent:
     # ------------------------------------------------------------------
     # Planning (delegates to shared.content_planning_loop; also used by
     # blog_planning_agent.BlogPlanningAgent, which delegates identically)
+    #
+    # plan_content() below calls run_content_planning_loop() directly, so it
+    # does not go through these four wrapper methods itself — they exist only
+    # so tests that call/reference them as BlogWriterAgent methods keep
+    # working without a rewrite.
+    # TODO: remove once blog_writer_agent tests call
+    # shared.content_planning_loop directly instead of these methods.
     # ------------------------------------------------------------------
 
     @staticmethod

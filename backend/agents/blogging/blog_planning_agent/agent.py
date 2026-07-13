@@ -9,14 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 from shared.content_plan import PlanningInput, PlanningPhaseResult
-from shared.content_planning_loop import (
-    build_generate_plan_prompt,
-    build_refine_plan_prompt,
-    complete_plan_json,
-    planning_done,
-    post_validate_plan,
-    run_content_planning_loop,
-)
+from shared.content_planning_loop import complete_plan_json, run_content_planning_loop
 from shared.content_profile import LengthPolicy
 from shared.planning_config import planning_max_iterations, planning_max_parse_retries
 from strands import Agent
@@ -26,16 +19,6 @@ from llm_service import extract_json_from_response
 from .prompts import GENERATE_PLAN_SYSTEM, REFINE_PLAN_SYSTEM
 
 logger = logging.getLogger(__name__)
-
-# Module-level aliases: existing tests import these names directly from this
-# module (e.g. ``from blog_planning_agent.agent import _post_validate``); the
-# underlying logic now lives in shared.content_planning_loop.
-# TODO: remove once blog_planning_agent tests import directly from
-# shared.content_planning_loop.
-_post_validate = post_validate_plan
-_planning_done = planning_done
-_build_generate_prompt = build_generate_plan_prompt
-_build_refine_prompt = build_refine_plan_prompt
 
 
 class BlogPlanningAgent:

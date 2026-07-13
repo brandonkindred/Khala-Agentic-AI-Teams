@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from blog_planning_agent import BlogPlanningAgent
-from blog_planning_agent.agent import _post_validate
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
@@ -12,6 +11,7 @@ from shared.content_plan import (
     TitleCandidate,
     section_count_bounds_for_profile,
 )
+from shared.content_planning_loop import post_validate_plan
 from shared.content_profile import ContentProfile, LengthPolicy, resolve_length_policy
 
 from llm_service import DummyLLMClient
@@ -76,6 +76,6 @@ def test_post_validate_flags_section_count() -> None:
             research_gaps=[],
         ),
     )
-    out = _post_validate(plan, _policy_standard())
+    out = post_validate_plan(plan, _policy_standard())
     assert out.requirements_analysis.plan_acceptable is False
     assert any("outside expected range" in g for g in out.requirements_analysis.gaps)

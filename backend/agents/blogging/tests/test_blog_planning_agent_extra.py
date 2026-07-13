@@ -6,11 +6,7 @@ import json
 from typing import Any
 
 import pytest
-from blog_planning_agent.agent import (
-    BlogPlanningAgent,
-    _build_generate_prompt,
-    _build_refine_prompt,
-)
+from blog_planning_agent.agent import BlogPlanningAgent
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
@@ -18,6 +14,7 @@ from shared.content_plan import (
     RequirementsAnalysis,
     TitleCandidate,
 )
+from shared.content_planning_loop import build_generate_plan_prompt, build_refine_plan_prompt
 from shared.content_profile import ContentProfile, resolve_length_policy
 from shared.errors import PlanningError
 
@@ -60,7 +57,7 @@ def test_build_generate_prompt_with_optional_fields() -> None:
         research_digest="digest",
         series_context_block="series block content",
     )
-    out = _build_generate_prompt(inp)
+    out = build_generate_plan_prompt(inp)
     assert "audience-x" in out
     assert "tone-y" in out
     assert "series block content" in out
@@ -73,7 +70,7 @@ def test_build_generate_prompt_skips_blank_series_block() -> None:
         research_digest="digest",
         series_context_block="   ",
     )
-    out = _build_generate_prompt(inp)
+    out = build_generate_plan_prompt(inp)
     assert "series" not in out.lower()
 
 
@@ -94,7 +91,7 @@ def test_build_refine_prompt_includes_previous_plan_and_feedback() -> None:
             research_gaps=[],
         ),
     )
-    out = _build_refine_prompt(inp, prev, "fix gaps")
+    out = build_refine_plan_prompt(inp, prev, "fix gaps")
     assert "fix gaps" in out
     assert "PREVIOUS PLAN" in out
 

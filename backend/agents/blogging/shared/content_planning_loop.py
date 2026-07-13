@@ -2,7 +2,7 @@
 Shared content-planning-loop logic for the blogging team.
 
 Extracted from ``blog_planning_agent.agent`` / ``blog_writer_agent.agent``,
-which had re-implemented this control flow byte-for-byte. The two agents'
+which had re-implemented this control flow nearly identically. The two agents'
 underlying LLM-call primitives differ (``BlogPlanningAgent._call_agent`` vs
 ``BlogWriterAgent._call_agent_json``/``_call_json_raw``), so callers inject
 those as closures captured at call time rather than this module calling an
