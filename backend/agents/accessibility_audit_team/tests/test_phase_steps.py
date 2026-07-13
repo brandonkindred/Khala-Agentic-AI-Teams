@@ -836,6 +836,69 @@ def test_mark_audit_timed_out_does_not_raise_on_clean_miss(monkeypatch):
     assert failed and "timed out after 1 hour" in failed[0].kwargs["error"]
 
 
+@pytest.mark.parametrize("terminal_status", ["completed", "failed"])
+def test_mark_audit_timed_out_skips_when_job_already_terminal(monkeypatch, terminal_status):
+    """The workflow's timebox timer and its phase chain genuinely race: the
+    phase chain can finish and persist a result microseconds before the timer
+    fires, so by the time this activity runs the job may already be terminal.
+    Overwriting a genuine outcome (success or an unrelated failure) with a
+    spurious 'timed out' one would be worse than a no-op here."""
+    load = mock.AsyncMock()
+    monkeypatch.setattr(ax, "_load_audit_state_strict", load)
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": terminal_status}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+
+    asyncio.run(ax.mark_audit_timed_out("j1", "a1", 2))  # must not raise
+
+    load.assert_not_awaited()
+    jm.update_job.assert_not_called()
+
+
+def test_mark_audit_timed_out_skips_when_persisted_state_already_terminal(monkeypatch):
+    """Even when the job-store write hasn't landed yet (job still shows
+    RUNNING), a persisted audit state that already reached a terminal outcome
+    (finalize_audit_step's persist landed before this read) must not be
+    overwritten with a timeout — the race window this closes is between that
+    persist and finalize_activity's own job-store write."""
+    seeded = AccessibilityAuditResult(audit_id="a1", success=True, total_findings=3)
+    monkeypatch.setattr(ax, "_load_audit_state_strict", mock.AsyncMock(return_value=seeded))
+    persist = mock.AsyncMock()
+    monkeypatch.setattr(ax, "persist_audit_state", persist)
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_RUNNING}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+
+    asyncio.run(ax.mark_audit_timed_out("j1", "a1", 2))  # must not raise
+
+    persist.assert_not_awaited()
+    jm.update_job.assert_not_called()
+    # The genuinely-successful result must not be flipped to a failure.
+    assert seeded.success is True
+    assert seeded.failure_reason == ""
+
+
+def test_mark_audit_timed_out_skips_when_persisted_failure_already_terminal(monkeypatch):
+    """Same guard, other terminal branch: a persisted state that already failed
+    for a different, genuine reason must not have that reason overwritten with
+    a misleading 'timed out' one."""
+    seeded = AccessibilityAuditResult(
+        audit_id="a1", success=False, failure_reason="Discovery failed: scan crashed"
+    )
+    monkeypatch.setattr(ax, "_load_audit_state_strict", mock.AsyncMock(return_value=seeded))
+    persist = mock.AsyncMock()
+    monkeypatch.setattr(ax, "persist_audit_state", persist)
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_RUNNING}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+
+    asyncio.run(ax.mark_audit_timed_out("j1", "a1", 2))  # must not raise
+
+    persist.assert_not_awaited()
+    jm.update_job.assert_not_called()
+    assert seeded.failure_reason == "Discovery failed: scan crashed"
+
+
 def test_load_audit_state_strict_round_trips_like_load(monkeypatch):
     """On a clean hit, the strict loader returns the same state as the swallowing one."""
     result = AccessibilityAuditResult(audit_id="strict_rt", success=True, total_findings=1)

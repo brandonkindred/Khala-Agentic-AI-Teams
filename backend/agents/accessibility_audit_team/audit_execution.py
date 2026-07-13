@@ -833,8 +833,25 @@ async def mark_audit_timed_out(job_id: str, audit_id: str, timebox_hours: int) -
     Preconditions:
         - ``job_id``/``audit_id`` are non-empty and a job row exists for ``job_id``.
     Postconditions:
-        - The job is marked ``failed`` with a timeout reason; when persisted audit
-          state exists it is also flipped to ``success=False`` with that reason.
+        - If the job is already terminal, OR the persisted audit state already
+          reflects a terminal outcome (``success`` or ``failure_reason`` set), this
+          is a no-op: the workflow's timebox timer and its phase chain genuinely
+          race (``asyncio.wait(..., FIRST_COMPLETED)`` can report the timer as the
+          sole winner even when ``finalize_audit_step`` finished and persisted a
+          successful result microseconds earlier — the workflow only reacts to
+          activity-completion events it has already received, so it cannot itself
+          detect this at the point it schedules this activity). A concurrent path
+          already legitimately decided the job's outcome, and overwriting a
+          genuine success (or an unrelated genuine failure) with a spurious
+          "timed out" one would be worse than leaving this call a no-op. This is
+          the same narrowing (not fully closing) TOCTOU guard used throughout this
+          module — the job-service client has no compare-and-swap primitive to
+          make the check-then-write atomic — but it shrinks the race window from
+          "the whole phase chain vs. the timer" down to "the gap between this
+          function's own checks and its own writes."
+        - Otherwise the job is marked ``failed`` with a timeout reason; when
+          persisted audit state exists it is also flipped to ``success=False``
+          with that reason.
         - Raises ``RuntimeError`` if persisting that flipped state fails, or if
           the state could not even be read (a transient artifact-store error, as
           opposed to a clean "nothing was ever persisted" miss) — either way,
@@ -846,6 +863,16 @@ async def mark_audit_timed_out(job_id: str, audit_id: str, timebox_hours: int) -
           persisted before the timeout, e.g. intake itself never completed) is
           distinguished from a read failure and does not spuriously retry.
     """
+    manager = get_job_manager()
+    existing = manager.get_job(job_id)
+    if existing is not None and existing.get("status") in (JOB_STATUS_COMPLETED, JOB_STATUS_FAILED):
+        logger.warning(
+            "Skipping timeout handling for job %s: job is already terminal (status=%s)",
+            job_id,
+            existing.get("status"),
+        )
+        return
+
     read_failed = False
     try:
         result = await _load_audit_state_strict(audit_id)
@@ -853,6 +880,14 @@ async def mark_audit_timed_out(job_id: str, audit_id: str, timebox_hours: int) -
         logger.warning("Failed to read audit state for timeout handling: %s", e)
         result = None
         read_failed = True
+
+    if result is not None and (result.success or result.failure_reason):
+        logger.warning(
+            "Skipping timeout handling for audit %s: persisted state is already terminal",
+            audit_id,
+        )
+        return
+
     completed = [p.value for p in result.completed_phases] if result is not None else []
     reason = f"Audit timed out after {timebox_hours} hour(s). Completed phases: {completed}"
     persisted = True
@@ -860,7 +895,7 @@ async def mark_audit_timed_out(job_id: str, audit_id: str, timebox_hours: int) -
         result.success = False
         result.failure_reason = reason
         persisted = await persist_audit_state(result)
-    get_job_manager().update_job(
+    manager.update_job(
         job_id,
         status=JOB_STATUS_FAILED,
         error=reason,

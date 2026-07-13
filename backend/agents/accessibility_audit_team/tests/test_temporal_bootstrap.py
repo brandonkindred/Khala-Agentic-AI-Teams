@@ -1148,21 +1148,38 @@ def test_heartbeat_activity_and_job_propagates_temporal_cancellation(monkeypatch
     manager.heartbeat.assert_not_called()
 
 
-class _FakeBackgroundHeartbeat:
-    """Stand-in for ``shared_concurrency.BackgroundHeartbeat`` that just captures
-    the ``beat`` callable instead of running a real background thread, so tests
-    can invoke it directly to assert on the combined heartbeat wiring."""
+def _make_fake_background_heartbeat():
+    """Build a fresh stand-in class for ``shared_concurrency.BackgroundHeartbeat``
+    that captures the ``beat`` callable instead of running a real background
+    thread, so a test can invoke it directly to assert on the combined heartbeat
+    wiring.
 
-    captured_beat = None
+    The code under test uses ``BackgroundHeartbeat`` as a context manager and
+    never hands the instance back to its caller, so a test has no way to reach
+    "the instance" after the fact — the capture has to live somewhere the test
+    can read afterward. Returning a brand-new class with its own closed-over
+    ``captured`` dict (rather than one shared class-level attribute reused by
+    every test) keeps each test's capture fully isolated: a single shared class
+    attribute would leak the most-recently-captured ``beat`` across tests if
+    they were ever run concurrently (e.g. under pytest-xdist).
 
-    def __init__(self, beat, interval_s, copy_context=False):
-        _FakeBackgroundHeartbeat.captured_beat = beat
+    Postconditions:
+        - Returns ``(FakeBackgroundHeartbeat, captured)`` where ``captured`` is a
+          dict populated with ``{"beat": beat}`` on construction.
+    """
+    captured = {}
 
-    def __enter__(self):
-        return self
+    class _FakeBackgroundHeartbeat:
+        def __init__(self, beat, interval_s, copy_context=False):
+            captured["beat"] = beat
 
-    def __exit__(self, *exc_info):
-        return False
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    return _FakeBackgroundHeartbeat, captured
 
 
 def test_run_phase_wires_combined_heartbeat(monkeypatch):
@@ -1176,7 +1193,8 @@ def test_run_phase_wires_combined_heartbeat(monkeypatch):
     jm = mock.Mock()
     jm.get_job.return_value = None
     monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
-    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", _FakeBackgroundHeartbeat)
+    fake_heartbeat_cls, captured = _make_fake_background_heartbeat()
+    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", fake_heartbeat_cls)
     beat_activity = mock.Mock()
     monkeypatch.setattr(acts.activity, "heartbeat", beat_activity)
 
@@ -1185,8 +1203,8 @@ def test_run_phase_wires_combined_heartbeat(monkeypatch):
 
     asyncio.run(acts._run_phase("j1", "a1", "discovery", 40, step, heartbeat=True))
 
-    assert _FakeBackgroundHeartbeat.captured_beat is not None
-    _FakeBackgroundHeartbeat.captured_beat()
+    assert captured.get("beat") is not None
+    captured["beat"]()
     beat_activity.assert_called_once()
     jm.heartbeat.assert_called_once_with("j1")
 
@@ -1201,14 +1219,15 @@ def test_finalize_activity_wires_combined_heartbeat(monkeypatch):
     monkeypatch.setattr(
         ax, "finalize_audit_step", mock.AsyncMock(return_value=_finalized_result(True))
     )
-    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", _FakeBackgroundHeartbeat)
+    fake_heartbeat_cls, captured = _make_fake_background_heartbeat()
+    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", fake_heartbeat_cls)
     beat_activity = mock.Mock()
     monkeypatch.setattr(acts.activity, "heartbeat", beat_activity)
 
     asyncio.run(acts.finalize_activity("j1", "a1"))
 
-    assert _FakeBackgroundHeartbeat.captured_beat is not None
-    _FakeBackgroundHeartbeat.captured_beat()
+    assert captured.get("beat") is not None
+    captured["beat"]()
     beat_activity.assert_called_once()
     jm.heartbeat.assert_called_once_with("j1")
 
@@ -1221,14 +1240,15 @@ def test_retest_activity_wires_combined_heartbeat(monkeypatch):
     jm = _patch_activity_jobmanager(monkeypatch)
     jm.get_job.return_value = None
     monkeypatch.setattr(ax, "run_retest_job", mock.AsyncMock())
-    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", _FakeBackgroundHeartbeat)
+    fake_heartbeat_cls, captured = _make_fake_background_heartbeat()
+    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", fake_heartbeat_cls)
     beat_activity = mock.Mock()
     monkeypatch.setattr(acts.activity, "heartbeat", beat_activity)
 
     asyncio.run(acts.retest_activity("j1", "a1", ["f1"]))
 
-    assert _FakeBackgroundHeartbeat.captured_beat is not None
-    _FakeBackgroundHeartbeat.captured_beat()
+    assert captured.get("beat") is not None
+    captured["beat"]()
     beat_activity.assert_called_once()
     jm.heartbeat.assert_called_once_with("j1")
 
