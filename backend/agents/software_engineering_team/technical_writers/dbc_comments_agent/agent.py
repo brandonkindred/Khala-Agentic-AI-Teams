@@ -125,6 +125,8 @@ class DbcCommentsAgent:
             data = complete_json_with_continuation(
                 self._model, prompt, system_prompt=DBC_COMMENTS_PROMPT
             )
+            if not isinstance(data, dict):
+                raise ValueError(f"expected a JSON object, got {type(data).__name__}")
         except Exception as e:
             # Fail-open: if LLM call fails, don't block the pipeline
             logger.warning(

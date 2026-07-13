@@ -135,6 +135,19 @@ def test_dbc_run_llm_exception_fails_open(monkeypatch) -> None:
     assert any(s == DbcCommentsStatus.FAILED for s, _ in statuses)
 
 
+def test_dbc_run_non_dict_top_level_json_fails_open(monkeypatch) -> None:
+    """A recovered-but-non-object top-level JSON value (e.g. a fenced `[]`) must
+    take the fail-open path, not crash with AttributeError on data.get(...)."""
+
+    def _returns_list(model, prompt, *, system_prompt=None, **kwargs):
+        return []
+
+    a = _build_agent(monkeypatch, _returns_list)
+    out = a.run(DbcCommentsInput(code="def f(): pass"))
+    assert out.already_compliant is True
+    assert "DbC review skipped" in out.summary
+
+
 def test_dbc_run_non_dict_files(monkeypatch) -> None:
     fake = _FakeCompleteJson({"files": "not a dict", "already_compliant": False})
     a = _build_agent(monkeypatch, fake)
