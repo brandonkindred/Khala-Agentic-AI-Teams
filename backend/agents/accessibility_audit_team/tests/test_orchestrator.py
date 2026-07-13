@@ -35,7 +35,9 @@ def _make_intake_result(audit_id: str = "audit_test") -> IntakeResult:
 
 
 def _make_discovery_result() -> DiscoveryResult:
-    return DiscoveryResult(success=True, draft_findings=[], pages_scanned=1, summary="Discovery done")
+    return DiscoveryResult(
+        success=True, draft_findings=[], pages_scanned=1, summary="Discovery done"
+    )
 
 
 def _make_verification_result() -> VerificationResult:
@@ -60,22 +62,27 @@ def _make_report_result() -> ReportPackagingResult:
 @pytest.mark.anyio
 async def test_full_audit_lifecycle():
     """Orchestrator runs all 4 phases to completion."""
-    with patch(
-        "accessibility_audit_team.orchestrator.run_intake_phase",
-        new_callable=AsyncMock,
-        return_value=_make_intake_result(),
-    ), patch(
-        "accessibility_audit_team.orchestrator.run_discovery_phase",
-        new_callable=AsyncMock,
-        return_value=_make_discovery_result(),
-    ), patch(
-        "accessibility_audit_team.orchestrator.run_verification_phase",
-        new_callable=AsyncMock,
-        return_value=_make_verification_result(),
-    ), patch(
-        "accessibility_audit_team.orchestrator.run_report_packaging_phase",
-        new_callable=AsyncMock,
-        return_value=_make_report_result(),
+    with (
+        patch(
+            "accessibility_audit_team.orchestrator.run_intake_phase",
+            new_callable=AsyncMock,
+            return_value=_make_intake_result(),
+        ),
+        patch(
+            "accessibility_audit_team.orchestrator.run_discovery_phase",
+            new_callable=AsyncMock,
+            return_value=_make_discovery_result(),
+        ),
+        patch(
+            "accessibility_audit_team.orchestrator.run_verification_phase",
+            new_callable=AsyncMock,
+            return_value=_make_verification_result(),
+        ),
+        patch(
+            "accessibility_audit_team.orchestrator.run_report_packaging_phase",
+            new_callable=AsyncMock,
+            return_value=_make_report_result(),
+        ),
     ):
         orchestrator = AccessibilityAuditOrchestrator()
         request = AuditRequest(
@@ -132,6 +139,7 @@ async def test_audit_timeout():
             "run_audit",
             wraps=orchestrator.run_audit,
         ):
+
             async def patched_run(req, tech_stack=None):
                 # Test the timeout logic by calling _run_audit_phases with a tiny timeout
                 result_obj = AccessibilityAuditResult(
@@ -182,6 +190,46 @@ async def test_run_retest_persists_updated_state(monkeypatch, sample_findings):
 
     persist.assert_awaited()
     assert Phase.RETEST in result.completed_phases
+
+
+@pytest.mark.anyio
+async def test_run_retest_reloads_fresh_state_instead_of_trusting_stale_cache(
+    monkeypatch, sample_findings
+):
+    """In a multi-worker Temporal deployment, a different worker process may have
+    already retested this audit and persisted newer finding states since this
+    process last cached it. run_retest must refresh from the store BEFORE
+    mutating — trusting the stale in-process cache (the old _ensure_loaded
+    behavior) would let this call's persist silently clobber that other
+    worker's update."""
+    orchestrator = AccessibilityAuditOrchestrator()
+    stale = AccessibilityAuditResult(
+        audit_id="audit_rt", final_findings=sample_findings, summary="stale (this process)"
+    )
+    fresh_findings = [
+        f.model_copy(update={"summary": "fresh from another worker"}) for f in sample_findings
+    ]
+    fresh = AccessibilityAuditResult(
+        audit_id="audit_rt", final_findings=fresh_findings, summary="fresh (another worker)"
+    )
+    orchestrator._audits["audit_rt"] = stale
+    monkeypatch.setattr(orchestrator, "_load_audit", AsyncMock(return_value=fresh))
+    persist = AsyncMock()
+    monkeypatch.setattr(orchestrator, "_persist_audit", persist)
+
+    with patch(
+        "accessibility_audit_team.orchestrator.run_retest_phase",
+        new_callable=AsyncMock,
+        return_value=RetestResult(
+            success=True, findings_retested=3, findings_closed=1, findings_still_open=2
+        ),
+    ):
+        result = await orchestrator.run_retest("audit_rt", None)
+
+    # The persisted/returned result is built on the FRESH state, not the stale cache.
+    persisted_result = persist.await_args.args[0]
+    assert persisted_result.final_findings[0].summary == "fresh from another worker"
+    assert result.final_findings[0].summary == "fresh from another worker"
 
 
 @pytest.mark.anyio
@@ -284,9 +332,10 @@ def test_get_retest_lock_is_evicted_once_unreferenced():
 @pytest.mark.anyio
 async def test_run_retest_serializes_concurrent_calls_for_same_audit(monkeypatch, sample_findings):
     """Two concurrent run_retest calls for the same audit_id must not interleave:
-    ``_ensure_loaded`` caches and returns the SAME AccessibilityAuditResult
-    instance for both, so without the lock the second call could mutate it out
-    from under the first before either persists."""
+    with no store write between them, both calls' store reload misses and each
+    falls back to the SAME cached AccessibilityAuditResult instance, so without
+    the lock the second call could mutate it out from under the first before
+    either persists."""
     orchestrator = AccessibilityAuditOrchestrator()
     orchestrator._audits["audit_rt"] = AccessibilityAuditResult(
         audit_id="audit_rt", final_findings=sample_findings
@@ -347,11 +396,34 @@ def test_get_audit_status_reports_in_progress_when_running():
 
 
 @pytest.mark.anyio
+async def test_load_audit_strict_round_trips_via_real_store():
+    """Exercises _load_audit_strict's actual delegation to
+    audit_execution._load_audit_state_strict (not mocked elsewhere in this file)."""
+    from accessibility_audit_team.audit_execution import persist_audit_state
+
+    orchestrator = AccessibilityAuditOrchestrator()
+    seeded = AccessibilityAuditResult(audit_id="orch_strict_rt", success=True, total_findings=2)
+    assert await persist_audit_state(seeded) is True
+
+    loaded = await orchestrator._load_audit_strict("orch_strict_rt")
+
+    assert loaded is not None
+    assert loaded.audit_id == "orch_strict_rt"
+    assert loaded.total_findings == 2
+
+
+@pytest.mark.anyio
+async def test_load_audit_strict_returns_none_on_clean_miss():
+    orchestrator = AccessibilityAuditOrchestrator()
+    assert await orchestrator._load_audit_strict("does_not_exist_anywhere") is None
+
+
+@pytest.mark.anyio
 async def test_get_audit_state_loads_from_store(monkeypatch):
     """The public get_audit_state resolves via the artifact store when not cached."""
     orchestrator = AccessibilityAuditOrchestrator()
     seeded = AccessibilityAuditResult(audit_id="a1", success=True)
-    monkeypatch.setattr(orchestrator, "_load_audit", AsyncMock(return_value=seeded))
+    monkeypatch.setattr(orchestrator, "_load_audit_strict", AsyncMock(return_value=seeded))
     loaded = await orchestrator.get_audit_state("a1")
     assert loaded is seeded
     # cached on the way out
@@ -360,16 +432,16 @@ async def test_get_audit_state_loads_from_store(monkeypatch):
 
 @pytest.mark.anyio
 async def test_get_audit_state_always_refreshes_stale_cache(monkeypatch):
-    """Unlike _ensure_loaded (used internally by run_retest), get_audit_state must
-    not trust a cached snapshot forever: a Temporal worker (or a retest handled by
-    a different process/instance) can keep advancing the persisted state after
-    this process cached an earlier one, and get_audit_state is the cross-process
-    source of truth callers rely on to see that newer state."""
+    """get_audit_state must not trust a cached snapshot forever: a Temporal
+    worker (or a retest handled by a different process/instance) can keep
+    advancing the persisted state after this process cached an earlier one, and
+    get_audit_state is the cross-process source of truth callers rely on to see
+    that newer state."""
     orchestrator = AccessibilityAuditOrchestrator()
     stale = AccessibilityAuditResult(audit_id="a1", success=False, summary="stale")
     fresh = AccessibilityAuditResult(audit_id="a1", success=True, summary="fresh")
     orchestrator._audits["a1"] = stale
-    monkeypatch.setattr(orchestrator, "_load_audit", AsyncMock(return_value=fresh))
+    monkeypatch.setattr(orchestrator, "_load_audit_strict", AsyncMock(return_value=fresh))
 
     loaded = await orchestrator.get_audit_state("a1")
 
@@ -379,12 +451,29 @@ async def test_get_audit_state_always_refreshes_stale_cache(monkeypatch):
 
 @pytest.mark.anyio
 async def test_get_audit_state_falls_back_to_cache_on_store_miss(monkeypatch):
-    """A transient store hiccup (or a race where nothing is persisted yet) must
-    not spuriously 404 an audit this process already has cached."""
+    """A clean store miss (a race where nothing is persisted yet) must not
+    spuriously 404 an audit this process already has cached."""
     orchestrator = AccessibilityAuditOrchestrator()
     cached = AccessibilityAuditResult(audit_id="a1", success=True)
     orchestrator._audits["a1"] = cached
-    monkeypatch.setattr(orchestrator, "_load_audit", AsyncMock(return_value=None))
+    monkeypatch.setattr(orchestrator, "_load_audit_strict", AsyncMock(return_value=None))
+
+    loaded = await orchestrator.get_audit_state("a1")
+
+    assert loaded is cached
+
+
+@pytest.mark.anyio
+async def test_get_audit_state_falls_back_to_cache_on_store_read_error(monkeypatch):
+    """A genuine store READ ERROR (not a clean miss) must also fall back to an
+    existing cached copy when this process has one — a transient hiccup must not
+    spuriously 404 an audit this process already knows about."""
+    orchestrator = AccessibilityAuditOrchestrator()
+    cached = AccessibilityAuditResult(audit_id="a1", success=True)
+    orchestrator._audits["a1"] = cached
+    monkeypatch.setattr(
+        orchestrator, "_load_audit_strict", AsyncMock(side_effect=RuntimeError("store down"))
+    )
 
     loaded = await orchestrator.get_audit_state("a1")
 
@@ -394,9 +483,26 @@ async def test_get_audit_state_falls_back_to_cache_on_store_miss(monkeypatch):
 @pytest.mark.anyio
 async def test_get_audit_state_returns_none_when_nothing_cached_or_persisted(monkeypatch):
     orchestrator = AccessibilityAuditOrchestrator()
-    monkeypatch.setattr(orchestrator, "_load_audit", AsyncMock(return_value=None))
+    monkeypatch.setattr(orchestrator, "_load_audit_strict", AsyncMock(return_value=None))
 
     assert await orchestrator.get_audit_state("nonexistent") is None
+
+
+@pytest.mark.anyio
+async def test_get_audit_state_propagates_read_error_when_nothing_cached(monkeypatch):
+    """The key fix: for a Temporal-run audit, the API process typically has NO
+    cache entry at all (it never ran the audit itself). With nothing to fall back
+    to, a genuine store read error must propagate rather than being swallowed to
+    None — which callers (the report/findings/export/retest existence checks)
+    would otherwise read as "audit not found" (404) instead of a retryable
+    infrastructure error."""
+    orchestrator = AccessibilityAuditOrchestrator()
+    monkeypatch.setattr(
+        orchestrator, "_load_audit_strict", AsyncMock(side_effect=RuntimeError("store down"))
+    )
+
+    with pytest.raises(RuntimeError, match="store down"):
+        await orchestrator.get_audit_state("a1")
 
 
 @pytest.mark.anyio
@@ -410,7 +516,7 @@ async def test_get_audit_state_trusts_locally_running_object_without_reload(monk
     orchestrator._audits["a1"] = live
     orchestrator._locally_running_audits.add("a1")
     load_audit = AsyncMock(return_value=AccessibilityAuditResult(audit_id="a1", success=True))
-    monkeypatch.setattr(orchestrator, "_load_audit", load_audit)
+    monkeypatch.setattr(orchestrator, "_load_audit_strict", load_audit)
 
     loaded = await orchestrator.get_audit_state("a1")
 

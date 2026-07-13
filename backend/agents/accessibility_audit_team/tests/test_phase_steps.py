@@ -715,7 +715,7 @@ def test_mark_audit_timed_out_marks_job_and_state(monkeypatch):
     import json
 
     seeded = AccessibilityAuditResult(audit_id="a1", completed_phases=[Phase.INTAKE])
-    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=seeded))
+    monkeypatch.setattr(ax, "_load_audit_state_strict", mock.AsyncMock(return_value=seeded))
     jm = mock.Mock()
     monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
 
@@ -738,7 +738,7 @@ def test_mark_audit_timed_out_marks_job_and_state(monkeypatch):
 
 def test_mark_audit_timed_out_without_persisted_state(monkeypatch):
     """With no persisted state, the job is still marked failed with a timeout reason."""
-    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=None))
+    monkeypatch.setattr(ax, "_load_audit_state_strict", mock.AsyncMock(return_value=None))
     jm = mock.Mock()
     monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
 
@@ -757,7 +757,7 @@ def test_mark_audit_timed_out_raises_when_persist_fails(monkeypatch):
     otherwise audit_state_{audit_id} stays stale (not reflecting the timeout) for
     any /report or /findings reader, with no retry to fix it."""
     seeded = AccessibilityAuditResult(audit_id="a1", completed_phases=[Phase.INTAKE])
-    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=seeded))
+    monkeypatch.setattr(ax, "_load_audit_state_strict", mock.AsyncMock(return_value=seeded))
     monkeypatch.setattr(ax, "persist_audit_state", mock.AsyncMock(return_value=False))
     jm = mock.Mock()
     monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
@@ -770,6 +770,47 @@ def test_mark_audit_timed_out_raises_when_persist_fails(monkeypatch):
         c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
     ]
     assert failed
+
+
+def test_mark_audit_timed_out_raises_when_read_fails(monkeypatch):
+    """A transient artifact-store READ failure (as opposed to a clean "nothing
+    was ever persisted" miss) must be distinguished by the strict loader: the job
+    is still marked failed (best-effort, with empty/default recovered fields),
+    but the activity raises so Temporal retries — otherwise a stale, unmarked
+    audit_state_{audit_id} left over from before the timeout is never fixed."""
+    monkeypatch.setattr(
+        ax, "_load_audit_state_strict", mock.AsyncMock(side_effect=RuntimeError("store down"))
+    )
+    persist = mock.AsyncMock()
+    monkeypatch.setattr(ax, "persist_audit_state", persist)
+    jm = mock.Mock()
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+
+    with pytest.raises(RuntimeError, match="failed to persist audit state"):
+        asyncio.run(ax.mark_audit_timed_out("j1", "a1", 3))
+
+    persist.assert_not_awaited()  # nothing to persist — the read itself failed
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed and "timed out after 3 hour" in failed[0].kwargs["error"]
+
+
+def test_mark_audit_timed_out_does_not_raise_on_clean_miss(monkeypatch):
+    """A genuine miss (nothing was ever persisted before the timeout, e.g. intake
+    itself never completed) must NOT be mistaken for a read failure — no raise,
+    matching the existing test_mark_audit_timed_out_without_persisted_state
+    behavior, now via the strict loader."""
+    monkeypatch.setattr(ax, "_load_audit_state_strict", mock.AsyncMock(return_value=None))
+    jm = mock.Mock()
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+
+    asyncio.run(ax.mark_audit_timed_out("j1", "a1", 1))  # must not raise
+
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_FAILED
+    ]
+    assert failed and "timed out after 1 hour" in failed[0].kwargs["error"]
 
 
 def test_load_audit_state_strict_round_trips_like_load(monkeypatch):

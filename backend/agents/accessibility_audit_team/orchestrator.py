@@ -331,33 +331,28 @@ class AccessibilityAuditOrchestrator:
 
         return await load_audit_state(audit_id)
 
-    async def _ensure_loaded(self, audit_id: str) -> Optional[AccessibilityAuditResult]:
-        """Return the audit from cache or load from persistent store.
+    async def _load_audit_strict(self, audit_id: str) -> Optional[AccessibilityAuditResult]:
+        """Load audit state, propagating a genuine store/deserialization error.
 
-        Internal helper for ``run_retest``'s cache-and-mutate pattern: a cache hit
-        is trusted and returned as-is (never re-checked against the store), so the
-        SAME object instance is returned across repeated calls for one audit_id —
-        callers that need a cross-process-fresh view must use ``get_audit_state``
-        instead, which always reloads.
+        Unlike :meth:`_load_audit` (which swallows any failure to ``None``), used
+        by :meth:`get_audit_state` so a transient read error can be distinguished
+        from a clean "this audit_id was never persisted" miss.
         """
-        if audit_id in self._audits:
-            return self._audits[audit_id]
-        loaded = await self._load_audit(audit_id)
-        if loaded:
-            self._audits[audit_id] = loaded
-        return loaded
+        from .audit_execution import _load_audit_state_strict
+
+        return await _load_audit_state_strict(audit_id)
 
     async def get_audit_state(self, audit_id: str) -> Optional[AccessibilityAuditResult]:
         """Return an audit's full state, refreshed from the artifact store.
 
         The public, cross-process-aware lookup, used as the cross-process source of
         truth (e.g. by the findings/report/export/case-study/retest endpoints'
-        existence checks). Unlike ``_ensure_loaded`` (used internally by
-        ``run_retest``'s cache-and-mutate pattern), a cache hit here is NOT trusted
-        forever: a Temporal worker — or another retest — can keep advancing an
-        audit's persisted state after this process cached an earlier snapshot (via
-        an earlier call to this method, or ``run_audit``/``run_retest`` seeding the
-        cache), so always reloading avoids serving a permanently stale result.
+        existence checks, and by ``run_retest``'s own reload-before-mutate step). A
+        cache hit here is NOT trusted forever: a Temporal worker — or another
+        retest — can keep advancing an audit's persisted state after this process
+        cached an earlier snapshot (via an earlier call to this method, or
+        ``run_audit``/``run_retest`` seeding the cache), so always reloading avoids
+        serving a permanently stale result.
 
         Preconditions:
             - ``audit_id`` is a non-empty audit identifier.
@@ -365,17 +360,31 @@ class AccessibilityAuditOrchestrator:
             - When ``audit_id`` is NOT in ``_locally_running_audits`` (no
               ``run_audit``/``run_retest`` call in THIS process is actively
               mutating it), reloads from the store and, on a hit, refreshes the
-              cache and returns the freshly-loaded result; on a store miss, falls
-              back to any existing cached copy (a transient store hiccup must not
-              spuriously 404 an audit this process already knows about) or ``None``.
+              cache and returns the freshly-loaded result; on a clean store miss,
+              falls back to any existing cached copy or ``None``.
             - When ``audit_id`` IS in ``_locally_running_audits``, returns the
               cached live object as-is without reloading — replacing it mid-run
               with a (store-lagging) snapshot would detach the cache from the
               object ``run_audit``/``run_retest`` is still mutating in place.
+            - A genuine store READ ERROR (as opposed to a clean miss) is masked
+              by falling back to an existing cached copy when this process has
+              one (a transient store hiccup must not spuriously 404 an audit this
+              process already knows about) — but for a Temporal-run audit the API
+              process typically has no cache entry at all (it never ran the audit
+              itself), so with nothing to fall back to the error PROPAGATES rather
+              than being swallowed to ``None``. Swallowing it would read to a
+              caller (the report/findings/export/retest existence checks) as
+              "audit not found" (404) instead of a retryable infrastructure error.
         """
         if audit_id in self._locally_running_audits:
             return self._audits.get(audit_id)
-        loaded = await self._load_audit(audit_id)
+        try:
+            loaded = await self._load_audit_strict(audit_id)
+        except Exception:
+            cached = self._audits.get(audit_id)
+            if cached is not None:
+                return cached
+            raise
         if loaded is not None:
             self._audits[audit_id] = loaded
             return loaded
@@ -385,11 +394,11 @@ class AccessibilityAuditOrchestrator:
         """Return (creating if needed) the lock serializing ``run_retest`` calls
         for one ``audit_id``.
 
-        ``_ensure_loaded`` caches and returns the SAME ``AccessibilityAuditResult``
-        instance for repeated calls with the same ``audit_id``; two concurrent
-        ``run_retest`` calls for that audit (e.g. a double-submitted retest request)
-        would otherwise mutate that shared object in place with no synchronization,
-        letting one call's write silently clobber the other's before either persists.
+        ``run_retest`` caches the (possibly just-reloaded) ``AccessibilityAuditResult``
+        it's about to mutate in ``self._audits``; two concurrent ``run_retest`` calls
+        for that audit (e.g. a double-submitted retest request) would otherwise mutate
+        a shared object in place with no synchronization, letting one call's write
+        silently clobber the other's before either persists.
 
         Preconditions:
             - Called from the event loop this orchestrator instance's coroutines run
@@ -429,19 +438,31 @@ class AccessibilityAuditOrchestrator:
             Updated AccessibilityAuditResult
         """
         async with self._get_retest_lock(audit_id):
+            # Refresh from the store BEFORE trusting any in-process cache: in a
+            # multi-worker Temporal deployment, a different worker process may
+            # have already retested this audit and persisted newer finding
+            # states since this process last cached it (or never saw it at
+            # all). _ensure_loaded's cache-first behavior would trust that
+            # stale snapshot and this call's persist would silently clobber the
+            # other worker's update. Falls back to the cache only on a clean
+            # store miss (e.g. an audit this process just created and the store
+            # hasn't durably reflected yet).
+            result = await self._load_audit(audit_id)
+            if result is None:
+                result = self._audits.get(audit_id)
+            if not result:
+                return AccessibilityAuditResult(
+                    audit_id=audit_id,
+                    success=False,
+                    failure_reason=f"Audit {audit_id} not found",
+                )
+            self._audits[audit_id] = result
+
             # See _locally_running_audits' docstring: guards get_audit_state against
             # replacing this method's live, in-place-mutating cached object with a
             # (possibly pre-retest) store snapshot while this block is in flight.
             self._locally_running_audits.add(audit_id)
             try:
-                result = await self._ensure_loaded(audit_id)
-                if not result:
-                    return AccessibilityAuditResult(
-                        audit_id=audit_id,
-                        success=False,
-                        failure_reason=f"Audit {audit_id} not found",
-                    )
-
                 # Get findings to retest
                 if finding_ids:
                     findings_to_retest = [f for f in result.final_findings if f.id in finding_ids]

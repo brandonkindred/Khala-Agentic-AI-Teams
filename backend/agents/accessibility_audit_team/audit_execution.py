@@ -754,13 +754,24 @@ async def mark_audit_timed_out(job_id: str, audit_id: str, timebox_hours: int) -
     Postconditions:
         - The job is marked ``failed`` with a timeout reason; when persisted audit
           state exists it is also flipped to ``success=False`` with that reason.
-        - Raises ``RuntimeError`` if persisting that flipped state fails (after
-          still marking the job failed) so Temporal retries this activity — a
-          transient artifact-store error must not leave ``audit_state_{audit_id}``
+        - Raises ``RuntimeError`` if persisting that flipped state fails, or if
+          the state could not even be read (a transient artifact-store error, as
+          opposed to a clean "nothing was ever persisted" miss) — either way,
+          after still marking the job failed, so Temporal retries this activity.
+          A transient artifact-store error must not leave ``audit_state_{audit_id}``
           stale (still looking in-progress) for ``/report``/``/findings`` readers,
-          even though the job record itself was successfully marked failed.
+          even though the job record itself was successfully marked failed. The
+          read uses :func:`_load_audit_state_strict` so a genuine miss (nothing
+          persisted before the timeout, e.g. intake itself never completed) is
+          distinguished from a read failure and does not spuriously retry.
     """
-    result = await load_audit_state(audit_id)
+    read_failed = False
+    try:
+        result = await _load_audit_state_strict(audit_id)
+    except Exception as e:
+        logger.warning("Failed to read audit state for timeout handling: %s", e)
+        result = None
+        read_failed = True
     completed = [p.value for p in result.completed_phases] if result is not None else []
     reason = f"Audit timed out after {timebox_hours} hour(s). Completed phases: {completed}"
     persisted = True
@@ -777,7 +788,7 @@ async def mark_audit_timed_out(job_id: str, audit_id: str, timebox_hours: int) -
         findings_count=result.total_findings if result is not None else 0,
         result=result.model_dump(mode="json") if result is not None else None,
     )
-    if not persisted:
+    if read_failed or not persisted:
         raise RuntimeError(f"mark_audit_timed_out: failed to persist audit state for {audit_id}")
 
 
