@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import Any, Optional
+from typing import Any, Coroutine, Optional, TypeVar
 
 from agent_provisioning_team.temporal.constants import (
     DEPROVISION_CLIENT_TIMEOUT_S,
@@ -23,8 +23,10 @@ logger = logging.getLogger(__name__)
 
 START_WORKFLOW_TIMEOUT = 30
 
+_T = TypeVar("_T")
 
-def _run_async(coro: Any) -> Any:
+
+def _run_async(coro: Coroutine[Any, Any, _T]) -> _T:
     loop = get_temporal_loop()
     client = get_temporal_client()
     if loop is None or client is None:

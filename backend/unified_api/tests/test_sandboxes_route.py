@@ -104,6 +104,21 @@ def test_teardown_is_idempotent_for_cold_agent(client: TestClient) -> None:
     assert resp.status_code == 200
 
 
+def test_teardown_returns_503_on_docker_error(client: TestClient, monkeypatch) -> None:
+    """Regression: delete_sandbox previously had no exception handling at all,
+    so a stop_container() failure (e.g. daemon unreachable) surfaced as a raw
+    500 instead of a clean 503, unlike warm_sandbox's equivalent mapping."""
+    resp = client.post("/api/agents/sandboxes/blogging.planner/warm")
+    assert resp.status_code == 200
+
+    monkeypatch.setattr(
+        provisioner_mod, "stop_container", AsyncMock(side_effect=provisioner_mod.DockerError("daemon gone"))
+    )
+
+    resp = client.delete("/api/agents/sandboxes/blogging.planner")
+    assert resp.status_code == 503
+
+
 def test_status_reconciles_vanished_container(client: TestClient, monkeypatch) -> None:
     """If the container was reaped externally, status() must flip the
     stored state back to COLD rather than keep reporting WARM."""

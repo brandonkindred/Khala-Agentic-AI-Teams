@@ -26,18 +26,22 @@ def test_task_queue_default() -> None:
 
 
 def test_task_queue_env_override(monkeypatch) -> None:
+    # importlib.reload mutates the shared constants module in place, so the
+    # restore-reload MUST run even if the assertion below fails, or every
+    # later test in this worker process that reads constants.TASK_QUEUE by
+    # attribute access (not a frozen `from X import Y` binding) would
+    # observe the overridden value for the rest of the session.
     monkeypatch.setenv("TEMPORAL_TASK_QUEUE_AGENT_PROVISIONING", "custom-queue")
-    # Force re-import to pick up env override.
     import importlib
 
     from agent_provisioning_team.temporal import constants as constants_mod
 
-    reloaded = importlib.reload(constants_mod)
-    assert reloaded.TASK_QUEUE == "custom-queue"
-
-    # Restore original module by reloading without the env var
-    monkeypatch.delenv("TEMPORAL_TASK_QUEUE_AGENT_PROVISIONING", raising=False)
-    importlib.reload(reloaded)
+    try:
+        reloaded = importlib.reload(constants_mod)
+        assert reloaded.TASK_QUEUE == "custom-queue"
+    finally:
+        monkeypatch.delenv("TEMPORAL_TASK_QUEUE_AGENT_PROVISIONING", raising=False)
+        importlib.reload(constants_mod)
 
 
 def test_sandbox_task_queue_default_differs_from_general_queue() -> None:
@@ -49,16 +53,18 @@ def test_sandbox_task_queue_default_differs_from_general_queue() -> None:
 
 
 def test_sandbox_task_queue_env_override(monkeypatch) -> None:
+    # Same restore-must-always-run rationale as test_task_queue_env_override.
     monkeypatch.setenv("TEMPORAL_TASK_QUEUE_AGENT_PROVISIONING_SANDBOX", "custom-sandbox-queue")
     import importlib
 
     from agent_provisioning_team.temporal import constants as constants_mod
 
-    reloaded = importlib.reload(constants_mod)
-    assert reloaded.SANDBOX_TASK_QUEUE == "custom-sandbox-queue"
-
-    monkeypatch.delenv("TEMPORAL_TASK_QUEUE_AGENT_PROVISIONING_SANDBOX", raising=False)
-    importlib.reload(reloaded)
+    try:
+        reloaded = importlib.reload(constants_mod)
+        assert reloaded.SANDBOX_TASK_QUEUE == "custom-sandbox-queue"
+    finally:
+        monkeypatch.delenv("TEMPORAL_TASK_QUEUE_AGENT_PROVISIONING_SANDBOX", raising=False)
+        importlib.reload(constants_mod)
 
 
 def test_workflows_activities_exclude_sandbox_items() -> None:

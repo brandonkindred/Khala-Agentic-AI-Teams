@@ -85,10 +85,11 @@ def test_provision_thread_fallback_env_flag() -> None:
 
 
 def test_provision_thread_fallback_with_blank_env() -> None:
+    """A blank value must be treated as not-set (falsy), not as truthy —
+    an empty PROVISION_THREAD_FALLBACK must not force the thread-mode
+    fallback the way "1"/"true"/"yes" do."""
     with patch.dict("os.environ", {"PROVISION_THREAD_FALLBACK": ""}):
-        # No-op: returns whatever the real path resolves to (could be None
-        # when Temporal isn't installed).
-        api_main._temporal_starter()
+        assert api_main._provision_thread_fallback() is False
 
 
 def test_provision_thread_fallback_returns_true_for_true() -> None:

@@ -243,12 +243,14 @@ async def test_sandbox_reaper_workflow_survives_activity_failure() -> None:
         patch.object(sw.workflow, "sleep", new=fake_sleep),
         patch.object(sw.workflow, "execute_activity", new=fake_exec),
         patch.object(sw.workflow, "continue_as_new", new=fake_can),
-        patch.object(sw.workflow, "logger"),
+        patch.object(sw.workflow, "logger") as mock_logger,
     ):
         # Must NOT raise — the workflow catches, logs, and keeps going.
         await sw.SandboxReaperWorkflow().run(45)
 
     assert calls["continue_as_new"] == (45,)
+    # The failure must actually be logged, not just silently swallowed.
+    mock_logger.exception.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +440,35 @@ def test_reraise_is_noop_for_unknown_type() -> None:
 
     # No recognizable ApplicationError type → returns without raising, caller re-raises.
     sd._reraise_sandbox_error(RuntimeError("plain"))
+
+
+def test_reraise_mapping_covers_every_sandbox_exception_type() -> None:
+    """Regression guard: _reraise_sandbox_error's type mapping must cover
+    every exception type agent_provisioning_team.sandbox exports (plus
+    DockerError from provisioner), so a new sandbox exception type added
+    without updating this mapping fails this test instead of silently
+    leaking as an opaque WorkflowFailureError (a raw 500) to callers."""
+    import agent_provisioning_team.sandbox as sandbox_pkg
+    from agent_provisioning_team.sandbox.provisioner import DockerError
+    from agent_provisioning_team.temporal import sandbox_dispatch as sd
+
+    expected = {
+        name
+        for name in sandbox_pkg.__all__
+        if isinstance(getattr(sandbox_pkg, name), type)
+        and issubclass(getattr(sandbox_pkg, name), Exception)
+    }
+    expected.add(DockerError.__name__)
+
+    captured: dict = {}
+
+    def fake_translate(exc, mapping):
+        captured["mapping"] = mapping
+
+    with patch("shared_temporal.translate_workflow_failure", new=fake_translate):
+        sd._reraise_sandbox_error(RuntimeError("dummy"))
+
+    assert set(captured["mapping"]) == expected
 
 
 @pytest.mark.asyncio

@@ -24,6 +24,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
+from temporalio.client import Client
 from temporalio.worker import Worker
 from temporalio.worker.workflow_sandbox import (
     SandboxedWorkflowRunner,
@@ -103,7 +104,7 @@ def start_agent_provisioning_sandbox_temporal_worker_thread() -> bool:
     )
 
 
-def create_agent_provisioning_worker(client: Optional[object] = None) -> Optional[Worker]:
+def create_agent_provisioning_worker(client: Optional[Client] = None) -> Optional[Worker]:
     """Build a ``Worker`` wired to every registered workflow/activity.
 
     Preconditions:

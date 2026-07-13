@@ -28,6 +28,7 @@ from agent_provisioning_team.sandbox import (
     metrics,
     status,
 )
+from agent_provisioning_team.sandbox.provisioner import DockerError
 
 # Temporal-aware mutators (durable workflows when Temporal is enabled, direct
 # in-process calls otherwise). Read-only routes below stay direct.
@@ -70,5 +71,14 @@ async def get_status(agent_id: str) -> SandboxHandle:
 
 @router.delete("/{agent_id}")
 async def delete_sandbox(agent_id: str) -> dict[str, str]:
-    await teardown_sandbox(agent_id)
+    try:
+        await teardown_sandbox(agent_id)
+    except DockerError as exc:
+        # The only exception teardown()/teardown_sandbox_via_temporal() can
+        # realistically raise: stop_container() failing (e.g. daemon
+        # unreachable mid-operation). Unlike warm_sandbox, teardown never
+        # raises UnknownAgentError (a never-warmed/unknown agent_id is a
+        # silent no-op, matching test_teardown_is_idempotent_for_cold_agent)
+        # or SandboxAcquireFailedError (acquire-only).
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"agent_id": agent_id, "status": "torn down"}
