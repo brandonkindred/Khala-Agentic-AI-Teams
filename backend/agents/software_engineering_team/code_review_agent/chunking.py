@@ -453,6 +453,30 @@ def _clean_str(value: object, default: str) -> str:
     return text or default
 
 
+def _coerce_bool(value: object) -> bool:
+    """Coerce an untrusted LLM field to a bool, tolerating string encodings.
+
+    LLMs emit booleans inconsistently — as a JSON ``true``/``false``, as the
+    string ``"true"``/``"yes"``/``"1"``, or omitted entirely — so a bare
+    ``bool(value)`` would read the string ``"false"`` as True. Mirrors the
+    strict-coercion convention coding_team's tech_lead_agent uses for the same
+    LLM-flag-drift problem: only a real ``True`` or a recognized truthy string
+    counts, so an unexpected type (a bare number, a list, ...) is never
+    silently treated as true.
+
+    Postconditions:
+        - Returns True only for the bool ``True`` or a recognized truthy
+          string token (``true``/``yes``/``1``, case-insensitive); False for
+          None, any number, an unrecognized string (including ``"false"``/
+          ``"no"``), or any other value. Never raises.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1"}
+    return False
+
+
 def _validate_line(line: Optional[int], seg: Optional[FileSegment]) -> Optional[int]:
     """Validate a cited original-file line number against its segment.
 
@@ -485,6 +509,9 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
           set, strings coerced), so conversion never raises on malformed output.
         - ``line``/``start_line`` are original-file absolute and within the
           cited segment's range, or dropped (see ``_validate_line``).
+        - ``pre_existing`` reflects the LLM's optional per-issue tag (coerced via
+          ``_coerce_bool``); it defaults to False when the field is absent, so a
+          reviewer/gate that never emits it is unaffected.
     """
     seg_by_path = {seg.path: seg for seg in chunk.segments}
     issues: List[CodeReviewIssue] = []
@@ -511,6 +538,7 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
                 start_line=_validate_line(coerce_line(item.get("start_line")), seg),
                 description=description,
                 suggestion=_clean_str(item.get("suggestion"), ""),
+                pre_existing=_coerce_bool(item.get("pre_existing")),
             )
         )
     return issues

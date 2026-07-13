@@ -97,7 +97,9 @@ from coding_team.api.pr_review import (  # noqa: F401
     _REVIEW_ADMISSION_LOCK,
     _REVIEW_GUARD_HEARTBEAT_STALE_S,
     _REVIEW_HEARTBEAT_INTERVAL_S,
+    RepoMismatchError,
     ReviewCode,
+    ReviewNotFoundError,
     _bisect_submit,
     _build_review_code,
     _format_questions_comment,
@@ -112,6 +114,7 @@ from coding_team.api.pr_review import (  # noqa: F401
     _safe_comment,
     _start_pr_review_thread,
     _submit_review,
+    create_review_issues,
 )
 from coding_team.api.state import (  # noqa: F401
     _ANSWER_WAIT_HEARTBEAT_STALE_S,
@@ -170,6 +173,7 @@ from coding_team.models import AgentStatusEntry, CodingTeamPlanInput  # noqa: F4
 from coding_team.orchestrator import run_coding_team_orchestrator  # noqa: F401
 from coding_team.postgres import SCHEMA as CODE_REVIEW_SCHEMA
 from coding_team.review_history_store import (  # noqa: F401
+    get_review,
     list_reviews,
     record_review_start,
     update_review,

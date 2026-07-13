@@ -296,6 +296,15 @@ class CodeReviewIssue(BaseModel):
         default="",
         description="Concrete suggestion for how to fix the issue",
     )
+    pre_existing: bool = Field(
+        default=False,
+        description="True when this issue is a bug in code the change under review did NOT add or "
+        "modify — a pre-existing defect in unrelated, unchanged code — rather than a defect the "
+        "change introduced. Only set by callers that explicitly ask the reviewer to surface "
+        "pre-existing findings (the PR-review whole-file path); every other gate leaves it False. "
+        "Pre-existing findings are never posted as PR review comments — they are collected and "
+        "offered to a human as GitHub-issue proposals. Default False.",
+    )
 
 
 class CodeReviewInput(BaseModel):

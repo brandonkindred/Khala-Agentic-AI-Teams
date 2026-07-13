@@ -328,6 +328,15 @@ describe('IntegrationsApiService', () => {
     req.flush([]);
   });
 
+  it('createGitHubReviewIssues POST with owner/repo, job id + proposal ids', () => {
+    service.createGitHubReviewIssues('acme', 'widget', 'rev 9', ['p0', 'p1']).subscribe();
+    // The job id is URL-encoded into the path; owner/repo ride in the body.
+    const req = httpMock.expectOne(`${baseUrl}/github/reviews/rev%209/issues`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({ proposal_ids: ['p0', 'p1'], owner: 'acme', repo: 'widget' });
+    req.flush({ job_id: 'rev 9', created: [], proposals: [] });
+  });
+
   it('getTradingViewConfig GET', () => {
     const mockConfig = {
       enabled: true,
