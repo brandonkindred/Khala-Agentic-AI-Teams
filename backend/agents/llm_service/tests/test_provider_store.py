@@ -40,9 +40,9 @@ class _FakeHeartbeat:
     """Stand-in for shared_concurrency.heartbeat.BackgroundHeartbeat.
 
     Exercises the real start-once idempotency logic in
-    ``_ensure_reset_sweep_started`` without ever spinning up a real OS thread —
-    keeps the reset-sweep tests deterministic and avoids leaking daemon threads
-    across the test session.
+    ``_ResetSweepState._ensure_started`` without ever spinning up a real OS
+    thread — keeps the reset-sweep tests deterministic and avoids leaking
+    daemon threads across the test session.
     """
 
     instances: list["_FakeHeartbeat"] = []
@@ -65,11 +65,11 @@ class _FakeHeartbeat:
 @pytest.fixture(autouse=True)
 def _reset_provider_sweep(monkeypatch):
     """Isolate the background reset-sweep across tests (see _FakeHeartbeat)."""
-    ps._reset_sweep_state_for_test()
+    ps._reset_sweep.reset_for_test()
     _FakeHeartbeat.instances.clear()
     monkeypatch.setattr(ps, "BackgroundHeartbeat", _FakeHeartbeat)
     yield
-    ps._reset_sweep_state_for_test()
+    ps._reset_sweep.reset_for_test()
 
 
 # --------------------------------------------------------------------------- #
@@ -183,7 +183,7 @@ def test_select_resets_and_uses_expired_entry(monkeypatch):
     sel = ps.select_active_entry([e1, _entry(2)], now=NOW)
     assert sel.id == 1
     assert reset_ids == []  # deferred: no synchronous reset_entry call
-    assert ps._pending_reset_ids == {1}  # queued for the background sweep instead
+    assert ps._reset_sweep.pending_ids == {1}  # queued for the background sweep instead
 
 
 def test_select_expired_without_reset_when_disabled(monkeypatch):
@@ -193,7 +193,7 @@ def test_select_expired_without_reset_when_disabled(monkeypatch):
     sel = ps.select_active_entry([e1], now=NOW, reset_expired=False)
     assert sel.id == 1
     assert reset_ids == []
-    assert ps._pending_reset_ids == set()  # reset_expired=False: nothing queued either
+    assert ps._reset_sweep.pending_ids == set()  # reset_expired=False: nothing queued either
 
 
 def test_select_all_limited_returns_soonest_reset():
@@ -231,43 +231,43 @@ def test_select_expired_enqueue_does_no_db_io(monkeypatch):
     e1 = _entry(1, limit_exceeded=True, reset_at=NOW - timedelta(seconds=1))
     sel = ps.select_active_entry([e1, _entry(2)], now=NOW)
     assert sel.id == 1
-    assert ps._pending_reset_ids == {1}
+    assert ps._reset_sweep.pending_ids == {1}
 
 
 def test_reset_sweep_tick_drains_pending_and_calls_reset_entry(monkeypatch):
     reset_ids: list[int] = []
     monkeypatch.setattr(ps, "reset_entry", lambda i: reset_ids.append(i))
-    ps._pending_reset_ids.update({1, 2, 3})
-    ps._reset_sweep_tick()
+    ps._reset_sweep.pending_ids.update({1, 2, 3})
+    ps._reset_sweep.tick()
     assert sorted(reset_ids) == [1, 2, 3]
-    assert ps._pending_reset_ids == set()
+    assert ps._reset_sweep.pending_ids == set()
 
 
 def test_reset_sweep_tick_noop_when_empty(monkeypatch):
     calls = []
     monkeypatch.setattr(ps, "reset_entry", lambda i: calls.append(i))
-    ps._reset_sweep_tick()
+    ps._reset_sweep.tick()
     assert calls == []
 
 
 def test_enqueue_reset_dedups_same_id():
-    ps._enqueue_reset(7)
-    ps._enqueue_reset(7)
-    assert ps._pending_reset_ids == {7}
+    ps._reset_sweep.enqueue(7)
+    ps._reset_sweep.enqueue(7)
+    assert ps._reset_sweep.pending_ids == {7}
 
 
 def test_enqueue_reset_starts_sweep_once():
-    ps._enqueue_reset(1)
-    ps._enqueue_reset(2)
+    ps._reset_sweep.enqueue(1)
+    ps._reset_sweep.enqueue(2)
     assert len(_FakeHeartbeat.instances) == 1
     assert _FakeHeartbeat.instances[0].started is True
-    assert ps._reset_sweep_started is True
+    assert ps._reset_sweep.started is True
 
 
 def test_ensure_reset_sweep_started_is_idempotent():
-    ps._ensure_reset_sweep_started()
-    ps._ensure_reset_sweep_started()
-    ps._ensure_reset_sweep_started()
+    ps._reset_sweep._ensure_started()
+    ps._reset_sweep._ensure_started()
+    ps._reset_sweep._ensure_started()
     assert len(_FakeHeartbeat.instances) == 1
 
 
@@ -283,13 +283,13 @@ def test_reset_sweep_interval_defaults_and_is_defensive(monkeypatch):
 
 
 def test_reset_sweep_state_for_test_stops_heartbeat():
-    ps._enqueue_reset(1)
+    ps._reset_sweep.enqueue(1)
     hb = _FakeHeartbeat.instances[0]
     assert hb.started is True
-    ps._reset_sweep_state_for_test()
+    ps._reset_sweep.reset_for_test()
     assert hb.started is False
-    assert ps._reset_sweep_started is False
-    assert ps._pending_reset_ids == set()
+    assert ps._reset_sweep.started is False
+    assert ps._reset_sweep.pending_ids == set()
 
 
 # --------------------------------------------------------------------------- #
