@@ -121,7 +121,6 @@ def complete_plan_json(
                 return data, parse_retries
         except LLMJsonParseError as e:
             last_err = e
-            parse_retries += 1
             logger.warning("JSON parse failed (attempt %s): %s", attempt + 1, e)
         try:
             raw = call_raw_fn(
@@ -132,8 +131,10 @@ def complete_plan_json(
             return data, parse_retries
         except LLMJsonParseError as e:
             last_err = e
-            parse_retries += 1
             logger.warning("JSON parse retry failed (attempt %s): %s", attempt + 1, e)
+        # Count once per full attempt (both the JSON-mode call and its
+        # raw-text fallback failed), not once per failed sub-call.
+        parse_retries += 1
     msg = f"Planning JSON parse failed after {max_parse_retries} attempts"
     if last_err:
         msg += f": {last_err}"

@@ -126,7 +126,10 @@ def test_complete_plan_json_recovers_on_parse_retry(monkeypatch) -> None:
         max_parse_retries=2,
     )
     assert data["overarching_topic"] == "Topic"
-    assert retries == 1
+    # parse_retries counts fully-failed attempts (both the JSON-mode call and
+    # its raw-text fallback failing); recovering via the raw-text fallback on
+    # the first attempt counts as zero full failures.
+    assert retries == 0
     assert any("Planning" in s for s in seen)
 
 

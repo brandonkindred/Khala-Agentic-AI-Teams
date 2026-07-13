@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 # Module-level aliases: existing tests import these names directly from this
 # module (e.g. ``from blog_planning_agent.agent import _post_validate``); the
 # underlying logic now lives in shared.content_planning_loop.
+# TODO: remove once blog_planning_agent tests import directly from
+# shared.content_planning_loop.
 _post_validate = post_validate_plan
 _planning_done = planning_done
 _build_generate_prompt = build_generate_plan_prompt
