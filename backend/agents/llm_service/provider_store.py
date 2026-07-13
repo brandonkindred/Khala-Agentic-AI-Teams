@@ -79,6 +79,9 @@ _DEFAULT_TTL_S = 30.0
 
 ENV_RESET_SWEEP_INTERVAL = "LLM_PROVIDER_RESET_SWEEP_INTERVAL_S"
 _DEFAULT_RESET_SWEEP_INTERVAL_S = 5.0
+# Floor applied to the resolved interval before starting the heartbeat: a 0 (or
+# near-0) interval would busy-loop the sweep thread.
+_MIN_RESET_SWEEP_INTERVAL_S = 0.1
 
 _table_ensured = False
 _ensure_lock = threading.Lock()
@@ -643,6 +646,17 @@ class _ResetSweepState:
           ``started``/``heartbeat`` pair (double-checked locking in
           :meth:`_ensure_started`).
         - At most one ``BackgroundHeartbeat`` runs for this instance at a time.
+
+    No shutdown/drain hook (intentional, not an oversight): ``llm_service`` has
+    no shared per-team lifecycle hook to wire one into (unlike ``trace_flusher``,
+    which hooks ``software_engineering_team/api/lifecycle.py``) — adding one here
+    would mean touching every team's startup/shutdown wiring for a low-severity
+    tradeoff. If the process exits with ids still in ``pending_ids``, those
+    entries' return-to-rotation is delayed by at most one sweep interval: the
+    next call to :func:`select_active_entry` re-detects the still-expired entry
+    (its Postgres row was never written) and re-enqueues it. This is not a
+    correctness or data-loss issue, just eventual consistency bounded by the
+    sweep interval.
     """
 
     def __init__(self) -> None:
@@ -705,7 +719,7 @@ class _ResetSweepState:
                 return
             self.heartbeat = BackgroundHeartbeat(
                 self.tick,
-                max(_reset_sweep_interval_s(), 0.1),  # a 0 interval would busy-loop
+                max(_reset_sweep_interval_s(), _MIN_RESET_SWEEP_INTERVAL_S),
                 name="llm-provider-reset-sweep",
             )
             self.heartbeat.start()
