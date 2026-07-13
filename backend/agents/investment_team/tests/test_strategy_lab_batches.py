@@ -96,10 +96,19 @@ def _make_record(idx: int, config: BacktestConfig) -> StrategyLabRecord:
 @pytest.fixture
 def empty_lab_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replace the persistent stores with plain dicts and reset run state."""
+    from investment_team.strategy_lab import run_state as _run_state
+
     monkeypatch.setattr(lab_main, "_strategy_lab_records", {})
     monkeypatch.setattr(lab_main, "_strategies", {})
     monkeypatch.setattr(lab_main, "_backtests", {})
-    monkeypatch.setattr(lab_main, "_active_runs", {})
+    # Patch both the ``api.main`` alias and the source-module attribute to the
+    # *same* dict, so direct reads/writes (routes, ``_seed_run_state``) and
+    # ``_get_run_state`` (which closes over ``run_state.active_runs``) share one
+    # store. Rebinding only one name leaves resume/restart lookups missing the
+    # seeded run.
+    shared_runs: Dict[str, Any] = {}
+    monkeypatch.setattr(lab_main, "_active_runs", shared_runs)
+    monkeypatch.setattr(_run_state, "active_runs", shared_runs)
 
 
 def _seed_run_state(run_id: str, request: RunStrategyLabRequest) -> None:
