@@ -180,6 +180,23 @@ def test_validate_finding_line_passes_through_none() -> None:
     assert _validate_finding_line(index, "a.py", None) is None
 
 
+def test_validate_finding_line_trusts_pre_numbered_citation_as_is() -> None:
+    """PR hunk review mode shows only a few hunk lines, each prefixed with its
+    ORIGINAL absolute line number as text (e.g. "4242: ..."); the hunk's
+    physical line count bears no relation to that cited number, so it must be
+    trusted as-is rather than bounds-checked against the physical count."""
+    index = CodebaseIndex.from_input(
+        CodeReviewInput(
+            files={"a.py": "4242: one\n4243: two\n"},
+            task_description="t",
+            pre_numbered=True,
+        )
+    )
+    assert _validate_finding_line(index, "a.py", 4242, pre_numbered=True) == 4242
+    # None still passes through unchanged.
+    assert _validate_finding_line(index, "a.py", None, pre_numbered=True) is None
+
+
 def test_validate_findings_nulls_only_out_of_range_lines() -> None:
     index = CodebaseIndex.from_input(_input(files={"a.py": "one\ntwo\nthree\n"}))
     in_range = CodeReviewIssue(category="architecture", description="d1", file_path="a.py", line=2)
@@ -191,6 +208,24 @@ def test_validate_findings_nulls_only_out_of_range_lines() -> None:
     assert validated[1].line is None
     # The rest of the finding is untouched -- only the hallucinated line is dropped.
     assert validated[1].description == "d2"
+
+
+def test_validate_findings_trusts_pre_numbered_citations() -> None:
+    """The same "physical line count bears no relation to the cited absolute
+    number" exemption applies through the full ``_validate_findings`` path,
+    not just the standalone line-check helper."""
+    index = CodebaseIndex.from_input(
+        CodeReviewInput(
+            files={"a.py": "4242: one\n4243: two\n"},
+            task_description="t",
+            pre_numbered=True,
+        )
+    )
+    finding = CodeReviewIssue(
+        category="architecture", description="d1", file_path="a.py", line=4242
+    )
+    validated = _validate_findings(index, [finding], pre_numbered=True)
+    assert validated[0].line == 4242
 
 
 class _FakeReader:
@@ -494,6 +529,42 @@ def test_finds_and_returns_new_findings() -> None:
     assert len(result) == 1
     assert result[0].category == "architecture"
     assert result[0].description == "bypasses the repository layer"
+
+
+def test_finds_and_returns_new_findings_with_pre_numbered_input() -> None:
+    """End-to-end: a finding citing a line far past the shown hunk's physical
+    length survives under ``pre_numbered=True`` (PR hunk review mode), proving
+    the flag reaches ``_run_pass``/``_validate_findings`` and is not lost
+    along the way."""
+    from code_review_agent.models import CodeReviewInput
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                return {
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "line": 4242,
+                            "description": "bypasses the repository layer",
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    result = find_architecture_and_redundancy_issues(
+        _FindingsClient(),
+        CodeReviewInput(
+            files={"app/main.py": "4242: def bar():\n4243:     return 1\n"},
+            task_description="wire up bar",
+            architecture=_arch(),
+            pre_numbered=True,
+        ),
+    )
+    assert len(result) == 1
+    assert result[0].line == 4242  # not nulled by the 2-physical-line hunk's length
 
 
 # --------------------------------------------------------------------------- coordinator integration

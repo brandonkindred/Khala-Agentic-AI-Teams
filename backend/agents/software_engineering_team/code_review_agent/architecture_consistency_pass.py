@@ -220,7 +220,7 @@ def _parse_findings(data: object) -> List[CodeReviewIssue]:
 
 
 def _validate_finding_line(
-    index: CodebaseIndex, file_path: str, line: Optional[int]
+    index: CodebaseIndex, file_path: str, line: Optional[int], pre_numbered: bool = False
 ) -> Optional[int]:
     """Validate a cited line number against the real file it names, or None.
 
@@ -228,9 +228,17 @@ def _validate_finding_line(
     a hallucinated citation can never anchor a finding to the wrong (or
     nonexistent) line. This pass has no ``FileSegment`` to bound against (it
     works over whole files), so it bounds against the resolved file's actual
-    line count instead.
+    line count instead -- except under ``pre_numbered`` inputs (e.g. PR hunk
+    review mode), where the submission's file content is only the shown hunk
+    lines, each already prefixed with its ORIGINAL absolute line number (as
+    text, e.g. ``"4242: ..."``); the physical line count of that hunk bears no
+    relation to the cited absolute number, so (mirroring
+    ``chunking._validate_line``'s identical ``seg.pre_numbered`` branch) the
+    citation is trusted as-is rather than bounds-checked against it.
 
     Postconditions:
+        - Under ``pre_numbered``, returns ``line`` unchanged (or None if
+          ``line`` is None) without reading the file at all.
         - Returns None when ``line`` is None, ``file_path`` does not resolve to
           a readable file, or the file's content cannot be read (an
           ``"Error: ..."`` sentinel from ``index.read_file``).
@@ -239,6 +247,8 @@ def _validate_finding_line(
     """
     if line is None:
         return None
+    if pre_numbered:
+        return line
     resolved = index.resolve_path(file_path)
     if resolved is None:
         return None
@@ -271,9 +281,14 @@ def _is_changed_file(index: CodebaseIndex, file_path: str) -> bool:
 
 
 def _validate_findings(
-    index: CodebaseIndex, findings: List[CodeReviewIssue]
+    index: CodebaseIndex, findings: List[CodeReviewIssue], pre_numbered: bool = False
 ) -> List[CodeReviewIssue]:
     """Bounds-check each finding's file/line anchor against the real submission.
+
+    Preconditions:
+        - ``pre_numbered`` mirrors ``CodeReviewInput.pre_numbered``: True only
+          when the submission's file content already carries original-file
+          absolute line-number prefixes (PR hunk review mode).
 
     Postconditions:
         - A finding whose ``file_path`` is not one of the submission's changed
@@ -285,7 +300,8 @@ def _validate_findings(
           rather than pointing at the wrong location.
         - Otherwise ``line`` is replaced by ``None`` wherever it does not fall
           within the cited file's actual line range (a file-wide finding is
-          still a valid, useful outcome).
+          still a valid, useful outcome) -- except under ``pre_numbered``,
+          where the citation is trusted as-is (see ``_validate_finding_line``).
         - Never drops a finding outright — only its potentially wrong/hallucinated
           location anchor — and never raises.
     """
@@ -302,7 +318,7 @@ def _validate_findings(
                 # submission's actual key ("app/main.py") so the anchor is
                 # exact for PR-comment placement, not just verified.
                 finding = finding.model_copy(update={"file_path": resolved_path})
-        checked_line = _validate_finding_line(index, finding.file_path, finding.line)
+        checked_line = _validate_finding_line(index, finding.file_path, finding.line, pre_numbered)
         if checked_line != finding.line:
             finding = finding.model_copy(update={"line": checked_line})
         validated.append(finding)
@@ -433,7 +449,7 @@ def _run_pass(
     data = json.loads(raw)
     findings = _parse_findings(data)
     if findings:
-        findings = _validate_findings(index, findings)
+        findings = _validate_findings(index, findings, pre_numbered=input_data.pre_numbered)
         logger.info(
             "ArchitectureConsistencyPass: found %s new finding(s) (architecture/refactor)",
             len(findings),
