@@ -100,9 +100,33 @@ from investment_team.shared.job_store import (
 )
 from investment_team.signal_intelligence_agent import SignalIntelligenceExpert
 from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
+from investment_team.strategy_lab.config import (
+    MAX_BATCH_COUNT as _MAX_BATCH_COUNT,
+)
+from investment_team.strategy_lab.config import (
+    MAX_PARALLEL as _MAX_PARALLEL,
+)
+from investment_team.strategy_lab.config import (
+    clamp_max_parallel as _clamp_max_parallel,
+)
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+from investment_team.strategy_lab.run_state import (
+    active_runs as _active_runs,
+)
+from investment_team.strategy_lab.run_state import (
+    get_lab_run_job_client as _get_lab_run_job_client,
+)
+from investment_team.strategy_lab.run_state import (
+    get_run_state as _get_run_state,
+)
+from investment_team.strategy_lab.run_state import (
+    load_run_from_job_service as _load_run_from_job_service,
+)
+from investment_team.strategy_lab.run_state import (
+    lock as _lock,
+)
 from investment_team.strategy_lab.spec_dsl import (
     DEFAULT_SIZING_PAYLOAD,
     EntryRule,
@@ -119,61 +143,6 @@ from shared_app import create_team_app
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-def _env_positive_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning("Invalid %s=%r; falling back to default %d", name, raw, default)
-        return default
-    if value < 1:
-        logger.warning("%s=%d is < 1; falling back to default %d", name, value, default)
-        return default
-    return value
-
-
-# Upper bound on batch_count for Strategy Lab runs. Evaluated at import time so
-# it becomes the Pydantic Field `le=` constraint; operators can override via env.
-_MAX_BATCH_COUNT = _env_positive_int("STRATEGY_LAB_MAX_BATCH_COUNT", 100)
-
-# Upper bound on the request's ``max_parallel`` field (its Pydantic ``le=``).
-# Evaluated at import like ``_MAX_BATCH_COUNT`` so operators can raise the schema
-# ceiling on larger hosts without a code change; kept as a single named constant
-# so the concurrency-cap default below cannot silently drift from the schema max.
-_MAX_PARALLEL = _env_positive_int("STRATEGY_LAB_MAX_PARALLEL", 6)
-
-# Hard ceiling on how many Strategy Lab cycles run concurrently per wave,
-# independent of the request's ``max_parallel``. Each concurrent cycle holds its
-# own market data + LLM contexts in the single worker process, so on a
-# memory-constrained host this caps the worker's peak footprint (the dominant
-# driver of OOM kills). Defaults to ``_MAX_PARALLEL`` (the request field's max) so
-# by default it adds no extra constraint and request validation stays the primary
-# limit; operators opt into tighter caps via env.
-_MAX_CONCURRENT_CYCLES = _env_positive_int("STRATEGY_LAB_MAX_CONCURRENT_CYCLES", _MAX_PARALLEL)
-
-
-def _clamp_max_parallel(requested: int) -> int:
-    """Clamp a request's ``max_parallel`` to the env-configured concurrency cap.
-
-    Preconditions:
-        - ``requested >= 1``.
-    Postconditions:
-        - Returns ``min(requested, _MAX_CONCURRENT_CYCLES)``; logs an INFO only
-          when the cap actually lowers the requested value. No other side effects.
-    """
-    effective = min(requested, _MAX_CONCURRENT_CYCLES)
-    if effective < requested:
-        logger.info(
-            "Strategy Lab concurrency capped to %d (requested %d) via "
-            "STRATEGY_LAB_MAX_CONCURRENT_CYCLES",
-            effective,
-            requested,
-        )
-    return effective
 
 
 def _startup() -> None:
@@ -241,7 +210,6 @@ app = create_team_app(
 )
 
 _workflow_state = WorkflowState()
-_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -327,9 +295,6 @@ _advisor_agent = FinancialAdvisorAgent()
 _policy_guardian = PolicyGuardianAgent()
 _orchestrator = InvestmentTeamOrchestrator()
 _committee_agent = InvestmentCommitteeAgent()
-
-# In-memory state for active strategy lab runs (keyed by run_id).
-_active_runs: Dict[str, Dict[str, Any]] = {}
 
 
 def _now() -> str:
@@ -1643,13 +1608,6 @@ def _strategy_lab_signal_expert_enabled() -> bool:
     )
 
 
-def _get_lab_run_job_client():
-    """Return a JobServiceClient scoped to strategy lab runs."""
-    from job_service_client import JobServiceClient
-
-    return JobServiceClient(team="investment_strategy_lab_runs")
-
-
 def _compute_signal_brief_snapshot(
     benchmark_symbol: str,
 ) -> tuple[Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]]:
@@ -1760,21 +1718,6 @@ def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = Fal
         logger.warning("Failed to persist run state for %s: %s", run_id, exc)
 
 
-def _load_run_from_job_service(run_id: str) -> Optional[Dict[str, Any]]:
-    """Try to load a run state from the job service (fallback when not in _active_runs)."""
-    try:
-        client = _get_lab_run_job_client()
-        job = client.get_job(run_id)
-        if job:
-            data = job.get("data", job)
-            data["run_id"] = run_id
-            data.setdefault("status", job.get("status", "completed"))
-            return data
-    except Exception:
-        pass
-    return None
-
-
 def _dispatch_via_temporal(starter: Callable[[], None]) -> bool:
     """Dispatch a job through Temporal when it is enabled, else report failure.
 
@@ -1857,58 +1800,6 @@ def _dispatch_backtest_run(
         start_backtest_workflow(job_id, strategy, config, submitted_by, notes)
 
     return _dispatch_via_temporal(_start)
-
-
-def _get_run_state(run_id: str) -> Optional[Dict[str, Any]]:
-    """Return a strategy-lab run's state from ``_active_runs``, else the job store.
-
-    Centralizes the "live in-memory entry, else durable fallback" read shared by
-    the resume/restart endpoints and the Temporal-activity helpers.
-
-    Preconditions:
-        - ``run_id`` names a strategy-lab run (may not exist).
-
-    Postconditions:
-        - Returns the in-memory state when present, otherwise the persisted state
-          from the job store, or ``None`` when neither exists. Does not mutate
-          ``_active_runs``.
-    """
-    with _lock:
-        state = _active_runs.get(run_id)
-    return state if state is not None else _load_run_from_job_service(run_id)
-
-
-def _rehydrate_active_run_offset(run_id: str) -> int:
-    """Ensure ``_active_runs[run_id]`` exists and return the resume cycle offset.
-
-    Called from the Temporal activity so the strategy-lab worker behaves
-    identically whether it runs in the dispatching process or a fresh one after
-    a restart/retry: it rehydrates the in-memory run entry from the durable job
-    store (so ``_update_run`` can persist progress) and derives the offset from
-    the persisted contiguous-cycle count (so a retry resumes instead of
-    replaying completed cycles).
-
-    Preconditions:
-        - ``run_id`` names a strategy-lab run whose state was persisted via
-          ``_persist_run_state`` before dispatch.
-
-    Postconditions:
-        - ``_active_runs[run_id]`` is populated when durable state exists.
-        - Returns the number of contiguous completed cycles to pass as
-          ``start_cycle_offset`` (``0`` for a fresh or restarted run, or when no
-          durable state is found).
-    """
-    state = _get_run_state(run_id)
-    if state is not None:
-        # setdefault: never clobber a live in-memory entry with the durable copy.
-        with _lock:
-            _active_runs.setdefault(run_id, state)
-    if not state:
-        return 0
-    try:
-        return max(0, int(state.get("contiguous_cycles", 0) or 0))
-    except (TypeError, ValueError):
-        return 0
 
 
 def _strategy_lab_run_failure(run_id: str) -> Optional[str]:
