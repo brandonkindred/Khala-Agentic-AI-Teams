@@ -48,23 +48,31 @@ class EmailToolAgent:
     def __init__(self, credential_store: Optional[CredentialStore] = None) -> None:
         """Initialize the email tool agent."""
         self.credential_store = credential_store or CredentialStore()
-        self._imap_connection: Optional[imaplib.IMAP4_SSL] = None
-        self._current_user: Optional[str] = None
 
-    def connect_imap(
+    def _open_connection(
         self,
         user_id: str,
         credentials: Optional[IMAPCredentials] = None,
-    ) -> bool:
-        """
-        Connect to an IMAP server.
+    ) -> imaplib.IMAP4_SSL:
+        """Open and return a fresh, logged-in IMAP connection for ``user_id``.
 
-        Args:
-            user_id: The user ID
-            credentials: IMAP credentials (loads from store if not provided)
+        Preconditions:
+            - ``user_id`` has stored credentials in ``self.credential_store``,
+              unless ``credentials`` is supplied directly.
 
-        Returns:
-            True if connection successful
+        Postconditions:
+            - Returns a connection already authenticated as ``user_id``.
+            - Raises ``EmailToolError`` on any connection/auth failure.
+
+        Deliberately returns a new, caller-owned connection rather than
+        caching one on ``self``: this class is shared across concurrent
+        callers (thread-mode dispatch and Temporal activities both route
+        through the same ``PersonalAssistantOrchestrator`` singleton via
+        ``core.get_orchestrator()``), and a per-instance cached connection
+        keyed by "current user" is not safe under concurrent access — two
+        users' calls could interleave on the same authenticated socket, up
+        to and including one user's request returning another user's email
+        content.
         """
         if credentials is None:
             cred_data = self.credential_store.get_email_credentials(user_id)
@@ -72,25 +80,24 @@ class EmailToolAgent:
                 raise EmailToolError("No email credentials found for user")
 
             if cred_data.get("provider") == "oauth":
-                return self._connect_oauth(user_id, cred_data)
+                return self._open_oauth_connection(user_id, cred_data)
 
             credentials = IMAPCredentials(**cred_data)
 
         try:
-            self._imap_connection = imaplib.IMAP4_SSL(
+            connection = imaplib.IMAP4_SSL(
                 credentials.host,
                 credentials.port,
             )
-            self._imap_connection.login(credentials.username, credentials.password)
-            self._current_user = user_id
+            connection.login(credentials.username, credentials.password)
             logger.info("Connected to IMAP server for user %s", user_id)
-            return True
+            return connection
         except Exception as e:
             logger.error("Failed to connect to IMAP: %s", e)
             raise EmailToolError(f"IMAP connection failed: {e}") from e
 
-    def _connect_oauth(self, user_id: str, cred_data: Dict[str, Any]) -> bool:
-        """Connect using OAuth credentials (Gmail/Outlook)."""
+    def _open_oauth_connection(self, user_id: str, cred_data: Dict[str, Any]) -> imaplib.IMAP4_SSL:
+        """Open and return a fresh IMAP connection using OAuth credentials (Gmail/Outlook)."""
         provider = cred_data.get("provider_type", "gmail")
         access_token = cred_data.get("access_token")
 
@@ -100,31 +107,48 @@ class EmailToolAgent:
         settings = self.DEFAULT_IMAP_SETTINGS.get(provider, self.DEFAULT_IMAP_SETTINGS["gmail"])
 
         try:
-            self._imap_connection = imaplib.IMAP4_SSL(
+            connection = imaplib.IMAP4_SSL(
                 settings["host"],
                 settings["port"],
             )
 
             email_addr = cred_data.get("email", cred_data.get("username", ""))
             auth_string = f"user={email_addr}\x01auth=Bearer {access_token}\x01\x01"
-            self._imap_connection.authenticate("XOAUTH2", lambda x: auth_string.encode())
+            connection.authenticate("XOAUTH2", lambda x: auth_string.encode())
 
-            self._current_user = user_id
             logger.info("Connected to %s via OAuth for user %s", provider, user_id)
-            return True
+            return connection
         except Exception as e:
             logger.error("OAuth connection failed: %s", e)
             raise EmailToolError(f"OAuth connection failed: {e}") from e
 
-    def disconnect(self) -> None:
-        """Disconnect from the IMAP server."""
-        if self._imap_connection:
-            try:
-                self._imap_connection.logout()
-            except Exception:
-                pass
-            self._imap_connection = None
-            self._current_user = None
+    def connect_imap(
+        self,
+        user_id: str,
+        credentials: Optional[IMAPCredentials] = None,
+    ) -> bool:
+        """
+        Verify IMAP credentials are valid for ``user_id`` by opening and
+        immediately closing a connection (used by the "connect your email
+        account" flow to validate credentials at save time).
+
+        Args:
+            user_id: The user ID
+            credentials: IMAP credentials (loads from store if not provided)
+
+        Returns:
+            True if connection successful
+
+        Postconditions:
+            - Raises ``EmailToolError`` on failure (unchanged contract).
+            - Does NOT cache the connection: each call opens its own.
+        """
+        connection = self._open_connection(user_id, credentials)
+        try:
+            connection.logout()
+        except Exception:
+            pass
+        return True
 
     def fetch_inbox(
         self,
@@ -144,18 +168,21 @@ class EmailToolAgent:
 
         Returns:
             List of EmailMessage objects
+
+        Preconditions:
+            - ``user_id`` has stored (or OAuth) email credentials.
+
+        Postconditions:
+            - Opens its own connection for this call only (never shared with
+              or mutated by a concurrent call for a different user) and
+              closes it before returning, success or failure.
         """
-        if self._current_user != user_id:
-            self.connect_imap(user_id)
-
-        if not self._imap_connection:
-            raise EmailToolError("Not connected to IMAP server")
-
+        connection = self._open_connection(user_id)
         try:
-            self._imap_connection.select(folder)
+            connection.select(folder)
 
             search_criteria = "UNSEEN" if unread_only else "ALL"
-            _, message_ids = self._imap_connection.search(None, search_criteria)
+            _, message_ids = connection.search(None, search_criteria)
 
             ids = message_ids[0].split()
             ids = ids[-limit:] if len(ids) > limit else ids
@@ -163,7 +190,7 @@ class EmailToolAgent:
 
             messages = []
             for msg_id in ids:
-                _, msg_data = self._imap_connection.fetch(msg_id, "(RFC822)")
+                _, msg_data = connection.fetch(msg_id, "(RFC822)")
 
                 if msg_data[0] is None:
                     continue
@@ -199,9 +226,16 @@ class EmailToolAgent:
                 )
 
             return messages
+        except EmailToolError:
+            raise
         except Exception as e:
             logger.error("Failed to fetch emails: %s", e)
             raise EmailToolError(f"Failed to fetch emails: {e}") from e
+        finally:
+            try:
+                connection.logout()
+            except Exception:
+                pass
 
     def send_email(
         self,
@@ -399,23 +433,26 @@ class EmailToolAgent:
 
         Returns:
             List of matching emails
+
+        Preconditions:
+            - ``user_id`` has stored (or OAuth) email credentials.
+
+        Postconditions:
+            - Opens its own connection for this call only (never shared with
+              or mutated by a concurrent call for a different user) and
+              closes it before returning, success or failure.
         """
-        if self._current_user != user_id:
-            self.connect_imap(user_id)
-
-        if not self._imap_connection:
-            raise EmailToolError("Not connected to IMAP server")
-
+        connection = self._open_connection(user_id)
         try:
-            self._imap_connection.select("INBOX")
-            _, message_ids = self._imap_connection.search(None, query)
+            connection.select("INBOX")
+            _, message_ids = connection.search(None, query)
 
             ids = message_ids[0].split()[-limit:]
             ids.reverse()
 
             messages = []
             for msg_id in ids:
-                _, msg_data = self._imap_connection.fetch(msg_id, "(RFC822)")
+                _, msg_data = connection.fetch(msg_id, "(RFC822)")
 
                 if msg_data[0] is None:
                     continue
@@ -444,9 +481,16 @@ class EmailToolAgent:
                 )
 
             return messages
+        except EmailToolError:
+            raise
         except Exception as e:
             logger.error("Search failed: %s", e)
             raise EmailToolError(f"Search failed: {e}") from e
+        finally:
+            try:
+                connection.logout()
+            except Exception:
+                pass
 
 
 def generate_oauth_url(provider: str = "gmail") -> str:

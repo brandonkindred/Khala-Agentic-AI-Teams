@@ -4,6 +4,23 @@ Each entry maps a team slug to the dotted path of its ``temporal`` package,
 which must export ``WORKFLOWS`` and ``ACTIVITIES``. ``start_all_team_workers``
 imports each lazily and spins up one worker per team on its own task queue
 so failures are isolated.
+
+Each team's task queue is its own module's ``TASK_QUEUE`` constant when
+present (falling back to ``f"{team}-queue"`` otherwise) — this lets a team
+pin a fixed/legacy queue name (e.g. for a workflow.patched drain, or to match
+a pre-existing external queue) and still register normally here, instead of
+special-casing itself out of this registry.
+
+Likewise, a team's own module's ``MAX_CONCURRENT_ACTIVITIES`` constant, when
+present, overrides ``start_team_worker``'s default concurrency cap. This
+matters because ``start_team_worker`` is idempotent per team name: whichever
+caller starts a team's worker FIRST wins for the whole process. A team with
+its own dedicated boot hook (e.g. a docker-compose ``TEAM_TEMPORAL_WORKER_FUNC``)
+that pins a non-default cap there must export that SAME value here too, or a
+consolidated process calling ``start_all_team_workers`` before that hook runs
+would silently start the worker at the default cap instead, and the team's
+own hook would then no-op (the worker is already running) without ever
+re-pinning it.
 """
 
 from __future__ import annotations
@@ -21,6 +38,7 @@ TEAM_TEMPORAL_MODULES: dict[str, str] = {
     # Already-Temporal teams are registered via their own startup hooks; this
     # registry covers teams migrated by the shared_temporal rollout.
     "market_research": "market_research_team.temporal",
+    "personal_assistant": "personal_assistant_team.temporal",
     "accessibility_audit": "accessibility_audit_team.temporal",
     "branding": "branding_team.temporal",
     "investment": "investment_team.temporal",
@@ -47,13 +65,17 @@ def _resolve_task_queue(team: str, mod: Any) -> str:
     Prefers the team module's own ``resolve_task_queue()`` (an operator
     override, e.g. SOC2's ``TEMPORAL_TASK_QUEUE_SOC2``) when it exports one, so
     a worker started through this generic host still polls the same queue
-    ``start_workflow_sync`` dispatches to. Falls back to the registry's
-    default ``f"{team}-queue"`` convention for teams that don't customize it.
+    ``start_workflow_sync`` dispatches to. Otherwise falls back to the
+    module's own ``TASK_QUEUE`` constant when present — some teams (e.g. PA,
+    draining a pre-existing ``personal-assistant`` queue) intentionally pin a
+    fixed queue name that does not follow the ``f"{team}-queue"`` convention —
+    and only then to that registry-default convention for teams that
+    customize neither.
     """
     resolver = getattr(mod, "resolve_task_queue", None)
     if callable(resolver):
         return resolver()
-    return f"{team}-queue"
+    return getattr(mod, "TASK_QUEUE", f"{team}-queue")
 
 
 def _resolve_max_concurrent_activities(mod: Any) -> Optional[int]:
@@ -76,9 +98,22 @@ def _resolve_max_concurrent_activities(mod: Any) -> Optional[int]:
 def start_all_team_workers(only: Iterable[str] | None = None) -> dict[str, bool]:
     """Start a Temporal worker for every registered team.
 
-    Returns a map of team -> whether a worker thread was started. Teams
-    whose Temporal module fails to import are skipped with an error log
-    rather than blocking startup of the rest.
+    Preconditions:
+        - ``only``, if given, is an iterable of team slugs; slugs not present
+          in ``TEAM_TEMPORAL_MODULES`` are silently ignored (not an error).
+
+    Postconditions:
+        - Returns a map of team -> whether a worker thread was started, one
+          entry per team considered (all of ``TEAM_TEMPORAL_MODULES`` when
+          ``only`` is ``None``, else its intersection with ``only``).
+        - A team whose Temporal module fails to import, or exposes no/empty
+          ``WORKFLOWS``/``ACTIVITIES``, is skipped with an error/warning log
+          and mapped to ``False`` rather than raising and blocking startup of
+          the remaining teams.
+        - A team exporting ``MAX_CONCURRENT_ACTIVITIES`` starts its worker
+          with that cap instead of ``start_team_worker``'s default, so this
+          bulk path agrees with that team's own dedicated boot hook on
+          whichever one wins the idempotent-start race.
     """
     results: dict[str, bool] = {}
     teams = TEAM_TEMPORAL_MODULES.items()

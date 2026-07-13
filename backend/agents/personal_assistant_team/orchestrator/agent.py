@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional
+import threading
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMNotConfiguredError
 
@@ -29,7 +30,24 @@ class PersonalAssistantOrchestrator:
     Main orchestrator for the Personal Assistant team.
 
     Routes user requests to appropriate specialist agents based on intent
-    classification and manages the overall conversation flow.
+    classification and manages the overall conversation flow. Two public
+    entry points share the same intent-dispatch logic (``_dispatch_intent``):
+    ``run`` (direct/library usage — see the package README's usage examples)
+    and ``handle_request`` (the AssistantRequest/Response-based path actually
+    wired to thread-mode job dispatch, with progress-callback reporting).
+
+    Invariants:
+        - ``_user_profile_agents`` is guarded by ``_profile_agents_lock``
+          (double-checked locking) — see ``_get_profile_agent``.
+        - ``llm``, ``credential_store``, and ``profile_store`` are shared,
+          unreplaced state across this instance's lifetime: every specialist
+          agent constructed in ``__init__`` holds a reference to the SAME
+          ``credential_store``/``profile_store`` objects passed in here, and
+          this whole instance is itself shared (via ``core.get_orchestrator``)
+          across concurrent callers — thread-mode dispatch and the Temporal
+          activity executor's own thread pool.
+        - Specialist agents (``email_agent``, ``calendar_agent``, etc.) are
+          constructed once in ``__init__`` and never reassigned.
     """
 
     def __init__(
@@ -58,14 +76,36 @@ class PersonalAssistantOrchestrator:
         self.doc_generator = DocGeneratorAgent(llm, self.profile_store)
 
         self._user_profile_agents: Dict[str, UserProfileAgent] = {}
+        # Guards the check-then-set below. This orchestrator instance is shared
+        # (via core.get_orchestrator) between the FastAPI thread-mode dispatch
+        # pool and the Temporal activity executor's own ThreadPoolExecutor, so
+        # two concurrent callers for the same user_id can race on this dict
+        # without a lock.
+        self._profile_agents_lock = threading.Lock()
 
     def _get_profile_agent(self, user_id: str) -> UserProfileAgent:
-        """Get or create a UserProfileAgent for a user."""
-        if user_id not in self._user_profile_agents:
-            self._user_profile_agents[user_id] = UserProfileAgent(
-                self.llm, user_id, self.profile_store
-            )
-        return self._user_profile_agents[user_id]
+        """Get or create a UserProfileAgent for a user.
+
+        Preconditions:
+            - ``user_id`` is a non-empty string.
+
+        Postconditions:
+            - Returns the same cached ``UserProfileAgent`` for a given
+              ``user_id`` across all callers (thread-mode and Temporal
+              activities), constructing it at most once.
+
+        Double-checked locking (mirrors ``core.get_orchestrator``'s singleton):
+        the cache-hit path — the overwhelming majority of calls, once a user's
+        agent exists — never acquires the lock, only a dict read.
+        """
+        agent = self._user_profile_agents.get(user_id)
+        if agent is None:
+            with self._profile_agents_lock:
+                agent = self._user_profile_agents.get(user_id)
+                if agent is None:
+                    agent = UserProfileAgent(self.llm, user_id, self.profile_store)
+                    self._user_profile_agents[user_id] = agent
+        return agent
 
     def classify_intent(self, message: str) -> Intent:
         """
@@ -108,63 +148,74 @@ class PersonalAssistantOrchestrator:
             entities=data.get("entities", {}),
         )
 
-    def run(self, request: OrchestratorRequest) -> OrchestratorResponse:
-        """
-        Process a user request through the orchestrator.
+    # intent.primary -> (specialist handler method name, progress status text,
+    # results dict key). Single source of truth for both public entry points
+    # (`run` and `handle_request`) that dispatch on intent, via
+    # `_dispatch_intent` — so a new intent is wired here once instead of
+    # independently in two near-identical if/elif chains.
+    _INTENT_DISPATCH: Dict[str, Tuple[str, str, str]] = {
+        "email": ("_handle_email", "Handling email request...", "email"),
+        "calendar": ("_handle_calendar", "Checking your calendar...", "calendar"),
+        "tasks": ("_handle_tasks", "Managing your tasks...", "tasks"),
+        "deals": ("_handle_deals", "Searching for deals...", "deals"),
+        "reservations": (
+            "_handle_reservations",
+            "Processing reservation request...",
+            "reservations",
+        ),
+        "documentation": (
+            "_handle_documentation",
+            "Generating documentation...",
+            "documentation",
+        ),
+        "profile": ("_handle_profile", "Updating your profile...", "profile"),
+    }
+    _GENERAL_DISPATCH: Tuple[str, str, str] = (
+        "_handle_general",
+        "Processing your request...",
+        "general",
+    )
 
-        Args:
-            request: The orchestrator request
+    def _dispatch_intent(
+        self,
+        request: OrchestratorRequest,
+        intent: Intent,
+        on_specialist_start: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[List[AgentAction], Dict[str, Any]]:
+        """Route to the specialist handler for ``intent.primary`` and collect its result.
 
-        Returns:
-            OrchestratorResponse with results
+        Preconditions:
+            - None beyond ``classify_intent``'s own contract on ``intent``.
+
+        Postconditions:
+            - Returns ``(actions, results)``: ``actions`` has exactly one
+              entry (the specialist's ``AgentAction``, or a degraded
+              ``orchestrator:error`` action on a non-LLM handler exception).
+            - ``results`` contains ``{result_key: action.result}`` on
+              success, or is left EMPTY on a handler exception — matching
+              the contract shared with the Temporal activity path
+              (``temporal.activities._run_specialist``): a caught specialist
+              error must not feed an error dict into response generation
+              under the intent's key.
+            - Re-raises ``LLMNotConfiguredError`` (a missing provider must
+              fail the run, not degrade to a partial response).
+            - Calls ``on_specialist_start(status_text)``, if given, once,
+              immediately before invoking the handler — lets ``handle_request``
+              report progress without ``run`` (which has no progress
+              callback) needing to.
         """
-        intent = self.classify_intent(request.message)
-        logger.info("Classified intent: %s (confidence: %.2f)", intent.primary, intent.confidence)
+        method_name, status_text, result_key = self._INTENT_DISPATCH.get(
+            intent.primary, self._GENERAL_DISPATCH
+        )
+        if on_specialist_start is not None:
+            on_specialist_start(status_text)
 
         actions: List[AgentAction] = []
         results: Dict[str, Any] = {}
-
         try:
-            if intent.primary == "email":
-                action_result = self._handle_email(request, intent)
-                actions.append(action_result)
-                results["email"] = action_result.result
-
-            elif intent.primary == "calendar":
-                action_result = self._handle_calendar(request, intent)
-                actions.append(action_result)
-                results["calendar"] = action_result.result
-
-            elif intent.primary == "tasks":
-                action_result = self._handle_tasks(request, intent)
-                actions.append(action_result)
-                results["tasks"] = action_result.result
-
-            elif intent.primary == "deals":
-                action_result = self._handle_deals(request, intent)
-                actions.append(action_result)
-                results["deals"] = action_result.result
-
-            elif intent.primary == "reservations":
-                action_result = self._handle_reservations(request, intent)
-                actions.append(action_result)
-                results["reservations"] = action_result.result
-
-            elif intent.primary == "documentation":
-                action_result = self._handle_documentation(request, intent)
-                actions.append(action_result)
-                results["documentation"] = action_result.result
-
-            elif intent.primary == "profile":
-                action_result = self._handle_profile(request, intent)
-                actions.append(action_result)
-                results["profile"] = action_result.result
-
-            else:
-                action_result = self._handle_general(request, intent)
-                actions.append(action_result)
-                results["general"] = action_result.result
-
+            action_result = getattr(self, method_name)(request, intent)
+            actions.append(action_result)
+            results[result_key] = action_result.result
         except LLMNotConfiguredError:
             # A missing LLM provider is a configuration failure, not a handled
             # per-request error: let it propagate so the job is marked failed.
@@ -179,6 +230,22 @@ class PersonalAssistantOrchestrator:
                     success=False,
                 )
             )
+        return actions, results
+
+    def run(self, request: OrchestratorRequest) -> OrchestratorResponse:
+        """
+        Process a user request through the orchestrator.
+
+        Args:
+            request: The orchestrator request
+
+        Returns:
+            OrchestratorResponse with results
+        """
+        intent = self.classify_intent(request.message)
+        logger.info("Classified intent: %s (confidence: %.2f)", intent.primary, intent.confidence)
+
+        actions, results = self._dispatch_intent(request, intent)
 
         profile_updates = self._check_for_profile_updates(request)
 
@@ -585,7 +652,7 @@ class PersonalAssistantOrchestrator:
         high_confidence = [p for p in extraction.extracted_info if p.confidence >= 0.8]
 
         for pref in high_confidence:
-            profile_agent._apply_preference(pref)
+            profile_agent.apply_preference(pref)
 
         return [p.model_dump() for p in high_confidence]
 
@@ -703,72 +770,11 @@ class PersonalAssistantOrchestrator:
                 data={},
             )
 
-        actions: List[AgentAction] = []
-        results: Dict[str, Any] = {}
-
-        try:
-            if intent.primary == "email":
-                _update(status_text="Handling email request...", progress=30)
-                action_result = self._handle_email(orch_request, intent)
-                actions.append(action_result)
-                results["email"] = action_result.result
-
-            elif intent.primary == "calendar":
-                _update(status_text="Checking your calendar...", progress=30)
-                action_result = self._handle_calendar(orch_request, intent)
-                actions.append(action_result)
-                results["calendar"] = action_result.result
-
-            elif intent.primary == "tasks":
-                _update(status_text="Managing your tasks...", progress=30)
-                action_result = self._handle_tasks(orch_request, intent)
-                actions.append(action_result)
-                results["tasks"] = action_result.result
-
-            elif intent.primary == "deals":
-                _update(status_text="Searching for deals...", progress=30)
-                action_result = self._handle_deals(orch_request, intent)
-                actions.append(action_result)
-                results["deals"] = action_result.result
-
-            elif intent.primary == "reservations":
-                _update(status_text="Processing reservation request...", progress=30)
-                action_result = self._handle_reservations(orch_request, intent)
-                actions.append(action_result)
-                results["reservations"] = action_result.result
-
-            elif intent.primary == "documentation":
-                _update(status_text="Generating documentation...", progress=30)
-                action_result = self._handle_documentation(orch_request, intent)
-                actions.append(action_result)
-                results["documentation"] = action_result.result
-
-            elif intent.primary == "profile":
-                _update(status_text="Updating your profile...", progress=30)
-                action_result = self._handle_profile(orch_request, intent)
-                actions.append(action_result)
-                results["profile"] = action_result.result
-
-            else:
-                _update(status_text="Processing your request...", progress=30)
-                action_result = self._handle_general(orch_request, intent)
-                actions.append(action_result)
-                results["general"] = action_result.result
-
-        except LLMNotConfiguredError:
-            # A missing LLM provider is a configuration failure, not a handled
-            # per-request error: let it propagate so the job is marked failed.
-            raise
-        except Exception as e:
-            logger.error("Error handling request: %s", e)
-            actions.append(
-                AgentAction(
-                    agent="orchestrator",
-                    action="error",
-                    result={"error": str(e)},
-                    success=False,
-                )
-            )
+        actions, results = self._dispatch_intent(
+            orch_request,
+            intent,
+            on_specialist_start=lambda status_text: _update(status_text=status_text, progress=30),
+        )
 
         _update(status_text="Checking for profile updates...", progress=70)
         profile_updates = self._check_for_profile_updates(orch_request)
