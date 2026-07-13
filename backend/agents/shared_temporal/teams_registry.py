@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import importlib
 import logging
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 from shared_temporal.worker import start_team_worker
 
@@ -56,6 +56,23 @@ def _resolve_task_queue(team: str, mod: Any) -> str:
     return f"{team}-queue"
 
 
+def _resolve_max_concurrent_activities(mod: Any) -> Optional[int]:
+    """The activity-slot count to start ``team``'s worker with, if customized.
+
+    Prefers the team module's own ``MAX_CONCURRENT_ACTIVITIES`` int constant
+    (e.g. SOC2's, sized for its 5-way criterion fan-out) when it exports one,
+    so a worker started through this generic host has the same concurrency as
+    the team's own dedicated boot hook — ``start_team_worker``'s default of 4
+    can otherwise leave a wide fan-out queued behind other activities for a
+    meaningful chunk of its schedule-to-close budget. Returns ``None`` for
+    teams that don't customize it, so the caller omits the argument and
+    ``start_team_worker``'s own default applies (avoids duplicating that
+    default as a second literal here, which could drift from it).
+    """
+    value = getattr(mod, "MAX_CONCURRENT_ACTIVITIES", None)
+    return value if isinstance(value, int) else None
+
+
 def start_all_team_workers(only: Iterable[str] | None = None) -> dict[str, bool]:
     """Start a Temporal worker for every registered team.
 
@@ -82,11 +99,12 @@ def start_all_team_workers(only: Iterable[str] | None = None) -> dict[str, bool]
                 )
                 results[team] = False
                 continue
+            worker_kwargs: dict[str, Any] = {"task_queue": _resolve_task_queue(team, mod)}
+            max_concurrent = _resolve_max_concurrent_activities(mod)
+            if max_concurrent is not None:
+                worker_kwargs["max_concurrent_activities"] = max_concurrent
             started = start_team_worker(
-                team,
-                workflows=workflows,
-                activities=activities,
-                task_queue=_resolve_task_queue(team, mod),
+                team, workflows=workflows, activities=activities, **worker_kwargs
             )
             results[team] = started
         except Exception as e:

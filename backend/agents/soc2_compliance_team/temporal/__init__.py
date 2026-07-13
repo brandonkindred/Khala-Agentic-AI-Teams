@@ -32,6 +32,21 @@ ACTIVITIES = [
 TASK_QUEUE = "soc2_compliance-queue"
 WORKFLOW_ID_PREFIX = "soc2-audit-"
 
+# The workflow fans out all 5 TSC criteria (``soc2_audit_criterion``)
+# concurrently via ``asyncio.gather``. ``start_team_worker``'s default
+# ``max_concurrent_activities=4`` would leave one criterion queued behind the
+# other four for up to their full 30-minute start-to-close budget before it
+# even starts running — pushing it close to (or past) its 1-hour
+# schedule-to-close ceiling. 8 slots comfortably covers one job's 5-way
+# fan-out plus headroom for a concurrent job's load/report/mark-failed step.
+# Defined here (not just in ``temporal/worker.py``) so both the dedicated
+# ``start_soc2_temporal_worker_thread`` boot hook and the generic
+# ``shared_temporal.teams_registry.start_all_team_workers`` host apply the
+# same concurrency, instead of the registry silently falling back to the
+# shared default and reintroducing the queuing problem this constant exists
+# to avoid.
+MAX_CONCURRENT_ACTIVITIES = 8
+
 
 def resolve_task_queue() -> str:
     """The SOC2 task queue name, honoring an optional operator override.
@@ -53,6 +68,7 @@ def resolve_task_queue() -> str:
 
 __all__ = [
     "ACTIVITIES",
+    "MAX_CONCURRENT_ACTIVITIES",
     "Soc2AuditWorkflow",
     "TASK_QUEUE",
     "WORKFLOWS",
