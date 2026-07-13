@@ -473,38 +473,39 @@ def test_backtest_dispatch_falls_back_to_thread_on_dispatch_failure(
 
 
 def test_rehydrate_active_run_offset_repopulates_from_job_store(monkeypatch) -> None:
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
-    monkeypatch.setattr(api_main, "_active_runs", {})
+    monkeypatch.setattr(run_state, "active_runs", {})
     monkeypatch.setattr(
-        api_main,
-        "_load_run_from_job_service",
+        run_state,
+        "load_run_from_job_service",
         lambda rid: {"run_id": rid, "status": "running", "contiguous_cycles": 4},
     )
 
-    offset = api_main._rehydrate_active_run_offset("run-k")
+    offset = run_state.rehydrate_active_run_offset("run-k")
 
     assert offset == 4
     # The in-memory entry is rehydrated so _update_run can persist progress.
-    assert api_main._active_runs["run-k"]["contiguous_cycles"] == 4
+    assert run_state.active_runs["run-k"]["contiguous_cycles"] == 4
 
 
 def test_rehydrate_active_run_offset_defaults_to_zero(monkeypatch) -> None:
-    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
-    monkeypatch.setattr(api_main, "_active_runs", {})
-    monkeypatch.setattr(api_main, "_load_run_from_job_service", lambda rid: None)
+    monkeypatch.setattr(run_state, "active_runs", {})
+    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
 
-    assert api_main._rehydrate_active_run_offset("missing") == 0
+    assert run_state.rehydrate_active_run_offset("missing") == 0
 
 
 def test_strategy_lab_run_failure_reports_only_hard_failure(monkeypatch) -> None:
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
 
-    monkeypatch.setattr(api_main, "_active_runs", {"r": {"status": "failed", "error": "kaboom"}})
+    monkeypatch.setattr(run_state, "active_runs", {"r": {"status": "failed", "error": "kaboom"}})
     assert api_main._strategy_lab_run_failure("r") == "kaboom"
 
-    monkeypatch.setattr(api_main, "_active_runs", {"r": {"status": "completed_with_errors"}})
+    monkeypatch.setattr(run_state, "active_runs", {"r": {"status": "completed_with_errors"}})
     assert api_main._strategy_lab_run_failure("r") is None
 
 
