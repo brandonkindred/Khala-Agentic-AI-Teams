@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from market_research_team.agents import (
+    ConsistencyAgent,
     MarketViabilityAgent,
     ResearchScriptAgent,
     TranscriptIngestionAgent,
@@ -11,7 +14,35 @@ from market_research_team.agents import (
     _parse_json,
     _safe_float,
 )
+
+# Captured at import time — BEFORE the autouse ``_mock_strands`` fixture rebinds
+# the module attribute — so this reference is the REAL ``_call_agent``.
+from market_research_team.agents import _call_agent as _real_call_agent
 from market_research_team.models import InterviewInsight, MarketSignal, ResearchMission
+
+
+class _FakeAgentResult:
+    """Mimics a strands ``AgentResult``: ``.message`` is a structured dict, and
+    ``str()`` yields the concatenated text blocks (as ``AgentResult.__str__`` does)."""
+
+    def __init__(self, text: str) -> None:
+        self.message = {"role": "assistant", "content": [{"text": text}]}
+        self._text = text
+
+    def __str__(self) -> str:
+        return self._text
+
+
+def test_call_agent_extracts_text_not_message_dict() -> None:
+    """Regression: ``AgentResult.message`` is a dict, so treating it as text (the
+    old ``result.message.strip()``) crashed; ``str(result)`` is the extraction."""
+    out = _real_call_agent(lambda prompt: _FakeAgentResult('  {"verdict": "x"}  '), "prompt")
+    assert out == '{"verdict": "x"}'
+
+
+def test_call_agent_handles_raw_string() -> None:
+    assert _real_call_agent(lambda prompt: "  hello  ", "prompt") == "hello"
+
 
 # ---------------------------------------------------------------------------
 # TranscriptIngestionAgent (unchanged — pure I/O, no LLM)
@@ -38,6 +69,23 @@ def test_transcript_ingestion_loads_inline_and_folder(tmp_path: Path) -> None:
     assert any(name == "a.txt" for name, _ in loaded)
     assert all(name != "b.txt" for name, _ in loaded)
     assert all(name != "c.md" for name, _ in loaded)
+
+
+def test_transcript_ingestion_truncates_beyond_max() -> None:
+    from market_research_team.agents import _MAX_TRANSCRIPTS
+
+    mission = ResearchMission(
+        product_concept="Concept",
+        target_users="Users",
+        business_goal="Goal",
+        transcripts=[f"text {i}" for i in range(_MAX_TRANSCRIPTS + 10)],
+    )
+
+    loaded = TranscriptIngestionAgent().load_transcripts(mission)
+
+    assert len(loaded) == _MAX_TRANSCRIPTS
+    assert loaded[0] == ("inline_transcript_1", "text 0")
+    assert loaded[-1] == ("inline_transcript_200", f"text {_MAX_TRANSCRIPTS - 1}")
 
 
 def test_transcript_ingestion_handles_missing_folder() -> None:
@@ -117,6 +165,25 @@ def test_user_psychology_pads_to_minimum_two_signals(monkeypatch) -> None:
     )
     signals = UserPsychologyAgent().derive_signals([])
     assert len(signals) >= 2
+
+
+def test_user_psychology_null_signal_name_defaults_to_placeholder(monkeypatch) -> None:
+    """Regression: a signal object with ``"signal": null`` (or any non-string)
+    used to construct ``MarketSignal(signal=None, ...)``, which is invalid per
+    the model's ``str`` field — this must fall back to a placeholder name
+    instead of raising."""
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: json.dumps(
+            [
+                {"signal": None, "confidence": 0.6, "evidence": ["e1"]},
+                {"signal": "Real signal", "confidence": 0.7, "evidence": ["e2"]},
+            ]
+        ),
+    )
+    signals = UserPsychologyAgent().derive_signals([])
+    assert signals[0].signal == "Unknown signal"
+    assert signals[1].signal == "Real signal"
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +306,26 @@ def test_market_viability_null_verdict_defaults(monkeypatch) -> None:
         mission, [MarketSignal(signal="s1", confidence=0.5)], 1
     )
     assert result.verdict == "needs_more_validation"
+
+
+# ---------------------------------------------------------------------------
+# ConsistencyAgent (Strands-powered)
+# ---------------------------------------------------------------------------
+
+
+def test_consistency_agent_returns_single_signal() -> None:
+    insights = [InterviewInsight(source="a", pain_points=["pain1"])]
+    signals = ConsistencyAgent().analyze(insights)
+    assert len(signals) == 1
+    assert isinstance(signals[0], MarketSignal)
+
+
+def test_consistency_agent_rejects_empty_insights() -> None:
+    """DbC: the empty-transcript case is the orchestrator's responsibility
+    (its deterministic fallback signal), not this agent's — calling it with
+    no insights is a caller (precondition) bug and must fail loudly."""
+    with pytest.raises(AssertionError):
+        ConsistencyAgent().analyze([])
 
 
 # ---------------------------------------------------------------------------

@@ -1,67 +1,111 @@
-"""Temporal workflow + activity for the market_research team.
+"""Temporal workflow for the market_research team — fine-grained per-stage orchestration.
 
-Kept in its own module (separate from the package ``__init__``) so the
-temporalio workflow sandbox can re-import the workflow class without
-executing any non-deterministic top-level code (e.g. ``os.getenv``,
-worker bootstrap). Co-locating ``start_team_worker``/``is_temporal_enabled``
-with the workflow class trips the sandbox with
-``__call__ on os.getenv restricted`` during workflow registration.
+``MarketResearchWorkflow`` runs the pipeline as a graph of Temporal activities
+(defined in :mod:`activities`): a single-shot ``market_research_prepare`` opens
+the run, ``market_research_ingest`` loads transcripts, the UX stage **fans out
+one activity per transcript** via ``asyncio.gather``, ``scripts`` runs as an
+independent parallel branch, ``psychology`` and (split mode) ``consistency`` run
+concurrently, ``viability`` fans in, and ``market_research_finalize`` assembles
+the ``TeamOutput`` and writes COMPLETED. Every specialist agent invocation is a
+durable, individually-retryable Temporal activity, visible in the Temporal UI —
+the whole point of the fine-grained decomposition.
 
-The activity reuses the shared pipeline core (``run_pipeline_core`` in
-``market_research_team.pipeline`` — a neutral module, so the worker does not
-import the FastAPI app) so the job-store bookkeeping (RUNNING → COMPLETED,
-cancel guards) lives in exactly one place. Status is written to the durable
-``JobServiceClient`` store, so a completed run survives a worker/process
-restart.
+Failure contract (mirrored from sales_team): activities never write FAILED
+(doing so mid-retry would trip their own terminal guards and defeat the retry
+policy). Instead the workflow body is wrapped in a catch-all that, after a fatal
+error has exhausted its retries, records FAILED via the dedicated
+``market_research_mark_failed`` activity and re-raises — so the Temporal
+workflow outcome always mirrors the job store: FAILED job ⇔ failed workflow,
+COMPLETED job ⇔ succeeded workflow, and a cancelled/interrupted job ends the
+workflow cleanly without a COMPLETED write.
+
+The workflow body is **deterministic**: no clock, no randomness, no I/O — only
+pure dict/string computation (the split-topology flag, per-stage progress
+gating, exception filtering of the UX fan-out) plus scheduling of activities.
+Long LLM activities use per-attempt ``start_to_close`` timeouts with heartbeats;
+the cheap job-store activities also use ``start_to_close`` (not
+``schedule_to_close``, which counts queue time — a queued progress write on a
+worker whose slots are saturated by long LLM activities must wait for a slot,
+not die of starvation).
+
+This package ``__init__`` and this module stay free of import-time side effects
+(no worker boot, no ``os.getenv``) — the temporalio sandbox replays them during
+workflow registration (guarded by ``test_temporal_bootstrap``).
 """
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from datetime import timedelta
 from typing import Any
 
-from temporalio import activity, workflow
+from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+with workflow.unsafe.imports_passed_through():
+    from market_research_team.temporal import activities as _act
 
-@activity.defn(name="market_research_run_pipeline")
-def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
-    """Run the market-research orchestrator and record job status.
+# Per-stage LLM calls are non-idempotent, but a single call is cheap to re-run
+# and the ``llm_service`` layer also retries transient provider errors; a small
+# bounded retry gives crash/transient durability — the point of the fine-grained
+# decomposition (vs. the old whole-pipeline single attempt).
+LLM_RETRY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=30),
+    maximum_interval=timedelta(minutes=2),
+    backoff_coefficient=2.0,
+)
+# Cheap, idempotent job-store activities: safe to retry aggressively so a
+# transient job-service blip never fails the whole workflow.
+IO_RETRY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=5),
+    maximum_interval=timedelta(seconds=30),
+    backoff_coefficient=2.0,
+)
+
+# Per-attempt execution timeouts (queue wait excluded — see module docstring).
+_IO_TIMEOUT = timedelta(minutes=2)
+_INGEST_TIMEOUT = timedelta(minutes=5)
+_FINALIZE_TIMEOUT = timedelta(minutes=5)
+_STAGE_TIMEOUT = timedelta(minutes=30)
+_HEARTBEAT_TIMEOUT = timedelta(seconds=_act.HEARTBEAT_TIMEOUT_S)
+
+# ``TeamTopology.SPLIT`` value. Compared against the JSON-round-tripped request
+# dict, so a plain string literal keeps the workflow body free of model imports.
+_SPLIT_TOPOLOGY = "split"
+
+# Temporal patch marker for the single-activity → per-stage-DAG decomposition.
+# New runs are patched (take the DAG); pre-decomposition histories replay the
+# unpatched drain-out branch, which re-schedules the legacy whole-pipeline
+# activity with byte-identical options so those in-flight runs stay
+# deterministic and survive the deploy.
+_PATCH_FINE_GRAINED = "market-research-fine-grained-activities"
+# Byte-identical to the pre-decomposition workflow's single execute_activity call.
+_LEGACY_ACTIVITY_TIMEOUT = timedelta(hours=2)
+_LEGACY_ACTIVITY_RETRY = RetryPolicy(maximum_attempts=1)
+
+
+def _root_cause_message(exc: BaseException) -> str:
+    """Return the innermost chained exception's message.
+
+    ``workflow.execute_activity`` failures surface as a
+    ``temporalio.exceptions.ActivityError`` wrapper whose own ``str()`` is
+    generic Temporal boilerplate (e.g. "Activity task failed"); the actual
+    activity-side exception is chained via ``__cause__``.
 
     Preconditions:
-        - ``job_id`` refers to a job already created in the job store
-          (the API endpoint calls ``create_job`` before dispatch).
-        - ``request`` is the serialized ``RunMarketResearchRequest``
-          (i.e. ``payload.model_dump()``).
-
+        - ``exc`` is any exception (chained or not).
     Postconditions:
-        - On success the job store row ends in ``COMPLETED`` with the
-          orchestrator result and the activity returns ``{"job_id": job_id}``.
-        - If the job was cancelled, leaves the row untouched and returns
-          ``{"job_id": job_id}`` (a cancelled run is terminal — not retried).
-        - On a genuine failure, marks the row ``FAILED`` and re-raises so the
-          failure surfaces as a failed Temporal workflow rather than a
-          silently-"completed" one. Auto-retry is bounded by the workflow's
-          ``RetryPolicy`` (see ``MarketResearchWorkflow.run``).
+        - Returns ``str()`` of the innermost ``__cause__`` in the chain, or
+          ``str(exc)`` unchanged when there is no chain — so a FAILED job's
+          recorded error reflects the real root cause instead of a wrapper's
+          generic text.
     """
-    from market_research_team.models import RunMarketResearchRequest
-    from market_research_team.pipeline import prepare, run_pipeline_core
-    from market_research_team.shared.job_store import (
-        JOB_STATUS_FAILED,
-        is_job_cancelled,
-        update_job,
-    )
-
-    mission, human_review = prepare(RunMarketResearchRequest(**request))
-    try:
-        run_pipeline_core(job_id, mission, human_review)
-    except Exception as e:
-        activity.logger.exception("Market research job %s failed", job_id)
-        if is_job_cancelled(job_id):
-            return {"job_id": job_id}
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
-        raise
-    return {"job_id": job_id}
+    while exc.__cause__ is not None:
+        exc = exc.__cause__
+    return str(exc)
 
 
 @workflow.defn(name="MarketResearchWorkflow")
@@ -76,26 +120,304 @@ class MarketResearchWorkflow:
               (``payload.model_dump()``).
 
         Postconditions:
-            - Delegates to ``run_pipeline_activity`` (which owns job-store
-              status bookkeeping) and returns its ``{"job_id": job_id}`` result.
+            - Pre-decomposition (unpatched) histories replay the legacy
+              single-activity path so in-flight runs survive the deploy; new
+              (patched) runs take the per-stage DAG.
+            - On success returns ``{"job_id": job_id}`` with the job-store row
+              COMPLETED (or left at its clean terminal state after a cancel).
+            - On a fatal pipeline error the job is marked FAILED (best-effort,
+              via ``market_research_mark_failed``) and the error re-raises so the
+              Temporal workflow fails — a real failure is never reported as a
+              succeeded workflow.
+        """
+        if not workflow.patched(_PATCH_FINE_GRAINED):
+            # Drain-out branch: a history that started before the decomposition
+            # replays here and must deterministically re-schedule the original
+            # whole-pipeline activity with byte-identical options. The legacy
+            # activity stays registered until every such run drains; then this
+            # branch and ``run_pipeline_activity`` can be deleted.
+            return await workflow.execute_activity(
+                _act.run_pipeline_activity,
+                args=[job_id, request],
+                start_to_close_timeout=_LEGACY_ACTIVITY_TIMEOUT,
+                retry_policy=_LEGACY_ACTIVITY_RETRY,
+            )
+
+        try:
+            return await self._pipeline(job_id, request)
+        except Exception as exc:
+            try:
+                await workflow.execute_activity(
+                    _act.mark_failed_activity,
+                    args=[job_id, _root_cause_message(exc)],
+                    start_to_close_timeout=_IO_TIMEOUT,
+                    retry_policy=IO_RETRY,
+                )
+            except Exception:
+                workflow.logger.warning(
+                    "market_research job %s: failed to record FAILED after pipeline error", job_id
+                )
+            raise
+
+    async def _pipeline(self, job_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Schedule the pipeline stages; deterministic control flow only.
+
+        Preconditions: same as :meth:`run` (its sole caller).
+        Postconditions: returns ``{"job_id": job_id}``; raises on the first fatal
+            activity error (handled by :meth:`run`'s catch-all).
+        """
+        # prepare only validates + returns the transcripts-stripped ctx; it does
+        # not need the transcript bodies (ingest loads them from the full
+        # request). Passing a stripped request keeps inline transcripts out of
+        # prepare's activity input in workflow history — they are already
+        # recorded once as the workflow start input, and flow to ingest.
+        prepare_request = {**request, "transcripts": [], "transcript_folder_path": None}
+        ctx = await workflow.execute_activity(
+            _act.prepare_activity,
+            args=[job_id, prepare_request],
+            start_to_close_timeout=_IO_TIMEOUT,
+            retry_policy=IO_RETRY,
+        )
+        if ctx["stopped"]:
+            return {"job_id": job_id}
+
+        split = request.get("topology") == _SPLIT_TOPOLOGY
+
+        # Gate before the expensive fan-out: if the job already went terminal
+        # (cancel / stale-job monitor), stop cleanly without spending on LLM
+        # activities. Downstream activities also self-guard, so a cancel landing
+        # mid-run still short-circuits (each becomes a cheap no-op) and finalize
+        # never writes COMPLETED.
+        if not await self._progress(job_id, "ingest", 10):
+            return {"job_id": job_id}
+
+        # ``scripts`` needs only the mission, so it runs as an independent branch
+        # concurrently with ingest + UX (mirrors the graph's parallel entry).
+        scripts_handle = workflow.start_activity(
+            _act.scripts_activity,
+            args=[ctx],
+            start_to_close_timeout=_STAGE_TIMEOUT,
+            heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+            retry_policy=LLM_RETRY,
+        )
+
+        # Populated once psychology/(split-mode) consistency are started, so the
+        # except block below can cancel+drain whichever were actually scheduled
+        # if the sibling activity or a later stage fails.
+        psych_handle: workflow.ActivityHandle | None = None
+        cons_handle: workflow.ActivityHandle | None = None
+
+        try:
+            # Ingest persists transcripts to the shared per-job store and returns
+            # only lightweight refs ({"index", "source"}); the transcript bodies
+            # never enter workflow history (ux_one loads each from the store).
+            refs = await workflow.execute_activity(
+                _act.ingest_activity,
+                args=[job_id, request],
+                start_to_close_timeout=_INGEST_TIMEOUT,
+                retry_policy=IO_RETRY,
+            )
+
+            # UX: one activity per transcript, fanned out concurrently. A
+            # transcript whose activity fails after its retries is dropped
+            # (return_exceptions), not fatal to the run — the Temporal upgrade
+            # over the thread path's whole-run failure. An outer cancellation
+            # still propagates out of gather.
+            ux_results = await asyncio.gather(
+                *[
+                    workflow.execute_activity(
+                        _act.ux_one_activity,
+                        args=[ctx, ref],
+                        start_to_close_timeout=_STAGE_TIMEOUT,
+                        heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+                        retry_policy=LLM_RETRY,
+                    )
+                    for ref in refs
+                ],
+                return_exceptions=True,
+            )
+            insights = [i for i in ux_results if not isinstance(i, BaseException)]
+
+            active = await self._progress(job_id, "analysis", 45)
+            if not active:
+                # Job went terminal (cancel / stale-job monitor) after
+                # scripts_handle was already scheduled. Every other activity
+                # from here on self-guards into a cheap no-op, but the
+                # already-running scripts activity does not re-check
+                # mid-flight — left alone, it would keep paying for its LLM
+                # call (and this method would keep waiting on it via
+                # ``_await_scripts``) for a job that's already done. Cancel +
+                # drain it here, same as the catch-all below.
+                return await self._cancel_scripts_and_stop(job_id, scripts_handle)
+
+            # Transcripts were loaded but EVERY UX analysis was dropped (not a
+            # cancel — that's handled above — but every transcript's own
+            # activity failed after retries). Surface it as a failed run
+            # rather than silently emitting an "insufficient evidence / collect
+            # more interviews" result from zero insights, which would
+            # misrepresent a run that had data but couldn't analyze it.
+            if refs and not insights:
+                raise RuntimeError(f"All {len(refs)} transcript analyses failed")
+
+            # Psychology and (split mode) consistency run concurrently after UX,
+            # via handles (not bare execute_activity coroutines) so the except
+            # block below can cancel+drain whichever is still running if its
+            # sibling fails — asyncio.gather does NOT cancel the other
+            # awaitable when one raises, it only propagates the first exception.
+            psych_handle = workflow.start_activity(
+                _act.psychology_activity,
+                args=[ctx, insights],
+                start_to_close_timeout=_STAGE_TIMEOUT,
+                heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+                retry_policy=LLM_RETRY,
+            )
+            if split:
+                cons_handle = workflow.start_activity(
+                    _act.consistency_activity,
+                    args=[ctx, insights],
+                    start_to_close_timeout=_STAGE_TIMEOUT,
+                    heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+                    retry_policy=LLM_RETRY,
+                )
+                psych_signals, cons_signals = await asyncio.gather(psych_handle, cons_handle)
+                signals = psych_signals + cons_signals
+            else:
+                signals = await psych_handle
+
+            if not await self._progress(job_id, "viability", 75):
+                # Same terminal short-circuit as the "analysis" gate above:
+                # a cancel landing between UX and viability must not fall
+                # through to viability_activity/finalize while the
+                # already-started scripts activity keeps running.
+                return await self._cancel_scripts_and_stop(job_id, scripts_handle)
+
+            recommendation = await workflow.execute_activity(
+                _act.viability_activity,
+                args=[ctx, signals, len(insights)],
+                start_to_close_timeout=_STAGE_TIMEOUT,
+                heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+                retry_policy=LLM_RETRY,
+            )
+
+            if not await self._progress(job_id, "finalize", 90):
+                # A cancel landing while viability_activity ran must not fall
+                # through to awaiting the (possibly still-running) scripts
+                # activity for a job that's already done — same short-circuit
+                # as the gates above; psychology/consistency already
+                # succeeded by this point, so only scripts needs cancelling.
+                return await self._cancel_scripts_and_stop(job_id, scripts_handle)
+        except BaseException:
+            # Any failure past this point must not leave an independently-
+            # scheduled activity orphaned (still running/retrying for a job
+            # that's about to be marked FAILED): scripts always started
+            # earlier; psych_handle/cons_handle are non-None once psychology/
+            # consistency were actually scheduled (gather propagates the
+            # first failure without cancelling its sibling, so a
+            # psychology/consistency failure must cancel the other here).
+            await self._cancel_handles(scripts_handle, psych_handle, cons_handle)
+            raise
+
+        scripts = await self._await_scripts(job_id, scripts_handle)
+
+        await workflow.execute_activity(
+            _act.finalize_activity,
+            args=[ctx, insights, signals, recommendation, scripts],
+            start_to_close_timeout=_FINALIZE_TIMEOUT,
+            retry_policy=IO_RETRY,
+        )
+        return {"job_id": job_id}
+
+    async def _cancel_handles(self, *handles: "workflow.ActivityHandle | None") -> None:
+        """Cancel + drain any number of started activity handles (skips ``None``).
+
+        Preconditions:
+            - Each non-``None`` element of ``handles`` is an ``ActivityHandle``
+              returned by ``workflow.start_activity``.
+        Postconditions:
+            - Every non-``None`` handle has ``.cancel()`` requested (all up
+              front, so none of them keep running while an earlier one is
+              drained) and is then awaited, suppressing any resulting
+              exception (including a benign ``CancelledError``) — so none of
+              them can resurface after this method returns.
+        """
+        live = [h for h in handles if h is not None]
+        for handle in live:
+            handle.cancel()
+        for handle in live:
+            with suppress(BaseException):
+                await handle
+
+    async def _cancel_scripts_and_stop(
+        self, job_id: str, handle: workflow.ActivityHandle
+    ) -> dict[str, Any]:
+        """Cancel the scripts activity and clean up for an early terminal return.
+
+        Used by the "analysis"/"viability"/"finalize" progress gates when the
+        job has already gone terminal (cancel / stale-job monitor) — all three
+        return directly to :meth:`run` as a clean success, so neither
+        ``finalize_activity`` nor ``mark_failed_activity`` (the DAG's only
+        other cleanup sites) ever runs for this path.
+
+        Preconditions:
+            - ``handle`` is the ``ActivityHandle`` returned by starting
+              ``scripts_activity``; ``ingest_activity`` has already run (all
+              three call sites are past it), so the job's transcripts may
+              already be persisted.
+        Postconditions:
+            - Cancels + drains ``handle`` so the in-flight LLM call is never
+              left running for a job that's already done. Clears the job's
+              persisted transcript directory via a dedicated activity
+              (best-effort — never raises) so it doesn't sit on disk until
+              the next process-startup sweep. Returns ``{"job_id": job_id}``
+              for the caller to return directly.
+        """
+        await self._cancel_handles(handle)
+        await workflow.execute_activity(
+            _act.cleanup_transcripts_activity,
+            args=[job_id],
+            start_to_close_timeout=_IO_TIMEOUT,
+            retry_policy=IO_RETRY,
+        )
+        return {"job_id": job_id}
+
+    async def _await_scripts(self, job_id: str, handle: workflow.ActivityHandle) -> list[str]:
+        """Await the scripts activity, tolerating its own failure (best-effort).
+
+        Preconditions:
+            - ``handle`` is the ``ActivityHandle`` returned by starting
+              ``scripts_activity``; every other pipeline stage already
+              succeeded (the caller only reaches here past the try/except that
+              cancels ``handle`` on any earlier failure).
+        Postconditions:
+            - Returns the scripts list on success. On ANY failure (retry
+              exhaustion, timeout) logs a warning and returns ``[]`` instead of
+              failing the whole run — matching the fault-tolerance the UX
+              fan-out already gets via ``return_exceptions=True``, since
+              ``scripts`` is documented as an independent branch.
+        """
+        try:
+            return await handle
+        except Exception:
+            workflow.logger.warning(
+                "market_research job %s: scripts activity failed; continuing without scripts",
+                job_id,
+            )
+            return []
+
+    async def _progress(self, job_id: str, stage: str, pct: int) -> bool:
+        """Write stage progress via the report-progress activity.
+
+        Preconditions:
+            - ``job_id`` refers to a job already created in the job store;
+              ``stage`` labels the current stage and ``pct`` is a 0-100 hint.
+        Postconditions:
+            - Returns ``True`` when the job is still active (progress written),
+              ``False`` when it has gone terminal (nothing written) so the caller
+              can stop scheduling further work.
         """
         return await workflow.execute_activity(
-            run_pipeline_activity,
-            args=[job_id, request],
-            start_to_close_timeout=timedelta(hours=2),
-            # The orchestrator is a long, non-idempotent LLM pipeline, and the
-            # llm_service layer already fails over on transient provider errors
-            # (429s, etc.). A workflow-level retry would therefore mostly re-run
-            # expensive, deterministic failures. Cap at a single attempt: a
-            # failure surfaces as a failed workflow + a FAILED job-store row for
-            # explicit resubmission rather than being auto-retried.
-            #
-            # Trade-off: because the single attempt is consumed, a worker crash
-            # mid-activity is NOT auto-re-dispatched either. Such an orphaned
-            # RUNNING job is instead reconciled to ``interrupted`` by the
-            # team_service startup/shutdown recovery
-            # (``team_service.entrypoint._startup_recovery`` /
-            # ``mark_all_active_jobs_interrupted``), not resumed — the expensive
-            # non-idempotent pipeline is deliberately not silently re-run.
-            retry_policy=RetryPolicy(maximum_attempts=1),
+            _act.report_progress_activity,
+            args=[job_id, stage, pct],
+            start_to_close_timeout=_IO_TIMEOUT,
+            retry_policy=IO_RETRY,
         )

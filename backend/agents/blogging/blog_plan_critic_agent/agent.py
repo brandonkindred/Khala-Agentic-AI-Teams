@@ -18,9 +18,10 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
-from blog_planning_agent.json_utils import parse_json_object
 from shared.content_plan import ContentPlan
 from strands import Agent
+
+from llm_service import LLMJsonParseError, extract_json_from_response
 
 from .models import PlanCriticReport, PlanViolation
 from .prompts import PLAN_CRITIC_SYSTEM, PLAN_CRITIC_USER_TEMPLATE
@@ -117,9 +118,9 @@ class BlogPlanCriticAgent:
             try:
                 agent = Agent(model=self._model, system_prompt=PLAN_CRITIC_SYSTEM)
                 raw = str(agent(user_prompt + suffix)).strip()
-                data = parse_json_object(raw)
+                data = extract_json_from_response(raw)
                 break
-            except (json.JSONDecodeError, TypeError, ValueError) as e:
+            except LLMJsonParseError as e:
                 last_err = e
                 logger.warning(
                     "Plan critic JSON parse failed on attempt %s/%s: %s",

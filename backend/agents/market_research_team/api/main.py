@@ -30,20 +30,25 @@ logger = logging.getLogger(__name__)
 
 
 def _startup() -> None:
-    """Start the Temporal worker backstop (best-effort).
+    """Start the Temporal worker backstop and sweep orphaned transcripts (best-effort).
 
     The team_service entrypoint normally starts the worker via
     ``TEAM_TEMPORAL_WORKER_MODULE`` before uvicorn accepts requests; this
-    backstop covers running the app standalone (``uvicorn ...:app``).
+    backstop covers running the app standalone (``uvicorn ...:app``). It also
+    runs once, after the team-service's own job-status startup reconciliation
+    (``mark_all_active_jobs_interrupted``), to clear any transcript-store
+    directories left behind by a job whose worker died before
+    ``finalize_activity``/``mark_failed_activity`` could run their own cleanup.
 
     Preconditions:
         - None (safe to call once at app startup).
 
     Postconditions:
         - Starts the worker thread when Temporal is enabled; a no-op when
-          ``TEMPORAL_ADDRESS`` is unset. Never raises — any failure is logged
-          as a warning so it cannot abort app boot (this runs as an
-          ``on_startup`` hook).
+          ``TEMPORAL_ADDRESS`` is unset. Clears transcript directories for any
+          job that is missing from the job store or not PENDING/RUNNING.
+          Never raises — any failure is logged as a warning so it cannot abort
+          app boot (this runs as an ``on_startup`` hook).
     """
     try:
         from market_research_team.temporal.worker import (
@@ -54,6 +59,29 @@ def _startup() -> None:
     except Exception:
         logger.warning(
             "market_research Temporal worker start (lifespan backstop) failed",
+            exc_info=True,
+        )
+
+    try:
+        from market_research_team.shared.transcript_store import sweep_orphaned
+
+        def _is_active(job_id: str) -> bool:
+            job = get_job(job_id)
+            return job is not None and job.get("status") in (
+                JOB_STATUS_PENDING,
+                JOB_STATUS_RUNNING,
+            )
+
+        cleared = sweep_orphaned(_is_active)
+        if cleared:
+            logger.info(
+                "market_research startup: cleared %d orphaned transcript director%s",
+                cleared,
+                "y" if cleared == 1 else "ies",
+            )
+    except Exception:
+        logger.warning(
+            "market_research orphaned-transcript sweep (lifespan backstop) failed",
             exc_info=True,
         )
 
