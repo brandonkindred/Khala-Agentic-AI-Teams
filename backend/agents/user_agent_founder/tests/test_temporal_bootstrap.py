@@ -158,6 +158,27 @@ def test_cancel_founder_workflow_signals_the_workflow(monkeypatch):
     assert captured["timeout_s"] == sw.CANCEL_SIGNAL_RPC_TIMEOUT_S
 
 
+def test_run_async_translates_future_timeout_to_runtime_error(monkeypatch):
+    """A stuck coroutine must surface as the documented RuntimeError, not the
+    bare concurrent.futures.TimeoutError Future.result raises — so every
+    caller (start_founder_workflow, _dispatch_founder_run) sees one failure
+    type instead of an undocumented stdlib one."""
+    from user_agent_founder.temporal import start_workflow as sw
+
+    monkeypatch.setattr(sw, "_wait_for_client", lambda *a, **k: (object(), object()))
+
+    class _StuckFuture:
+        def result(self, timeout=None):
+            raise TimeoutError("future timed out")
+
+    monkeypatch.setattr(sw.asyncio, "run_coroutine_threadsafe", lambda coro, loop: _StuckFuture())
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match=f"did not complete within {sw.START_WORKFLOW_TIMEOUT}s"):
+        sw._run_async(object())
+
+
 def test_start_founder_workflow_dispatches_with_prefixed_id(monkeypatch):
     """The start helper starts ``UserAgentFounderWorkflow`` with the prefixed id
     and the team task queue, on the worker's shared loop."""

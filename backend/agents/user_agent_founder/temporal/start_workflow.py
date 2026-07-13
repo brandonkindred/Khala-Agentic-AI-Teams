@@ -58,13 +58,40 @@ def _wait_for_client(timeout_s: float = CLIENT_READY_TIMEOUT_S) -> tuple[Any, An
 
 
 def _run_async(coro: Any) -> Any:
+    """Run ``coro`` on the worker's asyncio loop from this sync caller's thread.
+
+    Preconditions:
+        - The Temporal client + loop are available (see :func:`_wait_for_client`).
+    Postconditions:
+        - Returns the coroutine's result, or re-raises whatever it raised.
+        - Raises ``RuntimeError`` (not the bare ``TimeoutError`` that
+          ``Future.result`` would otherwise surface) if ``coro`` has not
+          completed within ``START_WORKFLOW_TIMEOUT`` seconds, so every caller
+          sees one documented failure mode instead of an undocumented stdlib one.
+    """
     _, loop = _wait_for_client()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=START_WORKFLOW_TIMEOUT)
+    try:
+        return future.result(timeout=START_WORKFLOW_TIMEOUT)
+    except TimeoutError as exc:
+        raise RuntimeError(
+            f"Temporal call did not complete within {START_WORKFLOW_TIMEOUT}s"
+        ) from exc
 
 
 def start_founder_workflow(run_id: str) -> None:
-    """Start ``UserAgentFounderWorkflow`` for the given run id."""
+    """Start ``UserAgentFounderWorkflow`` for the given run id.
+
+    Preconditions:
+        - ``run_id`` refers to a founder run + central job already created.
+    Postconditions:
+        - The workflow is started with id ``f"{WORKFLOW_ID_PREFIX}{run_id}"`` on
+          ``TASK_QUEUE``. Raises ``RuntimeError`` if the worker client never
+          becomes available or the start call does not complete within
+          ``START_WORKFLOW_TIMEOUT`` seconds (see :func:`_run_async`) — callers
+          (``_dispatch_founder_run``) rely on this being the sole exception type
+          for "Temporal is enabled but the workflow failed to start".
+    """
     client, _ = _wait_for_client()
     workflow_id = f"{WORKFLOW_ID_PREFIX}{run_id}"
     _run_async(

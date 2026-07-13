@@ -374,13 +374,17 @@ class UserAgentFounderWorkflow:
         Postconditions:
             - Schedules ``mark_failed_activity`` (which is a no-op if the run was
               already cancelled); a failure of that activity is swallowed and
-              logged so the original pipeline error is the one that propagates.
+              logged (with its own details, so the job-store/Temporal-state
+              divergence this leaves behind is diagnosable from the worker log)
+              so the original pipeline error is the one that propagates.
         """
         try:
             await self._exec(
                 _act.mark_failed_activity, run_id, error, retry=IO_RETRY, timeout=_IO_TIMEOUT
             )
-        except Exception:  # noqa: BLE001 — never mask the original pipeline error
+        except Exception as mark_exc:  # noqa: BLE001 — never mask the original pipeline error
             workflow.logger.warning(
-                "UserAgentFounderWorkflow %s: failed to record FAILED after error", run_id
+                "UserAgentFounderWorkflow %s: failed to record FAILED after error: %s",
+                run_id,
+                mark_exc,
             )

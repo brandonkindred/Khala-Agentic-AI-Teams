@@ -39,10 +39,14 @@ Job-store status ownership (retry-safe contract, mirroring ``sales_team``):
 from __future__ import annotations
 
 import time
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
+
+if TYPE_CHECKING:
+    import httpx
 
 # Heartbeat timeout every long, self-heartbeating activity (spec generation,
 # answer batches) is scheduled with, and the single source the beat interval
@@ -57,12 +61,15 @@ HEARTBEAT_TIMEOUT_S = 180.0
 _HEARTBEAT_INTERVAL_S = min(30.0, HEARTBEAT_TIMEOUT_S / 3.0)
 # In-activity retry budget for persisting a just-started target job id (see
 # _record_started_job_id) — absorbs a transient store blip so the activity does
-# not fail and re-submit a duplicate target job on Temporal retry.
-_PERSIST_RETRIES = 3
-_PERSIST_BACKOFF_S = 0.2
+# not fail and re-submit a duplicate target job on Temporal retry. 5 attempts at
+# 0.5s apart (~2s total) rather than a tighter budget: the window has to survive
+# a brief store hiccup (e.g. a Postgres failover), since exhausting it converts
+# to a non-retryable failure that requires a human-gated /resume.
+_PERSIST_RETRIES = 5
+_PERSIST_BACKOFF_S = 0.5
 
 
-def _http_client() -> Any:
+def _http_client() -> "httpx.Client":
     """Return the process-wide pooled ``httpx.Client`` for target-team calls.
 
     Preconditions:
@@ -77,7 +84,7 @@ def _http_client() -> Any:
     return get_pooled_client()
 
 
-def _beating(extra_beat: Any = None) -> Any:
+def _beating(extra_beat: Callable[[], None] | None = None) -> Any:
     """Background heartbeat keeping a long, LLM-calling activity alive.
 
     Preconditions:
