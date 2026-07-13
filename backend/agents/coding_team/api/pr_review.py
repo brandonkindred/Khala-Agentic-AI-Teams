@@ -1700,6 +1700,18 @@ def create_review_issues(
                                 changed = True
                                 created.append(result)
                     if errors:
+                        # Log every failure, not just the one re-raised below — an
+                        # operator debugging "why didn't proposal p3 get filed"
+                        # must not lose its detail just because p1's error happened
+                        # to be the one that propagated to the HTTP response.
+                        for pid in needed:
+                            if pid in errors:
+                                logger.warning(
+                                    "create_review_issues: proposal %s failed for job %s: %s",
+                                    pid,
+                                    job_id,
+                                    errors[pid],
+                                )
                         first_pid = next(pid for pid in needed if pid in errors)
                         raise errors[first_pid]
         finally:

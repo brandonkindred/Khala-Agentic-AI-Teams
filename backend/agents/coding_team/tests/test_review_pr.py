@@ -3064,6 +3064,50 @@ class TestCreateReviewIssuesUnit:
         assert len(calls) == 1
         assert [c["proposal_id"] for c in out["created"]] == ["p0"]
 
+    def test_multiple_failures_are_all_logged(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Only the first failure (by request order) is re-raised to the caller, but
+        every failure must be logged — an operator debugging why proposal p1 wasn't
+        filed must not find zero information about it just because p0's error is the
+        one that propagated to the HTTP response."""
+        from coding_team.api import main as api_main
+        from coding_team.api import pr_review
+
+        job = {
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
+            "status": "completed",
+            "review_summary": {
+                "pending_issue_proposals": [
+                    {"id": "p0", "description": "a", "issue_url": None},
+                    {"id": "p1", "description": "b", "issue_url": None},
+                ]
+            },
+        }
+        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
+        monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
+        monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return None
+
+            def create_issue(self, _o, _r, *, title, body, labels=None):
+                if "### Description\na" in body:
+                    raise GitHubAPIError(403, "boom-a")
+                raise GitHubAPIError(500, "boom-b")
+
+        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        with caplog.at_level("WARNING"):
+            with pytest.raises(GitHubAPIError):
+                pr_review.create_review_issues("job1", ["p0", "p1"], token="t")
+        logged = caplog.text
+        assert "p0" in logged and "boom-a" in logged
+        assert "p1" in logged and "boom-b" in logged
+
     def test_persist_swallows_store_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from coding_team.api import main as api_main
         from coding_team.api import pr_review
