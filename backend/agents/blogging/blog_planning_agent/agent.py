@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
@@ -24,7 +23,8 @@ from shared.errors import PlanningError
 from shared.planning_config import planning_max_iterations, planning_max_parse_retries
 from strands import Agent
 
-from .json_utils import parse_json_object
+from llm_service import LLMJsonParseError, extract_json_from_response
+
 from .prompts import GENERATE_PLAN_SYSTEM, REFINE_PLAN_SYSTEM
 
 logger = logging.getLogger(__name__)
@@ -120,12 +120,6 @@ class BlogPlanningAgent:
         result = agent(prompt)
         return str(result).strip()
 
-    def _parse_json_response(self, raw: str) -> dict:
-        """Strip markdown fences and parse JSON."""
-        raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
-        raw = re.sub(r"\s*```$", "", raw)
-        return json.loads(raw)
-
     def _complete_plan_json(  # pragma: no cover - JSON-parse retry/repair loop; reached only when the LLM emits non-JSON in the first try and the repair attempt also fails. Covered by integration tests with a flaky model. The happy path (first-try valid JSON) is exercised by unit tests through .run().
         self,
         prompt: str,
@@ -145,10 +139,10 @@ class BlogPlanningAgent:
                     prompt + "\n\nRespond with valid JSON only, no markdown fences.",
                     system,
                 )
-                data = self._parse_json_response(raw)
+                data = extract_json_from_response(raw)
                 if isinstance(data, dict) and data:
                     return data, parse_retries
-            except (json.JSONDecodeError, TypeError, ValueError) as e:
+            except LLMJsonParseError as e:
                 last_err = e
                 parse_retries += 1
                 logger.warning("JSON parse failed (attempt %s): %s", attempt + 1, e)
@@ -157,12 +151,12 @@ class BlogPlanningAgent:
                     prompt + "\n\nRespond with a single JSON object only, no markdown fences.",
                     system,
                 )
-                data = parse_json_object(raw)
+                data = extract_json_from_response(raw)
                 return data, parse_retries
-            except (json.JSONDecodeError, TypeError, ValueError) as e:
+            except LLMJsonParseError as e:
                 last_err = e
                 parse_retries += 1
-                logger.warning("parse_json_object failed (attempt %s): %s", attempt + 1, e)
+                logger.warning("JSON parse retry failed (attempt %s): %s", attempt + 1, e)
         msg = f"Planning JSON parse failed after {max_parse_retries} attempts"
         if last_err:
             msg += f": {last_err}"

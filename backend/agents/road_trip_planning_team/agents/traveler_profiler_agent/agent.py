@@ -60,13 +60,26 @@ class TravelerProfilerAgent:
             result = self._agent(prompt)
             raw = str(result).strip()
             data = json.loads(raw)
+            return TravelerGroupProfile.model_validate(data)
         except Exception as e:
-            logger.warning("TravelerProfilerAgent JSON parse failed: %s", e)
+            # Covers both a malformed LLM response (JSON parse failure) and a
+            # syntactically-valid-but-schema-invalid profile (pydantic
+            # ValidationError) — either way, fall back rather than raise.
+            logger.warning("TravelerProfilerAgent JSON parse/validation failed: %s", e)
+            # Traveler.needs is a free-text bucket (dietary, accessibility, or
+            # otherwise) with no field-level way to categorize it — the LLM
+            # normally does that split. Without it, carry the raw needs into
+            # food_requirements and accessibility_requirements too (alongside
+            # combined_needs), so ActivitiesExpertAgent's prompt — which reads
+            # those specific fields, not combined_needs — still sees a
+            # traveler's "vegetarian" or "wheelchair accessible" constraint
+            # instead of reporting it as "none".
+            needs = [n for t in trip.travelers for n in t.needs]
             return TravelerGroupProfile(
                 group_description="Group of travelers",
                 combined_interests=[i for t in trip.travelers for i in t.interests],
-                combined_needs=[n for t in trip.travelers for n in t.needs],
-                age_groups_present=list({t.age_group for t in trip.travelers}),
+                combined_needs=needs,
+                age_groups_present=sorted({t.age_group for t in trip.travelers}),
+                food_requirements=needs,
+                accessibility_requirements=needs,
             )
-
-        return TravelerGroupProfile.model_validate(data)

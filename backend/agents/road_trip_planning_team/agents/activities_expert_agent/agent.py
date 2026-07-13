@@ -54,16 +54,36 @@ class ActivitiesExpertAgent:
         group_profile: TravelerGroupProfile,
         trip: TripRequest,
     ) -> List[StopActivities]:
-        """Generate activity recommendations for each stop on the route."""
+        """Generate activity recommendations for each stop on the route.
+
+        Preconditions:
+            - ``route`` is a ``RoutePlan`` whose ``ordered_stops`` is non-empty;
+              ``group_profile`` and ``trip`` are the upstream typed outputs.
+
+        Postconditions:
+            - Returns exactly one ``StopActivities`` per stop in
+              ``route.ordered_stops``, in order. A pass-through start/end stop
+              (``recommended_nights == 0``) gets an empty entry with no LLM call;
+              every other stop's entry comes from ``_get_stop_activities``, which
+              never raises (see its own contract).
+        """
+        # An explicit raise (not assert) so the check survives `python -O` —
+        # this is the agent's public entry point, invoked across the Temporal
+        # activity boundary where `route` is reconstructed from cross-process
+        # JSON, not a purely internal-only call. Same reasoning
+        # RoadTripWorkflow._advance uses for its own explicit-raise precondition
+        # check. RoutePlannerAgent's postcondition guarantees ordered_stops is
+        # never empty, so this should never fire in normal operation.
+        if not route.ordered_stops:
+            raise ValueError("ActivitiesExpertAgent.run requires a non-empty route.ordered_stops")
+
         results: List[StopActivities] = []
 
         for stop in route.ordered_stops:
             if stop.stop_type in ("start", "end") and stop.recommended_nights == 0:
                 results.append(StopActivities(location=stop.location))
-                continue
-
-            activities = self._get_stop_activities(stop.location, group_profile, trip)
-            results.append(activities)
+            else:
+                results.append(self._get_stop_activities(stop.location, group_profile, trip))
 
         return results
 
@@ -73,7 +93,17 @@ class ActivitiesExpertAgent:
         group_profile: TravelerGroupProfile,
         trip: TripRequest,
     ) -> StopActivities:
-        """Get activities for a single stop."""
+        """Get activities for a single stop.
+
+        Preconditions:
+            - ``location`` is a non-empty stop location; ``group_profile`` and
+              ``trip`` are the upstream typed outputs.
+
+        Postconditions:
+            - Returns a ``StopActivities`` for ``location``. Never raises: on
+              LLM/parse failure returns a ``StopActivities`` with empty
+              ``activities``/``dining``/``tips`` rather than propagating the error.
+        """
         prompt = (
             f"Location: {location}\n\n"
             f"Group profile:\n"
@@ -91,13 +121,17 @@ class ActivitiesExpertAgent:
             result = self._agent(prompt)
             raw = str(result).strip()
             data = json.loads(raw)
+            return StopActivities(
+                location=location,
+                activities=data.get("activities") or [],
+                dining=data.get("dining") or [],
+                tips=data.get("tips") or [],
+            )
         except Exception as e:
-            logger.warning("ActivitiesExpertAgent JSON parse failed for %s: %s", location, e)
+            # Covers both a malformed LLM response (JSON parse failure) and a
+            # syntactically-valid-but-schema-invalid activity/dining entry
+            # (pydantic ValidationError) — either way, fall back rather than raise.
+            logger.warning(
+                "ActivitiesExpertAgent JSON parse/validation failed for %s: %s", location, e
+            )
             return StopActivities(location=location)
-
-        return StopActivities(
-            location=location,
-            activities=data.get("activities") or [],
-            dining=data.get("dining") or [],
-            tips=data.get("tips") or [],
-        )

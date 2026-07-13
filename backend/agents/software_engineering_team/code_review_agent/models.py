@@ -270,7 +270,10 @@ class CodeReviewIssue(BaseModel):
     )
     category: str = Field(
         default="general",
-        description="Category: naming, structure, logic, spec-compliance, standards, integration, testing",
+        description=(
+            "Category: naming, structure, logic, spec-compliance, standards, integration, "
+            "testing, architecture, refactor, maintainability, or general (no specific category)"
+        ),
     )
     file_path: str = Field(
         default="",
@@ -350,7 +353,10 @@ class CodeReviewInput(BaseModel):
         default="typescript",
         description="Primary language: typescript (React/Angular/Vue) or python (FastAPI)",
     )
-    architecture: Optional[SystemArchitecture] = None
+    architecture: Optional[SystemArchitecture] = Field(
+        default=None,
+        description="System architecture context (overview, components, decisions), when available",
+    )
     existing_codebase: Optional[str] = Field(
         default=None,
         description="Existing code in the repo before the agent's changes",

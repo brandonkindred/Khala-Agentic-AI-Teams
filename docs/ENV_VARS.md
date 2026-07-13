@@ -169,6 +169,41 @@ Temporal namespace.
 ### TEMPORAL_TASK_QUEUE
 Temporal task queue name.
 
+### Investment team Temporal queues
+The investment team runs three Temporal queues, all booted from
+`investment_team.temporal.worker.start_investment_temporal_worker_thread` (each on
+a distinct team key, since `start_team_worker` is idempotent per team key):
+
+- `investment-queue` — the ad hoc single-backtest `InvestmentBacktestWorkflow`
+  and the long-running `PaperTradingWorkflow` (cancel via a `stop` signal).
+  Tuned by `INVESTMENT_MAX_CONCURRENT_ACTIVITIES` (below).
+- `strategy-lab-queue` — the fine-grained Strategy Lab batch/cycle workflows
+  (tuned by `STRATEGY_LAB_MAX_CONCURRENT_ACTIVITIES`).
+- `investment-advisory-queue` — the interactive proposal / validation / promotion
+  / committee-memo / advisor-session workflows, dispatched execute-and-wait so a
+  multi-hour backtest activity can't head-of-line-block a quick request. Each
+  call runs under a fresh, randomly-suffixed workflow id (never a bare
+  `{op}-{key}`) so two calls for the same logical operation — e.g. two chat
+  messages in the same advisor session — can never collide on a live
+  workflow id.
+
+The paper-trading (`/strategy-lab/paper-trade`, `/stop`) and orchestrator/advisor
+endpoints (`/proposals/*`, `/strategies/*`, `/promotions/decide`, `/memos`,
+`/advisor/sessions/*`) are **Temporal-only**: with `TEMPORAL_ADDRESS` unset (or no
+connected worker) they return HTTP 503 rather than falling back to in-process
+execution. The backtest and Strategy Lab run endpoints keep their thread
+fallback.
+
+### INVESTMENT_MAX_CONCURRENT_ACTIVITIES
+Int (default `8`, floor `1`). Ceiling on how many `investment-queue` activities
+the investment worker runs at once. A live paper-trading session
+(`run_paper_trading_activity`) can hold a worker thread for hours (up to
+`max_hours`), so this queue defaults above the shared framework's 4-thread cap
+to avoid a handful of concurrent sessions silently starving backtest dispatch.
+Parsed as a plain `int(...)` (unset → default `8`; garbage/unparseable →
+default `8`; parsed but `< 1` → floored to `1`). Only read by the investment
+worker; mirrors `STRATEGY_LAB_MAX_CONCURRENT_ACTIVITIES`.
+
 ### SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Ceiling on how many sales activities the sales
 Temporal worker runs at once. The sales pipeline fans each stage out into one
@@ -187,7 +222,17 @@ of configuration — so a mis-set value can never make a healthy activity
 heartbeat-timeout. Parsed via the shared `env_float` (unset/garbage/non-finite →
 default, with a warning on a set-but-unparseable value).
 
-### Code review agent: Temporal by default
+### MARKET_RESEARCH_TEMPORAL_HEARTBEAT_INTERVAL_S
+Float seconds (default `30`, clamped to `[1, 60]`). How often each long market
+research LLM activity (UX, psychology, consistency, viability, scripts) emits
+`activity.heartbeat` so Temporal can detect a hung activity faster than its full
+timeout. Like the sales knob, the ceiling is one third of the fixed 180s activity
+heartbeat timeout, guaranteeing at least ~3 beats per window regardless of
+configuration. Parsed via the shared `env_float` (unset/garbage/non-finite →
+default, with a warning on a set-but-unparseable value). Only read by the market
+research worker.
+
+### TEMPORAL_ADDRESS (code review agent default)
 **The code review agent runs Temporal by default** (unlike the other teams, which
 only switch on when `TEMPORAL_ADDRESS` is set): `CodeReviewAgent.run` dispatches
 the durable `CodeReviewWorkflow` and falls back to the in-process coordinator only
@@ -294,7 +339,7 @@ cost are exposed at `GET /api/se/metrics` (alias of
 Tech Lead's Design prompt. All Postgres-backed pieces no-op when `POSTGRES_HOST`
 is unset; there is **no** per-job budget cap.
 
-### LLM_PRICE_&lt;model&gt;
+### `LLM_PRICE_<model>`
 Per-model price override for token→USD cost estimation, formatted
 `<usd_per_1k_input>/<usd_per_1k_output>`. `<model>` is the model name uppercased
 with each run of non-alphanumerics collapsed to `_` (e.g.
@@ -588,6 +633,34 @@ read existing repository files *outside* the diff. This lets it confirm that a
 file/module a finding claims is missing ("add X" / "X does not exist") already
 exists, and drop that false positive. The reader is read-only, bounded, and
 fail-safe (a read failure only ever keeps a finding).
+
+### CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS
+Default-on toggle for the architecture-consistency / cross-codebase-redundancy
+pass. After the false-positive filter runs, this pass makes exactly one
+additional LLM call for the whole submission (never once per chunk) with
+read access to the rest of the repository (the same `read_file`/`list_files`/
+`search_codebase`/`find_function_at_line` tools the false-positive filter
+uses), given the full architecture document. It can only ADD findings, in
+two categories: `architecture` (the change contradicts a stated boundary/
+pattern/decision in a way that would break integration) and `refactor` (the
+change duplicates a capability that already exists elsewhere in the
+repository, tool-verified before it is flagged — never guessed from naming
+alone). It never removes or alters any finding the map phase or the
+false-positive filter already produced. Requires
+`CodeReviewInput.architecture` to carry an `architecture_document`,
+`overview`, `components`, or `decisions` — the pass renders whichever of
+these are present; runs as a no-op (no LLM call) when none are. Any setup
+or LLM failure is fail-safe: it is logged and yields no additional findings,
+so a broken pass never blocks or changes the rest of the review. Set to
+`false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
+enabled). Related sizing knob: `CODE_REVIEW_ARCH_DOC_CHARS` (see below).
+
+### CODE_REVIEW_ARCH_DOC_CHARS
+Caps the architecture document (plus the rendered `overview`/`components`/
+`decisions`) inlined into the architecture-consistency pass's single prompt.
+Default `40000`, floor `2000` — generous relative to the per-chunk
+`CODE_REVIEW_ARCH_OVERVIEW_CHARS` excerpt because this pass pays its cost once
+per submission, not once per chunk.
 
 ---
 
