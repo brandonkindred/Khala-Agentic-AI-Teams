@@ -1,49 +1,52 @@
-"""Start PA Temporal workflows from sync API."""
+"""Start the personal-assistant Temporal workflow from synchronous API code.
+
+Thin wrapper over ``shared_temporal.start_workflow_sync`` (the shared
+sync->async bridge). We deliberately do NOT use ``shared_temporal.run_team_job``
+here: it would create its own job row under the ``personal_assistant`` team
+slug and set ``status=running`` itself, colliding with the API's ``create_job``
+(namespaced under ``personal_assistant_team``) and the activity-owned
+RUNNING/COMPLETED/FAILED bookkeeping.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from personal_assistant_team.temporal.client import (
-    get_temporal_client,
-    get_temporal_loop,
+from personal_assistant_team.temporal import (
+    TASK_QUEUE,
+    WORKFLOW_ID_PREFIX_ASSISTANT,
+    PaAssistantWorkflow,
 )
-from personal_assistant_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX_ASSISTANT
-from personal_assistant_team.temporal.workflows import PaAssistantWorkflow
+from shared_temporal import start_workflow_sync
 
 logger = logging.getLogger(__name__)
-
-START_WORKFLOW_TIMEOUT = 30
-
-
-def _run_async(coro: Any) -> Any:
-    loop = get_temporal_loop()
-    client = get_temporal_client()
-    if loop is None or client is None:
-        raise RuntimeError("Temporal client not available; is the PA worker running?")
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=START_WORKFLOW_TIMEOUT)
 
 
 def start_assistant_workflow(
     job_id: str,
     user_id: str,
     message: str,
-    context: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Start PaAssistantWorkflow for the given job."""
-    client = get_temporal_client()
-    if client is None:
-        raise RuntimeError("Temporal client not available")
+    """Start ``PaAssistantWorkflow`` for the given job.
+
+    Preconditions:
+        - ``job_id`` is a job already created in the PA job store.
+
+    Postconditions:
+        - A workflow with id ``pa-assistant-<job_id>`` is started on the
+          personal-assistant task queue (raises ``RuntimeError`` if the worker
+          client never becomes available within the wait window).
+    """
     workflow_id = f"{WORKFLOW_ID_PREFIX_ASSISTANT}{job_id}"
-    _run_async(
-        client.start_workflow(
-            PaAssistantWorkflow.run,
-            args=[job_id, user_id, message, context or {}],
-            id=workflow_id,
-            task_queue=TASK_QUEUE,
-        )
+    start_workflow_sync(
+        PaAssistantWorkflow.run,
+        job_id,
+        user_id,
+        message,
+        context or {},
+        workflow_id=workflow_id,
+        task_queue=TASK_QUEUE,
     )
     logger.info("Started PaAssistantWorkflow id=%s", workflow_id)
