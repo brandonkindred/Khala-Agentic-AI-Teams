@@ -1,5 +1,5 @@
 import json
-import time
+import threading
 
 from market_research_team.models import (
     HumanReview,
@@ -83,7 +83,14 @@ def test_orchestrator_split_mode_adds_consistency_signal_for_empty_inputs() -> N
 def test_orchestrator_runs_scripts_concurrently_with_ingest_and_ux(monkeypatch) -> None:
     """Regression: ``scripts`` must run concurrently with ingest+UX (mirrors
     the Temporal path's independently-started ``scripts_activity``), not
-    serialized after the UX fan-out completes onto the critical path."""
+    serialized after the UX fan-out completes onto the critical path.
+
+    Uses a ``threading.Barrier`` rather than a wall-clock timing bound: each
+    branch blocks until BOTH have started, so a serialized (non-concurrent)
+    implementation deadlocks and times out (``BrokenBarrierError``) instead of
+    merely running slower — a deterministic proof of concurrency, not one that
+    can flake under a loaded CI runner.
+    """
     orchestrator = MarketResearchOrchestrator()
     mission = ResearchMission(
         product_concept="Concept",
@@ -91,18 +98,18 @@ def test_orchestrator_runs_scripts_concurrently_with_ingest_and_ux(monkeypatch) 
         business_goal="Goal",
         topology=TeamTopology.UNIFIED,
     )
-    delay = 0.2
+    barrier = threading.Barrier(2, timeout=2.0)
 
-    def _slow_ingest_and_analyze(mission):
-        time.sleep(delay)
+    def _blocking_ingest_and_analyze(mission):
+        barrier.wait()
         return []
 
-    def _slow_scripts(mission):
-        time.sleep(delay)
+    def _blocking_scripts(mission):
+        barrier.wait()
         return ["script"]
 
-    monkeypatch.setattr(orchestrator, "_ingest_and_analyze", _slow_ingest_and_analyze)
-    monkeypatch.setattr(orchestrator, "scripts", _slow_scripts)
+    monkeypatch.setattr(orchestrator, "_ingest_and_analyze", _blocking_ingest_and_analyze)
+    monkeypatch.setattr(orchestrator, "scripts", _blocking_scripts)
     monkeypatch.setattr(
         orchestrator,
         "psychology",
@@ -122,20 +129,25 @@ def test_orchestrator_runs_scripts_concurrently_with_ingest_and_ux(monkeypatch) 
         ),
     )
 
-    started = time.monotonic()
     output = orchestrator.run(mission, HumanReview(approved=True))
-    elapsed = time.monotonic() - started
 
-    # Sequential execution would take >= 2 * delay; concurrent stays well under.
-    assert elapsed < delay * 1.8
     assert output.proposed_research_scripts == ["script"]
 
 
 def test_orchestrator_split_mode_runs_psychology_and_consistency_concurrently(monkeypatch) -> None:
     """Regression: split-mode psychology/consistency must run concurrently via
     ``parallel_map`` (mirrors the Temporal path's ``asyncio.gather``), not
-    sequentially back-to-back — and their results must combine in
-    psychology-then-consistency order regardless of completion order."""
+    sequentially back-to-back, and their results must combine in
+    psychology-then-consistency order.
+
+    Uses a ``threading.Barrier`` (see the sibling scripts-concurrency test
+    above) rather than a wall-clock timing bound to prove the two ran
+    concurrently. Completion-order-independence of that combined order is
+    ``parallel_map``'s own tested contract
+    (``shared_concurrency/tests/test_parallel_map.py::
+    test_preserves_input_order_under_jittered_completion``), so it isn't
+    re-proven with fragile timing here.
+    """
     orchestrator = MarketResearchOrchestrator()
     mission = ResearchMission(
         product_concept="Concept",
@@ -143,22 +155,20 @@ def test_orchestrator_split_mode_runs_psychology_and_consistency_concurrently(mo
         business_goal="Goal",
         topology=TeamTopology.SPLIT,
     )
-    delay = 0.2
+    barrier = threading.Barrier(2, timeout=2.0)
 
-    def _slow_psychology(insights):
-        time.sleep(delay)
+    def _blocking_psychology(insights):
+        barrier.wait()
         return [MarketSignal(signal="psych", confidence=0.5, evidence=[])]
 
-    def _slow_consistency(insights):
-        # Finishes first despite being scheduled second — order must still
-        # come back psychology-then-consistency (parallel_map preserves input
-        # order, not completion order).
+    def _blocking_consistency(insights):
+        barrier.wait()
         return [MarketSignal(signal="consistency", confidence=0.5, evidence=[])]
 
     monkeypatch.setattr(orchestrator, "ingest", lambda mission: [])
     monkeypatch.setattr(orchestrator, "scripts", lambda mission: ["script"])
-    monkeypatch.setattr(orchestrator, "psychology", _slow_psychology)
-    monkeypatch.setattr(orchestrator, "consistency", _slow_consistency)
+    monkeypatch.setattr(orchestrator, "psychology", _blocking_psychology)
+    monkeypatch.setattr(orchestrator, "consistency", _blocking_consistency)
     monkeypatch.setattr(
         orchestrator,
         "viability",
@@ -170,12 +180,8 @@ def test_orchestrator_split_mode_runs_psychology_and_consistency_concurrently(mo
         ),
     )
 
-    started = time.monotonic()
     output = orchestrator.run(mission, HumanReview(approved=True))
-    elapsed = time.monotonic() - started
 
-    # Sequential execution would take >= 2 * delay; concurrent stays well under.
-    assert elapsed < delay * 1.8
     assert [s.signal for s in output.market_signals[:2]] == ["psych", "consistency"]
 
 

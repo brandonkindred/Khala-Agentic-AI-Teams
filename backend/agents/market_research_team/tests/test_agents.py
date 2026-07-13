@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from market_research_team.agents import (
+    ConsistencyAgent,
     MarketViabilityAgent,
     ResearchScriptAgent,
     TranscriptIngestionAgent,
@@ -303,6 +306,26 @@ def test_market_viability_null_verdict_defaults(monkeypatch) -> None:
         mission, [MarketSignal(signal="s1", confidence=0.5)], 1
     )
     assert result.verdict == "needs_more_validation"
+
+
+# ---------------------------------------------------------------------------
+# ConsistencyAgent (Strands-powered)
+# ---------------------------------------------------------------------------
+
+
+def test_consistency_agent_returns_single_signal() -> None:
+    insights = [InterviewInsight(source="a", pain_points=["pain1"])]
+    signals = ConsistencyAgent().analyze(insights)
+    assert len(signals) == 1
+    assert isinstance(signals[0], MarketSignal)
+
+
+def test_consistency_agent_rejects_empty_insights() -> None:
+    """DbC: the empty-transcript case is the orchestrator's responsibility
+    (its deterministic fallback signal), not this agent's — calling it with
+    no insights is a caller (precondition) bug and must fail loudly."""
+    with pytest.raises(AssertionError):
+        ConsistencyAgent().analyze([])
 
 
 # ---------------------------------------------------------------------------

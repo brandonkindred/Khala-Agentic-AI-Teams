@@ -471,6 +471,11 @@ class ConsistencyAgent:
               name from the LLM falls back to ``"Cross-interview theme
               consistency"``; confidence is clamped to ``[0.0, 1.0]``.
         """
+        assert insights, (
+            "ConsistencyAgent.analyze requires non-empty insights — callers with "
+            "an empty transcript corpus must use the orchestrator's deterministic "
+            "empty-transcript fallback instead of invoking this LLM call"
+        )
         insights_json = json.dumps([i.model_dump() for i in insights], indent=2)
         prompt = (
             f"Analyze the following interview insights for cross-interview consistency. "

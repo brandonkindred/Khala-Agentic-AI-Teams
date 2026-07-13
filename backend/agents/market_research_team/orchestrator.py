@@ -54,7 +54,7 @@ _UX_FANOUT_WORKERS = 4
 # Padding used by ``assemble`` to guarantee ``TeamOutput`` always carries at
 # least two market signals (a display-only floor — these are never fed to the
 # viability stage, which sees only the real derived signals).
-_DEFAULT_SIGNALS_FALLBACK = [
+_ASSEMBLE_SIGNALS_FALLBACK = [
     MarketSignal(
         signal="User pain urgency",
         confidence=0.5,
@@ -257,7 +257,7 @@ class MarketResearchOrchestrator:
             # mutate) the same module-level MarketSignal — a shallow copy would
             # still share the nested ``evidence`` list.
             market_signals.append(
-                _DEFAULT_SIGNALS_FALLBACK[len(market_signals)].model_copy(deep=True)
+                _ASSEMBLE_SIGNALS_FALLBACK[len(market_signals)].model_copy(deep=True)
             )
 
         if not human_review.approved:
