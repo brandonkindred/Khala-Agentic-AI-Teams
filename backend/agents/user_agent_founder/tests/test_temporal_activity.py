@@ -149,6 +149,18 @@ def test_begin_run_snapshot_fresh(monkeypatch):
     orchestrator._sync_job_status.assert_called_once_with("r1", "running", phase="starting")
 
 
+def test_begin_run_snapshot_floors_nonpositive_max_poll_attempts(monkeypatch):
+    """A misconfigured non-positive FOUNDER_MAX_POLL_ATTEMPTS must be floored to 1
+    in the snapshot, so the workflow's `for _ in range(max_poll_attempts)` loop
+    still polls at least once instead of immediately timing out with zero polls."""
+    _install(monkeypatch, run=_run())
+    monkeypatch.setattr(orchestrator, "MAX_POLL_ATTEMPTS", 0)
+
+    snap = acts.begin_run_activity("r1")
+
+    assert snap["max_poll_attempts"] == 1
+
+
 def test_begin_run_snapshot_resume(monkeypatch):
     run = _run(spec_content="SPEC", repo_path="/repo", analysis_job_id="aj", se_job_id="bj")
     m = _install(monkeypatch, run=run)

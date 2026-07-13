@@ -302,7 +302,9 @@ def begin_run_activity(run_id: str) -> dict[str, Any]:
           checkpoint columns), the existing per-phase job ids for resume, the
           persisted ``repo_path``, display/label metadata, and the env-derived
           poll intervals + attempt/answer-retry ceilings (read here so the
-          deterministic workflow never touches the environment).
+          deterministic workflow never touches the environment). ``max_poll_attempts``
+          is floored at 1 so a misconfigured non-positive env value can't make the
+          workflow's poll loop skip every tick and immediately time out.
         - Resume breadcrumbs (``spec_content``/``repo_path`` already set) are
           gated on ``activity.info().attempt == 1`` (see :func:`_is_first_attempt`)
           so a Temporal retry of this activity (it runs under ``IO_RETRY``) does
@@ -344,7 +346,13 @@ def begin_run_activity(run_id: str) -> dict[str, Any]:
         "adapter_display_name": adapter.display_name,
         "analysis_poll_interval": orchestrator.ANALYSIS_POLL_INTERVAL,
         "build_poll_interval": orchestrator.EXECUTION_POLL_INTERVAL,
-        "max_poll_attempts": orchestrator.MAX_POLL_ATTEMPTS,
+        # Floor at 1 so a misconfigured FOUNDER_MAX_POLL_ATTEMPTS<=0 can't make the
+        # workflow's `for _ in range(max_poll_attempts)` loop skip polling entirely
+        # and immediately raise "timed out" without a single poll. (The env var is
+        # otherwise an un-clamped int() in orchestrator.py; the same floor could be
+        # applied there for thread-mode parity, but this snapshot is where the
+        # deterministic workflow consumes the value.)
+        "max_poll_attempts": max(1, orchestrator.MAX_POLL_ATTEMPTS),
         "max_answer_retries": orchestrator.MAX_ANSWER_RETRIES,
     }
 
