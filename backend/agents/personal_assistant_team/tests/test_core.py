@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from personal_assistant_team import core
@@ -54,3 +56,25 @@ def test_reset_orchestrator_rebuilds(monkeypatch):
     second = core.get_orchestrator()
 
     assert first is not second
+
+
+def test_get_orchestrator_concurrent_callers_get_same_instance(monkeypatch):
+    # Regression guard for the double-checked-locking singleton: concurrent
+    # first-callers (thread-mode dispatch racing a Temporal activity, the
+    # exact scenario this module's docstring exists to solve) must all
+    # observe the exact same instance, never each constructing their own.
+    built: list = []
+
+    def _factory(llm, credential_store, profile_store):
+        built.append(1)
+        return _FakeOrchestrator(llm, credential_store, profile_store)
+
+    monkeypatch.setattr(
+        "personal_assistant_team.orchestrator.agent.PersonalAssistantOrchestrator", _factory
+    )
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(lambda _: core.get_orchestrator(), range(32)))
+
+    assert len({id(r) for r in results}) == 1
+    assert len(built) == 1

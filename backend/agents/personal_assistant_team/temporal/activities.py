@@ -607,6 +607,25 @@ def run_assistant_activity(
     Postconditions:
         - Runs the whole orchestrator job via the thread-path runner and re-raises
           on failure (job-store bookkeeping is owned by ``_run_assistant_job``).
+
+    ``api.main`` import safety: this is the ONE place in ``temporal/`` that
+    imports the FastAPI app module, and only lazily, inside this dormant
+    legacy-only activity BODY — never at package import time, so it does not
+    threaten the worker's own startup path (which only imports this module,
+    not calls it; ``test_temporal_bootstrap.py`` pins the package's
+    import-time contract more generally). It is safe in the deployment this
+    runs in because the PA Temporal worker
+    is always started from ``TEAM_TEMPORAL_WORKER_FUNC`` inside the SAME
+    process as ``api.main`` (docker-compose's pa-service boots the worker
+    before uvicorn accepts requests — see ``worker.py``'s docstring), so
+    ``api.main`` is already imported and cached in ``sys.modules`` by the time
+    any pre-decomposition history could reach this activity; this re-import
+    is a no-op module-cache hit, not a fresh FastAPI app construction. This
+    activity — and the coupling — is deleted entirely once no in-flight
+    execution predates the decomposition (see ``_DECOMPOSED_PATCH``'s removal
+    criterion in ``workflows.py``), so it is not worth extracting
+    ``_run_assistant_job`` into a shared module for what is temporary,
+    already-safe-in-practice code.
     """
     try:
         from personal_assistant_team.api.main import _run_assistant_job

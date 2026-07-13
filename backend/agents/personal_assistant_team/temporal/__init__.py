@@ -1,5 +1,14 @@
 """Temporal export contract for the personal assistant team (Pattern A).
 
+Pattern A: a team exports a pure, side-effect-free ``WORKFLOWS``/``ACTIVITIES``
+data contract from ``<team>/temporal/__init__.py``, and a separate explicit
+call (``shared_temporal.start_team_worker``, invoked from this team's own
+``worker.py`` boot hook or from the registry's bulk ``start_all_team_workers``)
+is what actually starts the worker — importing this package alone never does.
+See ``backend/agents/shared_temporal/README.md``'s "See also" section for the
+contrast with Pattern B (``shared_postgres``'s explicit lifespan-call
+registration, used instead for synchronous blocking I/O like DDL).
+
 Exposes ``WORKFLOWS`` / ``ACTIVITIES`` / ``TASK_QUEUE`` so the shared worker
 registry (``shared_temporal.teams_registry``) and the team's worker bootstrap
 can register the workflow + activities on the team task queue.
