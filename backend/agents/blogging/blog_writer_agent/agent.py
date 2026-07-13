@@ -13,19 +13,17 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 from blog_plan_critic_agent import BlogPlanCriticAgent
-from blog_plan_critic_agent.agent import build_refine_feedback_from_critic
-from blog_plan_critic_agent.models import PlanCriticReport
 from blog_planning_agent.prompts import GENERATE_PLAN_SYSTEM, REFINE_PLAN_SYSTEM
-from shared.content_plan import (
-    ContentPlan,
-    PlanningFailureReason,
-    PlanningInput,
-    PlanningPhaseResult,
-    TitleCandidate,
-    section_count_bounds_for_profile,
+from shared.content_plan import ContentPlan, PlanningInput, PlanningPhaseResult
+from shared.content_planning_loop import (
+    build_generate_plan_prompt,
+    build_refine_plan_prompt,
+    complete_plan_json,
+    planning_done,
+    post_validate_plan,
+    run_content_planning_loop,
 )
 from shared.content_profile import LengthPolicy
-from shared.errors import PlanningError
 from strands import Agent
 
 from llm_service import (
@@ -233,67 +231,26 @@ class BlogWriterAgent:
             )
 
     # ------------------------------------------------------------------
-    # Embedded planning (merged from blog_planning_agent)
+    # Planning (delegates to shared.content_planning_loop; also used by
+    # blog_planning_agent.BlogPlanningAgent, which delegates identically)
     # ------------------------------------------------------------------
 
     @staticmethod
     def _post_validate_plan(plan: ContentPlan, policy: LengthPolicy) -> ContentPlan:
-        lo, hi = section_count_bounds_for_profile(policy.content_profile.value)
-        n = len(plan.sections)
-        ra = plan.requirements_analysis.model_copy(deep=True)
-        if n < lo or n > hi:
-            ra.plan_acceptable = False
-            ra.gaps = [
-                *list(ra.gaps),
-                f"Section count {n} outside expected range [{lo},{hi}] for profile {policy.content_profile.value}.",
-            ]
-        return plan.model_copy(update={"requirements_analysis": ra})
+        return post_validate_plan(plan, policy)
 
     @staticmethod
     def _planning_done(plan: ContentPlan) -> bool:
-        ra = plan.requirements_analysis
-        return bool(ra.plan_acceptable and ra.scope_feasible)
+        return planning_done(plan)
 
     @staticmethod
     def _build_generate_plan_prompt(inp: PlanningInput) -> str:
-        parts = [
-            "Produce the JSON content plan for ONE blog post.",
-            "[CONTENT_PLAN_JSON_V1]",
-            "",
-            "--- BRIEF ---",
-            inp.brief.strip(),
-            "",
-            "--- LENGTH / PROFILE ---",
-            inp.length_policy_context.strip(),
-        ]
-        if inp.audience:
-            parts.extend(["", f"Audience: {inp.audience}"])
-        if inp.tone_or_purpose:
-            parts.append(f"Tone/Purpose: {inp.tone_or_purpose}")
-        if inp.series_context_block and inp.series_context_block.strip():
-            parts.extend(["", inp.series_context_block.strip()])
-        parts.extend(
-            [
-                "",
-                "--- RESEARCH DIGEST (ground the plan in this; flag gaps) ---",
-                inp.research_digest.strip(),
-            ]
-        )
-        return "\n".join(parts)
+        return build_generate_plan_prompt(inp)
 
     def _build_refine_plan_prompt(
         self, inp: PlanningInput, previous: ContentPlan, feedback: str
     ) -> str:
-        base = self._build_generate_plan_prompt(inp)
-        prev_json = previous.model_dump(mode="json")
-        return (
-            base
-            + "\n\n--- PREVIOUS PLAN (JSON) ---\n"
-            + json.dumps(prev_json, indent=2)
-            + "\n\n--- REFINEMENT FEEDBACK ---\n"
-            + feedback
-            + "\n\n--- TASK ---\nReturn an improved full JSON plan as specified."
-        )
+        return build_refine_plan_prompt(inp, previous, feedback)
 
     def _complete_plan_json(
         self,
@@ -303,37 +260,13 @@ class BlogWriterAgent:
         on_llm_request: Optional[Callable[[str], None]],
         max_parse_retries: int,
     ) -> tuple[dict[str, Any], int]:
-        parse_retries = 0
-        last_err: Optional[Exception] = None
-        for attempt in range(max_parse_retries):
-            if on_llm_request:
-                on_llm_request("Planning: generating structured plan...")
-            try:
-                data = self._call_agent_json(prompt, system_prompt=system)
-                if isinstance(data, dict) and data:
-                    return data, parse_retries
-            except LLMJsonParseError as e:
-                last_err = e
-                parse_retries += 1
-                logger.warning("JSON parse failed (attempt %s): %s", attempt + 1, e)
-            try:
-                raw = self._call_json_raw(
-                    prompt + "\n\nRespond with a single JSON object only, no markdown fences.",
-                    system_prompt=system,
-                )
-                data = extract_json_from_response(raw)
-                return data, parse_retries
-            except LLMJsonParseError as e:
-                last_err = e
-                parse_retries += 1
-                logger.warning("JSON parse retry failed (attempt %s): %s", attempt + 1, e)
-        msg = f"Planning JSON parse failed after {max_parse_retries} attempts"
-        if last_err:
-            msg += f": {last_err}"
-        raise PlanningError(
-            msg,
-            failure_reason=PlanningFailureReason.PARSE_FAILURE.value,
-            cause=last_err,
+        return complete_plan_json(
+            prompt,
+            system=system,
+            on_llm_request=on_llm_request,
+            max_parse_retries=max_parse_retries,
+            call_json_fn=lambda p, s: self._call_agent_json(p, system_prompt=s),
+            call_raw_fn=lambda p, s: self._call_json_raw(p, system_prompt=s),
         )
 
     def plan_content(
@@ -354,85 +287,19 @@ class BlogWriterAgent:
         approves. Refine feedback comes from the critic's structured violations
         instead of a generic string. When absent, legacy planner-self-eval only.
         """
-        t0 = time.monotonic()
-        total_parse_retries = 0
-        last_plan: Optional[ContentPlan] = None
-        last_critic_report: Optional[PlanCriticReport] = None
-        for iteration in range(1, max_iterations + 1):
-            if iteration == 1:
-                prompt = self._build_generate_plan_prompt(planning_input)
-                system = GENERATE_PLAN_SYSTEM
-            else:
-                assert last_plan is not None
-                if last_critic_report is not None:
-                    feedback = build_refine_feedback_from_critic(last_critic_report)
-                else:
-                    feedback = (
-                        "The plan is not yet acceptable. "
-                        f"requirements_analysis: plan_acceptable={last_plan.requirements_analysis.plan_acceptable}, "
-                        f"scope_feasible={last_plan.requirements_analysis.scope_feasible}. "
-                        "Fix gaps, scope, and research alignment."
-                    )
-                prompt = self._build_refine_plan_prompt(planning_input, last_plan, feedback)
-                system = REFINE_PLAN_SYSTEM
-            data, pr = self._complete_plan_json(
-                prompt,
-                system=system,
-                on_llm_request=on_llm_request,
-                max_parse_retries=max_parse_retries,
-            )
-            total_parse_retries += pr
-            try:
-                plan = ContentPlan.model_validate(data)
-            except Exception as e:
-                raise PlanningError(
-                    f"Invalid content plan schema: {e}",
-                    failure_reason=PlanningFailureReason.PARSE_FAILURE.value,
-                    cause=e,
-                ) from e
-            plan = self._post_validate_plan(plan, length_policy)
-            if not plan.title_candidates:
-                plan = plan.model_copy(
-                    update={
-                        "title_candidates": [
-                            TitleCandidate(
-                                title=plan.overarching_topic[:120],
-                                probability_of_success=0.5,
-                            )
-                        ]
-                    }
-                )
-            last_plan = plan.model_copy(update={"plan_version": iteration})
-
-            planner_ok = self._planning_done(last_plan)
-            critic_report: Optional[PlanCriticReport] = None
-            if plan_critic is not None:
-                critic_report = plan_critic.run(
-                    plan=last_plan,
-                    brand_spec_prompt=self._brand_spec_prompt,
-                    writing_guidelines=self._writing_style_prompt,
-                    research_digest=planning_input.research_digest,
-                    on_llm_request=on_llm_request,
-                    work_dir=work_dir,
-                    artifact_name=f"plan_critic_report_v{iteration}.json",
-                )
-                last_critic_report = critic_report
-
-            critic_ok = critic_report is None or critic_report.approved
-            if planner_ok and critic_ok:
-                wall_ms = (time.monotonic() - t0) * 1000.0
-                return PlanningPhaseResult(
-                    content_plan=last_plan,
-                    planning_iterations_used=iteration,
-                    parse_retry_count=total_parse_retries,
-                    planning_wall_ms_total=wall_ms,
-                    plan_critic_report=critic_report.to_dict()
-                    if critic_report is not None
-                    else None,
-                )
-        raise PlanningError(
-            f"Planning did not converge after {max_iterations} iterations",
-            failure_reason=PlanningFailureReason.MAX_ITERATIONS_REACHED.value,
+        return run_content_planning_loop(
+            planning_input,
+            length_policy=length_policy,
+            on_llm_request=on_llm_request,
+            max_iterations=max_iterations,
+            max_parse_retries=max_parse_retries,
+            plan_critic=plan_critic,
+            brand_spec_prompt=self._brand_spec_prompt,
+            writing_guidelines=self._writing_style_prompt,
+            work_dir=work_dir,
+            generate_system=GENERATE_PLAN_SYSTEM,
+            refine_system=REFINE_PLAN_SYSTEM,
+            complete_plan_json_fn=self._complete_plan_json,
         )
 
     # ------------------------------------------------------------------
