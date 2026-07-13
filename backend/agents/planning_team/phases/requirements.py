@@ -10,7 +10,8 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from planning_team.models import ClientContext, OpenQuestion, OpenQuestionOption
-from planning_team.spec_digest import map_reduce, parse_json_response
+from planning_team.spec_digest import map_reduce
+from shared_llm_recovery import extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,7 @@ def _requirements_map_factory(
             think=True,
             objective=f"derive requirements/open questions (section {idx + 1}/{total})",
         )
-        return parse_json_response(response)
+        return extract_json_object(response, required_keys=("questions",))
 
     return _map
 
