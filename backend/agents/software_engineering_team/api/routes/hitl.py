@@ -5,13 +5,14 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
+from shared_hitl.progress import coerce_progress
+from shared_hitl.status import pending_questions_from_raw
 from shared_hitl.validation import validate_answers
 from software_engineering_team.api.models import (
     AutoAnswerRequest,
     AutoAnswerResponse,
     FailedTaskDetail,
     JobStatusResponse,
-    PendingQuestion,
     SubmitAnswersRequest,
     TaskStateEntry,
     TeamProgressEntry,
@@ -77,7 +78,7 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
         status_text=updated_data.get("status_text"),
         task_results=updated_data.get("task_results", []),
         task_ids=updated_data.get("execution_order", []),
-        progress=updated_data.get("progress"),
+        progress=coerce_progress(updated_data.get("progress")),
         error=updated_data.get("error"),
         failed_tasks=[FailedTaskDetail(**ft) for ft in updated_data.get("failed_tasks", [])],
         phase=updated_data.get("phase"),
@@ -91,7 +92,7 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
         }
         if updated_data.get("team_progress")
         else None,
-        pending_questions=[PendingQuestion(**q) for q in updated_data.get("pending_questions", [])],
+        pending_questions=pending_questions_from_raw(updated_data.get("pending_questions", [])),
         waiting_for_answers=updated_data.get("waiting_for_answers", False),
         planning_subprocess=updated_data.get("planning_subprocess"),
         planning_completed_phases=updated_data.get("planning_completed_phases") or [],

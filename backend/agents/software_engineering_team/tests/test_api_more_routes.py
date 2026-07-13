@@ -256,6 +256,27 @@ def test_submit_pending_answers_400_when_duplicate_question_id(client, fake_job_
     assert "q1" in resp.json()["detail"]
 
 
+def test_submit_pending_answers_clamps_progress_in_response(client, fake_job_client):
+    # The answers-endpoint response now clamps progress via coerce_progress, matching the status
+    # route — the intentional [0,100] behavior change applies to this endpoint too.
+    job_id = "job-prog"
+    fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
+    fake_job_client.update_job(
+        job_id,
+        waiting_for_answers=True,
+        progress=250,
+        pending_questions=[
+            {"id": "q1", "required": True, "options": [{"id": "opt_a", "label": "A"}]}
+        ],
+    )
+    resp = client.post(
+        f"/run-team/{job_id}/answers",
+        json={"answers": [{"question_id": "q1", "selected_option_id": "opt_a"}]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["progress"] == 100
+
+
 # ---------------------------------------------------------------------------
 # retry_failed_tasks
 # ---------------------------------------------------------------------------

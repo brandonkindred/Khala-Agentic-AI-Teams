@@ -44,10 +44,12 @@ def validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> Lis
     pending = data.get("pending_questions", [])
     if not pending:
         raise HTTPException(status_code=400, detail="No pending questions to answer.")
-    # A pending question without an "id" is a corrupted job record (the orchestrator always stamps
-    # one), not bad client input — surface it as a controlled 500 instead of a bare KeyError so the
-    # failure is attributed to the server and carries a clear message.
-    if any("id" not in q for q in pending):
+    # A pending question that is not a dict, or is a dict without an "id", is a corrupted job record
+    # (the orchestrator always stamps a dict with an id), not bad client input — surface it as a
+    # controlled 500 instead of a bare TypeError/KeyError so the failure is attributed to the server
+    # and carries a clear message. The isinstance guard must come first: `"id" not in q` on a
+    # non-dict (str/int/None) would itself raise before the id check ran.
+    if any(not isinstance(q, dict) or "id" not in q for q in pending):
         raise HTTPException(
             status_code=500, detail="Corrupted job record: pending question missing 'id'."
         )

@@ -49,6 +49,18 @@ def test_corrupted_record_missing_id_500():
     assert "Corrupted job record" in ei.value.detail
 
 
+@pytest.mark.parametrize("bad_entry", ["not-a-dict", 123, None, ["nested"]])
+def test_corrupted_record_non_dict_500(bad_entry):
+    # A non-dict pending entry is a corrupted record: it must hit the controlled 500 path, not raise
+    # a bare TypeError from `"id" not in <non-dict>`.
+    with pytest.raises(HTTPException) as ei:
+        validate_answers(
+            _job([bad_entry, _Q1]), _req([{"question_id": "q1", "selected_option_id": "strict"}])
+        )
+    assert ei.value.status_code == 500
+    assert "Corrupted job record" in ei.value.detail
+
+
 def test_duplicate_question_id_400():
     with pytest.raises(HTTPException) as ei:
         validate_answers(
