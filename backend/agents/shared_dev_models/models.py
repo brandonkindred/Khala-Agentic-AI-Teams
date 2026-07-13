@@ -221,6 +221,19 @@ class SystemArchitecture(BaseModel):
     )
 
 
+class ReviewContext(BaseModel):
+    """Optional system-design context threaded into a code-review gate.
+
+    Bundles ``architecture``/``spec_content`` because every code-review call
+    site receives them as a pair (see ``code_review_agent.models.CodeReviewInput``);
+    a bare ``ReviewContext()`` means "nothing to add" so an existing caller that
+    does not have this context yet is unaffected.
+    """
+
+    architecture: Optional[SystemArchitecture] = None
+    spec_content: str = ""
+
+
 class Task(BaseModel):
     """A single task assigned to a team member."""
 

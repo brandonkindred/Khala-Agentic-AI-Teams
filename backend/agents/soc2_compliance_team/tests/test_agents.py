@@ -1,8 +1,7 @@
 """Tests for the SOC2 specialist agent classes and report writer.
 
-These cover the legacy class-based agents (which the orchestrator's Graph
-path bypasses but which are still part of the public surface) plus the
-Strands ``make_*`` factories. All LLM calls are stubbed with a fake
+These cover the class-based agents that both execution modes drive (via
+:mod:`soc2_compliance_team.pipeline`). All LLM calls are stubbed with a fake
 client so no model is invoked.
 """
 
@@ -21,63 +20,15 @@ from soc2_compliance_team.agents import (
     SecurityTSCAgent,
     _parse_finding,
     _run_tsc_agent,
-    make_availability_tsc_agent,
-    make_confidentiality_tsc_agent,
-    make_privacy_tsc_agent,
-    make_processing_integrity_tsc_agent,
-    make_report_writer_agent,
-    make_security_tsc_agent,
 )
 from soc2_compliance_team.models import (
     FindingSeverity,
-    RepoContext,
     TSCAuditResult,
     TSCCategory,
 )
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-class _FakeLLM:
-    """Minimal LLM stand-in capturing prompts and returning canned JSON."""
-
-    def __init__(self, response: Dict[str, Any], ctx_tokens: int = 16384) -> None:
-        self._response = response
-        self._ctx_tokens = ctx_tokens
-        self.calls: list[Dict[str, Any]] = []
-
-    def complete_json(
-        self,
-        prompt: str,
-        *,
-        temperature: float | None = None,
-        think: bool | None = None,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        self.calls.append({"prompt": prompt, "temperature": temperature, "think": think, **kwargs})
-        return self._response
-
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        return prompt[: kwargs.get("max_chars", 100)] if "max_chars" in kwargs else prompt
-
-    def get_max_context_tokens(self) -> int:
-        return self._ctx_tokens
-
-
-def _ctx(**overrides: Any) -> RepoContext:
-    base = RepoContext(
-        repo_path="/repo",
-        code_summary="print('hi')",
-        readme_content="# Title",
-        file_list=["main.py", "README.md"],
-        tech_stack_hint="Python",
-    )
-    for k, v in overrides.items():
-        setattr(base, k, v)
-    return base
-
+from .conftest import FakeLLM as _FakeLLM
+from .conftest import default_repo_context as _ctx
 
 # ---------------------------------------------------------------------------
 # _parse_finding
@@ -407,6 +358,25 @@ def test_report_writer_returns_compliance_report_when_findings_exist() -> None:
     assert len(report.findings_by_tsc[TSCCategory.SECURITY.value]) == 1
 
 
+def test_report_writer_prompt_serializes_findings_as_json() -> None:
+    """The compliance-report prompt renders findings as real JSON (string enum
+    values), not Python enum reprs like ``<FindingSeverity.HIGH: 'high'>``."""
+    llm = _FakeLLM({"executive_summary": "s", "raw_markdown": "r"})
+    tsc_results = [
+        _audit_result(
+            TSCCategory.SECURITY,
+            findings_severities=[FindingSeverity.HIGH],
+            compliant=False,
+        )
+    ]
+    ReportWriterAgent().run(llm, "/repo", tsc_results)
+
+    prompt = llm.calls[0]["prompt"]
+    assert '"severity": "high"' in prompt
+    assert "<FindingSeverity" not in prompt
+    assert "<TSCCategory" not in prompt
+
+
 def test_report_writer_defaults_scope_on_empty_llm_response() -> None:
     llm = _FakeLLM({})
     tsc_results = [
@@ -454,59 +424,3 @@ def test_report_writer_handles_invalid_finding_dicts() -> None:
     report = agent._produce_compliance_report(llm, "/r", tsc_results, bad_findings)
     # Conversion failure ⇒ typed list for security becomes []
     assert report.findings_by_tsc["security"] == []
-
-
-# ---------------------------------------------------------------------------
-# Strands Agent factories — these just build agents; cover the call paths
-# ---------------------------------------------------------------------------
-
-
-def test_make_tsc_agent_factories_return_agent_objects(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Patch ``build_agent`` so we can verify the names/prompts without
-    constructing a real Strands Agent."""
-    import soc2_compliance_team.agents as amod
-
-    captured: list[Dict[str, Any]] = []
-
-    class _FakeAgent:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    def _fake_build_agent(*, name, system_prompt, agent_key, description):
-        captured.append(
-            {
-                "name": name,
-                "system_prompt": system_prompt,
-                "agent_key": agent_key,
-                "description": description,
-            }
-        )
-        return _FakeAgent(
-            name=name,
-            system_prompt=system_prompt,
-            agent_key=agent_key,
-            description=description,
-        )
-
-    monkeypatch.setattr(amod, "build_agent", _fake_build_agent)
-
-    a1 = make_security_tsc_agent()
-    a2 = make_availability_tsc_agent()
-    a3 = make_processing_integrity_tsc_agent()
-    a4 = make_confidentiality_tsc_agent()
-    a5 = make_privacy_tsc_agent()
-    a6 = make_report_writer_agent()
-
-    assert all(isinstance(a, _FakeAgent) for a in (a1, a2, a3, a4, a5, a6))
-    names = [c["name"] for c in captured]
-    assert "security_(common_criteria)_tsc_agent" in names
-    assert "availability_tsc_agent" in names
-    assert "processing_integrity_tsc_agent" in names
-    assert "confidentiality_tsc_agent" in names
-    assert "privacy_tsc_agent" in names
-    assert "soc2_report_writer" in names
-    # All agents are tagged with the same agent_key
-    assert all(c["agent_key"] == "soc2" for c in captured)
-    # System prompts reference the criterion name (where appropriate)
-    sec_prompt = next(c for c in captured if "security" in c["name"])["system_prompt"]
-    assert "Security (Common Criteria)" in sec_prompt

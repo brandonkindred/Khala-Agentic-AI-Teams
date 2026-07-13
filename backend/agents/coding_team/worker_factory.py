@@ -7,10 +7,11 @@ god-file into named collaborators) — pure structural move, no behavior change.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from coding_team.models import StackSpec
 from coding_team.team_routing import _v2_team_kind_for_stack
+from shared_dev_models import ReviewContext
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ def _build_implementation_worker(
     spec: StackSpec,
     llm_getter: Callable[[str], Any],
     engine_provider: Any,
+    review_context: Optional[ReviewContext] = None,
 ) -> Any:
     """Build a v2 specialist worker for a stack.
 
@@ -67,7 +69,12 @@ def _build_implementation_worker(
     coding_team only resolves the text-mode LLM and wraps the result in a
     ``V2TeamWorker``.
 
-    Preconditions: ``engine_provider`` is a live ``CodeEngineProvider``.
+    Preconditions:
+        - ``engine_provider`` is a live ``CodeEngineProvider``.
+        - ``review_context`` bundles the plan's system architecture and project
+          specification, when available; ``None`` means "nothing to add" so a
+          caller without this context yet is unaffected.
+
     Postconditions: returns a ``V2TeamWorker`` whose ``team_lead`` came from the
     provider. Raises ``ValueError`` for an unsupported stack and ``RuntimeError``
     when no provider was injected.
@@ -94,4 +101,5 @@ def _build_implementation_worker(
         stack_spec=spec,
         team_kind=kind,
         team_lead=team_lead,
+        review_context=review_context,
     )

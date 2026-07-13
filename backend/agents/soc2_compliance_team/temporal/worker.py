@@ -1,102 +1,59 @@
-"""Temporal worker for the SOC2 compliance team."""
+"""Temporal worker bootstrap for the SOC2 compliance team.
+
+Exposes a no-arg ``start_soc2_temporal_worker_thread`` that the generic
+team_service entrypoint invokes at boot via the ``TEAM_TEMPORAL_WORKER_MODULE`` /
+``TEAM_TEMPORAL_WORKER_FUNC`` env vars, so the Temporal worker (and its connected
+client) is ready before uvicorn starts accepting requests. Delegates to the
+shared :func:`shared_temporal.start_team_worker`, which installs the shared
+sandbox passthroughs and gzip payload codec and is idempotent per team.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import threading
-from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
 
-from temporalio.worker import Worker
-
-from soc2_compliance_team.temporal.activities import run_audit_activity
-from soc2_compliance_team.temporal.client import (
-    connect_temporal_client,
-    get_temporal_loop,
-    is_temporal_enabled,
-    set_temporal_client,
-    set_temporal_loop,
+from shared_temporal import is_temporal_enabled, start_team_worker
+from soc2_compliance_team.temporal import (
+    ACTIVITIES,
+    MAX_CONCURRENT_ACTIVITIES,
+    WORKFLOWS,
+    resolve_task_queue,
 )
-from soc2_compliance_team.temporal.constants import TASK_QUEUE
-from soc2_compliance_team.temporal.workflows import Soc2AuditWorkflow
 
 logger = logging.getLogger(__name__)
 
-_worker_thread: Optional[threading.Thread] = None
-_activity_executor: Optional[ThreadPoolExecutor] = None
-
-
-def create_soc2_worker(client: Optional[object] = None) -> Optional[Worker]:
-    if not is_temporal_enabled():
-        return None
-    if client is None:
-        return None
-    global _activity_executor
-    if _activity_executor is None:
-        _activity_executor = ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="soc2-temporal-activity"
-        )
-    worker = Worker(
-        client,
-        task_queue=TASK_QUEUE,
-        workflows=[Soc2AuditWorkflow],
-        activities=[run_audit_activity],
-        activity_executor=_activity_executor,
-        max_concurrent_activities=2,
-    )
-    logger.info("SOC2 Temporal worker created for task queue %s", TASK_QUEUE)
-    return worker
-
-
-async def _run_worker_async() -> None:
-    client = await connect_temporal_client()
-    if client is None:
-        return
-    set_temporal_client(client)
-    set_temporal_loop(asyncio.get_running_loop())
-    worker = create_soc2_worker(client)
-    if worker is None:
-        return
-    logger.info("SOC2 Temporal worker starting")
-    await worker.run()
-
-
-def _worker_thread_target() -> None:
-    global _worker_thread
-    if not is_temporal_enabled():
-        return
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(_run_worker_async())
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:
-        logger.exception("SOC2 Temporal worker failed: %s", e)
-    finally:
-        # client.py now re-exports shared_temporal.client's process-wide slots
-        # (shared with every other team on the same shim), so guard on
-        # identity: only clear if this worker's loop is still the registered
-        # one, never clobbering a different worker that has since taken
-        # ownership. See shared_temporal/worker.py's identical guard.
-        if get_temporal_loop() is loop:
-            set_temporal_loop(None)
-            set_temporal_client(None)
-        loop.close()
+# Team key for the per-team worker registry. Matches the slug registered in
+# ``shared_temporal.teams_registry`` so double-starts are idempotent.
+TEAM_KEY = "soc2_compliance"
 
 
 def start_soc2_temporal_worker_thread() -> bool:
-    global _worker_thread
+    """Start the SOC2 Temporal worker (no-op when disabled).
+
+    Postconditions:
+        - Returns ``True`` if a worker thread is running (or already running),
+          ``False`` when Temporal is disabled (``TEMPORAL_ADDRESS`` unset).
+        - On a fresh start, also sweeps stale context snapshots (best-effort,
+          never raises) — a snapshot orphaned by the crash that took down a
+          prior worker is otherwise only cleaned up by an unrelated future
+          job's ``save_snapshot`` call; sweeping on boot closes that gap
+          promptly.
+
+    Safe to call multiple times — the underlying ``start_team_worker`` is
+    idempotent per team.
+    """
     if not is_temporal_enabled():
         return False
-    if _worker_thread is not None and _worker_thread.is_alive():
-        return True
-    _worker_thread = threading.Thread(
-        target=_worker_thread_target,
-        name="soc2-temporal-worker",
-        daemon=True,
+    try:
+        from soc2_compliance_team.context_snapshot import purge_stale_snapshots
+
+        purge_stale_snapshots()
+    except Exception:
+        logger.warning("Could not purge stale SOC2 context snapshots on worker boot", exc_info=True)
+    return start_team_worker(
+        TEAM_KEY,
+        WORKFLOWS,
+        ACTIVITIES,
+        task_queue=resolve_task_queue(),
+        max_concurrent_activities=MAX_CONCURRENT_ACTIVITIES,
     )
-    _worker_thread.start()
-    logger.info("SOC2 Temporal worker thread started")
-    return True

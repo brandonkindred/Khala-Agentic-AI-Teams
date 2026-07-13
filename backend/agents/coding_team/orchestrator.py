@@ -64,6 +64,7 @@ from coding_team.worker_factory import (
     _v2_text_mode_llm,  # noqa: F401 - re-exported, test-imported
 )
 from coding_team.worktree_manager import WorktreeManager
+from shared_dev_models import ReviewContext, SystemArchitecture
 
 logger = logging.getLogger(__name__)
 
@@ -644,11 +645,30 @@ def run_coding_team_orchestrator(
         StackSpec(name=name, tools_services=tools) for (_aid, name, tools) in roster
     ]
     agent_ids = [aid for (aid, _name, _tools) in roster]
+    # The plan's architecture overview and final spec content, when available, are forwarded
+    # into each implementation worker so its code-review gate can check the change against
+    # the established architecture and the real project spec (not just the microtask
+    # description) -- see software_engineering_team's code_review_agent for how these reach
+    # the review prompt.
+    plan_architecture = (
+        SystemArchitecture(overview=plan_input.architecture_overview)
+        if plan_input.architecture_overview
+        else None
+    )
+    plan_review_context = ReviewContext(
+        architecture=plan_architecture, spec_content=plan_input.final_spec_content or ""
+    )
     implementation_workers: List[Any] = []
     try:
         for aid, spec in zip(agent_ids, stack_specs):
             implementation_workers.append(
-                _build_implementation_worker(aid, spec, llm_getter, engine_provider)
+                _build_implementation_worker(
+                    aid,
+                    spec,
+                    llm_getter,
+                    engine_provider,
+                    review_context=plan_review_context,
+                )
             )
     except Exception as exc:  # noqa: BLE001 - fail the job cleanly with the unsupported stack
         logger.error("Failed to build coding-team implementation workers: %s", exc)

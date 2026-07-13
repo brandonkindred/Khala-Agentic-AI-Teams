@@ -53,16 +53,47 @@ def test_workflows_and_activities_are_registered() -> None:
         WORKFLOW_ID_PREFIX,
         WORKFLOWS,
         InvestmentBacktestWorkflow,
+        PaperTradingWorkflow,
     )
 
-    # After the Strategy Lab cutover this coarse queue serves only the ad hoc
-    # single-backtest workflow; the batch run moved to
-    # ``investment_team.strategy_lab.temporal`` on ``strategy-lab-queue``.
-    assert WORKFLOWS == [InvestmentBacktestWorkflow]
-    assert len(ACTIVITIES) == 1
-    assert {a.__name__ for a in ACTIVITIES} == {"run_backtest_activity"}
+    # The coarse ``investment-queue`` serves the ad hoc single-backtest workflow
+    # and the long-running paper-trading workflow; the Strategy Lab batch run
+    # lives on ``strategy-lab-queue`` (``investment_team.strategy_lab.temporal``).
+    assert WORKFLOWS == [InvestmentBacktestWorkflow, PaperTradingWorkflow]
+    assert {a.__name__ for a in ACTIVITIES} == {
+        "run_backtest_activity",
+        "run_paper_trading_activity",
+        "mark_paper_trading_stopped_activity",
+    }
     assert TASK_QUEUE == "investment-queue"
     assert WORKFLOW_ID_PREFIX == "investment-"
+
+
+def test_advisory_workflows_and_activities_are_registered() -> None:
+    from investment_team.temporal import (
+        ADVISORY_ACTIVITIES,
+        ADVISORY_TASK_QUEUE,
+        ADVISORY_WORKFLOW_ID_PREFIX,
+        ADVISORY_WORKFLOWS,
+    )
+
+    # The interactive proposal/validation/promotion/memo/advisor workflows run on
+    # their own queue so a multi-hour backtest activity can't head-of-line-block
+    # a quick execute-and-wait call.
+    assert len(ADVISORY_WORKFLOWS) == 9
+    assert {a.__name__ for a in ADVISORY_ACTIVITIES} == {
+        "create_proposal_activity",
+        "validate_proposal_activity",
+        "create_strategy_activity",
+        "validate_strategy_activity",
+        "promotion_decision_activity",
+        "committee_memo_activity",
+        "advisor_start_activity",
+        "advisor_message_activity",
+        "advisor_complete_activity",
+    }
+    assert ADVISORY_TASK_QUEUE == "investment-advisory-queue"
+    assert ADVISORY_WORKFLOW_ID_PREFIX == "investment-adv-"
 
 
 def test_importing_temporal_package_does_not_call_start_team_worker() -> None:
