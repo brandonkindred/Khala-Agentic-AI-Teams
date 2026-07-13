@@ -210,7 +210,10 @@ async def run_audit_job(job_id: str, audit_id: str, request: CreateAuditRequest)
           legacy ``run_pipeline_activity`` (the sole caller subject to Temporal
           retry; the FastAPI background-task path has no retry at all), but
           without it a retry there would silently redo up to two hours of
-          already-completed LLM/scan work.
+          already-completed LLM/scan work. The check uses
+          :func:`_load_audit_state_strict`: a transient read error propagates (so
+          Temporal retries the read) instead of being swallowed to "no persisted
+          state", which would defeat the guard by re-running the audit anyway.
         - Otherwise, on success/logical-failure the job ends in ``completed``/``failed``.
         - On an infrastructure exception the exception propagates to the caller
           (the job's last persisted state is ``running``).
@@ -224,7 +227,7 @@ async def run_audit_job(job_id: str, audit_id: str, request: CreateAuditRequest)
     if existing is not None and existing.get("status") in (JOB_STATUS_COMPLETED, JOB_STATUS_FAILED):
         return
 
-    persisted = await load_audit_state(audit_id)
+    persisted = await _load_audit_state_strict(audit_id)
     if persisted is not None and (persisted.success or persisted.failure_reason):
         manager.update_job(
             job_id,
@@ -605,9 +608,12 @@ async def run_discovery_step(job_id: str, audit_id: str) -> AccessibilityAuditRe
           overwrite the original failure with a different one.
         - Raises ``RuntimeError`` if the persisted intake state / audit plan is
           missing (an infrastructure/plumbing failure, surfaced for Temporal retry).
+          The load uses :func:`_load_audit_state_strict`, so a transient store-read
+          error propagates as-is rather than being conflated with this clean
+          "missing" ``RuntimeError``.
     """
     logger.info("Discovery step for job %s audit %s", job_id, audit_id)
-    result = await load_audit_state(audit_id)
+    result = await _load_audit_state_strict(audit_id)
     if result is None or result.intake_result is None or result.intake_result.audit_plan is None:
         raise RuntimeError(f"discovery step: intake state/audit plan missing for {audit_id}")
 
@@ -662,10 +668,13 @@ async def run_verification_step(
         - If verification was already recorded complete, OR already failed and
           persisted, the already-persisted result is returned as-is WITHOUT
           re-running verification — see :func:`run_discovery_step` for why.
-        - Raises ``RuntimeError`` if the persisted discovery state is missing.
+        - Raises ``RuntimeError`` if the persisted discovery state is missing. The
+          load uses :func:`_load_audit_state_strict`, so a transient store-read
+          error propagates as-is rather than being conflated with this clean
+          "missing" ``RuntimeError``.
     """
     logger.info("Verification step for job %s audit %s", job_id, audit_id)
-    result = await load_audit_state(audit_id)
+    result = await _load_audit_state_strict(audit_id)
     if result is None or result.discovery_result is None:
         raise RuntimeError(f"verification step: discovery state missing for {audit_id}")
 
@@ -720,9 +729,12 @@ async def run_report_packaging_step(job_id: str, audit_id: str) -> Accessibility
           and persisted, the already-persisted result is returned as-is WITHOUT
           re-running it — see :func:`run_discovery_step` for why.
         - Raises ``RuntimeError`` if the persisted verification state is missing.
+          The load uses :func:`_load_audit_state_strict`, so a transient
+          store-read error propagates as-is rather than being conflated with this
+          clean "missing" ``RuntimeError``.
     """
     logger.info("Report-packaging step for job %s audit %s", job_id, audit_id)
-    result = await load_audit_state(audit_id)
+    result = await _load_audit_state_strict(audit_id)
     if result is None or result.verification_result is None:
         raise RuntimeError(f"report packaging step: verification state missing for {audit_id}")
 
@@ -770,10 +782,20 @@ async def finalize_audit_step(job_id: str, audit_id: str) -> AccessibilityAuditR
     Postconditions:
         - Returns the finalized ``AccessibilityAuditResult`` (``success=True`` with
           severity counts + summary via :func:`finalize_audit_result`) and persists
-          it. Raises ``RuntimeError`` if the persisted report state is missing.
+          it. Raises ``RuntimeError`` if the persisted report state is missing. The
+          load uses :func:`_load_audit_state_strict`, so a transient store-read
+          error propagates as-is rather than being conflated with this clean
+          "missing" ``RuntimeError``.
+        - If the loaded state is already finalized (``success`` is already
+          ``True`` — the only terminal state ``finalize_audit_result`` produces,
+          since it always runs after report packaging already succeeded), returns
+          it as-is without recomputing: a Temporal retry after this step already
+          succeeded and persisted (the completion ack was lost) must not redo the
+          (deterministic but unnecessary) severity-count/summary assembly and
+          re-persist.
     """
     logger.info("Finalize step for job %s audit %s", job_id, audit_id)
-    result = await load_audit_state(audit_id)
+    result = await _load_audit_state_strict(audit_id)
     # Enforce finalize_audit_result's precondition (report packaging succeeded). The
     # workflow only schedules finalize after report_packaging returns PASS, so a
     # missing/unsuccessful report here is a plumbing defect that must fail loudly.
@@ -781,6 +803,14 @@ async def finalize_audit_step(job_id: str, audit_id: str) -> AccessibilityAuditR
         raise RuntimeError(f"finalize step: report-packaging state missing for {audit_id}")
     if not result.report_packaging_result.success:
         raise RuntimeError(f"finalize step: report-packaging did not succeed for {audit_id}")
+
+    if result.success:
+        logger.info(
+            "Finalize step for job %s audit %s already finalized; skipping re-run",
+            job_id,
+            audit_id,
+        )
+        return result
 
     finalize_audit_result(result, result.report_packaging_result)
     if not await _persist_unless_job_terminal(job_id, result):

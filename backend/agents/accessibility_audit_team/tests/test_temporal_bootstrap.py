@@ -894,7 +894,7 @@ def test_run_audit_job_reconciles_from_persisted_terminal_state_without_rerunnin
         completed_phases=[Phase.INTAKE, Phase.DISCOVERY],
         total_findings=3,
     )
-    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=persisted))
+    monkeypatch.setattr(ax, "_load_audit_state_strict", mock.AsyncMock(return_value=persisted))
     orch = mock.Mock()
     orch.run_audit = mock.AsyncMock(side_effect=AssertionError("must not re-run"))
     monkeypatch.setattr(ax, "get_orchestrator", lambda: orch)
@@ -926,7 +926,7 @@ def test_run_audit_job_runs_when_persisted_state_is_not_terminal(monkeypatch):
     in_progress = AccessibilityAuditResult(
         audit_id="audit1", current_phase=Phase.DISCOVERY, completed_phases=[Phase.INTAKE]
     )
-    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=in_progress))
+    monkeypatch.setattr(ax, "_load_audit_state_strict", mock.AsyncMock(return_value=in_progress))
     orch = mock.Mock()
     orch.run_audit = mock.AsyncMock(return_value=_fake_result(True))
     monkeypatch.setattr(ax, "get_orchestrator", lambda: orch)
@@ -935,6 +935,30 @@ def test_run_audit_job_runs_when_persisted_state_is_not_terminal(monkeypatch):
     asyncio.run(ax.run_audit_job("job1", "audit1", req))
 
     orch.run_audit.assert_awaited_once()
+
+
+def test_run_audit_job_propagates_transient_read_error_on_reconciliation_check(monkeypatch):
+    """A transient artifact-store read error while checking for a persisted
+    terminal result must propagate (so Temporal retries the read) rather than
+    being swallowed to "no persisted state", which would silently re-run the
+    full (up to 2h) audit."""
+    from accessibility_audit_team import audit_execution as ax
+
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": ax.JOB_STATUS_RUNNING}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    monkeypatch.setattr(
+        ax, "_load_audit_state_strict", mock.AsyncMock(side_effect=RuntimeError("store down"))
+    )
+    orch = mock.Mock()
+    orch.run_audit = mock.AsyncMock(side_effect=AssertionError("must not re-run"))
+    monkeypatch.setattr(ax, "get_orchestrator", lambda: orch)
+
+    req = ax.CreateAuditRequest(web_urls=["https://e.com"])
+    with pytest.raises(RuntimeError, match="store down"):
+        asyncio.run(ax.run_audit_job("job1", "audit1", req))
+
+    orch.run_audit.assert_not_awaited()
 
 
 def test_run_audit_job_rejects_blank_ids():

@@ -155,7 +155,7 @@ def test_run_intake_step_skips_rerun_when_already_complete(monkeypatch, sample_a
 
 
 def _seed(monkeypatch, result: AccessibilityAuditResult):
-    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=result))
+    monkeypatch.setattr(ax, "_load_audit_state_strict", mock.AsyncMock(return_value=result))
 
 
 def test_run_discovery_step_records_phase(monkeypatch, sample_audit_plan, sample_findings):
@@ -176,7 +176,7 @@ def test_run_discovery_step_records_phase(monkeypatch, sample_audit_plan, sample
 
 
 def test_run_discovery_step_raises_when_state_missing(monkeypatch):
-    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=None))
+    monkeypatch.setattr(ax, "_load_audit_state_strict", mock.AsyncMock(return_value=None))
     with pytest.raises(RuntimeError, match="intake state"):
         asyncio.run(ax.run_discovery_step("j1", "a1"))
 
@@ -245,7 +245,7 @@ def test_run_report_packaging_step_defers_finalize(monkeypatch, sample_findings)
 
 
 def test_run_report_packaging_step_raises_when_state_missing(monkeypatch):
-    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=None))
+    monkeypatch.setattr(ax, "_load_audit_state_strict", mock.AsyncMock(return_value=None))
     with pytest.raises(RuntimeError, match="verification state"):
         asyncio.run(ax.run_report_packaging_step("j1", "a1"))
 
@@ -417,7 +417,7 @@ def test_run_verification_step_raises_when_persist_fails_on_logical_failure(
 
 
 def test_run_verification_step_raises_when_state_missing(monkeypatch):
-    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=None))
+    monkeypatch.setattr(ax, "_load_audit_state_strict", mock.AsyncMock(return_value=None))
     with pytest.raises(RuntimeError, match="discovery state"):
         asyncio.run(ax.run_verification_step("j1", "a1", {}))
 
@@ -575,9 +575,32 @@ def test_finalize_audit_step_assembles_result(monkeypatch, sample_findings):
 
 
 def test_finalize_audit_step_raises_when_state_missing(monkeypatch):
-    monkeypatch.setattr(ax, "load_audit_state", mock.AsyncMock(return_value=None))
+    monkeypatch.setattr(ax, "_load_audit_state_strict", mock.AsyncMock(return_value=None))
     with pytest.raises(RuntimeError, match="report-packaging state"):
         asyncio.run(ax.finalize_audit_step("j1", "a1"))
+
+
+def test_finalize_audit_step_skips_rerun_when_already_finalized(monkeypatch, sample_findings):
+    """A Temporal retry after finalize already succeeded and persisted (the
+    completion ack was lost) must not redo the severity-count/summary assembly
+    or re-persist — finalize_audit_result is deterministic but the extra work
+    and store write are unnecessary."""
+    seeded = AccessibilityAuditResult(
+        audit_id="a1",
+        success=True,
+        total_findings=3,
+        summary="Audit complete. 3 findings (1 critical, 1 high, 1 medium, 0 low). 0 patterns identified.",
+        report_packaging_result=ReportPackagingResult(success=True, final_backlog=sample_findings),
+        completed_phases=[Phase.REPORT_PACKAGING],
+    )
+    _seed(monkeypatch, seeded)
+    persist = mock.AsyncMock(return_value=True)
+    monkeypatch.setattr(ax, "persist_audit_state", persist)
+
+    result = asyncio.run(ax.finalize_audit_step("j1", "a1"))
+
+    assert result is seeded
+    persist.assert_not_awaited()
 
 
 def test_finalize_audit_step_raises_when_report_unsuccessful(monkeypatch):
