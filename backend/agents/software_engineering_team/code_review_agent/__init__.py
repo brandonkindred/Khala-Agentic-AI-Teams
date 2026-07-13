@@ -31,6 +31,9 @@ from typing import TYPE_CHECKING, Any
 # still works, but merely importing this package touches no submodule at all.
 if TYPE_CHECKING:  # pragma: no cover - for type checkers only
     from .agent import CodeReviewAgent  # noqa: F401
+    from .architecture_consistency_pass import (  # noqa: F401
+        find_architecture_and_redundancy_issues,
+    )
     from .chunk_reviewer import ChunkReviewAgent  # noqa: F401
     from .false_positive_filter import CodebaseIndex, filter_false_positives  # noqa: F401
     from .models import (  # noqa: F401
@@ -47,6 +50,7 @@ _LAZY_EXPORTS = {
     "ChunkReviewAgent": "chunk_reviewer",
     "CodebaseIndex": "false_positive_filter",
     "filter_false_positives": "false_positive_filter",
+    "find_architecture_and_redundancy_issues": "architecture_consistency_pass",
     "ChunkReviewInput": "models",
     "ChunkReviewOutput": "models",
     "CodeReviewInput": "models",
@@ -81,4 +85,5 @@ __all__ = [
     "ReviewProfile",
     "build_review_system_prompt",
     "filter_false_positives",
+    "find_architecture_and_redundancy_issues",
 ]

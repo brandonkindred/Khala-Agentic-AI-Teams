@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -17,8 +18,12 @@ from strands import Agent
 
 from llm_service import LLMClient
 from software_engineering_team.shared.agent_review import run_qa_agent, run_security_agent
+from software_engineering_team.shared.context_sizing import (
+    compute_code_review_arch_overview_chars,
+    compute_code_review_spec_excerpt_chars,
+)
 from software_engineering_team.shared.llm_review import run_llm_review
-from software_engineering_team.shared.models import Task
+from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.review_utils import (
     DOC_QUALITY_THRESHOLD,
     MANY_CHUNKS_WARN_THRESHOLD,
@@ -33,6 +38,7 @@ from software_engineering_team.shared.security_service import is_blocking
 from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
 from software_engineering_team.shared.v2_review import (
     _code_review_step,
+    _lint_passed,
     _review_steps_run_sequentially,  # noqa: F401  (re-exported for tests)
 )
 from software_engineering_team.shared.v2_review import (
@@ -65,6 +71,7 @@ def _run_llm_review(
     llm: LLMClient,
     task: Task,
     files: Dict[str, str],
+    review_context: Optional[ReviewContext] = None,
 ) -> List[ReviewIssue]:
     """LLM-based code review when no external review agent is available.
 
@@ -76,6 +83,12 @@ def _run_llm_review(
 
     Preconditions:
         - ``files`` maps file paths to their full source text.
+        - ``review_context`` bundles the caller's system architecture and project
+          specification, when available; ``None`` means "nothing to add" so a
+          caller without this context yet keeps working unchanged. Rendered and
+          hard-truncated to the same per-chunk caps the coordinator's own
+          architecture/spec excerpts use (this runs once per chunk, so an
+          uncapped document would repeat its full size in every chunk's prompt).
 
     Postconditions:
         - See ``software_engineering_team.shared.llm_review.run_llm_review``:
@@ -88,6 +101,26 @@ def _run_llm_review(
     def _invoke(prompt: str) -> str:
         return str(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
 
+    architecture_context = ""
+    spec_content = ""
+    if review_context is not None:
+        if review_context.architecture is not None:
+            # Lazy import: code_review_agent submodules are imported on demand
+            # rather than at module scope elsewhere in the review call chain
+            # (e.g. _code_review_step's CodeReviewInput import), so this module
+            # follows the same convention rather than adding a new eager edge.
+            from code_review_agent.architecture_context import render_architecture_context
+
+            architecture_context = render_architecture_context(review_context.architecture)
+        spec_content = review_context.spec_content or ""
+        # Bounded here (only when there is context to bound): this runs once per
+        # chunk, so an uncapped document would repeat its full size in every
+        # chunk's prompt. Skipped entirely with no review_context so a caller's
+        # bare llm handle (e.g. a test double without get_max_context_tokens)
+        # is never touched when there is nothing to bound.
+        architecture_context = architecture_context[: compute_code_review_arch_overview_chars(llm)]
+        spec_content = spec_content[: compute_code_review_spec_excerpt_chars(llm)]
+
     return run_llm_review(
         task=task,
         files=files,
@@ -97,6 +130,8 @@ def _run_llm_review(
         invoke_model=_invoke,
         max_chars=MAX_REVIEW_CODE_CHARS,
         warn_threshold=MANY_CHUNKS_WARN_THRESHOLD,
+        architecture_context=architecture_context,
+        spec_content=spec_content,
     )
 
 
@@ -195,6 +230,7 @@ def run_review(
     linting_tool_agent: Any = None,
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     language: str = "python",
+    review_context: Optional[ReviewContext] = None,
 ) -> ReviewResult:
     """Execute the Review phase.
 
@@ -225,6 +261,7 @@ def run_review(
         qa_agent_fn=_run_qa_agent,
         security_agent_fn=_run_security_agent,
         build_verify_fn=_run_build_verification,
+        review_context=review_context,
     )
 
 
@@ -243,6 +280,7 @@ def run_microtask_review(
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     language: str = "python",
+    review_context: Optional[ReviewContext] = None,
 ) -> ReviewResult:
     """Run full review on a single microtask's output files.
 
@@ -269,6 +307,7 @@ def run_microtask_review(
         qa_agent_fn=_run_qa_agent,
         security_agent_fn=_run_security_agent,
         build_verify_fn=_run_build_verification,
+        review_context=review_context,
     )
 
 
@@ -284,6 +323,7 @@ def run_code_review_phase(
     linting_tool_agent: Any = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     language: str = "python",
+    review_context: Optional[ReviewContext] = None,
 ) -> PhaseReviewResult:
     """
     Run code review phase only: build verification + lint + code review.
@@ -330,9 +370,7 @@ def run_code_review_phase(
                     task_description=f"Microtask: {microtask.title or microtask_id}",
                 )
             )
-            if lint_result and not getattr(
-                lint_result.execution_result, "success", getattr(lint_result, "passed", True)
-            ):
+            if lint_result and not _lint_passed(lint_result):
                 lint_ok = False
                 _lint_severity_map = {"error": "high", "warning": "medium", "info": "low"}
                 for li in getattr(lint_result, "linter_issues", getattr(lint_result, "issues", [])):
@@ -370,6 +408,7 @@ def run_code_review_phase(
             task_id=task_id,
             task_description=f"Microtask: {microtask.description or microtask.title}",
             llm_review_fn=_run_llm_review,
+            review_context=review_context,
             detail_callback=detail_callback,
         )
     )
@@ -597,7 +636,7 @@ def run_qa_testing_phase(
         microtask=microtask,
         files=files,
         review_agent=qa_agent,
-        agent_runner=lambda **kw: _run_qa_agent(qa_agent=qa_agent, **kw),
+        agent_runner=partial(_run_qa_agent, qa_agent=qa_agent),
         tool_agents=tool_agents,
         repo_path=repo_path,
         detail_callback=detail_callback,
@@ -628,7 +667,7 @@ def run_security_testing_phase(
         microtask=microtask,
         files=files,
         review_agent=security_agent,
-        agent_runner=lambda **kw: _run_security_agent(security_agent=security_agent, **kw),
+        agent_runner=partial(_run_security_agent, security_agent=security_agent),
         tool_agents=tool_agents,
         repo_path=repo_path,
         detail_callback=detail_callback,
@@ -644,6 +683,7 @@ def run_documentation_review_phase(
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     repo_path: Optional[Path] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
+    language: str = "python",
 ) -> PhaseReviewResult:
     """
     Run documentation review phase: check for missing/incomplete documentation.
@@ -669,7 +709,7 @@ def run_documentation_review_phase(
                     repo_path=str(repo_path) if repo_path else "",
                     existing_code="",
                     spec_context=task.description or "",
-                    language="python",
+                    language=language,
                     current_files=files,
                     review_issues=issues,
                     task_title=task.title or "",

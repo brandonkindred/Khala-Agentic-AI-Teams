@@ -104,7 +104,7 @@ _SHARED_OUTPUT_SECTION = (
     '- "approved": boolean (true ONLY if there are no critical or high issues; be strict)\n'
     '- "issues": list of objects, each with:\n'
     '  - "severity": "critical" | "high" | "medium" | "low" | "info"\n'
-    '  - "category": "naming" | "structure" | "logic" | "spec-compliance" | "standards" | "integration" | "testing"\n'
+    '  - "category": "naming" | "structure" | "logic" | "spec-compliance" | "standards" | "integration" | "testing" | "architecture" | "refactor" | "maintainability"\n'
     '  - "file_path": string (which file has the issue)\n'
     '  - "line": integer (1-based line number in the NEW version of file_path where the issue is). '
     'When the code is presented with line-number prefixes (e.g. `123: <code>`), set "line" to '
@@ -126,7 +126,8 @@ _SHARED_OUTPUT_SECTION = (
     "code won't compile, missing core logic, data loss risk)\n"
     "- **high**: Significant issues that must be fixed (e.g., missing tests, wrong project "
     "structure, incomplete implementation of acceptance criteria)\n"
-    "- **medium**: Should be fixed but not blocking (e.g., missing docstrings, minor style issues)\n"
+    "- **medium**: Should be fixed but not blocking (e.g., missing docstrings, minor style issues, "
+    "a refactor opportunity that improves clarity/performance without a correctness risk)\n"
     "- **low**: Minor cosmetic or style preference (e.g., variable naming, formatting)\n"
     "- **info**: Informational observation, no action required\n\n"
     "**Approval rules:**\n"
@@ -221,7 +222,47 @@ _CODE_REVIEW_CRITERIA = (
     "   - Imports are valid and reference existing modules\n"
     "   - No duplicate functionality\n"
     "   - Routes/components are registered properly\n"
-    "   - API contracts match between frontend and backend"
+    "   - API contracts match between frontend and backend\n\n"
+    "8. **Architecture Consistency** - Does the code fit the established system architecture?\n"
+    "   - Does it respect existing module/service/layer boundaries (e.g. does not reach past a "
+    "repository/service boundary, does not put business logic in a controller/route layer that "
+    "the architecture reserves for orchestration only)?\n"
+    "   - Does it follow the same pattern already used elsewhere for the same concern (e.g. the "
+    "same error-handling convention, the same data-access pattern, the same auth middleware "
+    "approach)? A DIFFERENT pattern is not automatically wrong -- flag it only when it conflicts "
+    "with or duplicates the established one, not merely because it differs stylistically.\n"
+    "   - Does it introduce a capability that already exists elsewhere in the architecture (a "
+    "second job queue, a second HTTP client wrapper, a second auth check) instead of reusing it?\n"
+    "   - Only escalate to critical/high when the inconsistency would actually break integration "
+    "(e.g. bypasses the architecture's stated data-access layer and writes directly to a store "
+    "another component owns, or violates a stated tenancy/reliability boundary). A stylistic or "
+    "structural inconsistency that does not risk breakage is medium or low.\n\n"
+    "9. **Refactoring Opportunities** - Could this code be simpler, faster, or less redundant "
+    "without changing behavior?\n"
+    "   - Redundancy: duplicated logic that could be extracted or reused from an existing helper\n"
+    "   - Performance: an obviously inefficient pattern for the data sizes implied by the task "
+    "(e.g. an N+1 query, an unbounded loop doing repeated I/O, avoidable quadratic work)\n"
+    "   - Complexity: deeply nested conditionals, overly long functions, or unclear control flow "
+    "that a straightforward restructuring would simplify\n"
+    "   - These are suggestions, not requirements: default to medium/low/info severity. Only use "
+    "high/critical when the current code is ALSO a correctness or production risk (e.g. the "
+    "inefficiency causes a real timeout/resource-exhaustion risk at expected scale), not merely "
+    "because a cleaner alternative exists.\n\n"
+    "10. **Correctness & Best Practices** - Beyond spec compliance, is the code itself correct and "
+    "idiomatic?\n"
+    "   - Logic errors, off-by-one mistakes, incorrect boundary/edge-case handling\n"
+    "   - Resource handling: unclosed files/connections, missing cleanup, unhandled promise "
+    "rejections\n"
+    "   - Idiomatic use of the language/framework (not fighting the framework's conventions)\n"
+    "   - Syntactic/type correctness: code that would fail to compile/type-check/lint under the "
+    "project's own configured tooling\n\n"
+    "11. **Maintainability** - Will this code be easy to safely change later?\n"
+    "   - Hidden state, tight coupling, or implicit ordering dependencies between files/functions\n"
+    "   - Magic numbers/strings that should be named constants or configuration\n"
+    "   - Functions/classes doing more than one job, making future changes riskier\n"
+    "   - Default severity is medium/low; escalate only when the maintainability problem is "
+    "already causing a concrete defect (e.g. hidden state that produces incorrect behavior), not "
+    "for a design preference alone."
 )
 
 _SPEC_CONFORMANCE_CRITERIA = (

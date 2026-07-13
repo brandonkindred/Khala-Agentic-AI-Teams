@@ -5,8 +5,11 @@ Pipeline: input → (path, content) blocks → bounded ``FileSegment``s →
 recovery and the map-phase cache (``mapping``) → false-positive verification
 (each genuine finding is re-checked against the *whole* submission, since a
 chunk reviewer saw only a slice, and confirmed false positives are dropped — see
-``false_positive_filter``) → deterministic merge (dedupe, severity gate, safety
-nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
+``false_positive_filter``) → architecture-consistency / cross-codebase-redundancy
+pass (a single additive, whole-repository check for architecture contradictions
+and duplicated capabilities the per-chunk view cannot see — see
+``architecture_consistency_pass``) → deterministic merge (dedupe, severity gate,
+safety nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
 code regardless of input size, and no input file is ever silently dropped:
 empty files are named by info findings, and a chunk that cannot be reviewed
 after recovery (retry, bisection, and a last-resort thinking-off retry) degrades
@@ -56,7 +59,15 @@ profile + resolved model) records the approved
 clone of it before touching the LLM when the same submission comes back — zero
 LLM calls (map, verification, and merge all skipped). Only approved outcomes are
 stored: a rejection is left to re-run through the (cheap, mostly cached) map
-phase so a fix that reappears identical still gets its findings.
+phase so a fix that reappears identical still gets its findings. The key is
+derived only from ``CodeReviewInput`` (plus the resolved model), so a verdict
+that also depends on ``repo_reader`` (the false-positive filter's and the
+architecture pass's whole-repository read access) cannot be safely keyed --
+the rest of the repository can change between two byte-identical submissions
+without changing the key. The short-circuit is therefore skipped entirely
+(no read, no write) whenever a ``repo_reader`` is given, so a cached approval
+can never mask a since-added architecture/redundancy finding or a
+since-resolved false positive.
 
 Cross-file surface: each chunk reviewer is also given the *sibling surface* —
 the top-level symbols (Python ``def``/``class``, TS/JS ``export``s) defined by
@@ -86,6 +97,8 @@ from software_engineering_team.shared.context_sizing import (
     parse_env_int,
 )
 
+from .architecture_consistency_pass import find_architecture_and_redundancy_issues
+from .architecture_context import render_architecture_context as _render_architecture_context
 from .chunk_reviewer import ChunkReviewAgent
 from .chunking import (
     MIN_SPLIT_SEGMENT_CHARS,
@@ -101,7 +114,7 @@ from .chunking import (
     parse_code_into_file_blocks,
     split_block_into_segments,
 )
-from .false_positive_filter import filter_false_positives
+from .false_positive_filter import CodebaseIndex, filter_false_positives
 from .mapping import (
     _cached_review_chunk,
     _chunk_cache_key,
@@ -176,6 +189,16 @@ __all__ = [
 # concurrently across jobs in one process. ``0`` disables it (every run is a
 # guaranteed miss). Coarser and independent of the per-chunk cache in ``mapping``.
 DEFAULT_SUBMISSION_CACHE_SIZE = 256  # CODE_REVIEW_SUBMISSION_CACHE_SIZE, floor 0
+
+# Progress-bar checkpoints (0.0-1.0), in the order the review actually reaches them:
+# preparing input -> chunking done (also the map phase's start -- see
+# mapping.py's _MAP_PHASE_START, which must stay equal to this) -> per-chunk map
+# review (reported incrementally by mapping.py, not here) -> verifying -> finalizing -> done.
+_PROGRESS_PREPARING_INPUT = 0.05
+_PROGRESS_CHUNKING_DONE = 0.10
+_PROGRESS_VERIFYING = 0.92
+_PROGRESS_FINALIZING = 0.95
+_PROGRESS_DONE = 1.0
 
 _SUBMISSION_OUTCOME_CACHE: "OrderedDict[str, CodeReviewOutput]" = OrderedDict()
 _SUBMISSION_OUTCOME_CACHE_LOCK = threading.Lock()
@@ -305,6 +328,7 @@ def _merge_narrative(
     approved: bool,
     issues: List[CodeReviewIssue],
     outcome: "_ChunkOutcome",
+    has_architecture_findings: bool = False,
 ) -> Tuple[str, str]:
     """Produce the merged ``(summary, spec_compliance_notes)`` for the review.
 
@@ -315,31 +339,35 @@ def _merge_narrative(
           results from ``_reconcile_approval``; this function only shapes prose
           and never reconsults or mutates them.
         - ``outcome.summaries`` holds one entry per successful sub-review.
+        - ``has_architecture_findings`` is True when the architecture-consistency
+          pass (which runs outside the map phase) added findings not reflected
+          in any ``outcome.summaries`` entry.
 
     Postconditions:
-        - With exactly one sub-review, returns that sub-review's summary/notes
-          verbatim and makes no synthesis LLM call.
-        - With more than one sub-review, attempts a single findings-only
-          synthesis pass; on any failure (``None``) falls back to the
+        - With exactly one sub-review and no architecture findings, returns
+          that sub-review's summary/notes verbatim and makes no synthesis LLM
+          call.
+        - Otherwise attempts a single findings-only synthesis pass so the
+          narrative reflects every source of ``issues`` (including the
+          architecture pass); on any failure (``None``) falls back to the
           ``"\\n\\n"``-joined per-pass summaries/notes.
     """
-    if len(outcome.summaries) == 1:
+    if len(outcome.summaries) == 1 and not has_architecture_findings:
         return outcome.summaries[0], (outcome.spec_notes[0] if outcome.spec_notes else "")
 
     concatenated_summary = "\n\n".join(s for s in outcome.summaries if s.strip())
     concatenated_notes = "\n\n".join(n for n in outcome.spec_notes if n.strip())
 
-    if len(outcome.summaries) > 1:
-        synthesized = synthesize_review_findings(
-            llm,
-            input_data=input_data,
-            approved=approved,
-            issues=issues,
-            chunk_summaries=outcome.summaries,
-            chunk_spec_notes=outcome.spec_notes,
-        )
-        if synthesized is not None:
-            return synthesized.summary, synthesized.spec_compliance_notes
+    synthesized = synthesize_review_findings(
+        llm,
+        input_data=input_data,
+        approved=approved,
+        issues=issues,
+        chunk_summaries=outcome.summaries,
+        chunk_spec_notes=outcome.spec_notes,
+    )
+    if synthesized is not None:
+        return synthesized.summary, synthesized.spec_compliance_notes
 
     return concatenated_summary, concatenated_notes
 
@@ -385,7 +413,10 @@ def run_coordinator(
           spec/architecture/existing-codebase excerpts are.
         - A submission byte-identical to one this process already approved *and
           fully reviewed* (same code + context + model; no unreviewed ranges)
-          returns the recorded approved output with no LLM call at all.
+          returns the recorded approved output with no LLM call at all —
+          unless a ``repo_reader`` is given, in which case this short-circuit
+          never fires (a verdict that reads the rest of the repository cannot
+          be safely reproduced from an input-only cache key).
         - When ``progress_callback`` is provided, it is invoked with
           non-decreasing fractions ending at 1.0 (step ``done``) on every
           successful return, including per-chunk ``reviewing`` reports.
@@ -408,11 +439,14 @@ def run_coordinator(
     # approved reproduces the same verdict, so return its cached output before any
     # LLM work (map, false-positive verification, and merge all skipped). Keyed on
     # the raw input + model only — no compaction — so the check itself costs no
-    # model call. Skipped entirely when disabled (size 0); on a miss the run
+    # model call. Skipped entirely when disabled (size 0) or when a ``repo_reader``
+    # is given: the verdict can then also depend on the rest of the repository,
+    # which the key cannot see, so a hit could mask a since-added architecture/
+    # redundancy finding or a since-resolved false positive. On a miss the run
     # proceeds and stores its verdict below if approved.
     submission_size = _submission_cache_size()
     submission_key: Optional[str] = None
-    if submission_size > 0:
+    if submission_size > 0 and repo_reader is None:
         submission_key = _submission_fingerprint(input_data, model_fingerprint)
         with _SUBMISSION_OUTCOME_CACHE_LOCK:
             cached = _SUBMISSION_OUTCOME_CACHE.get(submission_key)
@@ -421,11 +455,16 @@ def run_coordinator(
         if cached is not None:
             logger.info("CodeReviewCoordinator: submission cache hit; skipping review (approved)")
             notify_review_progress(
-                progress_callback, "done", "identical approved submission; review skipped", 1.0
+                progress_callback,
+                "done",
+                "identical approved submission; review skipped",
+                _PROGRESS_DONE,
             )
             return cached.model_copy(deep=True)
 
-    notify_review_progress(progress_callback, "preparing", "preparing review input", 0.05)
+    notify_review_progress(
+        progress_callback, "preparing", "preparing review input", _PROGRESS_PREPARING_INPUT
+    )
     blocks, skipped_empty = _blocks_from_input(input_data)
     skipped_issues = [
         CodeReviewIssue(
@@ -438,7 +477,7 @@ def run_coordinator(
         for path in skipped_empty
     ]
     if not blocks:
-        notify_review_progress(progress_callback, "done", "no code to review", 1.0)
+        notify_review_progress(progress_callback, "done", "no code to review", _PROGRESS_DONE)
         return CodeReviewOutput(
             approved=True,
             issues=skipped_issues,
@@ -458,7 +497,10 @@ def run_coordinator(
     arch_overview = ""
     if input_data.architecture:
         arch_overview = compact_text(
-            input_data.architecture.overview or "", max_arch, llm, "architecture overview"
+            _render_architecture_context(input_data.architecture),
+            max_arch,
+            llm,
+            "architecture overview",
         )[:max_arch]
     existing_codebase = compact_text(
         input_data.existing_codebase or "", max_existing, llm, "existing codebase"
@@ -472,7 +514,9 @@ def run_coordinator(
         len(blocks),
         len(chunks),
     )
-    notify_review_progress(progress_callback, "preparing", f"split into {len(chunks)} chunks", 0.10)
+    notify_review_progress(
+        progress_callback, "preparing", f"split into {len(chunks)} chunks", _PROGRESS_CHUNKING_DONE
+    )
 
     base_input = {
         "language": input_data.language or "",
@@ -529,8 +573,12 @@ def run_coordinator(
         progress_callback,
         "verifying",
         f"verifying {len(genuine_issues)} findings against the full codebase",
-        0.92,
+        _PROGRESS_VERIFYING,
     )
+    # Built once and shared with the architecture-consistency pass below: both read the
+    # same submission/repo_reader, so a single index avoids parsing the submission twice.
+    shared_index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
+
     if input_data.skip_false_positive_filter:
         # The calling gate opted out of the whole-codebase re-check and stands
         # behind its per-chunk findings as-is (e.g. a gate whose findings must
@@ -538,10 +586,29 @@ def run_coordinator(
         # drop-false-positives step, so it can only ever keep more findings.
         verified = genuine_issues
     else:
-        verified = filter_false_positives(llm, input_data, genuine_issues, repo_reader=repo_reader)
+        verified = filter_false_positives(
+            llm, input_data, genuine_issues, repo_reader=repo_reader, index=shared_index
+        )
+
+    # Architecture-consistency / cross-codebase-redundancy pass: a separate, additive,
+    # once-per-submission check for two things the map phase structurally cannot see —
+    # whether the change contradicts the architecture document, and whether it duplicates a
+    # capability that already exists elsewhere in the repository. Runs after the false-positive
+    # filter (its findings are already tool-grounded, so they are not subjected to that filter
+    # again) and folds straight into the same dedupe/severity-gate/merge machinery below.
+    # (Restricted internally to the default CODE_REVIEW profile -- see that function's
+    # own docstring for why the other profiles must never receive these findings.)
+    architecture_findings = find_architecture_and_redundancy_issues(
+        llm, input_data, repo_reader=repo_reader, index=shared_index
+    )
+    if architecture_findings:
+        verified = [*verified, *architecture_findings]
 
     notify_review_progress(
-        progress_callback, "finalizing", "deduplicating findings and applying approval rules", 0.95
+        progress_callback,
+        "finalizing",
+        "deduplicating findings and applying approval rules",
+        _PROGRESS_FINALIZING,
     )
     # A chunk that could not be reviewed after recovery degrades gracefully: by
     # default its "not reviewed" coverage findings are NOT posted and do NOT block
@@ -565,7 +632,14 @@ def run_coordinator(
     all_llm_approved = bool(outcome.approved_flags) and all(outcome.approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
 
-    merged_summary, spec_notes = _merge_narrative(llm, input_data, approved, deduped, outcome)
+    merged_summary, spec_notes = _merge_narrative(
+        llm,
+        input_data,
+        approved,
+        deduped,
+        outcome,
+        has_architecture_findings=bool(architecture_findings),
+    )
 
     logger.info(
         "CodeReviewCoordinator: done, approved=%s, issues=%s, chunks=%s (sub-reviews=%s)",
@@ -576,7 +650,7 @@ def run_coordinator(
     )
 
     notify_review_progress(
-        progress_callback, "done", f"approved={approved}, issues={len(deduped)}", 1.0
+        progress_callback, "done", f"approved={approved}, issues={len(deduped)}", _PROGRESS_DONE
     )
     result = CodeReviewOutput(
         approved=approved,

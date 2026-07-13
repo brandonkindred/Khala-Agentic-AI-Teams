@@ -905,6 +905,7 @@ def filter_false_positives(
     input_data: CodeReviewInput,
     issues: List[CodeReviewIssue],
     repo_reader: Optional[RepoReader] = None,
+    index: Optional[CodebaseIndex] = None,
 ) -> List[CodeReviewIssue]:
     """Return ``issues`` minus the ones a full-codebase re-check confirms are false.
 
@@ -917,6 +918,11 @@ def filter_false_positives(
         - ``issues`` are genuine reviewer findings only — coverage/safety
           findings (not-reviewed, empty-file) must be excluded by the caller, as
           they are never candidates for removal.
+        - ``index``, when given, must have been built from this same
+          ``input_data``/``repo_reader`` (the coordinator shares one index
+          across this filter and the architecture-consistency pass rather than
+          each rebuilding it); ``None`` builds a fresh one, so any caller that
+          does not have one yet is unaffected.
 
     Postconditions:
         - Returns a list that is ``issues`` with zero or more entries removed;
@@ -946,7 +952,7 @@ def filter_false_positives(
         return list(issues)
 
     try:
-        return _verify_and_filter(llm, input_data, issues, verifiable, repo_reader)
+        return _verify_and_filter(llm, input_data, issues, verifiable, repo_reader, index)
     except Exception as exc:  # noqa: BLE001 - fail-safe: verification must never break the review
         logger.warning(
             "FalsePositiveFilter: verification failed during setup (%s: %s); keeping all findings",
@@ -962,6 +968,7 @@ def _verify_and_filter(
     issues: List[CodeReviewIssue],
     verifiable: List[CodeReviewIssue],
     repo_reader: Optional[RepoReader] = None,
+    index: Optional[CodebaseIndex] = None,
 ) -> List[CodeReviewIssue]:
     """Core of :func:`filter_false_positives`; may raise on setup errors.
 
@@ -972,12 +979,15 @@ def _verify_and_filter(
     Preconditions:
         - ``verifiable`` is the subset of ``issues`` with a non-blank file path
           (already computed by the caller).
+        - ``index``, when given, was built from this same ``input_data``/
+          ``repo_reader``.
 
     Postconditions:
         - Same removal contract as :func:`filter_false_positives`, minus the
           env-toggle and blank-path early returns the caller already handled.
     """
-    index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
+    if index is None:
+        index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
     if not index.files and index.repo_reader is None:
         # No readable submission files AND no repo reader — the legacy ``code``
         # blob had no path-headed content and there is no repository to consult.
