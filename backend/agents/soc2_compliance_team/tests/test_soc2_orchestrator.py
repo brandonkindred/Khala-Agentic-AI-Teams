@@ -1,13 +1,26 @@
-"""Tests for SOC2 audit orchestrator and pipeline."""
+"""Tests for the SOC2 audit orchestrator (thread-mode driver).
+
+The orchestrator drives the shared pipeline steps; here the pipeline functions
+are patched so no LLM is invoked, and the orchestration paths (success with and
+without findings, repo-load failure, pipeline failure) are exercised directly.
+"""
 
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from llm_service import DummyLLMClient
-from soc2_compliance_team.models import SOC2AuditResult, TSCCategory
-from soc2_compliance_team.orchestrator import run_soc2_audit
+from soc2_compliance_team import pipeline
+from soc2_compliance_team.models import (
+    FindingSeverity,
+    NextStepsDocument,
+    RepoContext,
+    SOC2AuditResult,
+    SOC2ComplianceReport,
+    TSCAuditResult,
+    TSCCategory,
+    TSCFinding,
+)
+from soc2_compliance_team.orchestrator import SOC2AuditOrchestrator, run_soc2_audit
 from soc2_compliance_team.repo_loader import load_repo_context
 
 
@@ -27,26 +40,163 @@ def test_load_repo_context_invalid_path() -> None:
         load_repo_context("/nonexistent/path/12345")
 
 
-def test_run_soc2_audit_dummy(tmp_path: Path) -> None:
-    """Full audit with DummyLLM completes and returns next_steps when no findings."""
-    (tmp_path / "app.py").write_text("# placeholder")
-    dummy = DummyLLMClient()
-    with patch("shared_graph.agent_factory.get_strands_model", return_value=dummy):
-        result = run_soc2_audit(tmp_path)
-    assert isinstance(result, SOC2AuditResult)
-    assert result.status == "completed"
-    assert result.repo_path == str(tmp_path.resolve())
-    assert len(result.tsc_results) == 5
-    categories = {r.category for r in result.tsc_results}
-    assert categories == {
-        TSCCategory.SECURITY,
-        TSCCategory.AVAILABILITY,
-        TSCCategory.PROCESSING_INTEGRITY,
-        TSCCategory.CONFIDENTIALITY,
-        TSCCategory.PRIVACY,
-    }
-    # Dummy returns no findings, so we get next_steps_document
-    assert result.has_findings is False
-    assert result.next_steps_document is not None
-    assert result.next_steps_document.title
-    assert result.compliance_report is None
+def test_run_integrates_with_real_load_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every other orchestrator test patches ``pipeline.load_context`` directly,
+    so ``SOC2AuditOrchestrator.run`` is never exercised against the real
+    repo-scanning path it actually calls in production. Only the LLM-touching
+    steps (criteria audit, report synthesis) are patched here."""
+    (tmp_path / "README.md").write_text("# Test repo")
+    (tmp_path / "main.py").write_text("print('hello')")
+
+    monkeypatch.setattr(pipeline, "run_all_criteria", lambda ctx: _clean_results())
+    monkeypatch.setattr(
+        pipeline, "write_report", lambda rp, tsc: (None, NextStepsDocument(title="Next Steps"))
+    )
+
+    out = SOC2AuditOrchestrator().run(tmp_path)
+
+    assert out.status == "completed"
+    assert out.repo_path == str(tmp_path.resolve())
+
+
+def _clean_results() -> list[TSCAuditResult]:
+    return [
+        TSCAuditResult(category=c, summary="ok", findings=[], compliant=True)
+        for c in pipeline.TSC_CRITERIA
+    ]
+
+
+def _results_with_findings() -> list[TSCAuditResult]:
+    results = _clean_results()
+    results[0] = TSCAuditResult(
+        category=TSCCategory.SECURITY,
+        summary="gap",
+        findings=[
+            TSCFinding(
+                severity=FindingSeverity.HIGH,
+                category=TSCCategory.SECURITY,
+                title="No MFA",
+                description="x",
+            )
+        ],
+        compliant=False,
+    )
+    return results
+
+
+def test_run_success_next_steps_when_clean(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """No material findings ⇒ completed result with a next-steps document."""
+    monkeypatch.setattr(pipeline, "load_context", lambda p: RepoContext(repo_path=str(p)))
+    monkeypatch.setattr(pipeline, "run_all_criteria", lambda ctx: _clean_results())
+    monkeypatch.setattr(
+        pipeline,
+        "write_report",
+        lambda rp, tsc: (None, NextStepsDocument(title="Next Steps")),
+    )
+
+    out = SOC2AuditOrchestrator().run(tmp_path)
+    assert isinstance(out, SOC2AuditResult)
+    assert out.status == "completed"
+    assert out.repo_path == str(tmp_path.resolve())
+    assert len(out.tsc_results) == 5
+    assert {r.category for r in out.tsc_results} == set(pipeline.TSC_CRITERIA)
+    assert out.has_findings is False
+    assert out.next_steps_document is not None
+    assert out.compliance_report is None
+
+
+def test_run_success_report_when_findings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Material findings ⇒ completed result with a compliance report."""
+    monkeypatch.setattr(pipeline, "load_context", lambda p: RepoContext(repo_path=str(p)))
+    monkeypatch.setattr(pipeline, "run_all_criteria", lambda ctx: _results_with_findings())
+    monkeypatch.setattr(
+        pipeline,
+        "write_report",
+        lambda rp, tsc: (SOC2ComplianceReport(executive_summary="s"), None),
+    )
+
+    out = SOC2AuditOrchestrator().run(tmp_path)
+    assert out.status == "completed"
+    assert out.has_findings is True
+    assert out.compliance_report is not None
+    assert out.next_steps_document is None
+
+
+def test_run_repo_load_failure_returns_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(_p):
+        raise ValueError("bad repo")
+
+    monkeypatch.setattr(pipeline, "load_context", _boom)
+    out = SOC2AuditOrchestrator().run("/nonexistent")
+    assert out.status == "failed"
+    assert "bad repo" in (out.error or "")
+    assert out.tsc_results == []
+
+
+def test_run_pipeline_failure_returns_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(pipeline, "load_context", lambda p: RepoContext(repo_path=str(p)))
+
+    def _boom(_ctx):
+        raise RuntimeError("audit exploded")
+
+    monkeypatch.setattr(pipeline, "run_all_criteria", _boom)
+    out = SOC2AuditOrchestrator().run(tmp_path)
+    assert out.status == "failed"
+    assert "audit exploded" in (out.error or "")
+
+
+def test_run_report_failure_preserves_tsc_results(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failure in report synthesis (after criteria already succeeded) must
+    preserve those completed tsc_results in the failed result, not discard
+    them."""
+    monkeypatch.setattr(pipeline, "load_context", lambda p: RepoContext(repo_path=str(p)))
+    monkeypatch.setattr(pipeline, "run_all_criteria", lambda ctx: _clean_results())
+
+    def _boom(rp, tsc):
+        raise RuntimeError("report boom")
+
+    monkeypatch.setattr(pipeline, "write_report", _boom)
+    out = SOC2AuditOrchestrator().run(tmp_path)
+    assert out.status == "failed"
+    assert "report boom" in (out.error or "")
+    assert len(out.tsc_results) == 5
+
+
+def test_run_with_timeout_returns_result_within_deadline() -> None:
+    from soc2_compliance_team.orchestrator import _run_with_timeout
+
+    assert _run_with_timeout(lambda: 42, timeout_seconds=5, timeout_message="too slow") == 42
+
+
+def test_run_with_timeout_raises_and_warns_on_timeout(caplog: pytest.LogCaptureFixture) -> None:
+    """Python has no safe way to kill the underlying thread, so the timeout
+    path must at least log a warning noting the thread is being abandoned."""
+    import time
+
+    from soc2_compliance_team.orchestrator import _run_with_timeout
+
+    with caplog.at_level("WARNING"):
+        with pytest.raises(TimeoutError, match="too slow"):
+            _run_with_timeout(
+                lambda: time.sleep(0.3), timeout_seconds=0.05, timeout_message="too slow"
+            )
+
+    assert any("abandoning its thread" in r.message for r in caplog.records)
+
+
+def test_run_soc2_audit_module_wrapper(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The module-level wrapper delegates to the orchestrator."""
+    monkeypatch.setattr(pipeline, "load_context", lambda p: RepoContext(repo_path=str(p)))
+    monkeypatch.setattr(pipeline, "run_all_criteria", lambda ctx: _clean_results())
+    monkeypatch.setattr(
+        pipeline, "write_report", lambda rp, tsc: (None, NextStepsDocument(title="Next"))
+    )
+    out = run_soc2_audit(tmp_path)
+    assert isinstance(out, SOC2AuditResult)
+    assert out.status == "completed"

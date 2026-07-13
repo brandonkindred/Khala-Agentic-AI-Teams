@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import Task
+from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.review_progress import (
     build_disk_repo_reader,
     call_code_review_agent,
@@ -115,6 +115,23 @@ class ReviewConfig:
     summary_microtask: Callable[..., str]
     # ``microtask_intro(microtask_id, n_files) -> str`` for the opening INFO line.
     microtask_intro: Callable[..., str]
+
+
+def _lint_passed(lint_result: Any) -> bool:
+    """Resolve whether a lint-tool result reports success, defensively.
+
+    Preconditions: ``lint_result`` is any lint-tool return object shape.
+    Postconditions: returns ``lint_result.execution_result.success`` when both
+    attributes are present; else ``lint_result.passed`` when present; else
+    ``True`` (assume success -- nothing to flag). Every attribute lookup is
+    guarded by ``getattr`` (not just the innermost one), so a lint-tool object
+    missing ``execution_result`` entirely never raises ``AttributeError``.
+    """
+    execution_result = getattr(lint_result, "execution_result", None)
+    success = getattr(execution_result, "success", None) if execution_result is not None else None
+    if success is None:
+        success = getattr(lint_result, "passed", True)
+    return bool(success)
 
 
 def _lint_severity(config: ReviewConfig, raw: str) -> str:
@@ -188,6 +205,7 @@ def _code_review_step(
     task_id: str,
     task_description: str,
     llm_review_fn: Callable[..., List[ReviewIssue]],
+    review_context: Optional[ReviewContext] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
 ) -> List[ReviewIssue]:
     """Independent code-review step: external agent (with LLM fallback), or LLM review alone.
@@ -196,8 +214,13 @@ def _code_review_step(
         - ``files`` maps file paths to their full source text. ``task_description`` is the
           description surfaced to the external agent (the caller scopes this to the task or a
           single microtask; the LLM fallback always reasons over the full ``task``, unaffected).
-        - ``llm_review_fn(llm=, task=, files=)`` is the per-team chunking/prompt/parse reviewer
-          (the test patch surface for ``Agent`` / ``resolve_text_mode_strands_model``).
+        - ``llm_review_fn(llm=, task=, files=, review_context=)`` is the per-team
+          chunking/prompt/parse reviewer (the test patch surface for ``Agent`` /
+          ``resolve_text_mode_strands_model``); it must accept ``review_context``
+          so the fallback reviewer sees the same context the external agent path does.
+        - ``review_context`` bundles the caller's system architecture and project specification,
+          when available; ``None`` means "nothing to add" so a caller that does not have this
+          context yet keeps working unchanged.
 
     Postconditions:
         - Never raises: an external ``code_review_agent`` failure logs a warning and falls back
@@ -211,10 +234,11 @@ def _code_review_step(
     """
     try:
         if code_review_agent is None:
-            return llm_review_fn(llm=llm, task=task, files=files)
+            return llm_review_fn(llm=llm, task=task, files=files, review_context=review_context)
         try:
             from code_review_agent.models import CodeReviewInput as _CRInput
 
+            ctx = review_context or ReviewContext()
             # files= keeps per-file attribution and lets the coordinator bound
             # its own prompts — no header parsing, no upstream truncation.
             cr_input = _CRInput(
@@ -223,6 +247,8 @@ def _code_review_step(
                 task_requirements=task.requirements or "",
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
                 language=language,
+                architecture=ctx.architecture,
+                spec_content=ctx.spec_content,
             )
             cr_result = call_code_review_agent(
                 code_review_agent,
@@ -246,7 +272,7 @@ def _code_review_step(
                 task_id,
                 exc,
             )
-            return llm_review_fn(llm=llm, task=task, files=files)
+            return llm_review_fn(llm=llm, task=task, files=files, review_context=review_context)
     except Exception as exc:
         logger.warning("[%s] Code review step failed outright: %s", task_id, exc)
         return [
@@ -460,12 +486,16 @@ def run_review(
     qa_agent_fn: Callable[..., List[ReviewIssue]],
     security_agent_fn: Callable[..., List[ReviewIssue]],
     build_verify_fn: Callable[..., Tuple[bool, str]],
+    review_context: Optional[ReviewContext] = None,
 ) -> ReviewResult:
     """Execute the shared Review phase over an execution result's files.
 
     Preconditions:
         - ``execution_result`` exposes ``.files: Dict[str, str]``.
         - The injected runners match the per-team wrapper signatures.
+        - ``review_context`` is forwarded to the code-review step only; ``None`` means
+          "nothing to add" so an existing caller that does not have this context yet is
+          unaffected.
 
     Postconditions:
         - Returns a :class:`ReviewResult` whose ``passed`` reflects the team's
@@ -502,9 +532,7 @@ def run_review(
                     task_description=task.description or "",
                 )
             )
-            if lint_result and not getattr(
-                lint_result.execution_result, "success", getattr(lint_result, "passed", True)
-            ):
+            if lint_result and not _lint_passed(lint_result):
                 lint_ok = False
                 for li in getattr(lint_result, "linter_issues", getattr(lint_result, "issues", [])):
                     sev = getattr(li, "severity", "medium")
@@ -537,6 +565,7 @@ def run_review(
                     task_id=task_id,
                     task_description=task.description or "",
                     llm_review_fn=llm_review_fn,
+                    review_context=review_context,
                 ),
                 lambda: _qa_review_step(
                     qa_agent=qa_agent,
@@ -609,12 +638,16 @@ def run_microtask_review(
     qa_agent_fn: Callable[..., List[ReviewIssue]],
     security_agent_fn: Callable[..., List[ReviewIssue]],
     build_verify_fn: Callable[..., Tuple[bool, str]],
+    review_context: Optional[ReviewContext] = None,
 ) -> ReviewResult:
     """Run the shared full review on a single microtask's output files.
 
     Preconditions:
         - ``microtask`` exposes ``.id`` / ``.title`` / ``.description``.
         - The injected runners match the per-team wrapper signatures.
+        - ``review_context`` is forwarded to the code-review step only; ``None`` means
+          "nothing to add" so an existing caller that does not have this context yet is
+          unaffected.
 
     Postconditions:
         - Returns a :class:`ReviewResult` scoped to ``files``; ``passed``
@@ -655,9 +688,7 @@ def run_microtask_review(
                     task_description=f"Microtask: {microtask.title or microtask_id}",
                 )
             )
-            if lint_result and not getattr(
-                lint_result.execution_result, "success", getattr(lint_result, "passed", True)
-            ):
+            if lint_result and not _lint_passed(lint_result):
                 lint_ok = False
                 for li in getattr(lint_result, "linter_issues", getattr(lint_result, "issues", [])):
                     file_path = getattr(li, "file_path", "")
@@ -709,6 +740,7 @@ def run_microtask_review(
                     task_id=task_id,
                     task_description=microtask_desc,
                     llm_review_fn=llm_review_fn,
+                    review_context=review_context,
                     detail_callback=detail_callback,
                 ),
                 lambda: _qa_review_step(
