@@ -17,7 +17,6 @@ Architecture:
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -303,13 +302,10 @@ class GhostWriterElicitationAgent:
             try:
                 working_prompt = prompt if attempt == 0 else prompt + _JSON_RETRY_SUFFIX
                 result = agent(working_prompt)
-                raw = str(result).strip()
-                start = raw.find("[")
-                end = raw.rfind("]") + 1
-                if start == -1 or end == 0:
+                data = extract_json_from_response(str(result).strip())
+                if not isinstance(data, list):
                     logger.warning("Ghost writer: no JSON array in gap-finding response")
                     return []
-                data = json.loads(raw[start:end])
                 gaps = []
                 for item in data[:3]:
                     ctx = item.get("section_context", "")
@@ -325,10 +321,7 @@ class GhostWriterElicitationAgent:
                     )
                 logger.info("Ghost writer: found %s story gap(s) via LLM", len(gaps))
                 return gaps
-            except (
-                json.JSONDecodeError,
-                TypeError,
-            ) as e:  # pragma: no cover - JSON parse retry/exit branch in gap-finder; covered by integration tests with a flaky model.
+            except LLMJsonParseError as e:  # pragma: no cover - JSON parse retry/exit branch in gap-finder; covered by integration tests with a flaky model.
                 if attempt == 0:
                     logger.warning("Ghost writer gap-finding JSON parse failed, retrying: %s", e)
                     continue
