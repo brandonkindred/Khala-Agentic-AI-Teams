@@ -278,6 +278,16 @@ def mark_road_trip_failed_activity(job_id: str, error: str) -> None:
           handler. In that case this is a no-op so a genuinely successful run is
           never clobbered with FAILED. Otherwise idempotent — safe to re-run on
           a workflow retry.
+
+        Accepted narrow race: the read (``get_job``) and write (``update_job``)
+        below aren't atomic, so a ``persist_itinerary_activity`` retry that lands
+        COMPLETED in that exact window is still overwritten with FAILED. Closing
+        it needs a conditional server-side UPDATE — job_service's PATCH
+        ``/jobs/{team}/{job_id}`` has no status-guard parameter today (only
+        ``cancel_active_job`` gets one, hardcoded to the cancel transition) — so
+        it's out of scope here. Same accepted trade-off, and same shape, as
+        ``branding_team``'s ``mark_branding_failed_activity``, ``sales_team``'s
+        ``mark_failed_activity``, and ``planning_team``'s status-write guard.
     """
     from road_trip_planning_team.shared.job_store import (
         JOB_STATUS_COMPLETED,
