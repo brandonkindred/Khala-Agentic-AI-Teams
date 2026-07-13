@@ -84,9 +84,18 @@ class _ActivityRecorder:
         self.calls = []  # (fn, args, retry_policy)
         self.inst = None
 
-    async def execute_activity(self, fn, *args, **kw):
-        a = kw.get("args")
-        self.calls.append((fn, a, kw.get("retry_policy"), kw.get("heartbeat_timeout")))
+    async def execute_activity(
+        self, fn, *, args, start_to_close_timeout, retry_policy, heartbeat_timeout=None
+    ):
+        # Signature intentionally mirrors the real temporalio.workflow.execute_activity:
+        # multi-arg activities are passed via the keyword-only ``args=`` sequence (the
+        # real SDK accepts at most ONE positional ``arg`` and takes multiple args only
+        # as ``args=[...]``; passing a second positional raises TypeError there too),
+        # and the timeout/retry/heartbeat options are keyword-only. Keeping this strict
+        # (not ``*args, **kw``) means any regression in _exec's call convention surfaces
+        # as a TypeError here instead of a silently-passing test.
+        a = args
+        self.calls.append((fn, a, retry_policy, heartbeat_timeout))
         if fn is acts.begin_run_activity:
             if self.begin_exc is not None:
                 raise self.begin_exc

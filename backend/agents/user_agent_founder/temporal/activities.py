@@ -499,10 +499,13 @@ def enter_phase_activity(run_id: str, phase: str, existing_job_id: str | None) -
     except (httpx.ConnectError, httpx.ConnectTimeout):
         # Unlike the other httpx.HTTPError subclasses below, these fail before
         # any bytes reach the target (the TCP/TLS handshake itself didn't
-        # complete) — there is no ambiguity about whether the submit landed, so
-        # let this propagate uncaught: Temporal wraps it as a retryable failure
-        # under IO_RETRY instead of forcing a non-retryable, human-gated /resume
-        # for what may be a pure network blip.
+        # complete) — there is no ambiguity about whether the submit landed. Caught
+        # only to re-raise unchanged (rather than converting to a non-retryable
+        # ApplicationError like the general HTTPError case does), so Temporal wraps
+        # it as an ordinary retryable failure under IO_RETRY instead of forcing a
+        # non-retryable, human-gated /resume for what may be a pure network blip.
+        # This except must stay ABOVE the httpx.HTTPError clause (both are HTTPError
+        # subclasses; first match wins).
         raise
     except httpx.HTTPError as exc:
         # Ambiguous: the request may have reached the target before the
