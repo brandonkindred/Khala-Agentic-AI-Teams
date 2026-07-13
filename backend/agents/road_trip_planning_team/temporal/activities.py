@@ -1,0 +1,302 @@
+"""Temporal activities for the Road Trip Planning team's per-step durable pipeline.
+
+The road-trip pipeline is decomposed into fine-grained activities the durable
+``RoadTripWorkflow`` drives one at a time, so a worker restart re-runs only the
+unfinished specialist step instead of the whole multi-agent pipeline:
+
+- :func:`begin_road_trip_job_activity` — mark the job RUNNING (head of the old
+  ``run_plan_core``).
+- :func:`profile_travelers_activity` / :func:`plan_route_activity` /
+  :func:`recommend_activities_activity` / :func:`plan_logistics_activity` /
+  :func:`compose_itinerary_activity` — the five specialist agents, each wrapping
+  the matching neutral ``pipeline`` function.
+- :func:`persist_itinerary_activity` — write the itinerary result and mark
+  COMPLETED (tail of the old ``run_plan_core``).
+- :func:`mark_road_trip_failed_activity` — record a FAILED job row (the
+  ``run_plan_background`` except-branch).
+
+Each activity is a plain **sync** function (run in the worker's thread-pool
+executor) whose heavy imports live inside the body (or the ``_decode_*``
+helpers), keeping module import — which the workflow sandbox replays during
+registration — cheap and side-effect free. All payloads cross the
+workflow/activity boundary as JSON-native dicts (``model_dump(mode="json")``)
+and are reconstructed with pydantic inside the body.
+
+Invariant: job-store status is written to the durable ``JobServiceClient`` store
+under the ``road_trip_planning_team`` slug (the same slug the API's ``create_job``
+used), so a completed run survives a worker/process restart.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from temporalio import activity
+
+# Background-heartbeat cadence (seconds) for the whole recommend_activities
+# call (its per-stop LLM loop), kept well under _STEP_HEARTBEAT_TIMEOUT (10
+# min, in workflows.py) so a live run is never mistaken for a stalled worker.
+# Matches the 30s convention used by branding_team/temporal/activities.py.
+_ACTIVITIES_HEARTBEAT_INTERVAL_S = 30.0
+
+# ---------------------------------------------------------------------------
+# Payload decoders — shared by the specialist activities so a change to how a
+# JSON-native payload is reconstructed lives in one place. Imports stay inside
+# each helper to keep module import (replayed by the workflow sandbox) clean.
+# ---------------------------------------------------------------------------
+
+
+def _decode_trip(request: dict[str, Any]):
+    """Reconstruct the trip request from its JSON-safe dict.
+
+    Preconditions:
+        - ``request`` is a ``PlanTripRequest`` dict (``body.model_dump()``).
+
+    Postconditions:
+        - Returns the ``TripRequest`` nested in the reconstructed ``PlanTripRequest``.
+    """
+    from road_trip_planning_team.models import PlanTripRequest
+
+    return PlanTripRequest(**request).trip
+
+
+def _decode_profile(profile: dict[str, Any]):
+    """Reconstruct a traveler group profile from its JSON-safe dict.
+
+    Preconditions:
+        - ``profile`` is a ``TravelerGroupProfile`` dict produced by
+          ``model_dump(mode="json")``.
+
+    Postconditions:
+        - Returns the reconstructed ``TravelerGroupProfile``.
+    """
+    from road_trip_planning_team.models import TravelerGroupProfile
+
+    return TravelerGroupProfile.model_validate(profile)
+
+
+def _decode_route(route: dict[str, Any]):
+    """Reconstruct a route plan from its JSON-safe dict.
+
+    Preconditions:
+        - ``route`` is a ``RoutePlan`` dict produced by ``model_dump(mode="json")``.
+
+    Postconditions:
+        - Returns the reconstructed ``RoutePlan``.
+    """
+    from road_trip_planning_team.models import RoutePlan
+
+    return RoutePlan.model_validate(route)
+
+
+def _decode_logistics(logistics: dict[str, Any]):
+    """Reconstruct a logistics plan from its JSON-safe dict.
+
+    Preconditions:
+        - ``logistics`` is a ``LogisticsPlan`` dict produced by
+          ``model_dump(mode="json")``.
+
+    Postconditions:
+        - Returns the reconstructed ``LogisticsPlan``.
+    """
+    from road_trip_planning_team.models import LogisticsPlan
+
+    return LogisticsPlan.model_validate(logistics)
+
+
+@activity.defn(name="road_trip_begin_job")
+def begin_road_trip_job_activity(job_id: str) -> dict[str, Any]:
+    """Transition the job to RUNNING.
+
+    Preconditions:
+        - ``job_id`` refers to a job row already created by the API endpoint's
+          ``create_job`` call before dispatch.
+
+    Postconditions:
+        - Sets the job-store row to RUNNING and returns ``{"job_id": job_id}``.
+    """
+    from road_trip_planning_team.shared.job_store import JOB_STATUS_RUNNING, update_job
+
+    update_job(job_id, status=JOB_STATUS_RUNNING)
+    return {"job_id": job_id}
+
+
+@activity.defn(name="road_trip_profile_travelers")
+def profile_travelers_activity(request: dict[str, Any]) -> dict[str, Any]:
+    """Run the traveler-profiler step and return its profile as a dict.
+
+    Preconditions:
+        - ``request`` is the serialized ``PlanTripRequest`` (``body.model_dump()``).
+
+    Postconditions:
+        - Returns a JSON-safe ``TravelerGroupProfile`` dict.
+    """
+    from road_trip_planning_team.pipeline import profile_travelers
+
+    trip = _decode_trip(request)
+    return profile_travelers(trip).model_dump(mode="json")
+
+
+@activity.defn(name="road_trip_plan_route")
+def plan_route_activity(request: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    """Run the route-planner step and return the route plan as a dict.
+
+    Preconditions:
+        - ``request`` is the serialized ``PlanTripRequest``.
+        - ``profile`` is a ``TravelerGroupProfile`` dict from
+          :func:`profile_travelers_activity`.
+
+    Postconditions:
+        - Returns a JSON-safe ``RoutePlan`` dict.
+    """
+    from road_trip_planning_team.pipeline import plan_route
+
+    return plan_route(_decode_trip(request), _decode_profile(profile)).model_dump(mode="json")
+
+
+@activity.defn(name="road_trip_recommend_activities")
+def recommend_activities_activity(
+    request: dict[str, Any], profile: dict[str, Any], route: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Run the activities-expert step for every stop and return per-stop dicts.
+
+    Preconditions:
+        - ``request`` is the serialized ``PlanTripRequest``.
+        - ``profile`` is a ``TravelerGroupProfile`` dict; ``route`` a ``RoutePlan``
+          dict from the upstream activities.
+
+    Postconditions:
+        - Returns a list of JSON-safe ``StopActivities`` dicts, one per route stop.
+          A background heartbeat fires every ``_ACTIVITIES_HEARTBEAT_INTERVAL_S``
+          seconds for the whole call (not tied to per-stop boundaries), so a
+          stall anywhere in the per-stop LLM loop is detected within the
+          heartbeat timeout rather than only at start-to-close.
+    """
+    from road_trip_planning_team.pipeline import recommend_activities
+
+    # shared_concurrency is stdlib-only (threading/contextvars/logging) with no
+    # import side effects, and this runs in the worker thread pool (outside the
+    # workflow sandbox), so the call-time import is safe.
+    from shared_concurrency import BackgroundHeartbeat
+
+    with BackgroundHeartbeat(
+        activity.heartbeat, _ACTIVITIES_HEARTBEAT_INTERVAL_S, copy_context=True
+    ):
+        stops = recommend_activities(
+            _decode_route(route),
+            _decode_profile(profile),
+            _decode_trip(request),
+        )
+    return [s.model_dump(mode="json") for s in stops]
+
+
+@activity.defn(name="road_trip_plan_logistics")
+def plan_logistics_activity(
+    request: dict[str, Any], profile: dict[str, Any], route: dict[str, Any]
+) -> dict[str, Any]:
+    """Run the logistics step and return the logistics plan as a dict.
+
+    Preconditions:
+        - ``request`` is the serialized ``PlanTripRequest``.
+        - ``profile`` is a ``TravelerGroupProfile`` dict; ``route`` a ``RoutePlan``
+          dict from the upstream activities.
+
+    Postconditions:
+        - Returns a JSON-safe ``LogisticsPlan`` dict.
+    """
+    from road_trip_planning_team.pipeline import plan_logistics
+
+    return plan_logistics(
+        _decode_route(route), _decode_profile(profile), _decode_trip(request)
+    ).model_dump(mode="json")
+
+
+@activity.defn(name="road_trip_compose_itinerary")
+def compose_itinerary_activity(
+    request: dict[str, Any],
+    profile: dict[str, Any],
+    route: dict[str, Any],
+    activities: list[dict[str, Any]],
+    logistics: dict[str, Any],
+) -> dict[str, Any]:
+    """Assemble all specialist outputs into the final itinerary dict.
+
+    Preconditions:
+        - Every argument is the JSON-safe dict output of the corresponding
+          upstream activity (``activities`` a list of ``StopActivities`` dicts).
+
+    Postconditions:
+        - Returns a JSON-safe ``TripItinerary`` dict.
+    """
+    from road_trip_planning_team.models import StopActivities
+    from road_trip_planning_team.pipeline import compose_itinerary
+
+    activities_per_stop = [StopActivities.model_validate(a) for a in activities]
+    itinerary = compose_itinerary(
+        _decode_trip(request),
+        _decode_profile(profile),
+        _decode_route(route),
+        activities_per_stop,
+        _decode_logistics(logistics),
+    )
+    return itinerary.model_dump(mode="json")
+
+
+@activity.defn(name="road_trip_persist_itinerary")
+def persist_itinerary_activity(job_id: str, itinerary: dict[str, Any]) -> dict[str, Any]:
+    """Persist the itinerary result and mark the job COMPLETED.
+
+    Preconditions:
+        - ``job_id`` refers to a job already in RUNNING.
+        - ``itinerary`` is the JSON-safe ``TripItinerary`` dict from
+          :func:`compose_itinerary_activity`.
+
+    Postconditions:
+        - Sets the job-store row to COMPLETED with ``result=itinerary`` and
+          returns ``{"job_id": job_id}``.
+    """
+    from road_trip_planning_team.shared.job_store import JOB_STATUS_COMPLETED, update_job
+
+    update_job(job_id, status=JOB_STATUS_COMPLETED, result=itinerary)
+    return {"job_id": job_id}
+
+
+@activity.defn(name="road_trip_mark_failed")
+def mark_road_trip_failed_activity(job_id: str, error: str) -> None:
+    """Record a FAILED job row for a run whose workflow raised.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+        - ``error`` is the stringified failure cause.
+
+    Postconditions:
+        - Sets the job-store row to FAILED with ``error``, unless the row is
+          already COMPLETED — Temporal activities are at-least-once, so
+          ``persist_itinerary_activity`` may have already durably written the
+          result even if its completion signal to the workflow was lost (e.g. a
+          worker crash), leaving a subsequent retry-exhaustion to reach this
+          handler. In that case this is a no-op so a genuinely successful run is
+          never clobbered with FAILED. Otherwise idempotent — safe to re-run on
+          a workflow retry.
+
+        Accepted narrow race: the read (``get_job``) and write (``update_job``)
+        below aren't atomic, so a ``persist_itinerary_activity`` retry that lands
+        COMPLETED in that exact window is still overwritten with FAILED. Closing
+        it needs a conditional server-side UPDATE — job_service's PATCH
+        ``/jobs/{team}/{job_id}`` has no status-guard parameter today (only
+        ``cancel_active_job`` gets one, hardcoded to the cancel transition) — so
+        it's out of scope here. Same accepted trade-off, and same shape, as
+        ``branding_team``'s ``mark_branding_failed_activity``, ``sales_team``'s
+        ``mark_failed_activity``, and ``planning_team``'s status-write guard.
+    """
+    from road_trip_planning_team.shared.job_store import (
+        JOB_STATUS_COMPLETED,
+        JOB_STATUS_FAILED,
+        get_job,
+        update_job,
+    )
+
+    job = get_job(job_id)
+    if job is not None and job.get("status") == JOB_STATUS_COMPLETED:
+        return
+    update_job(job_id, status=JOB_STATUS_FAILED, error=error)
