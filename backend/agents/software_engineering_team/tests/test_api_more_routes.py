@@ -153,7 +153,9 @@ def test_submit_pending_answers_accepts_valid_option(client, fake_job_client):
     fake_job_client.update_job(
         job_id,
         waiting_for_answers=True,
-        pending_questions=[{"id": "q1", "required": True, "options": [{"id": "opt_a", "label": "A"}]}],
+        pending_questions=[
+            {"id": "q1", "required": True, "options": [{"id": "opt_a", "label": "A"}]}
+        ],
     )
     resp = client.post(
         f"/run-team/{job_id}/answers",
@@ -183,7 +185,9 @@ def test_submit_pending_answers_400_when_unknown_option_id(client, fake_job_clie
     fake_job_client.update_job(
         job_id,
         waiting_for_answers=True,
-        pending_questions=[{"id": "q1", "required": True, "options": [{"id": "opt_a", "label": "A"}]}],
+        pending_questions=[
+            {"id": "q1", "required": True, "options": [{"id": "opt_a", "label": "A"}]}
+        ],
     )
     resp = client.post(
         f"/run-team/{job_id}/answers",
@@ -207,6 +211,49 @@ def test_submit_pending_answers_400_when_no_option_and_no_text(client, fake_job_
     )
     assert resp.status_code == 400
     assert "no text provided" in resp.json()["detail"]
+
+
+def test_submit_pending_answers_500_when_pending_question_missing_id(client, fake_job_client):
+    # Intentional behavior change: a pending question without an "id" is a corrupted job record.
+    # The reconciled shared validation surfaces a controlled 500 (SE's old inline check would have
+    # raised a bare KeyError -> uncaught 500).
+    job_id = "job-corrupt"
+    fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
+    fake_job_client.update_job(
+        job_id,
+        waiting_for_answers=True,
+        pending_questions=[{"question_text": "no id here", "required": True}],
+    )
+    resp = client.post(
+        f"/run-team/{job_id}/answers",
+        json={"answers": [{"question_id": "q1", "selected_option_id": "x"}]},
+    )
+    assert resp.status_code == 500
+    assert "Corrupted job record" in resp.json()["detail"]
+
+
+def test_submit_pending_answers_400_when_duplicate_question_id(client, fake_job_client):
+    # Intentional behavior change: two answers for the same question are now rejected. SE previously
+    # collapsed them into a set and silently persisted both conflicting entries.
+    job_id = "job-dup"
+    fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
+    fake_job_client.update_job(
+        job_id,
+        waiting_for_answers=True,
+        pending_questions=[{"id": "q1", "required": True, "options": [{"id": "a", "label": "A"}]}],
+    )
+    resp = client.post(
+        f"/run-team/{job_id}/answers",
+        json={
+            "answers": [
+                {"question_id": "q1", "selected_option_id": "a"},
+                {"question_id": "q1", "selected_option_id": "other", "other_text": "b"},
+            ]
+        },
+    )
+    assert resp.status_code == 400
+    assert "Duplicate answers" in resp.json()["detail"]
+    assert "q1" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

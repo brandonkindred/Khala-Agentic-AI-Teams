@@ -15,6 +15,16 @@ from pydantic import BaseModel, Field
 
 from coding_team.models import AgentStatusEntry
 
+# The HITL "pending question / answer" schemas live in the shared_hitl package so every
+# team shares one reconciled definition; re-exported here so existing importers (routes,
+# StatusResponse) keep using `coding_team.api.models`.
+from shared_hitl.models import (  # noqa: F401
+    AnswerSubmission,
+    PendingQuestion,
+    QuestionOption,
+    SubmitAnswersRequest,
+)
+
 
 class RunRequest(BaseModel):
     """Request body for POST /run."""
@@ -30,49 +40,6 @@ class RunResponse(BaseModel):
     job_id: str
     status: str = "pending"
     message: str = "Job started. Poll GET /status/{job_id} for progress."
-
-
-class QuestionOption(BaseModel):
-    """A selectable option for a pending question."""
-
-    id: str = Field(..., description="Unique identifier for this option.")
-    label: str = Field(..., description="Display text for this option.")
-    is_default: bool = Field(
-        default=False, description="Whether this option is the suggested default."
-    )
-
-
-class PendingQuestion(BaseModel):
-    """A product/design decision the coding team escalated to the user before it could proceed."""
-
-    id: str = Field(..., description="Unique identifier for this question.")
-    question_text: str = Field(..., description="The question to display to the user.")
-    context: Optional[str] = Field(None, description="Why this decision matters.")
-    options: List[QuestionOption] = Field(
-        default_factory=list,
-        description="Selectable answer options. The UI always offers an 'other' free-text option.",
-    )
-    required: bool = Field(default=True, description="Whether this question must be answered.")
-    source: str = Field(
-        default="coding_team",
-        description="Origin of the question: plan_input, tech_lead, engineer:<agent>, etc.",
-    )
-
-
-class AnswerSubmission(BaseModel):
-    """A user's answer to a pending question."""
-
-    question_id: str = Field(..., description="ID of the question being answered.")
-    selected_option_id: Optional[str] = Field(
-        None, description="ID of the selected option, or 'other' if custom text is provided."
-    )
-    other_text: Optional[str] = Field(None, description="Custom text when 'other' is selected.")
-
-
-class SubmitAnswersRequest(BaseModel):
-    """Request body for submitting answers to a coding-team job's pending questions."""
-
-    answers: List[AnswerSubmission] = Field(..., description="List of answers to submit.")
 
 
 class StatusResponse(BaseModel):
