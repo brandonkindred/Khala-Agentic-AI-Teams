@@ -72,13 +72,15 @@ def _update_job_terminal(job_id: str, status: str, **fields: Any) -> None:
     later terminal write must not silently clobber it.
 
     Preconditions:
-        - ``status`` is ``"completed"`` or ``"failed"``.
+        - ``status`` is ``"completed"`` or ``"failed"``. Enforced with an
+          explicit raise, not a bare ``assert``, so it holds under ``-O``.
     Postconditions:
         - Updates the job to ``status`` with ``fields`` unless the job is
           already terminal (see :func:`_job_is_terminal`), in which case this
           is a no-op (logged).
     """
-    assert status in _TERMINAL_STATUSES, f"not a terminal status: {status}"
+    if status not in _TERMINAL_STATUSES:
+        raise ValueError(f"not a terminal status: {status}")
     if _job_is_terminal(job_id):
         logger.warning(
             "Skipping terminal write status=%s for job %s: already terminal", status, job_id

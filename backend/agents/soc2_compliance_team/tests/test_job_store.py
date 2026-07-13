@@ -59,6 +59,12 @@ def test_update_job_terminal_applies_when_not_terminal(fake_job_client) -> None:
     assert fake_job_client.get_job("g1")["status"] == "completed"
 
 
+def test_update_job_terminal_rejects_non_terminal_status(fake_job_client) -> None:
+    fake_job_client.create_job("g0", status="running")
+    with pytest.raises(ValueError, match="not a terminal status"):
+        job_store._update_job_terminal("g0", status="running")
+
+
 def test_update_job_terminal_skips_when_already_terminal(fake_job_client, caplog) -> None:
     """Whichever terminal write lands first must stick — a later one is a no-op."""
     fake_job_client.create_job("g2", status="completed", result={"status": "completed"})
