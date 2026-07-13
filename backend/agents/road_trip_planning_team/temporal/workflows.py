@@ -100,12 +100,49 @@ _STEP_TIMEOUT = timedelta(minutes=30)
 # genuine hang well before the 30-minute start-to-close budget.
 _STEP_HEARTBEAT_TIMEOUT = timedelta(minutes=10)
 
+# _STEP_TIMEOUT is a per-attempt start_to_close ceiling sized for a
+# single-LLM-call step — but recommend_activities_activity makes one call per
+# non-pass-through stop (ActivitiesExpertAgent's per-stop loop), so a route
+# with several stops (or a couple of slower calls) can legitimately run past
+# 30 minutes even though it's actively heartbeating, not stalled. Temporal's
+# start_to_close_timeout is a hard ceiling regardless of heartbeats, so a
+# fixed 30-minute budget can retry-then-fail a job the old single 2-hour
+# pipeline activity would have completed. Scale the budget by stop count
+# instead: floored at _STEP_TIMEOUT (small routes are unaffected) and capped
+# at PIPELINE_TIMEOUT (the legacy activity's own ceiling, so a pathological
+# stop count still fails within a bounded window).
+_PER_STOP_ACTIVITIES_TIMEOUT = timedelta(minutes=4)
+
 # Legacy single-activity path (the pre-decomposition contract): the whole pipeline
 # ran as one long, non-idempotent activity, capped at a single attempt because the
 # llm_service layer already fails over on transient provider errors. Retained only
 # so pre-patch workflow histories can replay/drain — not used by new executions.
 PIPELINE_TIMEOUT = timedelta(hours=2)
 NO_RETRY = RetryPolicy(maximum_attempts=1)
+
+
+def _activities_timeout_for_route(route: dict[str, Any]) -> timedelta:
+    """Scale ``recommend_activities_activity``'s start_to_close_timeout by stop count.
+
+    Preconditions:
+        - ``route`` is a ``RoutePlan.model_dump()``-shaped dict — the
+          ``plan_route_activity`` result already threaded through the workflow.
+
+    Postconditions:
+        - Returns ``_PER_STOP_ACTIVITIES_TIMEOUT`` times the number of
+          non-pass-through stops (a stop with ``stop_type`` in
+          ``("start", "end")`` and ``recommended_nights == 0`` is
+          pass-through and gets no LLM call — see
+          ``ActivitiesExpertAgent.run``), floored at ``_STEP_TIMEOUT`` and
+          capped at ``PIPELINE_TIMEOUT``.
+    """
+    non_pass_through = sum(
+        1
+        for s in route.get("ordered_stops") or []
+        if not (s.get("stop_type") in ("start", "end") and s.get("recommended_nights") == 0)
+    )
+    scaled = _PER_STOP_ACTIVITIES_TIMEOUT * max(1, non_pass_through)
+    return min(PIPELINE_TIMEOUT, max(_STEP_TIMEOUT, scaled))
 
 
 @activity.defn(name="road_trip_run_pipeline")
@@ -325,7 +362,7 @@ class RoadTripWorkflow:
                         _activities.recommend_activities_activity,
                         args=[request, profile, route],
                         task_queue=TASK_QUEUE,
-                        start_to_close_timeout=_STEP_TIMEOUT,
+                        start_to_close_timeout=_activities_timeout_for_route(route),
                         heartbeat_timeout=_STEP_HEARTBEAT_TIMEOUT,
                         retry_policy=_LLM_RETRY,
                     ),

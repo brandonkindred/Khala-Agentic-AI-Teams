@@ -219,6 +219,27 @@ def test_plan_route_accepts_initials_abbreviation():
     assert "San Francisco, CA" in locations
 
 
+def test_plan_route_matches_locations_differing_only_by_punctuation():
+    # The request's "Los Angeles, CA" and the LLM's "Los Angeles CA" (no
+    # comma) describe the same place, but the comma breaks raw contiguous
+    # substring containment — matching must normalize to alphanumeric tokens
+    # first so a formatting-only difference doesn't discard an otherwise
+    # valid LLM route.
+    trip = TripRequest(
+        start_location="San Francisco, CA",
+        required_stops=[],
+        end_location="Los Angeles, CA",
+        travelers=[{"name": "Alice"}],
+    )
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Los Angeles CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+
+
 def test_plan_route_ignores_blank_required_stop(sample_plan_request):
     # A blank entry in required_stops carries no location to verify — it must
     # be skipped rather than change whether the route is accepted or falls back.
@@ -312,24 +333,47 @@ def test_plan_route_normalizes_by_position_not_stop_type_label(sample_plan_reque
     assert by_location["Los Angeles, CA"].recommended_nights == 0  # the true last stop
 
 
-def test_plan_route_normalizes_endpoint_stop_type_by_position(sample_plan_request):
-    # Downstream endpoint skipping (ActivitiesExpertAgent, the fallback
-    # composer) requires both recommended_nights==0 AND stop_type in
-    # ("start", "end") to treat a stop as pass-through. If the LLM leaves the
-    # true first/last stop's stop_type as "destination" (or anything other
-    # than start/end), zeroing only recommended_nights isn't enough — the
-    # stop_type must be normalized too, by position.
+def test_plan_route_preserves_destination_labeled_endpoint(sample_plan_request):
+    # An endpoint the LLM explicitly labels "destination" (not "start"/"end")
+    # is a real requested stay — e.g. a one-way trip whose whole point is
+    # spending time at the destination — not a pass-through. Endpoint
+    # normalization must trust the LLM's own stop_type classification rather
+    # than overriding it based on position alone: it should only zero nights
+    # when the true first/last stop's own label already says "start"/"end".
     llm = _FakeLLM(
         '{"ordered_stops": ['
-        '{"location": "San Francisco, CA", "stop_type": "destination"},'
-        ' {"location": "Yosemite", "stop_type": "destination"},'
-        ' {"location": "Los Angeles, CA", "stop_type": "destination"}],'
+        '{"location": "San Francisco, CA", "stop_type": "destination", "recommended_nights": 1},'
+        ' {"location": "Yosemite", "stop_type": "destination", "recommended_nights": 1},'
+        ' {"location": "Los Angeles, CA", "stop_type": "destination", "recommended_nights": 3}],'
+        ' "route_summary": "coastal", "suggested_total_days": 5}'
+    )
+    route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+    # Neither the label nor the nights were overridden for either endpoint.
+    assert route.ordered_stops[0].stop_type == "destination"
+    assert route.ordered_stops[0].recommended_nights == 1
+    assert route.ordered_stops[-1].stop_type == "destination"
+    assert route.ordered_stops[-1].recommended_nights == 3
+
+
+def test_plan_route_normalizes_endpoint_nights_when_label_already_says_so(sample_plan_request):
+    # The complementary case: when the LLM's own stop_type for the true
+    # first/last stop already says "start"/"end" but omits recommended_nights
+    # (defaulting to RouteStop's own default of 1), normalization still zeroes
+    # it — this is the genuine pass-through case the prompt asks for, just
+    # under-specified by the LLM.
+    llm = _FakeLLM(
+        '{"ordered_stops": ['
+        '{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Yosemite", "stop_type": "destination", "recommended_nights": 2},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
         ' "route_summary": "coastal", "suggested_total_days": 3}'
     )
     route = rtp_pipeline.plan_route(sample_plan_request.trip, TravelerGroupProfile(), llm=llm)
     assert route.route_summary == "coastal"  # accepted, not the fallback route
-    assert route.ordered_stops[0].stop_type == "start"
-    assert route.ordered_stops[-1].stop_type == "end"
+    assert route.ordered_stops[0].recommended_nights == 0
+    assert route.ordered_stops[-1].recommended_nights == 0
+    assert route.ordered_stops[1].recommended_nights == 2  # interior stop untouched
 
 
 def test_plan_route_preserves_required_stop_that_is_also_the_endpoint():

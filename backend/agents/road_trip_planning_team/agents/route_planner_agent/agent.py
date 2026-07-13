@@ -93,34 +93,43 @@ class RoutePlannerAgent:
         # accepted route just because the *other* stops satisfy coverage.
         stops = [s for s in stops if s.location and s.location.strip()]
 
-        # The prompt asks the LLM to set recommended_nights=0 and
-        # stop_type="start"/"end" for the boundary stops, but doesn't enforce
-        # either — an LLM response that omits recommended_nights for an
-        # endpoint defaults to RouteStop's own default of 1, and downstream
-        # endpoint skipping (ActivitiesExpertAgent, _build_fallback_itinerary)
-        # requires *both* recommended_nights==0 and stop_type in
-        # ("start", "end") to treat a stop as pass-through — normalizing only
-        # nights would leave a mislabeled endpoint (e.g. still "destination")
-        # generating a real activities LLM call and itinerary day. Normalize
-        # both by *position* (the first/last stop), not the existing
-        # stop_type label — the LLM can mislabel an interior stop's stop_type
-        # as "start"/"end" while the actual boundary stops are elsewhere in
-        # the list, and keying off the label would then wrongly zero out a
-        # real must-visit stop's nights.
-        #
-        # Skip the override entirely when a boundary stop's location is also
-        # one of trip.required_stops — the caller explicitly asked to visit
-        # that location, not merely pass through it. Forcing pass-through
-        # there would make ActivitiesExpertAgent and the fallback composer
-        # skip it exactly when the LLM collapses "required stop" and "route
-        # endpoint" into a single returned stop (e.g. required_stops and
-        # end_location naming the same city).
-        if stops and not self._is_required_stop(trip, stops[0].location):
+        # The prompt asks the LLM to set recommended_nights=0 for a genuine
+        # pass-through start/end stop, but doesn't enforce it — an LLM
+        # response that labels the true first/last stop "start"/"end" but
+        # omits recommended_nights defaults to RouteStop's own default of 1,
+        # which ActivitiesExpertAgent/the fallback composer (skip a stop only
+        # when *both* recommended_nights==0 and stop_type in ("start", "end"))
+        # would then treat as a real overnight stop. Zero the nights only
+        # when both hold:
+        #   - the stop is the actual first/last *position* — an LLM can
+        #     mislabel an interior required stop "start"/"end" while the real
+        #     boundary stops are elsewhere in the list, and keying off the
+        #     label alone would wrongly zero out that must-visit stop's nights;
+        #   - its own stop_type already says "start"/"end" — trusting the
+        #     LLM's own classification rather than overriding it. An endpoint
+        #     the LLM explicitly calls "destination"/"overnight"/"landmark" is
+        #     a real requested stay (e.g. a one-way trip whose whole point is
+        #     spending time at the destination), not a pass-through, and
+        #     forcing it to zero nights would silently drop its activities
+        #     and itinerary day.
+        # Also respect an explicit required-stop request even when the LLM
+        # did label the position "start"/"end" — the caller explicitly asked
+        # to visit that location, not merely pass through it, and the LLM can
+        # collapse "required stop" and "route endpoint" into a single
+        # returned stop (e.g. required_stops and end_location naming the same
+        # city) without recognizing that overlap itself.
+        if (
+            stops
+            and stops[0].stop_type == "start"
+            and not self._is_required_stop(trip, stops[0].location)
+        ):
             stops[0].recommended_nights = 0
-            stops[0].stop_type = "start"
-        if stops and not self._is_required_stop(trip, stops[-1].location):
+        if (
+            stops
+            and stops[-1].stop_type == "end"
+            and not self._is_required_stop(trip, stops[-1].location)
+        ):
             stops[-1].recommended_nights = 0
-            stops[-1].stop_type = "end"
 
         if not stops or not self._covers_required_stops(stops, trip, end):
             # Valid JSON that yields no usable stops (e.g. an empty object from a
@@ -215,25 +224,34 @@ class RoutePlannerAgent:
         """Best-effort, already-lowercased location match — more robust than
         raw substring containment without needing a geocoding/gazetteer lookup.
 
-        Matches when the shorter string appears in the longer one at a word
-        boundary (so ``"yosemite"`` matches ``"yosemite national park"`` and
-        ``"san francisco"`` matches ``"san francisco, ca"``, but the bare
-        substring ``"la"`` no longer wrongly matches inside ``"atlanta, ga"``
-        since it's embedded mid-word there, not word-bounded), or when the
-        shorter string equals the initials of the longer string's words
-        (state-code-length tokens excluded, so ``"sf"`` matches
-        ``"san francisco, ca"`` via "San Francisco" without "CA" corrupting the
-        acronym).
+        Both strings are first normalized to their whitespace-joined
+        alphanumeric tokens, so punctuation/spacing-only differences (e.g. a
+        missing comma: ``"los angeles ca"`` vs. ``"los angeles, ca"``) don't
+        block a match on an otherwise-identical location — the raw comma
+        breaks contiguous substring containment even though both strings
+        describe the same place.
+
+        Matches when the shorter (normalized) string appears in the longer
+        one at a word boundary (so ``"yosemite"`` matches ``"yosemite
+        national park"`` and ``"san francisco"`` matches ``"san francisco,
+        ca"``, but the bare substring ``"la"`` no longer wrongly matches
+        inside ``"atlanta, ga"`` since it's embedded mid-word there, not
+        word-bounded), or when the shorter string equals the initials of the
+        longer string's words (state-code-length tokens excluded, so
+        ``"sf"`` matches ``"san francisco, ca"`` via "San Francisco" without
+        "CA" corrupting the acronym).
 
         Preconditions:
             - ``a``, ``b`` are already lowercased, non-empty.
 
         Postconditions:
-            - Returns True on a word-bounded containment or initials match,
-              False otherwise.
+            - Returns True on a word-bounded containment or initials match
+              (both computed on the normalized tokens), False otherwise.
         """
-        shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
-        if re.search(rf"\b{re.escape(shorter)}\b", longer):
+        norm_a = " ".join(re.findall(r"[a-z0-9]+", a))
+        norm_b = " ".join(re.findall(r"[a-z0-9]+", b))
+        shorter, longer = (norm_a, norm_b) if len(norm_a) <= len(norm_b) else (norm_b, norm_a)
+        if shorter and re.search(rf"\b{re.escape(shorter)}\b", longer):
             return True
         words = [w for w in re.findall(r"[a-z0-9]+", longer) if len(w) > 2]
         return len(shorter) > 1 and shorter == "".join(w[0] for w in words)

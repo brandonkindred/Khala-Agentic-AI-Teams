@@ -365,6 +365,70 @@ def test_workflow_dispatches_activities_and_logistics_via_asyncio_gather(
     assert gather_calls == [2]
 
 
+def test_workflow_scales_activities_timeout_for_multi_stop_routes(monkeypatch, sample_trip_body):
+    # recommend_activities_activity makes one LLM call per non-pass-through
+    # stop — a route with enough of them must get a start_to_close_timeout
+    # scaled beyond the flat _STEP_TIMEOUT budget sized for a single-call
+    # step, or Temporal can retry-then-fail a job that's actively
+    # heartbeating (not stalled), just running a long per-stop loop.
+    route_dict = {
+        "ordered_stops": [
+            {"location": "Start City", "stop_type": "start", "recommended_nights": 0},
+            *[
+                {"location": f"Stop {i}", "stop_type": "destination", "recommended_nights": 1}
+                for i in range(8)
+            ],
+            {"location": "End City", "stop_type": "end", "recommended_nights": 0},
+        ]
+    }
+    calls: list[dict] = []
+
+    async def _fake_execute_activity(fn, *args, **kwargs):
+        calls.append({"name": fn.__name__, "timeout": kwargs.get("start_to_close_timeout")})
+        if fn.__name__ == "plan_route_activity":
+            return route_dict
+        return {"stub": fn.__name__}
+
+    monkeypatch.setattr(wf.workflow, "patched", lambda _patch_id: True)
+    monkeypatch.setattr(wf.workflow, "execute_activity", _fake_execute_activity)
+
+    asyncio.run(wf.RoadTripWorkflow().run("job-scale", sample_trip_body))
+
+    by_name = {c["name"]: c for c in calls}
+    # 8 non-pass-through stops ("Stop 0".."Stop 7"); Start/End City are
+    # pass-through (0 nights, stop_type start/end) and excluded from the count.
+    assert (
+        by_name["recommend_activities_activity"]["timeout"] == wf._PER_STOP_ACTIVITIES_TIMEOUT * 8
+    )
+    # plan_logistics_activity makes a single LLM call regardless of stop
+    # count — unaffected, still the flat per-call budget.
+    assert by_name["plan_logistics_activity"]["timeout"] == wf._STEP_TIMEOUT
+
+
+def test_activities_timeout_for_route_floors_and_caps():
+    # Floor: a small/typical route (few or zero non-pass-through stops) must
+    # not get a *smaller* timeout than the flat per-call budget.
+    assert wf._activities_timeout_for_route({"ordered_stops": []}) == wf._STEP_TIMEOUT
+    small_route = {
+        "ordered_stops": [
+            {"location": "A", "stop_type": "start", "recommended_nights": 0},
+            {"location": "B", "stop_type": "destination", "recommended_nights": 1},
+            {"location": "C", "stop_type": "end", "recommended_nights": 0},
+        ]
+    }
+    assert wf._activities_timeout_for_route(small_route) == wf._STEP_TIMEOUT
+
+    # Cap: a pathological stop count must not scale past PIPELINE_TIMEOUT —
+    # the legacy single-activity path's own ceiling.
+    huge_route = {
+        "ordered_stops": [
+            {"location": f"Stop {i}", "stop_type": "destination", "recommended_nights": 1}
+            for i in range(1000)
+        ]
+    }
+    assert wf._activities_timeout_for_route(huge_route) == wf.PIPELINE_TIMEOUT
+
+
 def test_workflow_progress_starts_before_run():
     assert wf.RoadTripWorkflow().progress() == {"step": "starting", "fraction": 0.0}
 
