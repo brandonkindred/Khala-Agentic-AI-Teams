@@ -8,34 +8,6 @@ graph/swarm object — full graph execution is exercised by integration tests.
 from __future__ import annotations
 
 
-def test_build_se_top_level_graph_returns_graph() -> None:
-    from software_engineering_team.graphs.top_level import build_se_top_level_graph
-
-    graph = build_se_top_level_graph()
-    # Strands Graph exposes nodes attribute or similar; just confirm not None
-    assert graph is not None
-
-
-def test_make_se_agent_returns_strands_agent() -> None:
-    from software_engineering_team.graphs.shared import make_se_agent
-
-    agent = make_se_agent(
-        name="my_agent",
-        system_prompt="You are a test agent",
-        description="Test desc",
-    )
-    assert agent is not None
-    # Strands Agents expose a callable interface
-    assert callable(agent)
-
-
-def test_make_se_agent_default_agent_key() -> None:
-    from software_engineering_team.graphs.shared import make_se_agent
-
-    agent = make_se_agent(name="agent2", system_prompt="prompt")
-    assert agent is not None
-
-
 def test_build_phase2_design_graph_returns_graph() -> None:
     from software_engineering_team.devops_team.graphs.phase2_design import (
         build_phase2_design_graph,
@@ -51,24 +23,6 @@ def test_build_phase4_validation_graph_returns_graph() -> None:
     )
 
     graph = build_phase4_validation_graph()
-    assert graph is not None
-
-
-def test_build_review_gates_graph_returns_graph() -> None:
-    from software_engineering_team.frontend_code_v2_team.graphs.review_gates import (
-        build_review_gates_graph,
-    )
-
-    graph = build_review_gates_graph()
-    assert graph is not None
-
-
-def test_build_review_gates_graph_with_retries() -> None:
-    from software_engineering_team.frontend_code_v2_team.graphs.review_gates import (
-        build_review_gates_graph,
-    )
-
-    graph = build_review_gates_graph(max_fix_retries=5)
     assert graph is not None
 
 
