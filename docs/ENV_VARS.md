@@ -187,6 +187,16 @@ of configuration — so a mis-set value can never make a healthy activity
 heartbeat-timeout. Parsed via the shared `env_float` (unset/garbage/non-finite →
 default, with a warning on a set-but-unparseable value).
 
+### MARKET_RESEARCH_TEMPORAL_HEARTBEAT_INTERVAL_S
+Float seconds (default `30`, clamped to `[1, 60]`). How often each long market
+research LLM activity (UX, psychology, consistency, viability, scripts) emits
+`activity.heartbeat` so Temporal can detect a hung activity faster than its full
+timeout. Like the sales knob, the ceiling is one third of the fixed 180s activity
+heartbeat timeout, guaranteeing at least ~3 beats per window regardless of
+configuration. Parsed via the shared `env_float` (unset/garbage/non-finite →
+default, with a warning on a set-but-unparseable value). Only read by the market
+research worker.
+
 ### TEMPORAL_ADDRESS (code review agent default)
 **The code review agent runs Temporal by default** (unlike the other teams, which
 only switch on when `TEMPORAL_ADDRESS` is set): `CodeReviewAgent.run` dispatches
