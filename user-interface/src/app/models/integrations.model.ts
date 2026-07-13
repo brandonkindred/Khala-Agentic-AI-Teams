@@ -1,4 +1,4 @@
-import type { CodeReviewSummary } from './coding-team.model';
+import type { CodeReviewSummary, PendingIssueProposal } from './coding-team.model';
 
 /** Integration list item (GET /api/integrations). */
 export interface IntegrationListItem {
@@ -275,4 +275,31 @@ export interface CodeReviewRunItem {
   created_at: string;
   /** ISO-8601 timestamp when the review reached a terminal state, if any. */
   completed_at?: string;
+}
+
+/** Request body for POST /api/integrations/github/reviews/{job_id}/issues. */
+export interface CreateReviewIssuesRequest {
+  /** Ids of the review's pending issue proposals to file as GitHub issues. */
+  proposal_ids: string[];
+  /** Repository the review belongs to; validated server-side against the review. */
+  owner: string;
+  repo: string;
+}
+
+/** One GitHub issue opened from a review's pending issue proposal. */
+export interface CreatedReviewIssueItem {
+  proposal_id: string;
+  issue_number: number;
+  issue_url: string;
+  title: string;
+}
+
+/** Response from POST /api/integrations/github/reviews/{job_id}/issues. */
+export interface CreateReviewIssuesResponse {
+  job_id: string;
+  /** Issues opened by this request. */
+  created: CreatedReviewIssueItem[];
+  /** The review's full, updated pending-proposal list (filed ones now carry
+   * `issue_url`/`issue_number`). */
+  proposals: PendingIssueProposal[];
 }
