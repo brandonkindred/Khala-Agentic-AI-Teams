@@ -258,6 +258,11 @@ class UserAgentFounderWorkflow:
               ``orchestrator._run_phase``.
         """
         self._phase = f"polling_{phase}"
+        # Reset the queryable attempt counter so the progress query reports a
+        # per-phase attempt number: without this, entering the build phase would
+        # briefly surface analysis's final attempt count until build's first poll
+        # tick overwrites it.
+        self._attempt = 0
         # enter_phase starts a fresh phase or, on resume, transitions the run to
         # polling_<phase> (clearing stale error + syncing the job phase) — either
         # way returning the job id to poll.

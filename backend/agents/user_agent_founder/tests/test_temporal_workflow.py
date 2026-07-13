@@ -163,6 +163,8 @@ def _run(monkeypatch, rec, *, cancel_before=False):
 
 
 def test_full_pipeline_order(monkeypatch):
+    """A successful run invokes begin → spec → analysis → build → finalize in
+    order and never calls mark_failed."""
     rec = _ActivityRecorder(
         snap=_snap(),
         analysis_polls=[_running(), _completed("/repo")],
@@ -181,6 +183,8 @@ def test_full_pipeline_order(monkeypatch):
 
 
 def test_resume_skips_spec_and_analysis(monkeypatch):
+    """Both checkpoint flags set → spec generation and the whole analysis phase
+    are short-circuited; only the build phase runs."""
     rec = _ActivityRecorder(
         snap=_snap(skip_spec=True, skip_analysis=True), build_polls=[_completed()]
     )
@@ -193,7 +197,41 @@ def test_resume_skips_spec_and_analysis(monkeypatch):
     assert rec.args_for(acts.enter_phase_activity)[0] == ["r1", "build", None]
 
 
+def test_resume_skips_spec_only_still_runs_analysis(monkeypatch):
+    """skip_spec alone: spec generation is short-circuited but the analysis phase
+    still runs (then build) — the two skip flags gate independent branches."""
+    rec = _ActivityRecorder(
+        snap=_snap(skip_spec=True, skip_analysis=False),
+        analysis_polls=[_completed("/repo")],
+        build_polls=[_completed()],
+    )
+    _inst, out = _run(monkeypatch, rec)
+
+    assert out == {"run_id": "r1"}
+    assert rec.count(acts.generate_spec_activity) == 0
+    # Both phases are still entered (analysis then build).
+    assert rec.count(acts.enter_phase_activity) == 2
+    assert [a[1] for a in rec.args_for(acts.enter_phase_activity)] == ["analysis", "build"]
+
+
+def test_resume_skips_analysis_only_still_generates_spec(monkeypatch):
+    """skip_analysis alone: spec generation still runs, but the analysis phase is
+    short-circuited — build runs directly after spec."""
+    rec = _ActivityRecorder(
+        snap=_snap(skip_spec=False, skip_analysis=True), build_polls=[_completed()]
+    )
+    _inst, out = _run(monkeypatch, rec)
+
+    assert out == {"run_id": "r1"}
+    assert rec.count(acts.generate_spec_activity) == 1
+    # Only build is entered; analysis is short-circuited.
+    assert rec.count(acts.enter_phase_activity) == 1
+    assert rec.args_for(acts.enter_phase_activity)[0][1] == "build"
+
+
 def test_resume_existing_job_ids_enter_without_restart(monkeypatch):
+    """Persisted per-phase job ids are passed to enter_phase (which resumes the
+    poll without re-submitting) and the polls target those same ids."""
     rec = _ActivityRecorder(
         snap=_snap(analysis_job_id="aj", build_job_id="bj"),
         analysis_polls=[_completed("/repo")],
@@ -212,6 +250,8 @@ def test_resume_existing_job_ids_enter_without_restart(monkeypatch):
 
 
 def test_waiting_triggers_answer_then_completes(monkeypatch):
+    """A poll reporting waiting-for-answers drives one answer_questions activity
+    (with the pending batch) before the phase completes on the next poll."""
     rec = _ActivityRecorder(
         snap=_snap(),
         analysis_polls=[_waiting("q1"), _completed("/repo")],
@@ -235,6 +275,8 @@ def test_waiting_triggers_answer_then_completes(monkeypatch):
 
 
 def test_answer_retry_budget_exhausted_aborts(monkeypatch):
+    """Repeated answer-submission failures for the same question set exhaust the
+    per-set retry budget and abort the phase (→ mark_failed)."""
     rec = _ActivityRecorder(
         snap=_snap(max_answer_retries=1),
         analysis_polls=[_waiting(), _waiting(), _waiting()],
@@ -251,6 +293,8 @@ def test_answer_retry_budget_exhausted_aborts(monkeypatch):
 
 
 def test_target_failed_marks_failed(monkeypatch):
+    """A terminal 'failed' poll raises _PhaseFailed (carrying the target error),
+    routed to the catch-all mark_failed."""
     rec = _ActivityRecorder(
         snap=_snap(), analysis_polls=[{"status": "failed", "waiting": False, "error": "boom"}]
     )
@@ -278,6 +322,8 @@ def test_target_failed_with_none_error_falls_back_to_unknown(monkeypatch):
 
 
 def test_target_cancelled_marks_failed(monkeypatch):
+    """A terminal 'cancelled' poll from the target raises _PhaseFailed → the
+    catch-all mark_failed."""
     rec = _ActivityRecorder(
         snap=_snap(), analysis_polls=[{"status": "cancelled", "waiting": False}]
     )
@@ -290,6 +336,8 @@ def test_target_cancelled_marks_failed(monkeypatch):
 
 
 def test_poll_timeout_marks_failed(monkeypatch):
+    """Exhausting max_poll_attempts without a terminal status raises a 'timed
+    out' _PhaseFailed → the catch-all mark_failed."""
     rec = _ActivityRecorder(snap=_snap(max_poll_attempts=1), analysis_polls=[_running()])
     inst = wf.UserAgentFounderWorkflow()
     _prepare(monkeypatch, inst, rec)
@@ -300,6 +348,8 @@ def test_poll_timeout_marks_failed(monkeypatch):
 
 
 def test_begin_failure_marks_failed(monkeypatch):
+    """A failure in the very first activity (begin_run) still routes through the
+    catch-all mark_failed and re-raises."""
     rec = _ActivityRecorder(snap=_snap(), begin_exc=RuntimeError("begin boom"))
     inst = wf.UserAgentFounderWorkflow()
     _prepare(monkeypatch, inst, rec)
@@ -309,6 +359,8 @@ def test_begin_failure_marks_failed(monkeypatch):
 
 
 def test_poll_error_is_retried_not_fatal(monkeypatch):
+    """A poll that returns a transient poll_error is skipped and re-polled on the
+    next tick, not treated as a terminal failure."""
     rec = _ActivityRecorder(
         snap=_snap(),
         analysis_polls=[
@@ -346,6 +398,8 @@ def test_mark_failed_own_failure_is_swallowed(monkeypatch):
 
 
 def test_cancel_before_run_short_circuits(monkeypatch):
+    """A cancel already set before run() starts stops everything after the
+    post-begin cancel check — no spec, no finalize, no mark_failed."""
     rec = _ActivityRecorder(
         snap=_snap(), analysis_polls=[_completed("/repo")], build_polls=[_completed()]
     )
@@ -360,6 +414,8 @@ def test_cancel_before_run_short_circuits(monkeypatch):
 
 
 def test_cancel_mid_poll_loop_short_circuits(monkeypatch):
+    """A cancel delivered during the analysis poll loop ends the run cleanly
+    (cancelled=True, no build, no mark_failed)."""
     running_then_cancel = {**_running(), "_cancel": True}
     rec = _ActivityRecorder(
         snap=_snap(), analysis_polls=[running_then_cancel], build_polls=[_completed()]
@@ -424,13 +480,47 @@ def test_cancel_before_answering_stops_answer_activity(monkeypatch):
 
 
 def test_signal_and_query_handlers():
+    """The progress query returns the initial state, and the cancel signal flips
+    cancel_requested to True."""
     inst = wf.UserAgentFounderWorkflow()
     assert inst.progress() == {"phase": "starting", "attempt": 0, "cancel_requested": False}
     inst.cancel()
     assert inst.progress()["cancel_requested"] is True
 
 
+def test_progress_attempt_resets_per_phase(monkeypatch):
+    """_run_phase resets the queryable attempt counter at entry, so the build
+    phase starts from attempt 0 rather than carrying analysis's final count —
+    the progress query reports a per-phase attempt, not a cumulative one."""
+    # Analysis runs several poll ticks (bumping _attempt) before completing; the
+    # progress query is captured as build begins to prove the reset happened.
+    seen = {}
+
+    class _CapturingRecorder(_ActivityRecorder):
+        async def execute_activity(self, fn, *args, **kw):
+            # On the build phase's enter_phase (first build activity), snapshot the
+            # attempt the query would report — after _run_phase reset it but before
+            # build's first poll tick sets it.
+            if fn is acts.enter_phase_activity and kw.get("args", [None, None])[1] == "build":
+                seen["attempt_at_build_entry"] = self.inst.progress()["attempt"]
+            return await super().execute_activity(fn, *args, **kw)
+
+    rec = _CapturingRecorder(
+        snap=_snap(),
+        analysis_polls=[_running(), _running(), _completed("/repo")],
+        build_polls=[_completed()],
+    )
+    _inst, out = _run(monkeypatch, rec)
+
+    assert out == {"run_id": "r1"}
+    # Analysis reached attempt index 2 (3 polls), but build entry sees a reset 0.
+    assert seen["attempt_at_build_entry"] == 0
+
+
 def test_activities_use_expected_retry_policies(monkeypatch):
+    """Each activity is scheduled with its intended RetryPolicy: IO_RETRY for the
+    cheap bookkeeping/poll steps, LLM_RETRY for spec gen, ANSWER_RETRY (single
+    attempt) for the non-idempotent answer batch."""
     rec = _ActivityRecorder(
         snap=_snap(),
         analysis_polls=[_waiting(), _completed("/repo")],
