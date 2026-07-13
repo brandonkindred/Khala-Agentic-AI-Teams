@@ -58,7 +58,7 @@ def get_orchestrator() -> "PersonalAssistantOrchestrator":
     ``api.main`` constructed it before this module existed.
 
     Preconditions:
-        - None. Safe to call from any thread and from a Temporal activity.
+        - None.
 
     Postconditions:
         - Returns a fully-constructed ``PersonalAssistantOrchestrator``.
@@ -66,6 +66,9 @@ def get_orchestrator() -> "PersonalAssistantOrchestrator":
           shared profile cache) — see the module docstring's caveat on
           ``TEAM_WORKERS`` for what that does and doesn't guarantee across a
           multi-process deployment.
+        - Safe to call concurrently from any thread and from a Temporal
+          activity's own thread pool: the double-checked locking below
+          serializes the one-time construction.
 
     Invariants:
         - The orchestrator is constructed at most once per process

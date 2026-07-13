@@ -69,6 +69,10 @@ def _run_specialist(
         - ``intent`` is a serialized ``Intent`` (``Intent.model_dump()``).
         - ``method_name`` names an existing ``_handle_*`` method on the
           orchestrator.
+        - The caller schedules the ``pa_handle_*`` activity wrapping this
+          function with ``maximum_attempts=1`` (``workflows.py``'s
+          ``LLM_RETRY``): the specialist call is a non-idempotent, billed LLM
+          round-trip, so a retry would re-run — not resume — expensive work.
 
     Postconditions:
         - Returns ``AgentAction.model_dump(mode="json")`` for the handler's
@@ -137,6 +141,9 @@ def classify_intent_activity(
 
     Preconditions:
         - ``job_id`` refers to a job already created in the PA job store.
+        - The caller schedules this activity with ``maximum_attempts=1``
+          (``workflows.py``'s ``LLM_RETRY``): classification is a
+          non-idempotent, billed LLM round-trip.
 
     Postconditions:
         - Marks the job RUNNING and returns ``Intent.model_dump(mode="json")``,
@@ -425,6 +432,9 @@ def check_profile_updates_activity(
 
     Preconditions:
         - ``job_id`` refers to a job already created in the PA job store.
+        - The caller schedules this activity with ``maximum_attempts=1``
+          (``workflows.py``'s ``LLM_RETRY``): the preference-extraction call
+          is a non-idempotent, billed LLM round-trip.
 
     Postconditions:
         - Returns ``None`` (a cancellation signal the workflow short-circuits on)
@@ -464,6 +474,9 @@ def generate_response_activity(
           ``AgentAction`` dicts; ``results`` maps an intent key to its result;
           ``profile_updates`` is the list returned by
           ``check_profile_updates_activity`` (or ``None``/empty if none).
+        - The caller schedules this activity with ``maximum_attempts=1``
+          (``workflows.py``'s ``LLM_RETRY``): response generation is a
+          non-idempotent, billed LLM round-trip.
 
     Postconditions:
         - Returns the ``{"cancelled": True}`` sentinel (the workflow then skips
@@ -650,6 +663,7 @@ def _notify_slack(user_id: str, message: str, response: Any) -> None:
     try:
         from unified_api.slack_notifier import notify_pa_response
     except ImportError:
+        logger.debug("Slack notifier not available; skipping PA notification")
         return
     try:
         notify_pa_response(
