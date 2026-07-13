@@ -10,6 +10,18 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+# The HITL "pending question / answer" schemas live in the shared_hitl package so every
+# team shares one reconciled definition; re-exported here so existing importers keep using
+# `software_engineering_team.api.models`. SE's superset fields (recommendation/allow_multiple
+# on PendingQuestion, rationale/confidence on QuestionOption) are the ones the shared models
+# adopt, so these are field-identical to the previous local definitions.
+from shared_hitl.models import (  # noqa: F401
+    AnswerSubmission,
+    PendingQuestion,
+    QuestionOption,
+    SubmitAnswersRequest,
+)
+
 
 class RunTeamRequest(BaseModel):
     """Request body for the run-team endpoint."""
@@ -150,43 +162,6 @@ class CurrentActivityEntry(BaseModel):
     task_title: Optional[str] = Field(None, description="Title of that task.")
 
 
-class QuestionOption(BaseModel):
-    """A selectable option for a pending question."""
-
-    id: str = Field(..., description="Unique identifier for this option.")
-    label: str = Field(..., description="Display text for this option.")
-    is_default: bool = Field(
-        default=False, description="Whether this option is the recommended default."
-    )
-    rationale: Optional[str] = Field(None, description="Why this option is suggested.")
-    confidence: Optional[float] = Field(None, description="Agent confidence in this option (0–1).")
-
-
-class PendingQuestion(BaseModel):
-    """A question awaiting user response during job execution."""
-
-    id: str = Field(..., description="Unique identifier for this question.")
-    question_text: str = Field(..., description="The question to display to the user.")
-    context: Optional[str] = Field(None, description="Additional context or explanation.")
-    recommendation: Optional[str] = Field(
-        None,
-        description="Agent recommendation: which option to choose and why.",
-    )
-    options: List[QuestionOption] = Field(
-        default_factory=list,
-        description="Selectable answer options. Always includes an 'other' option automatically.",
-    )
-    required: bool = Field(default=True, description="Whether this question must be answered.")
-    allow_multiple: bool = Field(
-        default=False,
-        description="True = checkboxes (select all that apply), False = radio buttons (select one).",
-    )
-    source: str = Field(
-        default="planning",
-        description="Source of the question: planning, tech_lead, execution, etc.",
-    )
-
-
 class JobStatusResponse(BaseModel):
     """Response from GET /run-team/{job_id}."""
 
@@ -280,29 +255,6 @@ class RetryResponse(BaseModel):
     status: str = Field(default="running", description="Status after retry start.")
     retrying_tasks: List[str] = Field(default_factory=list, description="Task IDs being retried.")
     message: str = Field(default="")
-
-
-class AnswerSubmission(BaseModel):
-    """A user's answer to a pending question."""
-
-    question_id: str = Field(..., description="ID of the question being answered.")
-    selected_option_id: Optional[str] = Field(
-        None,
-        description="ID of the selected option, or 'other' if custom text provided.",
-    )
-    other_text: Optional[str] = Field(
-        None,
-        description="Custom text when 'other' option is selected.",
-    )
-
-
-class SubmitAnswersRequest(BaseModel):
-    """Request body for submitting answers to pending questions."""
-
-    answers: List[AnswerSubmission] = Field(
-        ...,
-        description="List of answers to submit.",
-    )
 
 
 class ArchitectDesignRequest(BaseModel):
