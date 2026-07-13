@@ -202,3 +202,46 @@ class ReviewRunItem(BaseModel):
     author: str
     created_at: datetime
     completed_at: Optional[datetime] = None
+
+
+class CreateReviewIssuesRequest(BaseModel):
+    """Request body for POST /reviews/{job_id}/issues."""
+
+    proposal_ids: List[str] = Field(
+        default_factory=list,
+        description="Ids of the review's pending issue proposals to file as GitHub issues.",
+    )
+    owner: Optional[str] = Field(
+        default=None,
+        description="Expected repository owner; validated against the stored review so issues are "
+        "only filed into the repository that was actually reviewed.",
+    )
+    repo: Optional[str] = Field(
+        default=None,
+        description="Expected repository name; validated against the stored review (see owner).",
+    )
+    github_token: Optional[str] = Field(
+        default=None, description="Overrides GITHUB_TOKEN env var for this request."
+    )
+
+
+class CreatedIssueItem(BaseModel):
+    """One GitHub issue opened from a pending issue proposal."""
+
+    proposal_id: str
+    issue_number: int
+    issue_url: str
+    title: str
+
+
+class CreateReviewIssuesResponse(BaseModel):
+    """Result of POST /reviews/{job_id}/issues.
+
+    ``proposals`` is the review's full, updated pending-proposal list (created
+    ones now carry ``issue_number``/``issue_url``) so the UI can reconcile in one
+    round-trip; ``created`` names only the issues opened by this request.
+    """
+
+    job_id: str
+    created: List[CreatedIssueItem] = Field(default_factory=list)
+    proposals: List[Dict[str, Any]] = Field(default_factory=list)

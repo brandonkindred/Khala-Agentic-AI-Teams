@@ -140,6 +140,38 @@ def update_review(
         logger.warning("code_review_runs: update_review failed", exc_info=True)
 
 
+@timed_query(store=_STORE, op="get_review")
+def get_review(job_id: str) -> Optional[dict[str, Any]]:
+    """Return one review row by ``job_id``, or None.
+
+    The durable counterpart to the in-memory job record: used when creating
+    GitHub issues from a review's stored ``pending_issue_proposals`` after the
+    original job may have aged out of the job store (e.g. a server restart).
+
+    Preconditions:
+        - ``job_id`` is a review job's id.
+    Postconditions:
+        - Returns the ``code_review_runs`` row (including ``review_summary`` with
+          any pending issue proposals, plus ``owner``/``repo``/``pr_number``/
+          ``pr_url``/``status``) for ``job_id``, or None when it does not exist,
+          Postgres is unavailable, or the query fails (never raises).
+    """
+    if not is_postgres_enabled():
+        return None
+    query = (
+        "SELECT job_id, owner, repo, pr_number, pr_url, status, status_text, "
+        "       review_summary, error, author, created_at, completed_at "
+        "FROM code_review_runs WHERE job_id = %s"
+    )
+    try:
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, (job_id,))
+            return cur.fetchone()
+    except Exception:  # noqa: BLE001 - degrade to "not found" rather than error
+        logger.warning("code_review_runs: get_review failed", exc_info=True)
+        return None
+
+
 @timed_query(store=_STORE, op="list_reviews")
 def list_reviews(
     owner: str,
