@@ -1156,7 +1156,9 @@ def test_run_phase_skips_terminal_write_when_job_becomes_terminal_during_step(mo
     from accessibility_audit_team.temporal import activities as acts
 
     jm = mock.Mock()
-    jm.get_job.side_effect = [None, {"status": ax.JOB_STATUS_COMPLETED}]
+    # Not terminal at the upfront check or the pre-write re-check; becomes
+    # terminal only by the time the post-step terminal write is considered.
+    jm.get_job.side_effect = [None, None, {"status": ax.JOB_STATUS_COMPLETED}]
     monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
 
     out = asyncio.run(
@@ -1258,6 +1260,32 @@ def test_run_phase_writes_initial_running_when_job_not_terminal(monkeypatch):
         c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_RUNNING
     ]
     assert running_writes and running_writes[0].kwargs.get("current_phase") == "discovery"
+
+
+def test_run_phase_skips_running_write_when_job_becomes_terminal_between_checks(monkeypatch):
+    """Narrows the TOCTOU window: if a concurrent path (e.g.
+    mark_timed_out_activity) marks the job terminal between the upfront check and
+    the RUNNING write, the re-check right before that write must catch it and
+    bail out — an unconditional write would otherwise silently revert the
+    terminal status back to RUNNING."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team.temporal import activities as acts
+
+    jm = mock.Mock()
+    # First _is_job_terminal call (upfront): not terminal yet. Second call (the
+    # re-check right before the RUNNING write): now terminal.
+    jm.get_job.side_effect = [None, {"status": ax.JOB_STATUS_FAILED}]
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    step = mock.AsyncMock()
+
+    out = asyncio.run(acts._run_phase("j1", "a1", "discovery", 40, step))
+
+    step.assert_not_called()
+    assert out == {"status": "FAIL", "audit_id": "a1", "error": "job already terminal"}
+    running_writes = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == ax.JOB_STATUS_RUNNING
+    ]
+    assert not running_writes
 
 
 def test_run_phase_reconciles_on_last_attempt_when_initial_write_raises(monkeypatch):
@@ -1432,7 +1460,9 @@ def test_run_phase_exception_skips_write_when_job_becomes_terminal_during_step(m
     from accessibility_audit_team.temporal import activities as acts
 
     jm = mock.Mock()
-    jm.get_job.side_effect = [None, {"status": ax.JOB_STATUS_COMPLETED}]
+    # Not terminal at the upfront check or the pre-write re-check; becomes
+    # terminal only by the time the exception handler's terminal write runs.
+    jm.get_job.side_effect = [None, None, {"status": ax.JOB_STATUS_COMPLETED}]
     monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
     monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
 

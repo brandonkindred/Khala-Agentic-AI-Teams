@@ -245,10 +245,21 @@ async def execute_audit_job(job_id: str, audit_id: str, request: CreateAuditRequ
 # ---------------------------------------------------------------------------
 # Per-phase step helpers
 #
-# These are the single source of truth for one phase's work + partial-state
-# persistence, shared by BOTH thread mode (the orchestrator) and the Temporal
-# per-phase activities (``temporal.activities``). They deliberately do NOT touch
-# the job store — each caller owns its own job lifecycle (thread mode writes one
+# Used by the Temporal per-phase activities (``temporal.activities``) — each
+# wraps one phase with the idempotency-on-retry and partial-state persistence
+# semantics that Temporal's at-least-once activity execution requires. Thread
+# mode (``AccessibilityAuditOrchestrator._run_audit_phases``) has no retry
+# mechanism of its own, so it does NOT call these step wrappers — it drives the
+# same underlying phase functions (``run_intake_phase`` etc.) inline, with its
+# own single running→terminal job-store transition. What IS genuinely shared
+# between the two paths is the lower persistence layer these steps sit on top
+# of — ``persist_audit_state``/``load_audit_state`` (both call sites write and
+# read ``audit_state_{id}`` identically) and ``finalize_audit_result`` (both
+# ``finalize_audit_step`` here and the orchestrator's own finalize block call
+# it) — so severity counts/summary assembly and the artifact-store format
+# can't drift between execution modes, even though the per-phase orchestration
+# around them does. These step helpers deliberately do NOT touch the job store
+# — each caller owns its own job lifecycle (thread mode writes one
 # running→terminal transition in ``run_audit_job``; each activity writes its own
 # per-phase progress) — and they raise on infrastructure failure so a Temporal
 # activity can surface it to the retry policy instead of masking it.
@@ -430,6 +441,15 @@ def finalize_audit_result(
           exactly once in ``completed_phases``, ``success=True``, the final
           findings/patterns/coverage matrix, the four severity counts, and a
           human-readable ``summary``. Returns the same (mutated) ``result``.
+
+    ``REPORT_PACKAGING`` may already be in ``completed_phases`` by the time this
+    runs — ``run_report_packaging_step`` records it as soon as that phase itself
+    succeeds, before ``finalize_audit_step`` even runs. The ``not in`` guard below
+    is intentional, not redundant: this function's own postcondition promises
+    ``REPORT_PACKAGING`` recorded exactly once regardless of caller, so it can't
+    rely on a caller having already appended it (the orchestrator's thread-mode
+    finalize block calls this directly, without going through
+    ``run_report_packaging_step`` at all).
     """
     result.report_packaging_result = report_result
     if Phase.REPORT_PACKAGING not in result.completed_phases:

@@ -199,7 +199,11 @@ async def _run_phase(
           workflow would let it continue while the job row stays stuck showing
           the earlier terminal failure. Returns ``{"status": "FAIL", ...}``
           immediately without touching the job store.
-        - Otherwise writes ``RUNNING``/``current_phase``/``progress`` before
+        - Otherwise re-checks terminality (narrowing, but not fully closing, the
+          TOCTOU window against a concurrent path like ``mark_timed_out_activity``
+          racing this same job between the check above and this point — the job
+          service has no compare-and-swap primitive to make check-then-write
+          atomic) and writes ``RUNNING``/``current_phase``/``progress`` before
           running the step. That write is inside the same failure handling as
           ``step`` itself: a transient job-service error on the initial write
           (not just a failure inside ``step``) is also caught below and, on the
@@ -239,6 +243,21 @@ async def _run_phase(
         return {"status": "FAIL", "audit_id": audit_id, "error": "job already terminal"}
 
     try:
+        # Re-check immediately before writing: a concurrent path (most notably
+        # mark_timed_out_activity, racing this same job) can mark the job
+        # terminal in the window between the check above and this write — an
+        # unconditional RUNNING write here would silently revert that terminal
+        # status. This narrows but cannot fully close the race (the job-service
+        # client has no compare-and-swap/optimistic-concurrency primitive to make
+        # the check-then-write atomic); the downstream logical-failure/exception
+        # guards use the same pattern and share the same residual risk.
+        if _is_job_terminal(manager, job_id):
+            logger.warning(
+                "Skipping %s phase for job %s: job became terminal before the RUNNING write",
+                phase_name,
+                job_id,
+            )
+            return {"status": "FAIL", "audit_id": audit_id, "error": "job already terminal"}
         manager.update_job(
             job_id, status=JOB_STATUS_RUNNING, current_phase=phase_name, progress=progress
         )
