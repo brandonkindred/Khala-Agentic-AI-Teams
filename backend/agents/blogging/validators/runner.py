@@ -92,7 +92,7 @@ def run_validators(
     report = ValidatorReport(status=status, checks=checks)
 
     if work_dir:
-        data = report.dict() if hasattr(report, "dict") else report.model_dump()
+        data = report.to_dict()
         write_artifact(work_dir, "validator_report.json", data)
         logger.info("Wrote validator_report.json: status=%s", status)
 

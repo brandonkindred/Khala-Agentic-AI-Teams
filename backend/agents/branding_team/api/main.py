@@ -20,7 +20,6 @@ from pydantic import BaseModel, Field
 from branding_team.assistant import get_conversation_store
 from branding_team.assistant.agent import BrandingAssistantAgent
 from branding_team.assistant.store import _default_mission, _StoredMessage
-from branding_team.config import env_float, env_int
 from branding_team.models import (
     Brand,
     BrandCheckRequest,
@@ -52,6 +51,7 @@ from branding_team.store import get_default_store
 from job_service_client import JobServiceClient, start_stale_job_monitor
 from shared_app import create_team_app
 from shared_concurrency import BackgroundHeartbeat
+from shared_env_config import env_float, env_int
 from shared_postgres import get_conn
 from shared_postgres.metrics import timed_query
 
@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 def _max_concurrent_runs() -> int:
     """Worker cap for the branding-run executor (env-tunable, clamped to >= 1)."""
-    return env_int("BRANDING_MAX_CONCURRENT_RUNS", 4, minimum=1)
+    return env_int("BRANDING_MAX_CONCURRENT_RUNS", 4, floor=1)
 
 
 # Branding runs are submitted to a bounded pool instead of spawning an
@@ -75,8 +75,8 @@ _run_executor = concurrent.futures.ThreadPoolExecutor(
 
 
 def _job_heartbeat_interval_s() -> float:
-    """Heartbeat cadence for a running branding job (env-tunable, > 0)."""
-    return env_float("BRANDING_JOB_HEARTBEAT_INTERVAL_S", 30.0, positive=True)
+    """Heartbeat cadence for a running branding job (env-tunable, clamped to >= 1.0s)."""
+    return env_float("BRANDING_JOB_HEARTBEAT_INTERVAL_S", 30.0, floor=1.0)
 
 
 # Periodic sweep that fails jobs whose heartbeat has gone stale (e.g. a worker

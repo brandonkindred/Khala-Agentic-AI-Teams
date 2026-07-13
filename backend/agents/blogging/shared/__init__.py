@@ -51,6 +51,12 @@ from .errors import (
     PublicationError,
     ValidationError,
 )
+from .gate_report import (
+    GateReport,
+    GateSeverity,
+    GateStatus,
+    GateViolation,
+)
 from .models import (
     PHASE_ORDER,
     PHASE_PROGRESS_RANGES,
@@ -98,6 +104,10 @@ __all__ = [
     "load_style_file",
     "read_artifact",
     "write_artifact",
+    "GateReport",
+    "GateSeverity",
+    "GateStatus",
+    "GateViolation",
     "ContentProfile",
     "LengthPolicy",
     "SeriesContext",

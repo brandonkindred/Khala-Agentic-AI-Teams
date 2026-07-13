@@ -18,8 +18,8 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from branding_team.config import env_int
 from branding_team.models import BrandingMission, ColorPalette
+from shared_env_config import env_int
 
 from .prompts import (
     EXTRACTION_SYSTEM_PROMPT,
@@ -342,7 +342,7 @@ def _history_window() -> int:
     and memory. Capping to the most recent turns keeps per-turn cost roughly
     constant while preserving the immediate context the strategist needs.
     """
-    return env_int("BRANDING_ASSISTANT_HISTORY_WINDOW", 20, minimum=1)
+    return env_int("BRANDING_ASSISTANT_HISTORY_WINDOW", 20, floor=1)
 
 
 def _format_history(messages: List[Tuple[str, str]]) -> str:
