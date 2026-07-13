@@ -84,7 +84,6 @@ def start_paper_trading_workflow(session_id: str, payload: dict[str, Any]) -> No
           investment task queue. Raises ``RuntimeError`` if the worker client
           never becomes available.
     """
-    from investment_team.temporal import TASK_QUEUE, WORKFLOW_ID_PREFIX
     from investment_team.temporal.paper_trading import PaperTradingWorkflow
     from shared_temporal import start_workflow_sync
 
@@ -110,7 +109,6 @@ def signal_paper_trading_stop(session_id: str) -> None:
           ``investment-pt-{session_id}``; the running session terminates at the
           next bar. Raises ``RuntimeError`` if the worker client is unavailable.
     """
-    from investment_team.temporal import WORKFLOW_ID_PREFIX
     from shared_temporal import signal_workflow_sync
 
     workflow_id = f"{WORKFLOW_ID_PREFIX}pt-{session_id}"
@@ -161,8 +159,8 @@ def execute_advisory_workflow(op: str, payload: dict[str, Any], *, key: str) -> 
           ``ApplicationError``) on error.
     """
     from investment_team.temporal.advisory import (
-        _ADVISORY_TIMEOUT,
         ADVISORY_TASK_QUEUE,
+        ADVISORY_TIMEOUT,
         ADVISORY_WORKFLOW_ID_PREFIX,
         AdvisorCompleteWorkflow,
         AdvisorMessageWorkflow,
@@ -197,7 +195,7 @@ def execute_advisory_workflow(op: str, payload: dict[str, Any], *, key: str) -> 
     # (_ADVISORY_RETRY caps retries at 1); give the execute-and-wait call a
     # modest buffer above that ceiling rather than the shared 300s default, so
     # a genuinely hung worker fails this interactive call well under 5 minutes.
-    execute_timeout_s = _ADVISORY_TIMEOUT.total_seconds() + 60.0
+    execute_timeout_s = ADVISORY_TIMEOUT.total_seconds() + 60.0
     return execute_workflow_sync(
         workflow_cls.run,
         payload,

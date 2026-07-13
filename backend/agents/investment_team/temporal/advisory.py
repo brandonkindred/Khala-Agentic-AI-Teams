@@ -40,7 +40,11 @@ ADVISORY_WORKFLOW_ID_PREFIX = "investment-adv-"
 # blind Temporal retry could double-apply a mutation on a worker crash. Bound to
 # a single attempt — a crash surfaces to the caller, which can safely re-issue.
 _ADVISORY_RETRY = RetryPolicy(maximum_attempts=1)
-_ADVISORY_TIMEOUT = timedelta(minutes=2)
+
+# Public (no leading underscore): start_workflow.execute_advisory_workflow
+# reads this to size the execute-and-wait client-side timeout it layers on top
+# of the activity's own start_to_close_timeout below.
+ADVISORY_TIMEOUT = timedelta(minutes=2)
 
 
 def _as_model(model_cls: Any, raw: Any) -> Any:
@@ -487,7 +491,7 @@ async def _run_single_activity(fn: Any, payload: dict[str, Any]) -> dict[str, An
     return await workflow.execute_activity(
         fn,
         args=[payload],
-        start_to_close_timeout=_ADVISORY_TIMEOUT,
+        start_to_close_timeout=ADVISORY_TIMEOUT,
         retry_policy=_ADVISORY_RETRY,
     )
 
@@ -652,6 +656,7 @@ ADVISORY_ACTIVITIES = [
 __all__ = [
     "ADVISORY_ACTIVITIES",
     "ADVISORY_TASK_QUEUE",
+    "ADVISORY_TIMEOUT",
     "ADVISORY_WORKFLOWS",
     "ADVISORY_WORKFLOW_ID_PREFIX",
     "AdvisorCompleteWorkflow",

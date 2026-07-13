@@ -83,20 +83,30 @@ def test_start_paper_trading_503_when_disabled(monkeypatch) -> None:
     assert ei.value.status_code == 503
 
 
-def test_start_and_signal_delegate_when_enabled(monkeypatch) -> None:
+def test_start_paper_trading_delegates_when_enabled(monkeypatch) -> None:
     import shared_temporal
     from investment_team.temporal import start_workflow as sw
 
     monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
-    started, signalled = [], []
+    started = []
     monkeypatch.setattr(
         sw, "start_paper_trading_workflow", lambda sid, payload: started.append(sid)
     )
-    monkeypatch.setattr(sw, "signal_paper_trading_stop", lambda sid: signalled.append(sid))
 
     REAL_START_PAPER("pt-1", {"session_id": "pt-1"})
+    assert started == ["pt-1"]
+
+
+def test_signal_paper_trading_stop_delegates_when_enabled(monkeypatch) -> None:
+    import shared_temporal
+    from investment_team.temporal import start_workflow as sw
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    signalled = []
+    monkeypatch.setattr(sw, "signal_paper_trading_stop", lambda sid: signalled.append(sid))
+
     REAL_SIGNAL_STOP("pt-1")
-    assert started == ["pt-1"] and signalled == ["pt-1"]
+    assert signalled == ["pt-1"]
 
 
 def test_route_returns_503_when_temporal_disabled(monkeypatch) -> None:
@@ -189,6 +199,29 @@ def test_execute_advisory_workflow_truncates_long_key(monkeypatch) -> None:
     assert captured["workflow_id"].startswith(
         f"investment-adv-advisor_start-{huge_key[: sw._ADVISORY_KEY_MAX_LEN]}-"
     )
+
+
+def test_execute_advisory_workflow_empty_key_still_dispatches(monkeypatch) -> None:
+    """An empty-string key (a valid, if degenerate, caller-supplied label —
+    see the precondition docstring) still produces a well-formed, dispatchable
+    workflow id rather than a malformed one. ``None`` is not a valid ``key``
+    (every call site's Pydantic request field is a required, non-optional
+    ``str``), so it is out of this function's precondition and not exercised
+    here."""
+    import shared_temporal
+    from investment_team.temporal import start_workflow as sw
+
+    captured = {}
+
+    def _fake_exec(run, payload, *, workflow_id, task_queue, execute_timeout_s=None):
+        captured["workflow_id"] = workflow_id
+        return {"ok": 1}
+
+    monkeypatch.setattr(shared_temporal, "execute_workflow_sync", _fake_exec)
+
+    sw.execute_advisory_workflow("advisor_start", {}, key="")
+
+    assert captured["workflow_id"].startswith("investment-adv-advisor_start--")
 
 
 def test_execute_advisory_workflow_unknown_op_raises() -> None:

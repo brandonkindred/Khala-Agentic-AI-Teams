@@ -103,7 +103,6 @@ def test_advisor_complete_activity_maps_build_ips_value_error(monkeypatch) -> No
 
     session = FinancialAdvisorAgent().start_session("adv-1", "u1")
     monkeypatch.setattr(api_main, "_advisor_sessions", {"adv-1": session})
-    monkeypatch.setattr(api_main, "_advisor_agent", api_main._advisor_agent)
     monkeypatch.setattr(FinancialAdvisorAgent, "missing_fields", staticmethod(lambda collected: []))
 
     def _boom(self, session):
