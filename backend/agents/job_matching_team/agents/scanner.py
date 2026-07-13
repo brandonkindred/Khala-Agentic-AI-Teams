@@ -14,6 +14,13 @@ logger = logging.getLogger(__name__)
 
 _VALID_REMOTE = {"remote", "hybrid", "onsite", "unknown"}
 
+# Upper bound on a stored posting description. LLM extraction normally returns a
+# short summary, but a misbehaving model can echo a large slice of the page. Cap
+# it so a single posting can't bloat the DB row, the ranker's LLM prompt, or —
+# in Temporal mode — the postings payload that crosses the scan->rank activity
+# boundary. Applied at the source so both execution modes store the same value.
+_MAX_DESCRIPTION_CHARS = 8000
+
 
 class JobScannerAgent:
     """Run web searches, fetch listing pages, and extract structured postings.
@@ -149,7 +156,7 @@ class JobScannerAgent:
             currency=str(data.get("currency") or "USD").strip() or "USD",
             url=hit.url,
             source=hit.source,
-            description=str(data.get("description") or "").strip(),
+            description=str(data.get("description") or "").strip()[:_MAX_DESCRIPTION_CHARS],
             posted_at=(str(data["posted_at"]) if data.get("posted_at") else None),
         )
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import get_strands_model
 
@@ -64,6 +64,16 @@ class SafetyInvariantError(RuntimeError):
     Steady-state this must remain zero. A non-zero rate in production
     is a pageable incident — the calculator is supposed to have
     prevented the violation already.
+    """
+
+
+class OperationCancelled(Exception):
+    """Raised by a long-running orchestrator operation when a caller-supplied
+    ``cancel_check`` reports the job was cancelled partway through the call.
+
+    Lets a caller (e.g. the async job pipeline) fail fast between expensive
+    steps of an otherwise-opaque public method, without the orchestrator
+    itself knowing about job IDs or a job store.
     """
 
 
@@ -419,13 +429,34 @@ class NutritionMealPlanningOrchestrator:
         plan = self._get_or_generate_nutrition_plan(profile)
         return NutritionPlanResponse(client_id=request.client_id, plan=plan)
 
-    def get_meal_plan(self, request: MealPlanRequest) -> MealPlanResponse:
-        """Load profile, nutrition plan, meal history; run meal planning agent; record each suggestion."""
+    def get_meal_plan(
+        self, request: MealPlanRequest, *, cancel_check: Optional[Callable[[], bool]] = None
+    ) -> MealPlanResponse:
+        """Load profile, nutrition plan, meal history; run meal planning agent; record each suggestion.
+
+        Preconditions:
+            - ``request.client_id`` identifies a client (raises ``ValueError`` if
+              no profile exists).
+            - ``cancel_check``, if given, is a zero-arg callable safe to call
+              repeatedly, returning True once the caller's job has been cancelled.
+
+        Postconditions:
+            - Returns the assembled ``MealPlanResponse`` on success.
+            - Raises ``OperationCancelled`` instead of running the (expensive)
+              meal-planning LLM call if ``cancel_check()`` reports cancellation
+              right after nutrition-plan generation — a fail-fast checkpoint so a
+              job cancelled mid-run doesn't still pay for the LLM call it will
+              never use.
+        """
         profile = self.profile_store.get_profile(request.client_id)
         if profile is None:
             raise ValueError("Profile not found")
         guardrail_on = is_guardrail_enabled()
         nutrition_plan = self._get_or_generate_nutrition_plan(profile)
+        if cancel_check is not None and cancel_check():
+            raise OperationCancelled(
+                f"meal plan for {request.client_id} cancelled after nutrition-plan generation"
+            )
         meal_history = self.meal_feedback_store.get_meal_history(request.client_id, limit=50)
         suggestions = self.meal_planning_agent.run(
             profile,
