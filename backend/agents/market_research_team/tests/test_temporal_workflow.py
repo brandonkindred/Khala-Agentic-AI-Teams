@@ -75,10 +75,11 @@ class _Recorder:
         self.calls: list[tuple[str, dict]] = []
         self.results = results
         self.raise_for = raise_for or {}
-        # The workflow only ever starts one activity via ``start_activity``
-        # (``scripts``), so a single slot is enough to let tests assert on the
-        # handle it was given (e.g. that ``.cancel()`` was called on it).
-        self.started_handle: _Handle | None = None
+        # Keyed by activity name: the workflow now starts scripts AND (in
+        # split mode) both psychology and consistency via ``start_activity``,
+        # so tests need to assert on a *specific* stage's handle (e.g. that
+        # scripts, not psychology, was the one cancelled).
+        self.started_handles: dict[str, _Handle] = {}
 
     async def execute_activity(self, fn, *args, **kwargs):
         name = _act_name(fn)
@@ -102,8 +103,9 @@ class _Recorder:
         # failure only surfaces when the handle is later awaited.
         if name not in self.results and name not in self.raise_for:
             raise KeyError(f"Unknown activity started (not seeded in results): {name}")
-        self.started_handle = _Handle(self.results.get(name), error=self.raise_for.get(name))
-        return self.started_handle
+        handle = _Handle(self.results.get(name), error=self.raise_for.get(name))
+        self.started_handles[name] = handle
+        return handle
 
     def names(self) -> list[str]:
         return [name for name, _ in self.calls]
@@ -355,8 +357,7 @@ def test_workflow_cancels_scripts_handle_when_analysis_gate_reports_terminal(mon
     out = _run(_REQUEST_UNIFIED)
 
     assert out == {"job_id": "job-x"}
-    assert rec.started_handle is not None
-    assert rec.started_handle._cancelled is True
+    assert rec.started_handles["market_research_scripts"]._cancelled is True
     assert "market_research_psychology" not in rec.names()
     assert "market_research_viability" not in rec.names()
     assert "market_research_finalize" not in rec.names()
@@ -391,13 +392,65 @@ def test_workflow_cancels_scripts_handle_when_viability_gate_reports_terminal(mo
     out = _run(_REQUEST_UNIFIED)
 
     assert out == {"job_id": "job-x"}
-    assert rec.started_handle is not None
-    assert rec.started_handle._cancelled is True
+    assert rec.started_handles["market_research_scripts"]._cancelled is True
     assert "market_research_psychology" in rec.names()
     assert "market_research_viability" not in rec.names()
     assert "market_research_finalize" not in rec.names()
     assert "market_research_cleanup_transcripts" in rec.names()
     assert rec.kwargs_for("market_research_cleanup_transcripts")["args"][0] == "job-x"
+
+
+def test_workflow_cancels_scripts_handle_when_finalize_gate_reports_terminal(monkeypatch) -> None:
+    """Regression: a cancel landing after viability_activity succeeds (before
+    the run would await scripts + finalize) must also cancel + drain
+    scripts_handle and clean up persisted transcripts — not fall through to
+    awaiting the possibly still-running scripts activity for a dead job."""
+    progress_calls = {"n": 0}
+
+    class _GateRecorder(_Recorder):
+        async def execute_activity(self, fn, *args, **kwargs):
+            name = _act_name(fn)
+            if name == "market_research_report_progress":
+                progress_calls["n"] += 1
+                self.calls.append((name, {"args": args, **kwargs}))
+                # "ingest"/"analysis"/"viability" gates stay active; the
+                # "finalize" gate reports the job has gone terminal.
+                return progress_calls["n"] < 4
+            return await super().execute_activity(fn, *args, **kwargs)
+
+    rec = _GateRecorder(_default_results())
+    _install(monkeypatch, rec)
+
+    out = _run(_REQUEST_UNIFIED)
+
+    assert out == {"job_id": "job-x"}
+    assert rec.started_handles["market_research_scripts"]._cancelled is True
+    assert "market_research_viability" in rec.names()
+    assert "market_research_finalize" not in rec.names()
+    assert "market_research_cleanup_transcripts" in rec.names()
+    assert rec.kwargs_for("market_research_cleanup_transcripts")["args"][0] == "job-x"
+
+
+def test_workflow_cancels_sibling_signal_handle_on_split_stage_failure(monkeypatch) -> None:
+    """Regression: in split topology, asyncio.gather propagates the first of
+    psychology/consistency's failures but does NOT cancel the other awaitable
+    on its own — the except block must explicitly cancel+drain whichever
+    signal handle is still live, not just scripts_handle."""
+    results = _default_results()
+    results["market_research_prepare"]["request"] = _REQUEST_SPLIT
+    rec = _Recorder(
+        results,
+        raise_for={"market_research_consistency": RuntimeError("consistency boom")},
+    )
+    _install(monkeypatch, rec)
+
+    with pytest.raises(RuntimeError, match="consistency boom"):
+        _run(_REQUEST_SPLIT)
+
+    assert rec.started_handles["market_research_scripts"]._cancelled is True
+    assert rec.started_handles["market_research_psychology"]._cancelled is True
+    assert rec.started_handles["market_research_consistency"]._cancelled is True
+    assert "market_research_mark_failed" in rec.names()
 
 
 def test_workflow_cancels_scripts_handle_on_stage_failure(monkeypatch) -> None:
@@ -412,7 +465,7 @@ def test_workflow_cancels_scripts_handle_on_stage_failure(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="viability boom"):
         _run(_REQUEST_UNIFIED)
 
-    assert rec.started_handle._cancelled is True
+    assert rec.started_handles["market_research_scripts"]._cancelled is True
 
 
 def test_workflow_scripts_failure_is_best_effort(monkeypatch) -> None:

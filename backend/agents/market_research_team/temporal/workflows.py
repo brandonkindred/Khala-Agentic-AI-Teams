@@ -201,6 +201,12 @@ class MarketResearchWorkflow:
             retry_policy=LLM_RETRY,
         )
 
+        # Populated once psychology/(split-mode) consistency are started, so the
+        # except block below can cancel+drain whichever were actually scheduled
+        # if the sibling activity or a later stage fails.
+        psych_handle: workflow.ActivityHandle | None = None
+        cons_handle: workflow.ActivityHandle | None = None
+
         try:
             # Ingest persists transcripts to the shared per-job store and returns
             # only lightweight refs ({"index", "source"}); the transcript bodies
@@ -253,8 +259,12 @@ class MarketResearchWorkflow:
             if refs and not insights:
                 raise RuntimeError(f"All {len(refs)} transcript analyses failed")
 
-            # Psychology and (split mode) consistency run concurrently after UX.
-            psych_coro = workflow.execute_activity(
+            # Psychology and (split mode) consistency run concurrently after UX,
+            # via handles (not bare execute_activity coroutines) so the except
+            # block below can cancel+drain whichever is still running if its
+            # sibling fails — asyncio.gather does NOT cancel the other
+            # awaitable when one raises, it only propagates the first exception.
+            psych_handle = workflow.start_activity(
                 _act.psychology_activity,
                 args=[ctx, insights],
                 start_to_close_timeout=_STAGE_TIMEOUT,
@@ -262,17 +272,17 @@ class MarketResearchWorkflow:
                 retry_policy=LLM_RETRY,
             )
             if split:
-                cons_coro = workflow.execute_activity(
+                cons_handle = workflow.start_activity(
                     _act.consistency_activity,
                     args=[ctx, insights],
                     start_to_close_timeout=_STAGE_TIMEOUT,
                     heartbeat_timeout=_HEARTBEAT_TIMEOUT,
                     retry_policy=LLM_RETRY,
                 )
-                psych_signals, cons_signals = await asyncio.gather(psych_coro, cons_coro)
+                psych_signals, cons_signals = await asyncio.gather(psych_handle, cons_handle)
                 signals = psych_signals + cons_signals
             else:
-                signals = await psych_coro
+                signals = await psych_handle
 
             if not await self._progress(job_id, "viability", 75):
                 # Same terminal short-circuit as the "analysis" gate above:
@@ -288,14 +298,23 @@ class MarketResearchWorkflow:
                 heartbeat_timeout=_HEARTBEAT_TIMEOUT,
                 retry_policy=LLM_RETRY,
             )
+
+            if not await self._progress(job_id, "finalize", 90):
+                # A cancel landing while viability_activity ran must not fall
+                # through to awaiting the (possibly still-running) scripts
+                # activity for a job that's already done — same short-circuit
+                # as the gates above; psychology/consistency already
+                # succeeded by this point, so only scripts needs cancelling.
+                return await self._cancel_scripts_and_stop(job_id, scripts_handle)
         except BaseException:
-            # Any failure past this point must not leave the independently-
-            # scheduled scripts activity orphaned (still running/retrying for
-            # a job that's about to be marked FAILED). Request cancellation and
-            # drain the handle before this exception reaches run()'s catch-all.
-            scripts_handle.cancel()
-            with suppress(BaseException):
-                await scripts_handle
+            # Any failure past this point must not leave an independently-
+            # scheduled activity orphaned (still running/retrying for a job
+            # that's about to be marked FAILED): scripts always started
+            # earlier; psych_handle/cons_handle are non-None once psychology/
+            # consistency were actually scheduled (gather propagates the
+            # first failure without cancelling its sibling, so a
+            # psychology/consistency failure must cancel the other here).
+            await self._cancel_handles(scripts_handle, psych_handle, cons_handle)
             raise
 
         scripts = await self._await_scripts(job_id, scripts_handle)
@@ -308,35 +327,51 @@ class MarketResearchWorkflow:
         )
         return {"job_id": job_id}
 
+    async def _cancel_handles(self, *handles: "workflow.ActivityHandle | None") -> None:
+        """Cancel + drain any number of started activity handles (skips ``None``).
+
+        Preconditions:
+            - Each non-``None`` element of ``handles`` is an ``ActivityHandle``
+              returned by ``workflow.start_activity``.
+        Postconditions:
+            - Every non-``None`` handle has ``.cancel()`` requested (all up
+              front, so none of them keep running while an earlier one is
+              drained) and is then awaited, suppressing any resulting
+              exception (including a benign ``CancelledError``) — so none of
+              them can resurface after this method returns.
+        """
+        live = [h for h in handles if h is not None]
+        for handle in live:
+            handle.cancel()
+        for handle in live:
+            with suppress(BaseException):
+                await handle
+
     async def _cancel_scripts_and_stop(
         self, job_id: str, handle: workflow.ActivityHandle
     ) -> dict[str, Any]:
         """Cancel the scripts activity and clean up for an early terminal return.
 
-        Used by the "analysis" and "viability" progress gates when the job has
-        already gone terminal (cancel / stale-job monitor) — both return
-        directly to :meth:`run` as a clean success, so neither
+        Used by the "analysis"/"viability"/"finalize" progress gates when the
+        job has already gone terminal (cancel / stale-job monitor) — all three
+        return directly to :meth:`run` as a clean success, so neither
         ``finalize_activity`` nor ``mark_failed_activity`` (the DAG's only
         other cleanup sites) ever runs for this path.
 
         Preconditions:
             - ``handle`` is the ``ActivityHandle`` returned by starting
-              ``scripts_activity``; ``ingest_activity`` has already run (both
-              call sites are past it), so the job's transcripts may already be
-              persisted.
+              ``scripts_activity``; ``ingest_activity`` has already run (all
+              three call sites are past it), so the job's transcripts may
+              already be persisted.
         Postconditions:
-            - Cancels + drains ``handle`` (suppressing any resulting
-              exception, including a benign ``CancelledError``) so the
-              in-flight LLM call is never left running for a job that's
-              already done. Clears the job's persisted transcript directory
-              via a dedicated activity (best-effort — never raises) so it
-              doesn't sit on disk until the next process-startup sweep.
-              Returns ``{"job_id": job_id}`` for the caller to return
-              directly.
+            - Cancels + drains ``handle`` so the in-flight LLM call is never
+              left running for a job that's already done. Clears the job's
+              persisted transcript directory via a dedicated activity
+              (best-effort — never raises) so it doesn't sit on disk until
+              the next process-startup sweep. Returns ``{"job_id": job_id}``
+              for the caller to return directly.
         """
-        handle.cancel()
-        with suppress(BaseException):
-            await handle
+        await self._cancel_handles(handle)
         await workflow.execute_activity(
             _act.cleanup_transcripts_activity,
             args=[job_id],
