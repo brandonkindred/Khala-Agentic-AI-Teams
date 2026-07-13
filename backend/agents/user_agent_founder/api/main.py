@@ -715,7 +715,10 @@ def list_testable_teams() -> TestableTeamsResponse:
     # (e.g. a module/None after a refactor), the ``.get`` below would 500. Degrade
     # to generated display names instead.
     if not isinstance(TEAM_CONFIGS, dict):
-        logger.warning("TEAM_CONFIGS is not a dict (%s); using default display names", type(TEAM_CONFIGS).__name__)
+        logger.warning(
+            "TEAM_CONFIGS is not a dict (%s); using default display names",
+            type(TEAM_CONFIGS).__name__,
+        )
         TEAM_CONFIGS = {}
     teams: list[TestableTeam] = []
     for team_key in ADAPTERS:
@@ -899,7 +902,24 @@ def list_jobs(running_only: bool = False) -> FounderJobListResponse:
 
 @app.post("/job/{job_id}/cancel")
 def cancel_job(job_id: str) -> dict[str, str]:
-    """Cancel a running founder workflow job."""
+    """Cancel a running founder workflow job.
+
+    Preconditions:
+        - ``job_id`` refers to a job in a cancellable status (see
+          ``_cancellable_statuses()``); a missing or non-cancellable job raises
+          ``HTTPException`` (404/400) before any write.
+    Postconditions:
+        - The central job is marked CANCELLED and the founder run row "failed"
+          (both carrying the "Cancelled by user" error) — this pair of writes
+          always happens and is what the response reflects.
+        - Best-effort, additive: when Temporal is enabled, also signals the
+          in-flight ``UserAgentFounderWorkflow`` to stop at its next
+          cancellation check. This signal is never required for the cancel to
+          succeed — any failure to deliver it (worker down, RPC timeout) is
+          caught and logged at DEBUG, never raised or reflected in the
+          response, since the two writes above are already the durable record
+          of the cancellation.
+    """
     from user_agent_founder.shared import job_store
 
     try:
@@ -912,7 +932,28 @@ def cancel_job(job_id: str) -> dict[str, str]:
 
     job_store.update_job(job_id, status=job_store.JOB_STATUS_CANCELLED, error="Cancelled by user")
     store = get_founder_store()
+    # The centralized job service has a dedicated CANCELLED status; the founder run
+    # store does not — its status vocabulary only has a terminal-non-success value,
+    # "failed" (the orchestrator likewise maps a target-team cancellation to
+    # "failed" in _run_phase). So a user cancel is CANCELLED on the job and "failed"
+    # on the run row by design; both carry the "Cancelled by user" error for the
+    # audit trail. (Behavior predates the Temporal work; documented here per review.)
     store.update_run(job_id, status="failed", error="Cancelled by user")
+
+    # Best-effort: signal the Temporal workflow so its poll loops stop at the next
+    # tick instead of running to completion after the store already says cancelled.
+    # Thread mode has no workflow to signal — its poll loop observes the cancelled
+    # job status directly — so this is Temporal-only and never fatal to the cancel.
+    try:
+        from shared_temporal import is_temporal_enabled
+
+        if is_temporal_enabled():
+            from user_agent_founder.temporal.start_workflow import cancel_founder_workflow
+
+            cancel_founder_workflow(job_id)
+    except Exception:
+        logger.debug("Temporal cancel signal failed for %s (non-fatal)", job_id, exc_info=True)
+
     return {"status": job_store.JOB_STATUS_CANCELLED, "job_id": job_id}
 
 
