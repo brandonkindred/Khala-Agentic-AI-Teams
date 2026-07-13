@@ -344,6 +344,19 @@ class TranscriptIngestionAgent:
     """Loads transcript text from a mission payload or folder path."""
 
     def load_transcripts(self, mission: ResearchMission) -> List[tuple[str, str]]:
+        """Load transcript text from inline transcripts and/or a transcript folder.
+
+        Preconditions:
+            - ``mission`` is a validated ``ResearchMission``.
+        Postconditions:
+            - Returns ``[(source, text), ...]`` — inline transcripts first
+              (labeled ``inline_transcript_N``), then ``*.txt`` files from
+              ``transcript_folder_path`` if set (sorted, labeled by
+              filename). Blank/whitespace-only entries are skipped.
+              Truncated to the first ``_MAX_TRANSCRIPTS`` (logging a warning)
+              if the combined count exceeds it, to bound the per-transcript
+              analysis fan-out.
+        """
         loaded: List[tuple[str, str]] = []
 
         for index, text in enumerate(mission.transcripts, start=1):
@@ -378,6 +391,16 @@ class UXResearchAgent:
     _system_prompt: str = field(default=_UX_RESEARCH_SYSTEM_PROMPT, init=False, repr=False)
 
     def analyze(self, source: str, transcript: str) -> InterviewInsight:
+        """Extract user jobs, pain points, desired outcomes, and quotes from one transcript.
+
+        Preconditions:
+            - ``source`` labels the transcript (e.g. a filename); ``transcript``
+              is its full text.
+        Postconditions:
+            - Returns an ``InterviewInsight`` tagged with ``source``. A
+              malformed or unparseable LLM response falls back to the
+              module's default fields rather than raising.
+        """
         # Fresh agent per call to avoid history pollution across transcripts.
         agent = _build_strands_agent(self._system_prompt, _DEFAULT_TOOLS)
         prompt = (
@@ -413,6 +436,16 @@ class UserPsychologyAgent:
         self._agent = _build_strands_agent(_USER_PSYCHOLOGY_SYSTEM_PROMPT, _DEFAULT_TOOLS)
 
     def derive_signals(self, insights: List[InterviewInsight]) -> List[MarketSignal]:
+        """Derive adoption/behavior-change market signals from interview insights.
+
+        Preconditions:
+            - ``insights`` is the per-interview UX output (may be empty).
+        Postconditions:
+            - Returns at least two ``MarketSignal`` objects — a malformed or
+              short LLM response is padded with ``_DEFAULT_SIGNALS_FALLBACK``
+              entries. A null/non-string ``signal`` name falls back to
+              ``"Unknown signal"``; confidence is clamped to ``[0.0, 1.0]``.
+        """
         insights_json = json.dumps([i.model_dump() for i in insights], indent=2)
         prompt = (
             f"Analyze the following interview insights and derive market signals "
@@ -514,6 +547,21 @@ class MarketViabilityAgent:
     def recommend(
         self, mission: ResearchMission, signals: List[MarketSignal], insight_count: int
     ) -> ViabilityRecommendation:
+        """Produce a viability verdict from the mission and derived market signals.
+
+        Preconditions:
+            - ``mission`` is a validated ``ResearchMission``; ``signals`` are
+              the derived signals (may be empty when ``insight_count == 0``);
+              ``insight_count`` is the number of successfully-analyzed
+              transcripts.
+        Postconditions:
+            - ``insight_count == 0`` → a deterministic ``insufficient_evidence``
+              recommendation (no LLM call). Otherwise returns an LLM-backed
+              ``ViabilityRecommendation`` whose ``verdict`` is always one of
+              ``insufficient_evidence``/``needs_more_validation``/
+              ``promising_with_risks`` — an invalid or missing verdict from
+              the LLM falls back to ``needs_more_validation``.
+        """
         # Deterministic response for zero-evidence case (no LLM call needed).
         if insight_count == 0:
             return ViabilityRecommendation(
@@ -576,6 +624,16 @@ class ResearchScriptAgent:
         self._agent = _build_strands_agent(_RESEARCH_SCRIPT_SYSTEM_PROMPT, _DEFAULT_TOOLS)
 
     def build_scripts(self, mission: ResearchMission) -> List[str]:
+        """Generate the research scripts/templates for a mission.
+
+        Preconditions:
+            - ``mission`` is a validated ``ResearchMission``.
+        Postconditions:
+            - Returns a non-empty ``list[str]`` (an interview script, a
+              transcript tagging guide, and a decision checkpoint template).
+              A malformed or empty LLM response falls back to
+              ``_DEFAULT_SCRIPTS_FALLBACK``.
+        """
         prompt = (
             f"Create research artifacts for the following product concept.\n\n"
             f"Product concept: {mission.product_concept}\n"
