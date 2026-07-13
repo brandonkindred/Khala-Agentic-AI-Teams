@@ -4,20 +4,19 @@ Models for the Fact-Checker and Risk Officer agent.
 
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import Field
+from shared.gate_report import GateReport, GateStatus
 
-Status = Literal["PASS", "FAIL"]
 
-
-class FactCheckReport(BaseModel):
+class FactCheckReport(GateReport):
     """Output from the Fact-Checker and Risk Officer."""
 
-    claims_status: Status = Field(
+    claims_status: GateStatus = Field(
         ..., description="PASS if all claims are supported; FAIL otherwise."
     )
-    risk_status: Status = Field(
+    risk_status: GateStatus = Field(
         ...,
         description="PASS if no legal/medical/financial/security hazards; FAIL if disclaimers or fixes needed.",
     )

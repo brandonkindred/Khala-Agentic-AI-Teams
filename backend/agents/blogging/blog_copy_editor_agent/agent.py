@@ -59,7 +59,7 @@ class BlogCopyEditorAgent:
         try:
             p = Path(path).resolve()
             p.parent.mkdir(parents=True, exist_ok=True)
-            data = output.model_dump() if hasattr(output, "model_dump") else output.dict()
+            data = output.to_dict()
             p.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception as e:
             logger.warning("Failed to write editor feedback to %s: %s", path, e)
