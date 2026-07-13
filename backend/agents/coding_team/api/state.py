@@ -5,15 +5,15 @@ at call time so ``monkeypatch.setattr(main, ...)`` keeps taking effect after the
 split; models are imported directly.
 
 Invariants:
-    - ``_active_run_threads`` / ``_starting_run_jobs`` are the one registry pair;
-      callers mutate them in place under ``_run_thread_lock`` (never rebind), so
-      background threads and the answers/resume routes observe the same maps.
+    - The run-thread registry itself lives in ``shared_run_thread_registry.RunThreadRegistry``;
+      ``_active_run_threads``/``_starting_run_jobs``/``_run_thread_lock`` are back-compat aliases
+      onto its live internals, so background threads and the answers/resume routes observe the
+      same maps regardless of whether they go through the registry or poke these aliases directly.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -23,53 +23,22 @@ from coding_team.api.models import (
 )
 from shared_hitl.progress import coerce_progress
 from shared_hitl.validation import validate_answers
+from shared_run_thread_registry import RunThreadRegistry
 
 logger = logging.getLogger(__name__)
 
 # Tracks the orchestrator thread per job so the answers endpoint can tell whether a blocked wait
 # loop will pick up answers automatically (thread alive) or the job needs an explicit /resume (the
 # thread died, e.g. on a server restart). Mirrors the SE team's _active_orchestrator_threads.
-_active_run_threads: Dict[str, threading.Thread] = {}
-# Jobs whose orchestrator thread has been claimed but not yet started/registered. The claim closes
-# the check-then-spawn race in resume_job: a not-yet-started Thread reports is_alive()==False, so
-# without this marker two concurrent /resume calls could both spawn an orchestrator for one job.
-_starting_run_jobs: set[str] = set()
-_run_thread_lock = threading.Lock()
-
-
-def _register_run_thread(job_id: str) -> None:
-    with _run_thread_lock:
-        _active_run_threads[job_id] = threading.current_thread()
-        _starting_run_jobs.discard(job_id)
-
-
-def _clear_run_thread(job_id: str) -> None:
-    with _run_thread_lock:
-        _active_run_threads.pop(job_id, None)
-        _starting_run_jobs.discard(job_id)
-
-
-def _is_run_thread_alive(job_id: str) -> bool:
-    """True if an orchestrator thread for this job is still running (so a blocked wait will resume)."""
-    t = _active_run_threads.get(job_id)
-    return t is not None and t.is_alive()
-
-
-def _claim_run_thread(job_id: str) -> bool:
-    """Atomically claim the right to start an orchestrator thread for *job_id*.
-
-    Postconditions:
-        - Returns True (and marks the job 'starting') iff no thread is running or already being
-          started for it; False otherwise. The claim is released by _register_run_thread (once the
-          new thread registers) or _clear_run_thread.
-    """
-    with _run_thread_lock:
-        if (
-            _active_run_threads.get(job_id) is not None and _active_run_threads[job_id].is_alive()
-        ) or (job_id in _starting_run_jobs):
-            return False
-        _starting_run_jobs.add(job_id)
-        return True
+_registry = RunThreadRegistry()
+# Back-compat aliases — existing call sites and tests reference these names directly.
+_active_run_threads = _registry.threads
+_starting_run_jobs = _registry.starting_jobs
+_run_thread_lock = _registry.lock
+_register_run_thread = _registry.register
+_clear_run_thread = _registry.clear
+_is_run_thread_alive = _registry.is_alive
+_claim_run_thread = _registry.claim
 
 
 def _coerce_progress(value: Any) -> Optional[int]:
