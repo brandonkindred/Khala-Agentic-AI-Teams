@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import logging
 import os
 import threading
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, ContextManager, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, HTTPException, Query
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from pydantic import BaseModel, Field
@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from branding_team.assistant import get_conversation_store
 from branding_team.assistant.agent import BrandingAssistantAgent
 from branding_team.assistant.store import _default_mission, _StoredMessage
-from branding_team.config import env_int
+from branding_team.config import env_float, env_int
 from branding_team.models import (
     Brand,
     BrandCheckRequest,
@@ -49,13 +49,13 @@ from branding_team.shared.job_store import (
     update_job,
 )
 from branding_team.store import get_default_store
-from shared_observability import init_otel, instrument_fastapi_app
+from job_service_client import JobServiceClient, start_stale_job_monitor
+from shared_app import create_team_app
+from shared_concurrency import BackgroundHeartbeat
 from shared_postgres import get_conn
 from shared_postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
-
-init_otel(service_name="branding-team", team_key="branding")
 
 
 def _max_concurrent_runs() -> int:
@@ -72,6 +72,56 @@ _run_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=_max_concurrent_runs(),
     thread_name_prefix="branding-run",
 )
+
+
+def _job_heartbeat_interval_s() -> float:
+    """Heartbeat cadence for a running branding job (env-tunable, > 0)."""
+    return env_float("BRANDING_JOB_HEARTBEAT_INTERVAL_S", 30.0, positive=True)
+
+
+# Periodic sweep that fails jobs whose heartbeat has gone stale (e.g. a worker
+# crashed mid-run). Degrades gracefully: a job-service outage at import time
+# leaves both globals None instead of crashing the whole app.
+#
+# A branding pipeline can run for several minutes, and its bounded executor can
+# leave extra submissions queued as PENDING. While a job is RUNNING its heartbeat
+# is kept fresh by ``_job_heartbeat`` (see ``_run_branding_core``), so the sweep
+# never fails a live run regardless of length. The 900s window only has to cover
+# the worst-case PENDING queue wait before a worker picks the job up — a job stuck
+# PENDING that long is genuinely wedged and should be swept.
+try:
+    _job_manager = JobServiceClient(team="branding_team")
+    _stale_monitor_stop: Optional[threading.Event] = start_stale_job_monitor(
+        _job_manager,
+        interval_seconds=15.0,
+        stale_after_seconds=900.0,
+        reason="Job heartbeat stale while pending/running",
+    )
+except Exception as _init_err:
+    logger.warning("Branding job manager init failed: %s", _init_err)
+    _job_manager = None
+    _stale_monitor_stop = None
+
+
+def _job_heartbeat(job_id: str) -> ContextManager[Any]:
+    """Keep ``job_id``'s job-service heartbeat fresh while the pipeline runs.
+
+    Preconditions:
+        ``job_id`` refers to a job already created in the job store.
+    Postconditions:
+        Returns a context manager that, while active, pings the job service every
+        ``_job_heartbeat_interval_s()`` seconds so the stale-job monitor never marks
+        a valid long-running branding run as failed. A no-op context when the job
+        manager is unavailable; a beat error is logged and never interrupts the run.
+    """
+    if _job_manager is None:
+        return contextlib.nullcontext()
+    return BackgroundHeartbeat(
+        lambda: _job_manager.heartbeat(job_id),
+        _job_heartbeat_interval_s(),
+        name=f"branding-job-heartbeat-{job_id}",
+        on_error=lambda exc: logger.warning("branding job %s heartbeat error: %s", job_id, exc),
+    )
 
 
 async def _run_in_pipeline_executor(func, *args):
@@ -97,37 +147,36 @@ async def _run_in_pipeline_executor(func, *args):
     return await loop.run_in_executor(_run_executor, func, *args)
 
 
-@asynccontextmanager
-async def _lifespan(application: FastAPI):
-    """FastAPI startup/shutdown lifecycle for the branding app.
+def _branding_service_shutdown() -> None:
+    """Runs while Uvicorn still has the event loop, before the shared Postgres pool closes."""
+    if _stale_monitor_stop is not None:
+        _stale_monitor_stop.set()
 
-    On startup: registers the team's Postgres schema (a no-op when
-    ``POSTGRES_HOST`` is unset). On shutdown: stops the bounded run executor
-    (cancelling queued runs) and closes the shared Postgres pool. Failures in
-    either phase are logged, not raised, so app startup/teardown is resilient.
-    """
-    # Register Postgres schema (no-op when POSTGRES_HOST is unset).
-    try:
-        from shared_postgres import register_team_schemas
-
-        register_team_schemas(BRANDING_POSTGRES_SCHEMA)
-    except Exception:
-        logger.exception("branding postgres schema registration failed")
-    yield
     # Stop accepting new runs and cancel any still queued so worker threads
     # don't outlive the app. Don't block teardown on an in-flight pipeline
     # (a full run can take minutes); those threads finish on their own.
     _run_executor.shutdown(wait=False, cancel_futures=True)
-    try:
-        from shared_postgres import close_pool
 
-        close_pool()
-    except Exception:
-        logger.warning("branding shared_postgres close_pool failed", exc_info=True)
+    if _job_manager is not None:
+        logger.info("Branding service shutdown: notifying job-service…")
+        try:
+            _job_manager.mark_all_active_jobs_interrupted(
+                "Branding service shutting down",
+                http_timeout=5.0,
+                http_max_retries=0,
+            )
+        except Exception as exc:
+            logger.info("Job-service shutdown notification skipped: %s", exc)
 
 
-app = FastAPI(title="Branding Team API", version="2.0.0", lifespan=_lifespan)
-instrument_fastapi_app(app, team_key="branding")
+app = create_team_app(
+    service_name="branding-team",
+    team_key="branding",
+    title="Branding Team API",
+    version="2.0.0",
+    postgres_schema=BRANDING_POSTGRES_SCHEMA,
+    on_shutdown=_branding_service_shutdown,
+)
 
 branding_store = get_default_store()
 conversation_store = get_conversation_store()
@@ -750,17 +799,21 @@ def _run_branding_core(
         if is_job_cancelled(job_id):
             return
         update_job(job_id, status=JOB_STATUS_RUNNING)
-        result = orchestrator.run(
-            mission=mission,
-            human_review=human_review,
-            brand_checks=brand_checks,
-            store=branding_store if (client_id and brand_id) else None,
-            client_id=client_id,
-            brand_id=brand_id,
-            include_market_research=include_market_research,
-            include_design_assets=include_design_assets,
-            target_phase=target_phase,
-        )
+        # orchestrator.run has no progress callback, so it never touches the job
+        # heartbeat itself. Drive it from a background beater for the duration of the
+        # (potentially multi-minute) run so the stale-job monitor doesn't fail a live run.
+        with _job_heartbeat(job_id):
+            result = orchestrator.run(
+                mission=mission,
+                human_review=human_review,
+                brand_checks=brand_checks,
+                store=branding_store if (client_id and brand_id) else None,
+                client_id=client_id,
+                brand_id=brand_id,
+                include_market_research=include_market_research,
+                include_design_assets=include_design_assets,
+                target_phase=target_phase,
+            )
         if is_job_cancelled(job_id):
             return
         update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
