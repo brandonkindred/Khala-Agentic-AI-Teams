@@ -424,6 +424,39 @@ def test_promotion_decision_happy_path(api_client) -> None:
     assert "decision" in body
 
 
+def test_promotion_decision_updates_workflow_status_in_api_process(api_client) -> None:
+    """The route applies the activity's returned audit-log/escalation delta to
+    the local ``_workflow_state`` — a reject decision must show up in a
+    subsequent ``/workflow/status``/``/workflow/queues`` call in this same
+    process, mirroring how the activity may run in a separate worker."""
+    api_client.post("/profiles", json=_profile_payload())
+    create = api_client.post("/strategies", json=_strategy_body())
+    sid = create.json()["strategy_id"]
+    api_client.post(
+        f"/strategies/{sid}/validate",
+        json={"backtest_period": "2020-2024", "scenario_set": [], "checks": []},
+    )
+    # Self-approval (proposer == approver) triggers a "reject" outcome.
+    resp = api_client.post(
+        "/promotions/decide",
+        json={
+            "strategy_id": sid,
+            "user_id": "u1",
+            "proposer_agent_id": "p1",
+            "approver_agent_id": "p1",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["decision"]["outcome"] == "reject"
+
+    status = api_client.get("/workflow/status").json()
+    assert any(entry.startswith(f"promotion:{sid}:reject") for entry in status["audit_log"])
+    assert status["queue_counts"]["escalation"] == 1
+
+    queues = api_client.get("/workflow/queues").json()
+    assert any(item["payload_id"] == sid for item in queues["queues"]["escalation"])
+
+
 def test_workflow_status_and_queues(api_client) -> None:
     resp = api_client.get("/workflow/status")
     assert resp.status_code == 200
