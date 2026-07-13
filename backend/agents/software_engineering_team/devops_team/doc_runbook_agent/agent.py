@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import json
-
 from devops_team.models import (
     DevOpsCompletionPackage,
     GitOperationsMetadata,
     HandoffInfo,
     ReleaseReadiness,
 )
-from strands import Agent
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import DocumentationRunbookInput, DocumentationRunbookOutput
 from .prompts import DOC_RUNBOOK_PROMPT
@@ -35,8 +33,8 @@ class DocumentationRunbookAgent:
             f"quality_gates={input_data.quality_gates}\n"
             f"notes={input_data.notes}\n"
         )
-        data = json.loads(
-            str(Agent(model=self._model)(DOC_RUNBOOK_PROMPT + "\n\n---\n\n" + context)).strip()
+        data = complete_json_with_continuation(
+            self._model, DOC_RUNBOOK_PROMPT + "\n\n---\n\n" + context
         )
         completion = DevOpsCompletionPackage(
             task_id=input_data.task_id,

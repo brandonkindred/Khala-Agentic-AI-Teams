@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 from pathlib import Path
@@ -22,6 +23,7 @@ from devops_team.orchestrator import DEVOPS_REQUIRED_GATE_NAMES, ENV_POLICY
 from devops_team.task_clarifier import DevOpsTaskClarifierAgent, DevOpsTaskClarifierInput
 
 from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.shared import llm as llm_mod
 
 
 class _StubClient(DummyLLMClient):
@@ -1479,3 +1481,209 @@ class TestMainOrchestratorRegistration:
         source = Path(mod.__file__).read_text()
         assert "build_fix_specialist" in source
         assert "BuildFixSpecialistAgent" in source
+
+
+# ===========================================================================
+# FENCE-RECOVERY REGRESSION TESTS
+#
+# Each of these 8 agents now routes its raw LLM completion through
+# complete_json_with_continuation() instead of a bare json.loads(). These
+# tests exercise the real recovery path (llm_mod.Agent is mocked at the
+# shared/llm.py level, not at complete_json_with_continuation itself) to
+# prove a markdown-fenced response no longer crashes the agent.
+# ===========================================================================
+
+
+def _strands_model_double():
+    """Minimal double satisfying the Strands ``Model`` protocol for isinstance checks,
+    so agent __init__ resolves ``self._model`` to this instance without touching the
+    real get_client/get_strands_model machinery."""
+    from strands.models.model import Model as StrandsModel
+
+    class _M(StrandsModel):
+        def update_config(self, *a, **kw):
+            pass
+
+        def get_config(self):
+            return {}
+
+        def structured_output(self, *a, **kw):  # pragma: no cover
+            return {}
+
+        async def stream(self, *a, **kw):  # pragma: no cover
+            yield {}
+
+    return _M()
+
+
+def _fenced(payload: Dict[str, Any]) -> str:
+    return "```json\n" + json.dumps(payload) + "\n```"
+
+
+class _FencedAgentInstance:
+    def __init__(self, text: str):
+        self._text = text
+
+    def __call__(self, prompt, **kwargs):
+        return self._text
+
+
+def _patch_fenced_response(monkeypatch, payload: Dict[str, Any]) -> None:
+    text = _fenced(payload)
+    monkeypatch.setattr(llm_mod, "Agent", lambda *a, **kw: _FencedAgentInstance(text))
+
+
+class TestDevOpsAgentsRecoverFencedJson:
+    def test_iac_agent_recovers_fenced_response(self, monkeypatch) -> None:
+        from devops_team.iac_agent import IaCAgentInput, InfrastructureAsCodeAgent
+
+        _patch_fenced_response(
+            monkeypatch,
+            {
+                "artifacts": {"infra/main.tf": "resource {}"},
+                "summary": "fenced iac ok",
+                "destructive_changes_detected": False,
+                "blast_radius_notes": [],
+            },
+        )
+        agent = InfrastructureAsCodeAgent(_strands_model_double())
+        out = agent.run(IaCAgentInput(task_spec=_base_task_spec()))
+        assert "infra/main.tf" in out.artifacts
+        assert out.summary == "fenced iac ok"
+
+    def test_cicd_pipeline_agent_recovers_fenced_response(self, monkeypatch) -> None:
+        from devops_team.cicd_pipeline_agent import CICDPipelineAgent, CICDPipelineAgentInput
+
+        _patch_fenced_response(
+            monkeypatch,
+            {
+                "artifacts": {".github/workflows/ci.yml": "on: push"},
+                "pipeline_job_graph_summary": "build -> test",
+                "required_gates_present": True,
+                "summary": "fenced cicd ok",
+            },
+        )
+        agent = CICDPipelineAgent(_strands_model_double())
+        out = agent.run(CICDPipelineAgentInput(task_spec=_base_task_spec()))
+        assert ".github/workflows/ci.yml" in out.artifacts
+
+    def test_deployment_strategy_agent_recovers_fenced_response(self, monkeypatch) -> None:
+        from devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        _patch_fenced_response(
+            monkeypatch,
+            {
+                "artifacts": {"deploy/values.yaml": "replicas: 2"},
+                "strategy": "rolling",
+                "rollback_plan": ["helm rollback"],
+                "health_checks": ["/healthz"],
+                "rollout_timeout_minutes": 10,
+                "summary": "fenced deploy ok",
+            },
+        )
+        agent = DeploymentStrategyAgent(_strands_model_double())
+        out = agent.run(DeploymentStrategyAgentInput(task_spec=_base_task_spec()))
+        assert out.strategy == "rolling"
+
+    def test_infra_debug_agent_recovers_fenced_response(self, monkeypatch) -> None:
+        from devops_team.infra_debug_agent import IaCDebugInput, InfraDebugAgent
+
+        _patch_fenced_response(
+            monkeypatch,
+            {
+                "errors": [{"error_type": "syntax", "error_message": "bad hcl"}],
+                "summary": "fenced debug ok",
+                "fixable": True,
+            },
+        )
+        agent = InfraDebugAgent(_strands_model_double())
+        out = agent.run(
+            IaCDebugInput(
+                execution_output="Error: bad hcl",
+                tool_name="terraform",
+                command="plan",
+                artifacts={"main.tf": "resource {}"},
+            )
+        )
+        assert out.summary == "fenced debug ok"
+        assert out.fixable is True
+
+    def test_doc_runbook_agent_recovers_fenced_response(self, monkeypatch) -> None:
+        from devops_team.doc_runbook_agent import (
+            DocumentationRunbookAgent,
+            DocumentationRunbookInput,
+        )
+
+        _patch_fenced_response(
+            monkeypatch,
+            {
+                "files": {"docs/runbook.md": "# Runbook"},
+                "summary": "fenced doc ok",
+            },
+        )
+        agent = DocumentationRunbookAgent(_strands_model_double())
+        out = agent.run(
+            DocumentationRunbookInput(
+                task_id="DO-1",
+                task_title="test",
+                artifacts={"a.tf": "resource"},
+                quality_gates={"iac_validate": "pass"},
+            )
+        )
+        assert "docs/runbook.md" in out.files
+
+    def test_infra_patch_agent_recovers_fenced_response(self, monkeypatch) -> None:
+        from devops_team.infra_debug_agent.models import IaCDebugOutput, IaCExecutionError
+        from devops_team.infra_patch_agent import IaCPatchInput, InfraPatchAgent
+
+        _patch_fenced_response(
+            monkeypatch,
+            {
+                "patched_artifacts": {"main.tf": "resource {} # fixed"},
+                "summary": "fenced patch ok",
+                "edits_applied": 1,
+            },
+        )
+        agent = InfraPatchAgent(_strands_model_double())
+        debug_output = IaCDebugOutput(
+            errors=[IaCExecutionError(error_type="syntax", error_message="bad hcl")],
+            summary="debug",
+            fixable=True,
+        )
+        out = agent.run(
+            IaCPatchInput(
+                debug_output=debug_output,
+                original_artifacts={"main.tf": "resource {}"},
+            )
+        )
+        assert "main.tf" in out.patched_artifacts
+
+    def test_devsecops_review_agent_recovers_fenced_response(self, monkeypatch) -> None:
+        from devops_team.devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
+
+        _patch_fenced_response(
+            monkeypatch,
+            {"approved": True, "findings": [], "summary": "fenced sec ok"},
+        )
+        agent = DevSecOpsReviewAgent(_strands_model_double())
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert out.approved
+
+    def test_task_clarifier_recovers_fenced_response(self, monkeypatch) -> None:
+        from devops_team.task_clarifier import DevOpsTaskClarifierAgent, DevOpsTaskClarifierInput
+
+        _patch_fenced_response(
+            monkeypatch,
+            {
+                "approved_for_execution": True,
+                "checklist": ["done"],
+                "gaps": [],
+                "clarification_requests": [],
+            },
+        )
+        agent = DevOpsTaskClarifierAgent(_strands_model_double())
+        out = agent.run(DevOpsTaskClarifierInput(task_spec=_base_task_spec()))
+        assert out.approved_for_execution is True
