@@ -602,16 +602,20 @@ change duplicates a capability that already exists elsewhere in the
 repository, tool-verified before it is flagged — never guessed from naming
 alone). It never removes or alters any finding the map phase or the
 false-positive filter already produced. Requires
-`CodeReviewInput.architecture` to carry an `architecture_document` or
-`overview`; runs as a no-op (no LLM call) when neither is present. Any setup
+`CodeReviewInput.architecture` to carry an `architecture_document`,
+`overview`, `components`, or `decisions` — the pass renders whichever of
+these are present; runs as a no-op (no LLM call) when none are. Any setup
 or LLM failure is fail-safe: it is logged and yields no additional findings,
 so a broken pass never blocks or changes the rest of the review. Set to
 `false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
-enabled). Related sizing knob: `CODE_REVIEW_ARCH_DOC_CHARS` (default 40,000,
-floor 2,000) caps the architecture document inlined into this pass's single
-prompt — generous relative to the per-chunk `CODE_REVIEW_ARCH_OVERVIEW_CHARS`
-excerpt because this pass pays its cost once per submission, not once per
-chunk.
+enabled). Related sizing knob: `CODE_REVIEW_ARCH_DOC_CHARS` (see below).
+
+### CODE_REVIEW_ARCH_DOC_CHARS
+Caps the architecture document (plus the rendered `overview`/`components`/
+`decisions`) inlined into the architecture-consistency pass's single prompt.
+Default `40000`, floor `2000` — generous relative to the per-chunk
+`CODE_REVIEW_ARCH_OVERVIEW_CHARS` excerpt because this pass pays its cost once
+per submission, not once per chunk.
 
 ---
 
