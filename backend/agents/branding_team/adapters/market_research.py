@@ -10,8 +10,8 @@ from typing import Awaitable, Optional, TypeVar
 
 import httpx
 
-from branding_team.config import env_float
 from branding_team.models import BrandingMission, CompetitiveSnapshot
+from shared_env_config import env_float
 
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
@@ -41,15 +41,15 @@ def _run_blocking(coro: Awaitable[_T]) -> _T:
 
 
 def _poll_interval_s() -> float:
-    return env_float("BRANDING_MR_POLL_INTERVAL_S", 2.0, positive=True)
+    return env_float("BRANDING_MR_POLL_INTERVAL_S", 2.0, floor=0.1)
 
 
 def _total_timeout_s() -> float:
-    return env_float("BRANDING_MR_TOTAL_TIMEOUT_S", 600.0, positive=True)
+    return env_float("BRANDING_MR_TOTAL_TIMEOUT_S", 600.0, floor=1.0)
 
 
 def _request_timeout_s() -> float:
-    return env_float("BRANDING_MR_REQUEST_TIMEOUT_S", 30.0, positive=True)
+    return env_float("BRANDING_MR_REQUEST_TIMEOUT_S", 30.0, floor=1.0)
 
 
 def _base_url() -> Optional[str]:
