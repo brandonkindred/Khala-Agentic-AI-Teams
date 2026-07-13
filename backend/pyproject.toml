@@ -103,6 +103,16 @@ omit = [
     "agents/planning_team/temporal/start_workflow.py",
     "agents/planning_team/temporal/worker.py",
     "agents/planning_team/temporal/workflows.py",
+    # Accessibility-audit Temporal layer — same story: the per-phase workflow body,
+    # sync dispatch bridge, and worker bootstrap only run inside a live Temporal
+    # cluster. The per-phase activity wrappers (temporal/activities.py), the name
+    # literals (temporal/constants.py), and the shared step helpers
+    # (audit_execution.py) are covered by tests/test_temporal_bootstrap.py and
+    # tests/test_phase_steps.py against the in-process orchestrator, so they are
+    # deliberately NOT omitted.
+    "agents/accessibility_audit_team/temporal/start_workflow.py",
+    "agents/accessibility_audit_team/temporal/worker.py",
+    "agents/accessibility_audit_team/temporal/workflows.py",
     # Thin uvicorn/CLI entrypoints for the SE team — invoke the api/main app
     # without adding any business logic of their own.
     "agents/software_engineering_team/agent_implementations/*",
