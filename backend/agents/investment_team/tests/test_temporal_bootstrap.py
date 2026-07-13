@@ -513,6 +513,7 @@ def test_resume_dispatches_via_temporal_when_enabled(monkeypatch, api_client) ->
     """Finding 6: resume must also route through Temporal when enabled."""
     import shared_temporal
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
     from investment_team.strategy_lab.temporal import start_workflow as sl_sw
 
     state = {
@@ -527,7 +528,9 @@ def test_resume_dispatches_via_temporal_when_enabled(monkeypatch, api_client) ->
         "completed_cycles": 2,
         "contiguous_cycles": 2,
     }
-    monkeypatch.setattr(api_main, "_load_run_from_job_service", lambda rid: dict(state))
+    # ``resume`` looks the run up via ``_get_run_state``, whose durable fallback
+    # is ``run_state.load_run_from_job_service`` — patch that (not the api.main alias).
+    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: dict(state))
     monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
     started = []
     monkeypatch.setattr(
@@ -549,6 +552,7 @@ def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_clie
     re-runs from scratch."""
     import shared_temporal
     from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state
     from investment_team.strategy_lab.temporal import start_workflow as sl_sw
 
     state = {
@@ -562,7 +566,9 @@ def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_clie
         },
         "contiguous_cycles": 2,
     }
-    monkeypatch.setattr(api_main, "_load_run_from_job_service", lambda rid: dict(state))
+    # ``restart`` looks the run up via ``_get_run_state``, whose durable fallback
+    # is ``run_state.load_run_from_job_service`` — patch that (not the api.main alias).
+    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: dict(state))
     persisted = {}
     monkeypatch.setattr(api_main, "_persist_run_state", lambda rid, s, **k: persisted.update(s))
     monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
