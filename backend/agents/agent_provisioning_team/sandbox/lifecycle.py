@@ -494,9 +494,12 @@ class Lifecycle:
             * ``self._state_file`` reflects the ``_state`` snapshot taken at
               call time, or a newer one if a concurrent ``_persist()`` call was
               also in flight (self-healing either way — the next successful
-              call always reflects then-current state). Never raises; an
-              ``OSError`` writing the file is logged and swallowed, matching
-              the prior synchronous behavior.
+              call always reflects then-current state). Never raises; any
+              exception from the threaded write (an ``OSError`` from the
+              filesystem, or e.g. a serialization error inside
+              ``state_mod.save``) is logged and swallowed, matching the prior
+              synchronous behavior — a checkpoint write is best-effort and
+              must never surface as an unhandled task exception.
 
         Invariants:
             * The lock is held only for the synchronous ``dict(self._state)``
@@ -537,7 +540,7 @@ class Lifecycle:
 
         try:
             await asyncio.to_thread(_write_if_still_latest)
-        except OSError as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Could not persist sandbox state: %s", exc)
 
 

@@ -882,6 +882,22 @@ async def test_lifecycle_persist_swallows_oserror(tmp_path: Path, monkeypatch) -
         await lc._persist()
 
 
+@pytest.mark.asyncio
+async def test_lifecycle_persist_swallows_non_oserror(tmp_path: Path, monkeypatch) -> None:
+    """The docstring promises `_persist()` never raises; a non-OSError failure
+    inside `state.save` (e.g. a serialization error) must be swallowed the
+    same way an OSError is, not propagate as an unhandled task exception."""
+    from agent_provisioning_team.sandbox import lifecycle as lc_mod
+
+    lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
+
+    def fail_save(path, state):
+        raise TypeError("not serializable")
+
+    with patch.object(lc_mod.state_mod, "save", side_effect=fail_save):
+        await lc._persist()
+
+
 # ---------------------------------------------------------------------------
 # sandbox.state load + save edge cases
 # ---------------------------------------------------------------------------

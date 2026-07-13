@@ -219,6 +219,7 @@ def test_create_worker_returns_none_when_no_client() -> None:
 
 
 def test_create_worker_constructs_worker_when_enabled() -> None:
+    from agent_provisioning_team.temporal import ACTIVITIES, WORKFLOWS
     from agent_provisioning_team.temporal import worker as worker_mod
 
     fake_worker = MagicMock(name="fake-worker")
@@ -230,22 +231,14 @@ def test_create_worker_constructs_worker_when_enabled() -> None:
 
     assert result is fake_worker
     mock_worker_cls.assert_called_once()
-    # Ensure activities / workflows lists make it through
+    # The worker must serve exactly the canonical WORKFLOWS/ACTIVITIES lists
+    # from temporal/__init__.py — not a separately maintained copy — so the
+    # two can never silently drift out of sync.
     _, kwargs = mock_worker_cls.call_args
     assert kwargs["task_queue"] == worker_mod.TASK_QUEUE
-    assert worker_mod.AgentProvisioningWorkflow in kwargs["workflows"]
-    assert worker_mod.AgentProvisioningWorkflowV2 in kwargs["workflows"]
-    # Deprovision + sandbox lifecycle workflows are registered too.
-    assert worker_mod.AgentDeprovisioningWorkflow in kwargs["workflows"]
-    assert worker_mod.SandboxAcquireWorkflow in kwargs["workflows"]
-    assert worker_mod.SandboxTeardownWorkflow in kwargs["workflows"]
-    assert worker_mod.SandboxReaperWorkflow in kwargs["workflows"]
-    # 8 provisioning activities + deprovision + 3 sandbox activities.
+    assert kwargs["workflows"] is WORKFLOWS
+    assert kwargs["activities"] is ACTIVITIES
     assert len(kwargs["activities"]) == 12
-    assert worker_mod.deprovision_activity in kwargs["activities"]
-    assert worker_mod.sandbox_acquire_activity in kwargs["activities"]
-    assert worker_mod.sandbox_teardown_activity in kwargs["activities"]
-    assert worker_mod.sandbox_reap_activity in kwargs["activities"]
 
 
 def test_start_worker_thread_no_op_when_disabled() -> None:

@@ -421,7 +421,10 @@ def test_restart_job_temporal_path() -> None:
 
 def test_deprovision_returns_orchestrator_result() -> None:
     fake_resp = DeprovisionResponse(agent_id="a1", success=True)
-    with patch.object(api_main.orchestrator, "deprovision", return_value=fake_resp):
+    with (
+        patch.object(api_main, "_deprovision_starter", return_value=None),
+        patch.object(api_main.orchestrator, "deprovision", return_value=fake_resp),
+    ):
         r = client.delete("/environments/a1")
     assert r.status_code == 200
     assert r.json()["agent_id"] == "a1"
@@ -436,7 +439,10 @@ def test_deprovision_with_force_flag() -> None:
         captured["force"] = force
         return fake_resp
 
-    with patch.object(api_main.orchestrator, "deprovision", side_effect=fake_dep):
+    with (
+        patch.object(api_main, "_deprovision_starter", return_value=None),
+        patch.object(api_main.orchestrator, "deprovision", side_effect=fake_dep),
+    ):
         r = client.delete("/environments/a1?force=true")
     assert r.status_code == 200
     assert captured["force"] is True

@@ -13,6 +13,7 @@ diagnostics that want to build a ``Worker`` instance directly.
 from __future__ import annotations
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -22,38 +23,13 @@ from temporalio.worker.workflow_sandbox import (
     SandboxRestrictions,
 )
 
-from agent_provisioning_team.temporal.activities import (
-    audit_activity_v2,
-    compensate_activity_v2,
-    credentials_activity_v2,
-    deliver_activity_v2,
-    deprovision_activity,
-    documentation_activity_v2,
-    provision_tool_activity,
-    run_provisioning_activity,
-    setup_activity_v2,
-)
 from agent_provisioning_team.temporal.client import is_temporal_enabled
 from agent_provisioning_team.temporal.constants import TASK_QUEUE
-from agent_provisioning_team.temporal.sandbox_activities import (
-    sandbox_acquire_activity,
-    sandbox_reap_activity,
-    sandbox_teardown_activity,
-)
-from agent_provisioning_team.temporal.sandbox_workflows import (
-    SandboxAcquireWorkflow,
-    SandboxReaperWorkflow,
-    SandboxTeardownWorkflow,
-)
-from agent_provisioning_team.temporal.workflows import (
-    AgentDeprovisioningWorkflow,
-    AgentProvisioningWorkflow,
-    AgentProvisioningWorkflowV2,
-)
 
 logger = logging.getLogger(__name__)
 
 _activity_executor: Optional[ThreadPoolExecutor] = None
+_activity_executor_lock = threading.Lock()
 
 
 def start_agent_provisioning_temporal_worker_thread() -> bool:
@@ -81,15 +57,30 @@ def start_agent_provisioning_temporal_worker_thread() -> bool:
 
 
 def create_agent_provisioning_worker(client: Optional[object] = None) -> Optional[Worker]:
+    """Build a ``Worker`` wired to every registered workflow/activity.
+
+    Preconditions:
+        - None; returns ``None`` (rather than raising) when Temporal is
+          disabled or ``client`` is not supplied, so callers can branch on a
+          single value.
+    Postconditions:
+        - The returned ``Worker`` serves exactly ``temporal.WORKFLOWS`` /
+          ``temporal.ACTIVITIES`` — the same canonical lists the Pattern A
+          auto-boot registers — so this function can never silently drift
+          from what ``__init__.py`` exports.
+    """
     if not is_temporal_enabled():
         return None
     if client is None:
         return None
+    from agent_provisioning_team.temporal import ACTIVITIES, WORKFLOWS
+
     global _activity_executor
-    if _activity_executor is None:
-        _activity_executor = ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="agent-provisioning-temporal-activity"
-        )
+    with _activity_executor_lock:
+        if _activity_executor is None:
+            _activity_executor = ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="agent-provisioning-temporal-activity"
+            )
     # Pass pydantic through the workflow sandbox so models with
     # datetime fields (DeliverResult.finalized_at, etc.) don't trip
     # pydantic-core's identity-based type check. See the longer
@@ -101,28 +92,8 @@ def create_agent_provisioning_worker(client: Optional[object] = None) -> Optiona
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[
-            AgentProvisioningWorkflow,
-            AgentProvisioningWorkflowV2,
-            AgentDeprovisioningWorkflow,
-            SandboxAcquireWorkflow,
-            SandboxTeardownWorkflow,
-            SandboxReaperWorkflow,
-        ],
-        activities=[
-            run_provisioning_activity,
-            setup_activity_v2,
-            credentials_activity_v2,
-            provision_tool_activity,
-            audit_activity_v2,
-            documentation_activity_v2,
-            deliver_activity_v2,
-            compensate_activity_v2,
-            deprovision_activity,
-            sandbox_acquire_activity,
-            sandbox_teardown_activity,
-            sandbox_reap_activity,
-        ],
+        workflows=WORKFLOWS,
+        activities=ACTIVITIES,
         activity_executor=_activity_executor,
         max_concurrent_activities=8,
         workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),

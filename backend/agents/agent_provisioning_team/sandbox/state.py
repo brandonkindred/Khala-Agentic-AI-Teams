@@ -251,18 +251,26 @@ def save(path: Path, state: dict[str, SandboxState]) -> None:
     Preconditions:
         * ``state`` may be mutated concurrently by another thread. The caller is
           expected to hold the ``Lifecycle`` state lock, but this function is
-          defensive regardless.
+          defensive regardless: it never observes ``state`` again after this
+          call returns, so any lock discipline lives entirely with the caller.
     Postconditions:
         * ``path`` reflects a consistent snapshot of ``state``. The snapshot is
           taken with ``list(state.items())`` **before** serialization so a
           concurrent insert/pop can't raise ``RuntimeError: dictionary changed
-          size during iteration``. The temp file name embeds pid + a random
-          suffix so two processes/threads writing the same ``path`` never share
-          a temp file or race their ``os.replace``.
+          size during iteration``; each value is additionally ``model_copy()``'d
+          into an independent object (mirroring ``Lifecycle.list_active``/
+          ``status``/``metrics``) so a concurrent field assignment on the
+          caller's live instance can't produce a torn write, even though no
+          code path in this package currently mutates a ``SandboxState`` field
+          in place (every update replaces the dict entry wholesale). The temp
+          file name embeds pid + a random suffix so two processes/threads
+          writing the same ``path`` never share a temp file or race their
+          ``os.replace``.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Snapshot first — never iterate the live dict during the comprehension.
-    snapshot = list(state.items())
+    # Snapshot first — never iterate the live dict during the comprehension,
+    # and copy each value so serialization never observes a live object.
+    snapshot = [(agent_id, s.model_copy()) for agent_id, s in state.items()]
     payload = {agent_id: s.model_dump(mode="json") for agent_id, s in snapshot}
     tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
