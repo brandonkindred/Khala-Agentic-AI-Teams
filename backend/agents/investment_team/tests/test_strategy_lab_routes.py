@@ -72,7 +72,15 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
     ):
         monkeypatch.setattr(api_main, attr, _InMemoryDict())
 
-    monkeypatch.setattr(api_main, "_active_runs", {})
+    # Rebind the shared run store to a fresh dict for test isolation. Patch both
+    # the ``api.main`` alias and the source module attribute to the *same* object,
+    # so direct reads/writes (routes) and ``_get_run_state`` (which closes over
+    # ``run_state.active_runs``) observe one consistent store.
+    from investment_team.strategy_lab import run_state as _run_state
+
+    shared_runs: Dict[str, Any] = {}
+    monkeypatch.setattr(api_main, "_active_runs", shared_runs)
+    monkeypatch.setattr(_run_state, "active_runs", shared_runs)
 
     # Stop real threads from spawning.
     monkeypatch.setattr(api_main, "_strategy_lab_worker", lambda *a, **k: None)
@@ -411,6 +419,104 @@ def test_list_strategy_lab_jobs_merges_persisted_completed_runs(
     ids2 = {j["job_id"] for j in body2["jobs"]}
     assert "mem-r" in ids2
     assert "persisted-c" not in ids2
+
+
+def test_list_strategy_lab_jobs_survives_concurrent_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``list_strategy_lab_jobs`` must not tear its read while a run is popped.
+
+    Reproduces the race the lock fix guards: a background cleanup (mirroring the
+    worker ``finally``'s ``_cleanup`` body) pops from the run store while
+    ``list_strategy_lab_jobs`` iterates it. Before the fix, the unlocked
+    ``in_memory_ids`` comprehension raised ``RuntimeError: dictionary changed
+    size during iteration`` — but that error is swallowed by the function's own
+    ``except Exception`` around the persisted-merge, so the *observable* symptom
+    is silent: the whole persisted block is skipped and persisted-only jobs
+    vanish from the result. This asserts the persisted job is never dropped.
+    """
+    import sys
+    import threading
+
+    from investment_team.api import main as api_main
+    from investment_team.strategy_lab import run_state as _run_state
+
+    # Use the real shared store + lock so the fix's ``with _lock:`` actually
+    # serializes reader vs. popper (a per-test dict would defeat the guard).
+    shared_runs: Dict[str, Any] = {}
+    monkeypatch.setattr(api_main, "_active_runs", shared_runs)
+    monkeypatch.setattr(_run_state, "active_runs", shared_runs)
+
+    # A persisted-only job that is NOT in ``_active_runs`` — a correct read always
+    # merges it in; a torn read skips the whole persisted block and drops it.
+    persisted_id = "persisted-keep"
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": persisted_id,
+                "status": "completed",
+                "data": {
+                    "started_at": "2024-01-01T00:00:00Z",
+                    "total_cycles": 2,
+                    "completed_cycles": 2,
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    def _make_state(rid: str) -> Dict[str, Any]:
+        return {
+            "run_id": rid,
+            "status": "running",
+            "total_cycles": 4,
+            "completed_cycles": 1,
+            "started_at": "2024-01-01T00:00:00Z",
+            "current_cycle": None,
+        }
+
+    run_ids = [f"run-{i}" for i in range(1000)]
+    for rid in run_ids:
+        shared_runs[rid] = _make_state(rid)
+
+    # Force very frequent thread switches so the reader is reliably preempted
+    # mid-iteration (the default 5ms interval almost never collides on a fast
+    # comprehension, masking the regression). Restored in ``finally``.
+    prev_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+
+    stop = threading.Event()
+    churn_errors: List[BaseException] = []
+
+    def _churn() -> None:
+        # Mirror the worker ``finally``'s ``_cleanup`` body: pop under the lock,
+        # then re-insert — hammering the same keys the reader iterates so the
+        # dict size oscillates continuously.
+        try:
+            while not stop.is_set():
+                for rid in run_ids:
+                    with _run_state.lock:
+                        shared_runs.pop(rid, None)
+                    with _run_state.lock:
+                        shared_runs[rid] = _make_state(rid)
+        except BaseException as exc:  # pragma: no cover - only on regression
+            churn_errors.append(exc)
+
+    popper = threading.Thread(target=_churn, name="cleanup-churn", daemon=True)
+    popper.start()
+    try:
+        for _ in range(2000):
+            resp = api_main.list_strategy_lab_jobs()
+            ids = {j.job_id for j in resp.jobs}
+            # The persisted job must survive every read; its absence means the
+            # persisted-merge block was skipped by a torn in-memory iteration.
+            assert persisted_id in ids
+    finally:
+        stop.set()
+        popper.join(timeout=5.0)
+        sys.setswitchinterval(prev_interval)
+
+    assert not churn_errors, f"cleanup churn raised: {churn_errors[0]!r}"
 
 
 # ---------------------------------------------------------------------------
