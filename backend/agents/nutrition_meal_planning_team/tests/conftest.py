@@ -21,8 +21,44 @@ for _d in (_backend_dir, _agents_dir):
 # through to structural fallback paths rather than waiting minutes.
 os.environ.setdefault("LLM_MAX_RETRIES", "0")
 # Disable the slow 429 rate-limit backoff so no test can ever sleep the 300s+
-# schedule (this team overrides pytest's rootdir, hiding backend/conftest.py).
+# schedule.
 os.environ.setdefault("LLM_RATE_LIMIT_MAX_RETRIES", "0")
+
+# ``fake_job_client`` is defined in backend/conftest.py (rootdir is the shared
+# backend/ dir — this team has no pyproject.toml/pytest.ini of its own to
+# override it) and inherited here via pytest's normal fixture resolution, the
+# same way road_trip_planning_team's conftest.py picks it up: no import needed,
+# just reference it by name as a fixture parameter below.
+
+
+@pytest.fixture
+def sample_nutrition_plan_body() -> dict:
+    """Canonical ``NutritionPlanRequest`` payload for the async-job tests."""
+    return {"client_id": "client-1"}
+
+
+@pytest.fixture
+def sample_meal_plan_body() -> dict:
+    """Canonical ``MealPlanRequest`` payload for the async-job tests."""
+    return {"client_id": "client-1", "period_days": 7, "meal_types": ["lunch", "dinner"]}
+
+
+@pytest.fixture(autouse=True)
+def _patched_nutrition_job_client(request, monkeypatch, fake_job_client):
+    """Route the team's job_store ``_client`` factory through the in-memory fake.
+
+    A no-op for ``@pytest.mark.integration`` tests, which run against the real
+    in-process job service. Clears the module-level singleton cache so a real
+    client cached at import time can't leak in.
+    """
+    if request.node.get_closest_marker("integration"):
+        return None
+
+    from nutrition_meal_planning_team.shared import job_store as js
+
+    monkeypatch.setattr(js, "_client_instance", None, raising=False)
+    monkeypatch.setattr(js, "_client", lambda *a, **kw: fake_job_client)
+    return fake_job_client
 
 
 @pytest.fixture(scope="session", autouse=True)
