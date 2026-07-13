@@ -682,6 +682,23 @@ def test_testable_teams_handles_non_dict_team_configs(monkeypatch):
     assert se.display_name  # generated fallback, no AttributeError
 
 
+def test_dispatch_uses_temporal_when_enabled(fake_store, monkeypatch):
+    """When Temporal is enabled, _dispatch_founder_run starts the workflow
+    (not a thread) and reports the "Temporal" mode label."""
+    import shared_temporal
+    from user_agent_founder.api import main as api_main
+    from user_agent_founder.temporal import start_workflow as sw
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    started: list[str] = []
+    monkeypatch.setattr(sw, "start_founder_workflow", lambda rid: started.append(rid))
+
+    mode = api_main._dispatch_founder_run("run-x")
+
+    assert mode == "Temporal"
+    assert started == ["run-x"]
+
+
 def test_dispatch_thread_mode_threads_process_id_and_spec(fake_store, monkeypatch):
     """Regression: the thread path builds the adapter itself (bypassing
     run_workflow's fallback), so it must thread the run's process_id (and the
@@ -911,6 +928,45 @@ def test_cancel_updates_job_and_store(fake_job_store, fake_store):
     fake_store.update_run.assert_called_once_with(
         "run-live", status="failed", error="Cancelled by user"
     )
+
+
+def test_cancel_signals_temporal_workflow_when_enabled(fake_job_store, fake_store, monkeypatch):
+    """When Temporal is enabled, cancel also signals the workflow so its poll
+    loops stop at the next tick (thread mode has no workflow to signal)."""
+    import shared_temporal
+    from user_agent_founder.api.main import cancel_job
+    from user_agent_founder.temporal import start_workflow as sw
+
+    fake_job_store.create_job("run-live", status="running")
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    signalled: list[str] = []
+    monkeypatch.setattr(sw, "cancel_founder_workflow", lambda rid: signalled.append(rid))
+
+    result = cancel_job("run-live")
+
+    assert result == {"status": "cancelled", "job_id": "run-live"}
+    assert signalled == ["run-live"]
+
+
+def test_cancel_temporal_signal_failure_is_non_fatal(fake_job_store, fake_store, monkeypatch):
+    """A failed cancel signal (no worker, already terminal) must not break the
+    cancel — the store already recorded the terminal state."""
+    import shared_temporal
+    from user_agent_founder.api.main import cancel_job
+    from user_agent_founder.temporal import start_workflow as sw
+
+    fake_job_store.create_job("run-live", status="running")
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+
+    def _boom(_rid):
+        raise RuntimeError("no worker")
+
+    monkeypatch.setattr(sw, "cancel_founder_workflow", _boom)
+
+    result = cancel_job("run-live")
+
+    assert result == {"status": "cancelled", "job_id": "run-live"}
+    assert fake_job_store.jobs["run-live"]["status"] == "cancelled"
 
 
 # ---------------------------------------------------------------------------

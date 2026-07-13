@@ -1,7 +1,6 @@
 """Targeted tests for medium-size coverage gaps:
 
 * ``blog_fact_check_agent.agent`` — JSON retry, fallback, run_from_work_dir.
-* ``blog_planning_agent.json_utils`` — parse_json_object happy + repair + extract paths.
 * ``validators/runner`` — run_validators, claims policy, run_from_work_dir.
 * ``shared.content_plan`` — content_plan_to_content_brief_markdown deep branches.
 * ``shared.medium_integration_access`` — full happy path with stubbed unified_api modules.
@@ -142,55 +141,6 @@ def test_fact_check_run_from_work_dir_fallback_draft(monkeypatch, tmp_path: Path
     monkeypatch.setattr(fc_mod, "Agent", _Agent)
     out = run_fact_check_from_work_dir(tmp_path, llm_client=object())
     assert out.claims_status == "PASS"
-
-
-# ---------------------------------------------------------------------------
-# blog_planning_agent.json_utils
-# ---------------------------------------------------------------------------
-
-
-def test_json_utils_parse_happy() -> None:
-    from blog_planning_agent.json_utils import parse_json_object
-
-    out = parse_json_object('{"a": 1, "b": 2}')
-    assert out == {"a": 1, "b": 2}
-
-
-def test_json_utils_parse_repairs_trailing_commas() -> None:
-    from blog_planning_agent.json_utils import parse_json_object
-
-    out = parse_json_object('{"a": 1, "b": 2, }')
-    assert out == {"a": 1, "b": 2}
-
-
-def test_json_utils_parse_extracts_from_prose() -> None:
-    from blog_planning_agent.json_utils import parse_json_object
-
-    out = parse_json_object('Here is the response: {"x": 5} done.')
-    assert out == {"x": 5}
-
-
-def test_json_utils_parse_extracts_with_repair() -> None:
-    from blog_planning_agent.json_utils import parse_json_object
-
-    out = parse_json_object('prefix {"x": 5, } suffix')
-    assert out == {"x": 5}
-
-
-def test_json_utils_parse_raises_on_total_failure() -> None:
-    from blog_planning_agent.json_utils import parse_json_object
-
-    with pytest.raises(json.JSONDecodeError):
-        parse_json_object("no json here at all")
-
-
-def test_json_utils_strip_noise() -> None:
-    from blog_planning_agent.json_utils import strip_json_noise
-
-    assert strip_json_noise("") == ""
-    assert strip_json_noise("﻿hello") == "hello"
-    # Control chars are stripped
-    assert "\x07" not in strip_json_noise("a\x07b")
 
 
 # ---------------------------------------------------------------------------

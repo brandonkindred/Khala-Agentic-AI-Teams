@@ -36,21 +36,41 @@ _DEFAULT_TOOLS = [http_request, python_repl, current_time]
 
 
 def _build_strands_agent(system_prompt: str, tools: list | None = None) -> StrandsAgent:
-    """Construct a strands.Agent."""
+    """Construct a strands.Agent backed by the centralized LLM service.
+
+    The model is resolved through ``llm_service.get_strands_model`` — the same
+    per-agent routing (Postgres provider list, failover, retry) the retired
+    Strands graph obtained via ``shared_graph.build_agent`` — with ``lazy=True``
+    so constructing an agent never eagerly resolves a provider: resolution (and
+    any ``LLMNotConfiguredError``) is deferred to the first agent call. This
+    keeps per-activity orchestrator construction cheap and side-effect-free.
+    """
+    from llm_service import get_strands_model
+
     return StrandsAgent(
         system_prompt=system_prompt,
+        model=get_strands_model(lazy=True),
         tools=tools if tools is not None else _DEFAULT_TOOLS,
     )
 
 
 def _call_agent(agent: StrandsAgent, prompt: str) -> str:
-    """Call a strands.Agent and return its text output."""
-    result = agent(prompt)
-    if hasattr(result, "message"):
-        content = result.message
-    else:
-        content = str(result)
-    return content.strip()
+    """Call a strands.Agent and return its text output.
+
+    ``strands.Agent.__call__`` returns an ``AgentResult`` whose ``.message`` is a
+    structured content mapping (``{"role": ..., "content": [{"text": ...}]}``) —
+    NOT plain text. ``str(result)`` is the SDK's text extraction: ``AgentResult.
+    __str__`` concatenates the message's text blocks (and handles structured
+    output). Using ``str(result)`` also degrades gracefully if a caller or a
+    mocked agent returns a raw string.
+
+    Preconditions:
+        - ``agent`` is a constructed ``strands.Agent``; ``prompt`` is the user turn.
+    Postconditions:
+        - Returns the agent's text output, stripped (never touches ``.message``
+          as if it were a string, which would raise ``AttributeError``).
+    """
+    return str(agent(prompt)).strip()
 
 
 def _parse_json(raw: str, fallback: object) -> object:
@@ -167,6 +187,30 @@ Return ONLY a valid JSON array (no markdown, no commentary). Each element must b
 Return at least 2 signals. Suggested signal types: "User pain urgency", \
 "Adoption motivation clarity", "Early adopter presence", "Switching cost tolerance", \
 "Willingness to pay indicators".
+"""
+
+_CONSISTENCY_SYSTEM_PROMPT = """\
+You are a Cross-Interview Consistency Analyst. Your job is to identify recurring themes \
+across multiple user interviews and assess how consistent the evidence is.
+
+## Your Methodology
+- Compare pain points, user jobs, and desired outcomes across all interviews.
+- Identify themes that appear in 2+ interviews — these are the strongest signals.
+- Assess whether different interviewees describe the same underlying problem in different words \
+(semantic similarity, not just exact matches).
+- Higher consistency = higher confidence that the problem is real and widespread.
+
+## Confidence Calibration
+- 5+ interviews with 3+ repeated themes: confidence 0.8-0.95
+- 3-4 interviews with 2+ repeated themes: confidence 0.6-0.8
+- 1-2 interviews or few repeated themes: confidence 0.4-0.6
+- Contradictory signals across interviews: confidence 0.2-0.4
+
+## Output Format
+Return ONLY a valid JSON object (no markdown, no commentary) with these exact keys:
+- "signal": always "Cross-interview theme consistency"
+- "confidence": float 0.0-1.0
+- "evidence": array of strings — the repeated themes or patterns found across interviews
 """
 
 _MARKET_VIABILITY_SYSTEM_PROMPT = """\
@@ -288,11 +332,31 @@ _DEFAULT_SCRIPTS_FALLBACK = [
 # ---------------------------------------------------------------------------
 
 
+# Bounds the per-transcript UX fan-out (one Temporal activity — or one
+# thread-pool call — per transcript): neither inline transcripts nor a
+# transcript folder are otherwise capped, so a very large corpus could
+# schedule an unbounded number of activities in a single workflow task.
+_MAX_TRANSCRIPTS = 200
+
+
 @dataclass
 class TranscriptIngestionAgent:
     """Loads transcript text from a mission payload or folder path."""
 
     def load_transcripts(self, mission: ResearchMission) -> List[tuple[str, str]]:
+        """Load transcript text from inline transcripts and/or a transcript folder.
+
+        Preconditions:
+            - ``mission`` is a validated ``ResearchMission``.
+        Postconditions:
+            - Returns ``[(source, text), ...]`` — inline transcripts first
+              (labeled ``inline_transcript_N``), then ``*.txt`` files from
+              ``transcript_folder_path`` if set (sorted, labeled by
+              filename). Blank/whitespace-only entries are skipped.
+              Truncated to the first ``_MAX_TRANSCRIPTS`` (logging a warning)
+              if the combined count exceeds it, to bound the per-transcript
+              analysis fan-out.
+        """
         loaded: List[tuple[str, str]] = []
 
         for index, text in enumerate(mission.transcripts, start=1):
@@ -307,6 +371,15 @@ class TranscriptIngestionAgent:
                     if text:
                         loaded.append((file_path.name, text))
 
+        if len(loaded) > _MAX_TRANSCRIPTS:
+            logger.warning(
+                "Loaded %d transcripts (inline + folder), truncating to the first %d "
+                "to bound the per-transcript analysis fan-out.",
+                len(loaded),
+                _MAX_TRANSCRIPTS,
+            )
+            loaded = loaded[:_MAX_TRANSCRIPTS]
+
         return loaded
 
 
@@ -318,6 +391,16 @@ class UXResearchAgent:
     _system_prompt: str = field(default=_UX_RESEARCH_SYSTEM_PROMPT, init=False, repr=False)
 
     def analyze(self, source: str, transcript: str) -> InterviewInsight:
+        """Extract user jobs, pain points, desired outcomes, and quotes from one transcript.
+
+        Preconditions:
+            - ``source`` labels the transcript (e.g. a filename); ``transcript``
+              is its full text.
+        Postconditions:
+            - Returns an ``InterviewInsight`` tagged with ``source``. A
+              malformed or unparseable LLM response falls back to the
+              module's default fields rather than raising.
+        """
         # Fresh agent per call to avoid history pollution across transcripts.
         agent = _build_strands_agent(self._system_prompt, _DEFAULT_TOOLS)
         prompt = (
@@ -353,6 +436,16 @@ class UserPsychologyAgent:
         self._agent = _build_strands_agent(_USER_PSYCHOLOGY_SYSTEM_PROMPT, _DEFAULT_TOOLS)
 
     def derive_signals(self, insights: List[InterviewInsight]) -> List[MarketSignal]:
+        """Derive adoption/behavior-change market signals from interview insights.
+
+        Preconditions:
+            - ``insights`` is the per-interview UX output (may be empty).
+        Postconditions:
+            - Returns at least two ``MarketSignal`` objects — a malformed or
+              short LLM response is padded with ``_DEFAULT_SIGNALS_FALLBACK``
+              entries. A null/non-string ``signal`` name falls back to
+              ``"Unknown signal"``; confidence is clamped to ``[0.0, 1.0]``.
+        """
         insights_json = json.dumps([i.model_dump() for i in insights], indent=2)
         prompt = (
             f"Analyze the following interview insights and derive market signals "
@@ -370,9 +463,11 @@ class UserPsychologyAgent:
         for item in data:
             if not isinstance(item, dict):
                 continue
+            raw_signal = item.get("signal")
+            signal_name = raw_signal if isinstance(raw_signal, str) else "Unknown signal"
             signals.append(
                 MarketSignal(
-                    signal=str(item.get("signal", "Unknown signal")),
+                    signal=signal_name,
                     confidence=min(1.0, max(0.0, _safe_float(item.get("confidence"), 0.5))),
                     evidence=_ensure_list(item.get("evidence"), []),
                 )
@@ -384,6 +479,59 @@ class UserPsychologyAgent:
             signals.append(MarketSignal(**fallback))
 
         return signals
+
+
+@dataclass
+class ConsistencyAgent:
+    """Scores cross-interview theme consistency from insights using LLM analysis."""
+
+    role: str = "Cross-Interview Consistency Analyst"
+    _agent: Any = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._agent = _build_strands_agent(_CONSISTENCY_SYSTEM_PROMPT, _DEFAULT_TOOLS)
+
+    def analyze(self, insights: List[InterviewInsight]) -> List[MarketSignal]:
+        """Assess how consistent recurring themes are across interviews.
+
+        Preconditions:
+            - ``insights`` is the per-interview UX output (non-empty; the
+              empty-transcript fallback is the orchestrator's responsibility).
+
+        Postconditions:
+            - Returns a single-element ``list[MarketSignal]`` (the consistency
+              node emits exactly one signal). A ``null``/non-string ``signal``
+              name from the LLM falls back to ``"Cross-interview theme
+              consistency"``; confidence is clamped to ``[0.0, 1.0]``.
+        """
+        assert insights, (
+            "ConsistencyAgent.analyze requires non-empty insights — callers with "
+            "an empty transcript corpus must use the orchestrator's deterministic "
+            "empty-transcript fallback instead of invoking this LLM call"
+        )
+        insights_json = json.dumps([i.model_dump() for i in insights], indent=2)
+        prompt = (
+            f"Analyze the following interview insights for cross-interview consistency. "
+            f"Identify recurring themes that appear across multiple interviews and assess "
+            f"how consistent the evidence is.\n\n"
+            f"Interview insights ({len(insights)} interviews):\n{insights_json}\n\n"
+            f"Return ONLY a valid JSON object with signal, confidence, and evidence."
+        )
+        raw = _call_agent(self._agent, prompt)
+        data = _parse_json(raw, {})
+
+        if not isinstance(data, dict):
+            data = {}
+
+        raw_signal = data.get("signal")
+        signal = raw_signal if isinstance(raw_signal, str) else "Cross-interview theme consistency"
+        return [
+            MarketSignal(
+                signal=signal,
+                confidence=min(1.0, max(0.0, _safe_float(data.get("confidence"), 0.5))),
+                evidence=_ensure_list(data.get("evidence"), []),
+            )
+        ]
 
 
 @dataclass
@@ -399,6 +547,21 @@ class MarketViabilityAgent:
     def recommend(
         self, mission: ResearchMission, signals: List[MarketSignal], insight_count: int
     ) -> ViabilityRecommendation:
+        """Produce a viability verdict from the mission and derived market signals.
+
+        Preconditions:
+            - ``mission`` is a validated ``ResearchMission``; ``signals`` are
+              the derived signals (may be empty when ``insight_count == 0``);
+              ``insight_count`` is the number of successfully-analyzed
+              transcripts.
+        Postconditions:
+            - ``insight_count == 0`` → a deterministic ``insufficient_evidence``
+              recommendation (no LLM call). Otherwise returns an LLM-backed
+              ``ViabilityRecommendation`` whose ``verdict`` is always one of
+              ``insufficient_evidence``/``needs_more_validation``/
+              ``promising_with_risks`` — an invalid or missing verdict from
+              the LLM falls back to ``needs_more_validation``.
+        """
         # Deterministic response for zero-evidence case (no LLM call needed).
         if insight_count == 0:
             return ViabilityRecommendation(
@@ -461,6 +624,16 @@ class ResearchScriptAgent:
         self._agent = _build_strands_agent(_RESEARCH_SCRIPT_SYSTEM_PROMPT, _DEFAULT_TOOLS)
 
     def build_scripts(self, mission: ResearchMission) -> List[str]:
+        """Generate the research scripts/templates for a mission.
+
+        Preconditions:
+            - ``mission`` is a validated ``ResearchMission``.
+        Postconditions:
+            - Returns a non-empty ``list[str]`` (an interview script, a
+              transcript tagging guide, and a decision checkpoint template).
+              A malformed or empty LLM response falls back to
+              ``_DEFAULT_SCRIPTS_FALLBACK``.
+        """
         prompt = (
             f"Create research artifacts for the following product concept.\n\n"
             f"Product concept: {mission.product_concept}\n"

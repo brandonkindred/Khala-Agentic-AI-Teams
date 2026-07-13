@@ -120,7 +120,9 @@ async def post_plan(body: PlanTripRequest):
     """
     Submit a road trip planning job.
 
-    Runs the full multi-agent pipeline via a Strands sequential Graph:
+    Runs the full multi-agent pipeline as five sequential specialist steps —
+    each its own Temporal activity when Temporal is enabled, or an in-process
+    chain in thread mode:
     1. **Traveler Profiler** — synthesizes who is going and their collective needs
     2. **Route Planner** — builds the optimal ordered route through required stops
     3. **Activities Expert** — tailors activities and dining to the group at each stop
