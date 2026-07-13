@@ -170,7 +170,7 @@ class UserProfileAgent:
         for pref in extraction.extracted_info:
             if pref.confidence >= self.CONFIDENCE_THRESHOLD:
                 if request.auto_apply:
-                    self._apply_preference(pref)
+                    self.apply_preference(pref)
                     applied.append(pref)
                 else:
                     pending.append(pref)
@@ -183,8 +183,24 @@ class UserProfileAgent:
             pending_confirmation=pending,
         )
 
-    def _apply_preference(self, pref: ExtractedPreference) -> bool:
-        """Apply a single extracted preference to the profile."""
+    def apply_preference(self, pref: ExtractedPreference) -> bool:
+        """Apply a single extracted preference to the profile.
+
+        Public (not ``_apply_preference``): called both internally
+        (``learn_from_text``, ``confirm_and_apply``) and externally by
+        ``PersonalAssistantOrchestrator._check_for_profile_updates``, which
+        applies high-confidence preferences it extracts independently of
+        ``learn_from_text``.
+
+        Preconditions:
+            - ``pref`` is an ``ExtractedPreference`` naming a valid profile
+              category/field for this agent's ``profile_store``.
+
+        Postconditions:
+            - Returns ``True`` and persists the preference to
+              ``self.profile_store`` under ``self.user_id`` on success.
+            - Returns ``False`` (never raises) if the store write fails.
+        """
         try:
             value = pref.value
 
@@ -230,7 +246,7 @@ class UserProfileAgent:
         """
         applied = []
         for pref in preferences:
-            if self._apply_preference(pref):
+            if self.apply_preference(pref):
                 applied.append(pref)
         return applied
 

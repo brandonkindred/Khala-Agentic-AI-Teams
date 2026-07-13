@@ -608,7 +608,7 @@ class PersonalAssistantOrchestrator:
         high_confidence = [p for p in extraction.extracted_info if p.confidence >= 0.8]
 
         for pref in high_confidence:
-            profile_agent._apply_preference(pref)
+            profile_agent.apply_preference(pref)
 
         return [p.model_dump() for p in high_confidence]
 
