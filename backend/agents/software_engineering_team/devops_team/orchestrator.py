@@ -8,6 +8,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from llm_service import LLMClient
+from software_engineering_team.shared.branch_utils import make_branch_suffix
+from software_engineering_team.shared.deliver_utils import DeliverGitOps, deliver_inline_merge
+from software_engineering_team.shared.git_utils import (
+    DEVELOPMENT_BRANCH,
+    abort_merge,
+    checkout_branch,
+    commit_working_tree,
+    create_feature_branch,
+    delete_branch,
+    ensure_development_branch,
+    get_head_sha,
+    merge_branch,
+)
 from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
 from software_engineering_team.shared.security_service import infra_gate_passed, run_policy_scan
 
@@ -30,6 +43,31 @@ from .models import (
     SubtaskContract,
 )
 from .phase2_graph import run_phase2_parallel
+
+# Commit-message template for the shared deliver helper. ``deliver_inline_merge``
+# calls ``template.format(scope=..., summary=...)``; only ``{summary}`` is used
+# here (``str.format`` ignores the unreferenced ``scope`` kwarg).
+DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE = "feat(devops): {summary}"
+
+
+def _git_ops() -> DeliverGitOps:
+    """Bundle this module's git callables for the shared deliver helper.
+
+    Postconditions:
+        - Returns a ``DeliverGitOps`` whose callables are the names bound in this
+          module, so tests can monkeypatch the ``devops_team.orchestrator``
+          boundary (e.g. ``merge_branch``) exactly as the v2 teams do.
+    """
+    return DeliverGitOps(
+        abort_merge=abort_merge,
+        checkout_branch=checkout_branch,
+        commit_working_tree=commit_working_tree,
+        create_feature_branch=create_feature_branch,
+        delete_branch=delete_branch,
+        merge_branch=merge_branch,
+        write_agent_output=write_agent_output,
+    )
+
 
 DEVOPS_REQUIRED_GATE_NAMES = [
     "iac_validate",
@@ -392,6 +430,26 @@ class DevOpsTeamLeadAgent:
         aggregated_artifacts: Dict[str, str] = phase2["aggregated_artifacts"]
 
         if write_changes and aggregated_artifacts:
+            # Cut a feature branch from development up front (mirroring the code-v2
+            # teams) so every intermediate write/patch commit lands on the branch
+            # and development stays clean until the reviewed Phase 5 merge. Without
+            # this, writes would commit straight to the checked-out development
+            # branch and the later merge would be an empty no-op.
+            dev_ok, dev_msg = ensure_development_branch(repo_path)
+            if not dev_ok:
+                return DevOpsTeamResult(
+                    success=False,
+                    failure_reason=f"Cannot prepare {DEVELOPMENT_BRANCH} branch: {dev_msg}",
+                )
+            branch_ok, branch_msg = create_feature_branch(
+                repo_path,
+                DEVELOPMENT_BRANCH,
+                make_branch_suffix(task_spec.task_id, task_spec.title),
+            )
+            if not branch_ok:
+                return DevOpsTeamResult(
+                    success=False, failure_reason=f"Cannot create feature branch: {branch_msg}"
+                )
             ok, msg = write_agent_output(
                 repo_path=repo_path,
                 output={
@@ -599,20 +657,66 @@ class DevOpsTeamLeadAgent:
                 "alert_health",
             ],
         )
-        completion.git_operations = GitOperationsMetadata(
-            branch_created=f"feature/{task_spec.task_id.lower()}",
-            commits=[
-                GitCommitMetadata(
-                    hash="", message=f"feat(devops): implement task [{task_spec.task_id}]"
+        # Deliver the artifacts for real via the shared inline-merge helper and
+        # report the actual outcome (real branch, commit SHA, merge status) rather
+        # than fabricated placeholders. A model-only run (write_changes=False) does
+        # no git work, so the neutral default honestly reports "nothing delivered".
+        git_ops = GitOperationsMetadata()
+        if write_changes and aggregated_artifacts:
+            deliver_result = deliver_inline_merge(
+                task_id=task_spec.task_id,
+                repo_path=repo_path,
+                deliver_files=aggregated_artifacts,
+                summary=f"implement task [{task_spec.task_id}]",
+                task_title=task_spec.title,
+                commit_msg_template=DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE,
+                ops=_git_ops(),
+                logger=logger,
+            )
+            # deliver_inline_merge leaves development checked out at the merged
+            # commit. merge_branch fast-forwards (development never advanced since
+            # the branch was cut), so this single HEAD SHA is the honest identifier
+            # for both the delivered commit and the merge result.
+            head_ok, head_sha = get_head_sha(repo_path)
+            sha = head_sha if head_ok else ""
+            commit_msg = (
+                deliver_result.commit_messages[0]
+                if deliver_result.commit_messages
+                else f"feat(devops): implement task [{task_spec.task_id}]"
+            )
+            if not deliver_result.merged:
+                return DevOpsTeamResult(
+                    success=False,
+                    failure_reason=deliver_result.summary or "DevOps delivery merge failed",
+                    completion_package=DevOpsCompletionPackage(
+                        task_id=task_spec.task_id,
+                        status="blocked",
+                        files_changed=sorted(aggregated_artifacts.keys()),
+                        quality_gates=quality_gates,
+                        git_operations=GitOperationsMetadata(
+                            branch_created=deliver_result.branch_name,
+                            commits=[GitCommitMetadata(hash="", message=commit_msg)],
+                            merge=GitMergeMetadata(
+                                target_branch=DEVELOPMENT_BRANCH,
+                                strategy="merge",
+                                merge_commit_hash="",
+                                status="failed",
+                            ),
+                        ),
+                        notes=[deliver_result.summary],
+                    ),
                 )
-            ],
-            merge=GitMergeMetadata(
-                target_branch="development",
-                strategy="squash",
-                merge_commit_hash="",
-                status="pending",
-            ),
-        )
+            git_ops = GitOperationsMetadata(
+                branch_created=deliver_result.branch_name,
+                commits=[GitCommitMetadata(hash=sha, message=commit_msg)],
+                merge=GitMergeMetadata(
+                    target_branch=DEVELOPMENT_BRANCH,
+                    strategy="merge",
+                    merge_commit_hash=sha,
+                    status="merged",
+                ),
+            )
+        completion.git_operations = git_ops
         completion.handoff = HandoffInfo(
             prod_approval_required="production" in task_spec.platform_scope.environments,
             runbook_updated=bool(doc.files),
