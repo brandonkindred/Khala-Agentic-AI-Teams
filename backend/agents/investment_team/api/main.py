@@ -1852,9 +1852,9 @@ def _execute_advisory(op: str, payload: Dict[str, Any], *, key: str) -> Dict[str
         raise _translate_advisory_failure(exc) from exc
 
 
-# Maps an ApplicationError's ``type`` (set by the advisory activities, e.g.
-# ``ApplicationError(..., type="NotFound")``) to the HTTP status the pre-Temporal
-# synchronous routes used to raise directly for the same condition.
+# Maps a Temporal ApplicationError's ``type`` (set by the advisory activities,
+# e.g. ``ApplicationError(..., type="NotFound")``) to the HTTP status the API
+# should return for that error condition.
 _ADVISORY_ERROR_TYPE_STATUS: Dict[str, int] = {
     "NotFound": 404,
     "MissingFields": 400,
@@ -1883,7 +1883,12 @@ def _translate_advisory_failure(exc: Exception) -> HTTPException:
 
     cause: Optional[BaseException] = exc
     seen: set = set()
-    while cause is not None and id(cause) not in seen:
+    # ``exc`` keeps its own __cause__ chain alive for this call's duration, so
+    # id() reuse from garbage collection can't happen here — the depth cap is
+    # pure belt-and-suspenders against a pathologically long or malformed chain.
+    for _ in range(20):
+        if cause is None or id(cause) in seen:
+            break
         seen.add(id(cause))
         if isinstance(cause, _AppErr):
             status = _ADVISORY_ERROR_TYPE_STATUS.get(cause.type or "", 500)
@@ -3412,7 +3417,21 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         try:
             _signal_paper_trading_stop(session_id)
         except Exception:
-            pass
+            # Best-effort: if the workflow really did start server-side despite
+            # the client-side timeout, and this stop signal ALSO fails to
+            # deliver, it runs unsupervised — if it later reaches its own
+            # terminal state, that write can silently overwrite the ``failed``
+            # status set just below. No automatic reconciliation catches this
+            # narrow compound-failure case (the startup orphan sweep only
+            # covers a crashed process, not a live unreachable workflow); log
+            # so it's at least visible to operators instead of silent.
+            logger.warning(
+                "Best-effort stop signal for possibly-orphaned paper-trading "
+                "session %s failed to deliver; the session is marked failed but "
+                "an orphaned workflow may still be running.",
+                session_id,
+                exc_info=True,
+            )
         _fail_paper_trading_session(
             session_id, "Failed to start the paper-trading workflow (Temporal unavailable)."
         )
