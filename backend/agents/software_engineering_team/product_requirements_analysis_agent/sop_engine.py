@@ -86,12 +86,12 @@ def evaluate_sop_conditionals(
         if parent_id not in decisions_map:
             return None  # Parent not answered yet — defer
         parent_answer = decisions_map[parent_id]
-        # Check if the parent answer matches any required value (case-insensitive)
+        # Exact match (case-insensitive, whitespace-stripped) against the required
+        # values — not a substring check, which previously caused false positives
+        # (e.g. required value "Yes" matching a parent answer like "Yesterday").
         parent_lower = parent_answer.lower().strip()
-        if not any(
-            v.lower().strip() in parent_lower or parent_lower in v.lower().strip()
-            for v in required_values
-        ):
+        required_lower = {v.lower().strip() for v in required_values}
+        if parent_lower not in required_lower:
             return False  # Condition not met
     return True
 
