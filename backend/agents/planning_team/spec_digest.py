@@ -16,7 +16,6 @@ Invariants:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -271,38 +270,3 @@ def _supports_compaction(llm: Any) -> bool:
     return callable(getattr(llm, "complete", None)) and callable(
         getattr(llm, "get_max_context_tokens", None)
     )
-
-
-# --- shared JSON parse helper -----
-
-# Prefer an explicit ```json fenced block anywhere in the response — robust to a
-# leading reasoning/"thinking" block or prose before the JSON. Non-greedy so it stops
-# at the closing fence of the first block.
-_JSON_FENCE_RE = re.compile(r"```json\s*([\s\S]*?)```", re.IGNORECASE)
-# Fallback: any fenced block (optionally language-tagged) located anywhere in the
-# response — handles prose followed by an untagged ``` block, not just a leading fence.
-_ANY_FENCE_RE = re.compile(r"```[^\n`]*\n?([\s\S]*?)```")
-
-
-def parse_json_response(response: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Parse an LLM JSON response, tolerating ```json (or untagged) fences anywhere.
-
-    Postconditions:
-        - Returns a ``dict`` on success, or ``None`` for empty/invalid input OR any
-          top-level JSON value that is not an object (e.g. a bare array or string).
-          Returning only dicts means callers' reducers can rely on ``.get`` without a
-          type guard on the parsed value itself.
-    """
-    text = (response or "").strip()
-    if not text:
-        return None
-    fenced = _JSON_FENCE_RE.search(text) or _ANY_FENCE_RE.search(text)
-    if fenced:
-        # A ```json block wins; otherwise the first fenced block's body, wherever it
-        # sits (handles thinking/prose before the fence).
-        text = fenced.group(1).strip()
-    try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
