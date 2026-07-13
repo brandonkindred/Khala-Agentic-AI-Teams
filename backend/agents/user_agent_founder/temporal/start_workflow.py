@@ -1,7 +1,22 @@
-"""Start the user_agent_founder Temporal workflow from synchronous API code.
+"""Drive the user_agent_founder Temporal workflow from synchronous API code.
 
-Bridges a sync request handler into the Temporal worker's asyncio loop via
-``asyncio.run_coroutine_threadsafe`` (mirrors ``blogging/temporal/start_workflow.py``).
+Bridges a sync FastAPI request handler into the Temporal worker's asyncio loop
+via ``asyncio.run_coroutine_threadsafe`` (mirrors
+``blogging/temporal/start_workflow.py``).
+
+Public API (called from ``api/main.py``):
+    - :func:`start_founder_workflow` — dispatch a new ``UserAgentFounderWorkflow``
+      for a run id; called by ``_dispatch_founder_run`` on ``/start`` (and
+      ``/resume``/``/restart``) when Temporal is enabled.
+    - :func:`cancel_founder_workflow` — deliver the cooperative ``cancel`` signal
+      to an in-flight workflow; called (best-effort) from the ``POST
+      /job/{id}/cancel`` route after the terminal cancel state is already written.
+
+Internal helpers (not part of the public surface):
+    - :func:`_wait_for_client` — briefly poll for the worker's connected client +
+      loop, turning a cold-start race into a short wait instead of a 500.
+    - :func:`_run_async` — run a coroutine on the worker loop and translate a
+      ``Future`` timeout into a documented ``RuntimeError``.
 """
 
 from __future__ import annotations

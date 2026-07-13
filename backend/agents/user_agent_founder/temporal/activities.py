@@ -499,7 +499,12 @@ def enter_phase_activity(run_id: str, phase: str, existing_job_id: str | None) -
     except httpx.HTTPError as exc:
         # Ambiguous: the request may have reached the target before the
         # transport failed. Non-retryable so Temporal doesn't auto-resubmit;
-        # see the Postconditions above.
+        # see the Postconditions above. This deliberately includes
+        # httpx.RemoteProtocolError / ReadTimeout / etc.: unlike the connection
+        # errors above (handshake never completed → no bytes sent), a protocol
+        # violation or GOAWAY can arrive *after* the request stream was already
+        # transmitted, so we have no proof the submit didn't land and must
+        # default to the safe, non-retryable side to avoid a duplicate job.
         raise ApplicationError(
             f"Transport error starting {phase}: {exc}", non_retryable=True
         ) from exc
@@ -583,6 +588,18 @@ def poll_phase_activity(run_id: str, phase: str, job_id: str) -> dict[str, Any]:
         pending_questions = raw_questions
     else:
         pending_questions = []
+        if raw_questions is not None:
+            # Loud, not silent: the target sent *something* for pending_questions
+            # that isn't a list-of-dicts. Discarding it (rather than crashing the
+            # answer activity) is deliberate, but an operator needs to see this —
+            # it usually means the target-team API contract drifted.
+            activity.logger.warning(
+                "Target returned malformed pending_questions (%s) for run %s %s; "
+                "treating as no questions",
+                type(raw_questions).__name__,
+                run_id,
+                phase,
+            )
     waiting = bool(status_data.get("waiting_for_answers") and pending_questions)
 
     if phase == "analysis" and status == "completed" and not poll_error:
@@ -670,7 +687,8 @@ def finalize_run_activity(run_id: str) -> dict[str, Any]:
     Preconditions:
         - ``run_id`` refers to an existing run whose build phase completed.
     Postconditions:
-        - Missing run → non-retryable ``ApplicationError``.
+        - Missing run row → non-retryable ``ApplicationError`` (via
+          :func:`_require_run`).
         - Central job already terminal (CANCELLED, COMPLETED, or FAILED, via
           :func:`_job_terminal_status`) → no-op, returns ``{"run_id": run_id}``
           without writing COMPLETED again. CANCELLED/FAILED covers a cancel (or
@@ -678,7 +696,9 @@ def finalize_run_activity(run_id: str) -> dict[str, Any]:
           this activity running — mirrors ``mark_failed_activity``'s "never
           clobber a terminal state" guard. COMPLETED covers a Temporal retry of
           this activity's own prior successful write — a clean no-op instead of
-          a harmless-but-redundant re-write.
+          a harmless-but-redundant re-write. A *missing* central job row (as
+          opposed to a terminal one) is treated as not-terminal — the guard
+          falls through and COMPLETED is written normally.
         - Otherwise the run row + central job are marked COMPLETED and a success
           breadcrumb is recorded exactly once; returns ``{"run_id": run_id}``.
     """
