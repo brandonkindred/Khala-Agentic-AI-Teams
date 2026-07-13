@@ -509,6 +509,35 @@ class GitHubClient:
             )
         )
 
+    def create_issue(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        title: str,
+        body: str,
+        labels: Optional[list[str]] = None,
+    ) -> Issue:
+        """Open a new issue in ``owner/repo``, tagged as Khala-generated.
+
+        Preconditions:
+            - ``title`` is a non-empty issue title.
+        Postconditions:
+            - Creates the issue with :data:`KHALA_COMMENT_MARKER` appended to the
+              body when not already present (marking it Khala-generated, the same
+              provenance convention :meth:`add_issue_comment` uses) and any
+              ``labels`` applied. Returns the created :class:`Issue`, which carries
+              the new issue's ``number`` and ``html_url``. Raises ``GitHubAPIError``
+              on any non-2xx (e.g. a token without issue-write scope).
+        """
+        if KHALA_COMMENT_MARKER not in body:
+            body = f"{body}\n\n{KHALA_COMMENT_MARKER}"
+        payload: dict[str, Any] = {"title": title, "body": body}
+        if labels:
+            payload["labels"] = list(labels)
+        r = self._check(self._request("POST", f"/repos/{owner}/{repo}/issues", json=payload))
+        return _issue_from_payload(r.json())
+
     def create_comment_reaction(
         self, owner: str, repo: str, comment_id: int, content: str = "eyes"
     ) -> None:
