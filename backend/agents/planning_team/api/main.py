@@ -15,7 +15,6 @@ from pathlib import Path
 
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 
 # Ensure backend/agents is on path for job_service_client and software_engineering_team.shared.llm
 _agents_dir = Path(__file__).resolve().parent.parent.parent
@@ -66,12 +65,12 @@ app.add_middleware(
 )
 
 
-class SubmitAnswersRequest(BaseModel):
-    """Submit answers to pending open questions."""
-
-    answers: list[dict] = Field(
-        ..., description="List of {question_id, selected_option_id?, other_text?}"
-    )
+# Reuse the shared HITL answer schema rather than a local loosely-typed copy. This
+# endpoint is a placeholder — Planning resolves open questions inline (PRA's
+# auto-answer callback) and never sets waiting_for_answers, so it always 400s today —
+# so tightening the request type is behavior-neutral. (E402: must follow the sys.path
+# insert above, like the other agents-path imports in this module.)
+from shared_hitl.models import SubmitAnswersRequest  # noqa: E402
 
 
 def _get_llm():

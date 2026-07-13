@@ -5,12 +5,14 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
+from shared_hitl.progress import coerce_progress
+from shared_hitl.status import pending_questions_from_raw
+from shared_hitl.validation import validate_answers
 from software_engineering_team.api.models import (
     AutoAnswerRequest,
     AutoAnswerResponse,
     FailedTaskDetail,
     JobStatusResponse,
-    PendingQuestion,
     SubmitAnswersRequest,
     TaskStateEntry,
     TeamProgressEntry,
@@ -43,65 +45,10 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
     if not data:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
-    if not data.get("waiting_for_answers"):
-        raise HTTPException(
-            status_code=400,
-            detail="Job is not waiting for answers.",
-        )
-
-    pending_questions = data.get("pending_questions", [])
-    if not pending_questions:
-        raise HTTPException(status_code=400, detail="No pending questions to answer.")
-
-    pending_ids = {q["id"] for q in pending_questions}
-    required_ids = {q["id"] for q in pending_questions if q.get("required", True)}
-    answered_ids = {a.question_id for a in request.answers}
-
-    missing_required = required_ids - answered_ids
-    if missing_required:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Missing answers for required questions: {', '.join(sorted(missing_required))}",
-        )
-
-    invalid_ids = answered_ids - pending_ids
-    if invalid_ids:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown question IDs: {', '.join(sorted(invalid_ids))}",
-        )
-
-    for answer in request.answers:
-        other_text = (answer.other_text or "").strip()
-        q = next((q for q in pending_questions if q["id"] == answer.question_id), None)
-        question_options = {o.get("id") for o in (q.get("options") or [])} if q else set()
-
-        if answer.selected_option_id == "other":
-            if not other_text:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Question {answer.question_id}: 'other' selected but no text provided.",
-                )
-        elif answer.selected_option_id:
-            if answer.selected_option_id not in question_options:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Question {answer.question_id}: unknown option '{answer.selected_option_id}'.",
-                )
-        elif not other_text:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Question {answer.question_id}: no option selected and no text provided.",
-            )
-
-    answers_dicts = [
-        {
-            "question_id": a.question_id,
-            "selected_option_id": a.selected_option_id,
-            "other_text": a.other_text,
-        }
-        for a in request.answers
-    ]
+    # Reconciled validation lives in shared_hitl (the strict union of both teams' rules):
+    # it adds the corrupted-record (500) and duplicate-answer (400) rejections SE's old
+    # inline check lacked, and returns answer dicts carrying each question's text.
+    answers_dicts = validate_answers(data, request)
     store_submit_answers(job_id, answers_dicts)
 
     # If the orchestrator thread is alive, its _wait_for_user_answers polling loop
@@ -131,7 +78,7 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
         status_text=updated_data.get("status_text"),
         task_results=updated_data.get("task_results", []),
         task_ids=updated_data.get("execution_order", []),
-        progress=updated_data.get("progress"),
+        progress=coerce_progress(updated_data.get("progress")),
         error=updated_data.get("error"),
         failed_tasks=[FailedTaskDetail(**ft) for ft in updated_data.get("failed_tasks", [])],
         phase=updated_data.get("phase"),
@@ -145,7 +92,7 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
         }
         if updated_data.get("team_progress")
         else None,
-        pending_questions=[PendingQuestion(**q) for q in updated_data.get("pending_questions", [])],
+        pending_questions=pending_questions_from_raw(updated_data.get("pending_questions", [])),
         waiting_for_answers=updated_data.get("waiting_for_answers", False),
         planning_subprocess=updated_data.get("planning_subprocess"),
         planning_completed_phases=updated_data.get("planning_completed_phases") or [],

@@ -15,11 +15,11 @@ from coding_team.agent_status import build_agent_statuses
 from coding_team.api import main as _main
 from coding_team.api.models import (
     JobListItem,
-    PendingQuestion,
     RunRequest,
     RunResponse,
     StatusResponse,
 )
+from shared_hitl.status import pending_questions_from_raw
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -151,7 +151,7 @@ def get_status(job_id: str) -> StatusResponse:
         github_context=data.get("github_context"),
         github_pr_url=data.get("github_pr_url"),
         review_summary=data.get("review_summary"),
-        pending_questions=[PendingQuestion(**q) for q in data.get("pending_questions", [])],
+        pending_questions=pending_questions_from_raw(data.get("pending_questions", [])),
         waiting_for_answers=bool(data.get("waiting_for_answers", False)),
         current_activity=data.get("current_activity")
         if isinstance(data.get("current_activity"), dict)

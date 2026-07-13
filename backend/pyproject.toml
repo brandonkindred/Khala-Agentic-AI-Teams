@@ -161,9 +161,6 @@ omit = [
     # against the live LLM model registry to repair build failures; pure
     # integration entry point.
     "agents/software_engineering_team/build_fix_specialist/agent.py",
-    # software_engineering_team: git_operations_tool_agent — shells out to real
-    # git inside the agent workspace; covered via integration runs.
-    "agents/software_engineering_team/git_operations_tool_agent/agent.py",
     # software_engineering_team: ai_agent_development_team tool agents — each
     # `run()` builds an LLM prompt and parses JSON back; only meaningful with
     # a live model.
