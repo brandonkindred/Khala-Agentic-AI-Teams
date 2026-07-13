@@ -107,9 +107,18 @@ class RoutePlannerAgent:
         # as "start"/"end" while the actual boundary stops are elsewhere in
         # the list, and keying off the label would then wrongly zero out a
         # real must-visit stop's nights.
-        if stops:
+        #
+        # Skip the override entirely when a boundary stop's location is also
+        # one of trip.required_stops — the caller explicitly asked to visit
+        # that location, not merely pass through it. Forcing pass-through
+        # there would make ActivitiesExpertAgent and the fallback composer
+        # skip it exactly when the LLM collapses "required stop" and "route
+        # endpoint" into a single returned stop (e.g. required_stops and
+        # end_location naming the same city).
+        if stops and not self._is_required_stop(trip, stops[0].location):
             stops[0].recommended_nights = 0
             stops[0].stop_type = "start"
+        if stops and not self._is_required_stop(trip, stops[-1].location):
             stops[-1].recommended_nights = 0
             stops[-1].stop_type = "end"
 
@@ -228,6 +237,26 @@ class RoutePlannerAgent:
             return True
         words = [w for w in re.findall(r"[a-z0-9]+", longer) if len(w) > 2]
         return len(shorter) > 1 and shorter == "".join(w[0] for w in words)
+
+    def _is_required_stop(self, trip: TripRequest, location: str) -> bool:
+        """Return True if ``location`` matches one of ``trip.required_stops``.
+
+        Preconditions:
+            - ``location`` is a route stop's already-parsed location string.
+
+        Postconditions:
+            - Returns True if any non-blank entry in ``trip.required_stops``
+              matches ``location`` per ``_locations_match``, False otherwise
+              (including when ``location`` is blank).
+        """
+        loc = (location or "").strip().lower()
+        if not loc:
+            return False
+        return any(
+            self._locations_match((req or "").strip().lower(), loc)
+            for req in trip.required_stops
+            if req and req.strip()
+        )
 
     def _fallback_route(self, trip: TripRequest, end: str) -> RoutePlan:
         """Build a minimal route covering start → required stops → end.

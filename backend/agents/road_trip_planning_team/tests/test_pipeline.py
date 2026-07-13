@@ -331,6 +331,28 @@ def test_plan_route_normalizes_endpoint_stop_type_by_position(sample_plan_reques
     assert route.ordered_stops[-1].stop_type == "end"
 
 
+def test_plan_route_preserves_required_stop_that_is_also_the_endpoint():
+    # If a required stop and the route's end_location name the same place,
+    # the LLM may collapse it into a single terminal stop object. Endpoint
+    # normalization must not force that stop into a zero-night pass-through
+    # — the caller explicitly listed it as required, meaning they want it
+    # visited (activities + a real day), not just driven through.
+    trip = TripRequest(
+        start_location="San Francisco, CA",
+        required_stops=["Los Angeles, CA"],
+        end_location="Los Angeles, CA",
+        travelers=[{"name": "Alice"}],
+    )
+    llm = _FakeLLM(
+        '{"ordered_stops": [{"location": "San Francisco, CA", "stop_type": "start"},'
+        ' {"location": "Los Angeles, CA", "stop_type": "end"}],'
+        ' "route_summary": "coastal", "suggested_total_days": 3}'
+    )
+    route = rtp_pipeline.plan_route(trip, TravelerGroupProfile(), llm=llm)
+    assert route.route_summary == "coastal"  # accepted, not the fallback route
+    assert route.ordered_stops[-1].recommended_nights != 0
+
+
 def test_plan_route_falls_back_when_route_summary_has_wrong_type(sample_plan_request):
     # RoutePlan.route_summary is typed as str — an LLM response with a
     # schema-valid, coverage-complete route but a wrong-typed top-level field
