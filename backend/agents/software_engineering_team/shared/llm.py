@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 from strands import Agent
 
@@ -31,6 +31,9 @@ from llm_service import (
     get_llm_config_summary,
     get_strands_model,
 )
+from llm_service.strands_model import resolve_strands_model
+
+DEFAULT_JSON_SYSTEM_PROMPT = "You are a helpful assistant. Always respond with valid JSON only."
 
 logger = logging.getLogger(__name__)
 
@@ -43,31 +46,38 @@ def complete_json_with_continuation(
     client: LLMClient,
     prompt: str,
     *,
+    system_prompt: str = DEFAULT_JSON_SYSTEM_PROMPT,
     temperature: float = 0.0,
+    think: Optional[Union[bool, str]] = None,
     max_continuation_cycles: int = 5,
     task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Complete JSON request with automatic continuation on truncation.
 
     Uses a Strands Agent for the LLM call. Parses the agent's text output as JSON.
-    max_continuation_cycles and task_id are accepted for backward compatibility but ignored.
+    max_continuation_cycles is accepted for backward compatibility but ignored.
 
-    When *client* implements the Strands ``Model`` protocol (e.g. a
-    ``DummyLLMClient`` in tests), it is used directly as the agent model so
-    that tests do not need a live LLM server.
+    Preconditions:
+        ``prompt`` is a non-empty string. ``client`` is a Strands ``Model``, an
+        ``LLMClient``, or ``None`` (see :func:`resolve_strands_model`).
+    Postconditions:
+        Returns the parsed JSON response as a dict. Responses wrapped in
+        markdown fences, prefixed with explanatory prose, or containing minor
+        formatting defects (e.g. trailing commas) are recovered via
+        ``extract_json_from_response`` before giving up. Raises
+        ``LLMJsonParseError`` (a subclass of ``LLMPermanentError``) only when
+        recovery also fails.
     """
-    from strands.models.model import Model as _StrandsModel
-
-    if client is not None and isinstance(client, _StrandsModel):
-        model = client
-    else:
-        model = get_strands_model(task_id)
+    model = resolve_strands_model(client, agent_key=task_id, get_strands_model_fn=get_strands_model)
     agent = Agent(
         model=model,
-        system_prompt="You are a helpful assistant. Always respond with valid JSON only.",
+        system_prompt=system_prompt,
         callback_handler=None,
     )
-    result = agent(prompt)
+    invocation_kwargs: Dict[str, Any] = {"temperature": temperature}
+    if think is not None:
+        invocation_kwargs["think"] = think
+    result = agent(prompt, **invocation_kwargs)
     raw = str(result).strip()
     # Try bare json.loads first; fall back to extract_json_from_response for
     # responses wrapped in markdown fences or prefixed with explanatory text.
