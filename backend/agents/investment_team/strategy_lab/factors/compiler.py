@@ -44,6 +44,8 @@ from typing import Any, Dict, List, Tuple
 
 from pydantic import BaseModel
 
+from ..indicators.registry_metadata import lookback_for
+from ..indicators.template_bodies import render_adx_body, render_macd_body
 from .models import (
     ADX,
     ATR,
@@ -92,12 +94,11 @@ def _lookback(node: BaseModel) -> int:
     if isinstance(node, (SMA, EMA, BollingerZ, StochasticK, VWAP)):
         return node.period
     if isinstance(node, RSI):
-        return node.period + 1
+        return lookback_for("rsi", {"period": node.period})
     if isinstance(node, MACDSignal):
-        # Matches the registry's signal-line gate (``slow + signal - 1``)
-        # and the synthesis compiler's ``_lookback_for`` for ``output='signal'``.
-        # The signal-EMA is computable as soon as ``len(macd_line) >= signal``,
-        # which occurs at ``len(bars) == slow + signal - 1``.
+        # Routed through the shared ``registry_metadata.lookback_for`` so this
+        # formula (``slow + signal - 1``) has exactly one source, consulted by
+        # both DSL compilers and the registry's own signal-line gate.
         #
         # BACKWARDS-COMPATIBILITY NOTE: prior revisions returned
         # ``slow + signal`` (one bar later). Genomes with MACDSignal
@@ -109,11 +110,13 @@ def _lookback(node: BaseModel) -> int:
         # into alignment with the registry, synthesis compiler, and the
         # reference primitive — but downstream pipelines that hash or
         # diff stored backtest artefacts may need to re-baseline.
-        return node.slow + node.signal - 1
+        return lookback_for(
+            "macd", {"slow": node.slow, "signal": node.signal, "output": "signal"}
+        )
     if isinstance(node, ATR):
-        return node.period + 1
+        return lookback_for("atr", {"period": node.period})
     if isinstance(node, ADX):
-        return 2 * node.period + 1
+        return lookback_for("adx", {"period": node.period})
     if isinstance(node, MomentumK):
         return node.k + 1
     if isinstance(node, ZScoreResidualOLS):
@@ -190,204 +193,19 @@ if avg_loss == 0:
 rs = avg_gain / avg_loss
 return 100.0 - (100.0 / (1.0 + rs))
 """,
-    MACDSignal: """\
-# Precondition defense-in-depth: matches IndicatorRegistry._macd_value,
-# but returns NAN (sandbox can't propagate ValueError cleanly).
-# ``not (x >= y)`` rather than ``x < y`` so NaN parameters trip the gate
-# (NaN is unordered with everything; ``NaN < 2`` is False under IEEE 754).
-if not ({fast} >= 2) or not ({slow} > {fast}) or not ({signal} >= 2):
-    return NAN
-# True warm-up: need at least ``slow`` bars to seed the first macd_line
-# entry. The signal-EMA fills at ``len(macd_line) >= signal``, i.e. at
-# ``len(bars) >= slow + signal - 1`` — matches the registry's gate and
-# the synthesis compiler's ``min_bars`` for ``output='signal'``.
-if len(bars) < {slow}:
-    return NAN
-# Streaming-cache the macd_line. Cache key includes the bar's symbol so
-# a strategy whose on_bar fires across multiple tickers does not
-# silently mutate one symbol's macd_line with another's bars. Classify
-# each call as ``expand`` (history grew by one bar — the warm-up
-# shape), ``slide`` (history length unchanged, oldest bar dropped — the
-# steady-state shape of a bounded history window), or cold-rebuild.
-# The 4-tuple fingerprint (id, len, ts, close) tolerates fresh-copy
-# ctx.history callers; the close leg is a CONDITIONAL fallback that
-# fires only when ts is unavailable on BOTH sides — so a non-close
-# source value or a flat market cannot silently merge unrelated streams
-# through coincident closes. Cache state is written on every code path
-# including warm-up (with val=NAN when len(macd_line) < signal), so
-# same-bar repeat calls during the [slow, slow+signal-1) warm-up window
-# share the cache instead of cold-rebuilding every bar.
-#
-# Reachability note: in the genome's on_bar flow this helper is gated
-# by ``MIN_HISTORY = _lookback(MACDSignal) = slow + signal - 1``, so
-# ``len(bars) < slow + signal - 1`` is unreachable through the normal
-# on_bar dispatch. The warm-up cache write is reachable from:
-#   (a) direct helper invocation (e.g. tests, ad-hoc probes);
-#   (b) cross-helper bar sharing where another indicator with a
-#       smaller lookback drives MIN_HISTORY lower than this helper's
-#       own minimum bar count.
-# Both pathways exist and the defense-in-depth amortisation matters
-# for them; the comment on `same-bar repeat calls during warm-up
-# share the cache` is true within those contexts.
-# Relies on the emitted __init__ initialising self._ind_state;
-# bypassing __init__ via cls.__new__ is not supported.
-# All bar-attribute reads route through a narrow try/except so a
-# raising @property/Pydantic computed_field on close/timestamp/symbol
-# degrades to None instead of crashing the helper. Mirrors
-# indicators/streaming.py::_safe_getattr verbatim — only descriptor /
-# resolution errors are caught; programmer/runtime sentinels propagate.
-_safe_exc = (AttributeError, TypeError, ValueError, RuntimeError, LookupError)
-try:
-    _symbol = getattr(bars[-1], 'symbol', None)
-except NotImplementedError:
-    raise
-except _safe_exc:
-    _symbol = None
-# Cache key embeds ``source='close'`` (the only source the factor DSL's
-# MACDSignal supports today) so future cross-source extensions cannot
-# silently collide. Matches the registry and synthesis key shapes.
-_macd_key = ('macd_signal_{fast}_{slow}_{signal}_close', _symbol)
-_state = self._ind_state.get(_macd_key)
-_last = bars[-1]
-try:
-    _raw_close = getattr(_last, 'close', None)
-except NotImplementedError:
-    raise
-except _safe_exc:
-    _raw_close = None
-# Close normalisation: mirrors indicators/streaming.py::_normalise_close
-# verbatim. Inlined because the sandbox import whitelist forbids the
-# host indicators package. Detects third-party bool scalars by
-# top-level module + exact-name allowlist (covers numpy.ma submodules,
-# pyarrow, polars); guards ``__module__`` against ``None`` (type()-built
-# classes); catches OverflowError for astronomical-magnitude ints.
-if _raw_close is None or isinstance(_raw_close, bool):
-    _new_close = None
-else:
-    _cls = type(_raw_close)
-    _mod = getattr(_cls, '__module__', None)
-    _nm = getattr(_cls, '__name__', '')
-    if (
-        isinstance(_mod, str)
-        and isinstance(_nm, str)
-        and _mod.split('.', 1)[0] in ('numpy', 'pandas', 'pyarrow', 'polars')
-        and _nm.lower() in ('bool', 'bool_', 'boolean', 'booleanscalar', 'boolscalar', 'bool8')
-    ):
-        _new_close = None
-    else:
-        try:
-            _new_close = float(_raw_close)
-        except (TypeError, ValueError, OverflowError):
-            _new_close = None
-        else:
-            if math.isnan(_new_close) or math.isinf(_new_close):
-                _new_close = None
-try:
-    _new_ts = getattr(_last, 'timestamp', None)
-except NotImplementedError:
-    raise
-except _safe_exc:
-    _new_ts = None
-_new_fp = (id(_last), len(bars), _new_ts, _new_close)
-if _state is not None and _state['fp'] == _new_fp:
-    return _state['value']
-_kind = 'none'
-if _state is not None and len(bars) >= 2:
-    _prev = bars[-2]
-    try:
-        _prev_ts = getattr(_prev, 'timestamp', None)
-    except NotImplementedError:
-        raise
-    except _safe_exc:
-        _prev_ts = None
-    _prev_fp = _state['fp']
-    _both_have_ts = _prev_fp[2] is not None and _prev_ts is not None
-    _both_ts_absent = _prev_fp[2] is None and _prev_ts is None
-    if _prev_fp[0] == id(_prev):
-        _prev_matches = True
-    elif _both_have_ts and _prev_fp[2] == _prev_ts:
-        _prev_matches = True
-    elif _both_ts_absent:
-        # Defer close compute to the close-leg branch; avoids wasted
-        # float() in the common id/ts-match path AND prevents crashes
-        # when prev_close is non-numeric. See indicators/streaming.py
-        # ::_normalise_close for the full bool/NaN/inf/non-numeric
-        # taxonomy this inlines.
-        try:
-            _prev_raw_close = getattr(_prev, 'close', None)
-        except NotImplementedError:
-            raise
-        except _safe_exc:
-            _prev_raw_close = None
-        if _prev_raw_close is None or isinstance(_prev_raw_close, bool):
-            _prev_close = None
-        else:
-            _prev_cls = type(_prev_raw_close)
-            _prev_mod = getattr(_prev_cls, '__module__', None)
-            _prev_nm = getattr(_prev_cls, '__name__', '')
-            if (
-                isinstance(_prev_mod, str)
-                and isinstance(_prev_nm, str)
-                and _prev_mod.split('.', 1)[0] in ('numpy', 'pandas', 'pyarrow', 'polars')
-                and _prev_nm.lower() in ('bool', 'bool_', 'boolean', 'booleanscalar', 'boolscalar', 'bool8')
-            ):
-                _prev_close = None
-            else:
-                try:
-                    _prev_close = float(_prev_raw_close)
-                except (TypeError, ValueError, OverflowError):
-                    _prev_close = None
-                else:
-                    if math.isnan(_prev_close) or math.isinf(_prev_close):
-                        _prev_close = None
-        _prev_matches = _prev_close is not None and _prev_fp[3] == _prev_close
-    else:
-        _prev_matches = False
-    if _prev_matches:
-        if len(bars) == _prev_fp[1] + 1:
-            _kind = 'expand'
-        elif len(bars) == _prev_fp[1]:
-            _kind = 'slide'
-_alpha_f = 2.0 / ({fast} + 1)
-_alpha_s = 2.0 / ({slow} + 1)
-if _kind == 'expand' or _kind == 'slide':
-    macd_line = _state['macd_line']
-    # Compute-then-mutate: finish the EMA loops BEFORE touching the
-    # cached deque, so any raise leaves the cache untouched.
-    _ef = bars[-{fast}].close
-    for _b in bars[-{fast} + 1:]:
-        _ef = _alpha_f * _b.close + (1 - _alpha_f) * _ef
-    _es = bars[-{slow}].close
-    for _b in bars[-{slow} + 1:]:
-        _es = _alpha_s * _b.close + (1 - _alpha_s) * _es
-    _new_macd = _ef - _es
-    if _kind == 'slide':
-        macd_line.popleft()
-    macd_line.append(_new_macd)
-else:
-    macd_line = deque()
-    for _end in range({slow}, len(bars) + 1):
-        _sub = bars[:_end]
-        _ef = _sub[-{fast}].close
-        for _b in _sub[-{fast} + 1:]:
-            _ef = _alpha_f * _b.close + (1 - _alpha_f) * _ef
-        _es = _sub[-{slow}].close
-        for _b in _sub[-{slow} + 1:]:
-            _es = _alpha_s * _b.close + (1 - _alpha_s) * _es
-        macd_line.append(_ef - _es)
-if len(macd_line) < {signal}:
-    val = NAN
-else:
-    _alpha_g = 2.0 / ({signal} + 1)
-    # Iterator walk avoids deque.__getitem__ O(min(i, n-i)) indexing
-    # cost — random-access on a deque would make signal-EMA O(n^2).
-    _it = iter(macd_line)
-    val = next(_it)
-    for _x in _it:
-        val = _alpha_g * _x + (1 - _alpha_g) * val
-self._ind_state[_macd_key] = {{'fp': _new_fp, 'value': val, 'macd_line': macd_line}}
-return val
-""",
+    MACDSignal: render_macd_body(
+        bars_var="bars",
+        missing="NAN",
+        # Cache key embeds ``source='close'`` (the only source the factor
+        # DSL's MACDSignal supports today) so future cross-source extensions
+        # cannot silently collide. Matches the registry and synthesis key
+        # shapes.
+        cache_key_expr="('macd_signal_{fast}_{slow}_{signal}_close', _symbol)",
+        # MACDSignal is always the signal-line output — the shared body
+        # computes macd/signal/histogram together and this pins the select.
+        select_expr="'signal'",
+        close_expr_template="{obj}.close",
+    ),
     BollingerZ: """\
 if len(bars) < {period}:
     return NAN
@@ -409,32 +227,7 @@ for _i in range(len(bars) - {period}, len(bars)):
     _trs.append(max(_h - _l, abs(_h - _pc), abs(_l - _pc)))
 return sum(_trs) / {period}
 """,
-    ADX: """\
-if len(bars) < 2 * {period} + 1:
-    return NAN
-_plus = []
-_minus = []
-_trs = []
-for _i in range(1, len(bars)):
-    _up = bars[_i].high - bars[_i - 1].high
-    _dn = bars[_i - 1].low - bars[_i].low
-    _plus.append(_up if _up > _dn and _up > 0 else 0.0)
-    _minus.append(_dn if _dn > _up and _dn > 0 else 0.0)
-    _pc = bars[_i - 1].close
-    _trs.append(max(
-        bars[_i].high - bars[_i].low,
-        abs(bars[_i].high - _pc),
-        abs(bars[_i].low - _pc),
-    ))
-_tr_sum = sum(_trs[-{period}:])
-if _tr_sum == 0:
-    return 0.0
-_plus_di = 100.0 * sum(_plus[-{period}:]) / _tr_sum
-_minus_di = 100.0 * sum(_minus[-{period}:]) / _tr_sum
-if _plus_di + _minus_di == 0:
-    return 0.0
-return 100.0 * abs(_plus_di - _minus_di) / (_plus_di + _minus_di)
-""",
+    ADX: render_adx_body(bars_var="bars", missing="NAN"),
     StochasticK: """\
 if len(bars) < {period}:
     return NAN

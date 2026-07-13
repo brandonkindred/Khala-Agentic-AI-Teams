@@ -20,6 +20,15 @@ from typing import Annotated, Any, Iterator, Literal, Optional, Sequence, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
+from .indicators.registry_metadata import (
+    INDICATOR_HELPER_NAME,
+    INDICATOR_OUTPUT_RANGES,  # noqa: F401 (re-exported for downstream imports)
+    _float_gt,  # noqa: F401 (re-exported for downstream imports)
+    _int_in,  # noqa: F401 (re-exported for downstream imports)
+    _one_of,  # noqa: F401 (re-exported for downstream imports)
+)
+from .indicators.registry_metadata import INDICATOR_PARAM_SPECS as _INDICATOR_PARAM_SPECS
+
 # Issue #537: comparison ops are the literal symbols, not name aliases.
 ComparisonOp = Literal["<", ">", "<=", ">=", "==", "cross_above", "cross_below"]
 
@@ -73,217 +82,16 @@ class _SpecNode(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Per-indicator param registry. Each entry describes the params an indicator
-# accepts; the registry is consulted by `IndicatorRef._validate_params` to
-# enforce required keys, default fill-ins on optional keys, and per-param
-# type/bounds. This is the per-indicator validation the issue-text shape
-# (``params: dict[str, float | int | str]``) cannot enforce at the type level.
+# Per-indicator param registry. ``_INDICATOR_PARAM_SPECS`` (consulted by
+# ``IndicatorRef._validate_params`` to enforce required keys, default
+# fill-ins on optional keys, and per-param type/bounds) and
+# ``INDICATOR_HELPER_NAME`` (DSL name -> emitted method name) are imported
+# above from ``indicators.registry_metadata`` — the single source of truth
+# shared with ``synthesis.compiler``'s emit-args table and both compilers'
+# lookback formulas. Re-exported here under their original names so no
+# downstream import site (``quality_gates.code_conformance``,
+# ``synthesis.compiler``, etc.) needs to change.
 # ---------------------------------------------------------------------------
-
-
-def _int_in(lo: int, hi: int):
-    def check(value: Any) -> None:
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise ValueError(f"must be int (got {type(value).__name__})")
-        if not (lo <= value <= hi):
-            raise ValueError(f"must be in [{lo}, {hi}] (got {value})")
-
-    return check
-
-
-def _float_gt(threshold: float):
-    def check(value: Any) -> None:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"must be numeric (got {type(value).__name__})")
-        if not (math.isfinite(float(value)) and float(value) > threshold):
-            raise ValueError(f"must be > {threshold} (got {value})")
-
-    return check
-
-
-def _one_of(*allowed: str):
-    allowed_set = frozenset(allowed)
-
-    def check(value: Any) -> None:
-        if value not in allowed_set:
-            raise ValueError(f"must be one of {sorted(allowed_set)} (got {value!r})")
-
-    # Expose the accepted set so downstream code can derive from the DSL rather
-    # than hardcoding a second copy (e.g. the conformance gate's Bollinger
-    # derived-band set); keep this the single source of truth.
-    check.allowed = allowed_set
-    return check
-
-
-# Each entry: required[key] = validator; optional[key] = (default, validator).
-# ``allow_source`` mirrors the previous per-class behaviour: ATR/ADX/Stochastic
-# do not accept a ``source`` override (they read OHLC directly).
-_INDICATOR_PARAM_SPECS: dict[str, dict[str, Any]] = {
-    "sma": {
-        "required": {"period": _int_in(2, 400)},
-        "optional": {},
-        "allow_source": True,
-    },
-    "ema": {
-        "required": {"period": _int_in(2, 400)},
-        "optional": {},
-        "allow_source": True,
-    },
-    "rsi": {
-        "required": {},
-        "optional": {"period": (14, _int_in(2, 200))},
-        "allow_source": True,
-        "output_range": (0.0, 100.0),
-    },
-    "macd": {
-        "required": {},
-        "optional": {
-            "fast": (12, _int_in(2, 200)),
-            "slow": (26, _int_in(3, 400)),
-            "signal": (9, _int_in(2, 100)),
-            "output": ("macd", _one_of("macd", "signal", "histogram")),
-        },
-        "allow_source": True,
-    },
-    "bollinger": {
-        "required": {},
-        "optional": {
-            "period": (20, _int_in(5, 200)),
-            "num_std": (2.0, _float_gt(0)),
-            # ``percent_b`` and ``bandwidth`` are derived series surfaced as their
-            # own band outputs so the common case needs no indicator-of-indicator:
-            # %B = (price − lower) / (upper − lower); bandwidth = (upper − lower) / middle.
-            "band": (
-                "middle",
-                _one_of("upper", "middle", "lower", "percent_b", "bandwidth"),
-            ),
-        },
-        "allow_source": True,
-    },
-    "atr": {
-        "required": {},
-        "optional": {"period": (14, _int_in(2, 200))},
-        "allow_source": False,
-    },
-    "adx": {
-        "required": {},
-        "optional": {"period": (14, _int_in(2, 200))},
-        "allow_source": False,
-        "output_range": (0.0, 100.0),
-    },
-    "stochastic": {
-        "required": {},
-        "optional": {
-            "k_period": (14, _int_in(2, 200)),
-            "d_period": (3, _int_in(1, 100)),
-            "output": ("k", _one_of("k", "d")),
-        },
-        "allow_source": False,
-        "output_range": (0.0, 100.0),
-    },
-    "vwap": {
-        "required": {},
-        "optional": {},
-        "allow_source": False,
-    },
-    # Donchian channels: highest-high / lowest-low breakout bands over ``period``;
-    # ``middle`` is their midpoint. Reads OHLC directly (no source override).
-    "donchian": {
-        "required": {},
-        "optional": {
-            "period": (20, _int_in(2, 400)),
-            "band": ("middle", _one_of("upper", "middle", "lower")),
-        },
-        "allow_source": False,
-    },
-    # Keltner channels: EMA(close, period) basis ± ``multiplier`` × ATR(atr_period).
-    # OHLC-only (the ATR leg reads high/low/close); the basis is close-EMA.
-    "keltner": {
-        "required": {},
-        "optional": {
-            "period": (20, _int_in(2, 400)),
-            "atr_period": (10, _int_in(2, 200)),
-            "multiplier": (2.0, _float_gt(0)),
-            "band": ("middle", _one_of("upper", "middle", "lower")),
-        },
-        "allow_source": False,
-    },
-    # On-Balance Volume: cumulative signed volume (close-direction weighted).
-    "obv": {
-        "required": {},
-        "optional": {},
-        "allow_source": False,
-    },
-    # Money Flow Index: volume-weighted RSI on typical price, bounded 0–100.
-    "mfi": {
-        "required": {},
-        "optional": {"period": (14, _int_in(2, 200))},
-        "allow_source": False,
-        "output_range": (0.0, 100.0),
-    },
-    # Rate of Change: percent change of ``source`` over ``period`` bars (unbounded).
-    "roc": {
-        "required": {},
-        "optional": {"period": (12, _int_in(2, 400))},
-        "allow_source": True,
-    },
-    # Commodity Channel Index: typical-price deviation oscillator (unbounded).
-    "cci": {
-        "required": {},
-        "optional": {"period": (20, _int_in(2, 400))},
-        "allow_source": False,
-    },
-    # Williams %R: position of close within the trailing high/low range, −100–0.
-    "williams_r": {
-        "required": {},
-        "optional": {"period": (14, _int_in(2, 200))},
-        "allow_source": False,
-        "output_range": (-100.0, 0.0),
-    },
-}
-
-
-# Indicators whose output is bounded to a fixed numeric range, derived from the
-# registry above (an indicator is bounded iff its spec carries an
-# ``output_range``). For the bounded indicators here every output selector
-# (e.g. stochastic ``%K`` / ``%D``) shares the same range, so a single
-# name → range mapping is sufficient. Consumed by the deterministic
-# spec-readiness reachability check, which decides whether a predicate comparing
-# the indicator against a constant can ever (or can always) be true. Keeping the
-# range on the registry means a future bounded indicator stays in sync
-# automatically — there is no separate table to update.
-INDICATOR_OUTPUT_RANGES: dict[str, tuple[float, float]] = {
-    name: spec["output_range"]
-    for name, spec in _INDICATOR_PARAM_SPECS.items()
-    if "output_range" in spec
-}
-
-
-# DSL indicator name → the exported/emitted helper function name. Single source of
-# truth for the name↔helper mapping: the synthesis compiler derives its emitted
-# ``self.<helper>(...)`` method name from this, and the conformance gate derives the
-# call names it credits. Most indicators share the DSL name; only the multi-output
-# channel indicators carry a distinct helper (bollinger→bollinger_bands, etc.). A
-# load-time guard here keeps it covering every ``IndicatorName``, so the two derived
-# tables no longer need their own guards.
-INDICATOR_HELPER_NAME: dict[str, str] = {
-    "sma": "sma",
-    "ema": "ema",
-    "rsi": "rsi",
-    "macd": "macd",
-    "bollinger": "bollinger_bands",
-    "atr": "atr",
-    "adx": "adx",
-    "stochastic": "stochastic",
-    "vwap": "vwap",
-    "donchian": "donchian_channels",
-    "keltner": "keltner_channels",
-    "obv": "obv",
-    "mfi": "mfi",
-    "roc": "roc",
-    "cci": "cci",
-    "williams_r": "williams_r",
-}
 
 # Explicit raise (survives ``python -O``): a DSL indicator missing from this map would
 # make the compiler ``KeyError`` at emit time and the conformance gate miss the call.

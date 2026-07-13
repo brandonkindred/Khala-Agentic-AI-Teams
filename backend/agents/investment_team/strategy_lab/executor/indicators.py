@@ -1,6 +1,12 @@
 """Pre-built technical indicators using only pandas and numpy.
 
-Available in the strategy sandbox via: from indicators import <function_name>
+This module is copied into the strategy sandbox as ``_indicators_impl.py``
+(see ``trading_service.strategy.streaming_harness.StreamingHarness``) — the
+sandbox's real ``indicators.py`` is a copy of ``strategy_indicators.py``'s
+scalar contract, which is what ``from indicators import <function_name>``
+resolves to at runtime. This module is instead consulted in-process by the
+static coverage probe (``coverage_probe/indicator_probe.py``) as the
+reference pandas/numpy implementation.
 
 Every function accepts either a ``pd.Series`` or a sequence the strategy
 already has on hand — a ``list[float]`` or the ``list[Bar]`` that

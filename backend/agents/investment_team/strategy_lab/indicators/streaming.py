@@ -1427,3 +1427,92 @@ class IndicatorRegistry:
         value = -50.0 if rng == 0 else -100.0 * (highest - close) / rng
         self._state[key] = {"fp": fp, "value": value}
         return value
+
+
+# ---------------------------------------------------------------------------
+# DSL indicator name -> IndicatorRegistry method dispatch. The single source
+# both ``executor.strategy_indicators.indicator_value`` and
+# ``executor.predicate_evaluator._registry_indicator`` route through — they
+# previously carried two independent, structurally-parallel 16-way if/elif
+# blocks reaching the same registry methods. Placed here (rather than a new
+# module) because this file is already flattened into the sandbox as
+# ``_streaming_indicators.py``, so both callers can reach it without the
+# flat-sandbox harness learning a new file.
+# ---------------------------------------------------------------------------
+
+
+def resolve_indicator(
+    reg: "IndicatorRegistry",
+    name: str,
+    bars: Sequence[Any],
+    *,
+    source: str = "close",
+    **params: Any,
+) -> Optional[float]:
+    """Dispatch DSL indicator ``name`` to its ``IndicatorRegistry`` method.
+
+    Preconditions: ``name`` is a known DSL indicator name; ``params`` carries
+    every param that indicator's registry method requires (callers are
+    responsible for defaults — ``IndicatorRef.params`` and
+    ``strategy_indicators``' validated ``**params`` both already carry them).
+    Postconditions: returns the registry's trailing-bar value for ``bars``,
+    or ``None`` during warm-up — identical to calling the registry method
+    directly with the same arguments.
+    """
+    if name == "sma":
+        return reg.sma(bars, period=int(params["period"]), source=source)
+    if name == "ema":
+        return reg.ema(bars, period=int(params["period"]), source=source)
+    if name == "rsi":
+        return reg.rsi(bars, period=int(params["period"]), source=source)
+    if name == "macd":
+        return reg.macd(
+            bars,
+            fast=int(params["fast"]),
+            slow=int(params["slow"]),
+            signal=int(params["signal"]),
+            source=source,
+            select=str(params["output"]),
+        )
+    if name == "bollinger":
+        return reg.bollinger_bands(
+            bars,
+            period=int(params["period"]),
+            num_std=float(params["num_std"]),
+            source=source,
+            select=str(params["band"]),
+        )
+    if name == "atr":
+        return reg.atr(bars, period=int(params["period"]))
+    if name == "adx":
+        return reg.adx(bars, period=int(params["period"]))
+    if name == "stochastic":
+        return reg.stochastic(
+            bars,
+            k_period=int(params["k_period"]),
+            d_period=int(params["d_period"]),
+            select=str(params["output"]),
+        )
+    if name == "vwap":
+        return reg.vwap(bars)
+    if name == "donchian":
+        return reg.donchian(bars, period=int(params["period"]), select=str(params["band"]))
+    if name == "keltner":
+        return reg.keltner(
+            bars,
+            period=int(params["period"]),
+            atr_period=int(params["atr_period"]),
+            multiplier=float(params["multiplier"]),
+            select=str(params["band"]),
+        )
+    if name == "obv":
+        return reg.obv(bars)
+    if name == "mfi":
+        return reg.mfi(bars, period=int(params["period"]))
+    if name == "roc":
+        return reg.roc(bars, period=int(params["period"]), source=source)
+    if name == "cci":
+        return reg.cci(bars, period=int(params["period"]))
+    if name == "williams_r":
+        return reg.williams_r(bars, period=int(params["period"]))
+    raise ValueError(f"unknown indicator name: {name!r}")
