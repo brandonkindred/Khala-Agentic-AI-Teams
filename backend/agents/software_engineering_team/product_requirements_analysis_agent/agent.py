@@ -20,6 +20,12 @@ from software_engineering_team.shared.json_utils import (
     default_decompose_by_sections,
 )
 
+# MAX_GAP_ROUNDS / MAX_SOP_ROUNDS are re-exported here for callers/tests that import
+# them from this module.
+from .context_discovery import (
+    inject_context_answers_into_spec,
+    run_context_constraints_discovery,
+)
 from .llm_io import call_llm_json, call_llm_text, parse_llm_json
 from .models import (
     AnalysisPhase,
@@ -52,9 +58,6 @@ from .question_processing import (
     parse_spec_review_response,
     review_question_answer_alignment,
 )
-
-# MAX_GAP_ROUNDS / MAX_SOP_ROUNDS are re-exported here for callers/tests that import
-# them from this module.
 from .sop_engine import (  # noqa: F401
     MAX_GAP_ROUNDS,
     MAX_SOP_ROUNDS,
@@ -66,21 +69,18 @@ from .sop_engine import (  # noqa: F401
     extract_sop_decisions_from_spec,
     format_architecture_document,
     generate_spec_aware_options,
-    inject_context_answers_into_spec,
-    run_context_constraints_discovery,
     run_sop_phase1,
     run_sop_phase2_architecture,
 )
 from .spec_review import (
     format_context_for_review,
-    merge_spec_review_results,
     run_spec_review,
 )
 from .spec_writing import (
+    _merge_spec_cleanup_results,
     build_specialist_collaboration_plan,
     format_answered_questions,
     generate_prd_document,
-    merge_spec_cleanup_results,
     parse_spec_cleanup_response,
     run_spec_cleanup,
     update_spec,
@@ -790,13 +790,9 @@ class ProductRequirementsAnalysisAgent:
                 break
         return spec_review_result, current_spec, open_count
 
-    def _merge_spec_review_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Delegates to :func:`spec_review.merge_spec_review_results`."""
-        return merge_spec_review_results(results)
-
     def _merge_spec_cleanup_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Delegates to :func:`spec_writing.merge_spec_cleanup_results`."""
-        return merge_spec_cleanup_results(results)
+        """Delegates to :func:`spec_writing._merge_spec_cleanup_results`."""
+        return _merge_spec_cleanup_results(results)
 
     def _format_context_for_review(self) -> str:
         """Delegates to :func:`spec_review.format_context_for_review`."""
@@ -1005,7 +1001,7 @@ class ProductRequirementsAnalysisAgent:
     def _run_context_constraints_discovery(
         self, spec_content: str, repo_path: Path
     ) -> List[OpenQuestion]:
-        """Delegates to :func:`sop_engine.run_context_constraints_discovery`."""
+        """Delegates to :func:`context_discovery.run_context_constraints_discovery`."""
         return run_context_constraints_discovery(self._model, spec_content, repo_path)
 
     def _inject_context_answers_into_spec(
@@ -1014,7 +1010,7 @@ class ProductRequirementsAnalysisAgent:
         answered_questions: List[AnsweredQuestion],
         repo_path: Path,
     ) -> str:
-        """Delegates to :func:`sop_engine.inject_context_answers_into_spec`."""
+        """Delegates to :func:`context_discovery.inject_context_answers_into_spec`."""
         return inject_context_answers_into_spec(current_spec, answered_questions, repo_path)
 
     def _parse_question_option(self, opt_data: Any, index: int) -> QuestionOption:

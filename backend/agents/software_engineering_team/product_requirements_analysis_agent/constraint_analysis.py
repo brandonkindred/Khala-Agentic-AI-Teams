@@ -8,8 +8,7 @@ indicators (defined in :mod:`constraint_domains`) and reports, per domain, the
 deepest layer that has been resolved, then turns that into LLM hint text so SOP
 Phase 1 asks only the *next* unresolved layer's question per domain.
 
-Extracted verbatim from ``agent.py`` to keep the workflow module focused on
-orchestration. Pure functions with no LLM or I/O.
+Pure functions with no LLM or I/O.
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ from .constraint_domains import CONSTRAINT_DOMAINS_CONFIG
 from .models import AnsweredQuestion
 
 __all__ = [
-    "CONSTRAINT_DOMAINS_CONFIG",
     "analyze_constraint_status",
     "generate_constraint_hints",
 ]

@@ -8,8 +8,7 @@ parsing the file back into structured blocks, and appending a new iteration whil
 pruning any prior block that the new answers supersede (a later directive replaces
 an earlier one for the same decision).
 
-Pure functions plus filesystem I/O — no LLM. Extracted from ``agent.py`` to keep the
-workflow module focused on orchestration.
+Pure functions plus filesystem I/O — no LLM.
 """
 
 from __future__ import annotations

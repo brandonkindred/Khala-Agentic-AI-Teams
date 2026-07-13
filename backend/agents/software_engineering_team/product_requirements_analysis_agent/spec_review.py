@@ -10,8 +10,7 @@ previously answered question is re-asked), and drops organizational/process ques
 ``run_spec_review`` takes the ``LLMClient`` and Strands ``model`` explicitly, plus the
 context-files dict, the iteration/version bookkeeping (``iteration``, ``spec_version``,
 ``answered_questions``), and an optional ``on_chunk_progress`` callback for UI status
-updates. Extracted from ``agent.py`` to keep the workflow module focused on
-orchestration.
+updates.
 """
 
 from __future__ import annotations
@@ -35,44 +34,6 @@ from .question_processing import (
 from .spec_writing import update_spec_from_duplicates
 
 logger = logging.getLogger(__name__)
-
-
-def merge_spec_review_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Combine issues, gaps, and questions from multiple chunk reviews.
-
-    Kept for potential future chunked fallback; spec review currently uses a single
-    whole-spec LLM call and does not call this.
-
-    Args:
-        results: List of parsed JSON dicts from chunk reviews
-
-    Returns:
-        Merged dict with concatenated lists
-
-    Preconditions: ``results`` is a list of dicts.
-    Postconditions: issues/gaps/open_questions are concatenated across chunks; the
-        summary reports the number of sections reviewed.
-    """
-    merged: Dict[str, Any] = {
-        "issues": [],
-        "gaps": [],
-        "open_questions": [],
-        "summary": "",
-    }
-
-    summaries = []
-    for r in results:
-        if isinstance(r.get("issues"), list):
-            merged["issues"].extend(r["issues"])
-        if isinstance(r.get("gaps"), list):
-            merged["gaps"].extend(r["gaps"])
-        if isinstance(r.get("open_questions"), list):
-            merged["open_questions"].extend(r["open_questions"])
-        if r.get("summary"):
-            summaries.append(str(r["summary"]))
-
-    merged["summary"] = f"Reviewed {len(results)} sections. " + " ".join(summaries[:3])
-    return merged
 
 
 def format_context_for_review(context_files: Dict[str, str]) -> str:

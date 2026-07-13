@@ -11,21 +11,21 @@ two human-in-the-loop orchestrators plus their supporting helpers:
   questions until each sub-phase is complete. Every question is guaranteed >= 3
   spec-aware options. Supported by ``evaluate_sop_conditionals``,
   ``extract_sop_decisions_from_spec``, ``generate_spec_aware_options``,
-  ``build_question_options``, and ``assess_sub_phase_gaps``.
+  ``build_question_options``, ``assess_sub_phase_gaps``, and the shared
+  ``_pad_to_minimum_options`` option-padding helper.
 * **Phase 2 — Architecture** (``run_sop_phase2_architecture``): autonomously analyze
   architecture from the spec plus Phase 1 decisions, present recommendations for
   user approval, persist an architecture document, and inject a summary into the
   spec. Supported by ``build_architecture_approval_questions``,
   ``apply_architecture_approval``, and ``format_architecture_document``.
 
-Also home to a standalone, currently-unwired context/constraints discovery pair
-(``run_context_constraints_discovery`` and ``inject_context_answers_into_spec``) that
-predates the two SOP phases above and is exercised directly by tests.
+The project context/constraints discovery pair lives separately in
+:mod:`context_discovery` — ``run_sop_phase1`` calls its
+``inject_context_answers_into_spec`` to fold Phase 1 answers back into the spec.
 
 The two orchestrators call the user-communication phase; the analyzers each make one
 LLM call and degrade gracefully on failure. Functions take an explicit Strands
-``model``. Extracted from ``agent.py`` to keep the workflow module focused on
-orchestration.
+``model``.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .context_discovery import inject_context_answers_into_spec
 from .llm_io import call_llm_json
 from .models import (
     AnsweredQuestion,
@@ -47,7 +48,6 @@ from .models import (
     ToolRecommendation,
 )
 from .prompts import (
-    CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT,
     SOP_ARCHITECTURE_ANALYSIS_PROMPT,
     SOP_GENERATE_OPTIONS_PROMPT,
     SOP_SPEC_EXTRACTION_PROMPT,
@@ -55,9 +55,7 @@ from .prompts import (
     SOP_SUB_PHASE_OBJECTIVES,
 )
 from .qa_history import record_answers
-from .question_data import SOP_PHASE1_QUESTIONS, _context_discovery_fallback_questions
-from .question_processing import parse_open_question
-from .spec_writing import format_answered_questions
+from .question_data import SOP_PHASE1_QUESTIONS
 from .user_communication import communicate_with_user
 
 logger = logging.getLogger(__name__)
@@ -217,6 +215,50 @@ def generate_spec_aware_options(
         return []
 
 
+def _pad_to_minimum_options(
+    options: List[QuestionOption],
+    min_options: int,
+    *,
+    text_default: bool,
+) -> List[QuestionOption]:
+    """Ensure at least ``min_options`` options by appending 'Other' and, if still
+    short, inserting a free-text placeholder at the front.
+
+    Shared by :func:`build_question_options` and :func:`assess_sub_phase_gaps` so
+    the option-padding policy lives in one place.
+
+    Preconditions: ``options`` is a list of :class:`QuestionOption`; ``min_options``
+        is a non-negative int.
+    Postconditions: mutates and returns ``options``; an existing "Other" option
+        (case-insensitive label match) is not duplicated; a no-op if ``options``
+        already has >= ``min_options`` entries.
+    """
+    if len(options) >= min_options:
+        return options
+    if not any(o.label.lower() == "other" for o in options):
+        options.append(
+            QuestionOption(
+                id="opt_other",
+                label="Other",
+                is_default=False,
+                rationale="Specify your preference.",
+                confidence=0.3,
+            )
+        )
+    if len(options) < min_options:
+        options.insert(
+            0,
+            QuestionOption(
+                id="opt_text",
+                label="(Please type your answer)",
+                is_default=text_default,
+                rationale="",
+                confidence=0.5,
+            ),
+        )
+    return options
+
+
 def build_question_options(
     model: Any,
     q_def: Dict[str, Any],
@@ -259,32 +301,7 @@ def build_question_options(
             options.append(gen_opt)
             existing_labels.add(gen_opt.label.lower())
 
-    # Ensure "Other" option exists
-    if not any(o.label.lower() == "other" for o in options):
-        options.append(
-            QuestionOption(
-                id="opt_other",
-                label="Other",
-                is_default=False,
-                rationale="Specify your preference.",
-                confidence=0.3,
-            )
-        )
-
-    # Final safety: if still < MIN_OPTIONS, add a free-text placeholder
-    if len(options) < MIN_OPTIONS:
-        options.insert(
-            0,
-            QuestionOption(
-                id="opt_text",
-                label="(Please type your answer)",
-                is_default=True,
-                rationale="",
-                confidence=0.5,
-            ),
-        )
-
-    return options
+    return _pad_to_minimum_options(options, MIN_OPTIONS, text_default=True)
 
 
 def assess_sub_phase_gaps(
@@ -400,28 +417,7 @@ def assess_sub_phase_gaps(
                 )
 
             # Ensure minimum 3 options
-            if len(options) < 3:
-                if not any(o.label.lower() == "other" for o in options):
-                    options.append(
-                        QuestionOption(
-                            id="opt_other",
-                            label="Other",
-                            is_default=False,
-                            rationale="Specify your preference.",
-                            confidence=0.3,
-                        )
-                    )
-                if len(options) < 3:
-                    options.insert(
-                        0,
-                        QuestionOption(
-                            id="opt_text",
-                            label="(Please type your answer)",
-                            is_default=False,
-                            rationale="",
-                            confidence=0.5,
-                        ),
-                    )
+            options = _pad_to_minimum_options(options, 3, text_default=False)
 
             # Ensure exactly one is_default=True
             defaults = [o for o in options if o.is_default]
@@ -583,6 +579,13 @@ def run_sop_phase1(
 
             all_answered.extend(answered)
             record_answers(repo_path, answered, iteration=0)
+        else:
+            logger.warning(
+                "SOP Phase 1: sub-phase '%s' hit MAX_SOP_ROUNDS (%d) — some hardcoded "
+                "questions may remain unanswered",
+                sub_phase.value,
+                MAX_SOP_ROUNDS,
+            )
 
         # --- Phase B: Gap analysis — generate follow-up questions until sub-phase is complete ---
         for gap_round in range(1, MAX_GAP_ROUNDS + 1):
@@ -650,6 +653,13 @@ def run_sop_phase1(
 
             all_answered.extend(answered)
             record_answers(repo_path, answered, iteration=0)
+        else:
+            logger.warning(
+                "SOP Phase 1: sub-phase '%s' hit MAX_GAP_ROUNDS (%d) — gap analysis may "
+                "not have converged",
+                sub_phase.value,
+                MAX_GAP_ROUNDS,
+            )
 
     # Step 3: Inject all decisions into spec
     if all_answered:
@@ -928,56 +938,3 @@ def format_architecture_document(arch_result: ArchitectureAnalysisResult) -> str
         lines.append(arch_result.summary + "\n")
 
     return "\n".join(lines)
-
-
-def run_context_constraints_discovery(
-    model: Any, spec_content: str, repo_path: Path
-) -> List[OpenQuestion]:
-    """Formulate context/constraint questions (project context, deployment, tenets, mandates).
-
-    Uses LLM with CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT; on empty or invalid response
-    returns a fixed fallback list.
-
-    Preconditions: ``model`` is a Strands ``Model``.
-    Postconditions: returns a non-empty question list — the LLM's when valid, else the
-        fixed fallback; never raises.
-    """
-    spec_excerpt = (spec_content or "")[:4000]
-    prompt = CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT.format(spec_excerpt=spec_excerpt)
-    try:
-        parsed = call_llm_json(model, prompt)
-        questions_data = parsed.get("open_questions") if isinstance(parsed, dict) else None
-        if not questions_data or not isinstance(questions_data, list):
-            return _context_discovery_fallback_questions()
-        out: List[OpenQuestion] = []
-        for i, q_data in enumerate(questions_data):
-            q = parse_open_question(q_data, i)
-            if q.source == "spec_review":
-                q = q.model_copy(update={"source": "context_discovery"})
-            out.append(q)
-        return out if out else _context_discovery_fallback_questions()
-    except Exception as e:
-        logger.warning(
-            "Context constraints discovery LLM failed, using fallback: %s",
-            str(e),
-        )
-        return _context_discovery_fallback_questions()
-
-
-def inject_context_answers_into_spec(
-    current_spec: str,
-    answered_questions: List[AnsweredQuestion],
-    repo_path: Path,
-) -> str:
-    """Build '## Project context and constraints' section from Q&A and prepend to current_spec.
-
-    Preconditions: ``answered_questions`` is a list of :class:`AnsweredQuestion`.
-    Postconditions: returns ``current_spec`` unchanged for an empty answer list;
-        otherwise the spec with a prepended context section.
-    """
-    if not answered_questions:
-        return current_spec
-    section = "## Project context and constraints\n\n"
-    section += format_answered_questions(answered_questions)
-    section += "\n\n---\n\n"
-    return section + current_spec

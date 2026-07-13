@@ -3,8 +3,7 @@ LLM invocation seam for the Product Requirements Analysis Agent.
 
 Every raw LLM round-trip in this agent funnels through one place — a single fresh
 Strands ``Agent`` per call, coerced to text and (optionally) parsed as JSON with
-fence stripping. Centralizing it mirrors ``shared/persona_agent_base.py``'s "one
-place owns the call mechanics" idea and keeps the workflow modules free of the
+fence stripping. Centralizing it keeps the workflow modules free of the
 ``str(Agent(model=...)(prompt))`` idiom.
 
 Pure functions parameterized by an explicit Strands ``model`` — no agent state.

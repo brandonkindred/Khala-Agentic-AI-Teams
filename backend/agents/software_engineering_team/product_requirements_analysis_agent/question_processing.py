@@ -7,8 +7,6 @@ duplicates of already-answered questions and organizational/process questions,
 consolidates semantically-equivalent questions, checks question/option coherence,
 and attaches a recommended option. The LLM-backed steps take an explicit Strands
 ``model`` and fall back to the unmodified list on any failure; the rest are pure.
-
-Extracted from ``agent.py`` to keep the workflow module focused on orchestration.
 """
 
 from __future__ import annotations

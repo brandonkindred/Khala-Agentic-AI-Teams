@@ -10,8 +10,6 @@ notification I/O plus deterministic answer merging.
 Shared across both SOP Phase 1 (``sop_engine.run_sop_phase1``, per-sub-phase question
 rounds) and the spec-review workflow's own Communicate-with-User phase — not tied to
 a single numbered phase.
-
-Extracted from ``agent.py`` to keep the workflow module focused on orchestration.
 """
 
 from __future__ import annotations
