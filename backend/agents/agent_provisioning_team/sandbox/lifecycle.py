@@ -72,14 +72,23 @@ async def _resolve_team(agent_id: str) -> str:
         * ``agent_id`` is a string.
     Postconditions:
         * Returns the resolved manifest's ``team``, or raises
-          :class:`UnknownAgentError` if unresolvable. Runs the (possibly
-          Postgres-backed, for a dynamically-registered agent) registry lookup in
-          a worker thread via ``asyncio.to_thread`` so it never blocks this
-          coroutine's event loop.
+          :class:`UnknownAgentError` if unresolvable. Both ``get_registry()``
+          and the ``.get(agent_id)`` lookup run inside the ``asyncio.to_thread``
+          worker — not just the lookup — so a cold-cache first call (which
+          performs ``AgentRegistry.load()``'s full manifest directory scan +
+          YAML parse across every team, not a cheap singleton fetch) never runs
+          on this coroutine's event loop. ``get_registry`` is
+          ``functools.lru_cache``-wrapped, whose internal lock already
+          serializes concurrent cold-cache calls, so no additional locking is
+          needed here.
     """
-    from agent_registry import get_registry
 
-    manifest = await asyncio.to_thread(get_registry().get, agent_id)
+    def _lookup():
+        from agent_registry import get_registry
+
+        return get_registry().get(agent_id)
+
+    manifest = await asyncio.to_thread(_lookup)
     if manifest is None:
         raise UnknownAgentError(f"No agent manifest for {agent_id!r}")
     return manifest.team
