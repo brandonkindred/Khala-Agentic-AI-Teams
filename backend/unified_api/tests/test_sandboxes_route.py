@@ -133,3 +133,55 @@ def test_status_reconciles_vanished_container(client: TestClient, monkeypatch) -
     resp = client.get("/api/agents/sandboxes/blogging.planner")
     assert resp.status_code == 200
     assert resp.json()["status"] == SandboxStatus.COLD
+
+
+def test_metrics_returns_pool_counters(client: TestClient) -> None:
+    resp = client.get("/api/agents/sandboxes/metrics")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["resident"] == 0
+    assert "by_team" in body
+    assert "by_status" in body
+    assert "reaper" in body
+    assert "boot_ms" in body
+
+    # Resident count reflects a warmed sandbox.
+    resp = client.post("/api/agents/sandboxes/blogging.planner/warm")
+    assert resp.status_code == 200
+    resp = client.get("/api/agents/sandboxes/metrics")
+    assert resp.json()["resident"] == 1
+
+
+def test_warm_and_teardown_dispatch_through_temporal_when_enabled(client: TestClient, monkeypatch) -> None:
+    """The route layer (warm_sandbox/delete_sandbox) must actually reach the
+    Temporal dispatch branch when it's enabled, not just the in-process
+    fallback every other test in this file exercises — sandbox_temporal_enabled()
+    is False in the ambient test environment (no TEMPORAL_ADDRESS), so without
+    this test the route's `if sandbox_temporal_enabled():` branch in
+    sandbox_dispatch.acquire_sandbox/teardown_sandbox would have no route-level
+    coverage at all (the branch itself is unit-tested in test_sandbox_temporal.py,
+    but never through the actual FastAPI route)."""
+    from agent_provisioning_team.sandbox.state import SandboxHandle
+    from agent_provisioning_team.temporal import sandbox_dispatch as sd
+
+    handle = SandboxHandle(
+        agent_id="blogging.planner",
+        team="blogging",
+        status=SandboxStatus.WARM,
+        container_name="sbx-blogging.planner",
+        host_port=55123,
+    )
+    monkeypatch.setattr(sd, "sandbox_temporal_enabled", lambda: True)
+    acquire_mock = AsyncMock(return_value=handle)
+    teardown_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(sd, "acquire_sandbox_via_temporal", acquire_mock)
+    monkeypatch.setattr(sd, "teardown_sandbox_via_temporal", teardown_mock)
+
+    resp = client.post("/api/agents/sandboxes/blogging.planner/warm")
+    assert resp.status_code == 200
+    assert resp.json()["agent_id"] == "blogging.planner"
+    acquire_mock.assert_awaited_once_with("blogging.planner")
+
+    resp = client.delete("/api/agents/sandboxes/blogging.planner")
+    assert resp.status_code == 200
+    teardown_mock.assert_awaited_once_with("blogging.planner")

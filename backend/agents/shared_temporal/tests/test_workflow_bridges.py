@@ -89,6 +89,16 @@ def test_cancel_workflow_sync_requests_cancel(running_loop):
     assert captured["cancel"] is True
 
 
+def test_start_workflow_sync_requires_non_empty_ids():
+    """start_workflow_sync's docstring documents non-empty workflow_id/task_queue
+    as preconditions, matching its execute/signal/cancel siblings — enforce them
+    the same way. The asserts precede the client wait, so no worker is needed."""
+    with pytest.raises(AssertionError):
+        runner.start_workflow_sync(object(), workflow_id="", task_queue="q")
+    with pytest.raises(AssertionError):
+        runner.start_workflow_sync(object(), workflow_id="wid", task_queue="")
+
+
 def test_signal_requires_non_empty_ids(running_loop):
     client_mod.set_temporal_client(_FakeClient({}))
     client_mod.set_temporal_loop(running_loop)
@@ -206,3 +216,26 @@ async def test_execute_workflow_async_raises_when_no_worker():
     finally:
         client_mod.set_temporal_client(prev_c)
         client_mod.set_temporal_loop(prev_l)
+
+
+class _FakeSlowClient:
+    """A client whose ``execute_workflow`` never resolves within the test's timeout."""
+
+    async def execute_workflow(self, workflow_run, *, args, id, task_queue):
+        await asyncio.sleep(10)
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_async_times_out(running_loop):
+    """``execute_timeout_s`` bounds the caller's wait: a workflow that outlives
+    it raises TimeoutError instead of hanging the caller forever (the workflow
+    itself keeps running server-side — Temporal is durable — this only stops
+    the caller's own wait, per the docstring's 'best-effort: abandon the
+    cross-loop future' comment)."""
+    client_mod.set_temporal_client(_FakeSlowClient())
+    client_mod.set_temporal_loop(running_loop)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await runner.execute_workflow_async(
+            object(), workflow_id="wid", task_queue="q", execute_timeout_s=0.1
+        )
