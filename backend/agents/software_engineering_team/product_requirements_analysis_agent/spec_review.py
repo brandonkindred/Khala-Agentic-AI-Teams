@@ -7,8 +7,10 @@ hints + optional context files), invokes the LLM with JSON recovery, parses the
 result, filters out questions already answered (clarifying the spec in place when a
 previously answered question is re-asked), and drops organizational/process questions.
 
-Functions take the ``LLMClient``, the Strands ``model``, and the context-files dict
-explicitly. Extracted from ``agent.py`` to keep the workflow module focused on
+``run_spec_review`` takes the ``LLMClient`` and Strands ``model`` explicitly, plus the
+context-files dict, the iteration/version bookkeeping (``iteration``, ``spec_version``,
+``answered_questions``), and an optional ``on_chunk_progress`` callback for UI status
+updates. Extracted from ``agent.py`` to keep the workflow module focused on
 orchestration.
 """
 

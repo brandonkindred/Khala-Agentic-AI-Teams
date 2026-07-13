@@ -8,9 +8,10 @@ cleanup pass, and generating the Product Requirements Document from the cleaned 
 Each writer persists versioned artifacts under ``plan/product_analysis`` and falls
 back to the unmodified input on any LLM failure.
 
-Functions take an explicit Strands ``model`` (for raw text calls) and/or the
-``LLMClient`` (for context sizing and JSON recovery). Extracted from ``agent.py`` to
-keep the workflow module focused on orchestration.
+The LLM-backed writers take an explicit Strands ``model`` (for raw text calls) and/or
+the ``LLMClient`` (for context sizing and JSON recovery); ``build_specialist_collaboration_plan``
+is the exception — a pure, deterministic keyword-driven helper that needs neither.
+Extracted from ``agent.py`` to keep the workflow module focused on orchestration.
 """
 
 from __future__ import annotations

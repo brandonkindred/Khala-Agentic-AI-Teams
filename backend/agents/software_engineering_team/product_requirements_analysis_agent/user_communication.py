@@ -1,11 +1,15 @@
 """
-User-communication phase for the Product Requirements Analysis Agent.
+User-communication seam for the Product Requirements Analysis Agent.
 
-Phase 2 of the workflow: push the open questions to the job store (and Slack), block
-until the user submits answers, then merge those answers with per-question defaults
-into typed :class:`AnsweredQuestion` models and record them in the Q&A history. This
-is the agent's only human-in-the-loop step and makes no LLM calls — it is job-store
-and notification I/O plus deterministic answer merging.
+The one place that pushes open questions to the job store (and Slack), blocks until
+the user submits answers, then merges those answers with per-question defaults into
+typed :class:`AnsweredQuestion` models and records them in the Q&A history. It is the
+agent's only human-in-the-loop step and makes no LLM calls — it is job-store and
+notification I/O plus deterministic answer merging.
+
+Shared across both SOP Phase 1 (``sop_engine.run_sop_phase1``, per-sub-phase question
+rounds) and the spec-review workflow's own Communicate-with-User phase — not tied to
+a single numbered phase.
 
 Extracted from ``agent.py`` to keep the workflow module focused on orchestration.
 """

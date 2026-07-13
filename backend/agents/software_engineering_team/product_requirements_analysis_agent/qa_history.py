@@ -15,13 +15,39 @@ workflow module focused on orchestration.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .models import AnsweredQuestion, OpenQuestion
 
 logger = logging.getLogger(__name__)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` atomically (write-temp-then-rename).
+
+    Avoids truncating ``path`` in place: an interruption mid-write (crash, kill)
+    leaves the original file untouched instead of partially overwritten.
+
+    Preconditions: ``path.parent`` exists; ``content`` is a string.
+    Postconditions: ``path`` contains exactly ``content`` on success; on any
+        failure before the final rename, ``path`` is left unmodified and the
+        temporary file is cleaned up.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def format_answered_questions_for_prompt(answered_questions: List[AnsweredQuestion]) -> str:
@@ -236,7 +262,9 @@ def record_answers(
     """Save answered questions to plan/product_analysis/qa_history.md.
 
     Removes any existing qa_history entry that is the same decision as a new answer
-    (new directive replaces old); then writes pruned history + new iteration.
+    (new directive replaces old); then writes pruned history + new iteration. The
+    write is atomic (via :func:`_atomic_write_text`): an interruption mid-write
+    cannot leave ``qa_history.md`` truncated or partially overwritten.
 
     Preconditions: ``repo_path`` is a repository root; ``answered_questions`` is a
         list of :class:`AnsweredQuestion`; ``iteration`` is a positive int.
@@ -268,8 +296,7 @@ def record_answers(
             "This file records all questions and answers from Product Requirements Analysis.\n"
             + new_section
         )
-        with open(qa_file, "w", encoding="utf-8") as f:
-            f.write(content)
+        _atomic_write_text(qa_file, content)
         logger.info("Recorded %d answers to %s", len(answered_questions), qa_file)
         return
 
@@ -300,6 +327,5 @@ def record_answers(
             parts.append("\n")
     parts.append(new_section)
     content = "".join(parts)
-    with open(qa_file, "w", encoding="utf-8") as f:
-        f.write(content)
+    _atomic_write_text(qa_file, content)
     logger.info("Recorded %d answers to %s", len(answered_questions), qa_file)

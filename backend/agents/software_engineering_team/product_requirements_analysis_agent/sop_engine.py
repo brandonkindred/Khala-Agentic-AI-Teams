@@ -1,21 +1,31 @@
 """
 SOP (Standard Operating Procedure) discovery engine for the Product Requirements Analysis Agent.
 
-The one-time pre-loop discovery that runs before the spec-review cycle, in two phases:
+The one-time pre-loop discovery that runs before the spec-review cycle, built around
+two human-in-the-loop orchestrators plus their supporting helpers:
 
-* **Phase 1 — Environment constraints:** extract any decisions the spec already
-  answers, then walk each sub-phase (deployment, regulations, ... priorities) asking
-  the hardcoded SOP questions (honoring conditional dependencies and multi-round
-  follow-ups), and fill remaining gaps with LLM-generated follow-up questions until
-  each sub-phase is complete. Every question is guaranteed >= 3 spec-aware options.
-* **Phase 2 — Architecture:** autonomously analyze architecture from the spec plus
-  Phase 1 decisions, present recommendations for user approval, persist an
-  architecture document, and inject a summary into the spec.
+* **Phase 1 — Environment constraints** (``run_sop_phase1``): extract any decisions
+  the spec already answers, then walk each sub-phase (deployment, regulations, ...
+  priorities) asking the hardcoded SOP questions (honoring conditional dependencies
+  and multi-round follow-ups), and fill remaining gaps with LLM-generated follow-up
+  questions until each sub-phase is complete. Every question is guaranteed >= 3
+  spec-aware options. Supported by ``evaluate_sop_conditionals``,
+  ``extract_sop_decisions_from_spec``, ``generate_spec_aware_options``,
+  ``build_question_options``, and ``assess_sub_phase_gaps``.
+* **Phase 2 — Architecture** (``run_sop_phase2_architecture``): autonomously analyze
+  architecture from the spec plus Phase 1 decisions, present recommendations for
+  user approval, persist an architecture document, and inject a summary into the
+  spec. Supported by ``build_architecture_approval_questions``,
+  ``apply_architecture_approval``, and ``format_architecture_document``.
 
-The two orchestrators are human-in-the-loop (they call the user-communication phase);
-the analyzers each make one LLM call and degrade gracefully on failure. Functions take
-an explicit Strands ``model``. Extracted from ``agent.py`` to keep the workflow module
-focused on orchestration.
+Also home to a standalone, currently-unwired context/constraints discovery pair
+(``run_context_constraints_discovery`` and ``inject_context_answers_into_spec``) that
+predates the two SOP phases above and is exercised directly by tests.
+
+The two orchestrators call the user-communication phase; the analyzers each make one
+LLM call and degrade gracefully on failure. Functions take an explicit Strands
+``model``. Extracted from ``agent.py`` to keep the workflow module focused on
+orchestration.
 """
 
 from __future__ import annotations

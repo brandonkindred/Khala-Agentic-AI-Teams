@@ -41,7 +41,7 @@ def filter_duplicate_questions(
     """Filter out questions that appear to be duplicates of answered ones.
 
     Uses normalized word stems (e.g. token/tokens, store/stored). Only filters as
-    duplicate when match to qa_history is >= 95%; 50–95% similar questions are kept
+    duplicate when match to qa_history is >= 90%; 50–90% similar questions are kept
     and may be consolidated elsewhere. Treats spec + Q&A as source of truth.
 
     Returns:
