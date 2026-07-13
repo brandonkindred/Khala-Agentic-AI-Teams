@@ -86,6 +86,7 @@ jobs:
               - 'backend/agents/shared_llm_recovery/**'
               - 'backend/agents/shared_dev_models/**'
               - 'backend/agents/shared_git/**'
+              - 'backend/agents/shared_hitl/**'
               - 'backend/agents/llm_service/**'
               - 'backend/agents/event_bus/**'
               - 'backend/agents/artifact_registry/**'
@@ -660,7 +661,7 @@ jobs:
       # still wins over --include, so shared_git/git_utils.py stays excluded.
       - run: >-
           coverage report --rcfile=shared_infra.coveragerc
-          --include='*/shared_command_runner/*,*/shared_repo_context/*,*/shared_llm_recovery/*,*/shared_dev_models/*,*/shared_git/*,*/coding_team_service/*'
+          --include='*/shared_command_runner/*,*/shared_repo_context/*,*/shared_llm_recovery/*,*/shared_dev_models/*,*/shared_git/*,*/shared_hitl/*,*/coding_team_service/*'
           --show-missing
           --fail-under=90
 
@@ -818,6 +819,7 @@ jobs:
               --cov=shared_llm_recovery \
               --cov=shared_dev_models \
               --cov=shared_git \
+              --cov=shared_hitl \
               --cov=coding_team_service \
               $COV_CONFIG_ARG \
               --cov-report=term-missing \

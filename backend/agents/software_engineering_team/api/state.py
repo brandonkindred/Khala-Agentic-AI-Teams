@@ -23,6 +23,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from shared_concurrency import BackgroundHeartbeat
+from shared_hitl.progress import coerce_progress
 from software_engineering_team.api.models import (
     CurrentActivityEntry,
     TaskStateEntry,
@@ -238,13 +239,15 @@ def _parse_team_progress(raw: Any) -> Optional[Dict[str, TeamProgressEntry]]:
 
 
 def _coerce_progress(value: Any) -> Optional[int]:
-    """Coerce progress to int or None for JobStatusResponse (JSON may give float)."""
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    """Coerce a stored progress value to an int in [0, 100], or None.
+
+    Thin wrapper over ``shared_hitl.progress.coerce_progress`` (see it for the full
+    contract). Kept as a named function on this module so callers importing
+    ``_coerce_progress`` are unchanged. Unlike SE's previous local version, the shared
+    helper clamps to [0, 100], so a corrupt record can no longer render an
+    out-of-range progress bar.
+    """
+    return coerce_progress(value)
 
 
 def _coerce_current_activity(value: Any) -> Optional[CurrentActivityEntry]:

@@ -561,6 +561,54 @@ def test_get_job_status_includes_server_time(client: TestClient, temp_work_path:
     datetime.fromisoformat(server_time)
 
 
+def test_get_job_status_clamps_progress(client: TestClient, temp_work_path: Path) -> None:
+    """Progress is clamped to [0, 100] via shared_hitl.progress.coerce_progress, so a corrupt
+    stored value can no longer render an out-of-range bar. This is an intentional behavior
+    change from SE's previous unclamped int() coercion."""
+    from software_engineering_team.shared.job_store import create_job, update_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="run_team")
+
+    update_job(job_id, progress=250)
+    assert client.get(f"/run-team/{job_id}").json()["progress"] == 100
+
+    update_job(job_id, progress=-5)
+    assert client.get(f"/run-team/{job_id}").json()["progress"] == 0
+
+
+def test_get_job_status_preserves_recommendation_and_allow_multiple(
+    client: TestClient, temp_work_path: Path
+) -> None:
+    """The status route materializes pending questions via shared_hitl.pending_questions_from_raw
+    (model_validate), so recommendation/allow_multiple survive the round-trip. The previous
+    hand-enumeration silently dropped both fields."""
+    from software_engineering_team.shared.job_store import create_job, update_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="run_team")
+    update_job(
+        job_id,
+        waiting_for_answers=True,
+        pending_questions=[
+            {
+                "id": "q1",
+                "question_text": "Which auth?",
+                "recommendation": "Use OAuth",
+                "allow_multiple": True,
+                "options": [{"id": "oauth", "label": "OAuth"}],
+                "required": True,
+                "source": "tech_lead",
+            }
+        ],
+    )
+
+    pq = client.get(f"/run-team/{job_id}").json()["pending_questions"][0]
+    assert pq["recommendation"] == "Use OAuth"
+    assert pq["allow_multiple"] is True
+    assert pq["source"] == "tech_lead"
+
+
 def test_get_job_status_malformed_activity_value_degrades_to_none(
     client: TestClient, temp_work_path: Path
 ) -> None:
