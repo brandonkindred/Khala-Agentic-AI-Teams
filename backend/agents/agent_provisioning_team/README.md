@@ -36,11 +36,21 @@ Progress is tracked via a file-based job store and exposed through REST API endp
 Every operation the team performs runs as a durable Temporal workflow/activity
 (decorator "annotations": `@workflow.defn` / `@workflow.run` / `@activity.defn`)
 when `TEMPORAL_ADDRESS` is set, and falls back to an in-process path otherwise.
-Workflows/activities live in `temporal/` and are registered in the `WORKFLOWS` /
-`ACTIVITIES` lists in `temporal/__init__.py`, served by the single Pattern A
-worker (task queue `agent-provisioning`) that auto-boots on import. The escape
-hatch `PROVISION_THREAD_FALLBACK=1` forces the in-process path for the whole
-team even when Temporal is configured.
+Workflows/activities live in `temporal/`. Provisioning/deprovision are
+registered in the `WORKFLOWS` / `ACTIVITIES` lists in `temporal/__init__.py`,
+served by the single Pattern A worker (task queue `agent-provisioning`) that
+auto-boots on import. **Sandbox workflows/activities are the exception**: they
+are exported separately as `SANDBOX_WORKFLOWS` / `SANDBOX_ACTIVITIES` and are
+*not* part of `WORKFLOWS`/`ACTIVITIES` — they run on a dedicated
+`SANDBOX_TASK_QUEUE`, served only by a worker started explicitly from
+`unified_api/main.py`'s own lifespan (never by Pattern A's auto-boot, which
+also runs inside the standalone `agent-provisioning-service` team container).
+This keeps the sandbox `Lifecycle` singleton's process-local state from being
+mutated by an activity dispatched into the wrong process — see
+`temporal/constants.py`'s `SANDBOX_TASK_QUEUE` docstring and
+`sandbox/README.md`'s "Durable execution" section for the full rationale. The
+escape hatch `PROVISION_THREAD_FALLBACK=1` forces the in-process path for the
+whole team (including sandbox) even when Temporal is configured.
 
 ### Coverage — every team operation → its workflow/activity
 
