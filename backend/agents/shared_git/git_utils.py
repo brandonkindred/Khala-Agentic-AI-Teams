@@ -340,8 +340,9 @@ def get_head_sha(repo_path: str | Path) -> Tuple[bool, str]:
     Preconditions:
         - ``repo_path`` refers to a git repository with at least one commit.
     Postconditions:
-        - On success returns ``(True, <40-char hex sha>)`` — the commit the
-          repository's HEAD currently resolves to.
+        - On success returns ``(True, <full commit sha>)`` — the commit the
+          repository's HEAD currently resolves to, exactly as emitted by
+          ``git rev-parse HEAD`` (40 hex chars for SHA-1 repos, 64 for SHA-256).
         - On failure (not a repo, or ``rev-parse`` errors) returns
           ``(False, message)`` and never a partial/garbage SHA. ``merge_stderr``
           is disabled so a stderr advisory on success cannot pollute the SHA.
