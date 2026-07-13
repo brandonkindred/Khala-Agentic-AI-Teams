@@ -59,7 +59,15 @@ profile + resolved model) records the approved
 clone of it before touching the LLM when the same submission comes back — zero
 LLM calls (map, verification, and merge all skipped). Only approved outcomes are
 stored: a rejection is left to re-run through the (cheap, mostly cached) map
-phase so a fix that reappears identical still gets its findings.
+phase so a fix that reappears identical still gets its findings. The key is
+derived only from ``CodeReviewInput`` (plus the resolved model), so a verdict
+that also depends on ``repo_reader`` (the false-positive filter's and the
+architecture pass's whole-repository read access) cannot be safely keyed --
+the rest of the repository can change between two byte-identical submissions
+without changing the key. The short-circuit is therefore skipped entirely
+(no read, no write) whenever a ``repo_reader`` is given, so a cached approval
+can never mask a since-added architecture/redundancy finding or a
+since-resolved false positive.
 
 Cross-file surface: each chunk reviewer is also given the *sibling surface* —
 the top-level symbols (Python ``def``/``class``, TS/JS ``export``s) defined by
@@ -405,7 +413,10 @@ def run_coordinator(
           spec/architecture/existing-codebase excerpts are.
         - A submission byte-identical to one this process already approved *and
           fully reviewed* (same code + context + model; no unreviewed ranges)
-          returns the recorded approved output with no LLM call at all.
+          returns the recorded approved output with no LLM call at all —
+          unless a ``repo_reader`` is given, in which case this short-circuit
+          never fires (a verdict that reads the rest of the repository cannot
+          be safely reproduced from an input-only cache key).
         - When ``progress_callback`` is provided, it is invoked with
           non-decreasing fractions ending at 1.0 (step ``done``) on every
           successful return, including per-chunk ``reviewing`` reports.
@@ -428,11 +439,14 @@ def run_coordinator(
     # approved reproduces the same verdict, so return its cached output before any
     # LLM work (map, false-positive verification, and merge all skipped). Keyed on
     # the raw input + model only — no compaction — so the check itself costs no
-    # model call. Skipped entirely when disabled (size 0); on a miss the run
+    # model call. Skipped entirely when disabled (size 0) or when a ``repo_reader``
+    # is given: the verdict can then also depend on the rest of the repository,
+    # which the key cannot see, so a hit could mask a since-added architecture/
+    # redundancy finding or a since-resolved false positive. On a miss the run
     # proceeds and stores its verdict below if approved.
     submission_size = _submission_cache_size()
     submission_key: Optional[str] = None
-    if submission_size > 0:
+    if submission_size > 0 and repo_reader is None:
         submission_key = _submission_fingerprint(input_data, model_fingerprint)
         with _SUBMISSION_OUTCOME_CACHE_LOCK:
             cached = _SUBMISSION_OUTCOME_CACHE.get(submission_key)
