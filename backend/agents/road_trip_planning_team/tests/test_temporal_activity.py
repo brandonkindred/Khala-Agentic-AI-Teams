@@ -418,6 +418,35 @@ def test_workflow_marks_failed_and_reraises_on_step_error(monkeypatch, sample_tr
     assert instance.progress() == {"step": "failed", "fraction": 0.0}
 
 
+def test_workflow_warns_when_gather_sibling_fails(monkeypatch, sample_trip_body):
+    """A failure inside the concurrent recommend/logistics gather logs a warning
+    (the still-running sibling's LLM cost is otherwise silently discarded) and
+    still reaches mark-failed via the outer except, same as any other step."""
+    calls: list[str] = []
+    warnings: list[tuple] = []
+
+    async def _fake_execute_activity(fn, *args, **kwargs):
+        calls.append(fn.__name__)
+        if fn.__name__ == "plan_logistics_activity":
+            raise RuntimeError("logistics boom")
+        return {"stub": fn.__name__}
+
+    class _StubLogger:
+        def warning(self, *args):
+            warnings.append(args)
+
+    monkeypatch.setattr(wf.workflow, "patched", lambda _patch_id: True)
+    monkeypatch.setattr(wf.workflow, "execute_activity", _fake_execute_activity)
+    monkeypatch.setattr(wf.workflow, "logger", _StubLogger())
+
+    with pytest.raises(RuntimeError, match="logistics boom"):
+        asyncio.run(wf.RoadTripWorkflow().run("job-gather-fail", sample_trip_body))
+
+    assert "mark_road_trip_failed_activity" in calls
+    assert len(warnings) == 1
+    assert "job-gather-fail" in warnings[0]
+
+
 def test_workflow_reraises_original_error_even_if_mark_failed_fails(monkeypatch, sample_trip_body):
     """A failure in the best-effort mark-failed write must not mask the cause."""
 
