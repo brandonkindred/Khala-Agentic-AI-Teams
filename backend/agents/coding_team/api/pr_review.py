@@ -42,6 +42,7 @@ from coding_team.github_source import (
 from coding_team.job_store import (
     heartbeat_job,
 )
+from coding_team.models import JobStatus
 
 logger = logging.getLogger(__name__)
 
@@ -127,12 +128,12 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
                 try:
                     _main.update_job(
                         job_id,
-                        status="failed",
+                        status=JobStatus.FAILED.value,
                         error="review worker heartbeat went stale (process died mid-review)",
                     )
                     _main.update_review(
                         job_id,
-                        status="failed",
+                        status=JobStatus.FAILED.value,
                         error="review worker heartbeat went stale (process died mid-review)",
                         completed=True,
                     )
@@ -445,12 +446,12 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             "coding-team service must run via coding_team_service.main (TEAM_MODULE), "
             "which installs the engine provider at startup"
         )
-        _main.update_job(job_id, status="failed", phase="completed", error=error)
+        _main.update_job(job_id, status=JobStatus.FAILED.value, phase="completed", error=error)
         # error=error (not just status_text) so the Code Review page's error column
         # is populated on this path exactly as _record_failure does everywhere else.
         _main.update_review(
             job_id,
-            status="failed",
+            status=JobStatus.FAILED.value,
             status_text="No engine provider configured",
             error=error,
             completed=True,
@@ -472,9 +473,14 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             logger.warning("PR review %s: failed to post abort notice: %s", job_id, exc)
         return
     _main.update_job(
-        job_id, status="running", phase="reviewing", status_text="Reviewing pull request"
+        job_id,
+        status=JobStatus.RUNNING.value,
+        phase="reviewing",
+        status_text="Reviewing pull request",
     )
-    _main.update_review(job_id, status="running", status_text="Reviewing pull request")
+    _main.update_review(
+        job_id, status=JobStatus.RUNNING.value, status_text="Reviewing pull request"
+    )
     # Continuous liveness beat for the admission guard: job updates only land at phase
     # transitions, and a single review LLM call can run for minutes — without this, a
     # perfectly healthy review would look heartbeat-stale to _running_review_for_pr.
@@ -504,7 +510,10 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             # phase="completed" (terminal), matching the success and provider-abort
             # paths — a failed job must not keep a mid-review "reviewing" phase.
             _finalize_review(
-                job_id, "failed", phase="completed", error=scrub_token_from_text(str(exc))
+                job_id,
+                JobStatus.FAILED,
+                phase="completed",
+                error=scrub_token_from_text(str(exc)),
             )
         except Exception:  # noqa: BLE001 - store unreachable; nothing more we can do, do not re-raise
             logger.exception(
@@ -514,7 +523,7 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
 
 def _finalize_review(
     job_id: str,
-    status: str,
+    status: JobStatus,
     status_text: Optional[str] = None,
     *,
     phase: Optional[str] = None,
@@ -530,15 +539,16 @@ def _finalize_review(
     ``completed=True``. Job is written before review, as at every original site.
 
     Preconditions:
-        - ``status`` is a terminal status ("completed"/"failed"); each optional
-          field is supplied only when the originating path set it.
+        - ``status`` is a terminal status (``JobStatus.COMPLETED``/``JobStatus.FAILED``);
+          each optional field is supplied only when the originating path set it.
     Postconditions:
         - ``update_job`` then ``update_review`` are called with exactly the
-          non-``None`` fields supplied; ``update_review`` additionally receives
-          ``completed=True``.
+          non-``None`` fields supplied, ``status`` unwrapped to its plain
+          ``.value`` for both (a single conversion point for both consumers);
+          ``update_review`` additionally receives ``completed=True``.
     """
-    job_kwargs: Dict[str, Any] = {"status": status}
-    review_kwargs: Dict[str, Any] = {"status": status, "completed": True}
+    job_kwargs: Dict[str, Any] = {"status": status.value}
+    review_kwargs: Dict[str, Any] = {"status": status.value, "completed": True}
     if status_text is not None:
         job_kwargs["status_text"] = status_text
         review_kwargs["status_text"] = status_text
@@ -579,7 +589,9 @@ def _complete_review_noop(
           ``completed`` with ``status_text`` and the PR URL.
     """
     _main._safe_comment(client, owner, repo, pr_number, comment)
-    _finalize_review(job_id, "completed", status_text, phase="completed", github_pr_url=pr.html_url)
+    _finalize_review(
+        job_id, JobStatus.COMPLETED, status_text, phase="completed", github_pr_url=pr.html_url
+    )
 
 
 def _run_reviewer(
@@ -925,7 +937,7 @@ def _run_pr_review_body(
                 )
                 _finalize_review(
                     job_id,
-                    "failed",
+                    JobStatus.FAILED,
                     err,
                     github_pr_url=pr.html_url,
                     review_summary=review_summary,
@@ -941,7 +953,7 @@ def _run_pr_review_body(
                 _react_to_pr(client, owner, repo, pr_number)
             _finalize_review(
                 job_id,
-                "completed",
+                JobStatus.COMPLETED,
                 status_text,
                 phase="completed",
                 github_pr_url=pr.html_url,
@@ -973,7 +985,7 @@ def _run_pr_review_body(
             # self-consistent means it never depends on that.
             safe_err = scrub_token_from_text(str(review_exc))
             try:
-                _finalize_review(job_id, "failed", phase="completed", error=safe_err)
+                _finalize_review(job_id, JobStatus.FAILED, phase="completed", error=safe_err)
             except Exception:  # noqa: BLE001 - store unreachable; nothing more we can do
                 logger.exception("PR review %s: last-resort finalize failed", job_id)
 
