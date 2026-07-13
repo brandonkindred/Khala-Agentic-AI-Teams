@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import typing
 
 import pytest
@@ -350,6 +351,12 @@ def test_workflow_dispatches_activities_and_logistics_via_asyncio_gather(
 
     monkeypatch.setattr(wf.workflow, "patched", lambda _patch_id: True)
     monkeypatch.setattr(wf.workflow, "execute_activity", _fake_execute_activity)
+    # wf.asyncio IS the asyncio module (workflows.py does `import asyncio`, so
+    # wf.asyncio.gather and asyncio.gather are the same object) — this patches
+    # the real asyncio.gather. Fragile to a hypothetical future
+    # `from asyncio import gather` + bare `gather(...)` call in workflows.py,
+    # which would silently stop being intercepted here; current code doesn't
+    # do that.
     monkeypatch.setattr(wf.asyncio, "gather", _spy_gather)
 
     asyncio.run(wf.RoadTripWorkflow().run("job-gather", sample_trip_body))
@@ -399,7 +406,7 @@ def test_workflow_marks_failed_and_reraises_on_step_error(monkeypatch, sample_tr
     assert fail_call["args"][0] == "job-x"
     assert "route boom" in fail_call["args"][1]
     # The mark-failed compensation write uses its own tighter retry/timeout,
-    # not the deeper _BOOKKEEPING_RETRY/_SHORT_TIMEOUT bookkeeping uses on the
+    # not the deeper _BOOKKEEPING_RETRY/_BOOKKEEPING_TIMEOUT bookkeeping uses on the
     # happy path — a slow/retried mark-failed write directly delays how soon
     # job_store shows FAILED instead of the last RUNNING/in-progress snapshot.
     assert fail_call["retry"] is wf._MARK_FAILED_RETRY
@@ -426,6 +433,12 @@ def test_workflow_reraises_original_error_even_if_mark_failed_fails(monkeypatch,
 
     monkeypatch.setattr(wf.workflow, "patched", lambda _patch_id: True)
     monkeypatch.setattr(wf.workflow, "execute_activity", _fake_execute_activity)
+    # workflow.logger normally requires a live Temporal workflow event loop
+    # (it checks replay state), which bare asyncio.run() of the coroutine
+    # doesn't provide. This test hits the except block's logger.warning call
+    # (the mark-failed compensation itself fails), so route it to a plain
+    # stdlib logger the way other Temporal-backed teams' tests do.
+    monkeypatch.setattr(wf.workflow, "logger", logging.getLogger("road_trip.wf.test"))
 
     with pytest.raises(RuntimeError, match="begin boom"):
         asyncio.run(wf.RoadTripWorkflow().run("job-y", sample_trip_body))

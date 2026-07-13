@@ -75,7 +75,7 @@ _BOOKKEEPING_RETRY = RetryPolicy(
 # speed matters more than resilience: it's what flips the job_store row from
 # the stale RUNNING begin_road_trip_job_activity wrote to FAILED, which is what
 # any client polling job status actually observes. Using _BOOKKEEPING_RETRY/
-# _SHORT_TIMEOUT here (3 attempts, up to 5 minutes each) could delay that
+# _BOOKKEEPING_TIMEOUT here (3 attempts, up to 5 minutes each) could delay that
 # visibility by many minutes on a transient infra blip, during which the job
 # looks like it's still running even though the pipeline already failed. One
 # retry still covers a single transient blip without leaving a job stuck at
@@ -89,7 +89,7 @@ _MARK_FAILED_RETRY = RetryPolicy(
     backoff_coefficient=2.0,
 )
 
-_SHORT_TIMEOUT = timedelta(minutes=5)
+_BOOKKEEPING_TIMEOUT = timedelta(minutes=5)
 _STEP_TIMEOUT = timedelta(minutes=30)
 # recommend_activities loops one LLM call per stop; the activity emits a
 # background heartbeat every 30s for the duration of the loop (see
@@ -236,7 +236,7 @@ class RoadTripWorkflow:
                 _activities.begin_road_trip_job_activity,
                 args=[job_id],
                 task_queue=TASK_QUEUE,
-                start_to_close_timeout=_SHORT_TIMEOUT,
+                start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
                 retry_policy=_BOOKKEEPING_RETRY,
             )
 
@@ -302,7 +302,7 @@ class RoadTripWorkflow:
                 _activities.persist_itinerary_activity,
                 args=[job_id, itinerary],
                 task_queue=TASK_QUEUE,
-                start_to_close_timeout=_SHORT_TIMEOUT,
+                start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
                 retry_policy=_BOOKKEEPING_RETRY,
             )
             self._advance("done", 1.0)
@@ -315,7 +315,7 @@ class RoadTripWorkflow:
             # Best-effort FAILED write (its own failure must not mask the original
             # cause), then re-raise so the workflow reflects the failure. Uses the
             # tighter _MARK_FAILED_RETRY/_MARK_FAILED_TIMEOUT, not
-            # _BOOKKEEPING_RETRY/_SHORT_TIMEOUT — see _MARK_FAILED_RETRY's comment.
+            # _BOOKKEEPING_RETRY/_BOOKKEEPING_TIMEOUT — see _MARK_FAILED_RETRY's comment.
             try:
                 await workflow.execute_activity(
                     _activities.mark_road_trip_failed_activity,
@@ -324,6 +324,16 @@ class RoadTripWorkflow:
                     start_to_close_timeout=_MARK_FAILED_TIMEOUT,
                     retry_policy=_MARK_FAILED_RETRY,
                 )
-            except Exception:  # noqa: BLE001 — never mask the original pipeline error
-                pass
+            except Exception as mark_failed_exc:  # noqa: BLE001 — never mask the original error
+                # Swallowed (not re-raised) so the original pipeline failure below
+                # is what the workflow surfaces — but logged, not silently
+                # dropped, so an operator can still see that job_id's job_store
+                # row may be stuck at RUNNING because this compensation write
+                # itself failed.
+                workflow.logger.warning(
+                    "mark_road_trip_failed_activity failed for job %s (original error: %s): %s",
+                    job_id,
+                    exc,
+                    mark_failed_exc,
+                )
             raise
