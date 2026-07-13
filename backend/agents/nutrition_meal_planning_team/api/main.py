@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import List, Optional
+from typing import Any, Callable, List, Optional
 from uuid import uuid4
 
 from fastapi import Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from nutrition_meal_planning_team.postgres import SCHEMA as NUTRITION_POSTGRES_SCHEMA
 from shared_app import create_team_app
@@ -35,26 +36,58 @@ from ..models import (
     ResolveAmbiguousRequest,
     RestrictionResolution,
 )
-from ..orchestrator.agent import NutritionMealPlanningOrchestrator
 from ..pantry import (
     InvalidQuantity,
     PantryItem,
     PantryItemNotFound,
     get_pantry_store,
 )
+from ..pipeline import (
+    get_orchestrator,
+    run_meal_plan_background,
+    run_nutrition_plan_background,
+    run_regenerate_background,
+)
 from ..shared.job_store import (
-    JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
-    JOB_STATUS_RUNNING,
     create_job,
     get_job,
-    is_job_cancelled,
     update_job,
 )
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _startup() -> None:
+    """Start the Temporal worker backstop (best-effort).
+
+    The team_service entrypoint normally starts the worker via
+    ``TEAM_TEMPORAL_WORKER_MODULE`` before uvicorn accepts requests; this
+    backstop covers running the app standalone (``uvicorn ...:app``).
+
+    Preconditions:
+        - None (safe to call once at app startup).
+
+    Postconditions:
+        - Starts the worker thread when Temporal is enabled; a no-op when
+          ``TEMPORAL_ADDRESS`` is unset. Never raises — any failure is logged
+          as a warning so it cannot abort app boot (this runs as an
+          ``on_startup`` hook).
+    """
+    try:
+        from nutrition_meal_planning_team.temporal.worker import (
+            start_nutrition_temporal_worker_thread,
+        )
+
+        start_nutrition_temporal_worker_thread()
+    except Exception:
+        logger.warning(
+            "nutrition_meal_planning Temporal worker start (lifespan backstop) failed",
+            exc_info=True,
+        )
+
 
 app = create_team_app(
     service_name="nutrition-meal-planning-team",
@@ -63,6 +96,7 @@ app = create_team_app(
     description="Personal nutrition and meal planning with learning from feedback",
     version="0.1.0",
     postgres_schema=NUTRITION_POSTGRES_SCHEMA,
+    on_startup=_startup,
 )
 
 app.add_middleware(
@@ -72,29 +106,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-_orchestrator: Optional[NutritionMealPlanningOrchestrator] = None
-
-
-def get_orchestrator() -> NutritionMealPlanningOrchestrator:
-    """Get or create the orchestrator singleton.
-
-    Lazy (deferred past module import) so the container can start — and every
-    route, including ones that don't touch an LLM, can serve — even when no
-    LLM provider is configured yet. The Strands model is itself built with
-    ``lazy=True``: resolving it (via ``get_strands_model`` -> ``get_client``)
-    is what raises ``LLMNotConfiguredError`` when the Postgres provider list
-    is empty, and that error should fail the individual request/job that
-    actually needs an LLM, not orchestrator construction or process startup.
-    """
-    global _orchestrator
-    if _orchestrator is None:
-        from llm_service import get_strands_model
-
-        _orchestrator = NutritionMealPlanningOrchestrator(
-            llm_model=get_strands_model("nutrition_meal_planning", lazy=True)
-        )
-    return _orchestrator
 
 
 @app.get("/health")
@@ -302,70 +313,112 @@ def reresolve_restrictions_route(client_id: str):
         raise HTTPException(status_code=404, detail=str(e)) from e
 
 
-def _run_nutrition_plan_job(job_id: str, body: NutritionPlanRequest) -> None:
-    """Background: run nutrition plan, store result in job."""
+def _temporal_enabled() -> bool:
+    """Return True when Temporal mode is active (``TEMPORAL_ADDRESS`` set).
+
+    Imports the flag lazily so it reflects the live env at request time (and so
+    tests can patch ``shared_temporal.is_temporal_enabled``).
+
+    Preconditions:
+        - None.
+
+    Postconditions:
+        - Returns ``True`` iff ``shared_temporal`` is importable and
+          ``is_temporal_enabled()`` is True; a missing ``shared_temporal``
+          (Temporal not installed) reads as disabled so the thread fallback runs.
+    """
     try:
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_RUNNING)
-        result = get_orchestrator().get_nutrition_plan(body)
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
-    except ValueError as e:
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), not_found=True)
-    except Exception as e:
-        logger.exception("Nutrition plan job %s failed", job_id)
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+        from shared_temporal import is_temporal_enabled
+    except ImportError:
+        return False
+    return is_temporal_enabled()
 
 
-def _run_nutrition_regenerate_job(job_id: str, client_id: str) -> None:
-    try:
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_RUNNING)
-        result = get_orchestrator().regenerate_nutrition_plan(client_id)
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
-    except ValueError as e:
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), not_found=True)
-    except Exception as e:
-        logger.exception("Nutrition regenerate job %s failed", job_id)
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+def _dispatch_job_run(
+    job_id: str, arg: Any, *, starter: str, thread_target: Callable[..., None]
+) -> None:
+    """Dispatch a job run via Temporal when enabled, else a daemon thread.
+
+    Single implementation shared by the three per-endpoint wrappers below.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+        - ``starter`` names a ``start_*`` function in
+          ``nutrition_meal_planning_team.temporal.start_workflow`` and
+          ``thread_target`` is the matching ``pipeline.run_*_background`` thread
+          body. ``arg`` is the original Pydantic request model or the plain
+          ``client_id`` str that both accept as their second positional
+          argument — serialized via ``model_dump()`` only when the Temporal
+          branch is actually taken, since that's the only path crossing a
+          process boundary; the in-process thread branch uses ``arg`` as-is.
+
+    Postconditions:
+        - Starts exactly one execution path. Any failure while starting the
+          workflow propagates to the caller, which marks the job FAILED — a
+          Temporal-enabled run is never silently downgraded to a thread.
+    """
+    if _temporal_enabled():
+        from nutrition_meal_planning_team.temporal import start_workflow
+
+        temporal_arg = arg.model_dump() if isinstance(arg, BaseModel) else arg
+        getattr(start_workflow, starter)(job_id, temporal_arg)
+        return
+
+    threading.Thread(target=thread_target, args=(job_id, arg), daemon=True).start()
 
 
-def _run_meal_plan_job(job_id: str, body: MealPlanRequest) -> None:
-    """Background: run meal plan, store result in job."""
-    try:
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_RUNNING)
-        result = get_orchestrator().get_meal_plan(body)
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
-    except ValueError as e:
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), not_found=True)
-    except Exception as e:
-        logger.exception("Meal plan job %s failed", job_id)
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+def _dispatch_nutrition_plan_run(job_id: str, body: NutritionPlanRequest) -> None:
+    """Dispatch a nutrition-plan run (Temporal or thread).
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Delegates to ``_dispatch_job_run``; see its contract. Propagates any
+          dispatch failure to the caller.
+    """
+    _dispatch_job_run(
+        job_id,
+        body,
+        starter="start_nutrition_plan_workflow",
+        thread_target=run_nutrition_plan_background,
+    )
 
 
-def _submit_thread_job(job_id: str, target, args) -> None:
-    threading.Thread(target=target, args=args, daemon=True).start()
+def _dispatch_regenerate_run(job_id: str, client_id: str) -> None:
+    """Dispatch a regenerate run (Temporal or thread).
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Delegates to ``_dispatch_job_run``; see its contract. Propagates any
+          dispatch failure to the caller.
+    """
+    _dispatch_job_run(
+        job_id,
+        client_id,
+        starter="start_regenerate_workflow",
+        thread_target=run_regenerate_background,
+    )
+
+
+def _dispatch_meal_plan_run(job_id: str, body: MealPlanRequest) -> None:
+    """Dispatch a meal-plan run (Temporal or thread).
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Delegates to ``_dispatch_job_run``; see its contract. Propagates any
+          dispatch failure to the caller.
+    """
+    _dispatch_job_run(
+        job_id,
+        body,
+        starter="start_meal_plan_workflow",
+        thread_target=run_meal_plan_background,
+    )
 
 
 @app.post("/plan/nutrition")
@@ -373,7 +426,12 @@ def post_plan_nutrition_route(body: NutritionPlanRequest):
     """Submit an async nutrition plan job. Poll GET /jobs/{job_id} for the result."""
     job_id = str(uuid4())
     create_job(job_id, request=body.model_dump(), kind="nutrition_plan")
-    _submit_thread_job(job_id, _run_nutrition_plan_job, (job_id, body))
+    try:
+        _dispatch_nutrition_plan_run(job_id, body)
+    except Exception as exc:
+        logger.exception("Failed to dispatch nutrition plan job %s", job_id)
+        update_job(job_id, status=JOB_STATUS_FAILED, error=f"Dispatch failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to start nutrition plan run.") from exc
     return {"job_id": job_id, "status": JOB_STATUS_PENDING}
 
 
@@ -390,7 +448,14 @@ def post_plan_nutrition_regenerate_route(client_id: str):
         client_id=client_id,
         kind="nutrition_regenerate",
     )
-    _submit_thread_job(job_id, _run_nutrition_regenerate_job, (job_id, client_id))
+    try:
+        _dispatch_regenerate_run(job_id, client_id)
+    except Exception as exc:
+        logger.exception("Failed to dispatch nutrition regenerate job %s", job_id)
+        update_job(job_id, status=JOB_STATUS_FAILED, error=f"Dispatch failed: {exc}")
+        raise HTTPException(
+            status_code=500, detail="Failed to start nutrition regenerate run."
+        ) from exc
     return {"job_id": job_id, "status": JOB_STATUS_PENDING}
 
 
@@ -414,15 +479,11 @@ def post_plan_meals_route(body: MealPlanRequest):
     job_id = str(uuid4())
     create_job(job_id, request=body.model_dump(), kind="meal_plan")
     try:
-        from nutrition_meal_planning_team.temporal.client import is_temporal_enabled
-        from nutrition_meal_planning_team.temporal.start_workflow import start_meal_plan_workflow
-
-        if is_temporal_enabled():
-            start_meal_plan_workflow(job_id, body.model_dump())
-            return {"job_id": job_id, "status": JOB_STATUS_PENDING}
-    except ImportError:
-        pass
-    _submit_thread_job(job_id, _run_meal_plan_job, (job_id, body))
+        _dispatch_meal_plan_run(job_id, body)
+    except Exception as exc:
+        logger.exception("Failed to dispatch meal plan job %s", job_id)
+        update_job(job_id, status=JOB_STATUS_FAILED, error=f"Dispatch failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to start meal plan run.") from exc
     return {"job_id": job_id, "status": JOB_STATUS_PENDING}
 
 
