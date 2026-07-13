@@ -1732,6 +1732,115 @@ def _dispatch_strategy_lab_run(run_id: str, request: RunStrategyLabRequest) -> b
     return _dispatch_via_temporal(_start)
 
 
+def _ensure_no_active_run() -> None:
+    """Raise 409 if any strategy-lab run is currently running.
+
+    Shared 409-guard for the run/resume/restart endpoints, which each allow at
+    most one concurrent strategy-lab run.
+
+    Preconditions:
+        - None.
+
+    Postconditions:
+        - Returns ``None`` when no entry in ``_active_runs`` has status
+          ``"running"``; otherwise raises ``HTTPException(409)``. Does not mutate
+          ``_active_runs``.
+    """
+    with _lock:
+        active = [r for r in _active_runs.values() if r["status"] == "running"]
+    if active:
+        raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
+
+
+def _build_run_state(
+    run_id: str,
+    *,
+    started_at: str,
+    total_cycles: int,
+    batch_size: int,
+    batch_count: int,
+    request_payload: Dict[str, Any],
+    completed_cycles: int = 0,
+    contiguous_cycles: Optional[int] = None,
+    skipped_cycles: int = 0,
+    errored_cycles: int = 0,
+    errored_details: Optional[List[Any]] = None,
+    completed_record_ids: Optional[List[Any]] = None,
+    completed_batches: int = 0,
+) -> Dict[str, Any]:
+    """Build a strategy-lab run-state dict, shared by run/resume/restart.
+
+    Defaults match the fresh-run (initial) case; resume/restart override the
+    fields that carry forward or reset.
+
+    Preconditions:
+        - ``request_payload`` is the serialized ``RunStrategyLabRequest`` for this run.
+
+    Postconditions:
+        - Returns a new dict with ``status == "running"``. The ``contiguous_cycles``
+          key is present iff ``contiguous_cycles`` is not ``None`` (the initial run
+          omits it; resume sets the offset; restart resets it to ``0``). Mutable
+          defaults (``errored_details``, ``completed_record_ids``) become fresh lists
+          when not supplied. Does not mutate its arguments.
+    """
+    state: Dict[str, Any] = {
+        "run_id": run_id,
+        "status": "running",
+        "started_at": started_at,
+        "total_cycles": total_cycles,
+        "completed_cycles": completed_cycles,
+        "skipped_cycles": skipped_cycles,
+        "errored_cycles": errored_cycles,
+        "errored_details": errored_details if errored_details is not None else [],
+        "current_cycle": None,
+        "completed_record_ids": (completed_record_ids if completed_record_ids is not None else []),
+        "error": None,
+        "request_payload": request_payload,
+        "batch_size": batch_size,
+        "batch_count": batch_count,
+        "completed_batches": completed_batches,
+        "current_batch": None,
+    }
+    if contiguous_cycles is not None:
+        state["contiguous_cycles"] = contiguous_cycles
+    return state
+
+
+def _dispatch_or_thread(
+    run_id: str,
+    request: RunStrategyLabRequest,
+    *,
+    thread_name: str,
+    start_cycle_offset: Optional[int] = None,
+) -> None:
+    """Dispatch a run via Temporal, else fall back to an in-process daemon thread.
+
+    Shared dispatch path for the run/resume/restart endpoints.
+
+    Preconditions:
+        - ``run_id``'s state is already registered in ``_active_runs`` and persisted.
+
+    Postconditions:
+        - When ``_dispatch_strategy_lab_run`` starts the durable workflow, returns
+          without spawning a thread. Otherwise a daemon ``threading.Thread`` running
+          ``_strategy_lab_worker`` is started; ``start_cycle_offset`` is passed to the
+          worker only when not ``None`` (so initial/restart start from cycle 0).
+    """
+    if _dispatch_strategy_lab_run(run_id, request):
+        return
+    kwargs = {}
+    if start_cycle_offset is not None:
+        kwargs["start_cycle_offset"] = start_cycle_offset
+    thread = threading.Thread(
+        target=_strategy_lab_worker,
+        args=(run_id, request),
+        kwargs=kwargs,
+        name=thread_name,
+        daemon=True,
+    )
+    thread.start()
+
+
 def _dispatch_backtest_run(
     job_id: str,
     strategy: StrategySpec,
@@ -2383,35 +2492,20 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     Use ``GET /strategy-lab/runs/{run_id}/stream`` for real-time SSE progress updates,
     or ``GET /strategy-lab/runs/{run_id}/status`` for polling.
     """
-    with _lock:
-        active = [r for r in _active_runs.values() if r["status"] == "running"]
-        if active:
-            raise HTTPException(
-                status_code=409, detail="A strategy lab run is already in progress."
-            )
+    _ensure_no_active_run()
 
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     now = _now()
     total_cycles = request.batch_size * request.batch_count
 
-    initial_state = {
-        "run_id": run_id,
-        "status": "running",
-        "started_at": now,
-        "total_cycles": total_cycles,
-        "completed_cycles": 0,
-        "skipped_cycles": 0,
-        "errored_cycles": 0,
-        "errored_details": [],
-        "current_cycle": None,
-        "completed_record_ids": [],
-        "error": None,
-        "request_payload": request.model_dump(),
-        "batch_size": request.batch_size,
-        "batch_count": request.batch_count,
-        "completed_batches": 0,
-        "current_batch": None,
-    }
+    initial_state = _build_run_state(
+        run_id,
+        started_at=now,
+        total_cycles=total_cycles,
+        batch_size=request.batch_size,
+        batch_count=request.batch_count,
+        request_payload=request.model_dump(),
+    )
     with _lock:
         _active_runs[run_id] = initial_state
     _persist_run_state(run_id, initial_state, create=True)
@@ -2419,16 +2513,7 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     # When Temporal is enabled, dispatch the run as a durable workflow so it
     # survives a worker/process restart and is visible in the Temporal UI; on
     # any dispatch failure fall back to the in-process daemon thread.
-    if _dispatch_strategy_lab_run(run_id, request):
-        return StrategyLabRunStartResponse(run_id=run_id, total_cycles=total_cycles)
-
-    thread = threading.Thread(
-        target=_strategy_lab_worker,
-        args=(run_id, request),
-        name=f"strategy-lab-{run_id}",
-        daemon=True,
-    )
-    thread.start()
+    _dispatch_or_thread(run_id, request, thread_name=f"strategy-lab-{run_id}")
 
     return StrategyLabRunStartResponse(run_id=run_id, total_cycles=total_cycles)
 
@@ -2511,7 +2596,8 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
     try:
         client = _get_lab_run_job_client()
         persisted = client.list_jobs() or []
-        in_memory_ids = {s["run_id"] for s in _active_runs.values()}
+        with _lock:
+            in_memory_ids = {s["run_id"] for s in _active_runs.values()}
         for job in persisted:
             jid = job.get("job_id", "")
             if jid in in_memory_ids:
@@ -2553,10 +2639,7 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
 )
 def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Resume a strategy lab run at the cycle it was interrupted."""
-    with _lock:
-        state = _active_runs.get(run_id)
-    if not state:
-        state = _load_run_from_job_service(run_id)
+    state = _get_run_state(run_id)
     try:
         validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
     except ValueError as exc:
@@ -2575,33 +2658,24 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     total_cycles = request.batch_size * request.batch_count
     completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
 
-    with _lock:
-        active = [r for r in _active_runs.values() if r["status"] == "running"]
-        if active:
-            raise HTTPException(
-                status_code=409, detail="A strategy lab run is already in progress."
-            )
+    _ensure_no_active_run()
 
     # Re-initialize in-memory state
-    resumed_state = {
-        "run_id": run_id,
-        "status": "running",
-        "started_at": state.get("started_at", _now()),
-        "total_cycles": total_cycles,
-        "completed_cycles": completed_cycles,
-        "contiguous_cycles": contiguous_cycles,
-        "skipped_cycles": state.get("skipped_cycles", 0),
-        "errored_cycles": state.get("errored_cycles", 0),
-        "errored_details": state.get("errored_details", []),
-        "current_cycle": None,
-        "completed_record_ids": state.get("completed_record_ids", []),
-        "error": None,
-        "request_payload": payload,
-        "batch_size": request.batch_size,
-        "batch_count": request.batch_count,
-        "completed_batches": completed_batches,
-        "current_batch": None,
-    }
+    resumed_state = _build_run_state(
+        run_id,
+        started_at=state.get("started_at", _now()),
+        total_cycles=total_cycles,
+        batch_size=request.batch_size,
+        batch_count=request.batch_count,
+        request_payload=payload,
+        completed_cycles=completed_cycles,
+        contiguous_cycles=contiguous_cycles,
+        skipped_cycles=state.get("skipped_cycles", 0),
+        errored_cycles=state.get("errored_cycles", 0),
+        errored_details=state.get("errored_details", []),
+        completed_record_ids=state.get("completed_record_ids", []),
+        completed_batches=completed_batches,
+    )
     with _lock:
         _active_runs[run_id] = resumed_state
     _persist_run_state(run_id, resumed_state)
@@ -2609,15 +2683,12 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     # The Temporal activity derives its resume offset from the persisted
     # contiguous-cycle count (set above), so a durable resume picks up where the
     # run left off. Fall back to the daemon thread with an explicit offset.
-    if not _dispatch_strategy_lab_run(run_id, request):
-        thread = threading.Thread(
-            target=_strategy_lab_worker,
-            args=(run_id, request),
-            kwargs={"start_cycle_offset": contiguous_cycles},
-            name=f"strategy-lab-resume-{run_id}",
-            daemon=True,
-        )
-        thread.start()
+    _dispatch_or_thread(
+        run_id,
+        request,
+        thread_name=f"strategy-lab-resume-{run_id}",
+        start_cycle_offset=contiguous_cycles,
+    )
 
     return StrategyLabRunStartResponse(
         run_id=run_id,
@@ -2634,10 +2705,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
 )
 def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Restart a strategy lab run from the beginning."""
-    with _lock:
-        state = _active_runs.get(run_id)
-    if not state:
-        state = _load_run_from_job_service(run_id)
+    state = _get_run_state(run_id)
     # "completed_with_errors" is a terminal outcome of the same workflow as
     # "completed" and must be restartable. Extend the shared set locally
     # rather than leaking a lab-specific status into job_service_client.
@@ -2652,52 +2720,30 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Original request payload not available.")
 
-    with _lock:
-        active = [r for r in _active_runs.values() if r["status"] == "running"]
-        if active:
-            raise HTTPException(
-                status_code=409, detail="A strategy lab run is already in progress."
-            )
+    _ensure_no_active_run()
 
     request = RunStrategyLabRequest(**payload)
     total_cycles = request.batch_size * request.batch_count
 
-    restarted_state = {
-        "run_id": run_id,
-        "status": "running",
-        "started_at": _now(),
-        "total_cycles": total_cycles,
-        "completed_cycles": 0,
+    restarted_state = _build_run_state(
+        run_id,
+        started_at=_now(),
+        total_cycles=total_cycles,
+        batch_size=request.batch_size,
+        batch_count=request.batch_count,
+        request_payload=payload,
         # Reset the resume offset the Temporal activity reads, so a durable
         # restart re-runs from cycle 0 instead of resuming a prior run's
         # contiguous-cycle count persisted on this run_id.
-        "contiguous_cycles": 0,
-        "skipped_cycles": 0,
-        "errored_cycles": 0,
-        "errored_details": [],
-        "current_cycle": None,
-        "completed_record_ids": [],
-        "error": None,
-        "request_payload": payload,
-        "batch_size": request.batch_size,
-        "batch_count": request.batch_count,
-        "completed_batches": 0,
-        "current_batch": None,
-    }
+        contiguous_cycles=0,
+    )
     with _lock:
         _active_runs[run_id] = restarted_state
     _persist_run_state(run_id, restarted_state)
 
     # Restart from scratch through Temporal when enabled (offset 0, per the
     # reset persisted state above); else fall back to the daemon thread.
-    if not _dispatch_strategy_lab_run(run_id, request):
-        thread = threading.Thread(
-            target=_strategy_lab_worker,
-            args=(run_id, request),
-            name=f"strategy-lab-restart-{run_id}",
-            daemon=True,
-        )
-        thread.start()
+    _dispatch_or_thread(run_id, request, thread_name=f"strategy-lab-restart-{run_id}")
 
     return StrategyLabRunStartResponse(
         run_id=run_id,
