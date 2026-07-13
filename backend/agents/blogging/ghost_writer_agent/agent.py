@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
 from shared.content_plan import ContentPlan
 from strands import Agent
+
+from llm_service import LLMJsonParseError, extract_json_from_response
 
 from .models import StoryElicitationResult, StoryGap
 
@@ -272,10 +273,7 @@ class GhostWriterElicitationAgent:
         try:
             agent = Agent(model=self._model, system_prompt=system)
             result = agent(prompt + "\n\nRespond with valid JSON only, no markdown fences.")
-            raw = str(result).strip()
-            raw = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw)
-            data = json.loads(raw)
+            data = extract_json_from_response(str(result).strip())
             if isinstance(data, dict):
                 for key in ("questions", "seeds", "text"):
                     if key in data and isinstance(data[key], list):
@@ -535,14 +533,11 @@ class GhostWriterElicitationAgent:
             try:
                 working_prompt = prompt if attempt == 0 else prompt + _JSON_RETRY_SUFFIX
                 result = agent(working_prompt)
-                raw = str(result).strip()
-                raw = re.sub(r"^```(?:json)?\s*", "", raw)
-                raw = re.sub(r"\s*```$", "", raw)
-                data = json.loads(raw)
+                data = extract_json_from_response(str(result).strip())
                 if isinstance(data, dict):
                     return data
                 return default
-            except (json.JSONDecodeError, TypeError) as e:
+            except LLMJsonParseError as e:
                 if attempt == 0:
                     logger.warning("Ghost writer evaluator JSON parse failed, retrying: %s", e)
                     continue
