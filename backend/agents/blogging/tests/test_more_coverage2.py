@@ -91,12 +91,12 @@ def test_research_synthesize_overview_json_error_returns_none(monkeypatch) -> No
     )
     from pydantic import HttpUrl
 
-    from llm_service import DummyLLMClient
+    from llm_service import DummyLLMClient, LLMJsonParseError
 
     a = ResearchAgent(llm_client=DummyLLMClient())
 
     def boom(self, p):
-        raise json.JSONDecodeError("bad", "doc", 0)
+        raise LLMJsonParseError("bad", response_preview="doc")
 
     monkeypatch.setattr(ResearchAgent, "_call_json", boom)
     refs = [

@@ -66,8 +66,8 @@ def test_complete_plan_json_first_attempt_succeeds(monkeypatch) -> None:
     assert retries == 0
 
 
-def test_complete_plan_json_falls_back_to_parse_json_object(monkeypatch) -> None:
-    """First call returns empty dict; the second call (parse_json_object) parses successfully."""
+def test_complete_plan_json_falls_back_to_second_attempt(monkeypatch) -> None:
+    """First call returns empty dict; the second call (extract_json_from_response) parses successfully."""
     from blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent_with_guidelines()
@@ -85,10 +85,12 @@ def test_complete_plan_json_raises_after_retries(monkeypatch) -> None:
     from blog_writer_agent.agent import BlogWriterAgent
     from shared.errors import PlanningError
 
+    from llm_service import LLMJsonParseError
+
     a = _agent_with_guidelines()
 
     def boom_json(self, p, **kw):
-        raise ValueError("bad json")
+        raise LLMJsonParseError("bad json", response_preview="bad json")
 
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom_json)
     monkeypatch.setattr(

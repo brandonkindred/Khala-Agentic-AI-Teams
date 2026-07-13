@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 from strands import Agent
+
+from llm_service import LLMJsonParseError, extract_json_from_response
+from llm_service.backoff import rate_limit_retry_delay
 
 from .models import CopyEditorInput, CopyEditorOutput, FeedbackItem
 from .prompts import COPY_EDITOR_PROMPT
@@ -207,13 +209,12 @@ class BlogCopyEditorAgent:
         for llm_round in range(_MAX_COPY_EDITOR_LLM_ROUNDS):
             for json_attempt in range(2):
                 try:
-                    result = agent(working_prompt + "\n\nRespond with valid JSON only, no markdown fences.")
-                    raw = str(result).strip()
-                    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-                    raw = re.sub(r"\s*```$", "", raw)
-                    data = json.loads(raw)
+                    result = agent(
+                        working_prompt + "\n\nRespond with valid JSON only, no markdown fences."
+                    )
+                    data = extract_json_from_response(str(result).strip())
                     break
-                except (json.JSONDecodeError, TypeError) as e:
+                except LLMJsonParseError as e:
                     if json_attempt == 0:
                         logger.warning(
                             "Copy editor JSON parse failed (attempt 1), retrying with strict instruction: %s",
@@ -233,7 +234,7 @@ class BlogCopyEditorAgent:
                 except Exception as e:
                     if llm_round >= _MAX_COPY_EDITOR_LLM_ROUNDS - 1:
                         raise
-                    wait = min(60.0, 15.0 * (llm_round + 1))
+                    wait = rate_limit_retry_delay(llm_round, 15.0, 60.0)
                     logger.warning(
                         "Copy editor LLM transport/timeout after service retries (agent round %d/%d, "
                         "json sub-attempt %d): %s — sleeping %.0fs and retrying.",
