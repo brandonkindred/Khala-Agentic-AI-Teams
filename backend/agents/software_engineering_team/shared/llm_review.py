@@ -33,13 +33,15 @@ def run_llm_review(
     invoke_model: Callable[[str], str],
     max_chars: int,
     warn_threshold: int,
+    architecture_context: str = "",
+    spec_content: str = "",
 ) -> List[IssueT]:
     """LLM-based code review when no external review agent is available.
 
     Preconditions:
         - ``files`` maps file paths to their full source text.
         - ``prompt_template`` accepts ``requirements``, ``acceptance_criteria``,
-          and ``code`` format fields.
+          ``architecture_context``, ``spec_content``, and ``code`` format fields.
         - ``parse_template`` returns a dict that may contain an ``"issues"`` list
           of dicts.
         - ``issue_factory`` is a callable accepting keyword arguments ``source``,
@@ -49,6 +51,10 @@ def run_llm_review(
         - ``invoke_model`` runs one prompt through the team's LLM and returns the
           raw text response.
         - ``max_chars`` > 0 and ``warn_threshold`` >= 0.
+        - ``architecture_context``/``spec_content`` are the caller's already
+          size-bounded excerpts (the caller is expected to have applied its own
+          cap before calling, since this runs once per chunk); both default to
+          ``""`` so a caller without this context yet is unaffected.
 
     Postconditions:
         - Inputs that exceed the per-call budget are split into function-aware
@@ -103,6 +109,8 @@ def run_llm_review(
                 acceptance_criteria=", ".join(task.acceptance_criteria)
                 if task.acceptance_criteria
                 else "N/A",
+                architecture_context=architecture_context or "(none provided)",
+                spec_content=spec_content or "(none provided)",
                 code=piece,
             )
             try:

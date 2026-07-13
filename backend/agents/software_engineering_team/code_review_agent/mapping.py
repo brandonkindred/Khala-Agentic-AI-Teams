@@ -1061,6 +1061,14 @@ def _cached_review_chunk(
     return outcome
 
 
+# Progress-bar band this phase reports into: [_MAP_PHASE_START, _MAP_PHASE_START +
+# _MAP_PHASE_SPAN]. ``_MAP_PHASE_START`` must stay equal to coordinator.py's
+# ``_PROGRESS_CHUNKING_DONE`` (the checkpoint reported just before this phase starts) --
+# the two live in different modules and are not otherwise coupled in code.
+_MAP_PHASE_START = 0.10
+_MAP_PHASE_SPAN = 0.80
+
+
 def _map_chunks(
     chunk_reviewer: ChunkReviewAgent,
     chunks: List[ReviewChunk],
@@ -1121,7 +1129,7 @@ def _map_chunks(
                     progress_callback,
                     "reviewing",
                     f"chunk {completed_count[0]}/{total} reviewed: {chunk.paths_label[:120]}",
-                    0.10 + 0.80 * completed_count[0] / total,
+                    _MAP_PHASE_START + _MAP_PHASE_SPAN * completed_count[0] / total,
                 )
         return outcome
 

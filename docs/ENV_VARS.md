@@ -232,7 +232,7 @@ configuration. Parsed via the shared `env_float` (unset/garbage/non-finite →
 default, with a warning on a set-but-unparseable value). Only read by the market
 research worker.
 
-### Code review agent: Temporal by default
+### TEMPORAL_ADDRESS (code review agent default)
 **The code review agent runs Temporal by default** (unlike the other teams, which
 only switch on when `TEMPORAL_ADDRESS` is set): `CodeReviewAgent.run` dispatches
 the durable `CodeReviewWorkflow` and falls back to the in-process coordinator only
@@ -339,7 +339,7 @@ cost are exposed at `GET /api/se/metrics` (alias of
 Tech Lead's Design prompt. All Postgres-backed pieces no-op when `POSTGRES_HOST`
 is unset; there is **no** per-job budget cap.
 
-### LLM_PRICE_&lt;model&gt;
+### `LLM_PRICE_<model>`
 Per-model price override for token→USD cost estimation, formatted
 `<usd_per_1k_input>/<usd_per_1k_output>`. `<model>` is the model name uppercased
 with each run of non-alphanumerics collapsed to `_` (e.g.
@@ -633,6 +633,34 @@ read existing repository files *outside* the diff. This lets it confirm that a
 file/module a finding claims is missing ("add X" / "X does not exist") already
 exists, and drop that false positive. The reader is read-only, bounded, and
 fail-safe (a read failure only ever keeps a finding).
+
+### CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS
+Default-on toggle for the architecture-consistency / cross-codebase-redundancy
+pass. After the false-positive filter runs, this pass makes exactly one
+additional LLM call for the whole submission (never once per chunk) with
+read access to the rest of the repository (the same `read_file`/`list_files`/
+`search_codebase`/`find_function_at_line` tools the false-positive filter
+uses), given the full architecture document. It can only ADD findings, in
+two categories: `architecture` (the change contradicts a stated boundary/
+pattern/decision in a way that would break integration) and `refactor` (the
+change duplicates a capability that already exists elsewhere in the
+repository, tool-verified before it is flagged — never guessed from naming
+alone). It never removes or alters any finding the map phase or the
+false-positive filter already produced. Requires
+`CodeReviewInput.architecture` to carry an `architecture_document`,
+`overview`, `components`, or `decisions` — the pass renders whichever of
+these are present; runs as a no-op (no LLM call) when none are. Any setup
+or LLM failure is fail-safe: it is logged and yields no additional findings,
+so a broken pass never blocks or changes the rest of the review. Set to
+`false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
+enabled). Related sizing knob: `CODE_REVIEW_ARCH_DOC_CHARS` (see below).
+
+### CODE_REVIEW_ARCH_DOC_CHARS
+Caps the architecture document (plus the rendered `overview`/`components`/
+`decisions`) inlined into the architecture-consistency pass's single prompt.
+Default `40000`, floor `2000` — generous relative to the per-chunk
+`CODE_REVIEW_ARCH_OVERVIEW_CHARS` excerpt because this pass pays its cost once
+per submission, not once per chunk.
 
 ---
 

@@ -18,6 +18,7 @@ import pytest
 from code_review_agent.coordinator import (
     MIN_SPLIT_SEGMENT_CHARS,
     _issues_from_chunk_output,
+    _render_architecture_context,
     _segment_range_label,
     _validate_line,
     build_review_chunks,
@@ -275,6 +276,81 @@ def test_shared_context_compaction_is_memoized_across_runs() -> None:
     run_coordinator(client, _make_input())
     # Second run reuses the memoized compactions — no additional compaction calls.
     assert client.compaction_calls == first_run_calls
+
+
+def test_render_architecture_context_folds_in_components_and_decisions() -> None:
+    """The architecture excerpt built for the reviewer includes not just the
+    overview prose but component responsibilities and architecture decisions
+    (ADRs) -- the concrete signal an architecture-consistency check needs."""
+    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+
+    arch = SystemArchitecture(
+        overview="Layered service architecture.",
+        components=[
+            ArchitectureComponent(name="UserService", type="backend", description="Owns user CRUD")
+        ],
+        decisions=[{"title": "ADR-001", "decision": "Use Postgres for persistence"}],
+    )
+    rendered = _render_architecture_context(arch)
+    assert "Layered service architecture." in rendered
+    assert "UserService (backend): Owns user CRUD" in rendered
+    assert "ADR-001: Use Postgres for persistence" in rendered
+
+
+def test_render_architecture_context_handles_missing_and_malformed_fields() -> None:
+    """A bare overview renders with no Components/Decisions sections; a malformed
+    (non-dict) decision entry is skipped rather than raising.
+
+    ``decisions`` entries that reach a real ``SystemArchitecture`` are always
+    dicts (Pydantic validates ``List[Dict[str, Any]]`` at construction), so the
+    non-dict case is exercised via a duck-typed stand-in -- the function only
+    ever accesses ``.overview``/``.components``/``.decisions`` by attribute, so
+    it works on anything shaped like a ``SystemArchitecture``.
+    """
+    from types import SimpleNamespace
+
+    from software_engineering_team.shared.models import SystemArchitecture
+
+    bare = SystemArchitecture(overview="Just an overview.")
+    rendered_bare = _render_architecture_context(bare)
+    assert rendered_bare == "Just an overview."
+
+    malformed = SimpleNamespace(overview="ov", components=[], decisions=["not-a-dict"])
+    rendered_malformed = _render_architecture_context(malformed)
+    assert rendered_malformed == "ov"
+
+
+def test_chunk_prompt_includes_component_and_decision_text() -> None:
+    """End-to-end: a submission reviewed with a component/decision-bearing
+    architecture renders that content into the chunk reviewer's prompt."""
+    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+
+    class _PromptCapturingClient(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prompts: List[str] = []
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            self.prompts.append(prompt)
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    arch = SystemArchitecture(
+        overview="Layered service architecture.",
+        components=[
+            ArchitectureComponent(
+                name="PaymentService", type="backend", description="Owns payment processing"
+            )
+        ],
+        decisions=[{"title": "ADR-002", "decision": "All writes go through the repository layer"}],
+    )
+    client = _PromptCapturingClient()
+    run_coordinator(
+        client,
+        CodeReviewInput(files={"app/main.py": "def f():\n    return 1\n"}, architecture=arch),
+    )
+    assert client.prompts, "expected at least one chunk-review call"
+    assert any("PaymentService (backend): Owns payment processing" in p for p in client.prompts)
+    assert any("ADR-002: All writes go through the repository layer" in p for p in client.prompts)
 
 
 def test_run_coordinator_merges_issues_and_rejects_if_critical() -> None:
@@ -1867,6 +1943,19 @@ def test_malformed_severity_and_category_are_sanitized_not_crashing() -> None:
     assert issues[0].category == "general"
 
 
+def test_unrecognized_category_is_clamped_to_general() -> None:
+    """An off-contract category string (not in the documented set) is clamped
+    to 'general' rather than passed through verbatim -- mirrors the existing
+    severity clamp so CodeReviewIssue.category never drifts from its contract."""
+    seg = FileSegment(path="a.py", content="x = 1", total_lines=1)
+    chunk = ReviewChunk(segments=[seg])
+    issues = _issues_from_chunk_output(
+        chunk,
+        [{"description": "d", "category": "made-up-category", "severity": "high"}],
+    )
+    assert issues[0].category == "general"
+
+
 def test_pre_existing_tag_is_carried_through_and_defaults_false() -> None:
     """The optional ``pre_existing`` tag (used by the PR-review path to route a
     finding to an issue proposal instead of a PR comment) survives conversion,
@@ -2333,7 +2422,7 @@ def test_coordinator_threads_repo_reader_to_filter(monkeypatch) -> None:
 
     captured: Dict[str, Any] = {}
 
-    def _spy(llm, input_data, issues, repo_reader=None):
+    def _spy(llm, input_data, issues, repo_reader=None, index=None):
         captured["reader"] = repo_reader
         return issues
 
@@ -2345,3 +2434,84 @@ def test_coordinator_threads_repo_reader_to_filter(monkeypatch) -> None:
         repo_reader=reader,
     )
     assert captured["reader"] is reader
+
+
+def test_coordinator_builds_codebase_index_once_and_shares_it(monkeypatch) -> None:
+    """The submission is parsed into a ``CodebaseIndex`` exactly once per
+    ``run_coordinator`` call, and the same instance is forwarded to both the
+    false-positive filter and the architecture-consistency pass (rather than
+    each independently rebuilding it from the same input)."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent.false_positive_filter import CodebaseIndex
+
+    build_calls: list = []
+    original_from_input = CodebaseIndex.from_input
+
+    def _counting_from_input(*args, **kwargs):
+        result = original_from_input(*args, **kwargs)
+        build_calls.append(result)
+        return result
+
+    monkeypatch.setattr(
+        CodebaseIndex,
+        "from_input",
+        classmethod(lambda cls, *a, **kw: _counting_from_input(*a, **kw)),
+    )
+
+    received_indexes: list = []
+
+    def _filter_spy(llm, input_data, issues, repo_reader=None, index=None):
+        received_indexes.append(index)
+        return issues
+
+    def _arch_spy(llm, input_data, repo_reader=None, index=None):
+        received_indexes.append(index)
+        return []
+
+    monkeypatch.setattr(coord, "filter_false_positives", _filter_spy)
+    monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch_spy)
+
+    run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+
+    assert len(build_calls) == 1, "CodebaseIndex.from_input should be called exactly once"
+    assert received_indexes == [build_calls[0], build_calls[0]]
+
+
+def test_single_chunk_summary_reflects_architecture_findings(monkeypatch) -> None:
+    """A single-chunk review whose only new findings come from the
+    architecture-consistency pass must not silently drop them from the
+    narrative: with exactly one map summary the coordinator would otherwise
+    return that chunk's summary verbatim, which said nothing about a finding
+    the map phase never saw."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent.models import CodeReviewIssue
+
+    arch_issue = CodeReviewIssue(
+        severity="high",
+        category="architecture",
+        file_path="a.py",
+        description="Duplicates the existing `Widget` service.",
+    )
+    monkeypatch.setattr(
+        coord, "find_architecture_and_redundancy_issues", lambda *a, **kw: [arch_issue]
+    )
+
+    synth_calls: list = []
+    original_synthesize = coord.synthesize_review_findings
+
+    def _spy(*args, **kwargs):
+        synth_calls.append(True)
+        return original_synthesize(*args, **kwargs)
+
+    monkeypatch.setattr(coord, "synthesize_review_findings", _spy)
+
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+
+    assert synth_calls, "synthesis must run so the narrative reflects the architecture finding"
+    assert any(i.description == arch_issue.description for i in result.issues)

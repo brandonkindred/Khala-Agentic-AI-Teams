@@ -814,3 +814,26 @@ def test_submission_cache_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -
     assert spy["n"] == 0
     run_coordinator(client, a)  # A was evicted → full review again
     assert spy["n"] == 1
+
+
+def test_submission_cache_bypassed_when_repo_reader_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A verdict backed by ``repo_reader`` reads beyond ``CodeReviewInput``, so
+    it must never be served from (or written to) the input-only submission
+    cache -- otherwise a stale approval could mask a since-added architecture/
+    redundancy finding or a since-resolved false positive from a rest-of-repo
+    change the cache key cannot see."""
+    client = _CountingClient(_APPROVED)
+    data = _one_file_input()
+    reader = object()  # a RepoReader stand-in; never actually read from here
+
+    run_coordinator(client, data, repo_reader=reader)  # would cache without the guard
+
+    spy = _chunking_spy(monkeypatch)
+    run_coordinator(client, data, repo_reader=reader)
+    assert spy["n"] == 1  # no short-circuit: reviewed again despite identical bytes
+
+    # A repo_reader-backed run must not poison the cache for reader-free reruns either.
+    run_coordinator(client, data)
+    assert spy["n"] == 2
