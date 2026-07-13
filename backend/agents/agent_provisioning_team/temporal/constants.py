@@ -30,18 +30,23 @@ SANDBOX_REAPER_WORKFLOW_ID = "agent-provisioning-sandbox-idle-reaper"
 # (its activity timeout(s) x retry attempts + backoff), or a legitimately slow
 # -but-eventually-successful run surfaces to the caller as a client-side
 # timeout even though the workflow is still executing durably server-side.
+# Flat margin (seconds) added on top of the worst-case retry budget, to cover
+# Temporal server-side scheduling/backoff overhead between activity attempts
+# that isn't itself part of any single activity's timeout.
+CLIENT_TIMEOUT_MARGIN_S = 120
+
 # SandboxAcquireWorkflow: SANDBOX_ACQUIRE_TIMEOUT_S per attempt x up to 3
 # attempts (SANDBOX_ACQUIRE_RETRY_POLICY), plus backoff, plus margin.
 SANDBOX_ACQUIRE_CLIENT_TIMEOUT_S = env_int(
     "AGENT_PROVISIONING_SANDBOX_ACQUIRE_CLIENT_TIMEOUT_S",
-    SANDBOX_ACQUIRE_TIMEOUT_S * 3 + 120,
+    SANDBOX_ACQUIRE_TIMEOUT_S * 3 + CLIENT_TIMEOUT_MARGIN_S,
     floor=1,
 )
 # SandboxTeardownWorkflow: SANDBOX_TEARDOWN_TIMEOUT_S per attempt x up to 3
 # attempts (SANDBOX_RETRY_POLICY), plus backoff, plus margin.
 SANDBOX_TEARDOWN_CLIENT_TIMEOUT_S = env_int(
     "AGENT_PROVISIONING_SANDBOX_TEARDOWN_CLIENT_TIMEOUT_S",
-    SANDBOX_TEARDOWN_TIMEOUT_S * 3 + 120,
+    SANDBOX_TEARDOWN_TIMEOUT_S * 3 + CLIENT_TIMEOUT_MARGIN_S,
     floor=1,
 )
 # AgentDeprovisioningWorkflow: schedule_to_close_timeout (PHASE_TIMEOUT, 20
@@ -49,5 +54,5 @@ SANDBOX_TEARDOWN_CLIENT_TIMEOUT_S = env_int(
 # DEFAULT_RETRY_POLICY's retries, so the client only needs that ceiling plus
 # margin.
 DEPROVISION_CLIENT_TIMEOUT_S = env_int(
-    "AGENT_PROVISIONING_DEPROVISION_CLIENT_TIMEOUT_S", 20 * 60 + 120, floor=1
+    "AGENT_PROVISIONING_DEPROVISION_CLIENT_TIMEOUT_S", 20 * 60 + CLIENT_TIMEOUT_MARGIN_S, floor=1
 )

@@ -490,6 +490,10 @@ class Lifecycle:
         Preconditions:
             * Callers must NOT already hold ``self._state_lock`` (this method
               acquires it itself, briefly, and releases it before the ``await``).
+              Enforced by an assertion below: ``RLock._is_owned()`` is a private
+              CPython API, but it's the only way to catch this violation, and a
+              silent reentrant acquire here would hide the exact hazard this
+              precondition exists to prevent (see Invariants).
         Postconditions:
             * ``self._state_file`` reflects the ``_state`` snapshot taken at
               call time, or a newer one if a concurrent ``_persist()`` call was
@@ -527,6 +531,9 @@ class Lifecycle:
               is disproportionate for this best-effort checkpoint file — state
               is already reconciled against ``docker inspect`` on next use.
         """
+        assert not self._state_lock._is_owned(), (
+            "_persist() must not be called while holding _state_lock"
+        )  # noqa: SLF001
         with self._state_lock:
             self._persist_seq += 1
             my_seq = self._persist_seq

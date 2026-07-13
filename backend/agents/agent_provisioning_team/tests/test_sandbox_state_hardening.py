@@ -69,6 +69,20 @@ def test_lifecycle_has_state_lock(tmp_path: Path) -> None:
             pass
 
 
+@pytest.mark.asyncio
+async def test_persist_asserts_lock_not_already_held(tmp_path: Path) -> None:
+    """Enforces the documented precondition: `_persist()` must not be called
+    while the caller already holds `_state_lock`. An RLock's reentrancy is
+    thread-identity-based, not coroutine-based, so a nested call would let an
+    unrelated coroutine resumed on the same OS thread silently reenter the
+    lock mid-`await` instead of raising — this assertion is the only thing
+    that would catch a future violation."""
+    lc = Lifecycle(state_file=tmp_path / "state.json")
+    with lc._state_lock:
+        with pytest.raises(AssertionError):
+            await lc._persist()
+
+
 def test_persist_and_mutation_are_thread_safe(tmp_path: Path) -> None:
     """A writer thread persisting while a mutator thread inserts/pops must not
     raise ``RuntimeError: dictionary changed size during iteration`` or corrupt
