@@ -24,8 +24,8 @@ from agent_provisioning_team.temporal.constants import (
     SANDBOX_ACQUIRE_CLIENT_TIMEOUT_S,
     SANDBOX_REAPER_INTERVAL_S,
     SANDBOX_REAPER_WORKFLOW_ID,
+    SANDBOX_TASK_QUEUE,
     SANDBOX_TEARDOWN_CLIENT_TIMEOUT_S,
-    TASK_QUEUE,
     WORKFLOW_ID_PREFIX,
 )
 from agent_provisioning_team.temporal.sandbox_workflows import (
@@ -119,7 +119,7 @@ async def acquire_sandbox_via_temporal(agent_id: str) -> SandboxHandle:
             SandboxAcquireWorkflow.run,
             agent_id,
             workflow_id=workflow_id,
-            task_queue=TASK_QUEUE,
+            task_queue=SANDBOX_TASK_QUEUE,
             execute_timeout_s=SANDBOX_ACQUIRE_CLIENT_TIMEOUT_S,
         )
     except Exception as exc:  # noqa: BLE001
@@ -184,7 +184,7 @@ async def teardown_sandbox_via_temporal(agent_id: str) -> None:
             SandboxTeardownWorkflow.run,
             agent_id,
             workflow_id=workflow_id,
-            task_queue=TASK_QUEUE,
+            task_queue=SANDBOX_TASK_QUEUE,
             execute_timeout_s=SANDBOX_TEARDOWN_CLIENT_TIMEOUT_S,
         )
     except Exception as exc:  # noqa: BLE001
@@ -200,9 +200,11 @@ def start_sandbox_reaper_workflow(
     """Start the singleton idle-reaper workflow (fixed id); no-op if already running.
 
     Preconditions:
-        * The Agent Provisioning Temporal worker is running (Temporal enabled).
+        * The Agent Provisioning sandbox Temporal worker
+          (:func:`agent_provisioning_team.temporal.worker.start_agent_provisioning_sandbox_temporal_worker_thread`)
+          is running, polling ``SANDBOX_TASK_QUEUE`` inside this same process.
     Postconditions:
-        * Exactly one ``SandboxReaperWorkflow`` runs on the shared task queue. A
+        * Exactly one ``SandboxReaperWorkflow`` runs on ``SANDBOX_TASK_QUEUE``. A
           ``WorkflowAlreadyStartedError`` (a reaper already running, e.g. after a
           restart or from a sibling replica) is swallowed — that IS the desired
           single-instance behavior. Any other exception propagates.
@@ -221,7 +223,7 @@ def start_sandbox_reaper_workflow(
             SandboxReaperWorkflow.run,
             interval_s,
             workflow_id=SANDBOX_REAPER_WORKFLOW_ID,
-            task_queue=TASK_QUEUE,
+            task_queue=SANDBOX_TASK_QUEUE,
             client_ready_timeout_s=client_ready_timeout_s,
         )
         logger.info("Started SandboxReaperWorkflow id=%s", SANDBOX_REAPER_WORKFLOW_ID)

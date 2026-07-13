@@ -29,8 +29,8 @@ with workflow.unsafe.imports_passed_through():
         SANDBOX_ACQUIRE_TIMEOUT_S,
         SANDBOX_REAP_TIMEOUT_S,
         SANDBOX_REAPER_INTERVAL_S,
+        SANDBOX_TASK_QUEUE,
         SANDBOX_TEARDOWN_TIMEOUT_S,
-        TASK_QUEUE,
     )
 
 SANDBOX_RETRY_POLICY = RetryPolicy(
@@ -69,7 +69,7 @@ class SandboxAcquireWorkflow:
         return await workflow.execute_activity(
             _sb.sandbox_acquire_activity,
             args=[agent_id],
-            task_queue=TASK_QUEUE,
+            task_queue=SANDBOX_TASK_QUEUE,
             start_to_close_timeout=timedelta(seconds=SANDBOX_ACQUIRE_TIMEOUT_S),
             retry_policy=SANDBOX_ACQUIRE_RETRY_POLICY,
         )
@@ -92,7 +92,7 @@ class SandboxTeardownWorkflow:
         await workflow.execute_activity(
             _sb.sandbox_teardown_activity,
             args=[agent_id],
-            task_queue=TASK_QUEUE,
+            task_queue=SANDBOX_TASK_QUEUE,
             start_to_close_timeout=timedelta(seconds=SANDBOX_TEARDOWN_TIMEOUT_S),
             retry_policy=SANDBOX_RETRY_POLICY,
         )
@@ -127,7 +127,7 @@ class SandboxReaperWorkflow:
         try:
             await workflow.execute_activity(
                 _sb.sandbox_reap_activity,
-                task_queue=TASK_QUEUE,
+                task_queue=SANDBOX_TASK_QUEUE,
                 start_to_close_timeout=timedelta(seconds=SANDBOX_REAP_TIMEOUT_S),
                 retry_policy=SANDBOX_RETRY_POLICY,
             )

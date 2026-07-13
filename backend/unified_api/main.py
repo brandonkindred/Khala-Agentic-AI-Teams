@@ -197,6 +197,46 @@ async def _start_sandbox_reaper_with_retry() -> None:
             delay = min(delay * 2, 60.0)
 
 
+async def _start_sandbox_reaper_task() -> asyncio.Task:
+    """Start the Agent Console sandbox idle reaper, in whichever mode is active.
+
+    Extracted from the lifespan body so this branch (and specifically the
+    Temporal-mode sandbox worker boot below) has its own directly-testable
+    seam, mirroring ``_start_sandbox_reaper_with_retry``'s own extraction.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Returns the created background ``asyncio.Task``. When Temporal is
+          enabled, this process's own sandbox-only Temporal worker
+          (``start_agent_provisioning_sandbox_temporal_worker_thread``) is
+          started FIRST, before the reaper workflow — sandbox
+          workflows/activities run on their own ``SANDBOX_TASK_QUEUE`` (never
+          the shared ``TASK_QUEUE`` the standalone agent-provisioning-service
+          team container also polls), so a sandbox activity can never execute
+          in that other process against a different, process-local
+          ``Lifecycle`` singleton than the one this API's
+          status/list/metrics/note_activity routes read. Otherwise, falls
+          back to the in-process ``run_idle_reaper()`` asyncio task
+          (thread mode).
+    """
+    from agent_provisioning_team.temporal.sandbox_dispatch import sandbox_temporal_enabled
+
+    if sandbox_temporal_enabled():
+        from agent_provisioning_team.temporal.worker import (
+            start_agent_provisioning_sandbox_temporal_worker_thread,
+        )
+
+        start_agent_provisioning_sandbox_temporal_worker_thread()
+        logger.info("Starting Agent Console sandbox idle reaper (Temporal workflow)")
+        return asyncio.create_task(_start_sandbox_reaper_with_retry())
+
+    from agent_provisioning_team.sandbox import run_idle_reaper
+
+    logger.info("Started Agent Console sandbox idle reaper (in-process)")
+    return asyncio.create_task(run_idle_reaper())
+
+
 async def _health_check_loop() -> None:
     """Periodically probe all registered teams' health endpoints.
 
@@ -491,24 +531,18 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     logger.info("Started background health checker (interval=%ds)", _HEALTH_CHECK_INTERVAL)
 
     # 4. Start the Agent Console sandbox idle reaper. When Temporal is enabled it
-    #    runs as a durable, single-instance SandboxReaperWorkflow (survives
-    #    restarts); otherwise it's an in-process asyncio task (thread mode). The
-    #    Temporal branch is a background retry loop, not a single blocking
-    #    attempt: the worker's client can legitimately still be connecting at
-    #    this point (see shared_temporal.runner._await_client), and a lost race
-    #    here must not mean the reaper never starts for the life of the process.
+    #    runs as a durable, single-instance SandboxReaperWorkflow served by this
+    #    process's own sandbox-only Temporal worker (survives restarts);
+    #    otherwise it's an in-process asyncio task (thread mode). The Temporal
+    #    branch is a background retry loop, not a single blocking attempt: the
+    #    worker's client can legitimately still be connecting at this point
+    #    (see shared_temporal.runner._await_client), and a lost race here must
+    #    not mean the reaper never starts for the life of the process. See
+    #    _start_sandbox_reaper_task's docstring for why the sandbox worker must
+    #    be booted here rather than shared with this team's general worker.
     sandbox_reaper_task: asyncio.Task | None = None
     try:
-        from agent_provisioning_team.temporal.sandbox_dispatch import sandbox_temporal_enabled
-
-        if sandbox_temporal_enabled():
-            sandbox_reaper_task = asyncio.create_task(_start_sandbox_reaper_with_retry())
-            logger.info("Starting Agent Console sandbox idle reaper (Temporal workflow)")
-        else:
-            from agent_provisioning_team.sandbox import run_idle_reaper
-
-            sandbox_reaper_task = asyncio.create_task(run_idle_reaper())
-            logger.info("Started Agent Console sandbox idle reaper (in-process)")
+        sandbox_reaper_task = await _start_sandbox_reaper_task()
     except Exception:
         logger.warning("Agent Console sandbox reaper failed to start", exc_info=True)
 

@@ -268,9 +268,13 @@ def save(path: Path, state: dict[str, SandboxState]) -> None:
           ``os.replace``.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Snapshot first — never iterate the live dict during the comprehension,
-    # and copy each value so serialization never observes a live object.
-    snapshot = [(agent_id, s.model_copy()) for agent_id, s in state.items()]
+    # Materialize the live dict into a list FIRST — never iterate `state.items()`
+    # directly inside the comprehension below, or a concurrent insert/pop on
+    # the caller's dict (this function's own defensiveness, independent of
+    # whatever copy the caller already made) could raise "dictionary changed
+    # size during iteration" partway through. Only then copy each value so
+    # serialization never observes a live object.
+    snapshot = [(agent_id, s.model_copy()) for agent_id, s in list(state.items())]
     payload = {agent_id: s.model_dump(mode="json") for agent_id, s in snapshot}
     tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:

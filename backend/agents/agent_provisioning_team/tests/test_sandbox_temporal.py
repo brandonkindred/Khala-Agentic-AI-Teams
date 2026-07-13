@@ -132,6 +132,7 @@ async def test_sandbox_acquire_workflow_returns_dump() -> None:
     async def fake_exec(activity_fn, *args, **kwargs):
         captured["name"] = getattr(activity_fn, "__name__", str(activity_fn))
         captured["args"] = kwargs.get("args")
+        captured["task_queue"] = kwargs.get("task_queue")
         return _handle().model_dump(mode="json")
 
     with patch.object(sw.workflow, "execute_activity", new=fake_exec):
@@ -140,6 +141,8 @@ async def test_sandbox_acquire_workflow_returns_dump() -> None:
     assert captured["name"] == "sandbox_acquire_activity"
     assert captured["args"] == ["blog.writer"]
     assert out["agent_id"] == "blog.writer"
+    # P1 regression: the activity must be scheduled on SANDBOX_TASK_QUEUE.
+    assert captured["task_queue"] == sw.SANDBOX_TASK_QUEUE
 
 
 @pytest.mark.asyncio
@@ -159,6 +162,7 @@ async def test_sandbox_teardown_workflow_calls_activity() -> None:
     async def fake_exec(activity_fn, *args, **kwargs):
         captured["name"] = getattr(activity_fn, "__name__", str(activity_fn))
         captured["args"] = kwargs.get("args")
+        captured["task_queue"] = kwargs.get("task_queue")
         return None
 
     with patch.object(sw.workflow, "execute_activity", new=fake_exec):
@@ -166,6 +170,7 @@ async def test_sandbox_teardown_workflow_calls_activity() -> None:
 
     assert captured["name"] == "sandbox_teardown_activity"
     assert captured["args"] == ["blog.writer"]
+    assert captured["task_queue"] == sw.SANDBOX_TASK_QUEUE
 
 
 @pytest.mark.asyncio
@@ -187,6 +192,7 @@ async def test_sandbox_reaper_workflow_one_tick() -> None:
 
     async def fake_exec(activity_fn, *args, **kwargs):
         calls["activity"] = getattr(activity_fn, "__name__", str(activity_fn))
+        calls["task_queue"] = kwargs.get("task_queue")
         return []
 
     def fake_can(*args):
@@ -201,6 +207,7 @@ async def test_sandbox_reaper_workflow_one_tick() -> None:
 
     assert calls["slept"].total_seconds() == 45
     assert calls["activity"] == "sandbox_reap_activity"
+    assert calls["task_queue"] == sw.SANDBOX_TASK_QUEUE
     # Restarts itself with the same interval so history stays bounded.
     assert calls["continue_as_new"] == (45,)
 
@@ -481,6 +488,24 @@ async def test_acquire_via_temporal_uses_client_timeout_that_covers_retries() ->
 
 
 @pytest.mark.asyncio
+async def test_acquire_via_temporal_dispatches_on_sandbox_task_queue() -> None:
+    """P1 regression: must dispatch on SANDBOX_TASK_QUEUE, never the shared
+    TASK_QUEUE the standalone agent-provisioning-service team container also
+    polls — otherwise Temporal could run this activity in that other
+    process's own (separate, process-local) Lifecycle singleton."""
+    from agent_provisioning_team.temporal import sandbox_dispatch as sd
+    from agent_provisioning_team.temporal.constants import SANDBOX_TASK_QUEUE, TASK_QUEUE
+
+    exec_mock = AsyncMock(return_value=_handle().model_dump(mode="json"))
+    with patch.object(sd, "execute_workflow_async", new=exec_mock):
+        await sd.acquire_sandbox_via_temporal("blog.writer")
+
+    call = exec_mock.await_args
+    assert call.kwargs["task_queue"] == SANDBOX_TASK_QUEUE
+    assert call.kwargs["task_queue"] != TASK_QUEUE
+
+
+@pytest.mark.asyncio
 async def test_teardown_via_temporal_dispatches_workflow() -> None:
     from agent_provisioning_team.temporal import sandbox_dispatch as sd
 
@@ -493,6 +518,21 @@ async def test_teardown_via_temporal_dispatches_workflow() -> None:
     assert call.args[0] is sd.SandboxTeardownWorkflow.run
     assert call.args[1] == "blog.writer"
     assert call.kwargs["workflow_id"].startswith("agent-provisioning-sandbox-teardown-blog.writer-")
+
+
+@pytest.mark.asyncio
+async def test_teardown_via_temporal_dispatches_on_sandbox_task_queue() -> None:
+    """P1 regression, teardown side of the same fix."""
+    from agent_provisioning_team.temporal import sandbox_dispatch as sd
+    from agent_provisioning_team.temporal.constants import SANDBOX_TASK_QUEUE, TASK_QUEUE
+
+    exec_mock = AsyncMock(return_value=None)
+    with patch.object(sd, "execute_workflow_async", new=exec_mock):
+        await sd.teardown_sandbox_via_temporal("blog.writer")
+
+    call = exec_mock.await_args
+    assert call.kwargs["task_queue"] == SANDBOX_TASK_QUEUE
+    assert call.kwargs["task_queue"] != TASK_QUEUE
 
 
 @pytest.mark.asyncio
@@ -540,12 +580,20 @@ def test_start_reaper_workflow_starts_with_fixed_id() -> None:
     def fake_start(workflow_run, *args, workflow_id, task_queue, **kwargs):
         captured["workflow_id"] = workflow_id
         captured["args"] = args
+        captured["task_queue"] = task_queue
 
     with patch.object(sd, "start_workflow_sync", side_effect=fake_start):
         sd.start_sandbox_reaper_workflow(30)
 
     assert captured["workflow_id"] == SANDBOX_REAPER_WORKFLOW_ID
     assert captured["args"] == (30,)
+    # P1 regression: must run on SANDBOX_TASK_QUEUE, never the shared
+    # TASK_QUEUE the standalone agent-provisioning-service team container
+    # also polls (see SANDBOX_TASK_QUEUE's docstring in temporal/constants.py).
+    from agent_provisioning_team.temporal.constants import SANDBOX_TASK_QUEUE, TASK_QUEUE
+
+    assert captured["task_queue"] == SANDBOX_TASK_QUEUE
+    assert captured["task_queue"] != TASK_QUEUE
 
 
 def test_start_reaper_workflow_swallows_already_started() -> None:

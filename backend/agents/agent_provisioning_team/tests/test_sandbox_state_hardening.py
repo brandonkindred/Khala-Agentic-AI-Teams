@@ -215,3 +215,86 @@ async def test_persist_skips_write_when_superseded_before_write_runs(
 
     captured_thunks[1]()
     assert len(save_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_persist_snapshot_immune_to_field_mutation_after_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """P2 regression (code review): _persist()'s model_copy() must happen
+    INSIDE the with self._state_lock: block that takes the snapshot, not
+    later inside state_mod.save() on the unlocked background thread. If the
+    copy happened later, a field write from an in-flight acquire()/teardown()
+    for the same agent_id (which also takes _state_lock, but only briefly,
+    per field-group) could land between the snapshot and the eventual copy,
+    producing a torn (partially-old, partially-new) checkpoint.
+
+    Verified by mutating the live SandboxState object AFTER _persist()'s
+    snapshot line has run but BEFORE the deferred write executes: the write
+    must still reflect the pre-mutation values.
+    """
+    lc = Lifecycle(state_file=tmp_path / "state.json")
+    st = state_mod.new_state(agent_id="a1", team="blogging", container_name="sbx-a1")
+    lc._state["a1"] = st
+
+    save_calls: list[dict] = []
+
+    def fake_save(path, state) -> None:
+        save_calls.append({agent_id: s.model_dump() for agent_id, s in state.items()})
+
+    monkeypatch.setattr(state_mod, "save", fake_save)
+
+    captured_thunks = []
+
+    async def fake_to_thread(func, *args, **kwargs):
+        captured_thunks.append(func)
+
+    monkeypatch.setattr(lifecycle_mod.asyncio, "to_thread", fake_to_thread)
+
+    await lc._persist()  # snapshots st while status=WARMING, container_id=None
+
+    # Simulate an in-flight acquire() continuing to mutate the SAME live
+    # object after _persist()'s snapshot was taken but before its deferred
+    # write has run.
+    st.container_id = "abc123"
+    st.status = state_mod.SandboxStatus.WARM
+
+    captured_thunks[0]()  # run the deferred write now
+
+    written = save_calls[0]["a1"]
+    assert written["status"] == "warming"
+    assert written["container_id"] is None
+
+
+def test_save_survives_concurrent_resize_during_iteration(tmp_path: Path, monkeypatch) -> None:
+    """P3 regression (code review, and a genuine regression from an earlier
+    round): save()'s per-item model_copy() comprehension must iterate a
+    pre-materialized list(state.items()), never state.items() directly — an
+    earlier round accidentally dropped the list() wrapper while adding
+    model_copy(), reintroducing 'dictionary changed size during iteration' if
+    another thread inserts/pops into the same live dict mid-iteration.
+
+    Simulates exactly that: a concurrent insert happens during the first
+    per-item model_copy() call.
+    """
+    path = tmp_path / "state.json"
+    live_state = _seed(3)
+
+    real_model_copy = state_mod.SandboxState.model_copy
+    calls = {"n": 0}
+
+    def mutating_model_copy(self, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            live_state["late-comer"] = state_mod.new_state(
+                agent_id="late-comer", team="t", container_name="late-comer"
+            )
+        return real_model_copy(self, *args, **kwargs)
+
+    monkeypatch.setattr(state_mod.SandboxState, "model_copy", mutating_model_copy)
+
+    # Must not raise RuntimeError: dictionary changed size during iteration.
+    state_mod.save(path, live_state)
+
+    loaded = state_mod.load(path)
+    assert {"agent-0", "agent-1", "agent-2"} <= set(loaded)

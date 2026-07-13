@@ -506,9 +506,10 @@ class Lifecycle:
               must never surface as an unhandled task exception.
 
         Invariants:
-            * The lock is held only for the synchronous ``dict(self._state)``
-              snapshot, never across the ``await``. A ``threading.RLock``'s
-              reentrancy is thread-identity-based, not coroutine-based, so
+            * The lock is held only for the synchronous per-agent
+              ``model_copy()`` snapshot, never across the ``await``. A
+              ``threading.RLock``'s reentrancy is thread-identity-based, not
+              coroutine-based, so
               holding it across an ``await`` would let an unrelated coroutine
               resumed on the same OS thread silently "reenter" it, and would
               block that thread's *entire* event loop — not just this
@@ -537,7 +538,19 @@ class Lifecycle:
         with self._state_lock:
             self._persist_seq += 1
             my_seq = self._persist_seq
-            snapshot = dict(self._state)
+            # model_copy() each value HERE, while still holding the lock that
+            # guards every field mutation (acquire()/teardown() take it around
+            # each st.field = ... assignment) — not later, unlocked, inside
+            # state_mod.save() on the background thread. Copying after the
+            # lock releases would let a field write from an in-flight
+            # acquire()/teardown() for the same agent_id land between this
+            # snapshot and the eventual model_copy(), producing a torn
+            # (partially-old, partially-new) checkpoint despite the lock
+            # discipline. Iterating self._state.items() directly (no need for
+            # a list() wrapper first) is safe here specifically because every
+            # dict-resizing mutation also takes this same lock, so nothing can
+            # insert/pop while we hold it.
+            snapshot = {agent_id: st.model_copy() for agent_id, st in self._state.items()}
 
         def _write_if_still_latest() -> None:
             with self._state_lock:

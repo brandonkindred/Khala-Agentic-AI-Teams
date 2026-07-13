@@ -115,3 +115,69 @@ async def test_reaper_retry_propagates_cancellation_from_start_attempt(
 
     with pytest.raises(asyncio.CancelledError):
         await main._start_sandbox_reaper_with_retry()
+
+
+@pytest.mark.asyncio
+async def test_start_sandbox_reaper_task_boots_sandbox_worker_when_temporal_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P1 regression: when Temporal is enabled, this process must boot its
+    own sandbox-only Temporal worker BEFORE starting the reaper workflow —
+    the reaper workflow (and every other sandbox activity) only ever
+    executes correctly if a worker polling SANDBOX_TASK_QUEUE is running
+    inside this same process."""
+    monkeypatch.setattr(
+        "agent_provisioning_team.temporal.sandbox_dispatch.sandbox_temporal_enabled",
+        lambda: True,
+    )
+    worker_started = []
+    monkeypatch.setattr(
+        "agent_provisioning_team.temporal.worker.start_agent_provisioning_sandbox_temporal_worker_thread",
+        lambda: worker_started.append(True),
+    )
+
+    reaper_started = []
+
+    async def fake_retry() -> None:
+        reaper_started.append(True)
+
+    monkeypatch.setattr(main, "_start_sandbox_reaper_with_retry", fake_retry)
+
+    task = await main._start_sandbox_reaper_task()
+    await task
+
+    assert worker_started == [True]
+    assert reaper_started == [True]
+
+
+@pytest.mark.asyncio
+async def test_start_sandbox_reaper_task_uses_in_process_reaper_when_temporal_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When Temporal is disabled, must fall back to the in-process asyncio
+    reaper task and must NOT boot the sandbox Temporal worker."""
+    monkeypatch.setattr(
+        "agent_provisioning_team.temporal.sandbox_dispatch.sandbox_temporal_enabled",
+        lambda: False,
+    )
+    worker_started = []
+    monkeypatch.setattr(
+        "agent_provisioning_team.temporal.worker.start_agent_provisioning_sandbox_temporal_worker_thread",
+        lambda: worker_started.append(True),
+    )
+
+    reaper_started = []
+
+    async def fake_run_idle_reaper(*, interval_s: int = 60) -> None:
+        reaper_started.append(True)
+
+    monkeypatch.setattr(
+        "agent_provisioning_team.sandbox.run_idle_reaper",
+        fake_run_idle_reaper,
+    )
+
+    task = await main._start_sandbox_reaper_task()
+    await task
+
+    assert worker_started == []
+    assert reaper_started == [True]

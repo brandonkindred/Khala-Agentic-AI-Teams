@@ -7,6 +7,28 @@ from shared_env_config import env_int
 TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE_AGENT_PROVISIONING", "agent-provisioning").strip()
 WORKFLOW_ID_PREFIX = "agent-provisioning-"
 
+# Sandbox workflows/activities run on their OWN task queue, separate from
+# TASK_QUEUE above, and are served by a worker booted only inside the unified
+# API process (temporal/worker.py's
+# start_agent_provisioning_sandbox_temporal_worker_thread), never by the
+# standalone agent-provisioning-service team container that also runs a
+# worker on TASK_QUEUE. Reason: sandbox/lifecycle.py's Lifecycle singleton is
+# process-local in-memory state. If sandbox activities were on the shared
+# TASK_QUEUE, Temporal could dispatch one to whichever process's worker picks
+# it up first — including the standalone team-service container, whose
+# Lifecycle singleton is a completely separate in-memory dict from the
+# unified API's. status()/list_active()/metrics()/note_activity() always run
+# directly (never via Temporal) against the unified API's own Lifecycle
+# instance, so a sandbox mutation landing in the other process would silently
+# diverge from what those reads observe — e.g. the reaper tearing down a
+# sandbox it (wrongly) believes is idle, or metrics/list staying empty despite
+# real activity. Pinning sandbox work to its own queue polled only by a
+# worker started from unified_api/main.py's own lifespan keeps every sandbox
+# mutation and the Lifecycle singleton it affects in the same process.
+SANDBOX_TASK_QUEUE = os.getenv(
+    "TEMPORAL_TASK_QUEUE_AGENT_PROVISIONING_SANDBOX", f"{TASK_QUEUE}-sandbox"
+).strip()
+
 # --- Sandbox lifecycle workflows -------------------------------------------
 # Activity timeouts (seconds). All numeric vars here parse defensively via
 # shared_env_config.env_int per CLAUDE.md ("garbage -> documented default,
