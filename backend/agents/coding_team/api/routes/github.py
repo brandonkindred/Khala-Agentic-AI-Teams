@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import uuid
 from pathlib import Path
 from typing import Any, Dict
@@ -16,6 +15,7 @@ from coding_team.api.models import (
     RunFromGitHubRequest,
     RunFromGitHubResponse,
 )
+from coding_team.api.routes._common import resolve_github_token
 from coding_team.github_source import (
     GitHubAPIError,
     NotAnIssueError,
@@ -32,9 +32,7 @@ router = APIRouter()
 @router.post("/run-from-github", response_model=RunFromGitHubResponse)
 def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse:
     """Discover (or verify) a ready GitHub issue and start a coding job for it."""
-    token = request.github_token or os.environ.get("GITHUB_TOKEN")
-    if not token:
-        raise HTTPException(status_code=400, detail="GITHUB_TOKEN not configured")
+    token = resolve_github_token(request)
     if not Path(request.repo_path).is_dir():
         raise HTTPException(status_code=400, detail=f"repo_path not found: {request.repo_path}")
 

@@ -5,6 +5,8 @@ import { environment } from '../../environments/environment';
 import { skipErrorNotify } from '../core/error-handler.interceptor';
 import type {
   CodeReviewRunItem,
+  CreateReviewIssuesRequest,
+  CreateReviewIssuesResponse,
   GitHubConfigResponse,
   GitHubConfigUpdate,
   GitHubIssueItem,
@@ -222,6 +224,25 @@ export class IntegrationsApiService {
       params['repo'] = options.repo;
     }
     return this.http.get<CodeReviewRunItem[]>(`${this.baseUrl}/github/reviews`, { params });
+  }
+
+  /**
+   * POST /api/integrations/github/reviews/{jobId}/issues — file GitHub issues for
+   * the selected pre-existing findings of a completed review. ``owner``/``repo``
+   * name the repository the review belongs to (validated server-side against the
+   * review). Returns the created issues plus the review's updated proposal list.
+   */
+  createGitHubReviewIssues(
+    owner: string,
+    repo: string,
+    jobId: string,
+    proposalIds: string[],
+  ): Observable<CreateReviewIssuesResponse> {
+    const body: CreateReviewIssuesRequest = { proposal_ids: proposalIds, owner, repo };
+    return this.http.post<CreateReviewIssuesResponse>(
+      `${this.baseUrl}/github/reviews/${encodeURIComponent(jobId)}/issues`,
+      body,
+    );
   }
 
   /** GET /api/integrations/tradingview */
