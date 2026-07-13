@@ -4,18 +4,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Optional
+import uuid
+from typing import Any, Coroutine, Optional, TypeVar
 
-from agent_provisioning_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
-from agent_provisioning_team.temporal.workflows import AgentProvisioningWorkflowV2
+from agent_provisioning_team.temporal.constants import (
+    DEPROVISION_CLIENT_TIMEOUT_S,
+    TASK_QUEUE,
+    WORKFLOW_ID_PREFIX,
+)
+from agent_provisioning_team.temporal.workflows import (
+    AgentDeprovisioningWorkflow,
+    AgentProvisioningWorkflowV2,
+)
 from shared_temporal import get_temporal_client, get_temporal_loop
+from shared_temporal.runner import execute_workflow_sync
 
 logger = logging.getLogger(__name__)
 
 START_WORKFLOW_TIMEOUT = 30
 
+_T = TypeVar("_T")
 
-def _run_async(coro: Any) -> Any:
+
+def _run_async(coro: Coroutine[Any, Any, _T]) -> _T:
     loop = get_temporal_loop()
     client = get_temporal_client()
     if loop is None or client is None:
@@ -58,3 +69,33 @@ def start_provisioning_workflow(
         )
     )
     logger.info("Started AgentProvisioningWorkflowV2 id=%s", workflow_id)
+
+
+def run_deprovision_workflow(agent_id: str, force: bool = False) -> dict[str, Any]:
+    """Run ``AgentDeprovisioningWorkflow`` and block for its result.
+
+    Execute-and-wait dispatch used by the synchronous ``DELETE
+    /environments/{agent_id}`` handler, so the caller gets back the real
+    ``DeprovisionResponse`` payload rather than a job id to poll.
+
+    Preconditions:
+        * ``agent_id`` is non-empty.
+        * The Agent Provisioning Temporal worker is running (Temporal enabled).
+    Postconditions:
+        * Returns the ``DeprovisionResponse.model_dump()`` dict produced by
+          ``deprovision_activity``. A fresh workflow id is minted per call
+          (execute-and-wait does not reuse ids for idempotency), so repeated
+          deprovisions of the same agent never collide.
+    """
+    assert agent_id, "agent_id must be non-empty"
+    workflow_id = f"{WORKFLOW_ID_PREFIX}deprovision-{agent_id}-{uuid.uuid4().hex[:8]}"
+    result = execute_workflow_sync(
+        AgentDeprovisioningWorkflow.run,
+        agent_id,
+        force,
+        workflow_id=workflow_id,
+        task_queue=TASK_QUEUE,
+        execute_timeout_s=DEPROVISION_CLIENT_TIMEOUT_S,
+    )
+    logger.info("Ran AgentDeprovisioningWorkflow id=%s", workflow_id)
+    return result
