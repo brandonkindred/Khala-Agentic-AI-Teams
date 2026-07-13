@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Callable, Optional
 
-from strands import Agent
-
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import DbcCommentsInput, DbcCommentsOutput, DbcCommentsStatus
 from .prompts import DBC_COMMENTS_PROMPT
@@ -38,12 +36,11 @@ class DbcCommentsAgent:
         Initialize the DbC Comments agent.
 
         Postconditions:
-            - self._agent is set to a Strands Agent
+            - self._model is set to a resolved Strands Model
         """
-        _model = resolve_strands_model(
+        self._model = resolve_strands_model(
             llm_client, agent_key="dbc_comments", get_strands_model_fn=get_strands_model
         )
-        self._agent = Agent(model=_model, system_prompt=DBC_COMMENTS_PROMPT)
 
     def run(
         self,
@@ -125,9 +122,11 @@ class DbcCommentsAgent:
         prompt = "\n".join(context_parts)
 
         try:
-            result = self._agent(prompt)
-            raw = str(result).strip()
-            data = json.loads(raw)
+            data = complete_json_with_continuation(
+                self._model, prompt, system_prompt=DBC_COMMENTS_PROMPT
+            )
+            if not isinstance(data, dict):
+                raise ValueError(f"expected a JSON object, got {type(data).__name__}")
         except Exception as e:
             # Fail-open: if LLM call fails, don't block the pipeline
             logger.warning(
