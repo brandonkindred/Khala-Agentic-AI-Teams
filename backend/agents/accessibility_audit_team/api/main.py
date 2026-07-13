@@ -119,6 +119,44 @@ class DesignSystemContractRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _resolve_temporal_dispatcher(
+    import_dispatcher: Callable[[], Callable], *, log_context: str
+) -> Optional[Callable]:
+    """Shared enablement-check + import-failure handling for a Temporal dispatcher.
+
+    Preconditions:
+        - ``import_dispatcher`` is a zero-arg callable that performs the actual
+          ``from ..temporal.start_workflow import start_*_workflow`` (kept as a
+          real static import at each call site below, not a dynamic/string-based
+          one, so tooling can still verify the imported name exists) and returns
+          the resolved callable.
+        - ``log_context`` is a short noun phrase (e.g. ``""`` or ``"retest "``)
+          naming what's being dispatched, for the fallback log message.
+    Postconditions:
+        - Returns ``None`` without calling ``import_dispatcher`` when the
+          ``shared_temporal`` package itself is unavailable or
+          ``is_temporal_enabled()`` is ``False``.
+        - Otherwise calls ``import_dispatcher``; returns its result, or ``None``
+          (after logging a warning) if that import fails.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+    except ImportError:
+        return None
+    if not is_temporal_enabled():
+        return None
+    try:
+        return import_dispatcher()
+    except ImportError:
+        logger.warning(
+            "Temporal is enabled but the accessibility-audit Temporal stack failed to "
+            "import; falling back to in-process %sexecution.",
+            log_context,
+            exc_info=True,
+        )
+        return None
+
+
 def _get_temporal_dispatcher() -> Optional[Callable[[str, str, dict], str]]:
     """Return the Temporal ``start_*_workflow`` dispatcher when Temporal is enabled.
 
@@ -131,22 +169,13 @@ def _get_temporal_dispatcher() -> Optional[Callable[[str, str, dict], str]]:
           ``None`` so callers fall back to the in-process background-task path. A
           failed import while Temporal is enabled is logged before returning ``None``.
     """
-    try:
-        from shared_temporal import is_temporal_enabled
-    except ImportError:
-        return None
-    if not is_temporal_enabled():
-        return None
-    try:
+
+    def _import():
         from ..temporal.start_workflow import start_accessibility_audit_workflow
-    except ImportError:
-        logger.warning(
-            "Temporal is enabled but the accessibility-audit Temporal stack failed to "
-            "import; falling back to in-process execution.",
-            exc_info=True,
-        )
-        return None
-    return start_accessibility_audit_workflow
+
+        return start_accessibility_audit_workflow
+
+    return _resolve_temporal_dispatcher(_import, log_context="")
 
 
 def _get_retest_temporal_dispatcher() -> Optional[Callable[[str, str, list], str]]:
@@ -161,22 +190,13 @@ def _get_retest_temporal_dispatcher() -> Optional[Callable[[str, str, list], str
           back to the in-process background-task path. A failed import while Temporal
           is enabled is logged before returning ``None``.
     """
-    try:
-        from shared_temporal import is_temporal_enabled
-    except ImportError:
-        return None
-    if not is_temporal_enabled():
-        return None
-    try:
+
+    def _import():
         from ..temporal.start_workflow import start_accessibility_audit_retest_workflow
-    except ImportError:
-        logger.warning(
-            "Temporal is enabled but the accessibility-audit Temporal stack failed to "
-            "import; falling back to in-process retest execution.",
-            exc_info=True,
-        )
-        return None
-    return start_accessibility_audit_retest_workflow
+
+        return start_accessibility_audit_retest_workflow
+
+    return _resolve_temporal_dispatcher(_import, log_context="retest ")
 
 
 # ---------------------------------------------------------------------------
