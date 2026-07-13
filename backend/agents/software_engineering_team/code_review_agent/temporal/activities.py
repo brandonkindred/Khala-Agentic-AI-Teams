@@ -80,6 +80,7 @@ def prepare_review_activity(review_input: Dict[str, Any]) -> Dict[str, Any]:
         compute_code_review_spec_excerpt_chars,
     )
 
+    from ..architecture_context import render_architecture_context
     from ..chunking import _blocks_from_input, build_review_chunks
     from ..mapping import _context_fingerprint, _review_model_fingerprint, _surface_by_path
     from ..models import CodeReviewInput, CodeReviewIssue
@@ -111,7 +112,10 @@ def prepare_review_activity(review_input: Dict[str, Any]) -> Dict[str, Any]:
     arch_overview = ""
     if input_data.architecture:
         arch_overview = compact_text(
-            input_data.architecture.overview or "", max_arch, llm, "architecture overview"
+            render_architecture_context(input_data.architecture),
+            max_arch,
+            llm,
+            "architecture overview",
         )[:max_arch]
     existing_codebase = compact_text(
         input_data.existing_codebase or "", max_existing, llm, "existing codebase"

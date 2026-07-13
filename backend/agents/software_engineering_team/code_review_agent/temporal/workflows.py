@@ -58,6 +58,19 @@ _LLM_RETRY = RetryPolicy(
 # so the sync dispatcher can translate it back into ``CodeReviewUnavailableError``.
 CODE_REVIEW_UNAVAILABLE_TYPE = "CodeReviewUnavailableError"
 
+# Replay-compatibility gate for inserting the architecture-consistency activity
+# between verification and finalization (see ``run``). A ``CodeReviewWorkflow``
+# history recorded before this activity existed has no marker for it, so
+# ``workflow.patched`` returns False on replay and that history's original
+# finalize-next sequence is reproduced exactly; a new execution records the
+# marker and always takes the new path. Mirrors ``planning_team.temporal.
+# workflows._PER_PHASE_PATCH``'s identical rationale.
+# TODO: Remove this gate (and always run the architecture pass unconditionally)
+# once no pre-migration CodeReviewWorkflow histories remain open (confirm via
+# the Temporal UI), then deprecate the marker with
+# ``workflow.deprecate_patch(_ARCHITECTURE_PASS_PATCH)`` before deleting it.
+_ARCHITECTURE_PASS_PATCH = "code-review-architecture-consistency-pass"
+
 
 @workflow.defn(name="CodeReviewWorkflow")
 class CodeReviewWorkflow:
@@ -198,19 +211,22 @@ class CodeReviewWorkflow:
             retry_policy=_LLM_RETRY,
         )
 
-        # Architecture-consistency / cross-codebase-redundancy pass: additive,
-        # once per submission (not once per chunk), matching thread mode's
-        # run_coordinator (see coordinator.py's identical call ordering — after
-        # false-positive verification, before the final dedupe/gate).
-        architecture_findings = await workflow.execute_activity(
-            A.find_architecture_and_redundancy_activity,
-            args=[review_input],
-            task_queue=TASK_QUEUE,
-            start_to_close_timeout=timedelta(minutes=30),
-            retry_policy=_LLM_RETRY,
-        )
-        if architecture_findings:
-            verified = [*verified, *architecture_findings]
+        if workflow.patched(_ARCHITECTURE_PASS_PATCH):
+            # Architecture-consistency / cross-codebase-redundancy pass: additive,
+            # once per submission (not once per chunk), matching thread mode's
+            # run_coordinator (see coordinator.py's identical call ordering — after
+            # false-positive verification, before the final dedupe/gate). Gated by
+            # workflow.patched so a pre-migration history (recorded before this
+            # activity existed) replays its original finalize-next sequence exactly.
+            architecture_findings = await workflow.execute_activity(
+                A.find_architecture_and_redundancy_activity,
+                args=[review_input],
+                task_queue=TASK_QUEUE,
+                start_to_close_timeout=timedelta(minutes=30),
+                retry_policy=_LLM_RETRY,
+            )
+            if architecture_findings:
+                verified = [*verified, *architecture_findings]
 
         self._advance("finalizing", 0.95)
         gate = await workflow.execute_activity(
