@@ -22,6 +22,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from llm_service import compact_text
+from shared_concurrency import parallel_map
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,14 @@ _DEFAULT_CONTEXT_TOKENS = 16384
 # are aware of an unusually large digest. Overridable via env for cost-sensitive
 # deployments (``PLANNING_MANY_SECTIONS_WARN``; see docs/ENV_VARS.md).
 _MANY_SECTIONS_WARN = _env_positive_int("PLANNING_MANY_SECTIONS_WARN", 50)
+
+# Max concurrent per-section map-phase LLM calls (see ``map_reduce``). Overridable via
+# env for deployments that need a different concurrency/cost tradeoff (see docs/ENV_VARS.md).
+_DEFAULT_MAP_PARALLELISM = 4  # PLANNING_MAP_PARALLELISM, floor 1
+
+
+def _map_parallelism() -> int:
+    return _env_positive_int("PLANNING_MAP_PARALLELISM", _DEFAULT_MAP_PARALLELISM)
 
 
 def compute_section_chars(llm: Any) -> int:
@@ -199,6 +208,7 @@ def map_reduce(
     map_fn: Callable[[str, Any, int, int], Optional[Dict[str, Any]]],
     reduce_fn: Callable[[Sequence[Dict[str, Any]]], Dict[str, Any]],
     fallback: Dict[str, Any],
+    max_workers: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Split ``text`` into sections, ``map_fn`` each, then ``reduce_fn`` the results.
 
@@ -206,13 +216,17 @@ def map_reduce(
     skips the section). A section still larger than the per-section budget is first run
     through ``compact_text`` (so it fits one call) before ``map_fn``; ``compact_text``
     chunks internally and returns the original on failure, so oversized sections are
-    compacted, never sliced.
+    compacted, never sliced. Sections are independent map steps, fanned out across a
+    bounded thread pool (``shared_concurrency.parallel_map``) when there is more than
+    one; ``max_workers`` overrides the ``PLANNING_MAP_PARALLELISM`` env default (see
+    ``_map_parallelism``).
 
     Preconditions:
         - ``map_fn`` / ``reduce_fn`` are callables; ``fallback`` is a valid result dict.
     Postconditions:
         - Returns ``fallback`` for empty/blank input or when every map step fails or
-          returns falsy; otherwise returns ``reduce_fn`` over the non-empty results.
+          returns falsy; otherwise returns ``reduce_fn`` over the non-empty results, in
+          original section order regardless of which worker finished first.
     """
     if not text or not text.strip():
         return fallback
@@ -225,9 +239,10 @@ def map_reduce(
             content_description,
             len(sections),
         )
-    results: List[Dict[str, Any]] = []
     total = len(sections)
-    for idx, section in enumerate(sections):
+
+    def _process_one(item: tuple) -> Optional[Dict[str, Any]]:
+        idx, section = item
         chunk = section
         if len(chunk) > section_chars and _supports_compaction(llm):
             try:
@@ -247,7 +262,7 @@ def map_reduce(
                 )
                 chunk = section
         try:
-            parsed = map_fn(chunk, llm, idx, total)
+            return map_fn(chunk, llm, idx, total)
         except Exception:  # never let one section kill the whole digest
             logger.warning(
                 "map step failed for %s section %d/%d",
@@ -256,9 +271,24 @@ def map_reduce(
                 total,
                 exc_info=True,
             )
-            parsed = None
-        if parsed:
-            results.append(parsed)
+            return None
+
+    workers = min(max_workers or _map_parallelism(), total)
+    if workers <= 1:
+        mapped = [_process_one(item) for item in enumerate(sections)]
+    else:
+        # parallel_map preserves section order in its result list regardless of
+        # completion order, so the reducers' order-dependent semantics ("first
+        # non-empty scalar wins") are unaffected by parallelizing this loop.
+        # skip_none=False + the falsy filter below reproduce today's exact
+        # "if parsed:" filtering (which also drops empty-dict results, not just None).
+        mapped = parallel_map(
+            list(enumerate(sections)),
+            _process_one,
+            max_workers=workers,
+            skip_none=False,
+        )
+    results: List[Dict[str, Any]] = [r for r in mapped if r]
     if not results:
         logger.warning("All map steps empty for %s; using fallback", content_description)
         return fallback
