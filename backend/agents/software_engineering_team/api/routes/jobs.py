@@ -10,14 +10,13 @@ from typing import Any, Dict
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from spec_parser import validate_work_path, validate_workspace_path_no_spec
 
+from shared_hitl.status import pending_questions_from_raw
 from software_engineering_team.api import main as _main
 from software_engineering_team.api.models import (
     CancelJobResponse,
     DeleteJobResponse,
     FailedTaskDetail,
     JobStatusResponse,
-    PendingQuestion,
-    QuestionOption,
     RetryResponse,
     RunningJobsResponse,
     RunningJobSummary,
@@ -287,24 +286,11 @@ def get_job_status(job_id: str) -> JobStatusResponse:
     task_states_parsed = _parse_task_states(data.get("task_states"))
     team_progress_parsed = _parse_team_progress(data.get("team_progress"))
 
+    # Materialize via the shared helper: model_validate keeps EVERY stored field
+    # (including recommendation/allow_multiple, which the previous hand-enumeration
+    # silently dropped) and still defensively skips non-dict entries.
     raw_pending_questions = data.get("pending_questions", [])
-    pending_questions_parsed = []
-    for pq in raw_pending_questions:
-        if isinstance(pq, dict):
-            options = [
-                QuestionOption(**opt) if isinstance(opt, dict) else opt
-                for opt in pq.get("options", [])
-            ]
-            pending_questions_parsed.append(
-                PendingQuestion(
-                    id=pq.get("id", ""),
-                    question_text=pq.get("question_text", ""),
-                    context=pq.get("context"),
-                    options=options,
-                    required=pq.get("required", True),
-                    source=pq.get("source", "planning"),
-                )
-            )
+    pending_questions_parsed = pending_questions_from_raw(raw_pending_questions)
 
     payload: Dict[str, Any] = {
         "job_id": str(job_id),
