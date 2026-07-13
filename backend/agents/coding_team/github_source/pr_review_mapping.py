@@ -38,6 +38,8 @@ import os
 import re
 from typing import Any, Iterable, Optional, Protocol
 
+from .client import scrub_token_from_text
+
 # GitHub inline review comments on side=RIGHT must target a line the diff adds
 # (`+`) or carries as context (` `). We accept both so the commentable set matches
 # exactly what the reviewer is shown by render_annotated_hunks (added + context
@@ -207,6 +209,29 @@ def map_issues_to_comments(
                 }
             )
     return review_comments, leftover
+
+
+def is_within_diff(finding: Any, valid_by_path: dict[str, set[int]]) -> bool:
+    """True when a finding's file/line is definitely inside this PR's diff.
+
+    Uses the same file/line matching as :func:`map_issues_to_comments`'s
+    line-anchored branch, so "within the diff" here means exactly "would be
+    posted as a line-anchored inline comment" — a finding whose file matches
+    but whose line does not (e.g. unchanged code inside a changed file) is NOT
+    considered within the diff, since that code legitimately can be
+    pre-existing.
+
+    Postconditions:
+        - Returns True iff ``finding.file_path`` resolves to a key in
+          ``valid_by_path`` (per :func:`_normalize_path`) and ``finding.line``
+          is a commentable line number for that file. False otherwise
+          (including when ``finding.line`` is ``None``).
+    """
+    path = _normalize_path(getattr(finding, "file_path", "") or "", valid_by_path)
+    if path is None:
+        return False
+    line = getattr(finding, "line", None)
+    return line is not None and int(line) in valid_by_path[path]
 
 
 def split_review_comments(
@@ -399,3 +424,113 @@ def choose_event(issues: Iterable[Any], author: str = "", reviewer: str = "") ->
     if has_blocking and not same_author:
         return "REQUEST_CHANGES"
     return "COMMENT"
+
+
+# Max length of a generated GitHub issue title (GitHub itself allows 256; keep it
+# short so the title reads as a headline and the full detail lives in the body).
+_ISSUE_TITLE_MAX = 120
+
+
+def proposal_from_finding(finding: Any, index: int) -> dict[str, Any]:
+    """Serialize a pre-existing review finding into a stable issue-proposal dict.
+
+    A proposal is the persisted, JSON-safe form of a ``pre_existing`` finding that
+    the review flow stores on the review summary and later offers to a human as a
+    GitHub-issue candidate. Findings are duck-typed (see :class:`ReviewFinding`).
+
+    Preconditions:
+        - ``index`` is the finding's 0-based position among a review's pre-existing
+          findings; it makes the proposal ``id`` (``"p{index}"``) stable and unique
+          within one review, which the create-issues endpoint uses to select
+          proposals and to mark them created idempotently.
+    Postconditions:
+        - Returns a dict with the keys ``id``, ``severity``, ``category``,
+          ``file_path``, ``line`` (int or None), ``description``, ``suggestion``,
+          ``issue_number`` (None) and ``issue_url`` (None). The two ``issue_*``
+          fields start None and are filled in once a GitHub issue is created for
+          the proposal. Every string field is coerced with ``str()`` so the dict
+          is JSON-serializable regardless of the finding's field types, and
+          ``description``/``suggestion`` are token-scrubbed: this proposal is
+          persisted and served through the Code Review page before any human
+          opts to file an issue, so it must never carry a raw secret any more
+          than a posted PR comment would.
+    """
+    line = getattr(finding, "line", None)
+    return {
+        "id": f"p{index}",
+        "severity": str(getattr(finding, "severity", "") or "info"),
+        "category": str(getattr(finding, "category", "") or "general"),
+        "file_path": str(getattr(finding, "file_path", "") or ""),
+        "line": line if isinstance(line, int) and line > 0 else None,
+        "description": scrub_token_from_text(str(getattr(finding, "description", "") or "")),
+        "suggestion": scrub_token_from_text(str(getattr(finding, "suggestion", "") or "")),
+        "issue_number": None,
+        "issue_url": None,
+    }
+
+
+def _proposal_title(proposal: dict[str, Any]) -> str:
+    """Build a concise, single-line GitHub issue title for a proposal.
+
+    Postconditions:
+        - Returns ``"[<severity>] <first line of description>"`` truncated to
+          ``_ISSUE_TITLE_MAX`` characters (an ellipsis replaces the tail when it
+          would overflow). Falls back to a generic "code review finding" phrase
+          when the description is blank, so the title is never empty.
+    """
+    severity = str(proposal.get("severity") or "info").lower()
+    description = str(proposal.get("description") or "").strip()
+    headline = description.splitlines()[0].strip() if description else "code review finding"
+    prefix = f"[{severity}] "
+    budget = _ISSUE_TITLE_MAX - len(prefix)
+    if len(headline) > budget:
+        headline = headline[: max(0, budget - 1)].rstrip() + "…"
+    return f"{prefix}{headline}"
+
+
+def build_issue_from_proposal(
+    proposal: dict[str, Any], *, pr_number: int, pr_url: str
+) -> tuple[str, str]:
+    """Render a proposal as a ``(title, body)`` pair for a new GitHub issue.
+
+    Preconditions:
+        - ``proposal`` is a dict produced by :func:`proposal_from_finding`.
+        - ``pr_number``/``pr_url`` identify the pull request whose review surfaced
+          the finding, so the issue records where it came from.
+    Postconditions:
+        - Returns ``(title, body)``. ``title`` is the concise headline from
+          :func:`_proposal_title`; ``body`` is markdown carrying every detail of
+          the finding (severity, category, location, description, suggested fix)
+          plus provenance naming the originating PR — enough for a maintainer to
+          act on the issue without the review context. Never raises.
+    """
+    title = _proposal_title(proposal)
+    severity = str(proposal.get("severity") or "info").lower()
+    category = str(proposal.get("category") or "general")
+    file_path = str(proposal.get("file_path") or "")
+    line = proposal.get("line")
+    description = str(proposal.get("description") or "").strip()
+    suggestion = str(proposal.get("suggestion") or "").strip()
+
+    if not file_path:
+        location_text = "n/a"
+    elif isinstance(line, int) and line > 0:
+        location_text = f"`{file_path}:{line}`"
+    else:
+        location_text = f"`{file_path}`"
+
+    lines: list[str] = [
+        f"An automated code review of pull request #{pr_number} ({pr_url}) flagged this as a "
+        "**pre-existing** bug — a defect in code the pull request did not add or modify. It is "
+        "filed here as its own issue so it can be triaged independently of that PR.",
+        "",
+        f"- **Severity:** {severity}",
+        f"- **Category:** {category}",
+        f"- **Location:** {location_text}",
+        "",
+        "### Description",
+        description or "_No description provided._",
+    ]
+    if suggestion:
+        lines.extend(["", "### Suggested fix", suggestion])
+    return title, "\n".join(lines)
