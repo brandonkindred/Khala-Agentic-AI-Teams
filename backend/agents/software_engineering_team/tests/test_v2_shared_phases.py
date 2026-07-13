@@ -19,7 +19,13 @@ import pytest
 
 from software_engineering_team.backend_code_v2_team import models as be_models
 from software_engineering_team.shared.git_utils import write_files_and_commit
-from software_engineering_team.shared.models import SystemArchitecture, Task, TaskStatus, TaskType
+from software_engineering_team.shared.models import (
+    ArchitectureComponent,
+    SystemArchitecture,
+    Task,
+    TaskStatus,
+    TaskType,
+)
 from software_engineering_team.shared.phases import execution as sh_exec
 from software_engineering_team.shared.phases import planning as sh_plan
 from software_engineering_team.shared.phases import problem_solving as sh_ps
@@ -249,6 +255,42 @@ def test_run_general_microtask_impl_omits_conventions_for_frontend():
         runner=_runner("resp"),
     )
     assert files == {}
+
+
+def test_run_general_microtask_impl_includes_components_and_decisions_in_arch_context():
+    """Regression test: the general coder's architecture_context slot must fold
+    in components/decisions, not just .overview -- previously it used
+    architecture.overview directly, so an explicit component boundary or ADR
+    was invisible to the LLM actually writing the code."""
+    seen_prompt = {}
+    architecture = SystemArchitecture(
+        overview="Layered service architecture.",
+        components=[
+            ArchitectureComponent(
+                name="billing-service", type="backend", description="Owns all billing writes."
+            )
+        ],
+        decisions=[
+            {"title": "ADR-003", "decision": "All billing writes go through billing-service."}
+        ],
+    )
+
+    files = sh_exec._run_general_microtask_impl(
+        llm=object(),
+        microtask=SimpleNamespace(description="do it", title="t"),
+        task=_task(),
+        language="python",
+        existing_code="",
+        architecture=architecture,
+        execution_prompt="arch={architecture_context}",
+        parse_files_and_summary=lambda _r: {"files": {}},
+        profile=_BACKEND_PROFILE,
+        runner=_runner("resp", on_prompt=lambda p: seen_prompt.update(prompt=p)),
+    )
+    assert files == {}
+    assert "Layered service architecture." in seen_prompt["prompt"]
+    assert "billing-service" in seen_prompt["prompt"]
+    assert "ADR-003" in seen_prompt["prompt"]
 
 
 def test_dedup_issues_removes_repeats():

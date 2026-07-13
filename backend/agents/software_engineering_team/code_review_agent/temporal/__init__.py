@@ -16,6 +16,7 @@ from __future__ import annotations
 from .activities import (
     filter_false_positives_activity,
     finalize_review_activity,
+    find_architecture_and_redundancy_activity,
     prepare_review_activity,
     review_chunk_activity,
     synthesize_findings_activity,
@@ -33,6 +34,7 @@ ACTIVITIES = [
     prepare_review_activity,
     review_chunk_activity,
     filter_false_positives_activity,
+    find_architecture_and_redundancy_activity,
     finalize_review_activity,
     synthesize_findings_activity,
 ]
@@ -46,6 +48,7 @@ __all__ = [
     "prepare_review_activity",
     "review_chunk_activity",
     "filter_false_positives_activity",
+    "find_architecture_and_redundancy_activity",
     "finalize_review_activity",
     "synthesize_findings_activity",
     "code_review_temporal_enabled",
