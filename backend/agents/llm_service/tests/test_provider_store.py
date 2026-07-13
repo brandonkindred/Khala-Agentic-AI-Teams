@@ -36,6 +36,42 @@ def _entry(
 NOW = datetime(2026, 6, 30, 12, 0, 0, tzinfo=timezone.utc)
 
 
+class _FakeHeartbeat:
+    """Stand-in for shared_concurrency.heartbeat.BackgroundHeartbeat.
+
+    Exercises the real start-once idempotency logic in
+    ``_ensure_reset_sweep_started`` without ever spinning up a real OS thread —
+    keeps the reset-sweep tests deterministic and avoids leaking daemon threads
+    across the test session.
+    """
+
+    instances: list["_FakeHeartbeat"] = []
+
+    def __init__(self, beat, interval_s, *, name: str = "") -> None:
+        self.beat = beat
+        self.interval_s = interval_s
+        self.name = name
+        self.started = False
+        _FakeHeartbeat.instances.append(self)
+
+    def start(self) -> "_FakeHeartbeat":
+        self.started = True
+        return self
+
+    def stop(self) -> None:
+        self.started = False
+
+
+@pytest.fixture(autouse=True)
+def _reset_provider_sweep(monkeypatch):
+    """Isolate the background reset-sweep across tests (see _FakeHeartbeat)."""
+    ps._reset_sweep_state_for_test()
+    _FakeHeartbeat.instances.clear()
+    monkeypatch.setattr(ps, "BackgroundHeartbeat", _FakeHeartbeat)
+    yield
+    ps._reset_sweep_state_for_test()
+
+
 # --------------------------------------------------------------------------- #
 # Fake DB plumbing (no live Postgres needed)                                   #
 # --------------------------------------------------------------------------- #
@@ -138,20 +174,26 @@ def test_select_skips_limited_within_window():
 
 
 def test_select_resets_and_uses_expired_entry(monkeypatch):
+    """The expired entry is returned immediately; its reset is deferred (enqueued
+    for the background sweep) rather than performed synchronously — reset_entry
+    must NOT be called on this hot path."""
     reset_ids: list[int] = []
     monkeypatch.setattr(ps, "reset_entry", lambda i: reset_ids.append(i))
     e1 = _entry(1, limit_exceeded=True, reset_at=NOW - timedelta(seconds=1))
     sel = ps.select_active_entry([e1, _entry(2)], now=NOW)
     assert sel.id == 1
-    assert reset_ids == [1]  # the expired entry was reset before reuse
+    assert reset_ids == []  # deferred: no synchronous reset_entry call
+    assert ps._pending_reset_ids == {1}  # queued for the background sweep instead
 
 
 def test_select_expired_without_reset_when_disabled(monkeypatch):
-    called = []
-    monkeypatch.setattr(ps, "reset_entry", lambda i: called.append(i))
+    reset_ids: list[int] = []
+    monkeypatch.setattr(ps, "reset_entry", lambda i: reset_ids.append(i))
     e1 = _entry(1, limit_exceeded=True, reset_at=NOW - timedelta(seconds=1))
     sel = ps.select_active_entry([e1], now=NOW, reset_expired=False)
-    assert sel.id == 1 and called == []
+    assert sel.id == 1
+    assert reset_ids == []
+    assert ps._pending_reset_ids == set()  # reset_expired=False: nothing queued either
 
 
 def test_select_all_limited_returns_soonest_reset():
@@ -170,6 +212,84 @@ def test_select_all_limited_none_reset_sorts_last():
 
 def test_select_empty_returns_none():
     assert ps.select_active_entry([], now=NOW) is None
+
+
+# --------------------------------------------------------------------------- #
+# Background reset sweep (deferred off the failover hot path)                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_select_expired_enqueue_does_no_db_io(monkeypatch):
+    """Regression: discovering an expired entry must never touch Postgres from
+    select_active_entry — the write is deferred to the background sweep."""
+    import shared_postgres
+
+    def _boom(*_a, **_k):
+        raise AssertionError("select_active_entry must not touch Postgres directly")
+
+    monkeypatch.setattr(shared_postgres, "get_conn", _boom)
+    e1 = _entry(1, limit_exceeded=True, reset_at=NOW - timedelta(seconds=1))
+    sel = ps.select_active_entry([e1, _entry(2)], now=NOW)
+    assert sel.id == 1
+    assert ps._pending_reset_ids == {1}
+
+
+def test_reset_sweep_tick_drains_pending_and_calls_reset_entry(monkeypatch):
+    reset_ids: list[int] = []
+    monkeypatch.setattr(ps, "reset_entry", lambda i: reset_ids.append(i))
+    ps._pending_reset_ids.update({1, 2, 3})
+    ps._reset_sweep_tick()
+    assert sorted(reset_ids) == [1, 2, 3]
+    assert ps._pending_reset_ids == set()
+
+
+def test_reset_sweep_tick_noop_when_empty(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ps, "reset_entry", lambda i: calls.append(i))
+    ps._reset_sweep_tick()
+    assert calls == []
+
+
+def test_enqueue_reset_dedups_same_id():
+    ps._enqueue_reset(7)
+    ps._enqueue_reset(7)
+    assert ps._pending_reset_ids == {7}
+
+
+def test_enqueue_reset_starts_sweep_once():
+    ps._enqueue_reset(1)
+    ps._enqueue_reset(2)
+    assert len(_FakeHeartbeat.instances) == 1
+    assert _FakeHeartbeat.instances[0].started is True
+    assert ps._reset_sweep_started is True
+
+
+def test_ensure_reset_sweep_started_is_idempotent():
+    ps._ensure_reset_sweep_started()
+    ps._ensure_reset_sweep_started()
+    ps._ensure_reset_sweep_started()
+    assert len(_FakeHeartbeat.instances) == 1
+
+
+def test_reset_sweep_interval_defaults_and_is_defensive(monkeypatch):
+    monkeypatch.delenv(ps.ENV_RESET_SWEEP_INTERVAL, raising=False)
+    assert ps._reset_sweep_interval_s() == ps._DEFAULT_RESET_SWEEP_INTERVAL_S
+    monkeypatch.setenv(ps.ENV_RESET_SWEEP_INTERVAL, "2.5")
+    assert ps._reset_sweep_interval_s() == 2.5
+    monkeypatch.setenv(ps.ENV_RESET_SWEEP_INTERVAL, "garbage")
+    assert ps._reset_sweep_interval_s() == ps._DEFAULT_RESET_SWEEP_INTERVAL_S
+    monkeypatch.setenv(ps.ENV_RESET_SWEEP_INTERVAL, "-5")
+    assert ps._reset_sweep_interval_s() == 0.0
+
+
+def test_reset_sweep_state_for_test_stops_heartbeat():
+    ps._enqueue_reset(1)
+    hb = _FakeHeartbeat.instances[0]
+    assert hb.started is True
+    ps._reset_sweep_state_for_test()
+    assert hb.started is False
+    assert ps._reset_sweep_started is False
+    assert ps._pending_reset_ids == set()
 
 
 # --------------------------------------------------------------------------- #

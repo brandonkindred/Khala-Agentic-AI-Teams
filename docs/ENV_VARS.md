@@ -145,6 +145,19 @@ rate window otherwise. The provider list is the sole source of LLM resolution: w
 `POSTGRES_HOST` unset) and a non-`dummy` provider, `get_client` raises `LLMNotConfiguredError` (there
 is no single-provider env fallback).
 
+### LLM_PROVIDER_RESET_SWEEP_INTERVAL_S
+Interval (seconds, default `5`) for the background sweep that clears a provider entry's
+`limit_exceeded` mark once its `reset_at` window has passed. `select_active_entry` (the pure
+selection logic behind `get_client`'s failover, called on every LLM call) no longer performs this
+reset itself — doing so meant a blocking `UPDATE`/`commit`/cache-clear round trip to Postgres on
+whichever call happened to discover the expiry. Instead it enqueues the entry's id in-process
+(pure Python, no I/O) and a lazily-started background thread (`shared_concurrency.heartbeat.BackgroundHeartbeat`,
+mirroring the SE team's `trace_flusher` pattern — see `SE_TRACE_FLUSH_INTERVAL_S`) drains the queue
+on this interval and performs the actual reset write. The caller still gets the entry back
+immediately either way; only the DB write (and its cross-container visibility) is deferred by up to
+this interval. Floored at `0.1`s internally to avoid busy-looping; garbage/missing env falls back to
+the default. `mark_exhausted` (the write on an actual 429) is unaffected and stays synchronous.
+
 ### LLM_COMPACTION_CACHE_SIZE
 Capacity of the process-global memoization cache for `compact_text` (`llm_service/compaction.py`),
 default **256**. `compact_text` compacts oversized text (spec, architecture overview, existing
