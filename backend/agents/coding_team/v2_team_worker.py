@@ -5,12 +5,12 @@ from __future__ import annotations
 import inspect
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from coding_team.models import StackSpec
+from shared_dev_models import ReviewContext, TaskType
 from shared_dev_models import Task as SETask
 from shared_dev_models import TaskStatus as SETaskStatus
-from shared_dev_models import TaskType
 from shared_git import branch_utils
 from shared_git.git_utils import (
     DEVELOPMENT_BRANCH,
@@ -301,8 +301,15 @@ class V2TeamWorker:
         stack_spec: StackSpec,
         team_kind: str,
         team_lead: Any,
+        review_context: Optional[ReviewContext] = None,
     ) -> None:
-        """Store the coding-team worker identity and delegated v2 team lead."""
+        """Store the coding-team worker identity and delegated v2 team lead.
+
+        Preconditions:
+            - ``review_context`` bundles the plan's system architecture and project
+              specification, when available; ``None`` means "nothing to add" so a
+              caller without this context yet is unaffected.
+        """
         if team_kind not in _ALLOWED_TEAM_KINDS:
             allowed = ", ".join(sorted(_ALLOWED_TEAM_KINDS))
             raise ValueError(f"team_kind must be one of: {allowed}")
@@ -310,6 +317,7 @@ class V2TeamWorker:
         self.stack_spec = stack_spec
         self.team_kind = team_kind
         self.team_lead = team_lead
+        self.review_context = review_context or ReviewContext()
 
     @property
     def _task_type(self) -> TaskType:
@@ -413,6 +421,14 @@ class V2TeamWorker:
         workflow_kwargs = {"repo_path": path, "task": se_task}
         if _accepts_keyword(self.team_lead.run_workflow, "merge_to_development"):
             workflow_kwargs["merge_to_development"] = False
+        if self.review_context.architecture is not None and _accepts_keyword(
+            self.team_lead.run_workflow, "architecture"
+        ):
+            workflow_kwargs["architecture"] = self.review_context.architecture
+        if self.review_context.spec_content and _accepts_keyword(
+            self.team_lead.run_workflow, "spec_content"
+        ):
+            workflow_kwargs["spec_content"] = self.review_context.spec_content
         try:
             result = self.team_lead.run_workflow(**workflow_kwargs)
         except Exception as exc:  # noqa: BLE001 - worker failure is task-local

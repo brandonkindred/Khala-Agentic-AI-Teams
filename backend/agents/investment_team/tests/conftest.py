@@ -66,6 +66,57 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.fixturenames.append("stub_readiness_market_data_fetch")  # type: ignore[attr-defined]
 
 
+@pytest.fixture(autouse=True)
+def _temporal_dispatch_inline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the Temporal-only dispatch seams in-process (offline test harness).
+
+    The paper-trading and advisory/orchestrator endpoints dispatch exclusively
+    through Temporal in production (no in-process fallback). CI has no Temporal
+    server, so this autouse fixture rebinds the module-level dispatch seams in
+    ``investment_team.api.main`` to invoke the corresponding workflow's activity
+    directly — preserving each route's end-to-end behavior without a worker. The
+    activities are the real business logic, so the routes stay fully covered.
+
+    Preconditions:
+        None (imports are lazy so non-API tests are unaffected).
+    Postconditions:
+        ``_execute_advisory`` / ``_start_paper_trading`` /
+        ``_signal_paper_trading_stop`` run inline for the duration of the test.
+        Tests that assert Temporal dispatch itself override these with their own
+        ``monkeypatch`` (last setattr wins).
+    """
+    from investment_team.api import main as api_main
+    from investment_team.temporal import advisory as adv
+    from investment_team.temporal.paper_trading import run_paper_trading_activity
+
+    activities = {
+        "create_proposal": adv.create_proposal_activity,
+        "validate_proposal": adv.validate_proposal_activity,
+        "create_strategy": adv.create_strategy_activity,
+        "validate_strategy": adv.validate_strategy_activity,
+        "promotion_decision": adv.promotion_decision_activity,
+        "committee_memo": adv.committee_memo_activity,
+        "advisor_start": adv.advisor_start_activity,
+        "advisor_message": adv.advisor_message_activity,
+        "advisor_complete": adv.advisor_complete_activity,
+    }
+
+    def _execute_advisory(op: str, payload: dict, *, key: str) -> dict:
+        return activities[op](payload)
+
+    def _start_paper_trading(session_id: str, payload: dict) -> None:
+        run_paper_trading_activity(payload)
+
+    def _signal_paper_trading_stop(session_id: str) -> None:
+        controller = api_main._live_paper_stop_controllers.get(session_id)
+        if controller is not None:
+            controller.request_stop()
+
+    monkeypatch.setattr(api_main, "_execute_advisory", _execute_advisory)
+    monkeypatch.setattr(api_main, "_start_paper_trading", _start_paper_trading)
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _signal_paper_trading_stop)
+
+
 @pytest.fixture
 def stub_readiness_market_data_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     """Return a single synthetic OHLCV bar for any ``fetch_ohlcv`` call.
