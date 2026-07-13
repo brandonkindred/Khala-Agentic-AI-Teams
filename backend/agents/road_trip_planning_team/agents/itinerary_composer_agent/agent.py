@@ -82,11 +82,30 @@ class ItineraryComposerAgent:
         activities_per_stop: List[StopActivities],
         logistics: LogisticsPlan,
     ) -> TripItinerary:
-        """Compose the final itinerary from all specialist inputs."""
-        # Build a compact summary of all inputs for the LLM
+        """Compose the final itinerary from all specialist inputs.
+
+        Preconditions:
+            - ``activities_per_stop`` is positionally aligned with
+              ``route.ordered_stops`` — index ``i`` in each list refers to the
+              same stop (the contract ``recommend_activities`` documents).
+            - ``group_profile``, ``route``, and ``logistics`` are the upstream
+              typed outputs; ``trip`` the original request.
+
+        Postconditions:
+            - Returns a ``TripItinerary`` whose ``days`` is non-empty whenever
+              ``route.ordered_stops`` is (see ``_ensure_nonempty_days``). Never
+              raises: on LLM/parse/validation failure, degrades to
+              ``_build_fallback_itinerary`` rather than propagating the error.
+        """
+        # Build a compact summary of all inputs for the LLM. activities_per_stop
+        # is positionally aligned with route.ordered_stops (ActivitiesExpertAgent
+        # appends exactly one StopActivities per route stop, in order — see its
+        # own postcondition), so a positional zip is both simpler and correct
+        # even when trip.required_stops contains a duplicate location (a
+        # location-keyed lookup would silently attribute the first match's
+        # activities to every same-named stop).
         stops_info = []
-        for stop in route.ordered_stops:
-            stop_acts = next((a for a in activities_per_stop if a.location == stop.location), None)
+        for stop, stop_acts in zip(route.ordered_stops, activities_per_stop):
             stops_info.append(
                 {
                     "location": stop.location,
@@ -96,9 +115,9 @@ class ItineraryComposerAgent:
                     "driving_miles": stop.estimated_driving_miles,
                     "driving_hours": stop.estimated_driving_hours,
                     "notes": stop.notes,
-                    "activities": stop_acts.activities[:5] if stop_acts else [],
-                    "dining": stop_acts.dining[:3] if stop_acts else [],
-                    "location_tips": stop_acts.tips[:3] if stop_acts else [],
+                    "activities": stop_acts.activities[:5],
+                    "dining": stop_acts.dining[:3],
+                    "location_tips": stop_acts.tips[:3],
                     "logistics": next(
                         (
                             lg
@@ -132,45 +151,54 @@ class ItineraryComposerAgent:
             result = self._agent(prompt)
             raw = str(result).strip()
             data = json.loads(raw)
-        except Exception as e:
-            logger.warning("ItineraryComposerAgent JSON parse failed: %s", e)
-            return self._build_fallback_itinerary(trip, route, group_profile, logistics)
 
-        days = []
-        for d in data.get("days") or []:
-            if not isinstance(d, dict):
-                continue
-            day = DayPlan(
-                day_number=d.get("day_number", 1),
-                date=d.get("date"),
-                location=d.get("location", ""),
-                driving_from=d.get("driving_from"),
-                driving_distance_miles=d.get("driving_distance_miles"),
-                driving_time_hours=d.get("driving_time_hours"),
-                driving_notes=d.get("driving_notes", ""),
-                morning_activities=self._parse_activities(d.get("morning_activities")),
-                afternoon_activities=self._parse_activities(d.get("afternoon_activities")),
-                evening_activities=self._parse_activities(d.get("evening_activities")),
-                meals=self._parse_activities(d.get("meals")),
-                accommodation=self._parse_accommodation(d.get("accommodation")),
-                day_summary=d.get("day_summary", ""),
-                day_tips=d.get("day_tips") or [],
+            days = []
+            for d in data.get("days") or []:
+                if not isinstance(d, dict):
+                    continue
+                day = DayPlan(
+                    day_number=d.get("day_number", 1),
+                    date=d.get("date"),
+                    location=d.get("location", ""),
+                    driving_from=d.get("driving_from"),
+                    driving_distance_miles=d.get("driving_distance_miles"),
+                    driving_time_hours=d.get("driving_time_hours"),
+                    driving_notes=d.get("driving_notes", ""),
+                    morning_activities=self._parse_activities(d.get("morning_activities")),
+                    afternoon_activities=self._parse_activities(d.get("afternoon_activities")),
+                    evening_activities=self._parse_activities(d.get("evening_activities")),
+                    meals=self._parse_activities(d.get("meals")),
+                    accommodation=self._parse_accommodation(d.get("accommodation")),
+                    day_summary=d.get("day_summary", ""),
+                    day_tips=d.get("day_tips") or [],
+                )
+                days.append(day)
+            days = self._ensure_nonempty_days(days, route)
+
+            return TripItinerary(
+                title=data.get("title", "Road Trip Itinerary"),
+                overview=data.get("overview", ""),
+                total_days=data.get("total_days", route.suggested_total_days),
+                total_driving_miles=data.get("total_driving_miles", route.total_driving_miles),
+                route_summary=data.get("route_summary")
+                or [s.location for s in route.ordered_stops],
+                traveler_highlights=data.get("traveler_highlights", ""),
+                days=days,
+                travel_tips=data.get("travel_tips") or logistics.travel_tips,
+                packing_suggestions=data.get("packing_suggestions")
+                or logistics.packing_suggestions,
+                budget_estimate=data.get("budget_estimate") or logistics.budget_estimate,
+                generated_at=datetime.now(timezone.utc).isoformat(),
             )
-            days.append(day)
-
-        return TripItinerary(
-            title=data.get("title", "Road Trip Itinerary"),
-            overview=data.get("overview", ""),
-            total_days=data.get("total_days", route.suggested_total_days),
-            total_driving_miles=data.get("total_driving_miles", route.total_driving_miles),
-            route_summary=data.get("route_summary") or [s.location for s in route.ordered_stops],
-            traveler_highlights=data.get("traveler_highlights", ""),
-            days=days,
-            travel_tips=data.get("travel_tips") or logistics.travel_tips,
-            packing_suggestions=data.get("packing_suggestions") or logistics.packing_suggestions,
-            budget_estimate=data.get("budget_estimate") or logistics.budget_estimate,
-            generated_at=datetime.now(timezone.utc).isoformat(),
-        )
+        except Exception as e:
+            # Covers both a malformed LLM response (JSON parse failure) and a
+            # syntactically-valid-but-schema-invalid day/itinerary field
+            # (pydantic ValidationError) — either way, fall back rather than
+            # raise. (A valid response with an empty/missing "days" list does
+            # NOT reach here — _ensure_nonempty_days above normalizes that case
+            # in place.)
+            logger.warning("ItineraryComposerAgent JSON parse/validation failed: %s", e)
+            return self._build_fallback_itinerary(trip, route, group_profile, logistics)
 
     def _parse_activities(self, raw: object) -> List[Activity]:
         if not isinstance(raw, list):
@@ -204,6 +232,47 @@ class ItineraryComposerAgent:
             booking_tips=raw.get("booking_tips", ""),
         )
 
+    def _ensure_nonempty_days(self, days: List[DayPlan], route: RoutePlan) -> List[DayPlan]:
+        """Guarantee at least one day when the route has stops.
+
+        Shared by both ``run()``'s LLM-success path and
+        ``_build_fallback_itinerary`` so the "never empty when the route has
+        stops" guarantee lives in one place rather than being reactively
+        patched at each call site.
+
+        Postconditions:
+            - Returns ``days`` unchanged if non-empty. If empty and
+              ``route.ordered_stops`` is non-empty (e.g. every stop is a
+              pass-through start/end, via ``RoutePlannerAgent._fallback_route``),
+              returns a list with one synthesized entry. When the start and
+              end locations differ (a one-way trip with no required stops),
+              that entry represents the drive from start to end so the
+              requested destination is never silently dropped from the
+              itinerary; when they're the same (a round trip), it's a same-day
+              entry at that single location.
+        """
+        if days or not route.ordered_stops:
+            return days
+        start, end = route.ordered_stops[0], route.ordered_stops[-1]
+        if end.location and end.location != start.location:
+            return [
+                DayPlan(
+                    day_number=1,
+                    location=end.location,
+                    driving_from=start.location,
+                    driving_distance_miles=end.estimated_driving_miles,
+                    driving_time_hours=end.estimated_driving_hours,
+                    day_summary=f"Drive from {start.location} to {end.location}",
+                )
+            ]
+        return [
+            DayPlan(
+                day_number=1,
+                location=start.location,
+                day_summary=f"Day trip from {start.location}",
+            )
+        ]
+
     def _build_fallback_itinerary(
         self,
         trip: TripRequest,
@@ -211,11 +280,40 @@ class ItineraryComposerAgent:
         group_profile: TravelerGroupProfile,
         logistics: LogisticsPlan,
     ) -> TripItinerary:
-        """Minimal fallback itinerary if LLM fails."""
+        """Minimal fallback itinerary if LLM fails.
+
+        Postconditions:
+            - Returns a ``TripItinerary`` whose ``days`` is never empty — see
+              ``_ensure_nonempty_days``. A pass-through end stop (e.g. the
+              destination in a route where every stop is normalized to
+              ``recommended_nights=0``) still gets its own arrival day when it
+              follows real overnight stops, so the final leg of the trip is
+              never silently dropped.
+        """
         days = []
         day_num = 1
         for stop in route.ordered_stops:
             if stop.recommended_nights == 0 and stop.stop_type in ("start", "end"):
+                if stop.stop_type == "end" and days and days[-1].location != stop.location:
+                    # A pass-through end stop that follows real overnight
+                    # stops is still the trip's actual destination — without
+                    # this, RoutePlannerAgent normalizing every end stop to
+                    # recommended_nights=0 means the final leg (e.g. the "LA"
+                    # in SF -> Yosemite -> LA) would be silently dropped from
+                    # the fallback itinerary even though route_summary still
+                    # lists it. (All-pass-through routes with no days yet are
+                    # handled by _ensure_nonempty_days below instead.)
+                    days.append(
+                        DayPlan(
+                            day_number=day_num,
+                            location=stop.location,
+                            driving_from=stop.driving_from,
+                            driving_distance_miles=stop.estimated_driving_miles,
+                            driving_time_hours=stop.estimated_driving_hours,
+                            day_summary=f"Arrive in {stop.location}",
+                        )
+                    )
+                    day_num += 1
                 continue
             for night in range(max(1, stop.recommended_nights)):
                 logistics_entry = next(
@@ -246,6 +344,8 @@ class ItineraryComposerAgent:
                     )
                 )
                 day_num += 1
+
+        days = self._ensure_nonempty_days(days, route)
 
         return TripItinerary(
             title="Road Trip Itinerary",
