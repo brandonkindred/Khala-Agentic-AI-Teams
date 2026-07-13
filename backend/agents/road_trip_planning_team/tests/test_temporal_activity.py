@@ -373,7 +373,14 @@ def test_workflow_marks_failed_and_reraises_on_step_error(monkeypatch, sample_tr
     calls: list[dict] = []
 
     async def _fake_execute_activity(fn, *args, **kwargs):
-        calls.append({"name": fn.__name__, "args": kwargs.get("args")})
+        calls.append(
+            {
+                "name": fn.__name__,
+                "args": kwargs.get("args"),
+                "retry": kwargs.get("retry_policy"),
+                "timeout": kwargs.get("start_to_close_timeout"),
+            }
+        )
         if fn.__name__ == "plan_route_activity":
             raise RuntimeError("route boom")
         return {"stub": fn.__name__}
@@ -391,6 +398,12 @@ def test_workflow_marks_failed_and_reraises_on_step_error(monkeypatch, sample_tr
     fail_call = next(c for c in calls if c["name"] == "mark_road_trip_failed_activity")
     assert fail_call["args"][0] == "job-x"
     assert "route boom" in fail_call["args"][1]
+    # The mark-failed compensation write uses its own tighter retry/timeout,
+    # not the deeper _BOOKKEEPING_RETRY/_SHORT_TIMEOUT bookkeeping uses on the
+    # happy path — a slow/retried mark-failed write directly delays how soon
+    # job_store shows FAILED instead of the last RUNNING/in-progress snapshot.
+    assert fail_call["retry"] is wf._MARK_FAILED_RETRY
+    assert fail_call["timeout"] == wf._MARK_FAILED_TIMEOUT
 
     # Progress must reflect the failure rather than the last successful step's
     # snapshot (plan_route at 0.25) — a caller polling progress() after run()

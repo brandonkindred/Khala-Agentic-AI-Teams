@@ -61,12 +61,31 @@ _LLM_RETRY = RetryPolicy(
     backoff_coefficient=2.0,
 )
 
-# Cheap/deterministic job-store bookkeeping (begin / persist / mark-failed): a
-# slightly deeper bounded retry is safe because each write is idempotent.
+# Cheap/deterministic job-store bookkeeping on the happy path (begin / persist):
+# a slightly deeper bounded retry is safe because each write is idempotent and
+# there's no pending failure whose visibility this could delay.
 _BOOKKEEPING_RETRY = RetryPolicy(
     maximum_attempts=3,
     initial_interval=timedelta(seconds=10),
     maximum_interval=timedelta(minutes=1),
+    backoff_coefficient=2.0,
+)
+
+# The mark-failed compensation write sits on the failure-reporting path, where
+# speed matters more than resilience: it's what flips the job_store row from
+# the stale RUNNING begin_road_trip_job_activity wrote to FAILED, which is what
+# any client polling job status actually observes. Using _BOOKKEEPING_RETRY/
+# _SHORT_TIMEOUT here (3 attempts, up to 5 minutes each) could delay that
+# visibility by many minutes on a transient infra blip, during which the job
+# looks like it's still running even though the pipeline already failed. One
+# retry still covers a single transient blip without leaving a job stuck at
+# RUNNING forever on one dropped connection, and bounds the worst case to
+# roughly two minutes instead.
+_MARK_FAILED_TIMEOUT = timedelta(minutes=1)
+_MARK_FAILED_RETRY = RetryPolicy(
+    maximum_attempts=2,
+    initial_interval=timedelta(seconds=5),
+    maximum_interval=timedelta(seconds=15),
     backoff_coefficient=2.0,
 )
 
@@ -294,14 +313,16 @@ class RoadTripWorkflow:
             # 0.25), which would misleadingly read as still in progress.
             self._advance("failed", 0.0)
             # Best-effort FAILED write (its own failure must not mask the original
-            # cause), then re-raise so the workflow reflects the failure.
+            # cause), then re-raise so the workflow reflects the failure. Uses the
+            # tighter _MARK_FAILED_RETRY/_MARK_FAILED_TIMEOUT, not
+            # _BOOKKEEPING_RETRY/_SHORT_TIMEOUT — see _MARK_FAILED_RETRY's comment.
             try:
                 await workflow.execute_activity(
                     _activities.mark_road_trip_failed_activity,
                     args=[job_id, str(exc)],
                     task_queue=TASK_QUEUE,
-                    start_to_close_timeout=_SHORT_TIMEOUT,
-                    retry_policy=_BOOKKEEPING_RETRY,
+                    start_to_close_timeout=_MARK_FAILED_TIMEOUT,
+                    retry_policy=_MARK_FAILED_RETRY,
                 )
             except Exception:  # noqa: BLE001 — never mask the original pipeline error
                 pass
