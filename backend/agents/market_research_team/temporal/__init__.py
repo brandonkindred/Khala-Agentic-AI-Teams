@@ -16,6 +16,7 @@ temporalio sandbox replays it during workflow registration.
 from __future__ import annotations
 
 from market_research_team.temporal.activities import (
+    cleanup_transcripts_activity,
     consistency_activity,
     finalize_activity,
     ingest_activity,
@@ -42,6 +43,7 @@ ACTIVITIES = [
     report_progress_activity,
     mark_failed_activity,
     finalize_activity,
+    cleanup_transcripts_activity,
     # Legacy whole-pipeline activity, registered for drain-out of
     # pre-decomposition histories (see workflows.MarketResearchWorkflow.run).
     run_pipeline_activity,
@@ -55,6 +57,7 @@ __all__ = [
     "TASK_QUEUE",
     "WORKFLOWS",
     "WORKFLOW_ID_PREFIX",
+    "cleanup_transcripts_activity",
     "consistency_activity",
     "finalize_activity",
     "ingest_activity",

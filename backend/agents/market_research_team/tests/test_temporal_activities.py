@@ -290,6 +290,25 @@ def test_mark_failed_writes_failed_and_clears_transcripts() -> None:
 
 
 # ---------------------------------------------------------------------------
+# cleanup_transcripts
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_transcripts_clears_persisted_store() -> None:
+    save_transcripts("job-cleanup", [("src", "body")])
+
+    assert act.cleanup_transcripts_activity("job-cleanup") is None
+
+    with pytest.raises(FileNotFoundError):
+        load_transcript("job-cleanup", 0)
+
+
+def test_cleanup_transcripts_is_a_noop_when_nothing_was_persisted() -> None:
+    # Never raises even if ingest_activity never ran for this job.
+    assert act.cleanup_transcripts_activity("job-never-persisted") is None
+
+
+# ---------------------------------------------------------------------------
 # finalize
 # ---------------------------------------------------------------------------
 

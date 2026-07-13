@@ -144,6 +144,7 @@ def _default_results(*, ctx_stopped=False, progress=True):
         },
         "market_research_scripts": ["script1"],
         "market_research_finalize": {"job_id": "job-x"},
+        "market_research_cleanup_transcripts": None,
     }
 
 
@@ -359,6 +360,44 @@ def test_workflow_cancels_scripts_handle_when_analysis_gate_reports_terminal(mon
     assert "market_research_psychology" not in rec.names()
     assert "market_research_viability" not in rec.names()
     assert "market_research_finalize" not in rec.names()
+    # The early return bypasses finalize/mark_failed (the DAG's only other
+    # cleanup sites), so this gate must clean up the persisted transcripts
+    # itself rather than leaving them on disk indefinitely.
+    assert "market_research_cleanup_transcripts" in rec.names()
+    assert rec.kwargs_for("market_research_cleanup_transcripts")["args"][0] == "job-x"
+
+
+def test_workflow_cancels_scripts_handle_when_viability_gate_reports_terminal(monkeypatch) -> None:
+    """Regression: a cancel landing between UX and viability (after psychology/
+    consistency succeed) must also cancel + drain scripts_handle and clean up
+    persisted transcripts — not fall through to viability_activity/finalize
+    while the already in-flight scripts activity keeps running."""
+    progress_calls = {"n": 0}
+
+    class _GateRecorder(_Recorder):
+        async def execute_activity(self, fn, *args, **kwargs):
+            name = _act_name(fn)
+            if name == "market_research_report_progress":
+                progress_calls["n"] += 1
+                self.calls.append((name, {"args": args, **kwargs}))
+                # The "ingest" and "analysis" gates stay active; the
+                # "viability" gate reports the job has gone terminal.
+                return progress_calls["n"] < 3
+            return await super().execute_activity(fn, *args, **kwargs)
+
+    rec = _GateRecorder(_default_results())
+    _install(monkeypatch, rec)
+
+    out = _run(_REQUEST_UNIFIED)
+
+    assert out == {"job_id": "job-x"}
+    assert rec.started_handle is not None
+    assert rec.started_handle._cancelled is True
+    assert "market_research_psychology" in rec.names()
+    assert "market_research_viability" not in rec.names()
+    assert "market_research_finalize" not in rec.names()
+    assert "market_research_cleanup_transcripts" in rec.names()
+    assert rec.kwargs_for("market_research_cleanup_transcripts")["args"][0] == "job-x"
 
 
 def test_workflow_cancels_scripts_handle_on_stage_failure(monkeypatch) -> None:

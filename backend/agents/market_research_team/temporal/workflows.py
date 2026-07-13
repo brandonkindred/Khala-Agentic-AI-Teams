@@ -242,10 +242,7 @@ class MarketResearchWorkflow:
                 # call (and this method would keep waiting on it via
                 # ``_await_scripts``) for a job that's already done. Cancel +
                 # drain it here, same as the catch-all below.
-                scripts_handle.cancel()
-                with suppress(BaseException):
-                    await scripts_handle
-                return {"job_id": job_id}
+                return await self._cancel_scripts_and_stop(job_id, scripts_handle)
 
             # Transcripts were loaded but EVERY UX analysis was dropped (not a
             # cancel — that's handled above — but every transcript's own
@@ -277,7 +274,12 @@ class MarketResearchWorkflow:
             else:
                 signals = await psych_coro
 
-            await self._progress(job_id, "viability", 75)
+            if not await self._progress(job_id, "viability", 75):
+                # Same terminal short-circuit as the "analysis" gate above:
+                # a cancel landing between UX and viability must not fall
+                # through to viability_activity/finalize while the
+                # already-started scripts activity keeps running.
+                return await self._cancel_scripts_and_stop(job_id, scripts_handle)
 
             recommendation = await workflow.execute_activity(
                 _act.viability_activity,
@@ -302,6 +304,43 @@ class MarketResearchWorkflow:
             _act.finalize_activity,
             args=[ctx, insights, signals, recommendation, scripts],
             start_to_close_timeout=_FINALIZE_TIMEOUT,
+            retry_policy=IO_RETRY,
+        )
+        return {"job_id": job_id}
+
+    async def _cancel_scripts_and_stop(
+        self, job_id: str, handle: workflow.ActivityHandle
+    ) -> dict[str, Any]:
+        """Cancel the scripts activity and clean up for an early terminal return.
+
+        Used by the "analysis" and "viability" progress gates when the job has
+        already gone terminal (cancel / stale-job monitor) — both return
+        directly to :meth:`run` as a clean success, so neither
+        ``finalize_activity`` nor ``mark_failed_activity`` (the DAG's only
+        other cleanup sites) ever runs for this path.
+
+        Preconditions:
+            - ``handle`` is the ``ActivityHandle`` returned by starting
+              ``scripts_activity``; ``ingest_activity`` has already run (both
+              call sites are past it), so the job's transcripts may already be
+              persisted.
+        Postconditions:
+            - Cancels + drains ``handle`` (suppressing any resulting
+              exception, including a benign ``CancelledError``) so the
+              in-flight LLM call is never left running for a job that's
+              already done. Clears the job's persisted transcript directory
+              via a dedicated activity (best-effort — never raises) so it
+              doesn't sit on disk until the next process-startup sweep.
+              Returns ``{"job_id": job_id}`` for the caller to return
+              directly.
+        """
+        handle.cancel()
+        with suppress(BaseException):
+            await handle
+        await workflow.execute_activity(
+            _act.cleanup_transcripts_activity,
+            args=[job_id],
+            start_to_close_timeout=_IO_TIMEOUT,
             retry_policy=IO_RETRY,
         )
         return {"job_id": job_id}

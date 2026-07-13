@@ -385,6 +385,35 @@ def mark_failed_activity(job_id: str, error: str) -> None:
         clear_transcripts(job_id)
 
 
+@activity.defn(name="market_research_cleanup_transcripts")
+def cleanup_transcripts_activity(job_id: str) -> None:
+    """Best-effort cleanup of a job's persisted transcripts.
+
+    ``finalize_activity``/``mark_failed_activity`` are the DAG's only other
+    cleanup sites (both clear the store on every exit path, including their own
+    terminal short-circuits). Neither runs when the workflow's progress gates
+    short-circuit on an already-terminal job (cancel / stale-job monitor) —
+    those gates return directly without reaching finalize or mark-failed — so
+    without this activity a cancelled run's persisted transcript directory
+    would sit on disk (potentially indefinitely, on a long-running worker
+    that's never restarted) until the next process-startup ``sweep_orphaned``
+    sweep.
+
+    Preconditions:
+        - ``job_id`` is the run's job id. Transcripts may or may not have been
+          persisted for it yet — ``clear_transcripts`` no-ops if the
+          directory was never created (e.g. the "ingest" gate stopped before
+          ``ingest_activity`` ever ran).
+    Postconditions:
+        - Removes the job's persisted transcript directory if present. Never
+          raises — this only runs on an already-terminal job, so a cleanup
+          failure must not turn a clean cancel into a failed workflow.
+    """
+    from market_research_team.shared.transcript_store import clear_transcripts
+
+    clear_transcripts(job_id)
+
+
 @activity.defn(name="market_research_finalize")
 def finalize_activity(
     ctx: dict[str, Any],
