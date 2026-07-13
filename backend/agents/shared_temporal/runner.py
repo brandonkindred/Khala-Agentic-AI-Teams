@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from concurrent import futures
 from typing import Any, Optional
 
 from shared_temporal.client import (
@@ -38,6 +39,39 @@ START_WORKFLOW_TIMEOUT_S = 30
 # the workflow's result) blocks for the whole workflow to finish. Generous because
 # the workflow may include LLM calls; per-activity timeouts bound each phase.
 EXECUTE_WORKFLOW_TIMEOUT_S = 300
+
+# Dedicated pool for the blocking client-ready poll `execute_workflow_async`
+# runs on behalf of async callers. Sized well below the default executor's
+# ~(cpu_count + 4) so a burst of concurrent cold-start callers can queue here
+# without ever touching (and starving) the loop's default `to_thread` pool,
+# which unrelated code (file I/O, integrations) also shares.
+_CLIENT_WAIT_MAX_WORKERS = 8
+_client_wait_executor: futures.ThreadPoolExecutor | None = None
+
+
+def _get_client_wait_executor() -> futures.ThreadPoolExecutor:
+    """Lazily create (or recreate after shutdown) the client-wait executor.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns a live ``ThreadPoolExecutor`` dedicated to running
+          ``_await_client`` on behalf of :func:`execute_workflow_async`,
+          isolated from the running loop's default executor — mirroring the
+          ``_PROBE_EXECUTOR`` pattern in ``unified_api/main.py`` (a bounded,
+          purpose-specific pool instead of the shared default one). Recreates
+          the pool if a previous one was shut down or broke, so a test
+          teardown or transient thread-spawn failure can't permanently strand
+          this module with a dead executor.
+    """
+    global _client_wait_executor
+    executor = _client_wait_executor
+    if executor is None or getattr(executor, "_shutdown", False) or getattr(executor, "_broken", False):
+        executor = futures.ThreadPoolExecutor(
+            max_workers=_CLIENT_WAIT_MAX_WORKERS, thread_name_prefix="temporal-client-wait"
+        )
+        _client_wait_executor = executor
+    return executor
 
 
 def _await_client(timeout_s: float | None = None) -> tuple[Any, Any]:
@@ -183,8 +217,11 @@ async def execute_workflow_async(
 
     Postconditions:
         - Returns the workflow's return value once it completes.
-        - The client-readiness poll (which uses ``time.sleep``) runs in a worker
-          thread via ``asyncio.to_thread`` so it never blocks the caller's loop.
+        - The client-readiness poll (which uses ``time.sleep``) runs on the
+          dedicated :func:`_get_client_wait_executor` pool — not the loop's
+          default executor — so it never blocks the caller's loop *and* a burst
+          of concurrent cold-start callers can't exhaust threads shared with
+          unrelated ``asyncio.to_thread`` work elsewhere in the process.
 
     Invariants:
         - Schedules the workflow coroutine on the worker's shared event loop via
@@ -199,8 +236,12 @@ async def execute_workflow_async(
     """
     assert workflow_id, "workflow_id must be non-empty"
     assert task_queue, "task_queue must be non-empty"
-    # _await_client blocks (time.sleep poll); offload it so the caller's loop is free.
-    client, loop = await asyncio.to_thread(_await_client, client_ready_timeout_s)
+    # _await_client blocks (time.sleep poll); run it on the dedicated pool so the
+    # caller's loop is free and the shared default executor is never touched.
+    caller_loop = asyncio.get_running_loop()
+    client, loop = await caller_loop.run_in_executor(
+        _get_client_wait_executor(), _await_client, client_ready_timeout_s
+    )
     coro = client.execute_workflow(
         workflow_run, args=list(args), id=workflow_id, task_queue=task_queue
     )

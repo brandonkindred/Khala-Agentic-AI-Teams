@@ -239,3 +239,55 @@ async def test_execute_workflow_async_times_out(running_loop):
         await runner.execute_workflow_async(
             object(), workflow_id="wid", task_queue="q", execute_timeout_s=0.1
         )
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_async_cancelled_abandons_cross_loop_future(running_loop):
+    """Cancelling the caller's own task while ``execute_workflow_async`` is awaiting
+    the workflow result must re-raise ``CancelledError`` (not swallow it or raise
+    something else) and must not itself blow up calling ``fut.cancel()`` on the
+    still-running cross-loop future — the 'best-effort: abandon' path the
+    docstring describes, exercised here via task cancellation rather than a timeout."""
+    client_mod.set_temporal_client(_FakeSlowClient())
+    client_mod.set_temporal_loop(running_loop)
+
+    task = asyncio.ensure_future(
+        runner.execute_workflow_async(object(), workflow_id="wid", task_queue="q")
+    )
+    await asyncio.sleep(0.05)  # let the coroutine reach its `await asyncio.wait_for(...)`
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_async_uses_dedicated_client_wait_executor(running_loop, monkeypatch):
+    """Regression: the client-ready poll previously ran via ``asyncio.to_thread``,
+    which always uses the running loop's *default* executor — a burst of concurrent
+    cold-start callers could exhaust threads shared with unrelated ``to_thread``
+    work elsewhere in the process. It must instead run on shared_temporal's own
+    dedicated pool (``runner._get_client_wait_executor``), identifiable by its
+    ``temporal-client-wait`` thread name prefix."""
+    import threading
+
+    captured: dict = {}
+    sentinel = {"ok": True}
+    orig_get_client = runner.get_temporal_client
+
+    def _recording_get_client():
+        captured["thread_name"] = threading.current_thread().name
+        return orig_get_client()
+
+    # Patch the name bound inside `runner` (not `client_mod`) — `_await_client`
+    # calls the function via its own `from shared_temporal.client import
+    # get_temporal_client` binding, so patching the origin module's attribute
+    # would not intercept calls made through runner's already-bound name.
+    monkeypatch.setattr(runner, "get_temporal_client", _recording_get_client)
+    client_mod.set_temporal_client(_FakeExecClient({}, sentinel))
+    client_mod.set_temporal_loop(running_loop)
+
+    out = await runner.execute_workflow_async(object(), workflow_id="wid", task_queue="q")
+
+    assert out is sentinel
+    assert captured["thread_name"].startswith("temporal-client-wait")
