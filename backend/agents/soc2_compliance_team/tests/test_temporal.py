@@ -1,545 +1,494 @@
-"""Tests for the SOC2 compliance team's Temporal client, activities,
-workflows, worker, and start-workflow helpers.
+"""Tests for the SOC2 compliance team's decomposed Temporal activities and
+workflow.
 
-These tests do not depend on a real Temporal server: ``temporalio``'s
-client is monkeypatched, the workflow ``run`` body is exercised via
-direct invocation, and the worker thread entrypoint is exercised with
-fakes that short-circuit network calls.
+Activities are exercised offline via ``temporalio.testing.ActivityEnvironment``
+with the pipeline steps and job-store patched; the workflow ``run`` body is
+exercised by monkeypatching ``workflow.execute_activity`` (no worker/server).
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib
-from concurrent.futures import Future
-from typing import Any
+import logging
+from datetime import timedelta
+from typing import Any, Dict, List
 
 import pytest
+from temporalio.testing import ActivityEnvironment
+
+from soc2_compliance_team.models import (
+    NextStepsDocument,
+    RepoContext,
+    TSCAuditResult,
+    TSCCategory,
+)
+
+
+def _patch_update_job(monkeypatch: pytest.MonkeyPatch) -> List[Dict[str, Any]]:
+    """Capture ``_update_job`` calls made by the activities."""
+    calls: List[Dict[str, Any]] = []
+
+    def _fake(job_id: str, **fields: Any) -> None:
+        calls.append({"job_id": job_id, **fields})
+
+    monkeypatch.setattr("soc2_compliance_team.job_store._update_job", _fake)
+    return calls
+
 
 # ---------------------------------------------------------------------------
-# constants
+# load_repo_activity
 # ---------------------------------------------------------------------------
 
 
-def test_constants_default_task_queue(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("TEMPORAL_TASK_QUEUE_SOC2", raising=False)
-    from soc2_compliance_team.temporal import constants as cmod
+def test_load_repo_activity_snapshots_and_returns_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Persists the context snapshot once and returns the resolved repo path (a
+    small string), never the full context; advances the job stages."""
+    from soc2_compliance_team import context_snapshot
+    from soc2_compliance_team.temporal import activities as amod
 
-    importlib.reload(cmod)
-    assert cmod.TASK_QUEUE == "soc2-compliance"
-    assert cmod.WORKFLOW_ID_PREFIX_AUDIT == "soc2-audit-"
+    calls = _patch_update_job(monkeypatch)
+    saved: Dict[str, Any] = {}
+    monkeypatch.setattr(
+        context_snapshot,
+        "save_snapshot",
+        lambda jid, ctx: saved.update(job_id=jid, ctx=ctx) or "handle",
+    )
+
+    out = ActivityEnvironment().run(amod.load_repo_activity, "job-1", str(tmp_path))
+
+    assert out == str(tmp_path.resolve())
+    assert saved["job_id"] == "job-1"
+    assert saved["ctx"].repo_path == str(tmp_path.resolve())
+    statuses = [c.get("status") for c in calls]
+    stages = [c.get("current_stage") for c in calls]
+    assert "running" in statuses
+    assert "Loading repository" in stages
+    assert "Running TSC audits" in stages
+
+
+def test_load_repo_activity_reraises_on_bad_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    from soc2_compliance_team.temporal import activities as amod
+
+    _patch_update_job(monkeypatch)
+
+    with pytest.raises(ValueError, match="not a directory"):
+        ActivityEnvironment().run(amod.load_repo_activity, "job-1", "/nonexistent/soc2-xyz")
+
+
+def test_load_repo_activity_skips_status_write_when_job_already_terminal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """If run_audit's dispatch-failure path already wrote a terminal status
+    (e.g. start_workflow_sync timed out client-side even though Temporal
+    accepted the workflow server-side), this activity's unconditional
+    status="running" write must not resurrect it back to non-terminal — the
+    activity still does its real work (load + snapshot) regardless."""
+    from soc2_compliance_team import context_snapshot
+    from soc2_compliance_team.temporal import activities as amod
+
+    calls = _patch_update_job(monkeypatch)
+    monkeypatch.setattr("soc2_compliance_team.job_store._job_is_terminal", lambda jid: True)
+    saved: Dict[str, Any] = {}
+    monkeypatch.setattr(
+        context_snapshot,
+        "save_snapshot",
+        lambda jid, ctx: saved.update(job_id=jid, ctx=ctx) or "handle",
+    )
+
+    out = ActivityEnvironment().run(amod.load_repo_activity, "job-1", str(tmp_path))
+
+    assert out == str(tmp_path.resolve())
+    assert saved["job_id"] == "job-1"
+    # Neither the status="running" write nor the current_stage advance ran.
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------
-# client module
+# audit_criterion_activity
 # ---------------------------------------------------------------------------
 
 
-def test_get_temporal_address_returns_none_when_unset(
+def test_audit_criterion_activity_returns_result_dict(monkeypatch: pytest.MonkeyPatch) -> None:
+    from soc2_compliance_team import context_snapshot, pipeline
+    from soc2_compliance_team.temporal import activities as amod
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_safe(category, context):
+        captured["category"] = category
+        captured["context"] = context
+        return TSCAuditResult(category=category, summary="done", findings=[], compliant=True)
+
+    # The activity reads the context snapshot by job_id (not shuttled in).
+    monkeypatch.setattr(
+        context_snapshot, "load_snapshot", lambda jid: RepoContext(repo_path="/repo")
+    )
+    monkeypatch.setattr(pipeline, "audit_criterion_safe", _fake_safe)
+
+    out = ActivityEnvironment().run(
+        amod.audit_criterion_activity, "job-1", TSCCategory.PRIVACY.value
+    )
+
+    assert out["category"] == TSCCategory.PRIVACY.value
+    assert out["summary"] == "done"
+    assert captured["category"] is TSCCategory.PRIVACY
+    assert isinstance(captured["context"], RepoContext)
+    assert captured["context"].repo_path == "/repo"
+
+
+def test_audit_criterion_activity_isolates_underlying_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
-    from soc2_compliance_team.temporal import client as cmod
+    """When the real audit fails, the activity returns a fail-closed placeholder
+    (via ``audit_criterion_safe``) rather than raising."""
+    from soc2_compliance_team import context_snapshot, pipeline
+    from soc2_compliance_team.temporal import activities as amod
 
-    assert cmod.get_temporal_address() is None
-    assert cmod.is_temporal_enabled() is False
+    monkeypatch.setattr(
+        context_snapshot, "load_snapshot", lambda jid: RepoContext(repo_path="/repo")
+    )
 
+    def _boom(_key: str) -> Any:
+        raise RuntimeError("no llm configured")
 
-def test_get_temporal_address_returns_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TEMPORAL_ADDRESS", "  temporal:7233 ")
-    from soc2_compliance_team.temporal import client as cmod
+    monkeypatch.setattr(pipeline, "get_client", _boom)
 
-    assert cmod.get_temporal_address() == "temporal:7233"
-    assert cmod.is_temporal_enabled() is True
+    out = ActivityEnvironment().run(
+        amod.audit_criterion_activity, "job-1", TSCCategory.SECURITY.value
+    )
 
-
-def test_get_temporal_namespace_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("TEMPORAL_NAMESPACE", raising=False)
-    from soc2_compliance_team.temporal import client as cmod
-
-    assert cmod.get_temporal_namespace() == "default"
-
-
-def test_get_temporal_namespace_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TEMPORAL_NAMESPACE", "  soc2 ")
-    from soc2_compliance_team.temporal import client as cmod
-
-    assert cmod.get_temporal_namespace() == "soc2"
+    assert out["category"] == TSCCategory.SECURITY.value
+    assert out["compliant"] is False
+    assert "could not be completed" in out["summary"].lower()
 
 
-def test_set_and_get_temporal_client_and_loop() -> None:
-    from soc2_compliance_team.temporal import client as cmod
+def test_audit_criterion_activity_rejects_bad_criterion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A criterion string that is not a valid TSCCategory value raises."""
+    from soc2_compliance_team import context_snapshot
+    from soc2_compliance_team.temporal import activities as amod
 
-    sentinel = object()
-    cmod.set_temporal_client(sentinel)  # type: ignore[arg-type]
-    assert cmod.get_temporal_client() is sentinel
-    cmod.set_temporal_client(None)
-    assert cmod.get_temporal_client() is None
-
-    loop = asyncio.new_event_loop()
-    try:
-        cmod.set_temporal_loop(loop)
-        assert cmod.get_temporal_loop() is loop
-    finally:
-        cmod.set_temporal_loop(None)
-        loop.close()
-    assert cmod.get_temporal_loop() is None
+    monkeypatch.setattr(
+        context_snapshot, "load_snapshot", lambda jid: RepoContext(repo_path="/repo")
+    )
+    with pytest.raises(ValueError):
+        ActivityEnvironment().run(amod.audit_criterion_activity, "job-1", "bogus")
 
 
-def test_connect_temporal_client_returns_none_when_no_address(
+def test_audit_criterion_activity_missing_snapshot_returns_placeholder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
-    from soc2_compliance_team.temporal import client as cmod
+    """A sibling criterion's failure can trigger ``mark_failed_activity`` to
+    delete the context snapshot while this activity is still queued/running
+    (``asyncio.gather`` doesn't cancel siblings). The activity must isolate
+    that into the same fail-closed placeholder as a runtime audit error,
+    rather than raising ``FileNotFoundError`` unhandled."""
+    from soc2_compliance_team import context_snapshot
+    from soc2_compliance_team.temporal import activities as amod
 
-    result = asyncio.run(cmod.connect_temporal_client())
-    assert result is None
+    def _missing(jid: str) -> RepoContext:
+        raise FileNotFoundError(f"no snapshot for {jid}")
 
+    monkeypatch.setattr(context_snapshot, "load_snapshot", _missing)
 
-def test_connect_temporal_client_connects_when_address_set(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
-    monkeypatch.setenv("TEMPORAL_NAMESPACE", "soc2")
+    out = ActivityEnvironment().run(
+        amod.audit_criterion_activity, "job-1", TSCCategory.AVAILABILITY.value
+    )
 
-    sentinel = object()
-
-    async def _fake_connect(address, namespace, **kwargs):  # noqa: ANN001
-        assert address == "temporal:7233"
-        assert namespace == "soc2"
-        return sentinel
-
-    import temporalio.client as tc
-
-    monkeypatch.setattr(tc.Client, "connect", staticmethod(_fake_connect))
-
-    from soc2_compliance_team.temporal import client as cmod
-
-    result = asyncio.run(cmod.connect_temporal_client())
-    assert result is sentinel
-
-
-def test_connect_temporal_client_raises_on_failure(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
-    monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
-
-    async def _bad_connect(address, namespace, **kwargs):  # noqa: ANN001
-        raise RuntimeError("boom")
-
-    import temporalio.client as tc
-
-    monkeypatch.setattr(tc.Client, "connect", staticmethod(_bad_connect))
-
-    from soc2_compliance_team.temporal import client as cmod
-
-    with caplog.at_level("ERROR"):
-        with pytest.raises(RuntimeError):
-            asyncio.run(cmod.connect_temporal_client())
-    assert any("Temporal client connection failed" in r.message for r in caplog.records)
+    assert out["category"] == TSCCategory.AVAILABILITY.value
+    assert out["compliant"] is False
+    assert "could not be completed" in out["summary"].lower()
 
 
 # ---------------------------------------------------------------------------
-# start_workflow
+# write_report_activity
 # ---------------------------------------------------------------------------
 
 
-def test_run_async_raises_when_no_loop_or_client() -> None:
-    from soc2_compliance_team.temporal import client as cmod
-    from soc2_compliance_team.temporal import start_workflow as swmod
+def test_write_report_activity_persists_completed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from soc2_compliance_team import context_snapshot, pipeline
+    from soc2_compliance_team.temporal import activities as amod
 
-    cmod.set_temporal_client(None)
-    cmod.set_temporal_loop(None)
+    calls = _patch_update_job(monkeypatch)
+    monkeypatch.setattr(
+        pipeline, "write_report", lambda rp, tsc: (None, NextStepsDocument(title="Next"))
+    )
+    deleted: List[str] = []
+    monkeypatch.setattr(context_snapshot, "delete_snapshot", lambda jid: deleted.append(jid))
 
-    async def _coro():
-        return 1
+    tsc_dicts = [
+        TSCAuditResult(category=c, summary="s", findings=[], compliant=True).model_dump(mode="json")
+        for c in TSCCategory
+    ]
+    out = ActivityEnvironment().run(amod.write_report_activity, "job-1", "/repo", tsc_dicts)
 
-    coro = _coro()
-    try:
-        with pytest.raises(RuntimeError, match="Temporal client not available"):
-            swmod._run_async(coro)
-    finally:
-        coro.close()
-
-
-def test_run_async_threads_through_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When loop + client are set, the coroutine is submitted to the loop
-    and its result is returned."""
-    from soc2_compliance_team.temporal import client as cmod
-    from soc2_compliance_team.temporal import start_workflow as swmod
-
-    cmod.set_temporal_client(object())  # type: ignore[arg-type]
-
-    fake_loop = object()
-    cmod.set_temporal_loop(fake_loop)  # type: ignore[arg-type]
-
-    called: dict[str, Any] = {}
-
-    def _fake_threadsafe(coro, loop):
-        called["coro"] = coro
-        called["loop"] = loop
-        f: Future = Future()
-        f.set_result("done")
-        return f
-
-    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _fake_threadsafe)
-
-    async def _coro():
-        return "x"
-
-    coro = _coro()
-    try:
-        out = swmod._run_async(coro)
-        assert out == "done"
-        assert called["loop"] is fake_loop
-    finally:
-        cmod.set_temporal_client(None)
-        cmod.set_temporal_loop(None)
-        coro.close()
+    assert out["status"] == "completed"
+    assert out["has_findings"] is False
+    completed = [c for c in calls if c.get("status") == "completed"]
+    assert completed and completed[0]["result"]["status"] == "completed"
+    # The context snapshot is cleaned up once the audit completes.
+    assert deleted == ["job-1"]
 
 
-def test_start_audit_workflow_raises_when_no_client() -> None:
-    from soc2_compliance_team.temporal import client as cmod
-    from soc2_compliance_team.temporal import start_workflow as swmod
+def test_write_report_activity_skips_stage_write_when_job_already_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirrors ``load_repo_activity``'s equivalent guard: if the job already
+    reached a terminal status (e.g. run_audit's dispatch-failure path marked
+    it ``failed`` even though the workflow actually started server-side), the
+    ``current_stage="Writing report"`` write must not resurrect it back to
+    non-terminal. The final ``_update_job_terminal`` completion write is
+    separately guarded and would itself be skipped too — this test only
+    exercises the stage write, so ``write_report`` raises immediately after."""
+    from soc2_compliance_team import pipeline
+    from soc2_compliance_team.temporal import activities as amod
 
-    cmod.set_temporal_client(None)
-    with pytest.raises(RuntimeError, match="Temporal client not available"):
-        swmod.start_audit_workflow("job-1", "/some/path")
+    calls = _patch_update_job(monkeypatch)
+    monkeypatch.setattr("soc2_compliance_team.job_store._job_is_terminal", lambda jid: True)
+
+    def _boom(rp, tsc):
+        raise RuntimeError("should not reach report synthesis in this test")
+
+    # If the stage write were unguarded it would still just append to `calls`
+    # regardless of terminal status — the assertion below is what matters.
+    monkeypatch.setattr(pipeline, "write_report", _boom)
+
+    with pytest.raises(RuntimeError):
+        ActivityEnvironment().run(amod.write_report_activity, "job-1", "/repo", [])
+
+    assert calls == []
 
 
-def test_start_audit_workflow_invokes_run_async(monkeypatch: pytest.MonkeyPatch) -> None:
-    from soc2_compliance_team.temporal import client as cmod
-    from soc2_compliance_team.temporal import start_workflow as swmod
+def test_write_report_activity_reraises_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    from soc2_compliance_team import pipeline
+    from soc2_compliance_team.temporal import activities as amod
 
-    captured: dict[str, Any] = {}
+    _patch_update_job(monkeypatch)
 
-    class _FakeClient:
-        def start_workflow(self, *args, **kwargs):
-            captured["args"] = args
-            captured["kwargs"] = kwargs
+    def _boom(rp, tsc):
+        raise RuntimeError("report boom")
 
-            async def _noop():
-                return None
+    monkeypatch.setattr(pipeline, "write_report", _boom)
+    with pytest.raises(RuntimeError, match="report boom"):
+        ActivityEnvironment().run(amod.write_report_activity, "job-1", "/repo", [])
 
-            return _noop()
 
-    cmod.set_temporal_client(_FakeClient())  # type: ignore[arg-type]
+# ---------------------------------------------------------------------------
+# mark_failed_activity
+# ---------------------------------------------------------------------------
 
-    def _fake_run_async(coro):
-        captured["coro"] = coro
-        coro.close()
+
+def test_mark_failed_activity_writes_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from soc2_compliance_team import context_snapshot
+    from soc2_compliance_team.temporal import activities as amod
+
+    calls = _patch_update_job(monkeypatch)
+    deleted: List[str] = []
+    monkeypatch.setattr(context_snapshot, "delete_snapshot", lambda jid: deleted.append(jid))
+
+    ActivityEnvironment().run(amod.mark_failed_activity, "job-1", "/repo", "kaboom")
+    assert calls[0]["status"] == "failed"
+    assert calls[0]["error"] == "kaboom"
+    assert calls[0]["result"]["status"] == "failed"
+    assert calls[0]["result"]["repo_path"] == "/repo"
+    assert calls[0]["result"]["tsc_results"] == []
+    # The context snapshot is cleaned up on failure too.
+    assert deleted == ["job-1"]
+
+
+def test_mark_failed_activity_preserves_tsc_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When some criteria already completed before a later step failed (e.g.
+    report synthesis), their results are carried into the persisted failure
+    rather than discarded."""
+    from soc2_compliance_team import context_snapshot
+    from soc2_compliance_team.temporal import activities as amod
+
+    calls = _patch_update_job(monkeypatch)
+    monkeypatch.setattr(context_snapshot, "delete_snapshot", lambda jid: None)
+
+    tsc_dicts = [
+        TSCAuditResult(category=c, summary="s", findings=[], compliant=True).model_dump(mode="json")
+        for c in TSCCategory
+    ]
+
+    ActivityEnvironment().run(amod.mark_failed_activity, "job-1", "/repo", "kaboom", tsc_dicts)
+
+    result = calls[0]["result"]
+    assert result["status"] == "failed"
+    assert len(result["tsc_results"]) == len(tsc_dicts)
+    assert {r["category"] for r in result["tsc_results"]} == {c.value for c in TSCCategory}
+
+
+def test_mark_failed_activity_reraises_job_store_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A job-store failure must re-raise (after snapshot cleanup) so Temporal
+    retries this activity per MARK_FAILED_RETRY_POLICY instead of silently
+    leaving the job non-terminal — the workflow's own except-around-
+    execute_activity guarantees the original audit failure still wins even if
+    retries are exhausted."""
+    from soc2_compliance_team import context_snapshot
+    from soc2_compliance_team.temporal import activities as amod
+
+    deleted: List[str] = []
+    monkeypatch.setattr(context_snapshot, "delete_snapshot", lambda jid: deleted.append(jid))
+
+    def _boom(job_id, **fields):
+        raise RuntimeError("job store down")
+
+    monkeypatch.setattr("soc2_compliance_team.job_store._update_job", _boom)
+    with pytest.raises(RuntimeError, match="job store down"):
+        ActivityEnvironment().run(amod.mark_failed_activity, "job-1", "/repo", "kaboom")
+    # Snapshot cleanup still ran before the re-raise.
+    assert deleted == ["job-1"]
+
+
+# ---------------------------------------------------------------------------
+# workflow run body
+# ---------------------------------------------------------------------------
+
+
+class _FakeExecute:
+    """Records execute_activity calls and returns canned per-activity values."""
+
+    def __init__(self, fail_on: str | None = None) -> None:
+        self.calls: List[Dict[str, Any]] = []
+        self.fail_on = fail_on
+
+    async def __call__(self, activity, args=None, **kwargs):  # noqa: ANN001
+        name = getattr(activity, "__name__", str(activity))
+        self.calls.append({"name": name, "args": args})
+        if self.fail_on and name == self.fail_on:
+            raise RuntimeError(f"{name} failed")
+        if name == "load_repo_activity":
+            return args[1]  # resolved repo path (a string), not the context
+        if name == "audit_criterion_activity":
+            return {"category": args[1], "summary": "x", "findings": [], "compliant": True}
+        if name == "write_report_activity":
+            return {"status": "completed", "has_findings": False}
         return None
 
-    monkeypatch.setattr(swmod, "_run_async", _fake_run_async)
 
-    try:
-        swmod.start_audit_workflow("abc", "/repo/path")
-    finally:
-        cmod.set_temporal_client(None)
-
-    assert captured["kwargs"]["id"] == "soc2-audit-abc"
-    assert captured["kwargs"]["task_queue"] == "soc2-compliance"
-    assert captured["kwargs"]["args"] == ["abc", "/repo/path"]
-    # First positional arg is the workflow's run method
-    assert captured["args"][0].__name__ == "run"
-
-
-# ---------------------------------------------------------------------------
-# activities
-# ---------------------------------------------------------------------------
-
-
-def test_run_audit_activity_invokes_run_audit_job(monkeypatch: pytest.MonkeyPatch) -> None:
-    from soc2_compliance_team.temporal import activities as amod
-
-    captured: dict[str, Any] = {}
-
-    def _fake_run_audit_job(job_id, repo_path):
-        captured["job_id"] = job_id
-        captured["repo_path"] = repo_path
-
-    # Patch the function inside its source module — the activity
-    # imports it dynamically inside the function body.
-    monkeypatch.setattr("soc2_compliance_team.api.main._run_audit_job", _fake_run_audit_job)
-
-    amod.run_audit_activity("job-1", "/repo/x")
-
-    assert captured["job_id"] == "job-1"
-    assert captured["repo_path"] == "/repo/x"
-
-
-def test_run_audit_activity_reraises_on_failure(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
-    from soc2_compliance_team.temporal import activities as amod
-
-    def _fake_run_audit_job(job_id, repo_path):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr("soc2_compliance_team.api.main._run_audit_job", _fake_run_audit_job)
-
-    with caplog.at_level("ERROR"):
-        with pytest.raises(RuntimeError):
-            amod.run_audit_activity("job-x", "/repo/y")
-    assert any("SOC2 audit activity failed" in r.message for r in caplog.records)
-
-
-# ---------------------------------------------------------------------------
-# workflows.run — exercise the body without a full worker
-# ---------------------------------------------------------------------------
-
-
-def test_workflow_run_executes_activity(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``Soc2AuditWorkflow.run`` should await execute_activity with
-    the correct arguments."""
+def test_workflow_runs_load_fanout_report(monkeypatch: pytest.MonkeyPatch) -> None:
     from soc2_compliance_team.temporal import workflows as wmod
 
-    captured: dict[str, Any] = {}
+    fake = _FakeExecute()
+    monkeypatch.setattr(wmod.workflow, "execute_activity", fake)
 
-    async def _fake_execute(activity, args=None, **kwargs):  # noqa: ANN001
-        captured["activity"] = activity
-        captured["args"] = args
-        captured["kwargs"] = kwargs
+    result = asyncio.run(wmod.Soc2AuditWorkflow().run("job-1", "/repo/path"))
 
-    monkeypatch.setattr(wmod.workflow, "execute_activity", _fake_execute)
-
-    wf = wmod.Soc2AuditWorkflow()
-    asyncio.run(wf.run("job-1", "/repo/path"))
-
-    assert captured["args"] == ["job-1", "/repo/path"]
-    assert captured["kwargs"]["task_queue"] == "soc2-compliance"
-    assert "schedule_to_close_timeout" in captured["kwargs"]
-    assert "retry_policy" in captured["kwargs"]
+    names = [c["name"] for c in fake.calls]
+    assert names[0] == "load_repo_activity"
+    assert names.count("audit_criterion_activity") == 5
+    assert names[-1] == "write_report_activity"
+    # The five criteria are fanned out in canonical order.
+    audit_criteria = [c["args"][1] for c in fake.calls if c["name"] == "audit_criterion_activity"]
+    assert audit_criteria == [c.value for c in TSCCategory]
+    assert result == {"status": "completed", "has_findings": False}
 
 
-# ---------------------------------------------------------------------------
-# worker
-# ---------------------------------------------------------------------------
+def test_workflow_marks_failed_on_activity_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from soc2_compliance_team.temporal import workflows as wmod
+
+    fake = _FakeExecute(fail_on="write_report_activity")
+    monkeypatch.setattr(wmod.workflow, "execute_activity", fake)
+
+    with pytest.raises(RuntimeError, match="write_report_activity failed"):
+        asyncio.run(wmod.Soc2AuditWorkflow().run("job-1", "/repo/path"))
+
+    # The except-path fires the terminal failure marker.
+    assert any(c["name"] == "mark_failed_activity" for c in fake.calls)
 
 
-def test_create_soc2_worker_returns_none_when_disabled(
+def test_workflow_preserves_sibling_results_when_one_criterion_activity_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
-    from soc2_compliance_team.temporal import worker as wmod
+    """asyncio.gather does not cancel sibling activities when one raises; with
+    return_exceptions=True every criterion still gets a chance to finish, so
+    one criterion exhausting its retries (e.g. a timeout) must not discard
+    results the other four already produced — mark_failed_activity should
+    still receive them."""
+    from soc2_compliance_team.temporal import workflows as wmod
 
-    assert wmod.create_soc2_worker(client=None) is None
+    class _OneCriterionFails:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, Any]] = []
+
+        async def __call__(self, activity, args=None, **kwargs):  # noqa: ANN001
+            name = getattr(activity, "__name__", str(activity))
+            self.calls.append({"name": name, "args": args})
+            if name == "load_repo_activity":
+                return args[1]
+            if name == "audit_criterion_activity":
+                criterion = args[1]
+                if criterion == TSCCategory.PRIVACY.value:
+                    raise RuntimeError("privacy audit timed out")
+                return {"category": criterion, "summary": "x", "findings": [], "compliant": True}
+            return None
+
+    fake = _OneCriterionFails()
+    monkeypatch.setattr(wmod.workflow, "execute_activity", fake)
+
+    with pytest.raises(RuntimeError, match="1 SOC2 criterion audit"):
+        asyncio.run(wmod.Soc2AuditWorkflow().run("job-1", "/repo/path"))
+
+    mark_failed_calls = [c for c in fake.calls if c["name"] == "mark_failed_activity"]
+    assert len(mark_failed_calls) == 1
+    tsc_results_arg = mark_failed_calls[0]["args"][3]
+    assert tsc_results_arg is not None
+    assert len(tsc_results_arg) == 4
+    assert all(r["category"] != TSCCategory.PRIVACY.value for r in tsc_results_arg)
+    # write_report_activity must never run — the fan-out itself failed.
+    assert not any(c["name"] == "write_report_activity" for c in fake.calls)
 
 
-def test_create_soc2_worker_returns_none_when_no_client(
+def test_workflow_reraises_original_when_mark_failed_also_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
-    from soc2_compliance_team.temporal import worker as wmod
-
-    assert wmod.create_soc2_worker(client=None) is None
-
-
-def test_create_soc2_worker_builds_worker(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
-    from soc2_compliance_team.temporal import worker as wmod
-
-    captured: dict[str, Any] = {}
-
-    class _FakeWorker:
-        def __init__(self, *args, **kwargs):
-            captured["args"] = args
-            captured["kwargs"] = kwargs
-
-    monkeypatch.setattr(wmod, "Worker", _FakeWorker)
-    monkeypatch.setattr(wmod, "_activity_executor", None)
-
-    out = wmod.create_soc2_worker(client=object())
-    assert isinstance(out, _FakeWorker)
-    assert captured["kwargs"]["task_queue"] == "soc2-compliance"
-    assert captured["kwargs"]["max_concurrent_activities"] == 2
-    # Workflow + activity wiring
-    assert wmod.Soc2AuditWorkflow in captured["kwargs"]["workflows"]
-
-
-def test_create_soc2_worker_reuses_activity_executor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A second call should not allocate a new executor."""
-    monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
-    from soc2_compliance_team.temporal import worker as wmod
-
-    captured: dict[str, Any] = {}
-
-    class _FakeWorker:
-        def __init__(self, *args, **kwargs):
-            captured.setdefault("executors", []).append(kwargs["activity_executor"])
-
-    monkeypatch.setattr(wmod, "Worker", _FakeWorker)
-    monkeypatch.setattr(wmod, "_activity_executor", None)
-
-    wmod.create_soc2_worker(client=object())
-    wmod.create_soc2_worker(client=object())
-    assert captured["executors"][0] is captured["executors"][1]
-
-
-def test_run_worker_async_no_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When connect_temporal_client returns None, _run_worker_async exits."""
-    from soc2_compliance_team.temporal import worker as wmod
-
-    async def _no_client():
-        return None
-
-    monkeypatch.setattr(wmod, "connect_temporal_client", _no_client)
-    asyncio.run(wmod._run_worker_async())
-
-
-def test_run_worker_async_no_worker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When create_soc2_worker returns None, exit cleanly."""
-    from soc2_compliance_team.temporal import worker as wmod
-
-    async def _client():
-        return object()
-
-    monkeypatch.setattr(wmod, "connect_temporal_client", _client)
-    monkeypatch.setattr(wmod, "set_temporal_client", lambda c: None)
-    monkeypatch.setattr(wmod, "set_temporal_loop", lambda loop: None)
-    monkeypatch.setattr(wmod, "create_soc2_worker", lambda c: None)
-    asyncio.run(wmod._run_worker_async())
-
-
-def test_run_worker_async_starts_worker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Happy path: a worker is created and its run() is awaited."""
-    from soc2_compliance_team.temporal import worker as wmod
-
-    fake_client = object()
-
-    async def _client():
-        return fake_client
-
-    captured: dict[str, Any] = {}
-
-    class _Worker:
-        async def run(self):
-            captured["ran"] = True
-
-    monkeypatch.setattr(wmod, "connect_temporal_client", _client)
-    monkeypatch.setattr(wmod, "set_temporal_client", lambda c: captured.setdefault("client", c))
-    monkeypatch.setattr(wmod, "set_temporal_loop", lambda loop: captured.setdefault("loop", loop))
-    monkeypatch.setattr(wmod, "create_soc2_worker", lambda c: _Worker())
-
-    asyncio.run(wmod._run_worker_async())
-    assert captured["ran"] is True
-    assert captured["client"] is fake_client
-
-
-def test_worker_thread_target_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
-    from soc2_compliance_team.temporal import worker as wmod
-
-    # Should exit immediately without calling asyncio.new_event_loop
-    wmod._worker_thread_target()
-
-
-def test_worker_thread_target_runs_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When temporal is enabled, _worker_thread_target opens a new loop, runs the
-    worker coroutine, and resets module state."""
-    monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
-    from soc2_compliance_team.temporal import client as cmod
-    from soc2_compliance_team.temporal import worker as wmod
-
-    state: dict[str, Any] = {}
-
-    async def _fake_run_worker_async():
-        state["ran"] = True
-
-    monkeypatch.setattr(wmod, "_run_worker_async", _fake_run_worker_async)
-    wmod._worker_thread_target()
-    assert state["ran"] is True
-    # Module-level state should have been cleared in the finally block
-    assert cmod.get_temporal_client() is None
-    assert cmod.get_temporal_loop() is None
-
-
-def test_worker_thread_target_handles_exception(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
-    monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
-    from soc2_compliance_team.temporal import worker as wmod
-
-    async def _explode():
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(wmod, "_run_worker_async", _explode)
-    with caplog.at_level("ERROR"):
-        wmod._worker_thread_target()
-    assert any("Temporal worker failed" in r.message for r in caplog.records)
-
-
-def test_worker_thread_target_handles_cancelled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
-    from soc2_compliance_team.temporal import worker as wmod
-
-    async def _cancelled():
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(wmod, "_run_worker_async", _cancelled)
-    # Should swallow CancelledError silently
-    wmod._worker_thread_target()
-
-
-def test_start_soc2_temporal_worker_thread_disabled_returns_false(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
-    from soc2_compliance_team.temporal import worker as wmod
-
-    assert wmod.start_soc2_temporal_worker_thread() is False
-
-
-def test_start_soc2_temporal_worker_thread_creates_thread(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Start path: when enabled and no live thread exists, a new thread is
-    spawned and the function returns True."""
-    monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
-    from soc2_compliance_team.temporal import worker as wmod
-
-    monkeypatch.setattr(wmod, "_worker_thread", None)
-
-    spawned: dict[str, Any] = {}
-
-    class _FakeThread:
-        def __init__(self, target=None, name=None, daemon=None):
-            spawned["target"] = target
-            spawned["name"] = name
-            self.daemon = daemon
-            self._alive = True
-
-        def start(self):
-            spawned["started"] = True
-
-        def is_alive(self):
-            return self._alive
-
-    monkeypatch.setattr(wmod.threading, "Thread", _FakeThread)
-    assert wmod.start_soc2_temporal_worker_thread() is True
-    assert spawned["started"] is True
-    assert spawned["name"] == "soc2-temporal-worker"
-
-
-def test_start_soc2_temporal_worker_thread_returns_true_when_already_running(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
-    from soc2_compliance_team.temporal import worker as wmod
-
-    class _AliveThread:
-        def is_alive(self):
-            return True
-
-    monkeypatch.setattr(wmod, "_worker_thread", _AliveThread())
-    assert wmod.start_soc2_temporal_worker_thread() is True
-
-
-# ---------------------------------------------------------------------------
-# temporal/__init__ re-exports
-# ---------------------------------------------------------------------------
-
-
-def test_temporal_init_reexports() -> None:
-    from soc2_compliance_team import temporal as tmod
-
-    assert callable(tmod.is_temporal_enabled)
-    assert tmod.TASK_QUEUE  # non-empty string
+    """If ``mark_failed_activity`` itself raises, the ORIGINAL audit failure must
+    still propagate (not be replaced by the marker's error)."""
+    from soc2_compliance_team.temporal import workflows as wmod
+
+    class _BothFail:
+        async def __call__(self, activity, args=None, **kwargs):  # noqa: ANN001
+            name = getattr(activity, "__name__", "")
+            if name == "load_repo_activity":
+                return args[1]  # resolved repo path (a string)
+            if name == "audit_criterion_activity":
+                return {"category": args[1], "summary": "x", "findings": [], "compliant": True}
+            if name == "write_report_activity":
+                raise RuntimeError("original report failure")
+            if name == "mark_failed_activity":
+                raise RuntimeError("mark-failed also failed")
+            return None
+
+    monkeypatch.setattr(wmod.workflow, "execute_activity", _BothFail())
+    # The logger call in the inner except needs no workflow context here.
+    monkeypatch.setattr(wmod.workflow, "logger", logging.getLogger("test-soc2-wf"))
+
+    with pytest.raises(RuntimeError, match="original report failure"):
+        asyncio.run(wmod.Soc2AuditWorkflow().run("job-1", "/repo/path"))
+
+
+def test_mark_failed_retry_policy_uses_its_full_schedule_to_close_budget() -> None:
+    """A bare 3-attempt policy with the temporalio default ~1s initial backoff
+    exhausts in a few seconds — far short of the 15 minutes
+    MARK_FAILED_SCHEDULE_TO_CLOSE_TIMEOUT already allocates. Retrying should
+    span most of that budget (via schedule_to_close, not a low attempt cap),
+    so a brief job-service blip during workflow-failure handling doesn't
+    leave the job stuck reporting "running" until the much coarser stale-job
+    monitor eventually catches it."""
+    from soc2_compliance_team.temporal import workflows as wmod
+
+    policy = wmod.MARK_FAILED_RETRY_POLICY
+    # No low attempt cap: retries are bounded by schedule_to_close instead.
+    assert policy.maximum_attempts in (0, None) or policy.maximum_attempts >= 8
+
+    # Simulate the backoff schedule and confirm it can span minutes, not
+    # seconds, within the allotted schedule-to-close window.
+    interval = policy.initial_interval
+    total = interval
+    for _ in range(6):
+        interval = min(interval * policy.backoff_coefficient, policy.maximum_interval)
+        total += interval
+    assert total >= timedelta(minutes=2)
+    assert total < wmod.MARK_FAILED_SCHEDULE_TO_CLOSE_TIMEOUT
