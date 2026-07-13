@@ -491,6 +491,39 @@ def test_poll_phase_waiting_surfaces_questions(monkeypatch):
     assert out["pending_questions"] == [{"id": "q1"}]
 
 
+def test_poll_phase_malformed_pending_questions_normalized_to_empty(monkeypatch):
+    """A malformed target response (non-dict entries, or a non-list value) must
+    not reach answer_questions_activity, which assumes each entry is a dict —
+    normalize to no-questions instead of crashing one activity downstream."""
+    adapter = MagicMock(name="adapter")
+    adapter.poll_build.return_value = {
+        "status": "running",
+        "waiting_for_answers": True,
+        "pending_questions": ["not-a-dict"],
+    }
+    _install(monkeypatch, run=_run(spec_content="SPEC", repo_path="/repo"), adapter=adapter)
+
+    out = acts.poll_phase_activity("r1", "build", "bj-1")
+
+    assert out["waiting"] is False
+    assert out["pending_questions"] == []
+
+
+def test_poll_phase_non_list_pending_questions_normalized_to_empty(monkeypatch):
+    adapter = MagicMock(name="adapter")
+    adapter.poll_build.return_value = {
+        "status": "running",
+        "waiting_for_answers": True,
+        "pending_questions": "not-a-list",
+    }
+    _install(monkeypatch, run=_run(spec_content="SPEC", repo_path="/repo"), adapter=adapter)
+
+    out = acts.poll_phase_activity("r1", "build", "bj-1")
+
+    assert out["waiting"] is False
+    assert out["pending_questions"] == []
+
+
 def test_poll_phase_poll_error_passed_through(monkeypatch):
     adapter = MagicMock(name="adapter")
     adapter.poll_analysis.return_value = {"_poll_error": "timeout", "status": ""}

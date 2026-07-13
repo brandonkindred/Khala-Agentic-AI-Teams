@@ -682,6 +682,23 @@ def test_testable_teams_handles_non_dict_team_configs(monkeypatch):
     assert se.display_name  # generated fallback, no AttributeError
 
 
+def test_dispatch_uses_temporal_when_enabled(fake_store, monkeypatch):
+    """When Temporal is enabled, _dispatch_founder_run starts the workflow
+    (not a thread) and reports the "Temporal" mode label."""
+    import shared_temporal
+    from user_agent_founder.api import main as api_main
+    from user_agent_founder.temporal import start_workflow as sw
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    started: list[str] = []
+    monkeypatch.setattr(sw, "start_founder_workflow", lambda rid: started.append(rid))
+
+    mode = api_main._dispatch_founder_run("run-x")
+
+    assert mode == "Temporal"
+    assert started == ["run-x"]
+
+
 def test_dispatch_thread_mode_threads_process_id_and_spec(fake_store, monkeypatch):
     """Regression: the thread path builds the adapter itself (bypassing
     run_workflow's fallback), so it must thread the run's process_id (and the

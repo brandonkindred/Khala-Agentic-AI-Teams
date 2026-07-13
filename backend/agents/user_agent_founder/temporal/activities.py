@@ -156,6 +156,15 @@ def _record_started_job_id(store: Any, run_id: str, phase: str, job_id: str) -> 
             return
         except Exception as exc:  # noqa: BLE001 — retried below; re-raised if exhausted
             last_exc = exc
+            activity.logger.warning(
+                "Persist %s=%s for run %s failed (attempt %d/%d): %s",
+                column,
+                job_id,
+                run_id,
+                attempt + 1,
+                _PERSIST_RETRIES,
+                exc,
+            )
             if attempt < _PERSIST_RETRIES - 1:
                 time.sleep(_PERSIST_BACKOFF_S)
     assert last_exc is not None
@@ -509,7 +518,11 @@ def poll_phase_activity(run_id: str, phase: str, job_id: str) -> dict[str, Any]:
           "error"}``. ``error`` is always present in the dict (``None`` when the
           target response omitted it) — callers must use ``r.get("error") or
           "unknown"``, not ``r.get("error", "unknown")``, to get the same
-          "unknown" fallback the pre-decomposition orchestrator produced. On a
+          "unknown" fallback the pre-decomposition orchestrator produced.
+          ``pending_questions`` is shape-guarded at this HTTP boundary: a
+          non-list value, or a list containing a non-dict entry, is normalized
+          to ``[]`` (and ``waiting`` to ``False``) rather than reaching
+          ``answer_questions_activity``, which assumes each entry is a dict. On a
           terminal ``completed`` analysis poll the analysis→build handoff
           ``repo_path`` is persisted (idempotent) and the run's success
           breadcrumb is written exactly once, gated on
@@ -539,8 +552,19 @@ def poll_phase_activity(run_id: str, phase: str, job_id: str) -> dict[str, Any]:
 
     poll_error = status_data.get("_poll_error")
     status = status_data.get("status", "")
-    waiting = bool(status_data.get("waiting_for_answers") and status_data.get("pending_questions"))
     repo_path = status_data.get("repo_path")
+
+    # Shape-guard the target's pending_questions before trusting it: this activity
+    # is the single normalization point between the target-team HTTP boundary and
+    # answer_questions_activity, which assumes each entry is a dict (q.get("id")).
+    # A malformed/non-dict entry here becomes an unhandled crash one activity
+    # downstream instead of a clean poll_error; treat it as no questions instead.
+    raw_questions = status_data.get("pending_questions")
+    if isinstance(raw_questions, list) and all(isinstance(q, dict) for q in raw_questions):
+        pending_questions = raw_questions
+    else:
+        pending_questions = []
+    waiting = bool(status_data.get("waiting_for_answers") and pending_questions)
 
     if phase == "analysis" and status == "completed" and not poll_error:
         store.update_run(run_id, repo_path=repo_path)
@@ -553,7 +577,7 @@ def poll_phase_activity(run_id: str, phase: str, job_id: str) -> dict[str, Any]:
         "status": status,
         "poll_error": poll_error,
         "waiting": waiting,
-        "pending_questions": status_data.get("pending_questions") or [],
+        "pending_questions": pending_questions,
         "repo_path": repo_path,
         "error": status_data.get("error"),
     }
