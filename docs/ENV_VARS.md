@@ -169,6 +169,41 @@ Temporal namespace.
 ### TEMPORAL_TASK_QUEUE
 Temporal task queue name.
 
+### Investment team Temporal queues
+The investment team runs three Temporal queues, all booted from
+`investment_team.temporal.worker.start_investment_temporal_worker_thread` (each on
+a distinct team key, since `start_team_worker` is idempotent per team key):
+
+- `investment-queue` — the ad hoc single-backtest `InvestmentBacktestWorkflow`
+  and the long-running `PaperTradingWorkflow` (cancel via a `stop` signal).
+  Tuned by `INVESTMENT_MAX_CONCURRENT_ACTIVITIES` (below).
+- `strategy-lab-queue` — the fine-grained Strategy Lab batch/cycle workflows
+  (tuned by `STRATEGY_LAB_MAX_CONCURRENT_ACTIVITIES`).
+- `investment-advisory-queue` — the interactive proposal / validation / promotion
+  / committee-memo / advisor-session workflows, dispatched execute-and-wait so a
+  multi-hour backtest activity can't head-of-line-block a quick request. Each
+  call runs under a fresh, randomly-suffixed workflow id (never a bare
+  `{op}-{key}`) so two calls for the same logical operation — e.g. two chat
+  messages in the same advisor session — can never collide on a live
+  workflow id.
+
+The paper-trading (`/strategy-lab/paper-trade`, `/stop`) and orchestrator/advisor
+endpoints (`/proposals/*`, `/strategies/*`, `/promotions/decide`, `/memos`,
+`/advisor/sessions/*`) are **Temporal-only**: with `TEMPORAL_ADDRESS` unset (or no
+connected worker) they return HTTP 503 rather than falling back to in-process
+execution. The backtest and Strategy Lab run endpoints keep their thread
+fallback.
+
+### INVESTMENT_MAX_CONCURRENT_ACTIVITIES
+Int (default `8`, floor `1`). Ceiling on how many `investment-queue` activities
+the investment worker runs at once. A live paper-trading session
+(`run_paper_trading_activity`) can hold a worker thread for hours (up to
+`max_hours`), so this queue defaults above the shared framework's 4-thread cap
+to avoid a handful of concurrent sessions silently starving backtest dispatch.
+Parsed as a plain `int(...)` (unset → default `8`; garbage/unparseable →
+default `8`; parsed but `< 1` → floored to `1`). Only read by the investment
+worker; mirrors `STRATEGY_LAB_MAX_CONCURRENT_ACTIVITIES`.
+
 ### SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Ceiling on how many sales activities the sales
 Temporal worker runs at once. The sales pipeline fans each stage out into one
