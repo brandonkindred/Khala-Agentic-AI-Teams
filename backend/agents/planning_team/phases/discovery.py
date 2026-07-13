@@ -10,7 +10,8 @@ import logging
 from typing import Any, Dict, Optional, Sequence
 
 from planning_team.models import ClientContext
-from planning_team.spec_digest import map_reduce, parse_json_response
+from planning_team.spec_digest import map_reduce
+from shared_llm_recovery import extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,16 @@ def _discovery_map(section: str, llm: Any, idx: int, total: int) -> Optional[Dic
         think=True,
         objective=f"extract discovery facts (section {idx + 1}/{total})",
     )
-    return parse_json_response(response)
+    return extract_json_object(
+        response,
+        required_keys=(
+            "problem_summary",
+            "opportunity_statement",
+            "target_users",
+            "success_criteria",
+            "assumptions",
+        ),
+    )
 
 
 def _discovery_reduce(parts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
