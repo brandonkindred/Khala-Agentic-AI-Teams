@@ -313,5 +313,13 @@ class PaperTradingWorkflow:
 
     @workflow.query
     def status(self) -> str:
-        """Return the last-known session status."""
+        """Return the workflow's own coarse execution state.
+
+        One of ``"running"``/``"stopped"``/the activity's terminal status
+        string — the workflow's own state machine, not the trading session's
+        finer-grained status (``OPENING``/``WARMING_UP``/``LIVE``/etc.).
+        Clients that need that detail read the persisted session via
+        ``GET /strategy-lab/paper-trade/{session_id}``, which is where it's
+        actually surfaced today.
+        """
         return self._status

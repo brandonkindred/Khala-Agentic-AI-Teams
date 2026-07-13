@@ -168,6 +168,22 @@ def test_as_model_passthrough_and_coercion() -> None:
     assert _as_model(_HasValidate, {"b": 2}) == ("validated", {"b": 2})
 
 
+def test_as_model_propagates_parse_persisted_failure() -> None:
+    """A malformed persisted record's parse failure propagates unchanged —
+    _as_model itself makes no error-handling promise; callers that need a
+    typed ApplicationError wrap their own call (see the paper-trading preamble
+    test for that pattern)."""
+    from investment_team.temporal.advisory import _as_model
+
+    class _Corrupt:
+        @classmethod
+        def parse_persisted(cls, raw):
+            raise ValueError("corrupted record")
+
+    with pytest.raises(ValueError, match="corrupted record"):
+        _as_model(_Corrupt, {"a": 1})
+
+
 def test_create_proposal_activity_missing_ips_raises(monkeypatch) -> None:
     from investment_team.api import main as api_main
     from investment_team.temporal.advisory import create_proposal_activity

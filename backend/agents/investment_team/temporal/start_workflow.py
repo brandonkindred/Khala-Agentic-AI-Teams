@@ -149,12 +149,15 @@ def execute_advisory_workflow(op: str, payload: dict[str, Any], *, key: str) -> 
 
     Postconditions:
         - Runs ``Investment<Op>Workflow`` on ``investment-advisory-queue`` under
-          id ``investment-adv-{op}-{key}-{uuid8}`` — a fresh random suffix is
-          appended on every call so two calls for the same ``(op, key)`` (e.g.
-          two chat messages in the same advisor session, or a client retry)
-          never collide on a live workflow id and raise
-          ``WorkflowAlreadyStartedError``; ``execute_workflow_sync`` documents
-          this uniqueness requirement. Raises ``ValueError`` for an unknown
+          id ``investment-adv-{op}-{key}-{uuid12}`` — a fresh 48-bit random
+          suffix is appended on every call so two calls for the same
+          ``(op, key)`` (e.g. two chat messages in the same advisor session, or
+          a client retry) essentially never collide on a live workflow id and
+          raise ``WorkflowAlreadyStartedError`` (a collision needs ~2e7
+          in-flight calls for the same key within the same short live window
+          for even a 50% chance — see the birthday bound at 2**48);
+          ``execute_workflow_sync`` documents this uniqueness requirement.
+          Raises ``ValueError`` for an unknown
           ``op``; propagates the workflow's failure (e.g. a wrapped
           ``ApplicationError``) on error.
     """
@@ -189,7 +192,7 @@ def execute_advisory_workflow(op: str, payload: dict[str, Any], *, key: str) -> 
     if workflow_cls is None:
         raise ValueError(f"unknown advisory op: {op}")
     workflow_id = (
-        f"{ADVISORY_WORKFLOW_ID_PREFIX}{op}-{key[:_ADVISORY_KEY_MAX_LEN]}-{uuid.uuid4().hex[:8]}"
+        f"{ADVISORY_WORKFLOW_ID_PREFIX}{op}-{key[:_ADVISORY_KEY_MAX_LEN]}-{uuid.uuid4().hex[:12]}"
     )
     # The activity's own start_to_close_timeout already bounds a single attempt
     # (_ADVISORY_RETRY caps retries at 1); give the execute-and-wait call a

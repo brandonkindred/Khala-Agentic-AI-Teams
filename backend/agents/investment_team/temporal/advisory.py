@@ -55,10 +55,15 @@ def _as_model(model_cls: Any, raw: Any) -> Any:
     accepts either so the reused agent methods always receive a real model.
 
     Preconditions:
-        ``raw`` is ``None``, an instance of ``model_cls``, or its JSON dump.
+        ``raw`` is ``None``, an instance of ``model_cls``, or its JSON dump
+        that ``parse_persisted``/``model_validate`` can parse.
     Postconditions:
         Returns ``None`` for ``None`` input, else a ``model_cls`` instance
         (via ``parse_persisted`` when available, else ``model_validate``).
+        Propagates unchanged whatever ``parse_persisted``/``model_validate``
+        raises on malformed ``raw`` — callers that need a typed
+        ``ApplicationError`` for corrupted persisted data wrap their own
+        ``_as_model`` call (see ``run_paper_trading_activity``'s preamble).
     """
     if raw is None or isinstance(raw, model_cls):
         return raw
