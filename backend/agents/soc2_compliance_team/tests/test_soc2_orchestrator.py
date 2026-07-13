@@ -128,6 +128,47 @@ def test_run_pipeline_failure_returns_failed(
     assert "audit exploded" in (out.error or "")
 
 
+def test_run_report_failure_preserves_tsc_results(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failure in report synthesis (after criteria already succeeded) must
+    preserve those completed tsc_results in the failed result, not discard
+    them."""
+    monkeypatch.setattr(pipeline, "load_context", lambda p: RepoContext(repo_path=str(p)))
+    monkeypatch.setattr(pipeline, "run_all_criteria", lambda ctx: _clean_results())
+
+    def _boom(rp, tsc):
+        raise RuntimeError("report boom")
+
+    monkeypatch.setattr(pipeline, "write_report", _boom)
+    out = SOC2AuditOrchestrator().run(tmp_path)
+    assert out.status == "failed"
+    assert "report boom" in (out.error or "")
+    assert len(out.tsc_results) == 5
+
+
+def test_run_with_timeout_returns_result_within_deadline() -> None:
+    from soc2_compliance_team.orchestrator import _run_with_timeout
+
+    assert _run_with_timeout(lambda: 42, timeout_seconds=5, timeout_message="too slow") == 42
+
+
+def test_run_with_timeout_raises_and_warns_on_timeout(caplog: pytest.LogCaptureFixture) -> None:
+    """Python has no safe way to kill the underlying thread, so the timeout
+    path must at least log a warning noting the thread is being abandoned."""
+    import time
+
+    from soc2_compliance_team.orchestrator import _run_with_timeout
+
+    with caplog.at_level("WARNING"):
+        with pytest.raises(TimeoutError, match="too slow"):
+            _run_with_timeout(
+                lambda: time.sleep(0.3), timeout_seconds=0.05, timeout_message="too slow"
+            )
+
+    assert any("abandoning its thread" in r.message for r in caplog.records)
+
+
 def test_run_soc2_audit_module_wrapper(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The module-level wrapper delegates to the orchestrator."""
     monkeypatch.setattr(pipeline, "load_context", lambda p: RepoContext(repo_path=str(p)))

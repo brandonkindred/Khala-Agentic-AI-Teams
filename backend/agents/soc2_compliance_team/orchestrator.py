@@ -48,6 +48,11 @@ def _run_with_timeout(fn: Callable[[], T], timeout_seconds: float, timeout_messa
     try:
         return future.result(timeout=timeout_seconds)
     except FutureTimeoutError:
+        logger.warning(
+            "SOC2 pipeline step exceeded %ss; abandoning its thread (Python cannot forcibly "
+            "kill it) — it keeps running in the background and its eventual result is discarded",
+            timeout_seconds,
+        )
         raise TimeoutError(timeout_message) from None
     finally:
         pool.shutdown(wait=False)

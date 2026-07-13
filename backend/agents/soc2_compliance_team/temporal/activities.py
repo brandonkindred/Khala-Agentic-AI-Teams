@@ -3,10 +3,13 @@
 Each ``@activity.defn`` wraps one stage of the decomposed audit pipeline
 (:mod:`soc2_compliance_team.pipeline`) — repo load, per-criterion audit, and
 report synthesis — plus a terminal failure marker. Activities are plain sync
-functions run in the worker's thread pool; heavy imports live inside the body so
-the module stays cheap for the temporalio sandbox to replay. Pydantic models
-cross the activity boundary as ``model_dump(mode="json")`` dicts and are
-reconstructed with ``model_validate``.
+functions run in the worker's thread pool. The ``@activity.defn`` decorator
+needs ``temporalio.activity`` at module level; every domain-heavy import
+(``pipeline``, ``context_snapshot``, ``models``, the ``api.main`` job-store
+helpers) is deferred to each function's body instead, so the module stays
+cheap for the temporalio sandbox to replay. Pydantic models cross the
+activity boundary as ``model_dump(mode="json")`` dicts and are reconstructed
+with ``model_validate``.
 
 The activities own the durable job-store bookkeeping (via the ``JobServiceClient``
 in :mod:`soc2_compliance_team.api.main`): ``load_repo_activity`` marks the job
