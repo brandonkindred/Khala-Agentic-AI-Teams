@@ -17,8 +17,11 @@ def test_temporal_package_exports_workflows_and_activities():
     mod = importlib.import_module("road_trip_planning_team.temporal")
     assert [w.__name__ for w in mod.WORKFLOWS] == ["RoadTripWorkflow"]
     # One activity per specialist step, framed by begin/persist bookkeeping and a
-    # mark-failed compensation — the order the workflow dispatches them in.
-    assert [a.__name__ for a in mod.ACTIVITIES] == [
+    # mark-failed compensation. ACTIVITIES only feeds Worker registration — the
+    # dispatch order is governed by workflows.py's own execute_activity call
+    # sequence, not this list — so compare as a set rather than pin an order
+    # that carries no contractual meaning here.
+    assert {a.__name__ for a in mod.ACTIVITIES} == {
         "begin_road_trip_job_activity",
         "profile_travelers_activity",
         "plan_route_activity",
@@ -29,7 +32,7 @@ def test_temporal_package_exports_workflows_and_activities():
         "mark_road_trip_failed_activity",
         # Legacy whole-pipeline activity retained for pre-patch workflow drain-out.
         "run_pipeline_activity",
-    ]
+    }
     assert mod.TASK_QUEUE == "road_trip_planning-queue"
 
 

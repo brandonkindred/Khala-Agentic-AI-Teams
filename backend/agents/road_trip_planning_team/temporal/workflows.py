@@ -205,9 +205,11 @@ class RoadTripWorkflow:
         Postconditions:
             - Drives begin → the five specialist steps → persist; the persist
               activity owns the COMPLETED transition and returns
-              ``{"job_id": job_id}``. Any step/bookkeeping failure records a
-              FAILED row (best-effort) and re-raises so the workflow reflects the
-              failure rather than completing silently.
+              ``{"job_id": job_id}``. Any step/bookkeeping failure advances
+              ``progress()`` to ``{"step": "failed", "fraction": 0.0}``, records a
+              FAILED row (best-effort), and re-raises so the workflow reflects the
+              failure rather than completing — or appearing to still be
+              running — silently.
         """
         try:
             self._advance("starting", 0.0)
@@ -287,6 +289,10 @@ class RoadTripWorkflow:
             self._advance("done", 1.0)
             return {"job_id": job_id}
         except Exception as exc:  # noqa: BLE001 — record the failure, then re-raise
+            # A caller polling progress() after this run raises must see "failed"
+            # rather than the last successful step's snapshot (e.g. plan_route at
+            # 0.25), which would misleadingly read as still in progress.
+            self._advance("failed", 0.0)
             # Best-effort FAILED write (its own failure must not mask the original
             # cause), then re-raise so the workflow reflects the failure.
             try:

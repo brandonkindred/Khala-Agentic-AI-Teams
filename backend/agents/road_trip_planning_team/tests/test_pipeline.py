@@ -26,6 +26,7 @@ from road_trip_planning_team.models import (
 from road_trip_planning_team.shared.job_store import (
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
+    JOB_STATUS_RUNNING,
     create_job,
     get_job,
 )
@@ -891,10 +892,20 @@ def test_run_plan_background_marks_failed_when_a_step_raises(monkeypatch, sample
 def test_run_plan_core_writes_running_then_completed(monkeypatch, sample_plan_request):
     create_job("job-core", request={"trip": {}})
     canned = TripItinerary(title="Core", total_days=1)
-    monkeypatch.setattr(rtp_pipeline, "run_pipeline", lambda body: canned)
+    captured: dict = {}
+
+    def _fake_run_pipeline(body):
+        # Snapshot the job's status as of the pipeline call, before
+        # run_plan_core writes COMPLETED — proves RUNNING was actually written
+        # first rather than skipped straight to COMPLETED.
+        captured["status_during_pipeline"] = get_job("job-core")["status"]
+        return canned
+
+    monkeypatch.setattr(rtp_pipeline, "run_pipeline", _fake_run_pipeline)
 
     rtp_pipeline.run_plan_core("job-core", sample_plan_request)
 
+    assert captured["status_during_pipeline"] == JOB_STATUS_RUNNING
     job = get_job("job-core")
     assert job["status"] == JOB_STATUS_COMPLETED
     assert job["result"]["title"] == "Core"
