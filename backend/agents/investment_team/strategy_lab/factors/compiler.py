@@ -120,7 +120,13 @@ def _lookback(node: BaseModel) -> int:
     if isinstance(node, MomentumK):
         return node.k + 1
     if isinstance(node, ZScoreResidualOLS):
-        return node.window
+        # The cross-symbol aux feed is not wired (see the compiled body's
+        # comment below): this primitive unconditionally returns NAN, so
+        # its lookback must not inflate MIN_HISTORY by up to node.window
+        # (400) for a primitive that can never contribute a value. Revert
+        # to `node.window` once the aux feed lands and the body computes a
+        # real OLS residual.
+        return 1
     if isinstance(node, Skew):
         return node.window + 1
     if isinstance(node, VolRegimeState):

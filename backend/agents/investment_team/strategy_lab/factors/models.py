@@ -109,7 +109,16 @@ class MomentumK(_NodeBase):
 
 
 class ZScoreResidualOLS(_NodeBase):
-    """Z-score of the rolling-OLS residual of close vs ``vs_symbol`` close."""
+    """Z-score of the rolling-OLS residual of close vs ``vs_symbol`` close.
+
+    ``window`` is NOT currently consulted by ``compiler._lookback`` — the
+    aux cross-symbol feed isn't wired yet (the compiled body unconditionally
+    returns NAN), so the lookback is pinned to a minimal constant instead of
+    ``window`` to avoid inflating a genome's warm-up requirement for a
+    primitive that can never contribute a value. Restore
+    ``compiler._lookback``'s ``ZScoreResidualOLS`` branch to ``node.window``
+    when the aux feed lands and the body computes a real OLS residual.
+    """
 
     type: Literal["zscore_residual_ols"] = "zscore_residual_ols"
     window: int = Field(default=60, ge=10, le=400)
