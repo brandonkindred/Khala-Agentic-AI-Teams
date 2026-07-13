@@ -64,6 +64,44 @@ Transitions are serialised by a per-agent `asyncio.Lock`. State is
 checkpointed after every transition and reconciled with `docker inspect`
 on the next request so an API restart doesn't orphan stacks.
 
+### Durable execution (Temporal)
+
+When `TEMPORAL_ADDRESS` is set, the state-**mutating** transitions run as
+durable Temporal workflows/activities instead of direct in-process calls
+(`SandboxAcquireWorkflow` / `SandboxTeardownWorkflow`, and the idle reaper as a
+single self-scheduling `SandboxReaperWorkflow`). Read-only ops (`status`,
+`list_active`, `metrics`, `note_activity`) stay direct on the API loop. Dispatch
+lives in `agent_provisioning_team.temporal.sandbox_dispatch`; the workflows and
+activities are exported from `temporal/__init__.py` as `SANDBOX_WORKFLOWS` /
+`SANDBOX_ACTIVITIES` — deliberately **not** part of the team's Pattern A
+`WORKFLOWS`/`ACTIVITIES` lists. They run on their own `SANDBOX_TASK_QUEUE`
+(`temporal/constants.py`), served only by a worker started explicitly from
+`unified_api/main.py`'s own lifespan
+(`start_agent_provisioning_sandbox_temporal_worker_thread`) — never by Pattern
+A's auto-boot, which also runs unchanged inside the standalone
+`agent-provisioning-service` team container. Sharing a task queue between the
+two would let Temporal dispatch a sandbox activity into that other process,
+against a different, unsynchronized `Lifecycle` instance than the one this
+API's `status`/`list`/`metrics`/`note_activity` routes read — silently
+diverging state (e.g. the reaper tearing down a sandbox it wrongly believes
+idle). Two invariants make the rest of this safe on the process-wide
+singleton:
+
+- **Loop affinity** — every `asyncio.Lock` taker (`acquire`, `teardown`,
+  `reap_once` via `teardown`) runs on exactly one event loop: the Temporal
+  worker loop when enabled, the API loop when not. It is never half-migrated
+  (moving only some mutators would split the shared lock across two loops).
+- **Thread safety** — a `threading.Lock` on the `Lifecycle` serialises every
+  `_state` read/write and persist, since mutators now run on the worker thread
+  while read-only ops run on the API loop. `state.save()` snapshots before
+  serialising and writes a uniquely-named temp file so concurrent persists
+  can't corrupt `state.json`.
+
+Durability is bounded: `_state` is in-memory per process, so a sandbox activity
+retried on a different worker replica sees empty state. Single-process
+deployments are unaffected; the concentrated win is the durable, single-instance
+reaper. `PROVISION_THREAD_FALLBACK=1` forces the in-process path.
+
 ## SandboxSpec (manifest side)
 
 Each agent's YAML manifest may declare a `sandbox:` block consumed by the
@@ -87,6 +125,10 @@ service (its own Postgres, its own Temporal, etc.).
 | `AGENT_PROVISIONING_SANDBOX_STATE_FILE` | `$AGENT_CACHE/agent_provisioning/sandboxes/state.json` | Where to checkpoint state across restarts. |
 | `AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES` | `5` | Idle threshold before the reaper tears a sandbox down. |
 | `AGENT_PROVISIONING_SANDBOX_BOOT_TIMEOUT_S` | `90` | How long to wait for the agent's `/health` to succeed. (Cold start is dominated by Postgres + Temporal coming up.) |
+| `AGENT_PROVISIONING_SANDBOX_ACQUIRE_TIMEOUT_S` | `300` | Temporal `SandboxAcquireWorkflow` activity ceiling; must exceed the boot timeout. |
+| `AGENT_PROVISIONING_SANDBOX_TEARDOWN_TIMEOUT_S` | `120` | Temporal `SandboxTeardownWorkflow` activity ceiling. |
+| `AGENT_PROVISIONING_SANDBOX_REAP_TIMEOUT_S` | `300` | Temporal reap activity ceiling per tick. |
+| `AGENT_PROVISIONING_SANDBOX_REAPER_INTERVAL_S` | `60` | Sleep between `SandboxReaperWorkflow` ticks (Temporal mode). |
 
 ## Local smoke test
 

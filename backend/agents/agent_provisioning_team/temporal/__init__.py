@@ -4,6 +4,10 @@ Follows shared_temporal Pattern A: exports ``WORKFLOWS``/``ACTIVITIES`` and
 self-boots a worker via ``start_team_worker`` when ``TEMPORAL_ADDRESS`` is
 set, so ``shared_temporal.teams_registry.start_all_team_workers`` picks up
 this team the same way it picks up every other team.
+
+Sandbox workflows/activities are exported separately, as ``SANDBOX_WORKFLOWS``
+/``SANDBOX_ACTIVITIES`` — this module never auto-boots a worker for them (see
+their docstring below for why).
 """
 
 from agent_provisioning_team.temporal.activities import (
@@ -11,6 +15,7 @@ from agent_provisioning_team.temporal.activities import (
     compensate_activity_v2,
     credentials_activity_v2,
     deliver_activity_v2,
+    deprovision_activity,
     documentation_activity_v2,
     provision_tool_activity,
     run_provisioning_activity,
@@ -18,12 +23,27 @@ from agent_provisioning_team.temporal.activities import (
 )
 from agent_provisioning_team.temporal.client import is_temporal_enabled
 from agent_provisioning_team.temporal.constants import TASK_QUEUE
+from agent_provisioning_team.temporal.sandbox_activities import (
+    sandbox_acquire_activity,
+    sandbox_reap_activity,
+    sandbox_teardown_activity,
+)
+from agent_provisioning_team.temporal.sandbox_workflows import (
+    SandboxAcquireWorkflow,
+    SandboxReaperWorkflow,
+    SandboxTeardownWorkflow,
+)
 from agent_provisioning_team.temporal.workflows import (
+    AgentDeprovisioningWorkflow,
     AgentProvisioningWorkflow,
     AgentProvisioningWorkflowV2,
 )
 
-WORKFLOWS = [AgentProvisioningWorkflow, AgentProvisioningWorkflowV2]
+WORKFLOWS = [
+    AgentProvisioningWorkflow,
+    AgentProvisioningWorkflowV2,
+    AgentDeprovisioningWorkflow,
+]
 ACTIVITIES = [
     run_provisioning_activity,
     setup_activity_v2,
@@ -33,6 +53,26 @@ ACTIVITIES = [
     documentation_activity_v2,
     deliver_activity_v2,
     compensate_activity_v2,
+    deprovision_activity,
+]
+
+# Sandbox workflows/activities are deliberately NOT part of WORKFLOWS/ACTIVITIES
+# above (and so are never served by this Pattern-A auto-boot, which also fires
+# inside the standalone agent-provisioning-service team container). They run
+# on their own SANDBOX_TASK_QUEUE, served only by a worker booted explicitly
+# from unified_api/main.py's own lifespan
+# (temporal/worker.py::start_agent_provisioning_sandbox_temporal_worker_thread)
+# — see SANDBOX_TASK_QUEUE's docstring in temporal/constants.py for why this
+# separation exists (the sandbox Lifecycle singleton is process-local state).
+SANDBOX_WORKFLOWS = [
+    SandboxAcquireWorkflow,
+    SandboxTeardownWorkflow,
+    SandboxReaperWorkflow,
+]
+SANDBOX_ACTIVITIES = [
+    sandbox_acquire_activity,
+    sandbox_teardown_activity,
+    sandbox_reap_activity,
 ]
 
 from shared_temporal import start_team_worker  # noqa: E402
@@ -45,6 +85,12 @@ __all__ = [
     "TASK_QUEUE",
     "WORKFLOWS",
     "ACTIVITIES",
+    "SANDBOX_WORKFLOWS",
+    "SANDBOX_ACTIVITIES",
     "AgentProvisioningWorkflow",
     "AgentProvisioningWorkflowV2",
+    "AgentDeprovisioningWorkflow",
+    "SandboxAcquireWorkflow",
+    "SandboxTeardownWorkflow",
+    "SandboxReaperWorkflow",
 ]

@@ -49,10 +49,14 @@ from agent_console.models import RunCreate
 from agent_provisioning_team.sandbox import (
     DockerUnavailableError,
     SandboxStatus,
-    acquire,
     note_activity,
 )
 from agent_provisioning_team.sandbox.state import COLD_START_LOG_PREFIX
+
+# Temporal-aware sandbox acquire (durable workflow when Temporal is enabled, direct
+# in-process call otherwise). Bound at module scope so it dispatches correctly and
+# stays patchable by the route tests.
+from agent_provisioning_team.temporal.sandbox_dispatch import acquire_sandbox as acquire
 from agent_registry import AgentDetail, AgentSummary, TeamGroup, get_registry
 from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
 from shared_agent_invoke.limits import (

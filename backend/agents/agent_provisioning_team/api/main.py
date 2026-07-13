@@ -67,8 +67,17 @@ COMPENSATE_TIMEOUT_S = float(os.getenv("COMPENSATE_TIMEOUT_S", "15"))
 
 
 def _provision_thread_fallback() -> bool:
-    """Escape hatch: force the legacy thread path even when TEMPORAL_ADDRESS is set."""
-    return os.getenv("PROVISION_THREAD_FALLBACK", "").strip().lower() in ("1", "true", "yes")
+    """Escape hatch: force the legacy thread path even when TEMPORAL_ADDRESS is set.
+
+    Delegates to the shared, single-source-of-truth check in
+    ``temporal.client.provision_thread_fallback_enabled`` — also used by
+    ``sandbox_dispatch.sandbox_temporal_enabled`` — so provisioning, deprovision,
+    and the sandbox lifecycle can never independently drift on which env-var
+    spellings disable Temporal.
+    """
+    from agent_provisioning_team.temporal.client import provision_thread_fallback_enabled
+
+    return provision_thread_fallback_enabled()
 
 
 def _temporal_starter():
@@ -84,6 +93,23 @@ def _temporal_starter():
     except ImportError:
         return None
     return start_provisioning_workflow if is_temporal_enabled() else None
+
+
+def _deprovision_starter():
+    """Return ``run_deprovision_workflow`` when ``DELETE /environments/{id}``
+    should run the deprovision as a durable Temporal workflow, else ``None`` so
+    the caller falls back to the in-process ``orchestrator.deprovision`` call.
+
+    Mirrors :func:`_temporal_starter`: honors the ``PROVISION_THREAD_FALLBACK``
+    escape hatch and returns ``None`` on import error or when Temporal is off."""
+    if _provision_thread_fallback():
+        return None
+    try:
+        from agent_provisioning_team.temporal.client import is_temporal_enabled
+        from agent_provisioning_team.temporal.start_workflow import run_deprovision_workflow
+    except ImportError:
+        return None
+    return run_deprovision_workflow if is_temporal_enabled() else None
 
 
 _executor: Optional[ThreadPoolExecutor] = None
@@ -564,7 +590,34 @@ def deprovision_agent(
     agent_id: str,
     force: bool = Query(False, description="Force removal even if errors occur"),
 ) -> DeprovisionResponse:
-    """Deprovision an agent and remove all resources."""
+    """Deprovision an agent and remove all resources.
+
+    Runs as a durable ``AgentDeprovisioningWorkflow`` when Temporal is enabled
+    (execute-and-wait, so the response shape is unchanged), and falls back to
+    the in-process ``orchestrator.deprovision`` call otherwise. This handler is
+    a sync ``def`` — FastAPI runs it in its threadpool — so the blocking
+    execute-and-wait dispatch does not stall the event loop.
+
+    Postconditions:
+        * Always returns a ``DeprovisionResponse`` — never raises. Matches the
+          pre-Temporal contract of ``orchestrator.deprovision`` (which never
+          raises either): an infrastructure-level failure of the Temporal
+          dispatch itself (client not ready, timeout, workflow failure) is
+          reported as ``success=False`` with the failure in ``error``, not as
+          an unhandled 500.
+    """
+    starter = _deprovision_starter()
+    if starter is not None:
+        try:
+            return DeprovisionResponse.model_validate(starter(agent_id, force))
+        except Exception as exc:
+            logger.exception("Durable deprovision failed for agent=%s", agent_id)
+            return DeprovisionResponse(
+                agent_id=agent_id,
+                success=False,
+                details={},
+                error=f"Deprovision workflow failed: {exc}",
+            )
     return orchestrator.deprovision(agent_id, force=force)
 
 

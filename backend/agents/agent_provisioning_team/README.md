@@ -31,6 +31,62 @@ The team uses a **phase-based workflow** with 6 sequential phases:
 
 Progress is tracked via a file-based job store and exposed through REST API endpoints.
 
+## Durable execution (Temporal)
+
+Every operation the team performs runs as a durable Temporal workflow/activity
+(decorator "annotations": `@workflow.defn` / `@workflow.run` / `@activity.defn`)
+when `TEMPORAL_ADDRESS` is set, and falls back to an in-process path otherwise.
+Workflows/activities live in `temporal/`. Provisioning/deprovision are
+registered in the `WORKFLOWS` / `ACTIVITIES` lists in `temporal/__init__.py`,
+served by the single Pattern A worker (task queue `agent-provisioning`) that
+auto-boots on import. **Sandbox workflows/activities are the exception**: they
+are exported separately as `SANDBOX_WORKFLOWS` / `SANDBOX_ACTIVITIES` and are
+*not* part of `WORKFLOWS`/`ACTIVITIES` — they run on a dedicated
+`SANDBOX_TASK_QUEUE`, served only by a worker started explicitly from
+`unified_api/main.py`'s own lifespan (never by Pattern A's auto-boot, which
+also runs inside the standalone `agent-provisioning-service` team container).
+This keeps the sandbox `Lifecycle` singleton's process-local state from being
+mutated by an activity dispatched into the wrong process — see
+`temporal/constants.py`'s `SANDBOX_TASK_QUEUE` docstring and
+`sandbox/README.md`'s "Durable execution" section for the full rationale. The
+escape hatch `PROVISION_THREAD_FALLBACK=1` forces the in-process path for the
+whole team (including sandbox) even when Temporal is configured.
+
+### Coverage — every team operation → its workflow/activity
+
+| Operation | Entry point | Workflow | Activities |
+|---|---|---|---|
+| Provision (default) | `POST /provision` | `AgentProvisioningWorkflowV2` | `setup` / `credentials` / per-tool `provision_tool` (parallel) / `audit` / `documentation` / `deliver` / `compensate` (`*_activity_v2`) |
+| Provision (legacy) | drain-only | `AgentProvisioningWorkflow` | `run_provisioning_activity` |
+| Resume / restart | `POST /provision/job/{id}/resume`·`/restart` | `AgentProvisioningWorkflowV2` (`skip_phases` + `prior_results`) | same as provision |
+| Deprovision | `DELETE /environments/{agent_id}` | `AgentDeprovisioningWorkflow` (execute-and-wait) | `deprovision_activity` |
+| Sandbox warm | `POST /api/agents/sandboxes/{id}/warm`, Agent Console invoke | `SandboxAcquireWorkflow` | `sandbox_acquire_activity` |
+| Sandbox teardown | `DELETE /api/agents/sandboxes/{id}` | `SandboxTeardownWorkflow` | `sandbox_teardown_activity` |
+| Sandbox idle reaper | started once at API boot | `SandboxReaperWorkflow` (self-scheduling, fixed id, `continue_as_new`) | `sandbox_reap_activity` |
+
+Deprovision and sandbox dispatch mirror `_temporal_starter()`: they branch on
+`is_temporal_enabled()` and use `execute_workflow_sync` (sync `DELETE
+/environments` handler) or the non-blocking `execute_workflow_async`
+(`async def` sandbox routes) so the API event loop is never blocked.
+
+### Sandbox lifecycle invariants
+
+The sandbox pool (`sandbox/`) is a process-wide singleton with in-memory state.
+Moving its mutators onto Temporal upholds two invariants (see `sandbox/README.md`
+and the docstrings in `sandbox/lifecycle.py`):
+
+- **Loop affinity** — every `asyncio.Lock` taker (`acquire`, `teardown`, and
+  `reap_once` via `teardown`) runs on exactly one loop: the Temporal worker loop
+  when enabled, the API loop when not. Never half-migrate.
+- **Thread safety** — all `_state` reads/writes and every persist are serialized
+  by a `threading.Lock`, because mutators now run on the worker thread while
+  read-only ops (`status`/`list`/`metrics`/`note_activity`) stay on the API loop.
+
+**Durability caveat:** sandbox `_state` is in-memory per process, so a sandbox
+activity retried on a *different* worker replica sees empty state. Single-process
+deployments (the norm here) are unaffected; the concentrated Temporal win is the
+durable, single-instance idle reaper plus per-activity retries/observability.
+
 ## API Endpoints
 
 | Method | Endpoint | Description |

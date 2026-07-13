@@ -152,6 +152,35 @@ async def test_resolve_team_unknown() -> None:
             await _resolve_team("ghost")
 
 
+@pytest.mark.asyncio
+async def test_resolve_team_calls_get_registry_off_the_event_loop_thread() -> None:
+    """Regression: ``get_registry()`` itself — not just the ``.get(agent_id)``
+    lookup on its result — must run inside the ``asyncio.to_thread`` worker.
+    ``get_registry`` is only cheap on a cache hit; a cold-cache first call
+    performs ``AgentRegistry.load()``'s full manifest directory scan. Evaluating
+    ``get_registry()`` as an eagerly-computed argument to ``asyncio.to_thread``
+    (the pre-fix shape) would run that scan directly on the event loop thread."""
+    import threading
+
+    fake_manifest = MagicMock()
+    fake_manifest.team = "myteam"
+    fake_registry = MagicMock()
+    fake_registry.get.return_value = fake_manifest
+    caller_thread = threading.current_thread()
+    captured: dict = {}
+
+    def _recording_get_registry():
+        captured["thread"] = threading.current_thread()
+        return fake_registry
+
+    from agent_provisioning_team.sandbox.lifecycle import _resolve_team
+
+    with patch("agent_registry.get_registry", side_effect=_recording_get_registry):
+        assert await _resolve_team("agent.x") == "myteam"
+
+    assert captured["thread"] is not caller_thread
+
+
 # ---------------------------------------------------------------------------
 # sandbox.provisioner._exec timeout
 # ---------------------------------------------------------------------------

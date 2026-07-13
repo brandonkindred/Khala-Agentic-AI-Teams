@@ -89,6 +89,16 @@ def test_cancel_workflow_sync_requests_cancel(running_loop):
     assert captured["cancel"] is True
 
 
+def test_start_workflow_sync_requires_non_empty_ids():
+    """start_workflow_sync's docstring documents non-empty workflow_id/task_queue
+    as preconditions, matching its execute/signal/cancel siblings — enforce them
+    the same way. The asserts precede the client wait, so no worker is needed."""
+    with pytest.raises(AssertionError):
+        runner.start_workflow_sync(object(), workflow_id="", task_queue="q")
+    with pytest.raises(AssertionError):
+        runner.start_workflow_sync(object(), workflow_id="wid", task_queue="")
+
+
 def test_signal_requires_non_empty_ids(running_loop):
     client_mod.set_temporal_client(_FakeClient({}))
     client_mod.set_temporal_loop(running_loop)
@@ -160,3 +170,124 @@ def test_bridges_are_exported():
     assert shared_temporal.signal_workflow_sync is runner.signal_workflow_sync
     assert shared_temporal.cancel_workflow_sync is runner.cancel_workflow_sync
     assert shared_temporal.execute_workflow_sync is runner.execute_workflow_sync
+    assert shared_temporal.execute_workflow_async is runner.execute_workflow_async
+
+
+# ---------------------------------------------------------------------------
+# execute_workflow_async — non-blocking execute-and-wait for async callers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_async_returns_result(running_loop):
+    """The async bridge schedules on the worker loop and awaits the result
+    without blocking the caller's loop."""
+    captured: dict = {}
+    sentinel = {"handle": "warm"}
+    client_mod.set_temporal_client(_FakeExecClient(captured, sentinel))
+    client_mod.set_temporal_loop(running_loop)
+
+    out = await runner.execute_workflow_async(object(), "a1", workflow_id="wid", task_queue="q")
+
+    assert out is sentinel
+    assert captured["id"] == "wid"
+    assert captured["task_queue"] == "q"
+    assert captured["args"] == ["a1"]
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_async_requires_non_empty_ids():
+    with pytest.raises(AssertionError):
+        await runner.execute_workflow_async(object(), workflow_id="", task_queue="q")
+    with pytest.raises(AssertionError):
+        await runner.execute_workflow_async(object(), workflow_id="wid", task_queue="")
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_async_raises_when_no_worker():
+    prev_c, prev_l = client_mod.get_temporal_client(), client_mod.get_temporal_loop()
+    client_mod.set_temporal_client(None)
+    client_mod.set_temporal_loop(None)
+    try:
+        with pytest.raises(RuntimeError, match="worker"):
+            await runner.execute_workflow_async(
+                object(), workflow_id="wid", task_queue="q", client_ready_timeout_s=0.05
+            )
+    finally:
+        client_mod.set_temporal_client(prev_c)
+        client_mod.set_temporal_loop(prev_l)
+
+
+class _FakeSlowClient:
+    """A client whose ``execute_workflow`` never resolves within the test's timeout."""
+
+    async def execute_workflow(self, workflow_run, *, args, id, task_queue):
+        await asyncio.sleep(10)
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_async_times_out(running_loop):
+    """``execute_timeout_s`` bounds the caller's wait: a workflow that outlives
+    it raises TimeoutError instead of hanging the caller forever (the workflow
+    itself keeps running server-side — Temporal is durable — this only stops
+    the caller's own wait, per the docstring's 'best-effort: abandon the
+    cross-loop future' comment)."""
+    client_mod.set_temporal_client(_FakeSlowClient())
+    client_mod.set_temporal_loop(running_loop)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await runner.execute_workflow_async(
+            object(), workflow_id="wid", task_queue="q", execute_timeout_s=0.1
+        )
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_async_cancelled_abandons_cross_loop_future(running_loop):
+    """Cancelling the caller's own task while ``execute_workflow_async`` is awaiting
+    the workflow result must re-raise ``CancelledError`` (not swallow it or raise
+    something else) and must not itself blow up calling ``fut.cancel()`` on the
+    still-running cross-loop future — the 'best-effort: abandon' path the
+    docstring describes, exercised here via task cancellation rather than a timeout."""
+    client_mod.set_temporal_client(_FakeSlowClient())
+    client_mod.set_temporal_loop(running_loop)
+
+    task = asyncio.ensure_future(
+        runner.execute_workflow_async(object(), workflow_id="wid", task_queue="q")
+    )
+    await asyncio.sleep(0.05)  # let the coroutine reach its `await asyncio.wait_for(...)`
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_async_uses_dedicated_client_wait_executor(running_loop, monkeypatch):
+    """Regression: the client-ready poll previously ran via ``asyncio.to_thread``,
+    which always uses the running loop's *default* executor — a burst of concurrent
+    cold-start callers could exhaust threads shared with unrelated ``to_thread``
+    work elsewhere in the process. It must instead run on shared_temporal's own
+    dedicated pool (``runner._get_client_wait_executor``), identifiable by its
+    ``temporal-client-wait`` thread name prefix."""
+    import threading
+
+    captured: dict = {}
+    sentinel = {"ok": True}
+    orig_get_client = runner.get_temporal_client
+
+    def _recording_get_client():
+        captured["thread_name"] = threading.current_thread().name
+        return orig_get_client()
+
+    # Patch the name bound inside `runner` (not `client_mod`) — `_await_client`
+    # calls the function via its own `from shared_temporal.client import
+    # get_temporal_client` binding, so patching the origin module's attribute
+    # would not intercept calls made through runner's already-bound name.
+    monkeypatch.setattr(runner, "get_temporal_client", _recording_get_client)
+    client_mod.set_temporal_client(_FakeExecClient({}, sentinel))
+    client_mod.set_temporal_loop(running_loop)
+
+    out = await runner.execute_workflow_async(object(), workflow_id="wid", task_queue="q")
+
+    assert out is sentinel
+    assert captured["thread_name"].startswith("temporal-client-wait")

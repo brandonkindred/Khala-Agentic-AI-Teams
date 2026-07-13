@@ -20,15 +20,19 @@ from fastapi import APIRouter, HTTPException
 
 from agent_provisioning_team.sandbox import (
     DockerUnavailableError,
+    SandboxAcquireFailedError,
     SandboxHandle,
     SandboxMetrics,
     UnknownAgentError,
-    acquire,
     list_active,
     metrics,
     status,
-    teardown,
 )
+from agent_provisioning_team.sandbox.provisioner import DockerError
+
+# Temporal-aware mutators (durable workflows when Temporal is enabled, direct
+# in-process calls otherwise). Read-only routes below stay direct.
+from agent_provisioning_team.temporal.sandbox_dispatch import acquire_sandbox, teardown_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +54,10 @@ async def sandbox_metrics() -> SandboxMetrics:
 @router.post("/{agent_id}/warm", response_model=SandboxHandle)
 async def warm_sandbox(agent_id: str) -> SandboxHandle:
     try:
-        return await acquire(agent_id)
+        return await acquire_sandbox(agent_id)
     except UnknownAgentError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except DockerUnavailableError as exc:
+    except (DockerUnavailableError, SandboxAcquireFailedError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
@@ -67,5 +71,14 @@ async def get_status(agent_id: str) -> SandboxHandle:
 
 @router.delete("/{agent_id}")
 async def delete_sandbox(agent_id: str) -> dict[str, str]:
-    await teardown(agent_id)
+    try:
+        await teardown_sandbox(agent_id)
+    except DockerError as exc:
+        # The only exception teardown()/teardown_sandbox_via_temporal() can
+        # realistically raise: stop_container() failing (e.g. daemon
+        # unreachable mid-operation). Unlike warm_sandbox, teardown never
+        # raises UnknownAgentError (a never-warmed/unknown agent_id is a
+        # silent no-op, matching test_teardown_is_idempotent_for_cold_agent)
+        # or SandboxAcquireFailedError (acquire-only).
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"agent_id": agent_id, "status": "torn down"}

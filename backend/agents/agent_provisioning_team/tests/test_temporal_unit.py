@@ -26,18 +26,74 @@ def test_task_queue_default() -> None:
 
 
 def test_task_queue_env_override(monkeypatch) -> None:
+    # importlib.reload mutates the shared constants module in place, so the
+    # restore-reload MUST run even if the assertion below fails, or every
+    # later test in this worker process that reads constants.TASK_QUEUE by
+    # attribute access (not a frozen `from X import Y` binding) would
+    # observe the overridden value for the rest of the session.
     monkeypatch.setenv("TEMPORAL_TASK_QUEUE_AGENT_PROVISIONING", "custom-queue")
-    # Force re-import to pick up env override.
     import importlib
 
     from agent_provisioning_team.temporal import constants as constants_mod
 
-    reloaded = importlib.reload(constants_mod)
-    assert reloaded.TASK_QUEUE == "custom-queue"
+    try:
+        reloaded = importlib.reload(constants_mod)
+        assert reloaded.TASK_QUEUE == "custom-queue"
+    finally:
+        monkeypatch.delenv("TEMPORAL_TASK_QUEUE_AGENT_PROVISIONING", raising=False)
+        importlib.reload(constants_mod)
 
-    # Restore original module by reloading without the env var
-    monkeypatch.delenv("TEMPORAL_TASK_QUEUE_AGENT_PROVISIONING", raising=False)
-    importlib.reload(reloaded)
+
+def test_sandbox_task_queue_default_differs_from_general_queue() -> None:
+    from agent_provisioning_team.temporal import constants
+
+    assert isinstance(constants.SANDBOX_TASK_QUEUE, str)
+    assert constants.SANDBOX_TASK_QUEUE
+    assert constants.SANDBOX_TASK_QUEUE != constants.TASK_QUEUE
+
+
+def test_sandbox_task_queue_env_override(monkeypatch) -> None:
+    # Same restore-must-always-run rationale as test_task_queue_env_override.
+    monkeypatch.setenv("TEMPORAL_TASK_QUEUE_AGENT_PROVISIONING_SANDBOX", "custom-sandbox-queue")
+    import importlib
+
+    from agent_provisioning_team.temporal import constants as constants_mod
+
+    try:
+        reloaded = importlib.reload(constants_mod)
+        assert reloaded.SANDBOX_TASK_QUEUE == "custom-sandbox-queue"
+    finally:
+        monkeypatch.delenv("TEMPORAL_TASK_QUEUE_AGENT_PROVISIONING_SANDBOX", raising=False)
+        importlib.reload(constants_mod)
+
+
+def test_workflows_activities_exclude_sandbox_items() -> None:
+    """P1 regression: WORKFLOWS/ACTIVITIES (served by Pattern A's auto-boot,
+    which also fires inside the standalone agent-provisioning-service team
+    container) must never include sandbox workflows/activities — those run
+    only on SANDBOX_TASK_QUEUE via a worker booted solely inside the unified
+    API process."""
+    from agent_provisioning_team import temporal as temporal_pkg
+
+    workflow_names = {w.__name__ for w in temporal_pkg.WORKFLOWS}
+    activity_names = {getattr(a, "__name__", str(a)) for a in temporal_pkg.ACTIVITIES}
+    sandbox_workflow_names = {w.__name__ for w in temporal_pkg.SANDBOX_WORKFLOWS}
+    sandbox_activity_names = {
+        getattr(a, "__name__", str(a)) for a in temporal_pkg.SANDBOX_ACTIVITIES
+    }
+
+    assert workflow_names.isdisjoint(sandbox_workflow_names)
+    assert activity_names.isdisjoint(sandbox_activity_names)
+    assert sandbox_workflow_names == {
+        "SandboxAcquireWorkflow",
+        "SandboxTeardownWorkflow",
+        "SandboxReaperWorkflow",
+    }
+    assert sandbox_activity_names == {
+        "sandbox_acquire_activity",
+        "sandbox_teardown_activity",
+        "sandbox_reap_activity",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +275,7 @@ def test_create_worker_returns_none_when_no_client() -> None:
 
 
 def test_create_worker_constructs_worker_when_enabled() -> None:
+    from agent_provisioning_team.temporal import ACTIVITIES, WORKFLOWS
     from agent_provisioning_team.temporal import worker as worker_mod
 
     fake_worker = MagicMock(name="fake-worker")
@@ -230,12 +287,18 @@ def test_create_worker_constructs_worker_when_enabled() -> None:
 
     assert result is fake_worker
     mock_worker_cls.assert_called_once()
-    # Ensure activities / workflows lists make it through
+    # The worker must serve exactly the canonical WORKFLOWS/ACTIVITIES lists
+    # from temporal/__init__.py — not a separately maintained copy — so the
+    # two can never silently drift out of sync.
     _, kwargs = mock_worker_cls.call_args
     assert kwargs["task_queue"] == worker_mod.TASK_QUEUE
-    assert worker_mod.AgentProvisioningWorkflow in kwargs["workflows"]
-    assert worker_mod.AgentProvisioningWorkflowV2 in kwargs["workflows"]
-    assert len(kwargs["activities"]) == 8
+    assert kwargs["workflows"] is WORKFLOWS
+    assert kwargs["activities"] is ACTIVITIES
+    # Provisioning/deprovision only — sandbox workflows/activities are
+    # deliberately excluded (they run on their own SANDBOX_TASK_QUEUE via a
+    # separately-booted worker; see start_agent_provisioning_sandbox_temporal_worker_thread).
+    assert len(kwargs["activities"]) == 9
+    assert len(kwargs["workflows"]) == 3
 
 
 def test_start_worker_thread_no_op_when_disabled() -> None:
@@ -269,6 +332,43 @@ def test_start_worker_thread_delegates_to_start_team_worker() -> None:
         args, kwargs = mock_start.call_args
         assert args[0] == "agent_provisioning"
         assert kwargs["task_queue"] == worker_mod.TASK_QUEUE
+
+
+def test_start_sandbox_worker_thread_returns_false_when_disabled() -> None:
+    import shared_temporal
+    from agent_provisioning_team.temporal import worker as worker_mod
+
+    with (
+        patch.object(worker_mod, "is_temporal_enabled", return_value=False),
+        patch.object(shared_temporal, "start_team_worker") as mock_start,
+    ):
+        assert worker_mod.start_agent_provisioning_sandbox_temporal_worker_thread() is False
+        mock_start.assert_not_called()
+
+
+def test_start_sandbox_worker_thread_uses_distinct_team_key_and_queue() -> None:
+    """Must use a DIFFERENT team key and task queue from the general
+    provisioning worker (P1 fix): sandbox activities must never be servable
+    by the standalone agent-provisioning-service team container, which also
+    calls start_agent_provisioning_temporal_worker_thread on TASK_QUEUE."""
+    import shared_temporal
+    from agent_provisioning_team.temporal import SANDBOX_ACTIVITIES, SANDBOX_WORKFLOWS
+    from agent_provisioning_team.temporal import worker as worker_mod
+    from agent_provisioning_team.temporal.constants import SANDBOX_TASK_QUEUE, TASK_QUEUE
+
+    with (
+        patch.object(worker_mod, "is_temporal_enabled", return_value=True),
+        patch.object(shared_temporal, "start_team_worker", return_value=True) as mock_start,
+    ):
+        assert worker_mod.start_agent_provisioning_sandbox_temporal_worker_thread() is True
+        mock_start.assert_called_once()
+        args, kwargs = mock_start.call_args
+        assert args[0] == "agent_provisioning_sandbox"
+        assert args[0] != "agent_provisioning"
+        assert kwargs["task_queue"] == SANDBOX_TASK_QUEUE
+        assert kwargs["task_queue"] != TASK_QUEUE
+        assert args[1] == SANDBOX_WORKFLOWS
+        assert args[2] == SANDBOX_ACTIVITIES
 
 
 # ---------------------------------------------------------------------------

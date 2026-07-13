@@ -247,3 +247,37 @@ class AgentProvisioningWorkflowV2:
             schedule_to_close_timeout=PHASE_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
         )
+
+
+@workflow.defn(name="AgentDeprovisioningWorkflow")
+class AgentDeprovisioningWorkflow:
+    """Deprovision one agent's resources as a single durable activity.
+
+    The teardown counterpart to :class:`AgentProvisioningWorkflowV2`. Dispatched
+    execute-and-wait from the ``DELETE /environments/{agent_id}`` handler so the
+    HTTP response is the workflow's result.
+
+    Invariants:
+        * Runs exactly one activity — the orchestrator's existing best-effort
+          deprovision — so the whole teardown is retried atomically on
+          infrastructure failure.
+    """
+
+    @workflow.run
+    async def run(self, agent_id: str, force: bool = False) -> dict[str, Any]:
+        """Execute deprovision and return the ``DeprovisionResponse`` dump.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+        Postconditions:
+            * Returns the ``DeprovisionResponse.model_dump()`` produced by
+              ``deprovision_activity``.
+        """
+        assert agent_id, "agent_id must be non-empty"
+        return await workflow.execute_activity(
+            _activities.deprovision_activity,
+            args=[agent_id, force],
+            task_queue=TASK_QUEUE,
+            schedule_to_close_timeout=PHASE_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
+        )

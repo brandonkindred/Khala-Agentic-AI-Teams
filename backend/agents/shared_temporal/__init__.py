@@ -33,8 +33,10 @@ from shared_temporal.client import (
     set_temporal_client,
     set_temporal_loop,
 )
+from shared_temporal.failure_translation import translate_workflow_failure
 from shared_temporal.runner import (
     cancel_workflow_sync,
+    execute_workflow_async,
     execute_workflow_sync,
     run_team_job,
     signal_workflow_sync,
@@ -47,6 +49,7 @@ __all__ = [
     "TEAM_TEMPORAL_MODULES",
     "cancel_workflow_sync",
     "connect_temporal_client",
+    "execute_workflow_async",
     "execute_workflow_sync",
     "signal_workflow_sync",
     "start_all_team_workers",
@@ -66,5 +69,6 @@ __all__ = [
     "start_team_worker",
     "start_workflow_sync",
     "submit_input",
+    "translate_workflow_failure",
     "wait_for_input",
 ]
