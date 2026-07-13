@@ -269,6 +269,63 @@ class TestClientIssueCommentMarker:
         assert seen["body"]["body"].count(KHALA_COMMENT_MARKER) == 1
 
 
+class TestClientCreateIssue:
+    def test_create_issue_posts_and_returns_issue(self) -> None:
+        from coding_team.github_source.client import KHALA_COMMENT_MARKER
+
+        seen: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["method"] = req.method
+            seen["url"] = str(req.url)
+            seen["body"] = json.loads(req.content.decode())
+            return httpx.Response(
+                201,
+                json={
+                    "number": 99,
+                    "title": "t",
+                    "body": "b",
+                    "state": "open",
+                    "html_url": "https://example/issues/99",
+                    "labels": [],
+                },
+            )
+
+        issue = _client_with(handler).create_issue(
+            "acme", "widget", title="Fix bug", body="details", labels=["bug"]
+        )
+        assert seen["method"] == "POST"
+        assert seen["url"].endswith("/repos/acme/widget/issues")
+        assert seen["body"]["title"] == "Fix bug"
+        # The marker is appended (provenance), and labels are forwarded.
+        assert seen["body"]["body"] == f"details\n\n{KHALA_COMMENT_MARKER}"
+        assert seen["body"]["labels"] == ["bug"]
+        assert issue.number == 99
+        assert issue.html_url == "https://example/issues/99"
+
+    def test_create_issue_omits_labels_when_none(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(req.content.decode())
+            return httpx.Response(
+                201,
+                json={"number": 1, "title": "t", "body": "b", "state": "open", "html_url": "u"},
+            )
+
+        _client_with(handler).create_issue("acme", "widget", title="t", body="b")
+        assert "labels" not in seen["body"]
+
+    def test_create_issue_raises_on_error(self) -> None:
+        from coding_team.github_source import GitHubAPIError
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, json={"message": "no scope"})
+
+        with pytest.raises(GitHubAPIError):
+            _client_with(handler).create_issue("acme", "widget", title="t", body="b")
+
+
 class TestClientCommentReaction:
     def test_posts_eyes_reaction_to_comment(self) -> None:
         seen: dict[str, Any] = {}

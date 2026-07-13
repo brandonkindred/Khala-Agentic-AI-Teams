@@ -8,6 +8,7 @@ from typing import Optional
 import pytest
 
 from coding_team.github_source.pr_review_mapping import (
+    build_issue_from_proposal,
     build_review_body,
     choose_event,
     format_comment_body,
@@ -15,6 +16,7 @@ from coding_team.github_source.pr_review_mapping import (
     inline_comment_to_timeline_body,
     map_issues_to_comments,
     parse_valid_lines,
+    proposal_from_finding,
     render_annotated_hunks,
     split_review_comments,
 )
@@ -384,3 +386,84 @@ def test_choose_event_comment_on_self_pr() -> None:
 def test_choose_event_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PR_REVIEW_EVENT", "approve")
     assert choose_event([_Issue(severity="critical")], author="a", reviewer="b") == "APPROVE"
+
+
+# ---------------------------------------------------------------------------
+# proposal_from_finding / build_issue_from_proposal
+# ---------------------------------------------------------------------------
+
+
+def test_proposal_from_finding_serializes_fields() -> None:
+    issue = _Issue(
+        severity="critical",
+        category="logic",
+        file_path="src/a.py",
+        line=12,
+        description="latent bug",
+        suggestion="do X",
+    )
+    p = proposal_from_finding(issue, 2)
+    assert p == {
+        "id": "p2",
+        "severity": "critical",
+        "category": "logic",
+        "file_path": "src/a.py",
+        "line": 12,
+        "description": "latent bug",
+        "suggestion": "do X",
+        "issue_number": None,
+        "issue_url": None,
+    }
+
+
+def test_proposal_from_finding_drops_nonpositive_line_and_defaults() -> None:
+    p = proposal_from_finding(_Issue(severity="", category="", file_path="", line=0), 0)
+    assert p["line"] is None
+    assert p["severity"] == "info"
+    assert p["category"] == "general"
+    assert p["file_path"] == ""
+
+
+def test_build_issue_from_proposal_full_detail() -> None:
+    p = proposal_from_finding(
+        _Issue(
+            severity="high",
+            category="logic",
+            file_path="src/a.py",
+            line=12,
+            description="off-by-one",
+            suggestion="use <=",
+        ),
+        0,
+    )
+    title, body = build_issue_from_proposal(p, pr_number=7, pr_url="https://x/pull/7")
+    assert title == "[high] off-by-one"
+    assert "pull request #7 (https://x/pull/7)" in body
+    assert "**Severity:** high" in body
+    assert "**Location:** `src/a.py:12`" in body
+    assert "off-by-one" in body
+    assert "### Suggested fix" in body and "use <=" in body
+
+
+def test_build_issue_from_proposal_no_file_and_no_suggestion() -> None:
+    p = proposal_from_finding(
+        _Issue(severity="low", file_path="", line=None, description="x", suggestion=""),
+        0,
+    )
+    title, body = build_issue_from_proposal(p, pr_number=1, pr_url="u")
+    assert title == "[low] x"
+    assert "**Location:** n/a" in body
+    assert "### Suggested fix" not in body
+
+
+def test_build_issue_from_proposal_blank_description_and_title_truncation() -> None:
+    # Blank description -> generic headline and a placeholder description line.
+    p_blank = proposal_from_finding(_Issue(description="", suggestion=""), 0)
+    title, body = build_issue_from_proposal(p_blank, pr_number=1, pr_url="u")
+    assert "code review finding" in title
+    assert "_No description provided._" in body
+    # A very long description is truncated to a single-line, bounded title.
+    p_long = proposal_from_finding(_Issue(description="Z" * 400), 0)
+    long_title, _ = build_issue_from_proposal(p_long, pr_number=1, pr_url="u")
+    assert len(long_title) <= 120
+    assert long_title.endswith("…")

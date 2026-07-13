@@ -1363,6 +1363,45 @@ class CodeReviewRunItem(BaseModel):
     completed_at: str | None = None
 
 
+class CreateReviewIssuesBody(BaseModel):
+    """Request body for POST /github/reviews/{job_id}/issues.
+
+    The GitHub token is injected server-side (never sent by the browser). The
+    Code Review page sends the repository the review belongs to (``owner``/
+    ``repo``) so the coding-team service can confirm the issues are filed into
+    the reviewed repository — access itself comes from the PAT.
+    """
+
+    proposal_ids: list[str] = Field(
+        default_factory=list,
+        description="Ids of the review's pending issue proposals to file as GitHub issues.",
+    )
+    owner: str = Field(description="Owner of the repository the review belongs to.")
+    repo: str = Field(description="Name of the repository the review belongs to.")
+
+
+class CreatedReviewIssueItem(BaseModel):
+    """One GitHub issue opened from a review's pending issue proposal."""
+
+    proposal_id: str
+    issue_number: int
+    issue_url: str
+    title: str
+
+
+class CreateReviewIssuesResponse(BaseModel):
+    """Result of POST /github/reviews/{job_id}/issues.
+
+    ``proposals`` is the review's full, updated pending-proposal list (created
+    ones now carry ``issue_number``/``issue_url``); ``created`` names only the
+    issues opened by this request.
+    """
+
+    job_id: str
+    created: list[CreatedReviewIssueItem] = Field(default_factory=list)
+    proposals: list[dict[str, Any]] = Field(default_factory=list)
+
+
 def _build_github_config_response(
     cfg: dict[str, Any], *, credential_store_unreachable: bool = False
 ) -> GitHubConfigResponse:
@@ -2415,6 +2454,71 @@ def _require_coding_team_url() -> str:
     return coding_team_url
 
 
+async def _forward_to_coding_team(
+    coding_team_url: str,
+    path: str,
+    *,
+    method: str = "POST",
+    json_body: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+    timeout_s: float = 60.0,
+    log_prefix: str,
+    timeout_detail: str,
+    generic_failure_detail: str,
+) -> Any:
+    """POST/GET ``path`` on the coding-team service and return its parsed JSON body.
+
+    Preconditions:
+        - ``coding_team_url`` is the configured coding-team service base URL (see
+          :func:`_require_coding_team_url`).
+        - ``method`` is ``"POST"`` or ``"GET"``; the caller supplies ``json_body``
+          for a POST or ``params`` for a GET, matching that method's contract.
+    Postconditions:
+        - Returns the upstream response's parsed JSON body on a 200. Every
+          failure path raises ``HTTPException`` instead of letting an ``httpx``
+          error (or a malformed response body) escape unhandled: a timeout
+          raises 504 with ``timeout_detail``, an unreachable service raises 502,
+          and a non-200 response re-raises the upstream status code with a
+          bounded copy of its detail for a 4xx or ``generic_failure_detail`` for
+          a 5xx (never echoing a possible stack trace to the client).
+    """
+    target = f"{coding_team_url.rstrip('/')}/{path.lstrip('/')}"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s, connect=10.0)) as client:
+            resp = (
+                await client.get(target, params=params)
+                if method == "GET"
+                else await client.post(target, json=json_body)
+            )
+    except httpx.TimeoutException as e:
+        logger.warning("%s: coding team service timed out: %s", log_prefix, e)
+        raise HTTPException(status_code=504, detail=timeout_detail) from e
+    except httpx.HTTPError as e:
+        logger.warning("%s: cannot reach coding team service at %s: %s", log_prefix, coding_team_url, e)
+        raise HTTPException(status_code=502, detail=f"Could not reach coding team service: {e}") from e
+
+    if resp.status_code != 200:
+        # The upstream body can carry internal detail (a stack trace on an unhandled
+        # 5xx, an HTML error page). Always log it server-side. For 4xx the detail is
+        # client-actionable, so return a bounded copy; for 5xx return a generic
+        # message so internal traces aren't exposed.
+        try:
+            upstream_detail = resp.json().get("detail", resp.text)
+        except Exception:
+            upstream_detail = resp.text
+        logger.warning("%s: coding team service returned %s: %s", log_prefix, resp.status_code, upstream_detail)
+        client_detail = str(upstream_detail)[:500] if resp.status_code < 500 else generic_failure_detail
+        raise HTTPException(status_code=resp.status_code, detail=client_detail)
+
+    try:
+        return resp.json()
+    except ValueError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Coding team service returned an unexpected response: {e}",
+        ) from e
+
+
 @router.post("/github/run-issue", response_model=RunGitHubIssueResponse)
 async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueResponse:
     """Start the coding team on a specific GitHub issue.
@@ -2471,41 +2575,18 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
     if body.base_branch:
         payload["base_branch"] = body.base_branch
 
-    target = f"{coding_team_url.rstrip('/')}/run-from-github"
     # connect fast-fails an unreachable service; the longer read budget covers the
     # coding team's synchronous GitHub API round-trips inside /run-from-github.
+    data = await _forward_to_coding_team(
+        coding_team_url,
+        "run-from-github",
+        json_body=payload,
+        log_prefix="github run-issue",
+        timeout_detail="Coding team service timed out while starting the job.",
+        # e.g. "issue blocked by sub-issues", "no ready issues" for 4xx.
+        generic_failure_detail="Failed to start the coding job.",
+    )
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
-            resp = await client.post(target, json=payload)
-    except httpx.TimeoutException as e:
-        logger.warning("github run-issue: coding team service timed out: %s", e)
-        raise HTTPException(
-            status_code=504,
-            detail="Coding team service timed out while starting the job.",
-        ) from e
-    except httpx.HTTPError as e:
-        logger.warning("github run-issue: cannot reach coding team service at %s: %s", coding_team_url, e)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not reach coding team service: {e}",
-        ) from e
-
-    if resp.status_code != 200:
-        # The upstream body can carry internal detail (a stack trace on an unhandled
-        # 5xx, an HTML error page). Always log it server-side. For 4xx the detail is
-        # client-actionable (e.g. "issue blocked by sub-issues", "no ready issues"),
-        # so return a bounded copy; for 5xx return a generic message so internal
-        # traces aren't exposed.
-        try:
-            upstream_detail = resp.json().get("detail", resp.text)
-        except Exception:
-            upstream_detail = resp.text
-        logger.warning("github run-issue: coding team service returned %s: %s", resp.status_code, upstream_detail)
-        client_detail = str(upstream_detail)[:500] if resp.status_code < 500 else "Failed to start the coding job."
-        raise HTTPException(status_code=resp.status_code, detail=client_detail)
-
-    try:
-        data = resp.json()
         return RunGitHubIssueResponse(
             job_id=data["job_id"],
             issue_number=data["issue_number"],
@@ -2513,7 +2594,7 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
             status=data.get("status", "pending"),
             message=data.get("message", ""),
         )
-    except (ValueError, KeyError, TypeError) as e:
+    except (KeyError, TypeError) as e:
         raise HTTPException(
             status_code=502,
             detail=f"Coding team service returned an unexpected response: {e}",
@@ -2575,38 +2656,16 @@ async def _start_pr_review(
     if base_branch:
         payload["base_branch"] = base_branch
 
-    target = f"{coding_team_url.rstrip('/')}/review-pr"
+    data = await _forward_to_coding_team(
+        coding_team_url,
+        "review-pr",
+        json_body=payload,
+        log_prefix="github review-pr",
+        timeout_detail="Coding team service timed out while starting the review.",
+        # e.g. "PR not found" for 4xx.
+        generic_failure_detail="Failed to start the review.",
+    )
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
-            resp = await client.post(target, json=payload)
-    except httpx.TimeoutException as e:
-        logger.warning("github review-pr: coding team service timed out: %s", e)
-        raise HTTPException(
-            status_code=504,
-            detail="Coding team service timed out while starting the review.",
-        ) from e
-    except httpx.HTTPError as e:
-        logger.warning("github review-pr: cannot reach coding team service at %s: %s", coding_team_url, e)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not reach coding team service: {e}",
-        ) from e
-
-    if resp.status_code != 200:
-        # The upstream body can carry internal detail (a stack trace on an unhandled
-        # 5xx). Always log it server-side. For 4xx the detail is client-actionable
-        # (e.g. "PR not found"), so return a bounded copy; for 5xx return a generic
-        # message so internal traces aren't exposed.
-        try:
-            upstream_detail = resp.json().get("detail", resp.text)
-        except Exception:
-            upstream_detail = resp.text
-        logger.warning("github review-pr: coding team service returned %s: %s", resp.status_code, upstream_detail)
-        client_detail = str(upstream_detail)[:500] if resp.status_code < 500 else "Failed to start the review."
-        raise HTTPException(status_code=resp.status_code, detail=client_detail)
-
-    try:
-        data = resp.json()
         return RunPrReviewResponse(
             job_id=data["job_id"],
             pr_number=data["pr_number"],
@@ -2614,7 +2673,7 @@ async def _start_pr_review(
             status=data.get("status", "pending"),
             message=data.get("message", ""),
         )
-    except (ValueError, KeyError, TypeError) as e:
+    except (KeyError, TypeError) as e:
         raise HTTPException(
             status_code=502,
             detail=f"Coding team service returned an unexpected response: {e}",
@@ -2683,41 +2742,86 @@ async def list_github_reviews(
     if pr_number is not None:
         params["pr_number"] = pr_number
 
-    target = f"{coding_team_url.rstrip('/')}/reviews"
+    data = await _forward_to_coding_team(
+        coding_team_url,
+        "reviews",
+        method="GET",
+        params=params,
+        timeout_s=30.0,
+        log_prefix="github reviews",
+        timeout_detail="Coding team service timed out while listing reviews.",
+        generic_failure_detail="Failed to retrieve review history.",
+    )
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
-            resp = await client.get(target, params=params)
-    except httpx.TimeoutException as e:
-        logger.warning("github reviews: coding team service timed out: %s", e)
-        raise HTTPException(
-            status_code=504,
-            detail="Coding team service timed out while listing reviews.",
-        ) from e
-    except httpx.HTTPError as e:
-        logger.warning("github reviews: cannot reach coding team service at %s: %s", coding_team_url, e)
+        return [CodeReviewRunItem.model_validate(item) for item in data]
+    except (ValueError, TypeError) as e:
         raise HTTPException(
             status_code=502,
-            detail=f"Could not reach coding team service: {e}",
+            detail=f"Coding team service returned an unexpected response: {e}",
         ) from e
 
-    if resp.status_code != 200:
-        # Sanitize: the upstream body could carry internal detail (a stack trace
-        # on an unhandled 500, etc.). Log it server-side and return a generic
-        # message to the client, preserving the upstream status code.
-        try:
-            upstream_detail = resp.json().get("detail", resp.text)
-        except Exception:
-            upstream_detail = resp.text
-        logger.warning("github reviews: coding team service returned %s: %s", resp.status_code, upstream_detail)
-        # Mirror the run-issue/review-pr routes: surface a bounded copy of the upstream
-        # detail for 4xx (client-actionable), but a generic message for 5xx (which can
-        # carry a stack trace), always preserving the upstream status code.
-        client_detail = str(upstream_detail)[:500] if resp.status_code < 500 else "Failed to retrieve review history."
-        raise HTTPException(status_code=resp.status_code, detail=client_detail)
 
+@router.post("/github/reviews/{job_id}/issues", response_model=CreateReviewIssuesResponse)
+async def create_github_review_issues(job_id: str, body: CreateReviewIssuesBody) -> CreateReviewIssuesResponse:
+    """File GitHub issues for a review's selected pre-existing findings.
+
+    A PR review does not comment on bugs it finds in pre-existing, unchanged code;
+    it collects them as proposals on the review summary. The Code Review page
+    calls this with the proposal ids the user chose to file, plus the repository
+    the review belongs to (``owner``/``repo``). The GitHub token is injected
+    server-side (never sent by the browser); access comes from the PAT. The
+    request is forwarded to the coding-team service, which validates owner/repo
+    against the stored review before opening any issue.
+
+    Preconditions:
+        - GitHub integration is enabled and a PAT is configured.
+        - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
+    Postconditions:
+        - Returns the issues opened by this request plus the review's updated
+          proposal list. Every failure path raises ``HTTPException``; no ``httpx``
+          error escapes unhandled. The upstream status code is preserved (404 for
+          an unknown review, 409 when owner/repo do not match the review, 502 for
+          a GitHub API failure, etc.). A 400 is raised for a missing or malformed
+          owner/repo.
+        - Like ``list_github_reviews``, this route acts on Khala's own store
+          (mutating a review's stored proposals) rather than being implicitly
+          gated by a GitHub call, so it first verifies the PAT can reach
+          ``owner``/``repo`` (``_assert_pat_can_reach_repo``) — a repo the token
+          can't access yields the same 404 as the issue/PR routes, so a caller
+          cannot use a job_id to file issues into (or read proposal detail from)
+          a repository outside the PAT's own access boundary.
+    """
+    # Access is defined by the PAT, so resolve only the token — the target repo is
+    # the caller's own (validated below and re-checked against the stored review by
+    # the coding-team service), not a single configured default.
+    _cfg, token = await asyncio.to_thread(_resolve_github_access)
+    owner = _validate_repo_component("owner", body.owner)
+    repo = _validate_repo_component("repo", body.repo)
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="GitHub owner and repo are required.")
+
+    # Cheap, local checks first (mirrors list_github_reviews): a misconfigured
+    # downstream fails fast with 503 before any network round-trip.
+    coding_team_url = _require_coding_team_url()
+
+    await _assert_pat_can_reach_repo(owner, repo, token)
+
+    payload: dict[str, Any] = {
+        "proposal_ids": body.proposal_ids,
+        "owner": owner,
+        "repo": repo,
+        "github_token": token,
+    }
+    data = await _forward_to_coding_team(
+        coding_team_url,
+        f"reviews/{job_id}/issues",
+        json_body=payload,
+        log_prefix="github create-issues",
+        timeout_detail="Coding team service timed out while creating issues.",
+        generic_failure_detail="Failed to create issues.",
+    )
     try:
-        data = resp.json()
-        return [CodeReviewRunItem.model_validate(item) for item in data]
+        return CreateReviewIssuesResponse.model_validate(data)
     except (ValueError, TypeError) as e:
         raise HTTPException(
             status_code=502,
