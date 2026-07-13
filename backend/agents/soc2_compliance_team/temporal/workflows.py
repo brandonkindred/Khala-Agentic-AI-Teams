@@ -60,7 +60,20 @@ LOAD_RETRY_POLICY = RetryPolicy(
     non_retryable_error_types=["ValueError"],
 )
 LLM_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
-MARK_FAILED_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
+
+# No maximum_attempts cap: mark_failed_activity's own default RetryPolicy()
+# equivalent (3 attempts, ~1s initial backoff) exhausts in ~3 seconds total —
+# far short of the 15 minutes MARK_FAILED_SCHEDULE_TO_CLOSE_TIMEOUT already
+# allocates it. A job-service blip (e.g. a rolling restart) that outlasts a
+# few seconds of retrying would otherwise leave the job stuck reporting
+# "running" indefinitely, until the stale-job monitor's much coarser backstop
+# eventually catches it. Retrying with capped backoff for as long as
+# schedule_to_close allows gives a transient outage real room to recover.
+MARK_FAILED_RETRY_POLICY = RetryPolicy(
+    initial_interval=timedelta(seconds=2),
+    maximum_interval=timedelta(minutes=2),
+    backoff_coefficient=2.0,
+)
 
 
 @workflow.defn(name="Soc2AuditWorkflow")

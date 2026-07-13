@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from typing import Any, Dict, List
 
 import pytest
@@ -437,3 +438,28 @@ def test_workflow_reraises_original_when_mark_failed_also_fails(
 
     with pytest.raises(RuntimeError, match="original report failure"):
         asyncio.run(wmod.Soc2AuditWorkflow().run("job-1", "/repo/path"))
+
+
+def test_mark_failed_retry_policy_uses_its_full_schedule_to_close_budget() -> None:
+    """A bare 3-attempt policy with the temporalio default ~1s initial backoff
+    exhausts in a few seconds — far short of the 15 minutes
+    MARK_FAILED_SCHEDULE_TO_CLOSE_TIMEOUT already allocates. Retrying should
+    span most of that budget (via schedule_to_close, not a low attempt cap),
+    so a brief job-service blip during workflow-failure handling doesn't
+    leave the job stuck reporting "running" until the much coarser stale-job
+    monitor eventually catches it."""
+    from soc2_compliance_team.temporal import workflows as wmod
+
+    policy = wmod.MARK_FAILED_RETRY_POLICY
+    # No low attempt cap: retries are bounded by schedule_to_close instead.
+    assert policy.maximum_attempts in (0, None) or policy.maximum_attempts >= 8
+
+    # Simulate the backoff schedule and confirm it can span minutes, not
+    # seconds, within the allotted schedule-to-close window.
+    interval = policy.initial_interval
+    total = interval
+    for _ in range(6):
+        interval = min(interval * policy.backoff_coefficient, policy.maximum_interval)
+        total += interval
+    assert total >= timedelta(minutes=2)
+    assert total < wmod.MARK_FAILED_SCHEDULE_TO_CLOSE_TIMEOUT
