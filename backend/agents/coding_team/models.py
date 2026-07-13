@@ -21,6 +21,19 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
 
 
+class JobStatus(str, Enum):
+    """Status of a coding_team job (persisted via the job service)."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    WAITING_FOR_USER = "waiting_for_user"
+    COMPLETED = "completed"
+    COMPLETED_WITH_FAILURES = "completed_with_failures"
+    ALREADY_COMPLETE = "already_complete"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class StackSpec(BaseModel):
     """Defines one implementation team/stack, e.g. frontend_v2 or backend_v2."""
 

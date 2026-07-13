@@ -16,11 +16,30 @@ from __future__ import annotations
 
 from job_matching_team.temporal.workflows import (
     JobMatchingWorkflow,
+    build_queries_activity,
+    fail_scan_activity,
+    finalize_scan_activity,
+    prepare_scan_activity,
+    rank_activity,
     run_scan_activity,
+    scan_activity,
 )
 
 WORKFLOWS = [JobMatchingWorkflow]
-ACTIVITIES = [run_scan_activity]
+# The scan pipeline is decomposed into per-phase activities that the workflow
+# schedules in order for new runs. ``run_scan_activity`` (the pre-decomposition
+# monolith) stays registered because the workflow still schedules it on the
+# ``workflow.patched`` legacy branch, so histories started before the
+# decomposition replay deterministically until they drain.
+ACTIVITIES = [
+    prepare_scan_activity,
+    build_queries_activity,
+    scan_activity,
+    rank_activity,
+    finalize_scan_activity,
+    fail_scan_activity,
+    run_scan_activity,
+]
 # Matches the registry's f"{team}-queue" so a registry-started worker and the
 # start_workflow dispatch agree on the same task queue.
 TASK_QUEUE = "job_matching-queue"
@@ -32,5 +51,11 @@ __all__ = [
     "TASK_QUEUE",
     "WORKFLOWS",
     "WORKFLOW_ID_PREFIX",
+    "build_queries_activity",
+    "fail_scan_activity",
+    "finalize_scan_activity",
+    "prepare_scan_activity",
+    "rank_activity",
     "run_scan_activity",
+    "scan_activity",
 ]

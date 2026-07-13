@@ -30,7 +30,7 @@ from coding_team.job_store import (
     DEFAULT_CACHE_DIR,
     RESUME_CLAIM_TTL_S,
 )
-from coding_team.models import CodingTeamPlanInput
+from coding_team.models import CodingTeamPlanInput, JobStatus
 from coding_team.token_crypto import decrypt_token
 from shared_env_config import env_bool
 from shared_git.git_utils import DEVELOPMENT_BRANCH
@@ -151,7 +151,7 @@ def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlan
 
     def _on_failure(e: Exception) -> None:
         logger.exception("Coding team orchestrator resume failed: %s", e)
-        _main.update_job(job_id, status="failed", error=str(e), current_activity=None)
+        _main.update_job(job_id, status=JobStatus.FAILED.value, error=str(e), current_activity=None)
 
     _spawn_run_thread(job_id, _run_body, _on_failure)
 
@@ -197,14 +197,16 @@ def _start_github_resume_thread(
         # expired claim as abandoned and spawn a second hook path. Moving the status to
         # "running" here makes _try_auto_resume and resume_job decline (they only proceed for
         # waiting_for_user), so the re-claiming window closes before the slow I/O begins.
-        _main.update_job(job_id, status="running", status_text="Resuming via GitHub hook…")
+        _main.update_job(
+            job_id, status=JobStatus.RUNNING.value, status_text="Resuming via GitHub hook…"
+        )
         with _main.GitHubClient(token=token) as client:
             issue = client.get_issue(request.owner, request.repo, int(ctx["issue_number"]))
         _main._run_with_github_hooks(job_id, request, plan, issue, token)
 
     def _on_failure(e: Exception) -> None:
         logger.exception("GitHub-path resume failed for job %s: %s", job_id, e)
-        _main.update_job(job_id, status="failed", error=f"resume failed: {e}")
+        _main.update_job(job_id, status=JobStatus.FAILED.value, error=f"resume failed: {e}")
 
     _spawn_run_thread(job_id, _run_body, _on_failure)
 
@@ -495,10 +497,12 @@ def _record_failure(
     # job's last-known phase intact for diagnosis. The review-outage path is a
     # terminal post-review state, so it marks the phase completed to match the
     # success/provider-abort paths.
-    _main.update_job(job_id, status="failed", error=safe, status_text=None, current_activity=None)
+    _main.update_job(
+        job_id, status=JobStatus.FAILED.value, error=safe, status_text=None, current_activity=None
+    )
     # No-op for non-review jobs (no matching code_review_runs row); persists the
     # failure for review jobs so the Code Review page shows the failed outcome.
-    _main.update_review(job_id, status="failed", error=safe, completed=True)
+    _main.update_review(job_id, status=JobStatus.FAILED.value, error=safe, completed=True)
     _main._safe_comment(client, owner, repo, num, f"Coding team job `{job_id}` failed: {safe}")
 
 
@@ -550,13 +554,13 @@ def _record_review_outage(
     safe = scrub_token_from_text(error)
     _main.update_job(
         job_id,
-        status="failed",
+        status=JobStatus.FAILED.value,
         phase="completed",
         error=safe,
         status_text=None,
         current_activity=None,
     )
-    _main.update_review(job_id, status="failed", error=safe, completed=True)
+    _main.update_review(job_id, status=JobStatus.FAILED.value, error=safe, completed=True)
     if _post_outage_notice_enabled():
         _main._safe_comment(client, owner, repo, num, _REVIEW_OUTAGE_NOTICE)
 
@@ -615,7 +619,7 @@ def _defer_terminal_success(job_id: str):
 
     def _update(**kw: Any) -> None:
         if kw.get("status") in hitl.TERMINAL_SUCCESS_STATUSES:
-            kw = {**kw, "status": "running", "phase": "publishing"}
+            kw = {**kw, "status": JobStatus.RUNNING.value, "phase": "publishing"}
         _main.update_job(job_id, **kw)
 
     return _update
@@ -658,7 +662,7 @@ def _finish_already_complete(
         _main._cleanup_issue_checkout(request.repo_path)
     _main.update_job(
         job_id,
-        status="already_complete",
+        status=JobStatus.ALREADY_COMPLETE.value,
         phase="completed",
         status_text="Work already complete; no changes needed",
     )
@@ -789,7 +793,7 @@ def _publish_merged_work(
     # some work but also has failed tasks is reported as a partial success.
     _main.update_job(
         job_id,
-        status="completed_with_failures" if failed else "completed",
+        status=(JobStatus.COMPLETED_WITH_FAILURES.value if failed else JobStatus.COMPLETED.value),
         phase="completed",
     )
 
@@ -874,7 +878,11 @@ def _run_with_github_hooks(
         # timed out (status=failed) or is still waiting for the user. Surface that diagnostic rather
         # than overwriting it with the generic "no merged tasks" message, which would hide the real
         # cause (an unanswered question) from the operator.
-        if job_after.get("status") in ("failed", "cancelled", "waiting_for_user"):
+        if job_after.get("status") in (
+            JobStatus.FAILED.value,
+            JobStatus.CANCELLED.value,
+            JobStatus.WAITING_FOR_USER.value,
+        ):
             reason = (
                 job_after.get("error") or job_after.get("status_text") or job_after.get("status")
             )
@@ -893,7 +901,7 @@ def _run_with_github_hooks(
         if not _has_merged_tasks(job_after):
             _main.update_job(
                 job_id,
-                status="failed",
+                status=JobStatus.FAILED.value,
                 error="orchestrator produced no merged tasks",
             )
             _main._safe_comment(
