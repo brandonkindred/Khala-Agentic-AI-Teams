@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import logging
-
-from strands import Agent
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import IaCPatchInput, IaCPatchOutput
 from .prompts import INFRA_PATCH_PROMPT
@@ -41,14 +39,11 @@ class InfraPatchAgent:
 
         context = f"--- Errors ---\n{errors_text}\n\n--- Current Artifacts ---\n{artifacts_text}\n"
 
-        data = json.loads(
-            str(
-                Agent(model=self._model)(
-                    INFRA_PATCH_PROMPT + "\n\n---\n\n" + context,
-                    temperature=0.1,
-                    think=True,
-                )
-            ).strip()
+        data = complete_json_with_continuation(
+            self._model,
+            INFRA_PATCH_PROMPT + "\n\n---\n\n" + context,
+            temperature=0.1,
+            think=True,
         )
 
         patched = data.get("patched_artifacts") or {}
