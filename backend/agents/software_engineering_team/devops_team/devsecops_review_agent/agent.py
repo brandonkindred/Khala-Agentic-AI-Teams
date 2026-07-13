@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import json
-
 from devops_team.models import ReviewFinding
-from strands import Agent
 
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.shared.llm import complete_json_with_continuation
 from software_engineering_team.shared.security_service import derive_approved
 
 from .models import DevSecOpsReviewInput, DevSecOpsReviewOutput
@@ -56,12 +54,11 @@ class DevSecOpsReviewAgent:
             f"requirements={input_data.requirements}\n"
             f"artifacts={list(input_data.artifacts.keys())}\n"
         )
-        data = json.loads(
-            str(
-                Agent(model=self._model)(
-                    DEVSECOPS_REVIEW_PROMPT + "\n\n---\n\n" + context, temperature=0.0, think=True
-                )
-            ).strip()
+        data = complete_json_with_continuation(
+            self._model,
+            DEVSECOPS_REVIEW_PROMPT + "\n\n---\n\n" + context,
+            temperature=0.0,
+            think=True,
         )
         findings = [ReviewFinding(**f) for f in (data.get("findings") or []) if isinstance(f, dict)]
         # Distinguish an absent ``approved`` key (no opinion -> defer to findings)
