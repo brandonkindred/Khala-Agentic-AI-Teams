@@ -79,3 +79,73 @@ def test_check_for_profile_updates_calls_the_public_apply_preference(monkeypatch
 
     assert applied_calls == [pref]
     assert result == [pref.model_dump()]
+
+
+def test_check_for_profile_updates_applies_all_high_confidence_preferences(monkeypatch):
+    orch = _orchestrator()
+    profile_agent = orch._get_profile_agent("user-1")
+
+    prefs = [
+        ExtractedPreference(category="dietary", field="likes", value="oat milk", confidence=0.9),
+        ExtractedPreference(
+            category="dietary", field="dislikes", value="cilantro", confidence=0.85
+        ),
+    ]
+    monkeypatch.setattr(
+        profile_agent,
+        "extract_preferences",
+        lambda text: ProfileExtractionResult(extracted_info=prefs),
+    )
+    applied_calls = []
+    monkeypatch.setattr(profile_agent, "apply_preference", applied_calls.append)
+
+    request = OrchestratorRequest(user_id="user-1", message="I love oat milk, hate cilantro")
+    result = orch._check_for_profile_updates(request)
+
+    assert applied_calls == prefs
+    assert result == [p.model_dump() for p in prefs]
+
+
+def test_check_for_profile_updates_returns_empty_when_no_preferences_extracted(monkeypatch):
+    orch = _orchestrator()
+    profile_agent = orch._get_profile_agent("user-1")
+
+    monkeypatch.setattr(
+        profile_agent,
+        "extract_preferences",
+        lambda text: ProfileExtractionResult(extracted_info=[]),
+    )
+    applied_calls = []
+    monkeypatch.setattr(profile_agent, "apply_preference", applied_calls.append)
+
+    request = OrchestratorRequest(user_id="user-1", message="what's the weather")
+    result = orch._check_for_profile_updates(request)
+
+    assert applied_calls == []
+    assert result == []
+
+
+def test_check_for_profile_updates_filters_out_low_confidence_preferences(monkeypatch):
+    orch = _orchestrator()
+    profile_agent = orch._get_profile_agent("user-1")
+
+    high = ExtractedPreference(category="dietary", field="likes", value="oat milk", confidence=0.8)
+    low = ExtractedPreference(
+        category="dietary", field="dislikes", value="cilantro", confidence=0.79
+    )
+    monkeypatch.setattr(
+        profile_agent,
+        "extract_preferences",
+        lambda text: ProfileExtractionResult(extracted_info=[high, low]),
+    )
+    applied_calls = []
+    monkeypatch.setattr(profile_agent, "apply_preference", applied_calls.append)
+
+    request = OrchestratorRequest(user_id="user-1", message="I love oat milk, maybe hate cilantro")
+    result = orch._check_for_profile_updates(request)
+
+    # 0.8 is the inclusive threshold (`confidence >= 0.8`): `high` passes,
+    # `low` (just under it) is filtered out of both the applied calls and the
+    # returned list.
+    assert applied_calls == [high]
+    assert result == [high.model_dump()]
