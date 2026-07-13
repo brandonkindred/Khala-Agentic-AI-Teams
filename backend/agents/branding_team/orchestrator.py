@@ -25,8 +25,9 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, List, Optional
 from pydantic import BaseModel, ValidationError
 from strands.multiagent.graph import GraphBuilder
 
+from shared_env_config import env_int
+
 from .agents import BrandComplianceAgent
-from .config import env_int
 from .graphs.phase1_strategic_core import build_phase1_graph
 from .graphs.phase2_narrative import build_phase2_swarm
 from .graphs.phase3_visual import build_phase3_graph
@@ -94,7 +95,7 @@ def _offload_pool_workers() -> int:
     async Temporal activities on the same loop each calling ``_run_coro``)
     behind a single worker.
     """
-    return env_int("BRANDING_RUN_CORO_OFFLOAD_WORKERS", 4, minimum=1)
+    return env_int("BRANDING_RUN_CORO_OFFLOAD_WORKERS", 4, floor=1)
 
 
 _offload_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
