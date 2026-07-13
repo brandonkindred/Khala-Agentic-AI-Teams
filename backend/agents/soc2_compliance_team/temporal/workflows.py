@@ -78,7 +78,17 @@ MARK_FAILED_RETRY_POLICY = RetryPolicy(
 
 @workflow.defn(name="Soc2AuditWorkflow")
 class Soc2AuditWorkflow:
-    """Runs one SOC2 audit job as load → fan-out audits → report."""
+    """Runs one SOC2 audit job as load → fan-out audits → report.
+
+    Invariants:
+        - The workflow body performs no I/O, time, or randomness of its own —
+          only ``execute_activity`` calls — so replay always reproduces the
+          same command sequence (temporalio's determinism requirement).
+        - The five criteria are always fanned out in the same canonical
+          ``TSCCategory`` enum order (``_TSC_CRITERIA``), matching
+          ``pipeline.TSC_CRITERIA`` so both execution modes audit the
+          identical criteria set in the identical order.
+    """
 
     @workflow.run
     async def run(self, job_id: str, repo_path: str) -> Dict[str, Any]:

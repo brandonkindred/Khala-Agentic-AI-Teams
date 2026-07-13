@@ -40,6 +40,27 @@ def test_load_repo_context_invalid_path() -> None:
         load_repo_context("/nonexistent/path/12345")
 
 
+def test_run_integrates_with_real_load_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every other orchestrator test patches ``pipeline.load_context`` directly,
+    so ``SOC2AuditOrchestrator.run`` is never exercised against the real
+    repo-scanning path it actually calls in production. Only the LLM-touching
+    steps (criteria audit, report synthesis) are patched here."""
+    (tmp_path / "README.md").write_text("# Test repo")
+    (tmp_path / "main.py").write_text("print('hello')")
+
+    monkeypatch.setattr(pipeline, "run_all_criteria", lambda ctx: _clean_results())
+    monkeypatch.setattr(
+        pipeline, "write_report", lambda rp, tsc: (None, NextStepsDocument(title="Next Steps"))
+    )
+
+    out = SOC2AuditOrchestrator().run(tmp_path)
+
+    assert out.status == "completed"
+    assert out.repo_path == str(tmp_path.resolve())
+
+
 def _clean_results() -> list[TSCAuditResult]:
     return [
         TSCAuditResult(category=c, summary="ok", findings=[], compliant=True)

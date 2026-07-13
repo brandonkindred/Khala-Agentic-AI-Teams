@@ -1,8 +1,12 @@
-"""Additional API tests for paths not covered by ``test_api.py``:
+"""Tests for ``api/main.py``'s internal helpers, not its HTTP endpoints
+(``test_api.py`` covers the endpoint-level behavior):
 
 * ``_now`` timestamp helper
 * ``mark_all_running_jobs_failed`` (both success and failure paths)
-* ``_run_audit_job`` failure branch (audit run raises)
+* ``_run_audit_job`` (thread-mode job runner, both branches)
+* ``_start_temporal_worker_backstop``
+* ``_job_is_terminal`` / ``_update_job_terminal`` / ``_update_job_unless_terminal``
+  (the terminal-status write guards)
 
 (The ``run_audit`` Temporal vs thread dispatch branch is covered by
 ``test_temporal_dispatch.py``.)
