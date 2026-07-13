@@ -134,10 +134,16 @@ def _prepare(monkeypatch, inst, rec):
     rec.inst = inst
     monkeypatch.setattr(wf.workflow, "execute_activity", rec.execute_activity)
 
-    async def _sleep(_seconds):
-        return None
+    async def _wait_condition(fn, *, timeout=None, timeout_summary=None):
+        # Mirrors the real semantics being faked: return immediately if the
+        # condition is already true (an instant wake, e.g. a cancel that landed
+        # earlier in this same simulated tick); otherwise behave as though the
+        # durable timer elapsed with the condition still false.
+        if fn():
+            return
+        raise asyncio.TimeoutError()
 
-    monkeypatch.setattr(wf.workflow, "sleep", _sleep)
+    monkeypatch.setattr(wf.workflow, "wait_condition", _wait_condition)
     # ``workflow.logger`` requires a live workflow event loop; swap in a plain
     # logger so the cancel/failure log lines don't raise outside the sandbox.
     monkeypatch.setattr(wf.workflow, "logger", logging.getLogger("uaf-workflow-test"))

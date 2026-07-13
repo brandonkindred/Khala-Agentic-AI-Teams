@@ -167,7 +167,14 @@ def _record_started_job_id(store: Any, run_id: str, phase: str, job_id: str) -> 
             )
             if attempt < _PERSIST_RETRIES - 1:
                 time.sleep(_PERSIST_BACKOFF_S)
-    assert last_exc is not None
+    if last_exc is None:  # pragma: no cover — unreachable given _PERSIST_RETRIES >= 1
+        # Every loop exit above either returns on success or sets last_exc in the
+        # except block, so this never actually fires; an explicit raise here
+        # instead of `assert` so it stays correct even under `-O` (which strips
+        # asserts) rather than silently trying to raise None.
+        raise RuntimeError(
+            f"_record_started_job_id: exhausted retries for run {run_id} with no exception captured"
+        )
     raise last_exc
 
 
@@ -418,15 +425,19 @@ def enter_phase_activity(run_id: str, phase: str, existing_job_id: str | None) -
           holds a job id): transitions the run to ``polling_<phase>`` with error
           cleared + the job phase synced, records a resume breadcrumb, and returns
           ``{"job_id": <that id>}`` without contacting the target.
-        - Fresh path: ``StartFailed`` (a definite target rejection) *or* an
-          ``httpx.HTTPError`` (an inconclusive transport failure — the target may
-          have already accepted the submit) → non-retryable ``ApplicationError``.
-          Both are treated as terminal rather than Temporal-retried: unlike
-          ``StartFailed``, a transport error gives no proof the submit didn't
-          land, so letting Temporal's automatic retry re-run this activity could
-          submit a second target job with no way to detect or reconcile the
-          duplicate. Failing the run instead requires a human-gated ``/resume``.
-          Otherwise the target job is started, its id is persisted to the
+        - Fresh path: ``StartFailed`` (a definite target rejection) *or* a
+          non-connection ``httpx.HTTPError`` (an inconclusive transport failure
+          — the target may have already accepted the submit) → non-retryable
+          ``ApplicationError``. Both are treated as terminal rather than
+          Temporal-retried: unlike ``StartFailed``, an ambiguous transport
+          failure gives no proof the submit didn't land, so letting Temporal's
+          automatic retry re-run this activity could submit a second target job
+          with no way to detect or reconcile the duplicate. Failing the run
+          instead requires a human-gated ``/resume``. ``httpx.ConnectError``/
+          ``httpx.ConnectTimeout`` are the one exception — the TCP/TLS
+          connection itself never completed, so no bytes reached the target —
+          and are left to propagate as an ordinary (Temporal-retryable) error
+          instead. Otherwise the target job is started, its id is persisted to the
           matching checkpoint column (``analysis_job_id``/``se_job_id``) via
           :func:`_record_started_job_id` (itself non-retryable on exhaustion, for
           the identical reason), the run transitions to ``polling_<phase>``, and
@@ -477,6 +488,14 @@ def enter_phase_activity(run_id: str, phase: str, existing_job_id: str | None) -
             job_id = adapter.start_build(client, run.repo_path)
     except StartFailed as exc:
         raise ApplicationError(f"Failed to start {phase}: {exc}", non_retryable=True) from exc
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        # Unlike the other httpx.HTTPError subclasses below, these fail before
+        # any bytes reach the target (the TCP/TLS handshake itself didn't
+        # complete) — there is no ambiguity about whether the submit landed, so
+        # let this propagate uncaught: Temporal wraps it as a retryable failure
+        # under IO_RETRY instead of forcing a non-retryable, human-gated /resume
+        # for what may be a pure network blip.
+        raise
     except httpx.HTTPError as exc:
         # Ambiguous: the request may have reached the target before the
         # transport failed. Non-retryable so Temporal doesn't auto-resubmit;

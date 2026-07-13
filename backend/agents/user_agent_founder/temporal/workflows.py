@@ -7,18 +7,22 @@ retryable, UI-visible Temporal activities, replacing the previous single
 monolithic activity that ran the whole orchestrator with blocking ``time.sleep``
 poll loops buried inside. A worker restart now re-runs only the unfinished
 activity, and the multi-hour analysis/build polling survives restarts because the
-inter-poll waits are durable ``workflow.sleep`` timers, not in-activity sleeps.
+inter-poll waits are durable ``workflow.wait_condition`` timers, not in-activity
+sleeps.
 
 Determinism: the workflow body performs no I/O, clock, or randomness — only
-``execute_activity`` scheduling, ``workflow.sleep`` timers, and pure dict/string
-control flow (a faithful port of ``orchestrator._run_phase``'s start→poll→answer
-state machine). All job-store/DB writes live in the activities.
+``execute_activity`` scheduling, ``workflow.wait_condition`` timers, and pure
+dict/string control flow (a faithful port of ``orchestrator._run_phase``'s
+start→poll→answer state machine). All job-store/DB writes live in the activities.
 
-Cancellation/observability: a ``cancel`` signal sets a flag the poll loops check
-between ticks (so a cancel short-circuits before the next expensive activity),
-and a ``progress`` query exposes the current phase/attempt. This mirrors
-``sales_team`` (fine-grained activities, catch-all ``mark_failed`` re-raise
-contract, ``start_to_close`` timeouts) and ``branding_team`` (signal + query).
+Cancellation/observability: a ``cancel`` signal sets a flag the poll loop's
+``wait_condition`` wakes on immediately (rather than waiting out the full
+``poll_interval``, the way a plain ``workflow.sleep`` would), and checks
+again at each remaining decision point (so a cancel short-circuits before the
+next expensive activity); a ``progress`` query exposes the current
+phase/attempt. This mirrors ``sales_team`` (fine-grained activities, catch-all
+``mark_failed`` re-raise contract, ``start_to_close`` timeouts) and
+``branding_team`` (signal + query).
 
 Sandbox note: this module and the package ``__init__`` stay free of import-time
 side effects (no ``os.getenv``, no worker boot) — the temporalio sandbox replays
@@ -29,6 +33,8 @@ Poll intervals and attempt ceilings are env-derived, so they are read once by th
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from datetime import timedelta
 from typing import Any
 
@@ -242,11 +248,14 @@ class UserAgentFounderWorkflow:
             - A target ``failed``/``cancelled``, an exhausted answer-retry budget,
               or a poll-attempt timeout raises ``_PhaseFailed`` (→ catch-all
               FAILED). A pending ``cancel`` signal raises ``_CancelledSignal``.
-            - Between polls the workflow durably sleeps ``poll_interval`` seconds;
-              each pending-question batch is answered by an activity and, on a
-              handled submission failure, the per-question-set failure counter is
-              advanced (abort once it exceeds ``_max_answer_retries``) — exactly
-              mirroring ``orchestrator._run_phase``.
+            - Between polls the workflow durably waits up to ``poll_interval``
+              seconds, woken early the instant a ``cancel`` signal arrives (see
+              the ``wait_condition`` below) rather than always waiting out the
+              full interval; each pending-question batch is answered by an
+              activity and, on a handled submission failure, the
+              per-question-set failure counter is advanced (abort once it
+              exceeds ``_max_answer_retries``) — exactly mirroring
+              ``orchestrator._run_phase``.
         """
         self._phase = f"polling_{phase}"
         # enter_phase starts a fresh phase or, on resume, transitions the run to
@@ -272,7 +281,14 @@ class UserAgentFounderWorkflow:
         for attempt in range(self._max_attempts):
             self._raise_if_cancelled()
             self._attempt = attempt
-            await workflow.sleep(timedelta(seconds=poll_interval))
+            # A durable timer (same as workflow.sleep), but woken immediately on
+            # cancel instead of always waiting out the full poll_interval — a
+            # cancel arriving early in a long-configured interval would otherwise
+            # not be observed until the timer fires.
+            with contextlib.suppress(asyncio.TimeoutError):
+                await workflow.wait_condition(
+                    lambda: self._cancel_requested, timeout=timedelta(seconds=poll_interval)
+                )
             self._raise_if_cancelled()
 
             r = await self._exec(

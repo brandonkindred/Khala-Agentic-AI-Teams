@@ -405,6 +405,20 @@ def test_enter_phase_transport_error_is_non_retryable(monkeypatch):
     assert "Transport error starting analysis" in str(ei.value)
 
 
+def test_enter_phase_connect_error_is_retryable(monkeypatch):
+    """Unlike other transport failures, a ConnectError/ConnectTimeout means no
+    bytes ever reached the target — no ambiguity about a duplicate submit — so
+    it must propagate as an ordinary (Temporal-retryable) error, not get
+    converted to a non-retryable ApplicationError."""
+    adapter = MagicMock(name="adapter")
+    adapter.display_name = "Software Engineering"
+    adapter.start_from_spec.side_effect = httpx.ConnectError("connection refused")
+    _install(monkeypatch, run=_run(spec_content="SPEC"), adapter=adapter)
+
+    with pytest.raises(httpx.ConnectError):
+        acts.enter_phase_activity("r1", "analysis", None)
+
+
 def test_enter_phase_persist_exhaustion_is_non_retryable(monkeypatch):
     """If _record_started_job_id exhausts its own retry budget, enter_phase_activity
     must convert that to non-retryable too — otherwise Temporal's activity-level
