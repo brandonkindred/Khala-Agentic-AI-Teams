@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 from job_service_client import (
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
-    JOB_STATUS_RUNNING,
     start_stale_job_monitor,
 )
 from shared_observability import init_otel
@@ -21,6 +20,7 @@ from shared_observability import init_otel
 from ..audit_execution import (
     CreateAuditRequest,
     execute_audit_job,
+    execute_retest_job,
     get_job_manager,
     get_orchestrator,
 )
@@ -119,6 +119,44 @@ class DesignSystemContractRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _resolve_temporal_dispatcher(
+    import_dispatcher: Callable[[], Callable], *, log_context: str
+) -> Optional[Callable]:
+    """Shared enablement-check + import-failure handling for a Temporal dispatcher.
+
+    Preconditions:
+        - ``import_dispatcher`` is a zero-arg callable that performs the actual
+          ``from ..temporal.start_workflow import start_*_workflow`` (kept as a
+          real static import at each call site below, not a dynamic/string-based
+          one, so tooling can still verify the imported name exists) and returns
+          the resolved callable.
+        - ``log_context`` is a short noun phrase (e.g. ``""`` or ``"retest "``)
+          naming what's being dispatched, for the fallback log message.
+    Postconditions:
+        - Returns ``None`` without calling ``import_dispatcher`` when the
+          ``shared_temporal`` package itself is unavailable or
+          ``is_temporal_enabled()`` is ``False``.
+        - Otherwise calls ``import_dispatcher``; returns its result, or ``None``
+          (after logging a warning) if that import fails.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+    except ImportError:
+        return None
+    if not is_temporal_enabled():
+        return None
+    try:
+        return import_dispatcher()
+    except ImportError:
+        logger.warning(
+            "Temporal is enabled but the accessibility-audit Temporal stack failed to "
+            "import; falling back to in-process %sexecution.",
+            log_context,
+            exc_info=True,
+        )
+        return None
+
+
 def _get_temporal_dispatcher() -> Optional[Callable[[str, str, dict], str]]:
     """Return the Temporal ``start_*_workflow`` dispatcher when Temporal is enabled.
 
@@ -131,22 +169,34 @@ def _get_temporal_dispatcher() -> Optional[Callable[[str, str, dict], str]]:
           ``None`` so callers fall back to the in-process background-task path. A
           failed import while Temporal is enabled is logged before returning ``None``.
     """
-    try:
-        from shared_temporal import is_temporal_enabled
-    except ImportError:
-        return None
-    if not is_temporal_enabled():
-        return None
-    try:
+
+    def _import():
         from ..temporal.start_workflow import start_accessibility_audit_workflow
-    except ImportError:
-        logger.warning(
-            "Temporal is enabled but the accessibility-audit Temporal stack failed to "
-            "import; falling back to in-process execution.",
-            exc_info=True,
-        )
-        return None
-    return start_accessibility_audit_workflow
+
+        return start_accessibility_audit_workflow
+
+    return _resolve_temporal_dispatcher(_import, log_context="")
+
+
+def _get_retest_temporal_dispatcher() -> Optional[Callable[[str, str, list], str]]:
+    """Return the Temporal retest dispatcher when Temporal is enabled, else ``None``.
+
+    Preconditions:
+        - None from the caller. Temporal enablement (``TEMPORAL_ADDRESS`` set) is
+          checked internally via ``shared_temporal.is_temporal_enabled()``.
+    Postconditions:
+        - Returns ``start_accessibility_audit_retest_workflow`` when Temporal is
+          enabled and the stack imports cleanly, else ``None`` so the caller falls
+          back to the in-process background-task path. A failed import while Temporal
+          is enabled is logged before returning ``None``.
+    """
+
+    def _import():
+        from ..temporal.start_workflow import start_accessibility_audit_retest_workflow
+
+        return start_accessibility_audit_retest_workflow
+
+    return _resolve_temporal_dispatcher(_import, log_context="retest ")
 
 
 # ---------------------------------------------------------------------------
@@ -233,10 +283,10 @@ async def create_audit(
             _job_manager.update_job(job_id, workflow_id=workflow_id)
         except Exception:
             logger.warning("Failed to record workflow_id for job %s", job_id, exc_info=True)
-        message = "Audit queued (Temporal). Poll /audit/status/{job_id} for progress."
+        message = f"Audit queued (Temporal). Poll /audit/status/{job_id} for progress."
     else:
         background_tasks.add_task(execute_audit_job, job_id, audit_id, request)
-        message = "Audit queued. Poll /audit/status/{job_id} for progress."
+        message = f"Audit queued. Poll /audit/status/{job_id} for progress."
 
     return AuditJobResponse(
         job_id=job_id,
@@ -288,15 +338,14 @@ async def get_audit_findings(
     Get findings for an audit with optional filters and pagination.
     """
     orchestrator = get_orchestrator()
+    # Existence check against the persisted audit state (via the artifact store), so a
+    # Temporal-executed audit that ran in a worker process is still found from the API
+    # process — the in-memory orchestrator cache alone would 404 every cross-process audit.
+    if await orchestrator.get_audit_state(audit_id) is None:
+        raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
 
     severity_filter = Severity(severity) if severity else None
     findings = orchestrator.get_findings(audit_id, severity_filter, state)
-
-    if not findings:
-        # Check if audit exists
-        status = orchestrator.get_audit_status(audit_id)
-        if status.get("status") == "not_found":
-            raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
 
     total = len(findings)
 
@@ -334,30 +383,31 @@ async def get_audit_report(audit_id: str) -> Dict[str, Any]:
     Get the final report for a completed audit.
     """
     orchestrator = get_orchestrator()
-    status = orchestrator.get_audit_status(audit_id)
-
-    if status.get("status") == "not_found":
+    # Existence check against the persisted audit state (via the artifact store), so a
+    # Temporal-executed audit that ran in a worker process is still found from the API
+    # process — the in-memory orchestrator cache alone would 404 every cross-process audit.
+    if await orchestrator.get_audit_state(audit_id) is None:
         raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
 
+    status = orchestrator.get_audit_status(audit_id)
     if status.get("status") != "complete":
         raise HTTPException(
             status_code=400,
             detail=f"Audit {audit_id} is not complete yet",
         )
 
-    orchestrator.get_findings(audit_id)
     patterns = orchestrator.get_patterns(audit_id)
 
     # Build report
     return {
         "audit_id": audit_id,
         "summary": status.get("summary"),
-        "findings_count": status.get("findings_count"),
+        "findings_count": status.get("findings_count", 0),
         "by_severity": {
-            "critical": status.get("critical_count"),
-            "high": status.get("high_count"),
-            "medium": status.get("medium_count"),
-            "low": status.get("low_count"),
+            "critical": status.get("critical_count", 0),
+            "high": status.get("high_count", 0),
+            "medium": status.get("medium_count", 0),
+            "low": status.get("low_count", 0),
         },
         "patterns_count": status.get("patterns_count"),
         "patterns": [p.model_dump() for p in patterns],
@@ -371,13 +421,24 @@ async def retest_findings(
     request: RetestRequest,
     background_tasks: BackgroundTasks,
 ) -> AuditJobResponse:
-    """
-    Run retest on specific findings or all findings.
+    """Run retest on specific findings or all findings.
+
+    Dispatch mirrors ``create_audit``: when Temporal is enabled the retest runs as a
+    durable ``AccessibilityRetestWorkflow`` (``workflow_id`` populated for Temporal-UI
+    correlation); otherwise it runs in-process via a FastAPI background task. Either
+    way the job row is created ``pending`` up front and its status transitions are
+    owned by whichever path executes it, so clients poll ``GET /audit/status/{job_id}``.
+
+    Postconditions:
+        - 404 when the audit is unknown; otherwise a ``pending`` retest job row exists
+          and the response returns its ``job_id`` / ``audit_id`` (and ``workflow_id``
+          on the Temporal path) for polling.
     """
     orchestrator = get_orchestrator()
-    status = orchestrator.get_audit_status(audit_id)
-
-    if status.get("status") == "not_found":
+    # Existence check against the persisted audit state (via the artifact store), so a
+    # Temporal-executed audit that ran in a worker process is still found from the API
+    # process — the in-memory orchestrator cache alone would 404 every cross-process audit.
+    if await orchestrator.get_audit_state(audit_id) is None:
         raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
 
     job_id = f"retest_{uuid.uuid4().hex[:8]}"
@@ -396,27 +457,48 @@ async def retest_findings(
         request_payload=request.model_dump(),
     )
 
-    async def run_retest_task():
+    # None => the in-process (non-Temporal) path ran; set to the workflow id on a
+    # successful Temporal dispatch. It is never an empty string.
+    workflow_id: Optional[str] = None
+    dispatch = _get_retest_temporal_dispatcher()
+    if dispatch is not None:
         try:
-            _job_manager.update_job(job_id, status=JOB_STATUS_RUNNING, progress=30)
-            result = await orchestrator.run_retest(audit_id, request.finding_ids)
-            _job_manager.update_job(
-                job_id,
-                status="completed" if result.success else JOB_STATUS_FAILED,
-                progress=100,
-                result=result.model_dump(),
-                error=result.failure_reason if not result.success else None,
-            )
+            # The dispatcher is synchronous and blocking (polls for the worker client,
+            # then a blocking start round-trip), so offload it off the event loop.
+            workflow_id = await asyncio.to_thread(dispatch, job_id, audit_id, request.finding_ids)
         except Exception as e:
-            _job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
-
-    background_tasks.add_task(run_retest_task)
+            # Fail fast rather than re-running in-process: the workflow may have been
+            # accepted server-side, so an in-process fallback could double-run.
+            logger.warning(
+                "Temporal retest dispatch failed for job %s: %s: %s",
+                job_id,
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
+            _job_manager.update_job(
+                job_id, status=JOB_STATUS_FAILED, error=f"Temporal dispatch failed: {e}"
+            )
+            raise HTTPException(
+                status_code=500, detail="Failed to dispatch retest to Temporal"
+            ) from e
+        # Record the workflow id for correlation only; the worker activity owns all
+        # status transitions. A persist failure here is logged, not raised.
+        try:
+            _job_manager.update_job(job_id, workflow_id=workflow_id)
+        except Exception:
+            logger.warning("Failed to record workflow_id for retest job %s", job_id, exc_info=True)
+        message = f"Retest queued (Temporal). Poll /audit/status/{job_id} for progress."
+    else:
+        background_tasks.add_task(execute_retest_job, job_id, audit_id, request.finding_ids)
+        message = f"Retest started. Poll /audit/status/{job_id} for progress."
 
     return AuditJobResponse(
         job_id=job_id,
         audit_id=audit_id,
-        status="running",
-        message="Retest started.",
+        status=JOB_STATUS_PENDING,
+        message=message,
+        workflow_id=workflow_id,
     )
 
 
@@ -432,9 +514,10 @@ async def export_backlog(
     from ..phases.report_packaging import export_final_report
 
     orchestrator = get_orchestrator()
-    status = orchestrator.get_audit_status(audit_id)
-
-    if status.get("status") == "not_found":
+    # Existence check against the persisted audit state (via the artifact store), so a
+    # Temporal-executed audit that ran in a worker process is still found from the API
+    # process — the in-memory orchestrator cache alone would 404 every cross-process audit.
+    if await orchestrator.get_audit_state(audit_id) is None:
         raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
 
     findings = orchestrator.get_findings(audit_id)
@@ -499,9 +582,10 @@ async def generate_audit_case_study(
     )
 
     orchestrator = get_orchestrator()
-    status = orchestrator.get_audit_status(audit_id)
-
-    if status.get("status") == "not_found":
+    # Existence check against the persisted audit state (via the artifact store), so a
+    # Temporal-executed audit that ran in a worker process is still found from the API
+    # process — the in-memory orchestrator cache alone would 404 every cross-process audit.
+    if await orchestrator.get_audit_state(audit_id) is None:
         raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
 
     findings = orchestrator.get_findings(audit_id)
