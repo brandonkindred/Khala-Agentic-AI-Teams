@@ -443,8 +443,41 @@ def test_workflow_warns_when_gather_sibling_fails(monkeypatch, sample_trip_body)
         asyncio.run(wf.RoadTripWorkflow().run("job-gather-fail", sample_trip_body))
 
     assert "mark_road_trip_failed_activity" in calls
+    # Exactly one warning — from the sibling that actually failed
+    # (plan_logistics_activity), naming it and the job_id so the discarded
+    # sibling (recommend_activities_activity) is identifiable by elimination.
     assert len(warnings) == 1
+    assert "plan_logistics_activity" in warnings[0]
     assert "job-gather-fail" in warnings[0]
+
+
+def test_workflow_warns_naming_whichever_gather_sibling_actually_fails(
+    monkeypatch, sample_trip_body
+):
+    """The warning names whichever activity failed, not a hardcoded one —
+    exercises the opposite failure direction from the test above
+    (recommend_activities_activity fails instead of plan_logistics_activity)."""
+    warnings: list[tuple] = []
+
+    async def _fake_execute_activity(fn, *args, **kwargs):
+        if fn.__name__ == "recommend_activities_activity":
+            raise RuntimeError("activities boom")
+        return {"stub": fn.__name__}
+
+    class _StubLogger:
+        def warning(self, *args):
+            warnings.append(args)
+
+    monkeypatch.setattr(wf.workflow, "patched", lambda _patch_id: True)
+    monkeypatch.setattr(wf.workflow, "execute_activity", _fake_execute_activity)
+    monkeypatch.setattr(wf.workflow, "logger", _StubLogger())
+
+    with pytest.raises(RuntimeError, match="activities boom"):
+        asyncio.run(wf.RoadTripWorkflow().run("job-gather-fail-2", sample_trip_body))
+
+    assert len(warnings) == 1
+    assert "recommend_activities_activity" in warnings[0]
+    assert "plan_logistics_activity" not in warnings[0]
 
 
 def test_workflow_reraises_original_error_even_if_mark_failed_fails(monkeypatch, sample_trip_body):

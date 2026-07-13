@@ -194,6 +194,37 @@ class RoadTripWorkflow:
         self._step = step
         self._fraction = fraction
 
+    @staticmethod
+    async def _named_activity(name: str, job_id: str, awaitable: Any) -> Any:
+        """Await ``awaitable``, logging ``name`` on failure before re-raising.
+
+        Used to wrap sibling ``execute_activity`` calls run concurrently via
+        ``asyncio.gather`` (no ``return_exceptions=True``) — pinpoints which
+        named step actually failed without altering gather's fail-fast
+        propagation, since the tag-and-reraise happens inline within the same
+        coroutine gather is already awaiting rather than via a post-hoc check
+        of gather's return value.
+
+        Preconditions:
+            - ``awaitable`` is a single ``workflow.execute_activity(...)`` call.
+
+        Postconditions:
+            - Returns ``awaitable``'s result unchanged on success. On failure,
+              logs a warning naming ``name`` and ``job_id`` before re-raising
+              the original exception unchanged.
+        """
+        try:
+            return await awaitable
+        except Exception:  # noqa: BLE001 — log which step failed, then re-raise unchanged
+            workflow.logger.warning(
+                "%s failed for job %s; its concurrent sibling may still be "
+                "running to completion with its result (and any LLM cost "
+                "incurred) discarded, since it isn't cancelled",
+                name,
+                job_id,
+            )
+            raise
+
     @workflow.run
     async def run(self, job_id: str, request: dict[str, Any]) -> dict[str, Any]:
         """Durable entrypoint: run the road-trip pipeline for ``job_id``.
@@ -279,13 +310,17 @@ class RoadTripWorkflow:
             # below still routes the failure to mark_road_trip_failed_activity,
             # so the run always ends in a definitive FAILED state. Same
             # trade-off branding_team's BrandingWorkflow accepts for its own
-            # asyncio.gather of integrations. The warning below at least makes
-            # the discarded sibling (and its LLM cost) observable rather than
-            # silent, without the larger scope of threading cancellation
-            # support through the activities themselves.
+            # asyncio.gather of integrations. _named_activity below logs which
+            # specific step failed (so the *other*, still-running one is
+            # identifiable by elimination — there are only the two) without
+            # changing this fail-fast propagation: it tags-and-reraises inline
+            # from within the same coroutine gather is already awaiting, rather
+            # than switching to return_exceptions=True and waiting for both.
             self._advance("recommend_activities_and_logistics", 0.45)
-            try:
-                activities, logistics = await asyncio.gather(
+            activities, logistics = await asyncio.gather(
+                self._named_activity(
+                    "recommend_activities_activity",
+                    job_id,
                     workflow.execute_activity(
                         _activities.recommend_activities_activity,
                         args=[request, profile, route],
@@ -294,6 +329,10 @@ class RoadTripWorkflow:
                         heartbeat_timeout=_STEP_HEARTBEAT_TIMEOUT,
                         retry_policy=_LLM_RETRY,
                     ),
+                ),
+                self._named_activity(
+                    "plan_logistics_activity",
+                    job_id,
                     workflow.execute_activity(
                         _activities.plan_logistics_activity,
                         args=[request, profile, route],
@@ -301,16 +340,8 @@ class RoadTripWorkflow:
                         start_to_close_timeout=_STEP_TIMEOUT,
                         retry_policy=_LLM_RETRY,
                     ),
-                )
-            except Exception:  # noqa: BLE001 — log, then let the outer except handle it
-                workflow.logger.warning(
-                    "recommend_activities_activity/plan_logistics_activity for job "
-                    "%s: one failed while the other may still be running to "
-                    "completion — its result (and any LLM cost incurred) will be "
-                    "discarded",
-                    job_id,
-                )
-                raise
+                ),
+            )
 
             self._advance("compose_itinerary", 0.85)
             itinerary = await workflow.execute_activity(
