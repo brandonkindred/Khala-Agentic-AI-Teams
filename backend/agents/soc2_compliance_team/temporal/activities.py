@@ -10,6 +10,14 @@ deferred to each function's body instead, so the module stays cheap for the
 temporalio sandbox to replay. Pydantic models cross the activity boundary as
 ``model_dump(mode="json")`` dicts and are reconstructed with ``model_validate``.
 
+Each activity keeps an explicit ``_activity`` suffix even though
+``@activity.defn(name=...)`` already gives Temporal its canonical name:
+``audit_criterion_activity`` wraps ``pipeline.audit_criterion`` and
+``write_report_activity`` wraps ``pipeline.write_report`` — the same bare
+names would collide with (and shadow) their ``pipeline`` counterparts in the
+scopes that import both (``workflows.py``, the test suite), so the suffix is
+disambiguation, not stutter.
+
 The activities own the durable job-store bookkeeping via
 :mod:`soc2_compliance_team.job_store` — deliberately not ``api.main``:
 importing the API module would pull the FastAPI ``app`` and its stale-job
