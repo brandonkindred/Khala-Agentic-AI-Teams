@@ -21,6 +21,7 @@ from shared_postgres.metrics import timed_query
 from .models import (
     LISTING_FILTERS,
     JobMatchRequest,
+    JobMatchResponse,
     JobPosting,
     Listing,
     ListingsResponse,
@@ -131,16 +132,37 @@ class JobMatchingStore:
 
     @timed_query(store=_STORE, op="create_run")
     def create_run(self, run_id: str, profile: JobSeekerProfile, request: JobMatchRequest) -> None:
-        """Insert a new run row in ``running`` state.
+        """Insert or refresh a run row in ``running`` state (idempotent on ``run_id``).
 
         Preconditions:
-            * ``run_id`` is unique (caller generates a UUID).
+            * ``run_id`` is caller-generated (e.g. a UUID or a workflow-owned id).
+        Postconditions:
+            * Exactly one run row exists for ``run_id`` in ``running`` state.
+            * Idempotent: a repeat call with the same ``run_id`` refreshes
+              ``profile_snapshot``/``request_json``/``top_n`` to this call's
+              values (``ON CONFLICT (run_id) DO UPDATE``) rather than duplicating
+              the row or silently keeping a stale snapshot from an earlier, lost
+              attempt — a Temporal activity retry that observed a changed profile
+              persists the profile it actually used. ``status`` and
+              ``created_at`` are left untouched on the update.
+            * The update only applies while the run is still ``running``
+              (``WHERE status = 'running'``): without heartbeating, a "timed
+              out" attempt's worker keeps executing in the background and can
+              still commit after a later attempt has already run and completed
+              the run, so a late, stale ``create_run`` call from that abandoned
+              attempt must not overwrite an already-completed run's snapshot
+              with data that no longer matches its persisted ranked results.
         """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO job_matching_runs "
                 "(run_id, status, profile_snapshot, request_json, top_n, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
+                "VALUES (%s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (run_id) DO UPDATE SET "
+                "profile_snapshot = EXCLUDED.profile_snapshot, "
+                "request_json = EXCLUDED.request_json, "
+                "top_n = EXCLUDED.top_n "
+                "WHERE job_matching_runs.status = %s",
                 (
                     run_id,
                     RUN_STATUS_RUNNING,
@@ -148,6 +170,7 @@ class JobMatchingStore:
                     Json(request.model_dump(mode="json")),
                     request.top_n,
                     _now(),
+                    RUN_STATUS_RUNNING,
                 ),
             )
 
@@ -172,8 +195,31 @@ class JobMatchingStore:
         Postconditions:
             * The run's ``status`` is ``completed`` with ``total_found`` /
               ``total_ranked`` populated and ``completed_at`` set.
-            * One ``job_matching_ranked_jobs`` row exists per entry in
+            * Exactly one ``job_matching_ranked_jobs`` row exists per entry in
               ``ranked`` (rank starts at 1, in list order).
+            * Idempotent on ``run_id``: any ranked rows from a prior call for the
+              same run are deleted first, unconditionally — not gated on an
+              attempt/retry count. Without heartbeating, a "timed out" attempt's
+              worker keeps executing in the background and can still commit
+              after a later attempt already saved and completed the run; an
+              attempt-number-based skip (e.g. "only delete when attempt > 1")
+              would let that late, abandoned first attempt append a duplicate
+              copy of its rows once it finally finishes, since *its own*
+              attempt number is always 1 regardless of what else has since
+              happened to the run.
+            * Serialized against any concurrent call for the same ``run_id`` by
+              a transaction-scoped Postgres advisory lock
+              (``pg_advisory_xact_lock``), acquired before the delete-then-
+              insert sequence and released automatically on commit/rollback.
+              Without it, two overlapping saves for the same run (e.g. a
+              zombie attempt's worker still running concurrently with its own
+              retry) run as two independent transactions under READ COMMITTED
+              with no other serialization between them, and — since there is
+              no unique constraint on ``(run_id, rank)`` to fall back on —
+              their DELETEs and INSERTs could interleave (delete/delete/
+              insert/insert) and leave duplicate rows for the same run. The
+              lock makes the second caller simply wait for the first to
+              finish, then proceed against its already-committed state.
             * The run's ``seen_fingerprints`` holds the de-duplicated set of
               ``scanned_fingerprints`` (falling back to the ranked postings'
               fingerprints when not supplied).
@@ -183,6 +229,13 @@ class JobMatchingStore:
         seen = sorted({fp for fp in scanned_fingerprints if fp})
         now = _now()
         with get_conn() as conn, conn.cursor() as cur:
+            # Serialize against any concurrent save_results for the same
+            # run_id (see docstring) before the delete-then-insert sequence.
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s)::bigint)", (run_id,))
+            # Idempotent re-save: drop any rows a prior (crashed-then-retried, or
+            # merely slow and since-abandoned) attempt wrote for this run before
+            # re-inserting the current set.
+            cur.execute("DELETE FROM job_matching_ranked_jobs WHERE run_id = %s", (run_id,))
             for idx, rj in enumerate(ranked, start=1):
                 cur.execute(
                     "INSERT INTO job_matching_ranked_jobs "
@@ -210,18 +263,84 @@ class JobMatchingStore:
 
     @timed_query(store=_STORE, op="mark_failed")
     def mark_failed(self, run_id: str, error: str) -> None:
-        """Mark a run failed.
+        """Mark a run failed, unless it already completed.
 
+        Preconditions:
+            * ``run_id`` may or may not have an existing row; a miss is a silent
+              no-op (this method never creates a row).
         Postconditions:
             * The stored ``error`` is capped at 2000 characters so an unbounded
               exception dump cannot bloat the run row.
+            * A run already in ``completed`` state is left untouched (the
+              ``status <> completed`` guard): a Temporal ``fail_scan`` that fires
+              after ``finalize`` already saved results must not flip a completed
+              run — with its persisted ranked rows — back to ``failed``.
         """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE job_matching_runs SET status = %s, error = %s, completed_at = %s "
-                "WHERE run_id = %s",
-                (RUN_STATUS_FAILED, (error or "")[:2000], _now(), run_id),
+                "WHERE run_id = %s AND status <> %s",
+                (RUN_STATUS_FAILED, (error or "")[:2000], _now(), run_id, RUN_STATUS_COMPLETED),
             )
+
+    @timed_query(store=_STORE, op="run_status")
+    def run_status(self, run_id: str) -> Optional[str]:
+        """Return the run's current status, or None if unknown.
+
+        Cheap, single-column probe for callers that only need the status, not
+        the full run — a :meth:`get_run` (which also fetches every ranked row)
+        or :meth:`get_run_response` would be overkill for that check.
+
+        Preconditions:
+            * ``run_id`` may or may not have an existing row.
+        Postconditions:
+            * Returns the ``status`` column's value, or ``None`` when no row
+              exists for ``run_id``.
+        """
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT status FROM job_matching_runs WHERE run_id = %s", (run_id,))
+            row = cur.fetchone()
+            return row[0] if row is not None else None
+
+    @timed_query(store=_STORE, op="get_run_response")
+    def get_run_response(self, run_id: str) -> Optional[JobMatchResponse]:
+        """Rebuild a completed run's full response from persisted data.
+
+        Used by ``fail_scan_activity`` to self-heal a job whose own completion
+        write never happened (e.g. a run that finalize durably saved, but whose
+        subsequent cancellation check then failed on every retry) — reconstructs
+        the same :class:`JobMatchResponse` finalize_scan_activity would have
+        returned, from the run row and its ranked-job rows alone.
+
+        Preconditions:
+            * ``run_id`` may or may not have an existing row.
+        Postconditions:
+            * Returns None when no row exists for ``run_id`` or its status is
+              not ``completed`` — there is nothing valid to rebuild.
+            * Otherwise returns the run's :class:`JobMatchResponse`, built from
+              its persisted ``profile_snapshot`` and ranked-job rows (rank
+              order). Raises if the run is completed but its
+              ``profile_snapshot`` is missing or fails validation — a
+              data-integrity problem the caller should not silently paper over
+              by guessing a response, unlike the "nothing to rebuild" None case.
+        """
+        detail = self.get_run(run_id)
+        if detail is None or detail.status != RUN_STATUS_COMPLETED:
+            return None
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT profile_snapshot FROM job_matching_runs WHERE run_id = %s", (run_id,)
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+        return JobMatchResponse(
+            run_id=detail.run_id,
+            ranked_jobs=detail.ranked_jobs,
+            total_found=detail.total_found,
+            total_ranked=detail.total_ranked,
+            profile_snapshot=JobSeekerProfile.model_validate(row[0]),
+        )
 
     @timed_query(store=_STORE, op="list_runs")
     def list_runs(self, *, limit: int = 50) -> List[RunSummary]:
