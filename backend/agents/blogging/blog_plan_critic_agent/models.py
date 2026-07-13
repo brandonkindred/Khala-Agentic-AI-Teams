@@ -2,25 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import List, Optional
 
-from pydantic import BaseModel, Field
-
-PlanStatus = Literal["PASS", "FAIL"]
-PlanSeverity = Literal["must_fix", "should_fix", "consider"]
+from pydantic import Field
+from shared.gate_report import GateReport, GateSeverity, GateStatus, GateViolation
 
 
-class PlanViolation(BaseModel):
+class PlanViolation(GateViolation):
     """A single rubric or brand-spec violation found in the plan."""
 
-    rule_id: str = Field(
-        ...,
-        description=(
-            "Rubric identifier, e.g. 'overarching_topic.stance_not_label', "
-            "'section.key_points.specificity', 'brand.voice_mismatch'."
-        ),
-    )
-    severity: PlanSeverity = Field(
+    severity: GateSeverity = Field(
         default="must_fix",
         description="must_fix blocks critic approval; should_fix and consider are advisory.",
     )
@@ -32,17 +23,16 @@ class PlanViolation(BaseModel):
         default=None,
         description="Exact quote from the offending plan field (keep under ~120 chars).",
     )
-    description: str = Field(..., description="What is wrong and why it matters.")
     suggested_fix: str = Field(
         ...,
         description="Concrete, actionable instruction the refiner can apply next iteration.",
     )
 
 
-class PlanCriticReport(BaseModel):
+class PlanCriticReport(GateReport):
     """Structured critique of a ContentPlan against the author's brand spec and the rubric."""
 
-    status: PlanStatus = Field(
+    status: GateStatus = Field(
         ...,
         description="PASS when no must_fix violations exist; FAIL otherwise.",
     )
@@ -62,7 +52,3 @@ class PlanCriticReport(BaseModel):
 
     def must_fix_count(self) -> int:
         return sum(1 for v in self.violations if v.severity == "must_fix")
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Export for JSON serialization."""
-        return self.model_dump(exclude_none=True)

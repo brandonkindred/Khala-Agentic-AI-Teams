@@ -132,7 +132,7 @@ class BlogFactCheckAgent:
                 notes=f"Fallback report: JSON parse failed after {_MAX_JSON_RETRIES} attempts.",
             )
             if work_dir and write_artifact:
-                fc_data = report.dict() if hasattr(report, "dict") else report.model_dump()
+                fc_data = report.to_dict()
                 write_artifact(work_dir, "fact_check_report.json", fc_data)
                 logger.info("Wrote fact_check_report.json: claims=FAIL risk=FAIL (fallback)")
             return report
@@ -154,7 +154,7 @@ class BlogFactCheckAgent:
         )
 
         if work_dir and write_artifact:
-            data = report.dict() if hasattr(report, "dict") else report.model_dump()
+            data = report.to_dict()
             write_artifact(work_dir, "fact_check_report.json", data)
             logger.info(
                 "Wrote fact_check_report.json: claims=%s risk=%s", claims_status, risk_status
