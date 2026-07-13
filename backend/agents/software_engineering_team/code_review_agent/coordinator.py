@@ -596,6 +596,8 @@ def run_coordinator(
     # capability that already exists elsewhere in the repository. Runs after the false-positive
     # filter (its findings are already tool-grounded, so they are not subjected to that filter
     # again) and folds straight into the same dedupe/severity-gate/merge machinery below.
+    # (Restricted internally to the default CODE_REVIEW profile -- see that function's
+    # own docstring for why the other profiles must never receive these findings.)
     architecture_findings = find_architecture_and_redundancy_issues(
         llm, input_data, repo_reader=repo_reader, index=shared_index
     )

@@ -461,8 +461,10 @@ def run_gated_execution_impl(
         ``gate_config.run_code_review_gate`` accepts a ``review_context`` keyword
         argument (the per-team adapter forwards it into its code-review call); a
         ``review_context`` is built here from ``architecture``/``spec_content``
+        only when at least one is actually populated, and is ``None`` otherwise
         (both default to ``None``/``""`` so a caller without them yet is
-        unaffected).
+        unaffected, and the LLM fallback reviewers' context-bounding path is
+        never entered with nothing to bound).
     Postconditions:
         Returns an ``ExecutionResult``; each microtask ends COMPLETED, SKIPPED,
         FAILED or REVIEW_FAILED. When a microtask's review fails and
@@ -478,7 +480,17 @@ def run_gated_execution_impl(
     config = review_config or models.MicrotaskReviewConfig()
     deps = review_deps or ReviewDependencies()
     runners = tool_runners or {}
-    review_context = ReviewContext(architecture=architecture, spec_content=spec_content)
+    # None (not an empty ReviewContext()) when there is nothing to add: the LLM
+    # fallback reviewers only enter their context-bounding path (which calls
+    # compute_code_review_*_chars(llm), requiring get_max_context_tokens()) when
+    # review_context is not None -- an always-non-None ReviewContext would touch
+    # that path even for a caller whose llm handle doesn't support it, for no
+    # actual context to bound.
+    review_context = (
+        ReviewContext(architecture=architecture, spec_content=spec_content)
+        if architecture is not None or spec_content
+        else None
+    )
 
     all_files: Dict[str, str] = {}
     microtasks = list(planning_result.microtasks)

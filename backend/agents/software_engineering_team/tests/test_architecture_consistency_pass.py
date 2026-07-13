@@ -219,6 +219,28 @@ def test_is_changed_file_true_only_for_submission_files() -> None:
     assert _is_changed_file(index, CodebaseIndex.EXISTING_CODEBASE_PATH) is False
 
 
+def test_is_changed_file_resolves_a_basename_alias_of_a_changed_file() -> None:
+    """A unique basename/suffix alias of a changed file (e.g. ``main.py`` for
+    ``app/main.py``) must resolve as changed, matching
+    ``CodebaseIndex.resolve_path``'s own alias support -- otherwise a valid
+    finding anchored by alias is wrongly treated as outside the diff."""
+    index = CodebaseIndex(files={"app/main.py": "code"})
+    assert _is_changed_file(index, "main.py") is True
+
+
+def test_validate_findings_normalizes_a_changed_file_alias_to_its_real_key() -> None:
+    """A finding anchored by a basename/suffix alias of a changed file is kept
+    AND its ``file_path`` is normalized to the submission's real key, so PR
+    comment placement is exact rather than merely "not blanked"."""
+    index = CodebaseIndex(files={"app/main.py": "def bar():\n    return 1\n"})
+    finding = CodeReviewIssue(
+        category="architecture", description="d1", file_path="main.py", line=1
+    )
+    validated = _validate_findings(index, [finding])
+    assert validated[0].file_path == "app/main.py"
+    assert validated[0].line == 1
+
+
 def test_validate_findings_blanks_file_path_anchored_outside_the_diff() -> None:
     """Regression test: a cross-codebase-redundancy finding that cites the
     EXISTING file it found the duplicate in (rather than the changed file that
@@ -419,6 +441,33 @@ def test_fails_safe_on_unparsable_reply() -> None:
     assert result == []
 
 
+def test_returns_empty_for_non_code_review_profile() -> None:
+    """Only the default CODE_REVIEW profile runs this pass. The other profiles
+    (ACCEPTANCE, SPEC_CONFORMANCE, ...) expect every issue to be attributable to
+    a specific criterion/requirement, which an architecture/refactor finding
+    never is -- e.g. AcceptanceVerifierAgent treats any unattributed issue as an
+    unmet criterion, so this pass could otherwise spuriously fail acceptance
+    verification even when every criterion is satisfied."""
+    from code_review_agent.models import CodeReviewInput
+    from code_review_agent.profiles import ReviewProfile
+
+    class _FailIfAskedClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            assert _ARCH_PASS_ANCHOR not in prompt, "architecture pass should not run"
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    result = find_architecture_and_redundancy_issues(
+        _FailIfAskedClient(),
+        CodeReviewInput(
+            files={"app/main.py": "def bar():\n    return 1\n"},
+            task_description="wire up bar",
+            architecture=_arch(),
+            profile=ReviewProfile.ACCEPTANCE,
+        ),
+    )
+    assert result == []
+
+
 # --------------------------------------------------------------------------- happy path
 
 
@@ -544,6 +593,40 @@ def test_run_pass_shrinks_code_budget_by_arch_doc_reserve(monkeypatch: pytest.Mo
     assert captured["max_arch_doc_chars"] == 9000
     # 20_000 - max(9_000 - 1_000, 0) == 12_000
     assert captured["max_inline_chars"] == 12_000
+
+
+def test_run_pass_clamps_arch_doc_when_it_would_still_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``CODE_REVIEW_ARCH_DOC_CHARS`` larger than the model's total
+    context-derived budget must not be inlined in full -- on a smaller-context
+    model even a code budget of zero would not save the combined prompt from
+    overflow, so the document itself is clamped to at most half of the total
+    available budget."""
+    import code_review_agent.architecture_consistency_pass as pass_mod
+
+    captured: Dict[str, Any] = {}
+    original_build_prompt = pass_mod._build_prompt
+
+    def _spy(index, architecture, max_inline_chars, max_arch_doc_chars):
+        captured["max_inline_chars"] = max_inline_chars
+        captured["max_arch_doc_chars"] = max_arch_doc_chars
+        return original_build_prompt(index, architecture, max_inline_chars, max_arch_doc_chars)
+
+    monkeypatch.setattr(pass_mod, "_build_prompt", _spy)
+    monkeypatch.setattr(pass_mod, "compute_code_review_map_chunk_chars", lambda llm: 6_000)
+    monkeypatch.setattr(pass_mod, "compute_code_review_arch_overview_chars", lambda llm: 2_000)
+    monkeypatch.setenv("CODE_REVIEW_ARCH_DOC_CHARS", "50000")  # far past the 8_000 total
+
+    class _EmptyClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return {"findings": []}
+
+    find_architecture_and_redundancy_issues(_EmptyClient(), _input(architecture=_arch()))
+
+    # available_total = 6_000 + 2_000 == 8_000; clamped to half instead of the full 50_000.
+    assert captured["max_arch_doc_chars"] == 4_000
+    assert captured["max_inline_chars"] == 4_000
 
 
 def test_arch_doc_abs_chars_default_is_generous() -> None:

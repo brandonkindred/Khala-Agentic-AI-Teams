@@ -34,6 +34,13 @@ Invariants:
 
     - **Bounded cost.** Exactly one LLM call per submission (not per chunk),
       matching the false-positive filter's per-submission cost shape.
+
+    - **``CODE_REVIEW`` profile only.** The other :class:`.profiles.ReviewProfile`
+      values narrow the engine to a specific checklist whose contract expects
+      every issue to map to a specific criterion/requirement (e.g. the
+      acceptance profile's per-criterion attribution); an architecture/refactor
+      finding never maps to one of those, so this pass never runs under any
+      profile but the default.
 """
 
 from __future__ import annotations
@@ -57,6 +64,7 @@ from .architecture_context import render_architecture_context
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line
+from .profiles import ReviewProfile
 from .prompts import ARCHITECTURE_CONSISTENCY_PROMPT
 from .repo_reader import RepoReader
 
@@ -252,9 +260,14 @@ def _is_changed_file(index: CodebaseIndex, file_path: str) -> bool:
 
     Postconditions: returns ``False`` for an empty/blank path or one that
     resolves only via ``repo_reader``/the existing-codebase excerpt; ``True``
-    iff ``file_path`` is a key of ``index.files``. Pure; never raises.
+    iff ``file_path`` resolves (via ``CodebaseIndex.resolve_path``, which also
+    accepts a unique basename/suffix alias such as ``main.py`` for
+    ``app/main.py``) to a key of ``index.files``. Pure; never raises.
     """
-    return bool(file_path) and file_path in index.files
+    if not file_path:
+        return False
+    resolved = index.resolve_path(file_path)
+    return resolved is not None and resolved in index.files
 
 
 def _validate_findings(
@@ -278,10 +291,17 @@ def _validate_findings(
     """
     validated: List[CodeReviewIssue] = []
     for finding in findings:
-        if finding.file_path and not _is_changed_file(index, finding.file_path):
-            finding = finding.model_copy(update={"file_path": "", "line": None})
-            validated.append(finding)
-            continue
+        if finding.file_path:
+            resolved_path = index.resolve_path(finding.file_path)
+            if resolved_path is None or resolved_path not in index.files:
+                finding = finding.model_copy(update={"file_path": "", "line": None})
+                validated.append(finding)
+                continue
+            if resolved_path != finding.file_path:
+                # Normalize a basename/suffix alias (e.g. "main.py") to the
+                # submission's actual key ("app/main.py") so the anchor is
+                # exact for PR-comment placement, not just verified.
+                finding = finding.model_copy(update={"file_path": resolved_path})
         checked_line = _validate_finding_line(index, finding.file_path, finding.line)
         if checked_line != finding.line:
             finding = finding.model_copy(update={"line": checked_line})
@@ -313,10 +333,18 @@ def find_architecture_and_redundancy_issues(
     Postconditions:
         - Returns ``[]`` (no LLM call) when the pass is disabled via
           ``CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS``, when
-          ``input_data.architecture`` is absent or carries none of an
-          ``architecture_document``, ``overview``, ``components``, or
-          ``decisions`` (nothing to check a contradiction against), or when
-          the submission has no readable files.
+          ``input_data.profile`` is anything other than
+          ``ReviewProfile.CODE_REVIEW`` (the other profiles -- ``ACCEPTANCE``,
+          ``SPEC_CONFORMANCE``, ... -- have a narrower contract that expects
+          every issue to be attributable to a specific criterion/requirement,
+          which an architecture/refactor finding never is; e.g.
+          ``AcceptanceVerifierAgent`` treats any unattributed issue as an
+          unmet criterion, so letting this pass run under that profile could
+          spuriously fail acceptance verification even when every criterion
+          is satisfied), when ``input_data.architecture`` is absent or
+          carries none of an ``architecture_document``, ``overview``,
+          ``components``, or ``decisions`` (nothing to check a contradiction
+          against), or when the submission has no readable files.
         - Otherwise returns zero or more NEW ``CodeReviewIssue``s in category
           ``"architecture"`` or ``"refactor"`` only, each with its cited
           ``line`` bounds-checked against the real file (a hallucinated
@@ -329,6 +357,8 @@ def find_architecture_and_redundancy_issues(
           map phase and the false-positive filter.
     """
     if not env_flag_enabled(_PASS_ENV):
+        return []
+    if input_data.profile != ReviewProfile.CODE_REVIEW:
         return []
     architecture = input_data.architecture
     if architecture is None or not (
@@ -375,14 +405,23 @@ def _run_pass(
         return []
 
     model = resolve_code_review_model(llm)
-    max_arch_doc_chars = parse_env_int("CODE_REVIEW_ARCH_DOC_CHARS", _ARCH_DOC_ABS_CHARS, 2_000)
-    # ``compute_code_review_map_chunk_chars`` already reserves room for a small architecture
-    # excerpt (``compute_code_review_arch_overview_chars``) inside its context-derived budget;
-    # this pass inlines the much larger full architecture document instead, so shrink the code
-    # budget by the extra the document consumes beyond that reservation, keeping the combined
-    # prompt within the same context-derived ceiling instead of silently overflowing it.
-    extra_arch_reserve = max(max_arch_doc_chars - compute_code_review_arch_overview_chars(llm), 0)
-    max_inline_chars = max(compute_code_review_map_chunk_chars(llm) - extra_arch_reserve, 2_000)
+    configured_arch_doc_chars = parse_env_int(
+        "CODE_REVIEW_ARCH_DOC_CHARS", _ARCH_DOC_ABS_CHARS, 2_000
+    )
+    # ``compute_code_review_map_chunk_chars`` plus ``compute_code_review_arch_overview_chars``
+    # approximates the total content this model's context can carry for a code+architecture
+    # prompt of this shape (the two already sum to a context-derived ceiling for the map-phase
+    # prompt this pass's own prompt closely resembles). Split that total between the architecture
+    # document and the inlined code -- at most half to the document -- rather than inlining the
+    # full (env-configurable, not context-aware) document cap unconditionally: on a smaller-context
+    # model a generous CODE_REVIEW_ARCH_DOC_CHARS could otherwise consume the whole budget by
+    # itself and push the combined prompt past the model's real context regardless of how much the
+    # code side shrinks.
+    available_total = compute_code_review_map_chunk_chars(
+        llm
+    ) + compute_code_review_arch_overview_chars(llm)
+    max_arch_doc_chars = min(configured_arch_doc_chars, available_total // 2)
+    max_inline_chars = max(available_total - max_arch_doc_chars, 0)
 
     prompt = _build_prompt(index, architecture, max_inline_chars, max_arch_doc_chars)
     agent = Agent(

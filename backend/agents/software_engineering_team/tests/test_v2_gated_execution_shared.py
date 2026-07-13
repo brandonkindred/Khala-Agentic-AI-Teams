@@ -403,15 +403,36 @@ def test_code_review_gate_receives_architecture_and_spec_content_on_every_call(t
 
 def test_code_review_gate_defaults_architecture_and_spec_content(tmp_path):
     """A caller that does not pass ``architecture``/``spec_content`` to ``_run``
-    (i.e. the existing default-free call shape) still reaches the gate with the
-    documented defaults (``None``/``""``), so existing callers are unaffected."""
+    (i.e. the existing default-free call shape) reaches the gate with
+    ``review_context=None`` -- not an empty ``ReviewContext()`` -- so existing
+    callers are unaffected and the LLM fallback reviewers' context-bounding
+    path (which calls ``compute_code_review_*_chars(llm)``, requiring
+    ``get_max_context_tokens()``) is never entered with nothing to bound."""
     cr = _CapturingGate()
     mt = _microtask()
     _run(_make_gate_config(code_review_gate=cr), [mt], tmp_path, review_config=_config())
 
     assert cr.calls_kwargs
-    assert cr.calls_kwargs[0]["review_context"].architecture is None
-    assert cr.calls_kwargs[0]["review_context"].spec_content == ""
+    assert cr.calls_kwargs[0]["review_context"] is None
+
+
+def test_code_review_gate_context_none_when_spec_content_blank(tmp_path):
+    """Passing an explicit blank ``spec_content=""`` and no ``architecture``
+    must not build a non-None ``ReviewContext`` either -- only an actually
+    populated field should turn it on."""
+    cr = _CapturingGate()
+    mt = _microtask()
+    _run(
+        _make_gate_config(code_review_gate=cr),
+        [mt],
+        tmp_path,
+        review_config=_config(),
+        architecture=None,
+        spec_content="",
+    )
+
+    assert cr.calls_kwargs
+    assert cr.calls_kwargs[0]["review_context"] is None
 
 
 def test_code_review_fail_stop_raises(tmp_path):
