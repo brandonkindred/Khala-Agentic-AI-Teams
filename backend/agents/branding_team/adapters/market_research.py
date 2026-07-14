@@ -3,41 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import os
 import time
-from typing import Awaitable, Optional, TypeVar
+from typing import Optional
 
 import httpx
 
 from branding_team.models import BrandingMission, CompetitiveSnapshot
+from branding_team.shared.coro_runner import run_coroutine
 from shared_env_config import env_float
 
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
-
-_T = TypeVar("_T")
-
-
-def _run_blocking(coro: Awaitable[_T]) -> _T:
-    """Run an awaitable to completion from synchronous code.
-
-    Uses ``asyncio.run`` when no loop is running in this thread; otherwise
-    runs it on a one-off worker thread so we never call ``asyncio.run`` inside
-    an active loop.
-
-    Preconditions:
-        ``coro`` is an un-awaited awaitable/coroutine.
-    Postconditions:
-        Returns the awaitable's result, or propagates whatever it raises.
-        Does not call ``asyncio.run`` while a loop is already running in the
-        calling thread.
-    """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)  # type: ignore[arg-type]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(lambda: asyncio.run(coro)).result()  # type: ignore[arg-type]
 
 
 def _poll_interval_s() -> float:
@@ -153,7 +129,7 @@ async def request_market_research_async(
 def request_market_research(mission: BrandingMission) -> Optional[CompetitiveSnapshot]:
     """Synchronous wrapper over :func:`request_market_research_async` for
     non-async callers (e.g. the orchestrator running in a worker thread)."""
-    return _run_blocking(request_market_research_async(mission))
+    return run_coroutine(request_market_research_async(mission))
 
 
 def _map_to_competitive_snapshot(data: dict) -> CompetitiveSnapshot:

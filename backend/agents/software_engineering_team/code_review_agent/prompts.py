@@ -110,7 +110,7 @@ Return a single JSON object with:
   - "file_path": string (which file has the issue)
   - "line": integer (1-based line number in the NEW version of file_path where the issue is). When the code is presented with line-number prefixes (e.g. `123: <code>`), set "line" to that exact prefixed number. REQUIRED when the issue is tied to a specific line; OMIT it for file-wide or structural issues.
   - "description": string (clear description of the issue)
-  - "suggestion": string (concrete fix recommendation)
+  - "suggestion": string (concrete fix recommendation). If there is nothing to change, do NOT include the finding in "issues" at all -- a finding whose only "suggestion" would be "no changes needed" is not an issue.
 - "summary": string. A brief, high-level overview for the developer. Do NOT restate what the PR does or is meant to accomplish. When any issue was found, do NOT praise the implementation (do not call it sound, well-structured, or well-implemented) and do NOT claim it aligns with the spec; instead name which functional areas or parts of the code have issues and call out any common theme across them, without re-listing the individual findings (they are posted as their own comments). When there are no issues, a single short sentence.
 - "spec_compliance_notes": string. List ONLY concrete spec or acceptance-criteria gaps (missing or unmet requirements), briefly. If there are no spec gaps, return an empty string "" — do not write reassuring "meets the spec" prose.
 

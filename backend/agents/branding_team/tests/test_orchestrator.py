@@ -469,17 +469,17 @@ def test_gather_integrations_market_research_failure_returns_none() -> None:
 
 
 def test_run_coro_offloads_when_loop_running() -> None:
-    """_run_coro runs a coroutine on a worker thread when a loop is already active."""
+    """run_coroutine runs a coroutine on a worker thread when a loop is already active."""
     import asyncio
 
-    from branding_team.orchestrator import _run_coro
+    from branding_team.shared.coro_runner import run_coroutine
 
     async def _driver():
         async def _val():
             return 42
 
-        # Called synchronously inside a running loop, so _run_coro must offload
+        # Called synchronously inside a running loop, so run_coroutine must offload
         # to a worker thread instead of calling asyncio.run on the live loop.
-        return _run_coro(_val())
+        return run_coroutine(_val())
 
     assert asyncio.run(_driver()) == 42
