@@ -96,18 +96,20 @@ def test_dead_predicate_custom_is_warning_not_critical() -> None:
     assert not any(r.severity == "critical" for r in results)
 
 
-def test_all_of_legs_never_co_occur_diagnostic() -> None:
-    # Each leg holds on its own on a rising series (close>sma(50) AND sma(5)>sma(200))
-    # but pair it with a leg that never holds so the conjunction is dead while each
-    # sub-leg fires — exercises the "never co-occur" vs "never hold" branches.
-    never_co_occur = AllOf(
+def test_all_of_with_one_leg_never_holds_diagnostic() -> None:
+    # One leg is always true and one is always false on a rising series, so the
+    # conjunction is dead because a leg never holds ON ITS OWN — exercises the
+    # "never hold on their own" diagnostic branch (the "never co-occur" branch,
+    # where every leg fires but never together, is covered by
+    # ``test_leg_diagnostic_never_co_occur_branch``).
+    never_holds = AllOf(
         of=[
             Predicate(lhs="bar.close", op=">", rhs=_sma(200)),  # always true
             Predicate(lhs="bar.close", op="<", rhs=_sma(200)),  # always false
         ]
     )
     probe = PredicateReachabilityProbe()
-    spec = _spec(never_co_occur)
+    spec = _spec(never_holds)
     results = probe.to_gate_results(probe.probe(spec, _MD), spec)
     crit = [r for r in results if r.severity == "critical"]
     assert crit, _details(results)

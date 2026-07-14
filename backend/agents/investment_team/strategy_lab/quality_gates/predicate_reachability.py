@@ -83,7 +83,16 @@ def _sweep(node: Any, views: List[PandasHistoryView]) -> tuple[int, int]:
     Post: ``evaluated`` counts non-warmup bars (a warming-up leg yields ``warmup``,
     which is excluded so an all-warmup window never reads as dead code); ``fires``
     counts bars where the tree evaluated to ``satisfied``. Deterministic.
+
+    Performance: O(symbols × bars × tree-nodes) scalar evaluations, but each
+    indicator series is computed once per (symbol, indicator) and cached on the
+    shared :class:`PandasHistoryView` (O(1) numpy reads thereafter) — NOT recomputed
+    per bar. Callers pass the SAME views to every ``_sweep`` (whole tree and each
+    leg), so the cache is warm after the first sweep and the per-bar cost is a
+    small fraction of the backtest this probe precedes.
     """
+    assert node is not None, "node must be a PredicateTree"
+    assert isinstance(views, list), "views must be a list of PandasHistoryView"
     evaluated = 0
     fires = 0
     for view in views:
@@ -118,6 +127,7 @@ class PredicateReachabilityProbe(GateResultsMixin):
         reusing one indicator-cached view per symbol so indicators are computed
         at most once per (symbol, indicator).
         """
+        assert spec is not None, "spec must be a StrategySpec"
         entry_rules = [
             r for r in (getattr(spec, "entry_rules", None) or []) if isinstance(r, EntryRule)
         ]

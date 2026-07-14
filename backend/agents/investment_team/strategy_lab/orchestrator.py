@@ -1927,6 +1927,12 @@ class StrategyLabOrchestrator:
         # budget. A later round that passes conformance but fails before
         # collecting trades does not clear an earlier demoted round's value.
         ran_on_non_conforming_code = False
+        # Signature of the inputs the reachability probe depends on (entry rules +
+        # code-path). Market data is fetched once and static, so the probe is
+        # re-run only when the entry rules change across refinement rounds — this
+        # avoids recomputing and recording duplicate reachability gate results
+        # every round for an unchanged spec.
+        last_reachability_sig: Optional[tuple] = None
 
         for round_num in range(MAX_CODE_REFINEMENT_ROUNDS):
             round_gate_results: List[QualityGateResult] = []
@@ -2042,8 +2048,15 @@ class StrategyLabOrchestrator:
             # the compiled path where zero fires ⇒ zero entries; warning on the
             # custom path where the executed code may differ); they do not
             # short-circuit the round — the post-backtest zero-trade path still
-            # owns routing.
-            if market_data:
+            # owns routing. Re-run only when the entry rules change across rounds
+            # (market data is static), so an unchanged spec is not re-probed and
+            # its findings are not recorded twice.
+            reachability_sig = (
+                tuple(str(getattr(r, "when", r)) for r in (spec.entry_rules or [])),
+                bool(spec.requires_custom_code),
+            )
+            if market_data and reachability_sig != last_reachability_sig:
+                last_reachability_sig = reachability_sig
                 reachability = self.predicate_reachability_probe.probe(spec, market_data)
                 self.record_gates(
                     self.predicate_reachability_probe.to_gate_results(
