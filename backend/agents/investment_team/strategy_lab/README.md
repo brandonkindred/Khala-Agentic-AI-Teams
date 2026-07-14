@@ -146,6 +146,19 @@ callback as a `"design_repair"` event and counted in `loop_telemetry.mechanical_
 defects (empty entry/exit rules, thesis coherence) are left to the LLM. Disable to restore the pure
 LLM-revise behaviour.
 
+### STRATEGY_LAB_DEMOTE_COMPILABLE_CUSTOM_CODE
+Toggle for demoting an over-elected custom-code spec back to the deterministic compiled path (default
+`true`; accepted truthy values `true`/`1`/`yes`, case-insensitive; anything else disables). This is
+the inverse of the trial-compile promote above: in Stage 2 of the pre-flight, if the LLM authored
+`requires_custom_code=True` but the spec **compiles cleanly**, `mechanical_repair.py:demote_code_path`
+flips it back to `False` and records a `compiler_demote` `"design_repair"` action. The compiled path
+decides every entry/exit engine-side straight from the spec, so it cannot drift on indicator `source`,
+bar indexing, or a falsy volume guard the way hand/LLM-authored `on_bar` code can — keeping a
+DSL-expressible strategy on the compiled path is the surest guarantee its executed trades faithfully
+implement the specification. A `CompilerError` is the authoritative "the DSL cannot express this"
+signal, so a genuinely cross-asset / path-dependent strategy is left on custom code. Disable this only
+if a lossy-but-compilable spec you intend to keep as custom code is being wrongly demoted.
+
 ### STRATEGY_LAB_CODE_CONFORMANCE_RETRIES
 Number of predicate-conformance gate retries before demoting criticals to warnings (default `2`).
 The gate runs in the synthesis loop after `CodeConformanceGate`,
