@@ -171,18 +171,16 @@ def _tool_rec_recommendation(config: ReviewConfig, rec: str) -> str:
 def _review_steps_run_sequentially(llm: LLMClient) -> bool:
     """True when the code-review/QA/security fan-out must run one step at a time.
 
-    Scripted test doubles (a ``DummyLLMClient`` subclass returning canned responses from a shared,
-    non-thread-safe index counter) are not safe to call from concurrent threads. Mirrors
-    ``devops_team.orchestrator``'s identical ``use_parallel = not isinstance(self.llm, _Dummy)``
+    Scripted ``DummyLLMClient`` doubles use a shared non-thread-safe response index,
+    so they are not safe under concurrent fan-out. Mirrors
+    ``devops_team.orchestrator``'s ``use_parallel = not isinstance(self.llm, _Dummy)``
     guard.
 
-    ``llm`` is not always the raw client: the coding team's default ``llm_getter`` (used by every
-    production caller of ``run_coding_team_orchestrator``) wraps it in a Strands ``LLMClientModel``
-    for reasoning-stream capture (``coding_team.reasoning_capture._make_reasoning_llm_getter``), and
-    that wrapper survives unchanged through ``worker_factory._v2_text_mode_llm``'s clone path all the
-    way to this module's ``llm`` parameter — so a bare ``isinstance(llm, DummyLLMClient)`` misses a
-    dummy client reached through that (default) path. Unwrap via the model's public ``client``
-    accessor (``LLMClientModel.client``) before checking.
+    Production coding-team callers often pass a Strands ``LLMClientModel`` wrapper
+    (reasoning-stream capture via ``_make_reasoning_llm_getter``), which survives the
+    ``worker_factory._v2_text_mode_llm`` clone path. A bare ``isinstance(llm,
+    DummyLLMClient)`` misses a dummy reached through that wrapper, so unwrap via
+    ``LLMClientModel.client`` before checking.
 
     Preconditions: ``llm`` is the LLM client that will be handed to the step thunks.
     Postconditions: returns ``True`` iff ``llm`` is (or wraps) a ``DummyLLMClient``. Pure.
@@ -191,6 +189,7 @@ def _review_steps_run_sequentially(llm: LLMClient) -> bool:
 
     if isinstance(llm, DummyLLMClient):
         return True
+    # Unwrap Strands LLMClientModel wrapper to reach the real client for isinstance check.
     return isinstance(getattr(llm, "client", None), DummyLLMClient)
 
 
@@ -207,6 +206,7 @@ def _code_review_step(
     llm_review_fn: Callable[..., List[ReviewIssue]],
     review_context: Optional[ReviewContext] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
+    enable_llm_review_grounding: bool = True,
 ) -> List[ReviewIssue]:
     """Independent code-review step: external agent (with LLM fallback), or LLM review alone.
 
@@ -214,13 +214,16 @@ def _code_review_step(
         - ``files`` maps file paths to their full source text. ``task_description`` is the
           description surfaced to the external agent (the caller scopes this to the task or a
           single microtask; the LLM fallback always reasons over the full ``task``, unaffected).
-        - ``llm_review_fn(llm=, task=, files=, review_context=)`` is the per-team
-          chunking/prompt/parse reviewer (the test patch surface for ``Agent`` /
-          ``resolve_text_mode_strands_model``); it must accept ``review_context``
-          so the fallback reviewer sees the same context the external agent path does.
+        - ``llm_review_fn(llm=, task=, files=, review_context=, enable_llm_review_grounding=)``
+          is the per-team chunking/prompt/parse reviewer (the test patch surface for
+          ``Agent`` / ``resolve_text_mode_strands_model``); it must accept
+          ``review_context`` so the fallback reviewer sees the same context the
+          external agent path does.
         - ``review_context`` bundles the caller's system architecture and project specification,
           when available; ``None`` means "nothing to add" so a caller that does not have this
           context yet keeps working unchanged.
+        - ``enable_llm_review_grounding`` defaults True; forwarded to the LLM fallback
+          (kill switch for ungrounded-claim filtering).
 
     Postconditions:
         - Never raises: an external ``code_review_agent`` failure logs a warning and falls back
@@ -234,7 +237,13 @@ def _code_review_step(
     """
     try:
         if code_review_agent is None:
-            return llm_review_fn(llm=llm, task=task, files=files, review_context=review_context)
+            return llm_review_fn(
+                llm=llm,
+                task=task,
+                files=files,
+                review_context=review_context,
+                enable_llm_review_grounding=enable_llm_review_grounding,
+            )
         try:
             from code_review_agent.models import CodeReviewInput as _CRInput
 
@@ -272,7 +281,13 @@ def _code_review_step(
                 task_id,
                 exc,
             )
-            return llm_review_fn(llm=llm, task=task, files=files, review_context=review_context)
+            return llm_review_fn(
+                llm=llm,
+                task=task,
+                files=files,
+                review_context=review_context,
+                enable_llm_review_grounding=enable_llm_review_grounding,
+            )
     except Exception as exc:
         logger.warning("[%s] Code review step failed outright: %s", task_id, exc)
         return [
@@ -487,6 +502,7 @@ def run_review(
     security_agent_fn: Callable[..., List[ReviewIssue]],
     build_verify_fn: Callable[..., Tuple[bool, str]],
     review_context: Optional[ReviewContext] = None,
+    enable_llm_review_grounding: bool = True,
 ) -> ReviewResult:
     """Execute the shared Review phase over an execution result's files.
 
@@ -496,6 +512,8 @@ def run_review(
         - ``review_context`` is forwarded to the code-review step only; ``None`` means
           "nothing to add" so an existing caller that does not have this context yet is
           unaffected.
+        - ``enable_llm_review_grounding`` is forwarded to the LLM-fallback path
+          (defaults True).
 
     Postconditions:
         - Returns a :class:`ReviewResult` whose ``passed`` reflects the team's
@@ -566,6 +584,7 @@ def run_review(
                     task_description=task.description or "",
                     llm_review_fn=llm_review_fn,
                     review_context=review_context,
+                    enable_llm_review_grounding=enable_llm_review_grounding,
                 ),
                 lambda: _qa_review_step(
                     qa_agent=qa_agent,
@@ -639,6 +658,7 @@ def run_microtask_review(
     security_agent_fn: Callable[..., List[ReviewIssue]],
     build_verify_fn: Callable[..., Tuple[bool, str]],
     review_context: Optional[ReviewContext] = None,
+    enable_llm_review_grounding: bool = True,
 ) -> ReviewResult:
     """Run the shared full review on a single microtask's output files.
 
@@ -648,6 +668,8 @@ def run_microtask_review(
         - ``review_context`` is forwarded to the code-review step only; ``None`` means
           "nothing to add" so an existing caller that does not have this context yet is
           unaffected.
+        - ``enable_llm_review_grounding`` is forwarded to the LLM-fallback path
+          (defaults True).
 
     Postconditions:
         - Returns a :class:`ReviewResult` scoped to ``files``; ``passed``
@@ -742,6 +764,7 @@ def run_microtask_review(
                     llm_review_fn=llm_review_fn,
                     review_context=review_context,
                     detail_callback=detail_callback,
+                    enable_llm_review_grounding=enable_llm_review_grounding,
                 ),
                 lambda: _qa_review_step(
                     qa_agent=qa_agent,

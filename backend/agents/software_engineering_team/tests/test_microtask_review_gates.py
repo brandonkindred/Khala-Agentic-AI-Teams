@@ -94,6 +94,7 @@ class TestFrontendMicrotaskReviewConfig:
         assert config.max_retries == 3
         assert config.on_failure == "stop"
         assert config.security_failure_always_stops is True
+        assert config.enable_llm_review_grounding is True
 
     def test_config_custom_values(self):
         from frontend_code_v2_team.models import MicrotaskReviewConfig
@@ -336,6 +337,7 @@ class TestBackendMicrotaskReviewConfig:
         assert config.max_retries == 3
         assert config.on_failure == "stop"
         assert config.security_failure_always_stops is True
+        assert config.enable_llm_review_grounding is True
 
 
 class TestBackendMicrotaskStatus:
@@ -459,3 +461,174 @@ class TestBackendRunExecutionWithReviewGates:
 
         failed = [m for m in result.microtasks if m.status == MicrotaskStatus.REVIEW_FAILED]
         assert len(failed) <= len(planning_result.microtasks)
+
+    def test_code_review_gate_forwards_enable_llm_review_grounding(self, tmp_path, monkeypatch):
+        """Kill switch on MicrotaskReviewConfig must reach run_code_review_phase."""
+        from backend_code_v2_team.models import Microtask
+        from backend_code_v2_team.phases import review as review_mod
+        from backend_code_v2_team.phases.execution import ReviewDependencies, _code_review_gate
+
+        seen: list = []
+
+        def fake_phase(**kwargs):
+            seen.append(kwargs.get("enable_llm_review_grounding"))
+            return MagicMock(passed=True, issues=[], summary="ok")
+
+        monkeypatch.setattr(review_mod, "run_code_review_phase", fake_phase)
+
+        task = _create_test_task("backend")
+        mt = Microtask(id="mt-1", title="Meal UI")
+        _code_review_gate(
+            llm=MagicMock(),
+            task=task,
+            microtask=mt,
+            repo_path=tmp_path,
+            files={"index.html": "<html></html>"},
+            deps=ReviewDependencies(),
+            detail_callback=lambda _d: None,
+            enable_llm_review_grounding=False,
+        )
+        assert seen == [False]
+
+    def test_execution_forwards_config_grounding_flag_to_gate(self, tmp_path, monkeypatch):
+        """run_execution_with_review_gates passes config.enable_llm_review_grounding
+        into the code-review gate (end-to-end kill-switch plumbing)."""
+        from dataclasses import replace
+
+        from backend_code_v2_team.models import (
+            Microtask,
+            MicrotaskReviewConfig,
+            PlanningResult,
+            ToolAgentKind,
+        )
+        from backend_code_v2_team.phases import execution as exec_mod
+        from backend_code_v2_team.phases.execution import (
+            ReviewDependencies,
+            run_execution_with_review_gates,
+        )
+
+        from software_engineering_team.shared.phases.execution import GateOutcome
+
+        seen: list = []
+
+        def fake_cr_gate(**kwargs):
+            seen.append(kwargs.get("enable_llm_review_grounding"))
+            return GateOutcome(passed=True, issues=[], summary="ok")
+
+        def fake_pass_gate(**_kwargs):
+            return GateOutcome(passed=True, issues=[], summary="ok")
+
+        monkeypatch.setattr(
+            exec_mod,
+            "GATE_CONFIG",
+            replace(
+                exec_mod.GATE_CONFIG,
+                run_code_review_gate=fake_cr_gate,
+                run_qa_gate=fake_pass_gate,
+                run_security_gate=fake_pass_gate,
+                run_documentation_self_review=lambda **_kw: MagicMock(
+                    documentation={},
+                    iterations=0,
+                    final_quality_score=1.0,
+                ),
+                run_general_microtask=lambda **_kw: {"index.html": "<html></html>"},
+            ),
+        )
+
+        (tmp_path / ".git").mkdir()
+        task = _create_test_task("backend")
+        task.requirements = "Build a meal planning UI"
+        task.acceptance_criteria = ["user can plan meals"]
+        mt = Microtask(id="mt-1", title="Meal UI", tool_agent=ToolAgentKind.GENERAL)
+        planning_result = PlanningResult(microtasks=[mt], language="python")
+
+        run_execution_with_review_gates(
+            llm=MagicMock(),
+            task=task,
+            planning_result=planning_result,
+            repo_path=tmp_path,
+            review_config=MicrotaskReviewConfig(
+                max_retries=0,
+                enable_llm_review_grounding=False,
+                on_failure="skip_continue",
+            ),
+            review_deps=ReviewDependencies(),
+        )
+        assert False in seen
+
+        seen.clear()
+        run_execution_with_review_gates(
+            llm=MagicMock(),
+            task=task,
+            planning_result=planning_result,
+            repo_path=tmp_path,
+            review_config=MicrotaskReviewConfig(
+                max_retries=0,
+                enable_llm_review_grounding=True,
+                on_failure="skip_continue",
+            ),
+            review_deps=ReviewDependencies(),
+        )
+        assert True in seen
+
+    def test_code_review_phase_drops_ungrounded_when_grounding_enabled(
+        self, tmp_path, monkeypatch
+    ):
+        """Behavioral: enable_llm_review_grounding True drops fabricated claims;
+        False keeps them."""
+        from backend_code_v2_team.models import Microtask
+        from backend_code_v2_team.phases import review as review_mod
+        from backend_code_v2_team.phases.review import run_code_review_phase
+
+        insurance_resp = (
+            "## PASSED ##\nfalse\n## END PASSED ##\n"
+            "## ISSUES ##\n"
+            "description: index.html does not support Insurance Provider ZephyrCare\n"
+            "severity: high\n"
+            "file_path: index.html\n"
+            "source: code_review\n"
+            "recommendation: Add ZephyrCare\n"
+            "## END ISSUES ##\n"
+            "## SUMMARY ##\nfake\n## END SUMMARY ##\n"
+        )
+
+        class _StubAgent:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __call__(self, _prompt):
+                return insurance_resp
+
+        monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent())
+        monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+        monkeypatch.setattr(
+            review_mod,
+            "_run_build_verification",
+            lambda *a, **kw: (True, "ok"),
+        )
+
+        task = _create_test_task("backend")
+        task.requirements = "Build a meal planning UI for weekly menus"
+        task.acceptance_criteria = ["user can plan meals for the week"]
+        mt = Microtask(id="mt-1", title="Meal UI", description="Meal planner")
+        files = {"index.html": "<html><body>Meal Planner</body></html>"}
+
+        dropped = run_code_review_phase(
+            llm=MagicMock(),
+            task=task,
+            microtask=mt,
+            repo_path=tmp_path,
+            files=files,
+            enable_llm_review_grounding=True,
+        )
+        assert not any("Insurance Provider" in (i.description or "") for i in dropped.issues)
+
+        kept = run_code_review_phase(
+            llm=MagicMock(),
+            task=task,
+            microtask=mt,
+            repo_path=tmp_path,
+            files=files,
+            enable_llm_review_grounding=False,
+        )
+        assert any("Insurance Provider" in (i.description or "") for i in kept.issues)

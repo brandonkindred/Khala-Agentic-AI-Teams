@@ -201,6 +201,14 @@ class BaseMicrotaskReviewConfig(BaseModel):
         default=True,
         description="When True, security review failures always stop the workflow regardless of on_failure setting",
     )
+    enable_llm_review_grounding: bool = Field(
+        default=True,
+        description=(
+            "When True, LLM-fallback review findings are grounded against task "
+            "requirements/ACs/spec/architecture and submitted file names; "
+            "ungrounded proper-noun claims are dropped"
+        ),
+    )
 
 
 class MicrotaskReviewFailedError(Exception):
