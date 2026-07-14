@@ -29,9 +29,9 @@ Invariants:
     - ``reset_entry``/``mark_exhausted`` are idempotent single-row writes, safe
       under concurrent callers across containers (last-writer-wins). ``reset_entry``
       is never called synchronously on the ``get_client``/failover hot path —
-      ``select_active_entry`` defers it to a background sweep (see
-      ``_ResetSweepState``) so an expired entry's bookkeeping never blocks the
-      call that discovers the expiry.
+      ``select_active_entry`` defers it to a background sweep (the generic
+      ``reset_sweep.ResetSweepState`` primitive) so an expired entry's
+      bookkeeping never blocks the call that discovers the expiry.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-from shared_concurrency.heartbeat import BackgroundHeartbeat
+from .reset_sweep import ResetSweepState
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +79,6 @@ _DEFAULT_TTL_S = 30.0
 
 ENV_RESET_SWEEP_INTERVAL = "LLM_PROVIDER_RESET_SWEEP_INTERVAL_S"
 _DEFAULT_RESET_SWEEP_INTERVAL_S = 5.0
-# Floor applied to the resolved interval before starting the heartbeat: a 0 (or
-# near-0) interval would busy-loop the sweep thread.
-_MIN_RESET_SWEEP_INTERVAL_S = 0.1
 
 _table_ensured = False
 _ensure_lock = threading.Lock()
@@ -632,120 +629,19 @@ def _reset_sweep_interval_s() -> float:
         return _DEFAULT_RESET_SWEEP_INTERVAL_S
 
 
-class _ResetSweepState:
-    """Encapsulates the background provider-reset sweep's mutable state.
-
-    ``select_active_entry`` enqueues an expired entry's id here (pure Python, no
-    I/O) instead of calling ``reset_entry`` synchronously on the failover hot
-    path; a lazily-started ``BackgroundHeartbeat`` drains ``pending_ids`` on an
-    interval and performs the real ``reset_entry`` writes off-thread. Mirrors how
-    ``trace_flusher`` encapsulates its own buffer/heartbeat state.
-
-    Invariants:
-        - ``_lock`` guards ``pending_ids`` only; ``_start_lock`` guards the
-          ``started``/``heartbeat`` pair (double-checked locking in
-          :meth:`_ensure_started`).
-        - At most one ``BackgroundHeartbeat`` runs for this instance at a time.
-
-    No shutdown/drain hook (intentional, not an oversight): ``llm_service`` has
-    no shared per-team lifecycle hook to wire one into (unlike ``trace_flusher``,
-    which hooks ``software_engineering_team/api/lifecycle.py``) — adding one here
-    would mean touching every team's startup/shutdown wiring for a low-severity
-    tradeoff. If the process exits with ids still in ``pending_ids``, those
-    entries' return-to-rotation is delayed by at most one sweep interval: the
-    next call to :func:`select_active_entry` re-detects the still-expired entry
-    (its Postgres row was never written) and re-enqueues it. This is not a
-    correctness or data-loss issue, just eventual consistency bounded by the
-    sweep interval.
-    """
-
-    def __init__(self) -> None:
-        self.pending_ids: set[int] = set()
-        self._lock = threading.Lock()
-        self.heartbeat: Optional[BackgroundHeartbeat] = None
-        self.started = False
-        self._start_lock = threading.Lock()
-
-    def enqueue(self, entry_id: int) -> None:
-        """Queue an expired entry's id for background reset; zero I/O on the call path.
-
-        Called from :func:`select_active_entry` instead of the old synchronous
-        ``reset_entry(entry_id)`` call, so a provider's failover selection never
-        blocks on a Postgres round trip. The actual write happens on the next
-        :meth:`tick`, at most ``_reset_sweep_interval_s()`` later.
-
-        Postconditions: ``entry_id`` is present in :attr:`pending_ids`; the
-            background sweep is running. Never raises.
-        """
-        with self._lock:
-            self.pending_ids.add(entry_id)
-        self._ensure_started()
-
-    def tick(self) -> None:
-        """Drain the pending-reset id set and reset each entry off the hot path.
-
-        Snapshots and clears :attr:`pending_ids` under the lock, then calls the
-        unmodified :func:`reset_entry` for each id *outside* the lock so a slow
-        write never blocks a concurrent enqueue. Mirrors ``trace_flusher._drain``.
-
-        Postconditions: the pending set is empty when this returns (new ids may
-            have been added concurrently and are picked up on the next tick). A
-            ``reset_entry`` failure is already swallowed internally, so this
-            never raises.
-        """
-        with self._lock:
-            if not self.pending_ids:
-                return
-            ids = list(self.pending_ids)
-            self.pending_ids.clear()
-        for entry_id in ids:
-            reset_entry(entry_id)
-
-    def _ensure_started(self) -> None:
-        """Lazily start the background reset-sweep heartbeat (idempotent).
-
-        ``llm_service`` has no shared per-team startup hook to call this from
-        (unlike e.g. ``software_engineering_team/api/lifecycle.py``), so the
-        sweep self-starts on first use instead — safe because it is cheap and a
-        no-op once running.
-
-        Postconditions: exactly one ``BackgroundHeartbeat`` daemon thread is
-            running for this instance after this returns. Never raises.
-        """
-        if self.started:
-            return
-        with self._start_lock:
-            if self.started:
-                return
-            self.heartbeat = BackgroundHeartbeat(
-                self.tick,
-                max(_reset_sweep_interval_s(), _MIN_RESET_SWEEP_INTERVAL_S),
-                name="llm-provider-reset-sweep",
-            )
-            self.heartbeat.start()
-            self.started = True
-
-    def reset_for_test(self) -> None:
-        """Test-only: clear pending ids and sweep-started state between tests.
-
-        Stops any heartbeat that was started (best-effort, never raises) so
-        daemon threads/fakes don't leak state across tests. Mirrors
-        ``trace_flusher._reset_for_test``.
-        """
-        hb = self.heartbeat
-        self.heartbeat = None
-        self.started = False
-        with self._lock:
-            self.pending_ids.clear()
-        if hb is not None:
-            try:
-                hb.stop()
-            except Exception:  # pragma: no cover - defensive only, stop() should not raise
-                pass
-
-
-# Single process-wide instance — see _ResetSweepState docstring.
-_reset_sweep = _ResetSweepState()
+# Single process-wide sweep instance. Uses lambdas (not direct function
+# references) for `reset_fn`/`interval_fn` so tests that monkeypatch
+# `reset_entry`/`_reset_sweep_interval_s` on this module are honored — a bound
+# reference to the original function object would ignore a later
+# monkeypatch.setattr reassignment, since the lambda re-resolves the global
+# name on every call instead of capturing it once at construction time.
+# Mirrors the thin-wrapper-for-testability pattern in
+# trace_flusher._register_call_observer/_unregister_call_observer.
+_reset_sweep = ResetSweepState(
+    reset_fn=lambda entry_id: reset_entry(entry_id),
+    interval_fn=lambda: _reset_sweep_interval_s(),
+    name="llm-provider-reset-sweep",
+)
 
 
 def select_active_entry(
@@ -759,11 +655,11 @@ def select_active_entry(
     Returns the first entry that is not usage-limited; for a limited entry whose
     ``reset_at`` has passed, queues its record for a background reset (when
     ``reset_expired``) and returns it immediately — this function never blocks on
-    Postgres itself; see :meth:`_ResetSweepState.enqueue`. When every entry is
-    still within its window, returns the one whose ``reset_at`` is soonest
-    (least-bad) so the call still targets a configured provider rather than
-    silently dropping to the env default; an entry marked without a ``reset_at``
-    sorts last among limited entries.
+    Postgres itself; see :meth:`~llm_service.reset_sweep.ResetSweepState.enqueue`.
+    When every entry is still within its window, returns the one whose
+    ``reset_at`` is soonest (least-bad) so the call still targets a configured
+    provider rather than silently dropping to the env default; an entry marked
+    without a ``reset_at`` sorts last among limited entries.
 
     Preconditions: ``entries`` is ordered by preference. Postconditions: returns an
         entry from ``entries`` or ``None`` (only when ``entries`` is empty); an

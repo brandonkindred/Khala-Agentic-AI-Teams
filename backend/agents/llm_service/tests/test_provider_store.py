@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from llm_service import provider_store as ps
+from llm_service import reset_sweep as reset_sweep_module
+from llm_service.tests.test_reset_sweep import _FakeHeartbeat
 
 
 def _entry(
@@ -36,38 +38,17 @@ def _entry(
 NOW = datetime(2026, 6, 30, 12, 0, 0, tzinfo=timezone.utc)
 
 
-class _FakeHeartbeat:
-    """Stand-in for shared_concurrency.heartbeat.BackgroundHeartbeat.
-
-    Exercises the real start-once idempotency logic in
-    ``_ResetSweepState._ensure_started`` without ever spinning up a real OS
-    thread — keeps the reset-sweep tests deterministic and avoids leaking
-    daemon threads across the test session.
-    """
-
-    instances: list["_FakeHeartbeat"] = []
-
-    def __init__(self, beat, interval_s, *, name: str = "") -> None:
-        self.beat = beat
-        self.interval_s = interval_s
-        self.name = name
-        self.started = False
-        _FakeHeartbeat.instances.append(self)
-
-    def start(self) -> "_FakeHeartbeat":
-        self.started = True
-        return self
-
-    def stop(self) -> None:
-        self.started = False
-
-
 @pytest.fixture(autouse=True)
 def _reset_provider_sweep(monkeypatch):
-    """Isolate the background reset-sweep across tests (see _FakeHeartbeat)."""
+    """Isolate the background reset-sweep across tests (see _FakeHeartbeat).
+
+    Patches BackgroundHeartbeat on the reset_sweep module (not provider_store)
+    since that's where ResetSweepState._ensure_started looks up the name —
+    provider_store no longer imports it directly after the reset_sweep split.
+    """
     ps._reset_sweep.reset_for_test()
     _FakeHeartbeat.instances.clear()
-    monkeypatch.setattr(ps, "BackgroundHeartbeat", _FakeHeartbeat)
+    monkeypatch.setattr(reset_sweep_module, "BackgroundHeartbeat", _FakeHeartbeat)
     yield
     ps._reset_sweep.reset_for_test()
 
@@ -234,41 +215,19 @@ def test_select_expired_enqueue_does_no_db_io(monkeypatch):
     assert ps._reset_sweep.pending_ids == {1}
 
 
-def test_reset_sweep_tick_drains_pending_and_calls_reset_entry(monkeypatch):
+def test_reset_sweep_singleton_wired_to_reset_entry(monkeypatch):
+    """Integration: the production _reset_sweep singleton's reset_fn lambda
+    actually calls the real (possibly monkeypatched) provider_store.reset_entry.
+
+    ResetSweepState's own drain/enqueue/heartbeat mechanics are covered in
+    isolation by test_reset_sweep.py; this is the one place that verifies
+    provider_store wired the generic primitive to the right callback."""
     reset_ids: list[int] = []
     monkeypatch.setattr(ps, "reset_entry", lambda i: reset_ids.append(i))
     ps._reset_sweep.pending_ids.update({1, 2, 3})
     ps._reset_sweep.tick()
     assert sorted(reset_ids) == [1, 2, 3]
     assert ps._reset_sweep.pending_ids == set()
-
-
-def test_reset_sweep_tick_noop_when_empty(monkeypatch):
-    calls = []
-    monkeypatch.setattr(ps, "reset_entry", lambda i: calls.append(i))
-    ps._reset_sweep.tick()
-    assert calls == []
-
-
-def test_enqueue_reset_dedups_same_id():
-    ps._reset_sweep.enqueue(7)
-    ps._reset_sweep.enqueue(7)
-    assert ps._reset_sweep.pending_ids == {7}
-
-
-def test_enqueue_reset_starts_sweep_once():
-    ps._reset_sweep.enqueue(1)
-    ps._reset_sweep.enqueue(2)
-    assert len(_FakeHeartbeat.instances) == 1
-    assert _FakeHeartbeat.instances[0].started is True
-    assert ps._reset_sweep.started is True
-
-
-def test_ensure_reset_sweep_started_is_idempotent():
-    ps._reset_sweep._ensure_started()
-    ps._reset_sweep._ensure_started()
-    ps._reset_sweep._ensure_started()
-    assert len(_FakeHeartbeat.instances) == 1
 
 
 def test_reset_sweep_interval_defaults_and_is_defensive(monkeypatch):
@@ -280,16 +239,6 @@ def test_reset_sweep_interval_defaults_and_is_defensive(monkeypatch):
     assert ps._reset_sweep_interval_s() == ps._DEFAULT_RESET_SWEEP_INTERVAL_S
     monkeypatch.setenv(ps.ENV_RESET_SWEEP_INTERVAL, "-5")
     assert ps._reset_sweep_interval_s() == 0.0
-
-
-def test_reset_sweep_state_for_test_stops_heartbeat():
-    ps._reset_sweep.enqueue(1)
-    hb = _FakeHeartbeat.instances[0]
-    assert hb.started is True
-    ps._reset_sweep.reset_for_test()
-    assert hb.started is False
-    assert ps._reset_sweep.started is False
-    assert ps._reset_sweep.pending_ids == set()
 
 
 # --------------------------------------------------------------------------- #
