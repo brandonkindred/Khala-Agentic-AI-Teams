@@ -14,7 +14,8 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Callable, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 from llm_service import LLMJsonParseError, extract_json_from_response
 
@@ -28,6 +29,9 @@ from .content_plan import (
 )
 from .content_profile import LengthPolicy
 from .errors import PlanningError
+
+if TYPE_CHECKING:
+    from blog_plan_critic_agent import BlogPlanCriticAgent, PlanCriticReport
 
 logger = logging.getLogger(__name__)
 
@@ -152,10 +156,10 @@ def run_content_planning_loop(
     on_llm_request: Optional[Callable[[str], None]],
     max_iterations: int,
     max_parse_retries: int,
-    plan_critic: Optional[Any],
+    plan_critic: Optional["BlogPlanCriticAgent"],
     brand_spec_prompt: str,
     writing_guidelines: str,
-    work_dir: Optional[Any],
+    work_dir: Optional[Union[str, Path]],
     generate_system: str,
     refine_system: str,
     complete_plan_json_fn: Callable[..., tuple[dict[str, Any], int]],
@@ -170,7 +174,7 @@ def run_content_planning_loop(
     t0 = time.monotonic()
     total_parse_retries = 0
     last_plan: Optional[ContentPlan] = None
-    last_critic_report: Optional[Any] = None
+    last_critic_report: Optional["PlanCriticReport"] = None
 
     for iteration in range(1, max_iterations + 1):
         if iteration == 1:
@@ -227,7 +231,7 @@ def run_content_planning_loop(
         last_plan = plan.model_copy(update={"plan_version": iteration})
 
         planner_ok = planning_done(last_plan)
-        critic_report = None
+        critic_report: Optional["PlanCriticReport"] = None
         if plan_critic is not None:
             critic_report = plan_critic.run(
                 plan=last_plan,

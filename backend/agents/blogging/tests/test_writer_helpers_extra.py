@@ -1,9 +1,9 @@
 """Additional tests for blog_writer_agent helper methods.
 
 Covers ``_fix_deterministic_violations``, ``_llm_self_review``, ``_self_review``,
-``_post_validate_plan``, ``_planning_done``, ``_build_generate_plan_prompt``,
-``_build_refine_plan_prompt``, ``_format_feedback_item_line``, and the
-``revise()`` no-op paths.
+the ``shared.content_planning_loop`` planning helpers (``post_validate_plan``,
+``planning_done``, ``build_generate_plan_prompt``, ``build_refine_plan_prompt``),
+``_format_feedback_item_line``, and the ``revise()`` no-op paths.
 """
 
 from __future__ import annotations
@@ -135,13 +135,13 @@ def _make_length_policy():
 
 
 def test_writer_post_validate_plan_in_bounds() -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
         TitleCandidate,
     )
+    from shared.content_planning_loop import post_validate_plan
 
     plan = ContentPlan(
         overarching_topic="X",
@@ -158,20 +158,20 @@ def test_writer_post_validate_plan_in_bounds() -> None:
         ),
     )
     policy = _make_length_policy()
-    out = BlogWriterAgent._post_validate_plan(plan, policy)
+    out = post_validate_plan(plan, policy)
     # Section count within typical bounds → plan_acceptable preserved
     assert out is not None
 
 
 def test_writer_post_validate_plan_out_of_bounds() -> None:
     """When section count is outside expected range, plan_acceptable is forced False."""
-    from blog_writer_agent.agent import BlogWriterAgent
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
         TitleCandidate,
     )
+    from shared.content_planning_loop import post_validate_plan
 
     plan = ContentPlan(
         overarching_topic="X",
@@ -185,18 +185,18 @@ def test_writer_post_validate_plan_out_of_bounds() -> None:
         ),
     )
     policy = _make_length_policy()
-    out = BlogWriterAgent._post_validate_plan(plan, policy)
+    out = post_validate_plan(plan, policy)
     assert out.requirements_analysis.plan_acceptable is False
 
 
 def test_writer_planning_done() -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
         TitleCandidate,
     )
+    from shared.content_planning_loop import planning_done
 
     plan = ContentPlan(
         overarching_topic="X",
@@ -207,7 +207,7 @@ def test_writer_planning_done() -> None:
             plan_acceptable=True, scope_feasible=True, research_gaps=[]
         ),
     )
-    assert BlogWriterAgent._planning_done(plan) is True
+    assert planning_done(plan) is True
 
     plan2 = plan.model_copy(
         update={
@@ -216,12 +216,12 @@ def test_writer_planning_done() -> None:
             )
         }
     )
-    assert BlogWriterAgent._planning_done(plan2) is False
+    assert planning_done(plan2) is False
 
 
 def test_writer_build_generate_plan_prompt() -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
     from shared.content_plan import PlanningInput
+    from shared.content_planning_loop import build_generate_plan_prompt
 
     inp = PlanningInput(
         brief="My brief",
@@ -231,7 +231,7 @@ def test_writer_build_generate_plan_prompt() -> None:
         series_context_block="Part 1 of 3",
         research_digest="some digest",
     )
-    p = BlogWriterAgent._build_generate_plan_prompt(inp)
+    p = build_generate_plan_prompt(inp)
     assert "My brief" in p
     assert "Audience: devs" in p
     assert "Tone/Purpose: inform" in p
@@ -247,8 +247,8 @@ def test_writer_build_refine_plan_prompt() -> None:
         RequirementsAnalysis,
         TitleCandidate,
     )
+    from shared.content_planning_loop import build_refine_plan_prompt
 
-    a = _make_agent_with_guidelines()
     prev = ContentPlan(
         overarching_topic="X",
         narrative_flow="f",
@@ -263,7 +263,7 @@ def test_writer_build_refine_plan_prompt() -> None:
         length_policy_context="ctx",
         research_digest="rd",
     )
-    p = a._build_refine_plan_prompt(inp, prev, "Be more specific")
+    p = build_refine_plan_prompt(inp, prev, "Be more specific")
     assert "PREVIOUS PLAN" in p
     assert "Be more specific" in p
 
