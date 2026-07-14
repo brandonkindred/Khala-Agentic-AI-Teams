@@ -90,6 +90,18 @@ def _sweep(node: Any, views: List[PandasHistoryView]) -> tuple[int, int]:
     per bar. Callers pass the SAME views to every ``_sweep`` (whole tree and each
     leg), so the cache is warm after the first sweep and the per-bar cost is a
     small fraction of the backtest this probe precedes.
+
+    The loop deliberately does NOT skip a computed warmup prefix: doing so would
+    need each indicator's required lookback ahead of time, and that formula is
+    already independently duplicated in three places in this codebase (the
+    synthesis compiler, the factors compiler, and the executor registry — a
+    known, separately-tracked duplication hazard). Reusing or re-deriving it here
+    would add a fourth copy that can drift from the others. The bars this loop
+    "wastes" evaluating are a cheap early return (``evaluate_predicate`` sees a
+    ``None`` indicator value and returns ``warmup`` without doing any comparison
+    work), and the probe itself is memoized per round in the orchestrator, so
+    this cost is paid at most once per distinct entry-rule set — not once per
+    refinement round.
     """
     assert node is not None, "node must be a PredicateTree"
     assert isinstance(views, list), "views must be a list of PandasHistoryView"
