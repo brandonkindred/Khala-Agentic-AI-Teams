@@ -16,6 +16,7 @@ for the one place in this stack that *is* written as a conditional update.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from job_service_client import (
@@ -27,6 +28,8 @@ from job_service_client import (
     JobServiceClient,
 )
 from job_store_factory import make_status_job_store
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "JOB_STATUS_CANCELLED",
@@ -85,8 +88,14 @@ def _guarded_transition(job_id: str, status: str, **extra_fields) -> bool:
         - Returns False and makes no write if the job is already cancelled (a
           cancelled run is terminal — never overwritten with another status).
         - Otherwise writes ``status``/``extra_fields`` and returns True.
+
+    Note: the cancel-check and status-write are not atomic; a cancel that lands
+    between the two calls may still be overwritten by this write. See
+    ``JobServiceClient.cancel_active_job`` for the one place in this stack that
+    *is* a conditional update.
     """
     if is_job_cancelled(job_id):
+        logger.debug("Skipping transition to %s for job %s — already cancelled", status, job_id)
         return False
     update_job(job_id, status=status, **extra_fields)
     return True
@@ -105,6 +114,7 @@ def begin_job(job_id: str) -> bool:
     Postconditions:
         - Returns False and makes no write if the job is already cancelled.
         - Otherwise writes status=RUNNING and returns True.
+        - Not atomic — see ``_guarded_transition`` for the cancel/write race note.
     """
     return _guarded_transition(job_id, JOB_STATUS_RUNNING)
 
@@ -119,6 +129,7 @@ def mark_completed(job_id: str, result: dict) -> bool:
         - Returns False and makes no write if the job is already cancelled (a
           cancelled run is terminal, not a completion).
         - Otherwise writes status=COMPLETED with ``result`` and returns True.
+        - Not atomic — see ``_guarded_transition`` for the cancel/write race note.
     """
     return _guarded_transition(job_id, JOB_STATUS_COMPLETED, result=result)
 
@@ -132,5 +143,6 @@ def mark_failed(job_id: str, error: str) -> bool:
         - Returns False and makes no write if the job is already cancelled (a
           cancelled run is terminal, not a failure).
         - Otherwise writes status=FAILED with ``error`` and returns True.
+        - Not atomic — see ``_guarded_transition`` for the cancel/write race note.
     """
     return _guarded_transition(job_id, JOB_STATUS_FAILED, error=error)
