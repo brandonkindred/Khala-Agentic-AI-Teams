@@ -5,9 +5,9 @@
 remain the single source of truth for the default reviewer checklist.
 """
 
-from code_review_agent.profiles import ReviewProfile, build_review_system_prompt
-
 from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
+
+from .profiles import ReviewProfile, build_review_system_prompt
 
 CODE_REVIEW_PROMPT = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
 
