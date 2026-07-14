@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from planning_team.models import ClientContext
+from planning_team.phases._util import as_client_context
 
 
 def run_synthesis(
@@ -29,9 +30,7 @@ def run_synthesis(
         return context_update, artifacts
 
     context_update["market_research_evidence"] = market_research_evidence
-    client_context = context.get("client_context")
-    if isinstance(client_context, dict):
-        client_context = ClientContext(**client_context)
+    client_context = as_client_context(context.get("client_context"))
     if client_context is None:
         return context_update, artifacts
 
