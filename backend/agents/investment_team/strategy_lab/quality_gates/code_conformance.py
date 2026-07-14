@@ -106,6 +106,16 @@ _KNOWN_INDICATOR_HELPER_NAMES: frozenset[str] = frozenset(_INDICATOR_ALLOWED_CAL
 # Names recognised as the position-snapshot receiver in exit branches.
 _POSITION_RECEIVER_NAMES: frozenset[str] = frozenset({"position", "pos"})
 
+# Attributes a position snapshot actually exposes. Mirrors the fields of
+# ``trading_service.strategy.contract._PositionSnapshot`` plus the ``quantity``
+# read-only alias for ``qty``. Any OTHER attribute read on a position snapshot
+# (``pos.size``, ``pos.shares``, …) raises ``AttributeError`` at runtime and
+# aborts the backtest, so the gate rejects it pre-execution. A unit test asserts
+# this stays in sync with the model so the two can never silently drift apart.
+_POSITION_SNAPSHOT_ATTRS: frozenset[str] = frozenset(
+    {"symbol", "side", "qty", "quantity", "entry_price", "entry_timestamp"}
+)
+
 # Valid ``source`` values for source-aware indicators (mirrors spec_dsl.Source).
 _VALID_SOURCES: frozenset[str] = frozenset(get_args(Source))
 
@@ -581,6 +591,283 @@ def _invalid_ctx_indicator_reads(
                 seen.add(msg)
                 errors.append(msg)
     return errors
+
+
+# ---------------------------------------------------------------------------
+# Custom-code faithfulness: the executed strategy must read indicators on the
+# same source/params the spec authored, must not disable a spec condition with a
+# falsy guard, and must not read a non-existent position attribute. These are
+# the three faithful-execution defects that let LLM-authored ``on_bar`` code
+# diverge from the specification while still passing the older presence checks.
+# ---------------------------------------------------------------------------
+
+
+def _literal_value(node: Optional[ast.AST]) -> tuple[bool, Any]:
+    """Return ``(is_literal, value)`` for an AST node.
+
+    Pre: ``node`` is an AST node or ``None``.
+    Post: ``is_literal`` is True only for an ``ast.Constant`` holding a
+    ``str``/``int``/``float`` (the value types indicator params and sources take);
+    otherwise ``(False, None)`` so a caller comparing against a spec value
+    abstains on an unresolved (``Name``/``Attribute``/computed) operand rather
+    than guessing.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, int, float)):
+        return True, node.value
+    return False, None
+
+
+def _authorized_indicator_signatures(spec: Any) -> dict[str, list[dict[str, Any]]]:
+    """Map each spec-required indicator name → the signatures the spec authorizes.
+
+    Pre: ``spec`` is a ``StrategySpec`` or ``None``.
+    Post: for every ``IndicatorRef`` in :func:`_iter_required_indicator_refs`,
+    records one signature ``{"source": ref.source, **ref.params}`` (spec_dsl has
+    already default-filled the ref's optional params). This is the faithful
+    contract a ``ctx.indicator('<name>', ...)`` read must satisfy — same
+    ``source`` and same params. An indicator name absent from the result is not
+    required by the spec, so a read of it is left un-checked (an extra/helper
+    read is another gate's concern, not a faithfulness defect here).
+    """
+    out: dict[str, list[dict[str, Any]]] = {}
+    for ref in _iter_required_indicator_refs(spec):
+        sig: dict[str, Any] = {"source": ref.source}
+        sig.update(dict(ref.params))
+        out.setdefault(ref.name, []).append(sig)
+    return out
+
+
+def _ctx_indicator_pinned_fields(node: ast.Call) -> dict[str, Any]:
+    """The source/param fields a ``ctx.indicator(...)`` call pins to a literal.
+
+    Pre: ``node`` is a ``ctx.indicator(...)`` call.
+    Post: returns ``{field: literal_value}`` for every keyword pinned to a
+    literal, EXCLUDING ``name``/``symbol`` and any ``**kwargs`` spread. ``source``
+    is always present: an omitted ``source`` reads the runtime default ``'close'``
+    (a firm pin), an explicit literal source pins that value, and a dynamic
+    ``source=`` is treated as unpinned (dropped) so it is not falsely compared.
+    Dynamic params (``period=self.WINDOW``) are likewise dropped.
+    """
+    pinned: dict[str, Any] = {}
+    source_seen = False
+    for kw in node.keywords:
+        if kw.arg is None or kw.arg in ("name", "symbol"):
+            continue
+        is_lit, val = _literal_value(kw.value)
+        if kw.arg == "source":
+            source_seen = True
+            if is_lit:
+                pinned["source"] = val
+            continue
+        if is_lit:
+            pinned[kw.arg] = val
+    if not source_seen:
+        pinned["source"] = "close"
+    return pinned
+
+
+def _ctx_indicator_spec_divergence(
+    node: ast.Call, authorized: dict[str, list[dict[str, Any]]]
+) -> Optional[str]:
+    """Message when a ``ctx.indicator(...)`` read diverges from the spec, else ``None``.
+
+    Pre: ``node`` is a ``ctx.indicator(...)`` call; ``authorized`` is
+    :func:`_authorized_indicator_signatures` for the spec.
+    Post: returns ``None`` when the name is dynamic, the indicator is not
+    spec-required, or the call matches at least one authorized signature on every
+    field it pins to a literal. Otherwise returns a critical message naming the
+    divergent field(s) — the faithful-execution defect where code reads an
+    indicator on a different ``source``/params than the spec declared (e.g.
+    ``source='low'`` against a ``source='close'`` spec). Matching is lenient on
+    unpinned/dynamic fields, so only a demonstrable literal mismatch is flagged.
+    """
+    name = _ctx_indicator_arg_name(node)
+    if name is None or name not in authorized:
+        return None
+    sigs = authorized[name]
+    # Compare only fields the spec's signatures actually carry (source + the
+    # indicator's real params). An unknown/typo'd key (``perod=20``) is left to
+    # the malformed-call checker, not treated as a source/params divergence.
+    valid_fields: set[str] = set().union(*(sig.keys() for sig in sigs))
+    pinned = {
+        field: value
+        for field, value in _ctx_indicator_pinned_fields(node).items()
+        if field in valid_fields
+    }
+    for sig in sigs:
+        if all(sig.get(field) == value for field, value in pinned.items()):
+            return None  # conforms to at least one authorized IndicatorRef
+    # Divergent. Prefer a precise per-field message; fall back to the whole
+    # combination when each field is individually authorized but the pairing is not.
+    per_field: list[str] = []
+    for field, value in pinned.items():
+        allowed = sorted((sig.get(field) for sig in sigs if sig.get(field) is not None), key=str)
+        if value not in allowed:
+            per_field.append(f"{field}={value!r} but the spec authorizes {field} in {allowed}")
+    if per_field:
+        return (
+            f"ctx.indicator('{name}', ...) diverges from the spec: {'; '.join(per_field)}. "
+            "Read the indicator on the same source/params the spec's IndicatorRef declares "
+            "so the executed trades faithfully implement the specification."
+        )
+    return (
+        f"ctx.indicator('{name}', ...) uses the field combination {pinned!r}, which matches "
+        f"no IndicatorRef the spec authored for '{name}' (authorized: {sigs}). Read the "
+        "indicator on a source/params combination the spec declares."
+    )
+
+
+def _divergent_ctx_indicator_reads(
+    cls: ast.ClassDef, method_names: frozenset[str], spec: Any
+) -> list[str]:
+    """De-duplicated spec-divergence messages for reachable ``ctx.indicator(...)`` reads.
+
+    Pre: ``cls`` is the Strategy ClassDef; ``method_names`` are on_bar-reachable.
+    Post: one message per distinct divergence (see :func:`_ctx_indicator_spec_divergence`);
+    empty when the spec requires no indicators (nothing to be faithful to).
+    """
+    authorized = _authorized_indicator_signatures(spec)
+    if not authorized:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for node in _iter_ctx_indicator_calls(cls, method_names):
+        msg = _ctx_indicator_spec_divergence(node, authorized)
+        if msg and msg not in seen:
+            seen.add(msg)
+            out.append(msg)
+    return out
+
+
+def _ctx_indicator_bound_names(cls: ast.ClassDef, method_names: frozenset[str]) -> frozenset[str]:
+    """Local names bound directly from a ``ctx.indicator(...)`` call in reachable code.
+
+    Pre: ``cls`` is the Strategy ClassDef; ``method_names`` are on_bar-reachable.
+    Post: every ``<name>`` in a single-target ``<name> = ctx.indicator(...)`` — the
+    values that are ``None`` during warm-up and may legitimately be ``0.0`` (e.g. a
+    volume SMA on a flat window), so a falsy guard on them silently drops a check.
+    """
+    names: set[str] = set()
+    for method in _iter_strategy_methods(cls):
+        if method.name not in method_names:
+            continue
+        for node in _iter_method_body_nodes(method):
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and _is_ctx_indicator_call(node.value)
+            ):
+                names.add(node.targets[0].id)
+    return frozenset(names)
+
+
+def _is_bare_indicator_truthiness(node: ast.AST, bound_names: frozenset[str]) -> bool:
+    """True iff ``node`` is a bare truthiness read of an indicator value.
+
+    Matches a bare ``ast.Name`` bound from ``ctx.indicator(...)`` or a bare
+    ``ctx.indicator(...)`` call used directly where its truth value is taken. A
+    comparison (``x is None``, ``x > y``) wraps the value in an explicit test and
+    is therefore NOT bare — only the unwrapped forms are matched.
+    """
+    if isinstance(node, ast.Name):
+        return node.id in bound_names
+    return _is_ctx_indicator_call(node)
+
+
+def _indicator_falsy_guard_errors(cls: ast.ClassDef, method_names: frozenset[str]) -> list[str]:
+    """Reachable falsy-guards on an indicator value (``if vol_sma and ...``).
+
+    Pre: ``cls`` is the Strategy ClassDef; ``method_names`` are on_bar-reachable.
+    Post: one de-duplicated message per distinct bare-truthiness read of a
+    ctx.indicator value. ``ctx.indicator(...)`` returns ``None`` during warm-up and
+    can be a legitimate ``0.0`` (a flat-window volume SMA); the idiom
+    ``if vol_sma and bar.volume > vol_sma:`` treats BOTH as "skip the filter",
+    silently dropping a spec-required condition. The faithful form guards with an
+    explicit ``is None`` check so a ``0.0`` value still gates the order.
+    """
+    bound = _ctx_indicator_bound_names(cls, method_names)
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _flag(operand: ast.AST) -> None:
+        if not _is_bare_indicator_truthiness(operand, bound):
+            return
+        label = (
+            operand.id
+            if isinstance(operand, ast.Name)
+            else f"ctx.indicator('{_ctx_indicator_arg_name(operand)}', ...)"
+        )
+        msg = (
+            f"Indicator value '{label}' is used as a bare truthiness test (e.g. "
+            "``if <ind> and ...`` / ``if not <ind>``). ctx.indicator(...) returns None "
+            "during warm-up and can be a legitimate 0.0 (a flat-window volume SMA), so a "
+            "falsy guard silently skips the spec-required condition. Guard it explicitly "
+            "with ``is None`` / ``is not None`` instead."
+        )
+        if msg not in seen:
+            seen.add(msg)
+            out.append(msg)
+
+    for method in _iter_strategy_methods(cls):
+        if method.name not in method_names:
+            continue
+        for node in _iter_method_body_nodes(method):
+            if isinstance(node, ast.BoolOp):
+                for operand in node.values:
+                    _flag(operand)
+            elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+                _flag(node.operand)
+            elif isinstance(node, (ast.If, ast.While, ast.IfExp)):
+                _flag(node.test)
+    return out
+
+
+def _invalid_position_attr_errors(cls: ast.ClassDef, method_names: frozenset[str]) -> list[str]:
+    """Reachable ``<position>.<attr>`` reads of an attribute the snapshot lacks.
+
+    Pre: ``cls`` is the Strategy ClassDef; ``method_names`` are on_bar-reachable.
+    Post: one de-duplicated message per distinct ``<name>.<attr>`` value read where
+    ``<name>`` is a position alias (``position``/``pos`` or a var bound from
+    ``ctx.position(...)``) and ``<attr>`` is not in :data:`_POSITION_SNAPSHOT_ATTRS`.
+    Such a read raises ``AttributeError`` at runtime and aborts the backtest (the
+    reported ``'_PositionSnapshot' object has no attribute 'quantity'`` — now an
+    alias, but a typo like ``.size``/``.shares`` still crashes). Method-call
+    receivers (``pos.model_dump()``) are excluded — the snapshot inherits pydantic
+    methods this gate does not enumerate.
+    """
+    position_names = _collect_position_aliases(cls)
+    out: list[str] = []
+    seen: set[str] = set()
+    for method in _iter_strategy_methods(cls):
+        if method.name not in method_names:
+            continue
+        nodes = list(_iter_method_body_nodes(method))
+        call_func_ids = {
+            id(n.func)
+            for n in nodes
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        }
+        for node in nodes:
+            if id(node) in call_func_ids:
+                continue  # ``pos.something(...)`` — a method call, not a field read
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in position_names
+                and node.attr not in _POSITION_SNAPSHOT_ATTRS
+                and not node.attr.startswith("__")
+            ):
+                msg = (
+                    f"Position snapshot read '{node.value.id}.{node.attr}' accesses an "
+                    f"attribute _PositionSnapshot does not expose (valid: "
+                    f"{sorted(_POSITION_SNAPSHOT_ATTRS)}); it raises AttributeError at "
+                    "runtime. Use '.qty' for the position size."
+                )
+                if msg not in seen:
+                    seen.add(msg)
+                    out.append(msg)
+    return out
 
 
 def _is_submit_order_call(node: ast.AST) -> bool:
@@ -1110,6 +1397,7 @@ class CodeConformanceGate(GateResultsMixin):
 
             results: List[QualityGateResult] = []
             results.extend(self._check_indicator_presence(cctx, import_aliases))
+            results.extend(self._check_custom_code_faithfulness(cctx))
             results.extend(self._check_symbol_gate(cctx))
             results.extend(self._check_entry_coverage(cctx))
             results.extend(self._note_signal_exit_engine_ownership(cctx))
@@ -1203,6 +1491,34 @@ class CodeConformanceGate(GateResultsMixin):
                                 "(the sandbox helper has no ``select`` param)."
                             )
                         )
+        return results
+
+    # ------------------------------------------------------------------
+    # Check 1b — custom-code faithfulness
+    # ------------------------------------------------------------------
+    def _check_custom_code_faithfulness(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
+        """Reject the three ways LLM-authored ``on_bar`` code diverges from the spec.
+
+        Pre: ``cctx`` holds the single Strategy ClassDef and the spec.
+        Post: a critical per distinct defect —
+          * a ``ctx.indicator(...)`` read on a different source/params than the
+            spec's ``IndicatorRef`` declares (the executed trades would not
+            implement the specification);
+          * a bare falsy-guard on an indicator value that silently disables a
+            spec-required condition when the value is ``0.0``/``None``;
+          * a read of a position attribute the snapshot does not expose
+            (a runtime ``AttributeError`` that aborts the backtest).
+        All three fire only on custom (``ctx.``-accessor) code; the deterministic
+        compiler emits named calls with spec-matched sources, so compiled
+        strategies never trip them.
+        """
+        results: List[QualityGateResult] = []
+        for detail in _divergent_ctx_indicator_reads(cctx.cls, cctx.reachable, cctx.spec):
+            results.append(self._critical(detail))
+        for detail in _indicator_falsy_guard_errors(cctx.cls, cctx.reachable):
+            results.append(self._critical(detail))
+        for detail in _invalid_position_attr_errors(cctx.cls, cctx.reachable):
+            results.append(self._critical(detail))
         return results
 
     # ------------------------------------------------------------------

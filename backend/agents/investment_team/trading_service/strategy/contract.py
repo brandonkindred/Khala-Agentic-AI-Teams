@@ -356,6 +356,22 @@ class _PositionSnapshot(BaseModel):
     entry_price: float
     entry_timestamp: str
 
+    @property
+    def quantity(self) -> float:
+        """Read-only alias for :attr:`qty`.
+
+        Strategy authors (and LLM-generated ``on_bar`` code) routinely reach for
+        the natural name ``position.quantity``; without this alias that read
+        raises ``AttributeError`` at runtime and aborts the whole backtest. The
+        alias makes the natural name a faithful synonym for the canonical
+        ``qty`` field so an otherwise-correct strategy never crashes on it.
+
+        Postconditions:
+          - Returns exactly ``self.qty`` (same sign and magnitude); read-only —
+            there is no setter, so ``qty`` remains the single source of truth.
+        """
+        return self.qty
+
 
 class StrategyContext:
     """Narrow, backward-looking API exposed to strategy code.

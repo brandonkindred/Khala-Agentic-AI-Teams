@@ -195,3 +195,54 @@ def select_code_path(spec: StrategySpec) -> Optional[RepairAction]:
             ),
         )
     return None
+
+
+def demote_code_path(spec: StrategySpec) -> Optional[RepairAction]:
+    """Trial-compile a ``requires_custom_code`` spec to see whether Path A suffices.
+
+    The inverse of :func:`select_code_path`. The deterministic compiler covers the
+    entire indicator catalogue, every operator/source, and ``all_of``/``any_of``
+    predicate trees, so a confirmation-stacked entry the LLM flagged as custom code
+    is almost always expressible on the faithful compiled path. The compiled path
+    decides every entry/exit engine-side straight from the spec, so it cannot drift
+    on indicator ``source``, bar indexing, or a falsy volume guard the way
+    hand/LLM-authored ``on_bar`` code can. When such a spec compiles cleanly,
+    custom code buys nothing and only widens that drift surface — demote it.
+
+    Preconditions:
+      - ``spec`` is structurally valid (readiness-clean) — same gating as
+        :func:`select_code_path`; a readiness-defective spec can make
+        ``compile_strategy`` raise a non-``CompilerError``.
+
+    Postconditions:
+      - Returns a ``compiler_demote`` :class:`RepairAction` (the caller should set
+        ``requires_custom_code=False``) when ``spec.requires_custom_code`` is set
+        AND the spec trial-compiles cleanly; returns ``None`` when the spec is
+        already on the compiled path or the compiler raises ``CompilerError`` (the
+        authoritative "the DSL cannot express this" signal — a genuinely
+        cross-asset / path-dependent strategy stays on custom code).
+
+    Note: the compiled path implements exactly the spec's DSL ``when``/exit rules.
+    A caller that wants to preserve a lossy-but-compilable custom spec can gate
+    this behind a toggle (the orchestrator does), but the default is to demote:
+    an unfaithful compiled implementation of the declared rules is still a truer
+    test of the specification than custom code that diverges from it.
+    """
+    assert isinstance(spec, StrategySpec), "spec must be a StrategySpec"
+    if not spec.requires_custom_code:
+        return None
+    try:
+        compile_strategy(spec)
+    except CompilerError:
+        return None  # genuinely outside the compiler envelope — keep custom code
+    return RepairAction(
+        rule="compiler_demote",
+        field="requires_custom_code",
+        before=True,
+        after=False,
+        reason=(
+            "spec compiles cleanly on the deterministic path, so custom code is "
+            "unnecessary; demoting to the faithful compiled path to eliminate the "
+            "source / bar-indexing / falsy-guard drift surface of custom code."
+        ),
+    )
