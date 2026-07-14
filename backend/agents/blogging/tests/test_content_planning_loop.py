@@ -21,7 +21,7 @@ from shared.content_planning_loop import (
     build_generate_plan_prompt,
     build_refine_plan_prompt,
     complete_plan_json,
-    planning_done,
+    is_planning_done,
     post_validate_plan,
     run_content_planning_loop,
 )
@@ -92,7 +92,7 @@ def test_post_validate_plan_preserves_in_bounds_plan() -> None:
     assert out.requirements_analysis.plan_acceptable is True
 
 
-def test_planning_done() -> None:
+def test_is_planning_done() -> None:
     """True only when both plan_acceptable and scope_feasible are True."""
     plan = ContentPlan(
         overarching_topic="X",
@@ -103,7 +103,7 @@ def test_planning_done() -> None:
             plan_acceptable=True, scope_feasible=True, research_gaps=[]
         ),
     )
-    assert planning_done(plan) is True
+    assert is_planning_done(plan) is True
 
     plan2 = plan.model_copy(
         update={
@@ -112,7 +112,7 @@ def test_planning_done() -> None:
             )
         }
     )
-    assert planning_done(plan2) is False
+    assert is_planning_done(plan2) is False
 
 
 def test_build_generate_plan_prompt_with_optional_fields() -> None:

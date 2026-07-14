@@ -15,7 +15,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, Union
 
 from llm_service import LLMJsonParseError, extract_json_from_response
 
@@ -50,7 +50,7 @@ def post_validate_plan(plan: ContentPlan, policy: LengthPolicy) -> ContentPlan:
     return plan.model_copy(update={"requirements_analysis": ra})
 
 
-def planning_done(plan: ContentPlan) -> bool:
+def is_planning_done(plan: ContentPlan) -> bool:
     ra = plan.requirements_analysis
     return bool(ra.plan_acceptable and ra.scope_feasible)
 
@@ -149,6 +149,25 @@ def complete_plan_json(
     )
 
 
+class CompletePlanJsonFn(Protocol):
+    """Signature of the LLM-call-and-parse step injected into the loop.
+
+    Matches ``BlogPlanningAgent._complete_plan_json`` /
+    ``BlogWriterAgent._complete_plan_json``, both of which wrap
+    ``complete_plan_json`` with their own ``call_json_fn``/``call_raw_fn``
+    closures.
+    """
+
+    def __call__(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        on_llm_request: Optional[Callable[[str], None]],
+        max_parse_retries: int,
+    ) -> tuple[dict[str, Any], int]: ...
+
+
 def run_content_planning_loop(
     planning_input: PlanningInput,
     *,
@@ -162,7 +181,7 @@ def run_content_planning_loop(
     work_dir: Optional[Union[str, Path]],
     generate_system: str,
     refine_system: str,
-    complete_plan_json_fn: Callable[..., tuple[dict[str, Any], int]],
+    complete_plan_json_fn: CompletePlanJsonFn,
 ) -> PlanningPhaseResult:
     """Generate and refine a ContentPlan until the planner (and optional critic) agree.
 
@@ -230,7 +249,7 @@ def run_content_planning_loop(
             )
         last_plan = plan.model_copy(update={"plan_version": iteration})
 
-        planner_ok = planning_done(last_plan)
+        planner_ok = is_planning_done(last_plan)
         critic_report: Optional["PlanCriticReport"] = None
         if plan_critic is not None:
             critic_report = plan_critic.run(
