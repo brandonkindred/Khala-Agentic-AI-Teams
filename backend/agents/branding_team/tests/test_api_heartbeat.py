@@ -13,6 +13,7 @@ import contextlib
 import threading
 
 from branding_team.api import main as api_main
+from branding_team.shared import job_store
 
 
 class _RecordingJobManager:
@@ -43,8 +44,8 @@ def test_run_branding_core_heartbeats_during_run(monkeypatch) -> None:
     manager = _RecordingJobManager()
     monkeypatch.setattr(api_main, "_job_manager", manager)
     monkeypatch.setattr(api_main, "_job_heartbeat_interval_s", lambda: 0.01)
-    monkeypatch.setattr(api_main, "is_job_cancelled", lambda job_id: False)
-    monkeypatch.setattr(api_main, "update_job", lambda *a, **kw: None)
+    monkeypatch.setattr(job_store, "is_job_cancelled", lambda job_id: False)
+    monkeypatch.setattr(job_store, "update_job", lambda *a, **kw: None)
 
     class _Result:
         def model_dump(self):
@@ -76,10 +77,10 @@ def test_job_heartbeat_is_noop_context_when_manager_unavailable(monkeypatch) -> 
 def test_run_branding_core_runs_without_job_manager(monkeypatch) -> None:
     """With no job manager the run still completes (heartbeat degrades to a no-op)."""
     monkeypatch.setattr(api_main, "_job_manager", None)
-    monkeypatch.setattr(api_main, "is_job_cancelled", lambda job_id: False)
+    monkeypatch.setattr(job_store, "is_job_cancelled", lambda job_id: False)
     completed: dict = {}
     monkeypatch.setattr(
-        api_main,
+        job_store,
         "update_job",
         lambda job_id, **kw: completed.update(kw) if kw.get("status") else None,
     )
@@ -96,4 +97,4 @@ def test_run_branding_core_runs_without_job_manager(monkeypatch) -> None:
 
     _call_run_core()
 
-    assert completed.get("status") == api_main.JOB_STATUS_COMPLETED
+    assert completed.get("status") == job_store.JOB_STATUS_COMPLETED

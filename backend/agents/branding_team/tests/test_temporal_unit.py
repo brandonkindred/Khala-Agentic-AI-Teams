@@ -380,6 +380,7 @@ def test_finalize_activity_completes_and_appends(monkeypatch) -> None:
     and marks the job COMPLETED with a serialized TeamOutput."""
     import shared_temporal
     from branding_team.api import main as main_mod
+    from branding_team.shared import job_store
     from branding_team.temporal import activities
 
     monkeypatch.setattr(shared_temporal, "load_checkpoint", lambda team, jid, phase: None)
@@ -408,7 +409,7 @@ def test_finalize_activity_completes_and_appends(monkeypatch) -> None:
     mock_append.assert_called_once()
     assert mock_append.call_args.args[:2] == ("c1", "b1")
     _, kwargs = mock_update.call_args
-    assert kwargs["status"] == main_mod.JOB_STATUS_COMPLETED
+    assert kwargs["status"] == job_store.JOB_STATUS_COMPLETED
     # Real assembly produced a populated brand book from the strategic core.
     assert "Brand Purpose" in kwargs["result"]["brand_book"]["content"]
 
@@ -418,6 +419,7 @@ def test_finalize_activity_finalized_checkpoint_blocks_double_append(monkeypatch
     (idempotently) complete the job."""
     import shared_temporal
     from branding_team.api import main as main_mod
+    from branding_team.shared import job_store
     from branding_team.temporal import activities
 
     monkeypatch.setattr(
@@ -434,7 +436,7 @@ def test_finalize_activity_finalized_checkpoint_blocks_double_append(monkeypatch
 
     mock_append.assert_not_called()
     _, kwargs = mock_update.call_args
-    assert kwargs["status"] == main_mod.JOB_STATUS_COMPLETED
+    assert kwargs["status"] == job_store.JOB_STATUS_COMPLETED
 
 
 def test_finalize_activity_skips_completion_when_cancelled(monkeypatch) -> None:
@@ -943,8 +945,8 @@ def test_run_branding_core_marks_failed_and_reraises() -> None:
 
     with (
         patch.object(main_mod.orchestrator, "run", side_effect=Boom("kaboom")),
-        patch.object(main_mod, "is_job_cancelled", return_value=False),
-        patch.object(main_mod, "update_job") as mock_update,
+        patch("branding_team.shared.job_store.is_job_cancelled", return_value=False),
+        patch("branding_team.shared.job_store.update_job") as mock_update,
     ):
         with pytest.raises(Boom, match="kaboom"):
             main_mod._run_branding_core(*_core_args())
