@@ -8,8 +8,6 @@ coverage via the orchestrator integration tests.
 
 from __future__ import annotations
 
-from typing import List
-
 from investment_team.models import StrategySpec
 from investment_team.strategy_lab.quality_gates.strategy_validator import (
     StrategySpecValidator,
@@ -26,8 +24,8 @@ from investment_team.strategy_lab.spec_dsl import (
 def _spec(
     *,
     hypothesis: str,
-    entry: List,
-    exit_: List,
+    entry: list,
+    exit_: list,
     asset_class: str = "stocks",
     sizing=None,
 ) -> StrategySpec:
@@ -567,3 +565,62 @@ def test_check_hypothesis_rules_empty_when_consistent() -> None:
         ],
     )
     assert StrategySpecValidator().check_hypothesis_rules(spec) == []
+
+
+def test_rule_indicator_names_extracts_structured_refs() -> None:
+    from investment_team.strategy_lab.quality_gates.strategy_validator import (
+        _rule_indicator_names,
+    )
+    from investment_team.strategy_lab.spec_dsl import AllOf
+
+    # No indicators (bar-field-only rule) -> empty set.
+    bar_field_only = _spec(
+        hypothesis="h",
+        entry=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0))],
+        exit_=[StopLossRule(pct=0.05)],
+    )
+    assert _rule_indicator_names(bar_field_only) == set()
+
+    # Multiple distinct indicators across entry + exit -> all extracted, deduped.
+    multi = _spec(
+        hypothesis="h",
+        entry=[
+            EntryRule(
+                side="long",
+                when=AllOf(
+                    of=[
+                        Predicate(
+                            lhs="bar.close",
+                            op=">",
+                            rhs=IndicatorRef(name="sma", params={"period": 50}),
+                        ),
+                        Predicate(
+                            lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30
+                        ),
+                    ]
+                ),
+            )
+        ],
+        exit_=[
+            SignalExitRule(
+                when=Predicate(lhs=IndicatorRef(name="sma", params={"period": 200}), op="<", rhs=0)
+            )
+        ],
+    )
+    assert _rule_indicator_names(multi) == {"sma", "rsi"}
+
+
+def test_concept_terms_matches_williams_r_not_williams_plus_r() -> None:
+    # Regression guard for the williams_r/williams alternation ordering: 'williams_r'
+    # precedes the bare 'williams' alias in _CONCEPT_TERMS so the regex engine's
+    # left-to-right, first-alternative-wins matching consumes the full token at
+    # its start position. If the alternation were ever reordered alphabetically
+    # ('williams' before 'williams_r'), a literal "williams_r" in hypothesis text
+    # would match only the "williams" prefix, leaving a stray "_r" and changing
+    # which surface term is credited — this pins the CURRENT (correct) behavior.
+    from investment_team.strategy_lab.quality_gates.strategy_validator import (
+        _concept_mentions,
+    )
+
+    mentions = _concept_mentions("A williams_r based reversal signal drives entries.")
+    assert mentions == [("williams_r", frozenset({"williams_r"}))]
