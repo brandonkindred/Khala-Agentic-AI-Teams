@@ -21,7 +21,7 @@ from shared.content_planning_loop import (
     build_generate_plan_prompt,
     build_refine_plan_prompt,
     complete_plan_json,
-    is_planner_self_eval_done,
+    is_planner_self_eval_satisfied,
     post_validate_plan,
     run_content_planning_loop,
 )
@@ -118,7 +118,7 @@ def test_post_validate_plan_uses_bounds_for_the_given_profile() -> None:
     assert any("outside expected range" in g for g in out.requirements_analysis.gaps)
 
 
-def test_is_planner_self_eval_done() -> None:
+def test_is_planner_self_eval_satisfied() -> None:
     """True only when both plan_acceptable and scope_feasible are True."""
     plan = ContentPlan(
         overarching_topic="X",
@@ -129,7 +129,7 @@ def test_is_planner_self_eval_done() -> None:
             plan_acceptable=True, scope_feasible=True, research_gaps=[]
         ),
     )
-    assert is_planner_self_eval_done(plan) is True
+    assert is_planner_self_eval_satisfied(plan) is True
 
     plan2 = plan.model_copy(
         update={
@@ -138,7 +138,7 @@ def test_is_planner_self_eval_done() -> None:
             )
         }
     )
-    assert is_planner_self_eval_done(plan2) is False
+    assert is_planner_self_eval_satisfied(plan2) is False
 
 
 def test_build_generate_plan_prompt_with_optional_fields() -> None:

@@ -7,6 +7,12 @@ underlying LLM-call primitives differ (``BlogPlanningAgent._call_agent`` vs
 ``BlogWriterAgent._call_agent_json``/``_call_json_raw``), so callers inject
 those as closures captured at call time rather than this module calling an
 LLM client directly.
+
+``run_content_planning_loop`` deferred-imports
+``blog_plan_critic_agent.agent.build_refine_feedback_from_critic`` (only when
+``plan_critic`` is supplied) to keep this module free of a hard dependency on
+``blog_plan_critic_agent`` when no critic is wired — a refactor of that
+function's name or location needs a matching update here.
 """
 
 from __future__ import annotations
@@ -50,7 +56,7 @@ def post_validate_plan(plan: ContentPlan, policy: LengthPolicy) -> ContentPlan:
     return plan.model_copy(update={"requirements_analysis": ra})
 
 
-def is_planner_self_eval_done(plan: ContentPlan) -> bool:
+def is_planner_self_eval_satisfied(plan: ContentPlan) -> bool:
     """True when the planner's own self-evaluation is satisfied.
 
     Does not reflect the critic's verdict — the loop's actual termination
@@ -265,7 +271,7 @@ def run_content_planning_loop(
             )
         last_plan = plan.model_copy(update={"plan_version": iteration})
 
-        planner_ok = is_planner_self_eval_done(last_plan)
+        planner_ok = is_planner_self_eval_satisfied(last_plan)
         critic_report: Optional["PlanCriticReport"] = None
         if plan_critic is not None:
             critic_report = plan_critic.run(
