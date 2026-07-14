@@ -94,6 +94,7 @@ class TestFrontendMicrotaskReviewConfig:
         assert config.max_retries == 3
         assert config.on_failure == "stop"
         assert config.security_failure_always_stops is True
+        assert config.enable_llm_review_grounding is True
 
     def test_config_custom_values(self):
         from frontend_code_v2_team.models import MicrotaskReviewConfig
@@ -336,6 +337,7 @@ class TestBackendMicrotaskReviewConfig:
         assert config.max_retries == 3
         assert config.on_failure == "stop"
         assert config.security_failure_always_stops is True
+        assert config.enable_llm_review_grounding is True
 
 
 class TestBackendMicrotaskStatus:

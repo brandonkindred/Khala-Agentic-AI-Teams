@@ -35,6 +35,7 @@ def run_llm_review(
     warn_threshold: int,
     architecture_context: str = "",
     spec_content: str = "",
+    enable_grounding: bool = True,
 ) -> List[IssueT]:
     """LLM-based code review when no external review agent is available.
 
@@ -55,6 +56,8 @@ def run_llm_review(
           size-bounded excerpts (the caller is expected to have applied its own
           cap before calling, since this runs once per chunk); both default to
           ``""`` so a caller without this context yet is unaffected.
+        - ``enable_grounding`` defaults True; when False, findings are returned
+          without the ungrounded-claim filter (kill switch).
 
     Postconditions:
         - Inputs that exceed the per-call budget are split into function-aware
@@ -71,6 +74,10 @@ def run_llm_review(
           from the other chunks are still returned (one bad chunk never aborts
           the whole review).
         - Small inputs are reviewed in a single call, as before.
+        - When ``enable_grounding`` is True, findings whose description or
+          recommendation contain checkable proper-noun phrases absent from the
+          task grounding corpus are dropped before return; unknown file paths
+          are blanked rather than dropped.
     """
     # Imported lazily (not at module level) so importing this helper does not
     # pull in the whole code_review_agent package; this also matches the V2
@@ -130,4 +137,20 @@ def run_llm_review(
                             recommendation=item.get("recommendation", ""),
                         )
                     )
+    if enable_grounding and issues:
+        from software_engineering_team.shared.issue_grounding import drop_ungrounded_issues
+
+        def _on_dropped(issue: Any) -> None:
+            logger.warning("LLM code review: dropping ungrounded finding: %s", issue)
+
+        requirements = task.requirements or task.description or ""
+        issues = drop_ungrounded_issues(
+            issues,
+            files=files,
+            requirements=requirements,
+            acceptance_criteria=task.acceptance_criteria,
+            spec_content=spec_content or "",
+            architecture_context=architecture_context or "",
+            on_dropped=_on_dropped,
+        )
     return issues

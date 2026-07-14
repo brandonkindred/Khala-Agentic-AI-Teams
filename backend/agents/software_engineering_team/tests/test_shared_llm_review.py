@@ -204,3 +204,69 @@ def test_run_llm_review_preserves_header_on_oversized_single_line():
     assert len(prompts) > 1  # the oversized line was hard-split across prompts
     assert not any(line in prompt for prompt in prompts)  # no single prompt holds it whole
     assert all("### bundle.py ###" in prompt for prompt in prompts)  # header on every piece
+
+
+def test_run_llm_review_drops_ungrounded_insurance_hallucination():
+    """Meal-planning task + fabricated Insurance Provider finding is dropped
+    before return (regression for the LLM-fallback hallucination loop)."""
+
+    def parse_insurance(_raw: str):
+        return {
+            "issues": [
+                {
+                    "description": "index.html does not support Insurance Provider ZephyrCare",
+                    "severity": "high",
+                    "file_path": "index.html",
+                    "recommendation": "Add ZephyrCare to the provider dropdown",
+                }
+            ]
+        }
+
+    issues = run_llm_review(
+        task=_task(
+            requirements="Build a meal planning UI for weekly menus",
+            description="Meal planner",
+            acceptance_criteria=["user can plan meals for the week"],
+        ),
+        files={"index.html": "<html><body>Meal Planner</body></html>"},
+        prompt_template=_PROMPT,
+        parse_template=parse_insurance,
+        issue_factory=_Issue,
+        invoke_model=lambda _p: "raw",
+        max_chars=60_000,
+        warn_threshold=20,
+        enable_grounding=True,
+    )
+    assert issues == []
+
+
+def test_run_llm_review_grounding_kill_switch_keeps_ungrounded():
+    """enable_grounding=False preserves today's behavior (no drop)."""
+
+    def parse_insurance(_raw: str):
+        return {
+            "issues": [
+                {
+                    "description": "index.html does not support Insurance Provider ZephyrCare",
+                    "severity": "high",
+                    "file_path": "index.html",
+                }
+            ]
+        }
+
+    issues = run_llm_review(
+        task=_task(
+            requirements="Build a meal planning UI for weekly menus",
+            acceptance_criteria=["user can plan meals for the week"],
+        ),
+        files={"index.html": "<html></html>"},
+        prompt_template=_PROMPT,
+        parse_template=parse_insurance,
+        issue_factory=_Issue,
+        invoke_model=lambda _p: "raw",
+        max_chars=60_000,
+        warn_threshold=20,
+        enable_grounding=False,
+    )
+    assert len(issues) == 1
+    assert "Insurance Provider" in issues[0].description

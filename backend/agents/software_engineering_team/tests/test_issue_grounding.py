@@ -1,0 +1,114 @@
+"""Tests for software_engineering_team.shared.issue_grounding."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from software_engineering_team.shared.issue_grounding import (
+    drop_ungrounded_issues,
+    extract_checkable_phrases,
+    ground_issue_file_path,
+)
+
+
+@dataclass
+class _Issue:
+    source: str = "code_review"
+    severity: str = "medium"
+    description: str = ""
+    file_path: str = ""
+    recommendation: str = ""
+
+
+def test_extract_checkable_phrases_title_case_and_quoted():
+    # Avoid a sentence-initial capital glued onto the proper-noun run.
+    text = 'index.html lacks Insurance Provider support; also see "Acme Health".'
+    phrases = extract_checkable_phrases(text)
+    assert "Insurance Provider" in phrases
+    assert "Acme Health" in phrases
+    # Single capitalized tokens are not checkable phrases.
+    assert "Provider" not in phrases
+
+
+def test_ground_issue_file_path_blanks_unknown_keeps_known():
+    files = {"app/index.html": "<html></html>", "src/main.py": "pass"}
+    assert ground_issue_file_path("app/index.html", files) == "app/index.html"
+    assert ground_issue_file_path("main.py", files) == "src/main.py"  # basename alias
+    assert ground_issue_file_path("missing.py", files) == ""
+    assert ground_issue_file_path("", files) == ""
+
+
+def test_drop_ungrounded_keeps_grounded_and_phrase_free():
+    files = {"index.html": "<html></html>"}
+    grounded = _Issue(
+        description="Meal Planner does not render weekly view",
+        file_path="index.html",
+    )
+    phrase_free = _Issue(
+        description="off-by-one in the loop bound",
+        file_path="index.html",
+    )
+    kept = drop_ungrounded_issues(
+        [grounded, phrase_free],
+        files=files,
+        requirements="Build a Meal Planner with weekly view",
+        acceptance_criteria=["weekly view works"],
+        spec_content="",
+    )
+    assert len(kept) == 2
+    assert kept[0].description == grounded.description
+    assert kept[1].description == phrase_free.description
+
+
+def test_drop_ungrounded_drops_fabricated_content_claims():
+    files = {"index.html": "<html></html>"}
+    fake = _Issue(
+        description="index.html does not support Insurance Provider ZephyrCare",
+        file_path="index.html",
+        recommendation="Add ZephyrCare to the provider list",
+    )
+    dropped: list = []
+    kept = drop_ungrounded_issues(
+        [fake],
+        files=files,
+        requirements="Meal planning UI for weekly menus",
+        acceptance_criteria=["user can plan meals"],
+        spec_content="No insurance features",
+        on_dropped=dropped.append,
+    )
+    assert kept == []
+    assert len(dropped) == 1
+
+
+def test_drop_ungrounded_blanks_bad_file_path_without_dropping():
+    files = {"real.py": "x = 1"}
+    issue = _Issue(
+        description="off-by-one in the loop bound",
+        file_path="hallucinated.py",
+    )
+    kept = drop_ungrounded_issues(
+        [issue],
+        files=files,
+        requirements="Fix loop",
+        acceptance_criteria=[],
+        spec_content="",
+    )
+    assert len(kept) == 1
+    assert kept[0].file_path == ""
+
+
+def test_drop_ungrounded_recommendation_only_fabrication():
+    files = {"app.py": "pass"}
+    issue = _Issue(
+        description="missing edge-case handling",
+        file_path="app.py",
+        recommendation='Wire up "Phantom Insurer" before merge',
+    )
+    kept = drop_ungrounded_issues(
+        [issue],
+        files=files,
+        requirements="Harden error paths",
+        acceptance_criteria=["errors are handled"],
+        spec_content="",
+    )
+    assert kept == []

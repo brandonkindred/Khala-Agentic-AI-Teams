@@ -645,6 +645,7 @@ def run_gated_execution_impl(
                 files=microtask_files,
                 deps=deps,
                 review_context=review_context,
+                enable_llm_review_grounding=getattr(config, "enable_llm_review_grounding", True),
                 detail_callback=lambda d: _detail_cb(d, current_idx, "code_review"),
             )
 
@@ -716,6 +717,7 @@ def run_gated_execution_impl(
                     files=microtask_files,
                     deps=deps,
                     review_context=review_context,
+                    enable_llm_review_grounding=getattr(config, "enable_llm_review_grounding", True),
                     detail_callback=lambda d: _detail_cb(d, current_idx, "code_review"),
                 )
 
