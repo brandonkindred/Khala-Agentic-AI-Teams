@@ -9,6 +9,7 @@ from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
 from llm_service import DummyLLMClient
 from software_engineering_team.shared.development_plan_writer import write_architecture_plan
 from software_engineering_team.shared.models import ProductRequirements
+from software_engineering_team.tests.conftest import _patch_fenced_response, _strands_model_double
 
 
 @pytest.fixture
@@ -91,12 +92,13 @@ def test_architecture_agent_builds_synthetic_when_parse_fails(
     """When the LLM returns unparseable content, the agent builds a
     synthetic architecture from requirements.
 
-    After the Wave 5 migration the LLM call routes through
-    ``run_json_via_strands``, which returns ``{}`` when the response text
-    can't be parsed as JSON. The agent's ``not data.get("overview")`` check
-    then triggers the synthetic-architecture fallback — same behavior as
-    pre-migration, but now driven by the helper's parse-failure path
-    rather than an ``LLMPermanentError``.
+    The LLM call routes through ``complete_json_with_continuation``
+    (``software_engineering_team.shared.llm``), which builds a fresh Strands
+    ``Agent`` per call and returns the parsed JSON dict. Here the raw-wrapper
+    client's response is valid JSON shaped as ``{"content": ...}`` — no parse
+    exception occurs — so it's the agent's own ``is_parse_failure`` check
+    (``not data.get("overview")``) that triggers the synthetic-architecture
+    fallback, not ``complete_json_with_continuation``'s exception path.
     """
 
     class _RawWrapperClient(DummyLLMClient):
@@ -124,9 +126,10 @@ def test_architecture_agent_multiple_sequential_runs_on_same_instance(
     requirements: ProductRequirements,
 ) -> None:
     """Regression: a single ``ArchitectureExpertAgent`` instance must
-    handle many sequential ``run()`` calls. Wave 5 migrations route every
-    LLM call through ``run_json_via_strands`` which builds a fresh Strands
-    ``Agent`` per call, so this regression is avoided by construction."""
+    handle many sequential ``run()`` calls. Every ``run()`` call routes
+    through ``complete_json_with_continuation``, which builds a fresh
+    Strands ``Agent`` per call, so this regression is avoided by
+    construction."""
     agent = ArchitectureExpertAgent(llm_client=DummyLLMClient())
     for i in range(3):
         result = agent.run(
@@ -136,3 +139,38 @@ def test_architecture_agent_multiple_sequential_runs_on_same_instance(
         )
         assert result.architecture.overview, f"run {i} missing overview"
         assert len(result.architecture.components) >= 1, f"run {i} missing components"
+
+
+def test_architecture_agent_recovers_fenced_json_response(
+    monkeypatch, requirements: ProductRequirements
+) -> None:
+    """A markdown-fenced LLM response is recovered via
+    ``complete_json_with_continuation``'s ``extract_json_from_response``
+    fallback instead of crashing. Before the migration to
+    ``complete_json_with_continuation``, a fenced response made the bare
+    ``json.loads`` raise an uncaught ``json.JSONDecodeError`` --
+    ``except LLMPermanentError:`` does not catch that. The real LLM data
+    must come through, not the synthetic requirements-only fallback.
+    """
+    payload = {
+        "overview": "Fenced-response architecture overview for the task manager API.",
+        "components": [
+            {
+                "name": "API Gateway",
+                "type": "backend",
+                "description": "Routes requests to services",
+                "technology": "fastapi",
+            },
+        ],
+        "architecture_document": "# Architecture\n\nFenced document body.",
+        "diagrams": {"client_server_architecture": "flowchart TD\n  a --> b"},
+        "decisions": [],
+        "summary": "Fenced architecture summary.",
+    }
+    _patch_fenced_response(monkeypatch, payload)
+    agent = ArchitectureExpertAgent(llm_client=_strands_model_double())
+    result = agent.run(ArchitectureInput(requirements=requirements))
+    assert result.architecture.overview == payload["overview"]
+    assert len(result.architecture.components) == 1
+    assert result.architecture.components[0].name == "API Gateway"
+    assert result.summary == "Fenced architecture summary."
