@@ -135,6 +135,7 @@ def _make_length_policy():
 
 
 def test_writer_post_validate_plan_in_bounds() -> None:
+    """Section count within the profile's expected range leaves plan_acceptable untouched."""
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
@@ -190,6 +191,7 @@ def test_writer_post_validate_plan_out_of_bounds() -> None:
 
 
 def test_writer_planning_done() -> None:
+    """True only when both plan_acceptable and scope_feasible are True."""
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
@@ -220,6 +222,7 @@ def test_writer_planning_done() -> None:
 
 
 def test_writer_build_generate_plan_prompt() -> None:
+    """All optional PlanningInput fields (audience, tone, series context) reach the prompt."""
     from shared.content_plan import PlanningInput
     from shared.content_planning_loop import build_generate_plan_prompt
 
@@ -240,6 +243,7 @@ def test_writer_build_generate_plan_prompt() -> None:
 
 
 def test_writer_build_refine_plan_prompt() -> None:
+    """Refine prompt embeds both the previous plan JSON and the refine feedback text."""
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,

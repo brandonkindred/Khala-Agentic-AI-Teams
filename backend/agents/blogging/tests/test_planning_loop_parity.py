@@ -14,6 +14,9 @@ from llm_service import DummyLLMClient
 
 
 def test_planning_agent_and_writer_agent_produce_equivalent_plan() -> None:
+    """Same PlanningInput/LengthPolicy through both entry points yields the same
+    ContentPlan, aside from plan_version and PlanningPhaseResult's timing/iteration
+    fields, which are excluded from the comparison since they're not expected to match."""
     policy = resolve_length_policy(content_profile=ContentProfile.standard_article)
     inp = PlanningInput(
         brief="Test brief about observability.",

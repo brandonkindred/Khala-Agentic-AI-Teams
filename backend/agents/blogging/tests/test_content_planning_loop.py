@@ -93,6 +93,7 @@ def test_post_validate_plan_preserves_in_bounds_plan() -> None:
 
 
 def test_planning_done() -> None:
+    """True only when both plan_acceptable and scope_feasible are True."""
     plan = ContentPlan(
         overarching_topic="X",
         narrative_flow="f",
@@ -267,6 +268,8 @@ class _CriticReport:
 
 
 def test_run_content_planning_loop_with_plan_critic() -> None:
+    """Critic rejects iteration 1 and approves iteration 2; loop converges on the second pass."""
+
     class _Critic:
         def __init__(self):
             self.called = 0
