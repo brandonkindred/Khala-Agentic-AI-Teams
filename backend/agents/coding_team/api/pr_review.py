@@ -8,6 +8,7 @@ split; models are imported directly.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import logging
 import os
 import threading
@@ -35,6 +36,7 @@ from coding_team.github_source import (
     build_issue_from_proposal,
     build_review_body,
     choose_event,
+    duplicate_check_max_open_issues,
     inline_comment_to_timeline_body,
     is_within_diff,
     map_issues_to_comments,
@@ -907,7 +909,15 @@ def _run_pr_review_body(
                 # PR (or a PR with only in-diff findings) never pays for the extra
                 # GitHub call.
                 try:
-                    open_issues = list(client.list_open_issues(owner, repo))
+                    cap = duplicate_check_max_open_issues()
+                    open_issues = list(itertools.islice(client.list_open_issues(owner, repo), cap))
+                    if len(open_issues) >= cap:
+                        logger.info(
+                            "PR review #%s: duplicate-detection capped at %d open issues; "
+                            "some older open issues were not considered",
+                            pr_number,
+                            cap,
+                        )
                 except GitHubAPIError as e:
                     logger.warning(
                         "PR review #%s: could not list open issues for duplicate-detection: %s",

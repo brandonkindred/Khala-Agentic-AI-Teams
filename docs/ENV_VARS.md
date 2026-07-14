@@ -615,6 +615,16 @@ parses defensively: a missing, blank, unparsable, or out-of-range value falls
 back to its documented default (clamped to `[0.0, 1.0]` when it does parse)
 rather than raising or disabling the check.
 
+### PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES
+Caps how many of the reviewed repository's open issues the `/review-pr` flow's
+duplicate-issue check reads per review (default `100`). `GitHubClient.list_open_issues`
+already paginates and self-limits at 1000, but reading that many issues synchronously
+on every review's critical path is real added latency for what is only an
+enhancement (skipping a redundant "file a new issue?" offer) — this trades recall
+(a match among issues past the cap won't be found) for bounded, predictable review
+latency. Parses defensively: a missing, blank, unparsable, or non-positive value
+falls back to the default rather than raising or disabling the cap.
+
 ### CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE
 Max entries in the coordinator's process-global map-phase outcome cache. The
 review→fix→re-review loop re-invokes the whole coordinator after every batch fix,

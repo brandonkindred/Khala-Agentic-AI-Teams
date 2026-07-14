@@ -13,6 +13,7 @@ from coding_team.github_source.pr_review_mapping import (
     build_issue_from_proposal,
     build_review_body,
     choose_event,
+    duplicate_check_max_open_issues,
     find_matching_open_issue,
     format_comment_body,
     format_issue_comment,
@@ -613,3 +614,28 @@ def test_annotate_duplicate_proposals_empty_open_issues_all_unmatched() -> None:
     out = annotate_duplicate_proposals(proposals, [])
     assert out[0]["matched_existing"] is False
     assert out[0]["issue_url"] is None
+
+
+# ---------------------------------------------------------------------------
+# duplicate_check_max_open_issues
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_check_max_open_issues_default() -> None:
+    assert duplicate_check_max_open_issues() == 100
+
+
+def test_duplicate_check_max_open_issues_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "5")
+    assert duplicate_check_max_open_issues() == 5
+
+
+def test_duplicate_check_max_open_issues_garbage_or_non_positive_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "not-an-int")
+    assert duplicate_check_max_open_issues() == 100
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "0")
+    assert duplicate_check_max_open_issues() == 100
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "-5")
+    assert duplicate_check_max_open_issues() == 100

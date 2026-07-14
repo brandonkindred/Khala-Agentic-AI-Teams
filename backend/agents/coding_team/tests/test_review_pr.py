@@ -3033,6 +3033,92 @@ class TestDuplicateProposalDetection:
         assert gh.created_issues == []
         assert data["proposals"][0]["issue_url"] == "https://example/issues/42"
 
+    def test_duplicate_check_only_considers_open_issues_up_to_the_cap(
+        self, review_app, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A matching issue placed past the configured cap is never considered —
+        the fetch is bounded rather than traversing every open issue."""
+        monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "2")
+        gh = review_app["github"]["client"]
+        gh.open_issues = [
+            Issue(
+                number=n,
+                title="unrelated issue",
+                body="",
+                state="open",
+                html_url=f"https://example/issues/{n}",
+                labels=(),
+            )
+            for n in range(1, 3)
+        ] + [
+            Issue(
+                number=99,
+                title="off-by-one error in loop bound",
+                body="",
+                state="open",
+                html_url="https://example/issues/99",
+                labels=(),
+            )
+        ]
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=2,
+                    file_path="legacy.py",
+                    description="off-by-one error in loop bound",
+                    pre_existing=True,
+                )
+            ],
+        )
+        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        # The matching issue (#99) sits past the cap of 2, so it was never fetched.
+        assert proposal["matched_existing"] is False
+        assert proposal["issue_url"] is None
+
+    def test_duplicate_check_env_override_widens_the_cap(
+        self, review_app, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Raising the cap via env var lets a later-listed matching issue be found."""
+        monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "3")
+        gh = review_app["github"]["client"]
+        gh.open_issues = [
+            Issue(
+                number=n,
+                title="unrelated issue",
+                body="",
+                state="open",
+                html_url=f"https://example/issues/{n}",
+                labels=(),
+            )
+            for n in range(1, 3)
+        ] + [
+            Issue(
+                number=99,
+                title="off-by-one error in loop bound",
+                body="",
+                state="open",
+                html_url="https://example/issues/99",
+                labels=(),
+            )
+        ]
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=2,
+                    file_path="legacy.py",
+                    description="off-by-one error in loop bound",
+                    pre_existing=True,
+                )
+            ],
+        )
+        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        assert proposal["matched_existing"] is True
+        assert proposal["issue_url"] == "https://example/issues/99"
+
 
 class TestCreateReviewIssuesUnit:
     """Direct unit tests for create_review_issues / its context loader."""

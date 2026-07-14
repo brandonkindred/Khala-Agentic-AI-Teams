@@ -503,6 +503,39 @@ def _duplicate_threshold(env_var: str, default: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+# Cap on how many open issues duplicate-detection reads per review. Unbounded
+# traversal of a very active repository's open-issue list (GitHubClient.list_open_issues
+# already paginates and self-limits at MAX_ISSUES_TRAVERSED=1000, which is still a lot
+# of synchronous round-trips) would add real latency to a review's critical path for a
+# benefit -- skipping a redundant proposal -- that degrades gracefully anyway. This
+# trades recall (a duplicate among issues beyond the cap won't be found) for bounded,
+# predictable review latency. Overridable via env var, same convention as the two
+# similarity thresholds above.
+_DUPLICATE_CHECK_MAX_OPEN_ISSUES = 100
+
+
+def duplicate_check_max_open_issues() -> int:
+    """Return the max number of open issues duplicate-detection reads per review.
+
+    Postconditions:
+        - Returns ``int(os.environ["PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES"])`` when it
+          parses to a positive integer; otherwise returns
+          :data:`_DUPLICATE_CHECK_MAX_OPEN_ISSUES` (100). A missing var, an
+          empty/whitespace string, unparsable text, or a non-positive value all
+          degrade to the default rather than raising or disabling the cap --
+          matches this repo's "garbage -> documented default" convention for
+          numeric env vars (see docs/ENV_VARS.md). Never raises.
+    """
+    raw = (os.environ.get("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES") or "").strip()
+    if not raw:
+        return _DUPLICATE_CHECK_MAX_OPEN_ISSUES
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DUPLICATE_CHECK_MAX_OPEN_ISSUES
+    return value if value > 0 else _DUPLICATE_CHECK_MAX_OPEN_ISSUES
+
+
 def _location_appears_in(file_path: str, issue: Issue) -> bool:
     """True when a finding's file_path is a substring of an existing issue's title/body.
 
