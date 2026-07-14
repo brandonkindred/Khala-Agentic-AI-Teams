@@ -4,15 +4,16 @@ SOP (Standard Operating Procedure) discovery engine for the Product Requirements
 The one-time pre-loop discovery that runs before the spec-review cycle, built around
 two human-in-the-loop orchestrators plus their supporting helpers:
 
-* **Phase 1 — Environment constraints** (``run_sop_phase1``): extract any decisions
-  the spec already answers, then walk each sub-phase (deployment, regulations, ...
-  priorities) asking the hardcoded SOP questions (honoring conditional dependencies
-  and multi-round follow-ups), and fill remaining gaps with LLM-generated follow-up
-  questions until each sub-phase is complete. Every question is guaranteed >= 3
-  spec-aware options. Supported by ``evaluate_sop_conditionals``,
-  ``extract_sop_decisions_from_spec``, ``generate_spec_aware_options``,
-  ``build_question_options``, ``assess_sub_phase_gaps``, and the shared
-  ``_pad_to_minimum_options`` option-padding helper.
+* **Phase 1 — Environment constraints** (``run_sop_phase1``): a thin per-sub-phase
+  orchestrator over ``_run_sop_sub_phase``, which — for each sub-phase (deployment,
+  regulations, ... priorities) — asks the hardcoded SOP questions (honoring
+  conditional dependencies and multi-round follow-ups), then fills remaining gaps
+  with LLM-generated follow-up questions until the sub-phase is complete. Every
+  question is guaranteed >= 3 spec-aware options. Supported by
+  ``evaluate_sop_conditionals``, ``extract_sop_decisions_from_spec``,
+  ``generate_spec_aware_options``, ``build_question_options``,
+  ``assess_sub_phase_gaps``, and the shared ``_pad_to_minimum_options``
+  option-padding helper.
 * **Phase 2 — Architecture** (``run_sop_phase2_architecture``): autonomously analyze
   architecture from the spec plus Phase 1 decisions, present recommendations for
   user approval, persist an architecture document, and inject a summary into the
@@ -455,6 +456,200 @@ def assess_sub_phase_gaps(
         return True, []  # On failure, consider complete to avoid blocking
 
 
+def _run_sop_sub_phase(
+    model: Any,
+    spec_content: str,
+    repo_path: Path,
+    job_id: str,
+    job_updater: Callable,
+    sub_phase: SOPSubPhase,
+    decisions_map: Dict[str, str],
+    all_decisions: List[SOPDecision],
+    all_answered: List[AnsweredQuestion],
+) -> None:
+    """Run one SOP Phase 1 sub-phase: hardcoded-question rounds, then gap-analysis rounds.
+
+    Extracted from :func:`run_sop_phase1` to keep that function a thin per-sub-phase
+    orchestrator.
+
+    Mutates ``decisions_map``, ``all_decisions``, and ``all_answered`` in place as
+    the user answers questions; the caller's references remain valid, so there is
+    nothing to return.
+
+    Preconditions: ``model`` is a Strands ``Model``; ``job_id`` identifies a live
+        job; ``decisions_map``/``all_decisions``/``all_answered`` carry state
+        accumulated from any prior sub-phases (for cross-referencing).
+    Postconditions: honors ``MAX_SOP_ROUNDS``/``MAX_GAP_ROUNDS``; propagates
+        communication failures.
+    """
+    q_defs = SOP_PHASE1_QUESTIONS.get(sub_phase, [])
+
+    # --- Phase A: Ask hardcoded SOP questions (including conditional follow-ups) ---
+    for round_num in range(1, MAX_SOP_ROUNDS + 1):
+        sub_phase_questions: List[OpenQuestion] = []
+
+        for q_def in q_defs:
+            sop_id = q_def["sop_id"]
+            if sop_id in decisions_map:
+                continue  # Already answered (from spec or prior round)
+
+            cond_result = evaluate_sop_conditionals(q_def, decisions_map)
+            if cond_result is False:
+                continue  # Condition not met
+            if cond_result is None:
+                continue  # Parent not answered yet — defer to next round within this sub-phase
+
+            # Build options ensuring at least 3 valid choices, informed by spec
+            options = build_question_options(model, q_def, spec_content, decisions_map)
+
+            sub_phase_questions.append(
+                OpenQuestion(
+                    id=sop_id,
+                    question_text=q_def["question_text"],
+                    context="",
+                    category=q_def.get("category", "general"),
+                    priority="high",
+                    allow_multiple=q_def.get("allow_multiple", False),
+                    source="sop_phase1",
+                    sop_sub_phase=sub_phase.value,
+                    options=options,
+                )
+            )
+
+        if not sub_phase_questions:
+            break  # No more hardcoded questions for this sub-phase
+
+        logger.info(
+            "SOP Phase 1 sub-phase '%s' round %d: asking %d questions",
+            sub_phase.value,
+            round_num,
+            len(sub_phase_questions),
+        )
+        job_updater(
+            status_text=f"SOP Phase 1 — {sub_phase.value}: waiting for answers to {len(sub_phase_questions)} question(s)",
+        )
+
+        try:
+            answered = communicate_with_user(
+                job_id=job_id,
+                open_questions=sub_phase_questions,
+                repo_path=repo_path,
+                iteration=0,
+            )
+        except Exception as exc:
+            logger.error(
+                "SOP Phase 1 communication failed in sub-phase '%s': %s",
+                sub_phase.value,
+                exc,
+            )
+            raise
+
+        if not answered:
+            logger.info(
+                "SOP Phase 1: No answers received for sub-phase '%s' round %d",
+                sub_phase.value,
+                round_num,
+            )
+            break
+
+        # Record answers as SOPDecision objects
+        for aq in answered:
+            decision = SOPDecision(
+                sop_id=aq.question_id,
+                sub_phase=sub_phase,
+                question_text=aq.question_text,
+                decision=aq.selected_answer,
+                source="user",
+                confidence=1.0,
+            )
+            all_decisions.append(decision)
+            decisions_map[aq.question_id] = aq.selected_answer
+
+        all_answered.extend(answered)
+        record_answers(repo_path, answered, iteration=0)
+    else:
+        logger.warning(
+            "SOP Phase 1: sub-phase '%s' hit MAX_SOP_ROUNDS (%d) — some hardcoded "
+            "questions may remain unanswered",
+            sub_phase.value,
+            MAX_SOP_ROUNDS,
+        )
+
+    # --- Phase B: Gap analysis — generate follow-up questions until sub-phase is complete ---
+    for gap_round in range(1, MAX_GAP_ROUNDS + 1):
+        job_updater(
+            status_text=f"SOP Phase 1 — {sub_phase.value}: assessing completeness...",
+        )
+        is_complete, follow_ups = assess_sub_phase_gaps(
+            model,
+            sub_phase,
+            spec_content,
+            all_decisions,
+            decisions_map,
+        )
+        if is_complete or not follow_ups:
+            logger.info(
+                "SOP Phase 1: Sub-phase '%s' is complete after %d gap-analysis round(s)",
+                sub_phase.value,
+                gap_round,
+            )
+            break
+
+        logger.info(
+            "SOP Phase 1 sub-phase '%s' gap round %d: asking %d follow-up questions",
+            sub_phase.value,
+            gap_round,
+            len(follow_ups),
+        )
+        job_updater(
+            status_text=f"SOP Phase 1 — {sub_phase.value}: {len(follow_ups)} follow-up question(s) to fill gaps",
+        )
+
+        try:
+            answered = communicate_with_user(
+                job_id=job_id,
+                open_questions=follow_ups,
+                repo_path=repo_path,
+                iteration=0,
+            )
+        except Exception as exc:
+            logger.error(
+                "SOP Phase 1 gap-analysis communication failed in sub-phase '%s': %s",
+                sub_phase.value,
+                exc,
+            )
+            raise
+
+        if not answered:
+            logger.info(
+                "SOP Phase 1: No answers to gap questions for sub-phase '%s'",
+                sub_phase.value,
+            )
+            break
+
+        for aq in answered:
+            decision = SOPDecision(
+                sop_id=aq.question_id,
+                sub_phase=sub_phase,
+                question_text=aq.question_text,
+                decision=aq.selected_answer,
+                source="user",
+                confidence=1.0,
+            )
+            all_decisions.append(decision)
+            decisions_map[aq.question_id] = aq.selected_answer
+
+        all_answered.extend(answered)
+        record_answers(repo_path, answered, iteration=0)
+    else:
+        logger.warning(
+            "SOP Phase 1: sub-phase '%s' hit MAX_GAP_ROUNDS (%d) — gap analysis may "
+            "not have converged",
+            sub_phase.value,
+            MAX_GAP_ROUNDS,
+        )
+
+
 def run_sop_phase1(
     model: Any,
     spec_content: str,
@@ -466,11 +661,12 @@ def run_sop_phase1(
 
     Sequential sub-phase approach:
     1. Extract answers already present in the spec.
-    2. Iterate through each sub-phase one at a time (DEPLOYMENT, REGULATIONS, ..., PRIORITIES).
-    3. For each sub-phase, first ask the hardcoded SOP questions (with conditional follow-ups).
-    4. Then assess whether the sub-phase is complete using LLM gap analysis.
-    5. If gaps remain, generate and ask follow-up questions until the sub-phase is complete.
-    6. Every question is guaranteed at least 3 answer options informed by the spec.
+    2. Iterate through each sub-phase one at a time (DEPLOYMENT, REGULATIONS, ..., PRIORITIES),
+       via :func:`_run_sop_sub_phase`: first ask the hardcoded SOP questions (with
+       conditional follow-ups), then assess whether the sub-phase is complete using
+       LLM gap analysis, asking follow-up questions until it is. Every question is
+       guaranteed at least 3 answer options informed by the spec.
+    3. Inject all collected decisions into the spec as a context section.
 
     Returns (all_decisions, updated_spec, answered_questions).
 
@@ -494,172 +690,17 @@ def run_sop_phase1(
 
     # Step 2: Iterate through sub-phases ONE AT A TIME in order
     for sub_phase in SOPSubPhase:
-        q_defs = SOP_PHASE1_QUESTIONS.get(sub_phase, [])
-
-        # --- Phase A: Ask hardcoded SOP questions (including conditional follow-ups) ---
-        for round_num in range(1, MAX_SOP_ROUNDS + 1):
-            sub_phase_questions: List[OpenQuestion] = []
-
-            for q_def in q_defs:
-                sop_id = q_def["sop_id"]
-                if sop_id in decisions_map:
-                    continue  # Already answered (from spec or prior round)
-
-                cond_result = evaluate_sop_conditionals(q_def, decisions_map)
-                if cond_result is False:
-                    continue  # Condition not met
-                if cond_result is None:
-                    continue  # Parent not answered yet — defer to next round within this sub-phase
-
-                # Build options ensuring at least 3 valid choices, informed by spec
-                options = build_question_options(model, q_def, spec_content, decisions_map)
-
-                sub_phase_questions.append(
-                    OpenQuestion(
-                        id=sop_id,
-                        question_text=q_def["question_text"],
-                        context="",
-                        category=q_def.get("category", "general"),
-                        priority="high",
-                        allow_multiple=q_def.get("allow_multiple", False),
-                        source="sop_phase1",
-                        sop_sub_phase=sub_phase.value,
-                        options=options,
-                    )
-                )
-
-            if not sub_phase_questions:
-                break  # No more hardcoded questions for this sub-phase
-
-            logger.info(
-                "SOP Phase 1 sub-phase '%s' round %d: asking %d questions",
-                sub_phase.value,
-                round_num,
-                len(sub_phase_questions),
-            )
-            job_updater(
-                status_text=f"SOP Phase 1 — {sub_phase.value}: waiting for answers to {len(sub_phase_questions)} question(s)",
-            )
-
-            try:
-                answered = communicate_with_user(
-                    job_id=job_id,
-                    open_questions=sub_phase_questions,
-                    repo_path=repo_path,
-                    iteration=0,
-                )
-            except Exception as exc:
-                logger.error(
-                    "SOP Phase 1 communication failed in sub-phase '%s': %s",
-                    sub_phase.value,
-                    exc,
-                )
-                raise
-
-            if not answered:
-                logger.info(
-                    "SOP Phase 1: No answers received for sub-phase '%s' round %d",
-                    sub_phase.value,
-                    round_num,
-                )
-                break
-
-            # Record answers as SOPDecision objects
-            for aq in answered:
-                decision = SOPDecision(
-                    sop_id=aq.question_id,
-                    sub_phase=sub_phase,
-                    question_text=aq.question_text,
-                    decision=aq.selected_answer,
-                    source="user",
-                    confidence=1.0,
-                )
-                all_decisions.append(decision)
-                decisions_map[aq.question_id] = aq.selected_answer
-
-            all_answered.extend(answered)
-            record_answers(repo_path, answered, iteration=0)
-        else:
-            logger.warning(
-                "SOP Phase 1: sub-phase '%s' hit MAX_SOP_ROUNDS (%d) — some hardcoded "
-                "questions may remain unanswered",
-                sub_phase.value,
-                MAX_SOP_ROUNDS,
-            )
-
-        # --- Phase B: Gap analysis — generate follow-up questions until sub-phase is complete ---
-        for gap_round in range(1, MAX_GAP_ROUNDS + 1):
-            job_updater(
-                status_text=f"SOP Phase 1 — {sub_phase.value}: assessing completeness...",
-            )
-            is_complete, follow_ups = assess_sub_phase_gaps(
-                model,
-                sub_phase,
-                spec_content,
-                all_decisions,
-                decisions_map,
-            )
-            if is_complete or not follow_ups:
-                logger.info(
-                    "SOP Phase 1: Sub-phase '%s' is complete after %d gap-analysis round(s)",
-                    sub_phase.value,
-                    gap_round,
-                )
-                break
-
-            logger.info(
-                "SOP Phase 1 sub-phase '%s' gap round %d: asking %d follow-up questions",
-                sub_phase.value,
-                gap_round,
-                len(follow_ups),
-            )
-            job_updater(
-                status_text=f"SOP Phase 1 — {sub_phase.value}: {len(follow_ups)} follow-up question(s) to fill gaps",
-            )
-
-            try:
-                answered = communicate_with_user(
-                    job_id=job_id,
-                    open_questions=follow_ups,
-                    repo_path=repo_path,
-                    iteration=0,
-                )
-            except Exception as exc:
-                logger.error(
-                    "SOP Phase 1 gap-analysis communication failed in sub-phase '%s': %s",
-                    sub_phase.value,
-                    exc,
-                )
-                raise
-
-            if not answered:
-                logger.info(
-                    "SOP Phase 1: No answers to gap questions for sub-phase '%s'",
-                    sub_phase.value,
-                )
-                break
-
-            for aq in answered:
-                decision = SOPDecision(
-                    sop_id=aq.question_id,
-                    sub_phase=sub_phase,
-                    question_text=aq.question_text,
-                    decision=aq.selected_answer,
-                    source="user",
-                    confidence=1.0,
-                )
-                all_decisions.append(decision)
-                decisions_map[aq.question_id] = aq.selected_answer
-
-            all_answered.extend(answered)
-            record_answers(repo_path, answered, iteration=0)
-        else:
-            logger.warning(
-                "SOP Phase 1: sub-phase '%s' hit MAX_GAP_ROUNDS (%d) — gap analysis may "
-                "not have converged",
-                sub_phase.value,
-                MAX_GAP_ROUNDS,
-            )
+        _run_sop_sub_phase(
+            model,
+            spec_content,
+            repo_path,
+            job_id,
+            job_updater,
+            sub_phase,
+            decisions_map,
+            all_decisions,
+            all_answered,
+        )
 
     # Step 3: Inject all decisions into spec
     if all_answered:

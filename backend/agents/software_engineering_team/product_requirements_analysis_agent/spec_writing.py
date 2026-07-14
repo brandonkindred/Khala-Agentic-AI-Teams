@@ -94,6 +94,27 @@ def _merge_spec_cleanup_results(results: List[Dict[str, Any]]) -> Dict[str, Any]
     return merged
 
 
+def _write_spec_artifact(repo_path: Path, filename: str, spec_text: str) -> Path:
+    """Persist ``spec_text`` under plan/product_analysis as a versioned artifact
+    plus the "latest" updated_spec.md alias.
+
+    Shared by :func:`update_spec`, :func:`update_spec_from_duplicates`, and
+    :func:`update_spec_for_consistency_and_clarity`, which otherwise duplicated
+    this exact write sequence.
+
+    Preconditions: ``filename`` is a bare filename (no path separators).
+    Postconditions: creates ``plan/product_analysis`` if missing; writes both
+        ``filename`` and ``updated_spec.md`` with ``spec_text``; returns the
+        versioned file's path for the caller to log/reference.
+    """
+    plan_dir = repo_path / "plan" / "product_analysis"
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    spec_file = plan_dir / filename
+    spec_file.write_text(spec_text, encoding="utf-8")
+    (plan_dir / "updated_spec.md").write_text(spec_text, encoding="utf-8")
+    return spec_file
+
+
 def update_spec(
     model: Any,
     current_spec: str,
@@ -121,15 +142,8 @@ def update_spec(
         logger.error("Failed to update spec with LLM: %s", e)
         return current_spec
 
-    plan_dir = repo_path / "plan" / "product_analysis"
-    plan_dir.mkdir(parents=True, exist_ok=True)
-
-    spec_file = plan_dir / f"updated_spec_v{version}.md"
-    spec_file.write_text(updated_spec, encoding="utf-8")
+    spec_file = _write_spec_artifact(repo_path, f"updated_spec_v{version}.md", updated_spec)
     logger.info("Saved updated spec to %s", spec_file)
-
-    latest_file = plan_dir / "updated_spec.md"
-    latest_file.write_text(updated_spec, encoding="utf-8")
 
     return updated_spec
 
@@ -373,15 +387,8 @@ def update_spec_from_duplicates(
         return current_spec
 
     # Save the clarified spec using the same versioned pattern as update_spec
-    plan_dir = repo_path / "plan" / "product_analysis"
-    plan_dir.mkdir(parents=True, exist_ok=True)
-
-    spec_file = plan_dir / f"updated_spec_v{version}.md"
-    spec_file.write_text(clarified_spec, encoding="utf-8")
+    spec_file = _write_spec_artifact(repo_path, f"updated_spec_v{version}.md", clarified_spec)
     logger.info("Saved updated spec (clarification) to %s", spec_file)
-
-    latest_file = plan_dir / "updated_spec.md"
-    latest_file.write_text(clarified_spec, encoding="utf-8")
 
     return clarified_spec
 
@@ -421,13 +428,12 @@ def update_spec_for_consistency_and_clarity(
         logger.error("Failed to update spec for consistency with LLM: %s", e)
         return current_spec
 
-    plan_dir = repo_path / "plan" / "product_analysis"
-    plan_dir.mkdir(parents=True, exist_ok=True)
-    spec_file = plan_dir / f"updated_spec_consistency_v{version}_loop{consistency_loop}.md"
-    spec_file.write_text(updated_spec, encoding="utf-8")
+    spec_file = _write_spec_artifact(
+        repo_path,
+        f"updated_spec_consistency_v{version}_loop{consistency_loop}.md",
+        updated_spec,
+    )
     logger.info("Saved consistency-updated spec to %s", spec_file.name)
-    latest_file = plan_dir / "updated_spec.md"
-    latest_file.write_text(updated_spec, encoding="utf-8")
     return updated_spec
 
 
