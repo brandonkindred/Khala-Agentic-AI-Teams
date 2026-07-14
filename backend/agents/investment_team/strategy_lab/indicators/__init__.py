@@ -42,6 +42,16 @@ inlined ``stochastic`` template was fixed in lockstep to iterate only
 the last ``d_period`` positions for %D (was O(len(history)), now
 O(d_period × k_period) bounded). Any change to the %K / %D recurrence
 must land in both sites together.
+
+**ADX / VWAP shared templates** — like MACD, the ADX and VWAP bodies both
+DSL compilers inline into compiled strategy code are rendered from the
+single canonical bodies in :mod:`strategy_lab.indicators.template_bodies`
+(``render_adx_body`` / ``render_vwap_body``), rather than hand-duplicated
+between ``factors/compiler.py`` and ``synthesis/compiler.py``. As with
+MACD, this is a deliberate, tested-for-parity duplication against the
+registry's own :meth:`IndicatorRegistry.adx` / :meth:`IndicatorRegistry.vwap`
+— any change to either formula must land in both the registry and the
+corresponding ``template_bodies.render_*_body`` in lockstep.
 """
 
 from __future__ import annotations

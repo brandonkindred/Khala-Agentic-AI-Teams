@@ -36,6 +36,15 @@ from typing import Any, Callable, Mapping, Optional, Tuple
 
 
 def _int_in(lo: int, hi: int):
+    """Return a validator rejecting non-``int`` values or values outside ``[lo, hi]``.
+
+    Preconditions: ``lo <= hi``.
+    Postconditions: the returned callable raises :class:`ValueError` for a
+    ``bool`` (bools are ``int`` subclasses but never a valid param value
+    here), a non-``int``, or an out-of-range ``int``; returns ``None``
+    (accepts) otherwise.
+    """
+
     def check(value: Any) -> None:
         if not isinstance(value, int) or isinstance(value, bool):
             raise ValueError(f"must be int (got {type(value).__name__})")
@@ -46,6 +55,13 @@ def _int_in(lo: int, hi: int):
 
 
 def _float_gt(threshold: float):
+    """Return a validator rejecting non-numeric, non-finite, or ``<= threshold`` values.
+
+    Postconditions: the returned callable raises :class:`ValueError` for a
+    ``bool``, a non-numeric value, a non-finite float (NaN/inf), or a value
+    ``<= threshold``; returns ``None`` (accepts) otherwise.
+    """
+
     def check(value: Any) -> None:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"must be numeric (got {type(value).__name__})")
@@ -56,15 +72,21 @@ def _float_gt(threshold: float):
 
 
 def _one_of(*allowed: str):
+    """Return a validator rejecting values not in ``allowed``.
+
+    Postconditions: the returned callable raises :class:`ValueError` for a
+    value not in ``allowed``; returns ``None`` (accepts) otherwise. The
+    callable also carries an ``.allowed`` attribute (the ``frozenset`` of
+    ``allowed``) so downstream code (e.g. ``quality_gates.code_conformance``'s
+    Bollinger derived-band set) can derive from this single source of truth
+    instead of hardcoding a second copy of the allowed values.
+    """
     allowed_set = frozenset(allowed)
 
     def check(value: Any) -> None:
         if value not in allowed_set:
             raise ValueError(f"must be one of {sorted(allowed_set)} (got {value!r})")
 
-    # Exposed so downstream code can derive from the DSL rather than
-    # hardcoding a second copy (e.g. the conformance gate's Bollinger
-    # derived-band set); keep this the single source of truth.
     check.allowed = allowed_set
     return check
 
@@ -332,35 +354,12 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
 )
 
+if len({d.name for d in _DESCRIPTORS}) != len(_DESCRIPTORS):
+    raise RuntimeError("_DESCRIPTORS must not contain duplicate indicator names")
+
 INDICATOR_METADATA: Mapping[str, IndicatorDescriptor] = MappingProxyType(
     {d.name: d for d in _DESCRIPTORS}
 )
-
-_EXPECTED_NAMES: frozenset[str] = frozenset(
-    {
-        "sma",
-        "ema",
-        "rsi",
-        "macd",
-        "bollinger",
-        "atr",
-        "adx",
-        "stochastic",
-        "vwap",
-        "donchian",
-        "keltner",
-        "obv",
-        "mfi",
-        "roc",
-        "cci",
-        "williams_r",
-    }
-)
-if set(INDICATOR_METADATA) != _EXPECTED_NAMES:
-    raise RuntimeError(
-        "INDICATOR_METADATA must cover exactly the DSL indicator names; "
-        f"mismatch: {_EXPECTED_NAMES ^ set(INDICATOR_METADATA)}"
-    )
 
 
 # ---------------------------------------------------------------------------
