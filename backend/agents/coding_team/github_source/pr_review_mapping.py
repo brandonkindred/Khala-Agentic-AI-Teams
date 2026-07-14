@@ -65,6 +65,19 @@ class ReviewFinding(Protocol):
     line: Optional[int]
 
 
+class ExistingCommentRef(Protocol):
+    """Duck-typed shape of an existing-comment match a body can reference.
+
+    Kept duck-typed (rather than importing ``existing_comments.ExistingComment``
+    directly) so this module stays free of any dependency beyond the GitHub
+    finding shape itself — ``existing_comments`` already depends on this
+    module (it reuses ``_normalize_path``), so a direct import back would be
+    circular.
+    """
+
+    html_url: str
+
+
 def parse_valid_lines(patch: str, *, added_only: bool = COMMENT_ON_ADDED_LINES_ONLY) -> set[int]:
     """Return the new-file line numbers commentable on ``side="RIGHT"``.
 
@@ -163,7 +176,9 @@ def _normalize_path(file_path: str, valid_by_path: dict[str, set[int]]) -> Optio
 
 
 def map_issues_to_comments(
-    issues: Iterable[Any], valid_by_path: dict[str, set[int]]
+    issues: Iterable[Any],
+    valid_by_path: dict[str, set[int]],
+    existing_by_issue: Optional[dict[int, ExistingCommentRef]] = None,
 ) -> tuple[list[dict[str, Any]], list[Any]]:
     """Split findings into review comments and standalone leftovers.
 
@@ -174,6 +189,12 @@ def map_issues_to_comments(
     can't be a review comment, so it is left for the caller to post as a
     standalone conversation comment.
 
+    Preconditions:
+        - ``existing_by_issue``, when given, maps ``id(issue)`` (Python object
+          identity, valid only among the ``issues`` passed in this same call)
+          to the existing PR comment that finding duplicates but which is not
+          yet resolved — see ``existing_comments.partition_issues_by_existing_comments``.
+          Absent or ``None`` behaves exactly as before this parameter existed.
     Postconditions:
         - Returns ``(review_comments, leftover_issues)``. ``review_comments``
           contains one entry per finding whose file resolves to a path in
@@ -182,13 +203,17 @@ def map_issues_to_comments(
           file-level ``{"path", "subject_type": "file", "body"}``. Every other
           finding (no resolvable file) is returned as a leftover so the caller
           can post it as its own standalone conversation comment. Nothing is
-          dropped, and no comment carries more than one finding.
+          dropped, and no comment carries more than one finding. A finding with
+          an entry in ``existing_by_issue`` has its body annotated with a
+          reference to that existing comment (see ``format_comment_body``).
     """
     review_comments: list[dict[str, Any]] = []
     leftover: list[Any] = []
+    existing_by_issue = existing_by_issue or {}
     for issue in issues:
         line = getattr(issue, "line", None)
         path = _normalize_path(getattr(issue, "file_path", "") or "", valid_by_path)
+        reference = existing_by_issue.get(id(issue))
         if path is None:
             leftover.append(issue)
         elif line is not None and int(line) in valid_by_path[path]:
@@ -197,7 +222,7 @@ def map_issues_to_comments(
                     "path": path,
                     "line": int(line),
                     "side": "RIGHT",
-                    "body": format_comment_body(issue),
+                    "body": format_comment_body(issue, reference),
                 }
             )
         else:
@@ -205,7 +230,7 @@ def map_issues_to_comments(
                 {
                     "path": path,
                     "subject_type": "file",
-                    "body": format_comment_body(issue),
+                    "body": format_comment_body(issue, reference),
                 }
             )
     return review_comments, leftover
@@ -263,15 +288,24 @@ def split_review_comments(
     return line_anchored, file_level
 
 
-def format_comment_body(issue: ReviewFinding) -> str:
+def format_comment_body(
+    issue: ReviewFinding, existing_reference: Optional[ExistingCommentRef] = None
+) -> str:
     """Render one finding as a review-comment body: what's wrong + the fix (prose).
 
     Used for both line-anchored and file-level review comments — the body carries
     no location, so the same rendering serves either anchor.
 
+    Preconditions:
+        - ``existing_reference``, when given, exposes ``html_url`` (duck-typed —
+          see :class:`ExistingCommentRef`); it names an existing, still-open PR
+          comment this same finding duplicates.
     Postconditions:
         - Returns ``**[SEVERITY] category** — description`` followed by a
-          ``**Suggested fix:**`` paragraph when a suggestion is present.
+          ``**Suggested fix:**`` paragraph when a suggestion is present, and,
+          when ``existing_reference`` is given, a trailing note linking it —
+          so a reviewer sees this finding was already raised and is still open,
+          rather than reading it as a brand-new duplicate.
     """
     severity = (getattr(issue, "severity", "") or "info").upper()
     category = getattr(issue, "category", "") or "general"
@@ -280,6 +314,11 @@ def format_comment_body(issue: ReviewFinding) -> str:
     body = f"**[{severity}] {category}** — {description}".rstrip()
     if suggestion:
         body += f"\n\n**Suggested fix:** {suggestion}"
+    if existing_reference is not None:
+        body += (
+            "\n\n_Possibly already tracked by an existing unresolved comment: "
+            f"{existing_reference.html_url}_"
+        )
     return body
 
 
@@ -299,7 +338,9 @@ def _location_prefix(path: str, line: Optional[int] = None) -> str:
     return f"`{anchor}` — "
 
 
-def format_issue_comment(issue: Any) -> str:
+def format_issue_comment(
+    issue: Any, existing_reference: Optional[ExistingCommentRef] = None
+) -> str:
     """Render one finding as its own standalone PR conversation comment.
 
     Used for findings that could not be anchored to a diff line: each is posted
@@ -307,11 +348,14 @@ def format_issue_comment(issue: Any) -> str:
     exactly one comment and no comment ever lists more than one issue.
 
     Postconditions:
-        - Returns ``format_comment_body(issue)`` prefixed with a `` `file_path` — ``
-          location when the finding names a file, so the standalone comment still
-          points at where the issue lives.
+        - Returns ``format_comment_body(issue, existing_reference)`` prefixed
+          with a `` `file_path` — `` location when the finding names a file, so
+          the standalone comment still points at where the issue lives.
     """
-    return f"{_location_prefix(getattr(issue, 'file_path', '') or '')}{format_comment_body(issue)}"
+    return (
+        f"{_location_prefix(getattr(issue, 'file_path', '') or '')}"
+        f"{format_comment_body(issue, existing_reference)}"
+    )
 
 
 def inline_comment_to_timeline_body(comment: dict[str, Any]) -> str:
@@ -373,7 +417,9 @@ def build_review_body(summary: str, spec_compliance_notes: str, issue_count: int
 
 
 def anchor_to_first_file(
-    finding: ReviewFinding, valid_by_path: dict[str, set[int]]
+    finding: ReviewFinding,
+    valid_by_path: dict[str, set[int]],
+    existing_reference: Optional[ExistingCommentRef] = None,
 ) -> Optional[dict[str, Any]]:
     """Anchor a leftover finding to the first changed file as a file-level review comment.
 
@@ -386,12 +432,14 @@ def anchor_to_first_file(
           attributes expected by ``format_comment_body``).
         - ``valid_by_path`` is the dict mapping each changed file's path to the set
           of its commentable line numbers (may be empty).
+        - ``existing_reference``, when given, is threaded into
+          ``format_comment_body`` unchanged (see :class:`ExistingCommentRef`).
     Postconditions:
         - Returns ``None`` when ``valid_by_path`` is empty (no changed file to anchor
           to; the caller should handle this case — typically the no-files early-exit
           path already prevents this from being reached).
         - Otherwise returns ``{"path": <first key of valid_by_path>,
-          "subject_type": "file", "body": format_comment_body(finding)}``.
+          "subject_type": "file", "body": format_comment_body(finding, existing_reference)}``.
           The ``subject_type="file"`` field is the GitHub Review Comments API
           parameter that attaches the comment to the file rather than a specific line.
     """
@@ -401,7 +449,7 @@ def anchor_to_first_file(
     return {
         "path": fallback_path,
         "subject_type": "file",
-        "body": format_comment_body(finding),
+        "body": format_comment_body(finding, existing_reference),
     }
 
 
