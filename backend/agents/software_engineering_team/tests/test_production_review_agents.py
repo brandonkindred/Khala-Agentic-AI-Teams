@@ -1,10 +1,9 @@
-"""Tests for GH#1273 — wire real code_review_agent / build_verifier / linting_tool_agent
-into production callers.
+"""Tests for production review-agent wiring into code-v2 callers.
 
 Coverage:
 1. ``build_production_review_kwargs`` returns the three expected keys with non-None values.
-2. ``build_production_review_kwargs_in_process`` returns the three keys and forces the
-   CodeReviewAgent into in-process mode (TEMPORAL_ADDRESS is preserved afterwards).
+2. ``build_production_review_kwargs_in_process`` returns the three keys and constructs
+   ``CodeReviewAgent(..., force_in_process=True)`` without mutating ``TEMPORAL_ADDRESS``.
 3. Both helpers degrade gracefully to ``{}`` when construction raises.
 4. ``_run_frontend_code_v2_impl`` passes non-None code_review_agent / build_verifier /
    linting_tool_agent to ``run_workflow`` (Temporal activity caller).
@@ -121,7 +120,7 @@ class TestBuildProductionReviewKwargs:
         assert result == {}
 
     def test_in_process_happy_path_returns_expected_keys(self, monkeypatch) -> None:
-        """All three keys are present in the in-process variant."""
+        """All three keys are present; CodeReviewAgent gets force_in_process=True."""
         import software_engineering_team.shared.production_review_agents as pra
 
         monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
@@ -131,7 +130,7 @@ class TestBuildProductionReviewKwargs:
 
         with (
             patch("llm_service.get_client", return_value=MagicMock()),
-            patch(self._CRA_TARGET, return_value=fake_cra),
+            patch(self._CRA_TARGET, return_value=fake_cra) as cra_ctor,
             patch(self._LTA_TARGET, return_value=fake_lta),
             patch(self._BV_TARGET, fake_bv),
         ):
@@ -140,9 +139,11 @@ class TestBuildProductionReviewKwargs:
         assert result.get("code_review_agent") is fake_cra
         assert result.get("linting_tool_agent") is fake_lta
         assert result.get("build_verifier") is fake_bv
+        cra_ctor.assert_called_once()
+        assert cra_ctor.call_args.kwargs.get("force_in_process") is True
 
-    def test_in_process_restores_temporal_address_after_success(self, monkeypatch) -> None:
-        """TEMPORAL_ADDRESS must be restored to its original value after construction."""
+    def test_in_process_does_not_mutate_temporal_address(self, monkeypatch) -> None:
+        """In-process helper must not touch TEMPORAL_ADDRESS (force flag is instance-scoped)."""
         import software_engineering_team.shared.production_review_agents as pra
 
         monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
@@ -155,10 +156,9 @@ class TestBuildProductionReviewKwargs:
         ):
             pra.build_production_review_kwargs_in_process()
 
-        # Env restored to the original value — not left as "disabled"
         assert os.environ.get("TEMPORAL_ADDRESS") == "temporal:7233"
 
-    def test_in_process_clears_temporal_address_when_previously_unset(
+    def test_in_process_leaves_temporal_address_unset_when_previously_unset(
         self, monkeypatch
     ) -> None:
         """When TEMPORAL_ADDRESS was not set before the call it must remain unset afterwards."""
@@ -188,10 +188,10 @@ class TestBuildProductionReviewKwargs:
 
         assert result == {}
 
-    def test_in_process_restores_env_even_on_constructor_failure(
+    def test_in_process_degrade_does_not_mutate_env_on_constructor_failure(
         self, monkeypatch
     ) -> None:
-        """TEMPORAL_ADDRESS is restored even when CodeReviewAgent() raises."""
+        """TEMPORAL_ADDRESS is unchanged even when CodeReviewAgent() raises."""
         import software_engineering_team.shared.production_review_agents as pra
 
         monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
@@ -202,7 +202,6 @@ class TestBuildProductionReviewKwargs:
         ):
             result = pra.build_production_review_kwargs_in_process()
 
-        # Must degrade, not crash, and env must be restored
         assert result == {}
         assert os.environ.get("TEMPORAL_ADDRESS") == "temporal:7233"
 

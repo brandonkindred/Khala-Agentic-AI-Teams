@@ -152,6 +152,7 @@ def _code_review_gate(
     deps: ReviewDependencies,
     detail_callback: Callable[[str], None],
     review_context: Optional[ReviewContext] = None,
+    enable_llm_review_grounding: bool = True,
 ) -> GateOutcome:
     """Run the backend code-review phase (build + lint + code review)."""
     from .review import run_code_review_phase
@@ -167,6 +168,7 @@ def _code_review_gate(
         linting_tool_agent=deps.linting_tool_agent,
         detail_callback=detail_callback,
         review_context=review_context,
+        enable_llm_review_grounding=enable_llm_review_grounding,
     )
     return GateOutcome(passed=r.passed, issues=r.issues, summary=r.summary)
 

@@ -465,6 +465,9 @@ def run_gated_execution_impl(
         (both default to ``None``/``""`` so a caller without them yet is
         unaffected, and the LLM fallback reviewers' context-bounding path is
         never entered with nothing to bound).
+        ``review_config.enable_llm_review_grounding`` (default True) is forwarded
+        to the code-review gate so the LLM-fallback path can drop ungrounded
+        proper-noun findings; set it False to disable that filter.
     Postconditions:
         Returns an ``ExecutionResult``; each microtask ends COMPLETED, SKIPPED,
         FAILED or REVIEW_FAILED. When a microtask's review fails and
@@ -645,6 +648,7 @@ def run_gated_execution_impl(
                 files=microtask_files,
                 deps=deps,
                 review_context=review_context,
+                enable_llm_review_grounding=getattr(config, "enable_llm_review_grounding", True),
                 detail_callback=lambda d: _detail_cb(d, current_idx, "code_review"),
             )
 
@@ -716,6 +720,7 @@ def run_gated_execution_impl(
                     files=microtask_files,
                     deps=deps,
                     review_context=review_context,
+                    enable_llm_review_grounding=getattr(config, "enable_llm_review_grounding", True),
                     detail_callback=lambda d: _detail_cb(d, current_idx, "code_review"),
                 )
 

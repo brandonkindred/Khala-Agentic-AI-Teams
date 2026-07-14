@@ -90,10 +90,14 @@ class CodeReviewAgent:
           prompts stay bounded regardless of how much code is submitted.
     """
 
-    def __init__(self, llm_client=None) -> None:
+    def __init__(self, llm_client=None, *, force_in_process: bool = False) -> None:
         # The chunk reviewer resolves its own strands model per call; this
         # client is used for context sizing and shared-context compaction.
         self.llm = llm_client if llm_client is not None else get_client("code_review")
+        # When True, run() always uses the in-process coordinator — required for
+        # callers already inside a Temporal activity so review never nests a
+        # child workflow on the same worker (nested-workflow deadlock risk).
+        self._force_in_process = bool(force_in_process)
 
     def run(
         self,
@@ -125,6 +129,9 @@ class CodeReviewAgent:
               non-decreasing fractions ending at 1.0 (step ``done``) on every
               successful return; the review result is identical whether or not
               a callback is provided.
+            - When this instance was constructed with ``force_in_process=True``,
+              never starts a Temporal worker or child workflow; always uses the
+              in-process coordinator.
 
         Raises:
             CodeReviewUnavailableError: when the review could not be completed —
@@ -149,8 +156,9 @@ class CodeReviewAgent:
         # Temporal is the default execution mode for the code review agent (see
         # ``temporal/config.py``). Dispatch the durable ``CodeReviewWorkflow`` when
         # enabled; fall back to the in-process coordinator only when Temporal is
-        # explicitly disabled (sentinel / dummy / pytest) or unavailable.
-        if _code_review_temporal_enabled():
+        # explicitly disabled (sentinel / dummy / pytest), force_in_process is set
+        # (Temporal activity callers), or Temporal dispatch is unavailable.
+        if not self._force_in_process and _code_review_temporal_enabled():
             try:
                 return self._run_via_temporal(input_data, progress_callback)
             except CodeReviewUnavailableError:

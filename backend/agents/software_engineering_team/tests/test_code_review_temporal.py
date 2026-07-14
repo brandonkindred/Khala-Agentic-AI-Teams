@@ -382,6 +382,36 @@ def test_run_dispatches_to_temporal_when_enabled(monkeypatch: pytest.MonkeyPatch
     assert out.approved is True
 
 
+def test_run_force_in_process_skips_temporal_even_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """force_in_process must bypass Temporal at run() time (not just construction).
+
+    Temporal activity callers construct CodeReviewAgent with force_in_process=True
+    so review never nests a child workflow on the same worker. A TEMPORAL_ADDRESS
+    env dance at construction time is insufficient because dispatch is decided
+    inside run() via _code_review_temporal_enabled().
+    """
+    monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
+    monkeypatch.setattr("code_review_agent.agent._code_review_temporal_enabled", lambda: True)
+
+    temporal_calls: list[object] = []
+
+    def _temporal_run(self, input_data, progress_callback=None):  # noqa: ANN001
+        temporal_calls.append(input_data)
+        raise AssertionError("_run_via_temporal must not be called when force_in_process=True")
+
+    monkeypatch.setattr(
+        "code_review_agent.agent.CodeReviewAgent._run_via_temporal",
+        _temporal_run,
+    )
+
+    out = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(_input())
+    assert temporal_calls == []
+    assert isinstance(out, CodeReviewOutput)
+    assert out.approved is True
+
+
 def test_run_falls_back_to_coordinator_when_worker_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

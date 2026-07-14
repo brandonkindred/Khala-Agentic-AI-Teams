@@ -21,10 +21,10 @@ Temporal activity callers (``temporal/activities.py``)::
     )
     result = team_lead.run_workflow(**task_kwargs, **build_production_review_kwargs_in_process())
 
-The ``_in_process`` variant forces ``CodeReviewAgent`` into thread/in-process
-mode so it never attempts to launch its own Temporal child-workflow from inside
-an already-running Temporal activity (which would cause a nested-workflow
-deadlock on the shared task queue).
+The ``_in_process`` variant constructs ``CodeReviewAgent(force_in_process=True)``
+so ``run()`` never attempts to launch a Temporal child-workflow from inside an
+already-running Temporal activity (which would risk a nested-workflow deadlock
+on the shared worker).
 
 Both helpers degrade to ``{}`` on any construction failure so a broken review
 agent can never turn a working pipeline into a hard outage — today's ``None``
@@ -87,48 +87,26 @@ def build_production_review_kwargs_in_process() -> Dict[str, Any]:
     """Return a dict of real review agents for Temporal activity callers.
 
     Identical to :func:`build_production_review_kwargs` except the
-    ``CodeReviewAgent`` is forced into **in-process / thread mode** by patching
-    the environment before construction.  This prevents a nested-workflow
-    deadlock: ``CodeReviewAgent.run`` defaults to dispatching a Temporal
-    child-workflow (``code_review_temporal_enabled()`` is ``True`` in production)
-    — if that call comes from *inside* a running Temporal activity, it tries to
-    schedule work on the same task queue the activity is consuming, which hangs
-    indefinitely.  Overriding ``TEMPORAL_ADDRESS`` to the ``"disabled"``
-    sentinel for the duration of the constructor (which reads the env at call
-    time via ``code_review_temporal_enabled``) makes ``CodeReviewAgent`` always
-    use the fast in-process coordinator instead.
+    ``CodeReviewAgent`` is constructed with ``force_in_process=True``.  That
+    flag is checked inside ``CodeReviewAgent.run`` so review always uses the
+    in-process coordinator and never starts a nested Temporal child-workflow
+    from inside an already-running activity.
 
     Postconditions:
         - Returns a non-empty dict on success, or ``{}`` on failure.
         - Never raises.
-        - Does not permanently mutate ``os.environ``; the env is restored after
-          the constructor returns.
+        - Does not mutate ``os.environ`` (including ``TEMPORAL_ADDRESS``).
     """
     try:
-        import os
-
         from llm_service import get_client
         from software_engineering_team.build_fix import _run_build_verification
         from software_engineering_team.code_review_agent import CodeReviewAgent
         from software_engineering_team.linting_tool_agent import LintingToolAgent
 
-        # Force in-process code review while inside a Temporal activity.
-        # The ``disabled`` sentinel is recognised by ``resolve_code_review_temporal_address``
-        # (``code_review_agent/temporal/config.py``) as "use thread mode".
-        _prev = os.environ.get("TEMPORAL_ADDRESS")
-        os.environ["TEMPORAL_ADDRESS"] = "disabled"
-        try:
-            code_review_agent = CodeReviewAgent(get_client("code_review"))
-        finally:
-            # Restore regardless of success/failure so the activity's own
-            # Temporal client still resolves its address correctly afterwards.
-            if _prev is None:
-                os.environ.pop("TEMPORAL_ADDRESS", None)
-            else:
-                os.environ["TEMPORAL_ADDRESS"] = _prev
-
         return {
-            "code_review_agent": code_review_agent,
+            "code_review_agent": CodeReviewAgent(
+                get_client("code_review"), force_in_process=True
+            ),
             "build_verifier": _run_build_verification,
             "linting_tool_agent": LintingToolAgent(get_client("linting_tool_agent")),
         }
