@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from llm_service import provider_store as ps
+from llm_service import reset_sweep as reset_sweep_module
+from llm_service.tests.test_reset_sweep import _FakeHeartbeat
 
 
 def _entry(
@@ -34,6 +36,21 @@ def _entry(
 
 
 NOW = datetime(2026, 6, 30, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _reset_provider_sweep(monkeypatch):
+    """Isolate the background reset-sweep across tests (see _FakeHeartbeat).
+
+    Patches BackgroundHeartbeat on the reset_sweep module (not provider_store)
+    since that's where ResetSweepState._ensure_started looks up the name —
+    provider_store no longer imports it directly after the reset_sweep split.
+    """
+    ps._reset_sweep.reset_for_test()
+    _FakeHeartbeat.instances.clear()
+    monkeypatch.setattr(reset_sweep_module, "BackgroundHeartbeat", _FakeHeartbeat)
+    yield
+    ps._reset_sweep.reset_for_test()
 
 
 # --------------------------------------------------------------------------- #
@@ -138,20 +155,26 @@ def test_select_skips_limited_within_window():
 
 
 def test_select_resets_and_uses_expired_entry(monkeypatch):
+    """The expired entry is returned immediately; its reset is deferred (enqueued
+    for the background sweep) rather than performed synchronously — reset_entry
+    must NOT be called on this hot path."""
     reset_ids: list[int] = []
     monkeypatch.setattr(ps, "reset_entry", lambda i: reset_ids.append(i))
     e1 = _entry(1, limit_exceeded=True, reset_at=NOW - timedelta(seconds=1))
     sel = ps.select_active_entry([e1, _entry(2)], now=NOW)
     assert sel.id == 1
-    assert reset_ids == [1]  # the expired entry was reset before reuse
+    assert reset_ids == []  # deferred: no synchronous reset_entry call
+    assert ps._reset_sweep.pending_ids == {1}  # queued for the background sweep instead
 
 
 def test_select_expired_without_reset_when_disabled(monkeypatch):
-    called = []
-    monkeypatch.setattr(ps, "reset_entry", lambda i: called.append(i))
+    reset_ids: list[int] = []
+    monkeypatch.setattr(ps, "reset_entry", lambda i: reset_ids.append(i))
     e1 = _entry(1, limit_exceeded=True, reset_at=NOW - timedelta(seconds=1))
     sel = ps.select_active_entry([e1], now=NOW, reset_expired=False)
-    assert sel.id == 1 and called == []
+    assert sel.id == 1
+    assert reset_ids == []
+    assert ps._reset_sweep.pending_ids == set()  # reset_expired=False: nothing queued either
 
 
 def test_select_all_limited_returns_soonest_reset():
@@ -170,6 +193,52 @@ def test_select_all_limited_none_reset_sorts_last():
 
 def test_select_empty_returns_none():
     assert ps.select_active_entry([], now=NOW) is None
+
+
+# --------------------------------------------------------------------------- #
+# Background reset sweep (deferred off the failover hot path)                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_select_expired_enqueue_does_no_db_io(monkeypatch):
+    """Regression: discovering an expired entry must never touch Postgres from
+    select_active_entry — the write is deferred to the background sweep."""
+    import shared_postgres
+
+    def _boom(*_a, **_k):
+        raise AssertionError("select_active_entry must not touch Postgres directly")
+
+    monkeypatch.setattr(shared_postgres, "get_conn", _boom)
+    e1 = _entry(1, limit_exceeded=True, reset_at=NOW - timedelta(seconds=1))
+    sel = ps.select_active_entry([e1, _entry(2)], now=NOW)
+    assert sel.id == 1
+    assert ps._reset_sweep.pending_ids == {1}
+
+
+def test_reset_sweep_singleton_wired_to_reset_entry(monkeypatch):
+    """Integration: the production _reset_sweep singleton's reset_fn lambda
+    actually calls the real (possibly monkeypatched) provider_store.reset_entry.
+
+    ResetSweepState's own drain/enqueue/heartbeat mechanics are covered in
+    isolation by test_reset_sweep.py; this is the one place that verifies
+    provider_store wired the generic primitive to the right callback."""
+    reset_ids: list[int] = []
+    monkeypatch.setattr(ps, "reset_entry", lambda i: reset_ids.append(i))
+    ps._reset_sweep.pending_ids.update({1, 2, 3})
+    ps._reset_sweep.tick()
+    assert sorted(reset_ids) == [1, 2, 3]
+    assert ps._reset_sweep.pending_ids == set()
+
+
+def test_reset_sweep_interval_defaults_and_is_defensive(monkeypatch):
+    monkeypatch.delenv(ps.ENV_RESET_SWEEP_INTERVAL, raising=False)
+    assert ps._reset_sweep_interval_s() == ps._DEFAULT_RESET_SWEEP_INTERVAL_S
+    monkeypatch.setenv(ps.ENV_RESET_SWEEP_INTERVAL, "2.5")
+    assert ps._reset_sweep_interval_s() == 2.5
+    monkeypatch.setenv(ps.ENV_RESET_SWEEP_INTERVAL, "garbage")
+    assert ps._reset_sweep_interval_s() == ps._DEFAULT_RESET_SWEEP_INTERVAL_S
+    monkeypatch.setenv(ps.ENV_RESET_SWEEP_INTERVAL, "-5")
+    assert ps._reset_sweep_interval_s() == 0.0
 
 
 # --------------------------------------------------------------------------- #

@@ -27,7 +27,11 @@ Invariants:
       (``POSTGRES_HOST`` unset), so non-Postgres dev and tests fall back to the
       legacy flat-key / env configuration path unchanged.
     - ``reset_entry``/``mark_exhausted`` are idempotent single-row writes, safe
-      under concurrent callers across containers (last-writer-wins).
+      under concurrent callers across containers (last-writer-wins). ``reset_entry``
+      is never called synchronously on the ``get_client``/failover hot path —
+      ``select_active_entry`` defers it to a background sweep (the generic
+      ``reset_sweep.ResetSweepState`` primitive) so an expired entry's
+      bookkeeping never blocks the call that discovers the expiry.
 """
 
 from __future__ import annotations
@@ -39,6 +43,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
+
+from .reset_sweep import ResetSweepState
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +76,9 @@ TABLE_NAME = "llm_provider_configs"
 
 ENV_RUNTIME_TTL = "LLM_RUNTIME_CONFIG_TTL_S"
 _DEFAULT_TTL_S = 30.0
+
+ENV_RESET_SWEEP_INTERVAL = "LLM_PROVIDER_RESET_SWEEP_INTERVAL_S"
+_DEFAULT_RESET_SWEEP_INTERVAL_S = 5.0
 
 _table_ensured = False
 _ensure_lock = threading.Lock()
@@ -604,6 +613,37 @@ def reset_entry(entry_id: int) -> None:
     clear_cache()
 
 
+def _reset_sweep_interval_s() -> float:
+    """Seconds between background reset-sweep drains (env override, defensive).
+
+    Postconditions: returns a non-negative float; missing/unparseable env yields
+        ``_DEFAULT_RESET_SWEEP_INTERVAL_S``; a negative value floors to ``0.0``.
+        Never raises.
+    """
+    raw = os.environ.get(ENV_RESET_SWEEP_INTERVAL)
+    if not raw:
+        return _DEFAULT_RESET_SWEEP_INTERVAL_S
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _DEFAULT_RESET_SWEEP_INTERVAL_S
+
+
+# Single process-wide sweep instance. Uses lambdas (not direct function
+# references) for `reset_fn`/`interval_fn` so tests that monkeypatch
+# `reset_entry`/`_reset_sweep_interval_s` on this module are honored — a bound
+# reference to the original function object would ignore a later
+# monkeypatch.setattr reassignment, since the lambda re-resolves the global
+# name on every call instead of capturing it once at construction time.
+# Mirrors the thin-wrapper-for-testability pattern in
+# trace_flusher._register_call_observer/_unregister_call_observer.
+_reset_sweep = ResetSweepState(
+    reset_fn=lambda entry_id: reset_entry(entry_id),
+    interval_fn=lambda: _reset_sweep_interval_s(),
+    name="llm-provider-reset-sweep",
+)
+
+
 def select_active_entry(
     entries: "list[ProviderEntry]",
     *,
@@ -613,15 +653,18 @@ def select_active_entry(
     """Pure selection over a pre-loaded ``entries`` list (most->least preferred).
 
     Returns the first entry that is not usage-limited; for a limited entry whose
-    ``reset_at`` has passed, resets its record (when ``reset_expired``) and returns
-    it. When every entry is still within its window, returns the one whose
+    ``reset_at`` has passed, queues its record for a background reset (when
+    ``reset_expired``) and returns it immediately — this function never blocks on
+    Postgres itself; see :meth:`~llm_service.reset_sweep.ResetSweepState.enqueue`.
+    When every entry is still within its window, returns the one whose
     ``reset_at`` is soonest (least-bad) so the call still targets a configured
     provider rather than silently dropping to the env default; an entry marked
     without a ``reset_at`` sorts last among limited entries.
 
     Preconditions: ``entries`` is ordered by preference. Postconditions: returns an
-        entry from ``entries`` or ``None`` (only when ``entries`` is empty);
-        ``reset_entry`` may be called as a side effect for an expired entry. Never
+        entry from ``entries`` or ``None`` (only when ``entries`` is empty); an
+        expired entry's id may be enqueued for a background ``reset_entry`` call as
+        a side effect, with no synchronous I/O performed by this function. Never
         raises for well-formed entries.
     """
     if not entries:
@@ -633,7 +676,7 @@ def select_active_entry(
             return entry
         if entry.reset_at is not None and current >= entry.reset_at:
             if reset_expired:
-                reset_entry(entry.id)
+                _reset_sweep.enqueue(entry.id)
             return entry
         limited.append(entry)
     # All limited and none expired: pick the soonest reset (None resets sort last).
