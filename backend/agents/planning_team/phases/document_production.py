@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import compact_text, get_client
 from planning_team.models import ClientContext, HandoffPackage
+from planning_team.phases._util import as_client_context
 
 logger = logging.getLogger(__name__)
 
@@ -131,9 +132,7 @@ def run_document_production(
     Returns (context_update, artifacts). artifacts includes handoff_package.
     """
     repo_path = context.get("repo_path", "")
-    client_context = context.get("client_context")
-    if isinstance(client_context, dict):
-        client_context = ClientContext(**client_context)
+    client_context = as_client_context(context.get("client_context"))
     spec_content = context.get("spec_content") or ""
     initial_brief = context.get("initial_brief") or ""
     spec_to_use = spec_content or initial_brief or "# Specification\n\n(To be refined.)"

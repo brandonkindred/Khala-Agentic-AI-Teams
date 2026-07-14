@@ -5,7 +5,9 @@ pending follow-up.
 """
 
 import sys
+import uuid as uuid_module
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -17,6 +19,7 @@ if str(_agents_dir) not in sys.path:
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from planning_team.api import main as main_module  # noqa: E402
 from planning_team.api.main import app  # noqa: E402
 
 
@@ -167,3 +170,64 @@ def test_jobs_list(client):
     r = client.get("/jobs")
     assert r.status_code == 200
     assert "jobs" in r.json()
+
+
+# --- run_planning failure paths ------------------------------------------------
+
+
+def test_run_create_job_failure_returns_500_and_removes_workspace(client, tmp_path, monkeypatch):
+    workspace_dir = tmp_path / "workspace-create-fail"
+    workspace_dir.mkdir()
+    (workspace_dir / "marker").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(main_module, "resolve_workspace", lambda *a, **k: str(workspace_dir))
+
+    def _raise_create_job(*args, **kwargs):
+        raise RuntimeError("job store unavailable")
+
+    monkeypatch.setattr(main_module, "create_job", _raise_create_job)
+    mark_failed_mock = MagicMock()
+    monkeypatch.setattr(main_module, "mark_job_failed", mark_failed_mock)
+
+    r = client.post(
+        "/run",
+        json={"initial_brief": "x", "use_product_analysis": False},
+    )
+    assert r.status_code == 500
+    assert "Failed to create job" in r.json()["detail"]
+    assert not workspace_dir.exists()
+    # No job record exists yet at this failure point, so unlike the Temporal-dispatch
+    # path below, mark_job_failed must NOT be called (see _fail_job_dispatch's
+    # mark_failed=False for this call site).
+    mark_failed_mock.assert_not_called()
+
+
+def test_run_temporal_dispatch_failure_returns_500_marks_job_failed_and_removes_workspace(
+    client, tmp_path, monkeypatch
+):
+    # A 500 error response carries no job_id, so pin uuid4() to a known value instead
+    # of trying to recover it from the response (there's nothing to recover it from).
+    fixed_job_id = uuid_module.UUID("11111111-1111-1111-1111-111111111111")
+    monkeypatch.setattr(main_module.uuid, "uuid4", lambda: fixed_job_id)
+
+    workspace_dir = tmp_path / "workspace-temporal-fail"
+    workspace_dir.mkdir()
+    monkeypatch.setattr(main_module, "resolve_workspace", lambda *a, **k: str(workspace_dir))
+    monkeypatch.setattr("planning_team.temporal.client.is_temporal_enabled", lambda: True)
+
+    def _raise_start_workflow(*args, **kwargs):
+        raise RuntimeError("Temporal unreachable")
+
+    monkeypatch.setattr(
+        "planning_team.temporal.start_workflow.start_planning_workflow", _raise_start_workflow
+    )
+    mark_failed_mock = MagicMock()
+    monkeypatch.setattr(main_module, "mark_job_failed", mark_failed_mock)
+
+    r = client.post(
+        "/run",
+        json={"initial_brief": "x", "use_product_analysis": False},
+    )
+    assert r.status_code == 500
+    assert "Failed to start workflow" in r.json()["detail"]
+    assert not workspace_dir.exists()
+    mark_failed_mock.assert_called_once_with(str(fixed_job_id), error="Temporal unreachable")
