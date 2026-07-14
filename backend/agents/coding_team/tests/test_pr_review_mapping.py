@@ -578,6 +578,41 @@ def test_find_matching_open_issue_threshold_env_override(monkeypatch: pytest.Mon
     assert find_matching_open_issue(proposal, [issue]) is None
 
 
+def test_find_matching_open_issue_threshold_with_location_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal = proposal_from_finding(
+        _Issue(file_path="src/a.py", description="race condition in worker pool"), 0
+    )
+    # The file_path appears in the issue body (location signal present), but the
+    # headline/title ratio (~0.16) is far below both the default with-location
+    # (0.5) and no-location (0.8) thresholds, so there is no match by default.
+    issue = _open_issue(
+        1, "totally unrelated feature request", body="See `src/a.py:5` for context."
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+    # A very low with-location override turns the location-corroborated, otherwise
+    # too-dissimilar pair into a match.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION", "0.0")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+    # Garbage falls back to the documented default rather than raising.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION", "not-a-float")
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_location_in_title_matches() -> None:
+    # The location signal must check the issue TITLE, not only its body: the
+    # file_path here appears only in the title, and the body is blank.
+    proposal = proposal_from_finding(
+        _Issue(file_path="src/a.py", description="null pointer dereference in parser"), 0
+    )
+    # Ratio (~0.505) clears the with-location bar (0.5) but not the no-location
+    # bar (0.8), so this match happens only because the location signal (title
+    # contains the file_path) is honored.
+    issue = _open_issue(1, "possible null pointer issue in the parser module for src/a.py", body="")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
 def test_annotate_duplicate_proposals_marks_matched_and_preserves_order_and_length() -> None:
     proposals = [
         proposal_from_finding(
