@@ -753,6 +753,29 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.proposalLocation(proposal('p0', { file_path: '', line: null }))).toBe('');
   });
 
+  it('formats a combined proposal location as an occurrence count', async () => {
+    await setup();
+    const combined = proposal('p0', {
+      locations: [
+        { file_path: 'a.py', line: 1, description: 'bare import `os`', suggestion: 'scope it' },
+        { file_path: 'b.py', line: 5, description: 'bare import `sys`', suggestion: 'scope it' },
+      ],
+    });
+    expect(component.isCombinedProposal(combined)).toBe(true);
+    expect(component.proposalLocation(combined)).toBe('2 locations');
+    expect(component.isCombinedProposal(proposal('p0'))).toBe(false);
+  });
+
+  it('formats a single location as path:line, path, or empty', async () => {
+    await setup();
+    expect(component.locationText({ file_path: 'a.py', line: 3, description: '', suggestion: '' }))
+      .toBe('a.py:3');
+    expect(component.locationText({ file_path: 'a.py', line: null, description: '', suggestion: '' }))
+      .toBe('a.py');
+    expect(component.locationText({ file_path: '', line: null, description: '', suggestion: '' }))
+      .toBe('');
+  });
+
   it('toggles proposal selection and tracks the count', async () => {
     await setup();
     expect(component.isProposalSelected('j1', 'p0')).toBe(false);

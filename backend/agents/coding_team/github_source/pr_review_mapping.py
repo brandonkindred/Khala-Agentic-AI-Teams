@@ -19,6 +19,12 @@ Pure, side-effect-free helpers used by the ``/review-pr`` flow:
   finding as its own standalone PR conversation (issue) comment.
 - ``build_review_body`` — render the summary-only review body.
 - ``choose_event`` — pick the GitHub review event from issue severity.
+- ``group_similar_findings`` — cluster pre-existing findings that describe the
+  same underlying issue (same category, near-identical description) so they
+  become one combined GitHub-issue proposal instead of one each.
+- ``proposal_from_findings`` / ``build_issue_from_proposal`` — turn a group of
+  similar findings into a persisted issue-proposal dict, then render it as a
+  GitHub issue ``(title, body)``.
 
 Every finding gets exactly one comment, all attached to the single review where
 possible: a finding on a changed line becomes a line-anchored inline comment, a
@@ -430,40 +436,148 @@ def choose_event(issues: Iterable[Any], author: str = "", reviewer: str = "") ->
 # short so the title reads as a headline and the full detail lives in the body).
 _ISSUE_TITLE_MAX = 120
 
+# Severities ordered least to most urgent, matching the documented set on
+# CodeReviewIssue.severity (software_engineering_team/code_review_agent/models.py).
+_SEVERITY_ORDER = ["info", "low", "medium", "high", "critical"]
 
-def proposal_from_finding(finding: Any, index: int) -> dict[str, Any]:
-    """Serialize a pre-existing review finding into a stable issue-proposal dict.
+# Minimum Jaccard similarity (on normalized description word-sets) for two
+# same-category findings to be treated as the same underlying issue. Word-set
+# overlap (rather than raw character similarity) avoids false-merging short,
+# genuinely distinct descriptions that happen to share a common prefix (e.g.
+# "latent bug A" vs "latent bug B" score low here despite scoring high on
+# character-level similarity), while still catching near-duplicates whose
+# only difference is a quoted identifier or number (e.g. "bare import `os`"
+# vs "bare import `sys`" normalize to the identical word-set).
+_SIMILARITY_THRESHOLD = 0.6
 
-    A proposal is the persisted, JSON-safe form of a ``pre_existing`` finding that
-    the review flow stores on the review summary and later offers to a human as a
-    GitHub-issue candidate. Findings are duck-typed (see :class:`ReviewFinding`).
+_QUOTED_RE = re.compile(r"`[^`]*`|\"[^\"]*\"|'[^']*'")
+_DIGITS_RE = re.compile(r"\b\d+\b")
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tokenize_for_similarity(text: str) -> frozenset[str]:
+    """Reduce a finding description to a comparable bag of words.
+
+    Postconditions:
+        - Returns the set of word tokens in ``text``, lowercased, with
+          backtick/quoted spans and standalone digit runs dropped first (so
+          "bare import `os`" and "bare import `sys`" tokenize identically).
+          Empty for blank/punctuation-only input.
+    """
+    normalized = _QUOTED_RE.sub(" ", text.lower())
+    normalized = _DIGITS_RE.sub(" ", normalized)
+    return frozenset(_WORD_RE.findall(normalized))
+
+
+def _jaccard_similarity(a: frozenset[str], b: frozenset[str]) -> float:
+    """Postconditions: returns ``|a & b| / |a | b|``, or 0.0 when both are empty."""
+    union = a | b
+    if not union:
+        return 0.0
+    return len(a & b) / len(union)
+
+
+def group_similar_findings(
+    findings: list[Any], threshold: float = _SIMILARITY_THRESHOLD
+) -> list[list[Any]]:
+    """Cluster pre-existing findings that describe the same underlying issue.
 
     Preconditions:
-        - ``index`` is the finding's 0-based position among a review's pre-existing
-          findings; it makes the proposal ``id`` (``"p{index}"``) stable and unique
-          within one review, which the create-issues endpoint uses to select
-          proposals and to mark them created idempotently.
+        - ``findings`` are duck-typed review findings exposing ``category`` and
+          ``description`` (see module docstring); ``threshold`` is a Jaccard
+          similarity in ``[0, 1]``.
+    Postconditions:
+        - Returns a list of non-empty groups partitioning ``findings``; both
+          group order and within-group order match ``findings``' input order,
+          so the result is deterministic for a given input.
+        - Two findings are only ever grouped together when they share the same
+          ``category`` (case-insensitive) AND the Jaccard similarity of their
+          tokenized descriptions (see :func:`_tokenize_for_similarity`)
+          against the group's first (founding) member is ``>= threshold``.
+          Findings in different categories, or whose descriptions diverge
+          below the threshold, land in separate single- or multi-member
+          groups. Never raises; a finding with a blank category/description
+          groups on that blank value like any other.
+    """
+    groups: list[list[Any]] = []
+    representatives: list[tuple[str, frozenset[str]]] = []  # (category, tokens) per group
+    for finding in findings:
+        category = str(getattr(finding, "category", "") or "general").strip().lower()
+        tokens = _tokenize_for_similarity(str(getattr(finding, "description", "") or ""))
+        placed = False
+        for group, (rep_category, rep_tokens) in zip(groups, representatives):
+            if category != rep_category:
+                continue
+            if _jaccard_similarity(tokens, rep_tokens) >= threshold:
+                group.append(finding)
+                placed = True
+                break
+        if not placed:
+            groups.append([finding])
+            representatives.append((category, tokens))
+    return groups
+
+
+def proposal_from_findings(findings: list[Any], index: int) -> dict[str, Any]:
+    """Serialize a group of similar pre-existing findings into one issue-proposal dict.
+
+    A proposal is the persisted, JSON-safe form of one or more ``pre_existing``
+    findings (see :func:`group_similar_findings`) that the review flow stores on
+    the review summary and later offers to a human as a single GitHub-issue
+    candidate. Findings are duck-typed (see :class:`ReviewFinding`).
+
+    Preconditions:
+        - ``findings`` is non-empty (one call per group produced by
+          ``group_similar_findings``, never an empty group).
+        - ``index`` is the group's 0-based position among a review's grouped
+          pre-existing findings; it makes the proposal ``id`` (``"p{index}"``)
+          stable and unique within one review, which the create-issues endpoint
+          uses to select proposals and to mark them created idempotently.
     Postconditions:
         - Returns a dict with the keys ``id``, ``severity``, ``category``,
           ``file_path``, ``line`` (int or None), ``description``, ``suggestion``,
-          ``issue_number`` (None) and ``issue_url`` (None). The two ``issue_*``
-          fields start None and are filled in once a GitHub issue is created for
-          the proposal. Every string field is coerced with ``str()`` so the dict
-          is JSON-serializable regardless of the finding's field types, and
-          ``description``/``suggestion`` are token-scrubbed: this proposal is
-          persisted and served through the Code Review page before any human
-          opts to file an issue, so it must never carry a raw secret any more
-          than a posted PR comment would.
+          ``locations``, ``issue_number`` (None) and ``issue_url`` (None).
+        - ``locations`` is a list with one entry per finding in ``findings``,
+          each ``{"file_path", "line", "description", "suggestion"}`` built the
+          same way the top-level fields are; ``file_path``/``line``/
+          ``description``/``suggestion`` mirror ``locations[0]`` (the group's
+          first/representative finding), so single-finding groups produce the
+          same top-level shape as before grouping existed.
+        - ``severity`` is the most urgent value across the group (per
+          ``_SEVERITY_ORDER``); ``category`` is the group's shared category.
+        - The two ``issue_*`` fields start None and are filled in once a GitHub
+          issue is created for the proposal. Every string field is coerced with
+          ``str()`` so the dict is JSON-serializable regardless of the finding's
+          field types, and every ``description``/``suggestion`` is
+          token-scrubbed: this proposal is persisted and served through the Code
+          Review page before any human opts to file an issue, so it must never
+          carry a raw secret any more than a posted PR comment would.
     """
-    line = getattr(finding, "line", None)
+
+    def _location(finding: Any) -> dict[str, Any]:
+        line = getattr(finding, "line", None)
+        return {
+            "file_path": str(getattr(finding, "file_path", "") or ""),
+            "line": line if isinstance(line, int) and line > 0 else None,
+            "description": scrub_token_from_text(str(getattr(finding, "description", "") or "")),
+            "suggestion": scrub_token_from_text(str(getattr(finding, "suggestion", "") or "")),
+        }
+
+    locations = [_location(f) for f in findings]
+    severities = {str(getattr(f, "severity", "") or "info").lower() for f in findings}
+    severity = max(
+        severities, key=lambda s: _SEVERITY_ORDER.index(s) if s in _SEVERITY_ORDER else -1
+    )
+    primary = locations[0]
     return {
         "id": f"p{index}",
-        "severity": str(getattr(finding, "severity", "") or "info"),
-        "category": str(getattr(finding, "category", "") or "general"),
-        "file_path": str(getattr(finding, "file_path", "") or ""),
-        "line": line if isinstance(line, int) and line > 0 else None,
-        "description": scrub_token_from_text(str(getattr(finding, "description", "") or "")),
-        "suggestion": scrub_token_from_text(str(getattr(finding, "suggestion", "") or "")),
+        "severity": severity,
+        "category": str(getattr(findings[0], "category", "") or "general"),
+        "file_path": primary["file_path"],
+        "line": primary["line"],
+        "description": primary["description"],
+        "suggestion": primary["suggestion"],
+        "locations": locations,
         "issue_number": None,
         "issue_url": None,
     }
@@ -476,16 +590,35 @@ def _proposal_title(proposal: dict[str, Any]) -> str:
         - Returns ``"[<severity>] <first line of description>"`` truncated to
           ``_ISSUE_TITLE_MAX`` characters (an ellipsis replaces the tail when it
           would overflow). Falls back to a generic "code review finding" phrase
-          when the description is blank, so the title is never empty.
+          when the description is blank, so the title is never empty. When the
+          proposal covers more than one location, an ``" ({N} occurrences)"``
+          suffix is appended (inside the truncation budget) so a filed issue's
+          title signals it's a combined report.
     """
     severity = str(proposal.get("severity") or "info").lower()
     description = str(proposal.get("description") or "").strip()
     headline = description.splitlines()[0].strip() if description else "code review finding"
+    locations = proposal.get("locations") or []
+    suffix = f" ({len(locations)} occurrences)" if len(locations) > 1 else ""
     prefix = f"[{severity}] "
-    budget = _ISSUE_TITLE_MAX - len(prefix)
+    budget = _ISSUE_TITLE_MAX - len(prefix) - len(suffix)
     if len(headline) > budget:
         headline = headline[: max(0, budget - 1)].rstrip() + "…"
-    return f"{prefix}{headline}"
+    return f"{prefix}{headline}{suffix}"
+
+
+def _location_text(file_path: str, line: Any) -> str:
+    """Render one ``file_path``/``line`` pair as the markdown location text.
+
+    Postconditions:
+        - Returns ``"n/a"`` when ``file_path`` is blank, ``` `path:line` ```
+          when ``line`` is a positive int, else ``` `path` ```.
+    """
+    if not file_path:
+        return "n/a"
+    if isinstance(line, int) and line > 0:
+        return f"`{file_path}:{line}`"
+    return f"`{file_path}`"
 
 
 def build_issue_from_proposal(
@@ -494,30 +627,28 @@ def build_issue_from_proposal(
     """Render a proposal as a ``(title, body)`` pair for a new GitHub issue.
 
     Preconditions:
-        - ``proposal`` is a dict produced by :func:`proposal_from_finding`.
+        - ``proposal`` is a dict produced by :func:`proposal_from_findings`.
         - ``pr_number``/``pr_url`` identify the pull request whose review surfaced
           the finding, so the issue records where it came from.
     Postconditions:
         - Returns ``(title, body)``. ``title`` is the concise headline from
           :func:`_proposal_title`; ``body`` is markdown carrying every detail of
-          the finding (severity, category, location, description, suggested fix)
-          plus provenance naming the originating PR — enough for a maintainer to
-          act on the issue without the review context. Never raises.
+          the finding(s) (severity, category, location(s), description,
+          suggested fix) plus provenance naming the originating PR — enough for
+          a maintainer to act on the issue without the review context.
+        - When ``proposal["locations"]`` has more than one entry, the body
+          renders a ``### Locations`` section listing every location as a
+          bullet (with its own description) instead of the single
+          ``**Location:**`` line, and a ``### Suggested fixes`` section listing
+          each distinct non-blank suggestion once. A single-location proposal
+          renders exactly as before grouping existed. Never raises.
     """
     title = _proposal_title(proposal)
     severity = str(proposal.get("severity") or "info").lower()
     category = str(proposal.get("category") or "general")
-    file_path = str(proposal.get("file_path") or "")
-    line = proposal.get("line")
     description = str(proposal.get("description") or "").strip()
     suggestion = str(proposal.get("suggestion") or "").strip()
-
-    if not file_path:
-        location_text = "n/a"
-    elif isinstance(line, int) and line > 0:
-        location_text = f"`{file_path}:{line}`"
-    else:
-        location_text = f"`{file_path}`"
+    locations = proposal.get("locations") or []
 
     lines: list[str] = [
         f"An automated code review of pull request #{pr_number} ({pr_url}) flagged this as a "
@@ -526,11 +657,32 @@ def build_issue_from_proposal(
         "",
         f"- **Severity:** {severity}",
         f"- **Category:** {category}",
-        f"- **Location:** {location_text}",
-        "",
-        "### Description",
-        description or "_No description provided._",
     ]
-    if suggestion:
-        lines.extend(["", "### Suggested fix", suggestion])
+
+    if len(locations) > 1:
+        lines.append(f"- **Occurrences:** {len(locations)}")
+        lines.extend(["", "### Description", description or "_No description provided._"])
+        lines.extend(["", "### Locations"])
+        for loc in locations:
+            loc_text = _location_text(str(loc.get("file_path") or ""), loc.get("line"))
+            loc_description = str(loc.get("description") or "").strip()
+            lines.append(f"- {loc_text} — {loc_description or '_No description provided._'}")
+        suggestions = list(
+            dict.fromkeys(
+                str(loc.get("suggestion") or "").strip()
+                for loc in locations
+                if loc.get("suggestion")
+            )
+        )
+        if suggestions:
+            lines.extend(["", "### Suggested fixes"])
+            lines.extend(f"- {s}" for s in suggestions)
+    else:
+        file_path = str(proposal.get("file_path") or "")
+        line = proposal.get("line")
+        lines.append(f"- **Location:** {_location_text(file_path, line)}")
+        lines.extend(["", "### Description", description or "_No description provided._"])
+        if suggestion:
+            lines.extend(["", "### Suggested fix", suggestion])
+
     return title, "\n".join(lines)

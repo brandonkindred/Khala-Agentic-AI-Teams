@@ -34,11 +34,12 @@ from coding_team.github_source import (
     build_issue_from_proposal,
     build_review_body,
     choose_event,
+    group_similar_findings,
     inline_comment_to_timeline_body,
     is_within_diff,
     map_issues_to_comments,
     parse_valid_lines,
-    proposal_from_finding,
+    proposal_from_findings,
     render_annotated_hunks,
     scrub_token_from_text,
     split_review_comments,
@@ -894,7 +895,12 @@ def _run_pr_review_body(
                     preexisting_issues.append(i)
                 else:
                     pr_issues.append(i)
-            proposals = [proposal_from_finding(i, idx) for idx, i in enumerate(preexisting_issues)]
+            # Similar findings (same category, near-identical description — e.g. the
+            # same "bare import" pattern flagged across several files) are combined
+            # into one proposal so a human is offered one issue per kind of problem,
+            # not one per occurrence.
+            finding_groups = group_similar_findings(preexisting_issues)
+            proposals = [proposal_from_findings(g, idx) for idx, g in enumerate(finding_groups)]
 
             comments, leftovers = map_issues_to_comments(pr_issues, valid_by_path)
 
@@ -1637,7 +1643,7 @@ def create_review_issues(
             )
 
         proposals = ctx.summary["pending_issue_proposals"]
-        # A proposal's id always comes from proposal_from_finding's f"p{index}"
+        # A proposal's id always comes from proposal_from_findings's f"p{index}"
         # (never None); the `is not None` filter is defense-in-depth against a
         # malformed stored record so a missing id can never collide under the
         # shared string key "None".

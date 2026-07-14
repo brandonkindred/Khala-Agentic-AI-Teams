@@ -22,6 +22,7 @@ import type {
   CodeReviewSummary,
   CodingTeamJobStatus,
   PendingIssueProposal,
+  PendingIssueProposalLocation,
 } from '../../models/coding-team.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
@@ -576,10 +577,28 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     return this.proposalsFor(record).filter((p) => !p.issue_url);
   }
 
-  /** A proposal's `path:line` (or `path`, or '') location for display. */
+  /**
+   * A proposal's location summary for display: `path:line` (or `path`, or '')
+   * for a single-location proposal, or `"{N} locations"` when the reviewer
+   * combined several similar findings into one proposal.
+   */
   proposalLocation(proposal: PendingIssueProposal): string {
+    if ((proposal.locations?.length ?? 0) > 1) {
+      return `${proposal.locations!.length} locations`;
+    }
     if (!proposal.file_path) return '';
     return proposal.line ? `${proposal.file_path}:${proposal.line}` : proposal.file_path;
+  }
+
+  /** True when a proposal combines more than one finding's location. */
+  isCombinedProposal(proposal: PendingIssueProposal): boolean {
+    return (proposal.locations?.length ?? 0) > 1;
+  }
+
+  /** A single location's `path:line` (or `path`) text for display. */
+  locationText(location: PendingIssueProposalLocation): string {
+    if (!location.file_path) return '';
+    return location.line ? `${location.file_path}:${location.line}` : location.file_path;
   }
 
   /** Whether a proposal is currently selected for filing. */

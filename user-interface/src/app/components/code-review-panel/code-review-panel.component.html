@@ -306,6 +306,20 @@
                                   <mat-icon>open_in_new</mat-icon>
                                 </a>
                               }
+                              @if (isCombinedProposal(p)) {
+                                <ul class="cr-proposal__locations">
+                                  @for (loc of p.locations; track $index) {
+                                    <li class="cr-proposal__location">
+                                      @if (locationText(loc); as locText) {
+                                        <code class="cr-proposal__loc">{{ locText }}</code>
+                                      }
+                                      <span class="cr-proposal__location-desc">{{
+                                        loc.description
+                                      }}</span>
+                                    </li>
+                                  }
+                                </ul>
+                              }
                             </li>
                           }
                         </ul>

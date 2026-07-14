@@ -97,11 +97,23 @@ export interface CodingTeamJobListItem {
 }
 
 /** Summary of a posted PR review (from the /review-pr flow). */
+/** One occurrence of a combined proposal's underlying issue. */
+export interface PendingIssueProposalLocation {
+  file_path: string;
+  line: number | null;
+  description: string;
+  suggestion: string;
+}
+
 /**
- * One pre-existing bug the reviewer flagged in code the pull request did not
- * change. It is NOT posted on the PR; instead it is offered to the user on the
- * Code Review page as a GitHub-issue candidate. Once filed, `issue_url` /
- * `issue_number` are populated.
+ * One (possibly combined) pre-existing bug the reviewer flagged in code the
+ * pull request did not change. It is NOT posted on the PR; instead it is
+ * offered to the user on the Code Review page as a GitHub-issue candidate.
+ * Once filed, `issue_url` / `issue_number` are populated. Similar findings
+ * (same category, near-identical description — e.g. the same "bare import"
+ * pattern flagged across several files) are combined into one proposal: when
+ * `locations` has more than one entry, `file_path`/`line`/`description`/
+ * `suggestion` mirror its first entry.
  */
 export interface PendingIssueProposal {
   id: string;
@@ -111,6 +123,7 @@ export interface PendingIssueProposal {
   line: number | null;
   description: string;
   suggestion: string;
+  locations?: PendingIssueProposalLocation[];
   issue_number?: number | null;
   issue_url?: string | null;
 }
