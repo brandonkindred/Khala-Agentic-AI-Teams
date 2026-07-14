@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-from typing import Any
+from typing import Any, Dict
 
 import pytest
 
@@ -191,3 +192,52 @@ class ConfigurableLLM(DummyLLMClient):
 
     def get_max_context_tokens(self) -> int:
         return self._max_context_tokens
+
+
+def _strands_model_double():
+    """Minimal double satisfying the Strands ``Model`` protocol for isinstance checks,
+    so agent __init__ resolves ``self._model`` to this instance without touching the
+    real get_client/get_strands_model machinery."""
+    from strands.models.model import Model as StrandsModel
+
+    class _M(StrandsModel):
+        def update_config(self, *a, **kw):
+            pass
+
+        def get_config(self):
+            return {}
+
+        def structured_output(self, *a, **kw):  # pragma: no cover
+            return {}
+
+        async def stream(self, *a, **kw):  # pragma: no cover
+            yield {}
+
+    return _M()
+
+
+def _fenced(payload: Dict[str, Any]) -> str:
+    """Wrap a JSON-serializable payload in a markdown ```json fence, as models do."""
+    return "```json\n" + json.dumps(payload) + "\n```"
+
+
+class _FencedAgentInstance:
+    """Callable standing in for a Strands ``Agent`` instance, always returning fixed text."""
+
+    def __init__(self, text: str):
+        self._text = text
+
+    def __call__(self, prompt, **kwargs):
+        return self._text
+
+
+def _patch_fenced_response(monkeypatch, payload: Dict[str, Any], target_module=None) -> None:
+    """Monkeypatch ``Agent`` on ``target_module`` (default: ``shared.llm``) to return
+    ``payload`` wrapped in a markdown fence, proving a caller recovers it instead of
+    crashing on a bare ``json.loads``. Pass ``target_module`` for call sites that build
+    their own ``Agent`` directly rather than going through ``complete_json_with_continuation``.
+    """
+    if target_module is None:
+        from software_engineering_team.shared import llm as target_module
+    text = _fenced(payload)
+    monkeypatch.setattr(target_module, "Agent", lambda *a, **kw: _FencedAgentInstance(text))
