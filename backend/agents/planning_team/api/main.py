@@ -12,6 +12,7 @@ import sys
 import threading
 import uuid
 from pathlib import Path
+from typing import Any, Dict
 
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -84,6 +85,36 @@ def _get_llm():
     three.
     """
     return get_client("planning")
+
+
+def _get_job_or_404(job_id: str) -> Dict[str, Any]:
+    """Return the job record for ``job_id``, or raise HTTPException(404) if it doesn't exist."""
+    data = get_job(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    return data
+
+
+def _handoff_field(handoff: Any, key: str) -> Any:
+    """Return ``handoff[key]`` when ``handoff`` is a dict, else None."""
+    return handoff.get(key) if isinstance(handoff, dict) else None
+
+
+def _fail_job_dispatch(
+    job_id: str,
+    resolved_path: str,
+    exc: Exception,
+    *,
+    log_message: str,
+    detail_prefix: str,
+    mark_failed: bool,
+) -> None:
+    """Log, best-effort mark the job failed (only if mark_failed), remove the workspace, raise HTTPException(500)."""
+    logger.exception(log_message, job_id)
+    if mark_failed:
+        mark_job_failed(job_id, error=str(exc))
+    shutil.rmtree(resolved_path, ignore_errors=True)
+    raise HTTPException(status_code=500, detail=f"{detail_prefix}: {exc}") from exc
 
 
 def run_workflow_background(
@@ -171,9 +202,14 @@ def run_planning(request: PlanningRunRequest) -> PlanningRunResponse:
         # Job-store failures (DB connectivity, duplicate id) should surface as a
         # logged 500 with context rather than an opaque unhandled error. Remove
         # the just-created workspace so a failed insert leaves no orphan dir.
-        shutil.rmtree(resolved_path, ignore_errors=True)
-        logger.exception("Failed to create Planning job %s", job_id)
-        raise HTTPException(status_code=500, detail=f"Failed to create job: {exc}") from exc
+        _fail_job_dispatch(
+            job_id,
+            resolved_path,
+            exc,
+            log_message="Failed to create Planning job %s",
+            detail_prefix="Failed to create job",
+            mark_failed=False,
+        )
 
     try:
         from planning_team.temporal.client import is_temporal_enabled
@@ -200,10 +236,14 @@ def run_planning(request: PlanningRunRequest) -> PlanningRunResponse:
             # job stuck "running": mark it failed, remove the now-orphaned
             # workspace (nothing has been written to it yet), and surface a
             # logged 500.
-            logger.exception("Failed to start Planning Temporal workflow %s", job_id)
-            mark_job_failed(job_id, error=str(exc))
-            shutil.rmtree(resolved_path, ignore_errors=True)
-            raise HTTPException(status_code=500, detail=f"Failed to start workflow: {exc}") from exc
+            _fail_job_dispatch(
+                job_id,
+                resolved_path,
+                exc,
+                log_message="Failed to start Planning Temporal workflow %s",
+                detail_prefix="Failed to start workflow",
+                mark_failed=True,
+            )
         return PlanningRunResponse(
             job_id=job_id,
             status="running",
@@ -251,9 +291,7 @@ def get_status(job_id: str) -> PlanningStatusResponse:
     Raises:
         HTTPException: 404 if the job does not exist.
     """
-    data = get_job(job_id)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    data = _get_job_or_404(job_id)
     return PlanningStatusResponse(
         job_id=job_id,
         status=data.get("status", JOB_STATUS_PENDING),
@@ -287,22 +325,16 @@ def get_result(job_id: str) -> PlanningResultResponse:
     Raises:
         HTTPException: 404 if the job does not exist.
     """
-    data = get_job(job_id)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    data = _get_job_or_404(job_id)
     success = data.get("status") == JOB_STATUS_COMPLETED
     handoff = data.get("handoff_package")
     return PlanningResultResponse(
         job_id=job_id,
         success=success,
         handoff_package=handoff,
-        client_context_document_path=handoff.get("client_context_document_path")
-        if isinstance(handoff, dict)
-        else None,
-        validated_spec_path=handoff.get("validated_spec_path")
-        if isinstance(handoff, dict)
-        else None,
-        prd_path=handoff.get("prd_path") if isinstance(handoff, dict) else None,
+        client_context_document_path=_handoff_field(handoff, "client_context_document_path"),
+        validated_spec_path=_handoff_field(handoff, "validated_spec_path"),
+        prd_path=_handoff_field(handoff, "prd_path"),
         summary=data.get("summary"),
         failure_reason=data.get("error"),
     )
@@ -354,9 +386,7 @@ def submit_answers(job_id: str, request: SubmitAnswersRequest) -> PlanningStatus
         HTTPException: 404 if the job does not exist; 400 if the job is not
             waiting for answers.
     """
-    data = get_job(job_id)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    data = _get_job_or_404(job_id)
     if not data.get("waiting_for_answers"):
         raise HTTPException(status_code=400, detail="Job is not waiting for answers")
     # Planning currently does not pause for answers mid-run; PRA is called with auto-answer callback.
