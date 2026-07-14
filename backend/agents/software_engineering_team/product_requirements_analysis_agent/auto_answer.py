@@ -7,13 +7,12 @@ product context, and risk assessment.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, List, Optional
 
-from strands import Agent
-
 from llm_service import LLMClient, get_strands_model
+from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import AutoAnswerResult, OpenQuestion, QuestionOption
 from .prompts import AUTO_ANSWER_PROMPT
@@ -103,6 +102,17 @@ def auto_answer_question(
 
     Returns:
         AutoAnswerResult with selected option and rationale
+
+    Preconditions:
+        - question is a valid OpenQuestion; question.options may be empty.
+        - spec_content is a string (only its first 8000 characters are used).
+
+    Postconditions:
+        - Never raises: any failure calling the LLM or parsing its response is
+          caught and converted into an AutoAnswerResult whose risks list
+          contains "Auto-answer failed, manual review recommended".
+        - On success, returns _parse_auto_answer_response(raw, question) where
+          raw is the LLM's parsed JSON response.
     """
     options_text = _format_options_for_prompt(question.options)
 
@@ -118,10 +128,13 @@ def auto_answer_question(
     )
 
     try:
-        agent = Agent(model=get_strands_model("product_analysis"), system_prompt="Respond with valid JSON only.")
-        agent_result = agent(prompt)
-        raw_text = str(agent_result).strip()
-        raw = json.loads(raw_text)
+        raw = complete_json_with_continuation(
+            resolve_strands_model(
+                llm, agent_key="product_analysis", get_strands_model_fn=get_strands_model
+            ),
+            prompt,
+            system_prompt="Respond with valid JSON only.",
+        )
         result = _parse_auto_answer_response(raw, question)
         logger.info(
             "Auto-answered question %s: selected %s with confidence %.2f",
@@ -228,7 +241,9 @@ def get_auto_answer_for_job(
         # Auto-answer requires at least one selectable (non-synthetic) option; questions without
         # real options must be answered by the user via free-text (the "other" field).
         logger.warning(
-            "Question %s in job %s has no selectable options; cannot auto-answer", question_id, job_id
+            "Question %s in job %s has no selectable options; cannot auto-answer",
+            question_id,
+            job_id,
         )
         return None
 

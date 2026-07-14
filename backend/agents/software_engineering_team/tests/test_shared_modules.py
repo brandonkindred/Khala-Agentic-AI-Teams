@@ -353,9 +353,7 @@ def test_continuation_build_messages_multi_partials_no_system() -> None:
     from software_engineering_team.shared.continuation import ResponseContinuator
 
     c = ResponseContinuator(base_url="http://x", model="m")
-    msgs = c._build_continuation_messages(
-        original_prompt="hi", partial_responses=["p1", "p2"]
-    )
+    msgs = c._build_continuation_messages(original_prompt="hi", partial_responses=["p1", "p2"])
     roles = [m["role"] for m in msgs]
     # user + (assistant+user) * 2
     assert roles == ["user", "assistant", "user", "assistant", "user"]
@@ -369,9 +367,7 @@ def test_continuation_find_overlap() -> None:
     assert c._find_overlap("abc", "") == 0
     # min_overlap is 10 by default — provide a long matching tail
     overlap_word = "overlapping"  # 11 chars > min 10
-    assert c._find_overlap(f"prefix {overlap_word}", f"{overlap_word} suffix") == len(
-        overlap_word
-    )
+    assert c._find_overlap(f"prefix {overlap_word}", f"{overlap_word} suffix") == len(overlap_word)
     assert c._find_overlap("abc", "xyz") == 0
 
 
@@ -425,9 +421,7 @@ def test_continuation_attempt_success(monkeypatch) -> None:
         return ("done!", "stop")
 
     monkeypatch.setattr(c, "_send_chat_request", fake_send)
-    res = c.attempt_continuation(
-        original_prompt="orig", partial_content="partial "
-    )
+    res = c.attempt_continuation(original_prompt="orig", partial_content="partial ")
     assert res.success is True
     assert "partial" in res.content
 
@@ -484,9 +478,7 @@ def test_attempt_response_continuation_helper(monkeypatch) -> None:
 
     class _Fake:
         def attempt_continuation(self, **kwargs):
-            return continuation.ContinuationResult(
-                success=True, content="ok", cycles_used=1
-            )
+            return continuation.ContinuationResult(success=True, content="ok", cycles_used=1)
 
     monkeypatch.setattr(continuation, "ResponseContinuator", lambda **_: _Fake())
     r = continuation.attempt_response_continuation(
@@ -691,20 +683,12 @@ def test_recursive_processor_max_depth_post_mortem(tmp_path, monkeypatch) -> Non
         return tmp_path / "POST_MORTEMS.md"
 
     monkeypatch.setattr(pm, "write_post_mortem", fake_write)
-    # Re-import to ensure decomposition's local reference picks up patch
-    import software_engineering_team.shared.decomposition as decomp_mod
-
-    monkeypatch.setattr(decomp_mod, "__name__", decomp_mod.__name__)  # no-op
 
     def fail(_prompt):
         raise LLMTruncatedError("truncated", partial_content="part")
 
     p: RecursiveProcessor = RecursiveProcessor(SectionDecompositionStrategy(), max_depth=0)
     ctx = DecompositionContext(original_task="t", max_depth=0)
-    # Direct patch decomp module's write_post_mortem import inside method:
-    monkeypatch.setitem(
-        decomp_mod.__dict__, "write_post_mortem", fake_write
-    ) if False else None  # noqa: E501
     with pytest.raises(LLMTruncatedError):
         p.process(
             llm=MagicMock(),
@@ -817,28 +801,13 @@ def test_recursive_processor_single_chunk_returns_empty_merge(monkeypatch) -> No
 
 
 def test_process_with_decomposition_helper() -> None:
-    # Patch the inner Agent/get_strands_model path to return JSON.
-    import software_engineering_team.shared.decomposition as decomp
+    # The helper imports inside process(); easier to monkeypatch strands.Agent directly.
+    import strands
 
-    # Wrap via process_fn — but process_with_decomposition doesn't expose one.
-    # Use the no-truncation success path indirectly by passing a custom strategy
-    # that won't get used since no truncation occurs.
     from software_engineering_team.shared.decomposition import (
         SectionDecompositionStrategy,
         process_with_decomposition,
     )
-
-    class _FakeAgent:
-        def __init__(self, *a, **kw):
-            pass
-
-        def __call__(self, prompt):
-            return '{"ok": true}'
-
-    decomp.RecursiveProcessor.process.__globals__  # noqa: B018
-
-    # The helper imports inside process(); easier to monkeypatch llm_service.get_strands_model + strands.Agent
-    import strands
 
     orig_agent = strands.Agent
 
@@ -861,3 +830,35 @@ def test_process_with_decomposition_helper() -> None:
         assert out == {"hello": "world"}
     finally:
         strands.Agent = orig_agent
+
+
+def test_process_with_decomposition_helper_recovers_fenced_json(monkeypatch) -> None:
+    import json
+
+    import strands
+
+    from software_engineering_team.shared.decomposition import (
+        SectionDecompositionStrategy,
+        process_with_decomposition,
+    )
+
+    payload = {"hello": "world"}
+    fenced = "```json\n" + json.dumps(payload) + "\n```"
+
+    class _FencedAgent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return fenced
+
+    monkeypatch.setattr(strands, "Agent", _FencedAgent)
+
+    out = process_with_decomposition(
+        llm=MagicMock(),
+        prompt="hi",
+        content="hi",
+        agent_name="X",
+        strategy=SectionDecompositionStrategy(),
+    )
+    assert out == payload

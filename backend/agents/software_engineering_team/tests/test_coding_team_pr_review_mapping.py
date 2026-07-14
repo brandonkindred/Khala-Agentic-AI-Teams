@@ -13,10 +13,11 @@ from software_engineering_team.coding_team.github_source.pr_review_mapping impor
     choose_event,
     format_comment_body,
     format_issue_comment,
+    group_similar_findings,
     inline_comment_to_timeline_body,
     map_issues_to_comments,
     parse_valid_lines,
-    proposal_from_finding,
+    proposal_from_findings,
     render_annotated_hunks,
     split_review_comments,
 )
@@ -389,11 +390,53 @@ def test_choose_event_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# proposal_from_finding / build_issue_from_proposal
+# group_similar_findings
 # ---------------------------------------------------------------------------
 
 
-def test_proposal_from_finding_serializes_fields() -> None:
+def test_group_similar_findings_merges_near_duplicates_same_category() -> None:
+    findings = [
+        _Issue(category="standards", description="bare import `os` should be scoped"),
+        _Issue(category="standards", description="bare import `sys` should be scoped"),
+        _Issue(category="standards", description="bare import `re` should be scoped"),
+    ]
+    groups = group_similar_findings(findings)
+    assert len(groups) == 1
+    assert groups[0] == findings
+
+
+def test_group_similar_findings_never_merges_across_categories() -> None:
+    findings = [
+        _Issue(category="standards", description="bare import `os` should be scoped"),
+        _Issue(category="logic", description="bare import `os` should be scoped"),
+    ]
+    groups = group_similar_findings(findings)
+    assert len(groups) == 2
+
+
+def test_group_similar_findings_keeps_dissimilar_descriptions_separate() -> None:
+    findings = [
+        _Issue(category="logic", description="off-by-one error in loop bound"),
+        _Issue(category="logic", description="null pointer dereference on missing config"),
+    ]
+    groups = group_similar_findings(findings)
+    assert len(groups) == 2
+
+
+def test_group_similar_findings_preserves_order() -> None:
+    a = _Issue(category="logic", description="off-by-one error in loop bound")
+    b = _Issue(category="logic", description="off-by-one error in the loop bound")
+    c = _Issue(category="logic", description="null pointer dereference on missing config")
+    groups = group_similar_findings([a, b, c])
+    assert groups == [[a, b], [c]]
+
+
+# ---------------------------------------------------------------------------
+# proposal_from_findings / build_issue_from_proposal
+# ---------------------------------------------------------------------------
+
+
+def test_proposal_from_findings_serializes_single_finding_group() -> None:
     issue = _Issue(
         severity="critical",
         category="logic",
@@ -402,7 +445,7 @@ def test_proposal_from_finding_serializes_fields() -> None:
         description="latent bug",
         suggestion="do X",
     )
-    p = proposal_from_finding(issue, 2)
+    p = proposal_from_findings([issue], 2)
     assert p == {
         "id": "p2",
         "severity": "critical",
@@ -411,29 +454,71 @@ def test_proposal_from_finding_serializes_fields() -> None:
         "line": 12,
         "description": "latent bug",
         "suggestion": "do X",
+        "locations": [
+            {
+                "file_path": "src/a.py",
+                "line": 12,
+                "description": "latent bug",
+                "suggestion": "do X",
+            }
+        ],
         "issue_number": None,
         "issue_url": None,
     }
 
 
-def test_proposal_from_finding_drops_nonpositive_line_and_defaults() -> None:
-    p = proposal_from_finding(_Issue(severity="", category="", file_path="", line=0), 0)
+def test_proposal_from_findings_drops_nonpositive_line_and_defaults() -> None:
+    p = proposal_from_findings([_Issue(severity="", category="", file_path="", line=0)], 0)
     assert p["line"] is None
     assert p["severity"] == "info"
     assert p["category"] == "general"
     assert p["file_path"] == ""
 
 
-def test_build_issue_from_proposal_full_detail() -> None:
-    p = proposal_from_finding(
+def test_proposal_from_findings_combines_a_group() -> None:
+    findings = [
+        _Issue(
+            severity="medium",
+            category="standards",
+            file_path="src/a.py",
+            line=1,
+            description="bare import `os`",
+            suggestion="scope the import",
+        ),
         _Issue(
             severity="high",
-            category="logic",
-            file_path="src/a.py",
-            line=12,
-            description="off-by-one",
-            suggestion="use <=",
+            category="standards",
+            file_path="src/b.py",
+            line=5,
+            description="bare import `sys`",
+            suggestion="scope the import",
         ),
+    ]
+    p = proposal_from_findings(findings, 0)
+    # Severity is the most urgent across the group; top-level fields mirror
+    # the first (representative) finding; locations carries every finding.
+    assert p["severity"] == "high"
+    assert p["category"] == "standards"
+    assert p["file_path"] == "src/a.py"
+    assert p["line"] == 1
+    assert p["description"] == "bare import `os`"
+    assert len(p["locations"]) == 2
+    assert p["locations"][0]["file_path"] == "src/a.py"
+    assert p["locations"][1]["file_path"] == "src/b.py"
+
+
+def test_build_issue_from_proposal_full_detail() -> None:
+    p = proposal_from_findings(
+        [
+            _Issue(
+                severity="high",
+                category="logic",
+                file_path="src/a.py",
+                line=12,
+                description="off-by-one",
+                suggestion="use <=",
+            )
+        ],
         0,
     )
     title, body = build_issue_from_proposal(p, pr_number=7, pr_url="https://x/pull/7")
@@ -446,8 +531,8 @@ def test_build_issue_from_proposal_full_detail() -> None:
 
 
 def test_build_issue_from_proposal_no_file_and_no_suggestion() -> None:
-    p = proposal_from_finding(
-        _Issue(severity="low", file_path="", line=None, description="x", suggestion=""),
+    p = proposal_from_findings(
+        [_Issue(severity="low", file_path="", line=None, description="x", suggestion="")],
         0,
     )
     title, body = build_issue_from_proposal(p, pr_number=1, pr_url="u")
@@ -458,12 +543,52 @@ def test_build_issue_from_proposal_no_file_and_no_suggestion() -> None:
 
 def test_build_issue_from_proposal_blank_description_and_title_truncation() -> None:
     # Blank description -> generic headline and a placeholder description line.
-    p_blank = proposal_from_finding(_Issue(description="", suggestion=""), 0)
+    p_blank = proposal_from_findings([_Issue(description="", suggestion="")], 0)
     title, body = build_issue_from_proposal(p_blank, pr_number=1, pr_url="u")
     assert "code review finding" in title
     assert "_No description provided._" in body
     # A very long description is truncated to a single-line, bounded title.
-    p_long = proposal_from_finding(_Issue(description="Z" * 400), 0)
+    p_long = proposal_from_findings([_Issue(description="Z" * 400)], 0)
     long_title, _ = build_issue_from_proposal(p_long, pr_number=1, pr_url="u")
     assert len(long_title) <= 120
     assert long_title.endswith("…")
+
+
+def test_build_issue_from_proposal_multi_location_body_and_title() -> None:
+    findings = [
+        _Issue(
+            severity="medium",
+            category="standards",
+            file_path="src/a.py",
+            line=1,
+            description="bare import `os`",
+            suggestion="scope the import",
+        ),
+        _Issue(
+            severity="medium",
+            category="standards",
+            file_path="src/b.py",
+            line=5,
+            description="bare import `sys`",
+            suggestion="scope the import",
+        ),
+        _Issue(
+            severity="medium",
+            category="standards",
+            file_path="src/c.py",
+            line=None,
+            description="bare import `re`",
+            suggestion="scope the import",
+        ),
+    ]
+    p = proposal_from_findings(findings, 0)
+    title, body = build_issue_from_proposal(p, pr_number=1, pr_url="u")
+    assert title.endswith("(3 occurrences)")
+    assert "### Locations" in body
+    assert "- `src/a.py:1` — bare import `os`" in body
+    assert "- `src/b.py:5` — bare import `sys`" in body
+    assert "- `src/c.py` — bare import `re`" in body
+    assert "**Location:**" not in body
+    # Identical suggestions across every location dedupe to one bullet.
+    assert body.count("scope the import") == 1
+    assert "### Suggested fixes" in body

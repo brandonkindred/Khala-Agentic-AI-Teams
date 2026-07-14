@@ -1,5 +1,6 @@
 """Tests for the Product Requirements Analysis agent."""
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Optional
@@ -1894,6 +1895,13 @@ def test_call_llm_json_returns_none_on_unparseable_output() -> None:
     """_call_llm_json returns None (never raises) when the response is not JSON."""
     agent = ProductRequirementsAnalysisAgent(_StubClient("not valid json {"))
     assert agent._call_llm_json("prompt") is None
+
+
+def test_call_llm_json_parses_markdown_fenced_object() -> None:
+    """_call_llm_json recovers a JSON object wrapped in a ```json fence."""
+    fenced = "```json\n" + json.dumps({"key": "value"}) + "\n```"
+    agent = ProductRequirementsAnalysisAgent(_StubClient(fenced))
+    assert agent._call_llm_json("prompt") == {"key": "value"}
 
 
 def test_run_phase_returns_value_on_success() -> None:

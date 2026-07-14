@@ -260,10 +260,11 @@ def _is_infra_failure(exc: BaseException) -> bool:
 # Failures that represent the *model* (not our code) returning unusable output
 # for a chunk. Only these may be retried/bisected and, if still unreviewable,
 # degraded to a not-reviewed finding. Any other exception is treated as an
-# unexpected defect and fails closed. ``json.JSONDecodeError`` is included
-# because the chunk reviewer parses the model's reply with a bare
-# ``json.loads`` — malformed model JSON surfaces as that raw error, not an
-# ``LLMJsonParseError``, and is just as recoverable. ``LLMTruncatedError``
+# unexpected defect and fails closed. ``json.JSONDecodeError`` is retained
+# defensively: no current call path raises it directly anymore (the chunk
+# reviewer now routes through ``complete_json_with_continuation``, which raises
+# ``LLMJsonParseError`` instead), but any future bare ``json.loads`` reachable
+# from this call chain would still classify correctly here. ``LLMTruncatedError``
 # (finish_reason=length) is recoverable for the same reason bisection exists:
 # a smaller chunk yields a smaller review, so a half that no longer exhausts the
 # output-token budget parses cleanly; a chunk that still truncates at the
@@ -287,9 +288,13 @@ def _is_content_failure(exc: BaseException) -> bool:
           failure (``LLMJsonParseError``, ``LLMSchemaValidationError``,
           ``LLMSemanticExhaustionError``, ``LLMTruncatedError`` — a
           finish_reason=length token-limit truncation — or a raw
-          ``json.JSONDecodeError`` from parsing the model's reply) — the failures
-          a smaller or repeated input might fix, or that a human can be asked to
-          review manually.
+          ``json.JSONDecodeError``) — the failures a smaller or repeated input
+          might fix, or that a human can be asked to review manually.
+          ``json.JSONDecodeError`` is retained defensively: no current call path
+          raises it directly (the chunk reviewer now routes through
+          ``complete_json_with_continuation``, which raises
+          ``LLMJsonParseError`` instead), but any future bare ``json.loads``
+          reachable from this call chain would still classify correctly here.
         - Returns False for everything else (e.g. ``KeyError``/``TypeError`` from
           a bug in the reviewer code), so unexpected defects fail closed instead
           of being masked as a not-reviewed finding.
