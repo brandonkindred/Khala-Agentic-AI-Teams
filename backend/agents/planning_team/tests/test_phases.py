@@ -166,19 +166,42 @@ def test_run_requirements_skips_malformed_options():
     assert [o.id for o in q.options] == ["ok"]  # non-dict option dropped, no crash
 
 
+def _dispatch_by_section_heading(responses: dict):
+    """Build a ``complete_text`` side_effect that dispatches by section content.
+
+    Sections are processed concurrently (``map_reduce`` fans out via
+    ``parallel_map``), so a shared ``iter([...])``'s "Nth call gets the Nth
+    payload" assumption doesn't hold. Each section's heading text (e.g.
+    ``"Heading 0"``) is embedded verbatim in its prompt, so dispatching on that
+    marker is order-independent and proves the reducer tolerates true
+    out-of-order results rather than papering over the race with
+    ``max_workers=1``.
+    """
+
+    def _dispatch(prompt, **_k):
+        for marker, payload in responses.items():
+            if marker in prompt:
+                return payload
+        raise AssertionError(f"no matching section marker in prompt: {prompt[:200]}")
+
+    return _dispatch
+
+
 def test_run_discovery_multi_section_tolerates_malformed_fields():
     # Two sections; one has non-str scalars, a non-list field, and a non-str list item.
     # The reducer must skip the malformed bits without crashing.
-    payloads = iter(
-        [
+    responses = {
+        "Heading 0": (
             '{"problem_summary": "", "opportunity_statement": "",'
-            ' "target_users": "notalist", "success_criteria": [123, "good"], "assumptions": []}',
+            ' "target_users": "notalist", "success_criteria": [123, "good"], "assumptions": []}'
+        ),
+        "Heading 1": (
             '{"problem_summary": "", "opportunity_statement": "",'
-            ' "target_users": ["u1"], "success_criteria": ["good"], "assumptions": []}',
-        ]
-    )
+            ' "target_users": ["u1"], "success_criteria": ["good"], "assumptions": []}'
+        ),
+    }
     context = {"client_context": ClientContext(), "spec_content": multi_heading_doc(2, 5000)}
-    llm = make_llm(lambda *a, **k: next(payloads), max_ctx=1000)
+    llm = make_llm(_dispatch_by_section_heading(responses), max_ctx=1000)
     ctx_update, _ = run_discovery(context, llm=llm)
     cc = ctx_update["client_context"]
     assert cc.problem_summary == ""  # no valid str scalar in either section
@@ -189,16 +212,18 @@ def test_run_discovery_multi_section_tolerates_malformed_fields():
 def test_run_discovery_multi_section_coerces_numeric_scalar():
     # First section returns a numeric problem_summary; reduce coerces it to str rather
     # than discarding it (the other section has an empty summary).
-    payloads = iter(
-        [
+    responses = {
+        "Heading 0": (
             '{"problem_summary": 42, "opportunity_statement": "",'
-            ' "target_users": [], "success_criteria": [], "assumptions": []}',
+            ' "target_users": [], "success_criteria": [], "assumptions": []}'
+        ),
+        "Heading 1": (
             '{"problem_summary": "", "opportunity_statement": "",'
-            ' "target_users": ["u1"], "success_criteria": [], "assumptions": []}',
-        ]
-    )
+            ' "target_users": ["u1"], "success_criteria": [], "assumptions": []}'
+        ),
+    }
     context = {"client_context": ClientContext(), "spec_content": multi_heading_doc(2, 5000)}
-    llm = make_llm(lambda *a, **k: next(payloads), max_ctx=1000)
+    llm = make_llm(_dispatch_by_section_heading(responses), max_ctx=1000)
     ctx_update, _ = run_discovery(context, llm=llm)
     assert ctx_update["client_context"].problem_summary == "42"  # coerced, not discarded
 
@@ -259,19 +284,21 @@ def test_run_discovery_brief_only_and_spec_only():
 
 def test_run_discovery_multi_section_unions_lists():
     # Two sections return overlapping + distinct personas; reduce should union+dedupe.
-    payloads = iter(
-        [
+    responses = {
+        "Heading 0": (
             '{"problem_summary": "P1", "opportunity_statement": "O1",'
-            ' "target_users": ["admin", "user"], "success_criteria": ["fast"], "assumptions": []}',
+            ' "target_users": ["admin", "user"], "success_criteria": ["fast"], "assumptions": []}'
+        ),
+        "Heading 1": (
             '{"problem_summary": "P2", "opportunity_statement": "O2",'
-            ' "target_users": ["User", "guest"], "success_criteria": ["fast", "cheap"], "assumptions": ["x"]}',
-        ]
-    )
+            ' "target_users": ["User", "guest"], "success_criteria": ["fast", "cheap"], "assumptions": ["x"]}'
+        ),
+    }
     context = {
         "client_context": ClientContext(),
         "spec_content": multi_heading_doc(2, 5000),
     }
-    llm = make_llm(lambda *a, **k: next(payloads), max_ctx=1000)
+    llm = make_llm(_dispatch_by_section_heading(responses), max_ctx=1000)
     ctx_update, _ = run_discovery(context, llm=llm)
     cc = ctx_update["client_context"]
     # First non-empty scalar wins; lists are case-insensitively deduped unions.
