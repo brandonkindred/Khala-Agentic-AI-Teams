@@ -1121,25 +1121,28 @@ def test_compute_indicator_series_matches_registry_tail(case) -> None:
 def test_retention_window_constant_is_single_source_of_truth() -> None:
     """Every trailing-window bound derives from the one ``STREAMING_WINDOW_BARS``.
 
-    Cumulative indicators (vwap, obv) re-base to the window start, so the audit walk,
+    OBV (still cumulative, re-basing to the window start) needs the audit walk,
     the streaming-history deque, the compiler's cumulative-history depth, the
-    conformance shadow context, and the *production* ``StrategyContext`` must all use
-    the same retention ceiling. This guards against a future edit reintroducing a
-    private ``500`` literal at one site and silently diverging validation from
-    runtime — including the production context itself, not just the validation layers.
+    conformance shadow context, and the *production* ``StrategyContext`` to all
+    use the same retention ceiling. This guards against a future edit
+    reintroducing a private ``500`` literal at one site and silently diverging
+    validation from runtime — including the production context itself, not
+    just the validation layers.
     """
     from investment_team.strategy_lab.executor.predicate_evaluator import (
         _SERIES_WINDOW,
         StreamingHistoryView,
     )
     from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
-    from investment_team.strategy_lab.synthesis.compiler import _VWAP_HISTORY
+    from investment_team.strategy_lab.synthesis.compiler import _OBV_HISTORY
     from investment_team.trading_service.strategy.contract import (
         STREAMING_WINDOW_BARS as _CONTRACT_WINDOW,
     )
 
     assert _SERIES_WINDOW == STREAMING_WINDOW_BARS
-    assert _VWAP_HISTORY == STREAMING_WINDOW_BARS
+    # VWAP is no longer cumulative (it now takes a rolling ``period``, unified
+    # with the factors DSL's VWAP), so only OBV still requests this ceiling.
+    assert _OBV_HISTORY == STREAMING_WINDOW_BARS
     assert StreamingHistoryView()._max_bars == STREAMING_WINDOW_BARS
     assert _CONTRACT_WINDOW == STREAMING_WINDOW_BARS
 

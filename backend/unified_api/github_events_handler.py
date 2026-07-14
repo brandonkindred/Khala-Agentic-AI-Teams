@@ -77,9 +77,9 @@ _REVIEW_COMMAND = re.compile(r"@khala\s+review\b", re.IGNORECASE)
 # operator's PAT, so author identity CANNOT be the loop guard: the PAT owner is often
 # exactly the maintainer expected to trigger reviews from PR comments, and filtering by
 # author would silently break their commands. Duplicated from
-# ``coding_team.github_source.client.KHALA_COMMENT_MARKER`` (this module must stay
-# importable without the coding-team package at module scope); a cross-module test
-# asserts the two literals stay equal.
+# ``software_engineering_team.coding_team.github_source.client.KHALA_COMMENT_MARKER``
+# (this module must stay importable without the coding-team package at module
+# scope); a cross-module test asserts the two literals stay equal.
 _KHALA_COMMENT_MARKER = "<!-- khala-generated -->"
 
 
@@ -196,7 +196,7 @@ def _add_comment_reaction(owner: str, repo: str, comment_id: int, token: str | N
     if not comment_id or not token:
         return
     try:
-        from coding_team.github_source.client import GitHubClient
+        from software_engineering_team.coding_team.github_source.client import GitHubClient
 
         with GitHubClient(token) as client:
             client.create_comment_reaction(owner, repo, comment_id, content=content)

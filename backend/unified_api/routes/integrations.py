@@ -36,13 +36,13 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from coding_team.clone_workspace import (
+from shared_postgres import bounded_probe
+from software_engineering_team.coding_team.clone_workspace import (
     PER_ISSUE_DIR_TEMPLATE,
     agent_cache_dir,
     clone_lock_path,
 )
-from coding_team.github_source.client import _pr_detail_from_payload
-from shared_postgres import bounded_probe
+from software_engineering_team.coding_team.github_source.client import _pr_detail_from_payload
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
     get_google_browser_login_credentials,
@@ -1190,8 +1190,8 @@ _GITHUB_DEPENDENCY_PER_PAGE = 100
 _GITHUB_MAX_DEPENDENCY_PAGES = 10
 # Per-request timeout (seconds) for direct GitHub REST calls (repos/issues/pulls
 # listing). One constant so the latency budget is tuned in a single place; the
-# coding-team-service calls use their own longer timeouts (those are a different
-# upstream with different latency characteristics).
+# coding-team calls forwarded via _forward_to_coding_team() use their own longer
+# timeouts (those are a different upstream with different latency characteristics).
 _GITHUB_HTTP_TIMEOUT = 15.0
 # Allowlist for a single owner/repo path component: GitHub logins and repository
 # names are ASCII alphanumerics plus ``.``, ``_``, ``-``. Validating against this

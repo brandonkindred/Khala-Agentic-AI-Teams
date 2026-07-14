@@ -571,8 +571,8 @@ def execute_coding_team_activity(
             adapter_result, str(path), existing_code, resolved_questions_override
         )
 
-        from coding_team.orchestrator import run_coding_team_orchestrator
         from software_engineering_team.coding_engine_provider import SECodeEngineProvider
+        from software_engineering_team.coding_team.orchestrator import run_coding_team_orchestrator
         from software_engineering_team.orchestrator import PROGRESS_BAND_CODING
         from software_engineering_team.shared.job_store import get_job
 
