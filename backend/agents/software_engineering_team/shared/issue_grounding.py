@@ -96,7 +96,7 @@ def ground_issue_file_path(file_path: str, files: Dict[str, str]) -> str:
     return ""
 
 
-def _corpus_text(
+def _build_grounding_corpus(
     *,
     files: Dict[str, str],
     requirements: str,
@@ -106,7 +106,13 @@ def _corpus_text(
 ) -> str:
     parts: List[str] = [
         requirements or "",
-        " ".join(a for a in (acceptance_criteria or ()) if a is not None),
+        " ".join(
+            stripped
+            for a in (acceptance_criteria or ())
+            if a is not None
+            for stripped in (str(a).strip(),)
+            if stripped
+        ),
         spec_content or "",
         architecture_context or "",
         " ".join(files.keys()),
@@ -130,7 +136,8 @@ def _with_file_path(issue: IssueT, file_path: str) -> IssueT:
     if is_dataclass(issue) and not isinstance(issue, type):
         return replace(issue, file_path=file_path)
     logger.warning(
-        "Cannot copy issue of type %s to update file_path; returning unchanged",
+        "Cannot copy issue %r of type %s to update file_path; returning unchanged",
+        issue,
         type(issue).__name__,
     )
     return issue
@@ -170,7 +177,7 @@ def drop_ungrounded_issues(
           blanking) for each drop.
         - Never raises — on unexpected errors the issue is kept (fail-open).
     """
-    corpus = _corpus_text(
+    corpus = _build_grounding_corpus(
         files=files,
         requirements=requirements,
         acceptance_criteria=acceptance_criteria,

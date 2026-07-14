@@ -197,6 +197,23 @@ def test_drop_ungrounded_all_none_acceptance_criteria():
     assert len(kept) == 1
 
 
+def test_drop_ungrounded_strips_acceptance_criteria_whitespace():
+    """Padded AC text still grounds Title Case phrases (no double-space miss)."""
+    kept = drop_ungrounded_issues(
+        [
+            _Issue(
+                description="Meal Planner weekly view is incomplete",
+                file_path="app.py",
+            )
+        ],
+        files={"app.py": "pass"},
+        requirements="Build UI",
+        acceptance_criteria=["  Meal Planner  ", "", None],  # type: ignore[list-item]
+        spec_content="",
+    )
+    assert len(kept) == 1
+
+
 def test_drop_ungrounded_missing_issue_attributes():
     """Objects lacking description/recommendation/file_path still ground safely."""
 
