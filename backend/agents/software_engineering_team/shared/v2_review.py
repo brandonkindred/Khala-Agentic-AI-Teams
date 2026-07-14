@@ -171,18 +171,16 @@ def _tool_rec_recommendation(config: ReviewConfig, rec: str) -> str:
 def _review_steps_run_sequentially(llm: LLMClient) -> bool:
     """True when the code-review/QA/security fan-out must run one step at a time.
 
-    Scripted test doubles (a ``DummyLLMClient`` subclass returning canned responses from a shared,
-    non-thread-safe index counter) are not safe to call from concurrent threads. Mirrors
-    ``devops_team.orchestrator``'s identical ``use_parallel = not isinstance(self.llm, _Dummy)``
+    Scripted ``DummyLLMClient`` doubles use a shared non-thread-safe response index,
+    so they are not safe under concurrent fan-out. Mirrors
+    ``devops_team.orchestrator``'s ``use_parallel = not isinstance(self.llm, _Dummy)``
     guard.
 
-    ``llm`` is not always the raw client: the coding team's default ``llm_getter`` (used by every
-    production caller of ``run_coding_team_orchestrator``) wraps it in a Strands ``LLMClientModel``
-    for reasoning-stream capture (``coding_team.reasoning_capture._make_reasoning_llm_getter``), and
-    that wrapper survives unchanged through ``worker_factory._v2_text_mode_llm``'s clone path all the
-    way to this module's ``llm`` parameter — so a bare ``isinstance(llm, DummyLLMClient)`` misses a
-    dummy client reached through that (default) path. Unwrap via the model's public ``client``
-    accessor (``LLMClientModel.client``) before checking.
+    Production coding-team callers often pass a Strands ``LLMClientModel`` wrapper
+    (reasoning-stream capture via ``_make_reasoning_llm_getter``), which survives the
+    ``worker_factory._v2_text_mode_llm`` clone path. A bare ``isinstance(llm,
+    DummyLLMClient)`` misses a dummy reached through that wrapper, so unwrap via
+    ``LLMClientModel.client`` before checking.
 
     Preconditions: ``llm`` is the LLM client that will be handed to the step thunks.
     Postconditions: returns ``True`` iff ``llm`` is (or wraps) a ``DummyLLMClient``. Pure.
@@ -191,6 +189,7 @@ def _review_steps_run_sequentially(llm: LLMClient) -> bool:
 
     if isinstance(llm, DummyLLMClient):
         return True
+    # Unwrap Strands LLMClientModel wrapper to reach the real client for isinstance check.
     return isinstance(getattr(llm, "client", None), DummyLLMClient)
 
 

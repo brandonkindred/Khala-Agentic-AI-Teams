@@ -108,6 +108,10 @@ def _normalize_match_text(text: str) -> str:
 
     ``User.Profile`` / ``User-Profile`` / ``User\\nProfile`` all become
     ``user profile`` so Title Case phrases match across punctuation boundaries.
+
+    Limitation: punctuation that carries meaning (URL scheme separators, code
+    operators, path slashes) is collapsed the same way. Grounding is aimed at
+    Title Case / quoted prose claims, not exact URL or code-snippet equality.
     """
     return " ".join(re.sub(r"[^a-zA-Z0-9]+", " ", text or "").split()).lower()
 
@@ -125,6 +129,8 @@ def _grounding_corpus_parts(
     A phrase must appear entirely inside one part (requirements, ACs, spec,
     architecture, or file names) — gluing the last word of requirements to the
     first word of acceptance criteria must not invent a grounded claim.
+    Acceptance criteria are space-joined before normalization; see
+    ``_normalize_match_text`` for the punctuation-collapse trade-off.
     """
     return [
         p
