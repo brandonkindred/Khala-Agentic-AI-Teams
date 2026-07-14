@@ -131,6 +131,12 @@ def complete_plan_json(
             data = call_json_fn(prompt, system)
             if isinstance(data, dict) and data:
                 return data, attempt
+            logger.warning(
+                "call_json_fn returned a non-dict or empty result (attempt %s): %r; "
+                "falling back to raw call",
+                attempt + 1,
+                data,
+            )
         except LLMJsonParseError as e:
             last_err = e
             logger.warning("JSON parse failed (attempt %s): %s", attempt + 1, e)

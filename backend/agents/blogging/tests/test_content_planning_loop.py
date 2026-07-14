@@ -208,6 +208,21 @@ def test_complete_plan_json_falls_back_to_raw_call() -> None:
     assert data == {"a": 1}
 
 
+def test_complete_plan_json_logs_when_json_call_returns_empty_result(caplog) -> None:
+    """A non-dict/empty call_json_fn result falls through without raising, so it
+    needs its own log line to stay distinguishable from an LLMJsonParseError."""
+    with caplog.at_level("WARNING"):
+        complete_plan_json(
+            "p",
+            system="s",
+            on_llm_request=None,
+            max_parse_retries=1,
+            call_json_fn=lambda p, s: {},
+            call_raw_fn=lambda p, s: json.dumps({"a": 1}),
+        )
+    assert any("non-dict or empty result" in r.message for r in caplog.records)
+
+
 def test_complete_plan_json_raises_after_max_parse_retries() -> None:
     with pytest.raises(PlanningError) as exc:
         complete_plan_json(
