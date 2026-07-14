@@ -11,7 +11,6 @@ from shared.content_plan import (
     TitleCandidate,
     section_count_bounds_for_profile,
 )
-from shared.content_planning_loop import post_validate_plan
 from shared.content_profile import ContentProfile, LengthPolicy, resolve_length_policy
 
 from llm_service import DummyLLMClient
@@ -58,24 +57,3 @@ def test_planning_agent_dummy_llm_produces_acceptable_plan() -> None:
     assert result.content_plan.requirements_analysis.plan_acceptable
     assert result.content_plan.requirements_analysis.scope_feasible
     assert result.planning_iterations_used >= 1
-
-
-def test_post_validate_flags_section_count() -> None:
-    """Too many sections for profile sets plan_acceptable False."""
-    sections = [
-        ContentPlanSection(title=f"S{i}", coverage_description="x", order=i) for i in range(15)
-    ]
-    plan = ContentPlan(
-        overarching_topic="T",
-        narrative_flow="n",
-        sections=sections,
-        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True,
-            scope_feasible=True,
-            research_gaps=[],
-        ),
-    )
-    out = post_validate_plan(plan, _policy_standard())
-    assert out.requirements_analysis.plan_acceptable is False
-    assert any("outside expected range" in g for g in out.requirements_analysis.gaps)

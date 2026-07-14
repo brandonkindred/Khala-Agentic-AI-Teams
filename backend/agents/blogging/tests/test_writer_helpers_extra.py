@@ -1,9 +1,10 @@
 """Additional tests for blog_writer_agent helper methods.
 
 Covers ``_fix_deterministic_violations``, ``_llm_self_review``, ``_self_review``,
-the ``shared.content_planning_loop`` planning helpers (``post_validate_plan``,
-``planning_done``, ``build_generate_plan_prompt``, ``build_refine_plan_prompt``),
-``_format_feedback_item_line``, and the ``revise()`` no-op paths.
+``_format_feedback_item_line``, and the ``revise()`` no-op paths. The
+``shared.content_planning_loop`` planning helpers (``post_validate_plan``,
+``planning_done``, ``build_generate_plan_prompt``, ``build_refine_plan_prompt``)
+are tested directly in ``test_content_planning_loop.py`` — not duplicated here.
 """
 
 from __future__ import annotations
@@ -125,151 +126,8 @@ def test_writer_self_review_combines_both(monkeypatch) -> None:
     # Force at least one violation
     draft = "In today's fast-paced world—Studies show."
     out = a._self_review(draft)
-    assert out  # produced something
-
-
-def _make_length_policy():
-    from shared.content_profile import ContentProfile, resolve_length_policy
-
-    return resolve_length_policy(content_profile=ContentProfile.standard_article)
-
-
-def test_writer_post_validate_plan_in_bounds() -> None:
-    """Section count within the profile's expected range leaves plan_acceptable untouched."""
-    from shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
-    from shared.content_planning_loop import post_validate_plan
-
-    plan = ContentPlan(
-        overarching_topic="X",
-        narrative_flow="flow",
-        sections=[
-            ContentPlanSection(title="A", coverage_description="a", order=0),
-            ContentPlanSection(title="B", coverage_description="b", order=1),
-            ContentPlanSection(title="C", coverage_description="c", order=2),
-            ContentPlanSection(title="D", coverage_description="d", order=3),
-        ],
-        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
-    )
-    policy = _make_length_policy()
-    out = post_validate_plan(plan, policy)
-    # Section count within typical bounds → plan_acceptable preserved
-    assert out is not None
-
-
-def test_writer_post_validate_plan_out_of_bounds() -> None:
-    """When section count is outside expected range, plan_acceptable is forced False."""
-    from shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
-    from shared.content_planning_loop import post_validate_plan
-
-    plan = ContentPlan(
-        overarching_topic="X",
-        narrative_flow="flow",
-        sections=[
-            ContentPlanSection(title=f"S{i}", coverage_description="c", order=i) for i in range(40)
-        ],
-        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
-    )
-    policy = _make_length_policy()
-    out = post_validate_plan(plan, policy)
-    assert out.requirements_analysis.plan_acceptable is False
-
-
-def test_writer_planning_done() -> None:
-    """True only when both plan_acceptable and scope_feasible are True."""
-    from shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
-    from shared.content_planning_loop import planning_done
-
-    plan = ContentPlan(
-        overarching_topic="X",
-        narrative_flow="f",
-        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
-        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
-    )
-    assert planning_done(plan) is True
-
-    plan2 = plan.model_copy(
-        update={
-            "requirements_analysis": RequirementsAnalysis(
-                plan_acceptable=False, scope_feasible=True, research_gaps=[]
-            )
-        }
-    )
-    assert planning_done(plan2) is False
-
-
-def test_writer_build_generate_plan_prompt() -> None:
-    """All optional PlanningInput fields (audience, tone, series context) reach the prompt."""
-    from shared.content_plan import PlanningInput
-    from shared.content_planning_loop import build_generate_plan_prompt
-
-    inp = PlanningInput(
-        brief="My brief",
-        audience="devs",
-        tone_or_purpose="inform",
-        length_policy_context="900 words",
-        series_context_block="Part 1 of 3",
-        research_digest="some digest",
-    )
-    p = build_generate_plan_prompt(inp)
-    assert "My brief" in p
-    assert "Audience: devs" in p
-    assert "Tone/Purpose: inform" in p
-    assert "Part 1 of 3" in p
-    assert "some digest" in p
-
-
-def test_writer_build_refine_plan_prompt() -> None:
-    """Refine prompt embeds both the previous plan JSON and the refine feedback text."""
-    from shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        PlanningInput,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
-    from shared.content_planning_loop import build_refine_plan_prompt
-
-    prev = ContentPlan(
-        overarching_topic="X",
-        narrative_flow="f",
-        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
-        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=False, scope_feasible=True, research_gaps=[]
-        ),
-    )
-    inp = PlanningInput(
-        brief="b",
-        length_policy_context="ctx",
-        research_digest="rd",
-    )
-    p = build_refine_plan_prompt(inp, prev, "Be more specific")
-    assert "PREVIOUS PLAN" in p
-    assert "Be more specific" in p
+    assert "—" not in out
+    assert "Good text" in out
 
 
 def test_writer_format_feedback_item_line() -> None:

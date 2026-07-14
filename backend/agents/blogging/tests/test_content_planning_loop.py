@@ -130,6 +130,17 @@ def test_build_generate_plan_prompt_with_optional_fields() -> None:
     assert "series block content" in out
 
 
+def test_build_generate_plan_prompt_skips_blank_series_block() -> None:
+    inp = PlanningInput(
+        brief="A brief",
+        length_policy_context="ctx",
+        research_digest="digest",
+        series_context_block="   ",
+    )
+    out = build_generate_plan_prompt(inp)
+    assert "series" not in out.lower()
+
+
 def test_build_refine_plan_prompt_includes_previous_plan_and_feedback() -> None:
     inp = PlanningInput(brief="b", length_policy_context="ctx", research_digest="digest")
     prev = ContentPlan(
