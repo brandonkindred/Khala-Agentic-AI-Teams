@@ -10,6 +10,7 @@ import logging
 from typing import Any, Dict, Optional, Sequence
 
 from planning_team.models import ClientContext
+from planning_team.phases._util import as_client_context, assemble_material
 from planning_team.spec_digest import map_reduce
 from shared_llm_recovery import extract_json_object
 
@@ -129,15 +130,8 @@ def run_discovery(
     context should contain client_context, initial_brief, spec_content, and optionally evidence.
     Returns (context_update, artifacts).
     """
-    client_context = context.get("client_context")
-    if isinstance(client_context, dict):
-        client_context = ClientContext(**client_context)
-    brief = context.get("initial_brief") or ""
-    spec = context.get("spec_content") or ""
-    if brief and spec:
-        material = f"Brief:\n{brief}\n\nSpec:\n{spec}"
-    else:
-        material = brief or spec or "No brief or spec provided."
+    client_context = as_client_context(context.get("client_context"))
+    material = assemble_material(context)
 
     context_update: Dict[str, Any] = {}
     artifacts: Dict[str, Any] = {}
