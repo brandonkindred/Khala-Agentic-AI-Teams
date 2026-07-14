@@ -8,14 +8,15 @@ assertions on ``complete_json.call_args`` are no longer meaningful.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, Optional
 
 import pytest
 from code_review_agent.chunk_reviewer import ChunkReviewAgent, review_chunk
 from code_review_agent.models import ChunkReviewInput, ChunkReviewOutput
 
+from llm_service import LLMJsonParseError
 from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.tests.conftest import _patch_fenced_response
 
 
 class _StubClient(DummyLLMClient):
@@ -54,27 +55,62 @@ def _chunk_input(**overrides: Any) -> ChunkReviewInput:
 
 
 class _NonJsonClient(DummyLLMClient):
-    """DummyLLMClient whose reply is not JSON, so the reviewer's ``json.loads``
-    of the model output raises ``json.JSONDecodeError`` (a non-dict reply is
-    emitted verbatim as assistant text by the dummy strands stream)."""
+    """DummyLLMClient whose reply is not JSON, so the reviewer's parse via
+    ``complete_json_with_continuation`` raises ``LLMJsonParseError`` (a non-dict
+    reply is emitted verbatim as assistant text by the dummy strands stream, and
+    neither a bare ``json.loads`` nor the ``extract_json_from_response`` recovery
+    ladder can make sense of it)."""
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Any:
         return "I could not produce the requested JSON object."
 
 
-def test_chunk_review_raises_json_decode_error_on_non_json_model_output() -> None:
-    """The chunk reviewer parses the model reply with a bare ``json.loads``, so an
-    invalid (non-JSON) reply surfaces as a raw ``json.JSONDecodeError``.
+def test_chunk_review_raises_llm_json_parse_error_on_non_json_model_output() -> None:
+    """The chunk reviewer parses the model reply via
+    ``complete_json_with_continuation``, so an invalid (non-JSON, unrecoverable)
+    reply surfaces as ``LLMJsonParseError`` once that helper's
+    ``extract_json_from_response`` recovery ladder also fails.
 
     This guards the coupling in ``mapping._CONTENT_FAILURE_TYPES``, which lists
-    ``json.JSONDecodeError`` precisely because this parse path raises it: if the
-    reviewer ever wrapped or replaced ``json.loads`` (e.g. re-raising as an
-    ``LLMJsonParseError``), that classification would silently stop matching —
-    this test fails loudly instead.
+    ``LLMJsonParseError`` precisely because this parse path raises it: if the
+    reviewer ever bypassed ``complete_json_with_continuation`` for a bare
+    ``json.loads`` again (re-raising ``json.JSONDecodeError`` instead), that
+    classification would silently stop matching — this test fails loudly
+    instead.
     """
     agent = ChunkReviewAgent(llm=_NonJsonClient())
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(LLMJsonParseError):
         agent.run(_chunk_input())
+
+
+def test_chunk_review_recovers_markdown_fenced_model_response(monkeypatch) -> None:
+    """A markdown-fenced JSON reply — the shape a model returns when it wraps its
+    JSON answer in a ```json fence despite the "JSON only" system prompt — now
+    recovers via ``complete_json_with_continuation``'s ``extract_json_from_response``
+    fallback instead of crashing on a bare ``json.loads`` of the fenced text.
+    """
+    payload = {
+        "approved": False,
+        "issues": [
+            {
+                "severity": "high",
+                "category": "general",
+                "file_path": "app/main.py",
+                "description": "Missing input validation",
+                "suggestion": "Validate before use",
+            }
+        ],
+        "summary": "Found one issue.",
+        "spec_compliance_notes": "",
+    }
+    _patch_fenced_response(monkeypatch, payload)
+    agent = ChunkReviewAgent(llm=DummyLLMClient())
+    result = agent.run(_chunk_input())
+    assert isinstance(result, ChunkReviewOutput)
+    assert result.approved is False
+    assert len(result.issues) == 1
+    assert result.issues[0]["description"] == "Missing input validation"
+    assert result.summary == "Found one issue."
 
 
 def test_review_chunk_legacy_wrapper_returns_dict_with_expected_keys() -> None:

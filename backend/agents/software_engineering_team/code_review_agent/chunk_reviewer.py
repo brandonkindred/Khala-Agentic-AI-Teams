@@ -28,11 +28,8 @@ Invariants:
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import List, Optional, Union
-
-from strands import Agent
 
 from llm_service import LLMClient
 from software_engineering_team.shared.context_sizing import (
@@ -42,6 +39,7 @@ from software_engineering_team.shared.context_sizing import (
     compute_code_review_sibling_surface_chars,
     compute_code_review_spec_excerpt_chars,
 )
+from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .model_resolution import resolve_code_review_model
 from .models import ChunkReviewInput, ChunkReviewOutput
@@ -287,10 +285,11 @@ def _run_chunk_review(
 
     prompt = "\n".join(context_parts)
     model = resolve_code_review_model(llm, think=think)
-    agent = Agent(model=model, system_prompt=build_review_system_prompt(input_data.profile))
-    result = agent(prompt)
-    raw = str(result).strip()
-    data = json.loads(raw)
+    data = complete_json_with_continuation(
+        model,
+        prompt,
+        system_prompt=build_review_system_prompt(input_data.profile),
+    )
 
     # Issue dicts are passed through raw: normalization (defaults, line
     # coercion, path resolution) happens exactly once, in the coordinator's
