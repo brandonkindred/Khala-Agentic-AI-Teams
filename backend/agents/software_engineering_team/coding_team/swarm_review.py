@@ -5,13 +5,14 @@ god-file into named collaborators) — pure structural move, no behavior change.
 Composed onto ``CodingTeamSwarm`` in orchestrator.py alongside the assignment and
 implementation mixins.
 
-A few names used here (``MAX_TASK_REVISIONS``, ``ActivityBridge``, ``_feature_branch_name``,
-``_build_review_evidence``, ``_review_concurrency``) are defined in
-``coding_team/orchestrator.py`` itself and referenced via a late-bound module reference
-(``_orch.NAME``, resolved at call time) rather than imported by name at module load
-time — see the equivalent note in ``coding_team/swarm_implementation.py`` for why
-(circular import at load time, and monkeypatchability of ``MAX_TASK_REVISIONS``/
-``ActivityBridge`` in tests).
+Names defined in ``orchestrator.py`` (``MAX_TASK_REVISIONS``, ``ActivityBridge``,
+``_feature_branch_name``, ``_build_review_evidence``) are referenced via a late-bound
+module reference (``_orch.NAME``, resolved at call time) rather than imported by
+name at module load time — see the equivalent note in
+``coding_team/swarm_implementation.py`` for why (circular import at load time, and
+monkeypatchability of ``MAX_TASK_REVISIONS``/``ActivityBridge`` in tests).
+
+``_review_concurrency`` lives in ``progress_config`` and is late-bound the same way.
 """
 
 from __future__ import annotations
@@ -245,7 +246,7 @@ class _ReviewMixin:
               the branch's own divergence point, so an earlier same-round merge advancing the
               development tip does not change any other branch's computed diff.
         """
-        from software_engineering_team.coding_team import orchestrator as _orch
+        from software_engineering_team.coding_team import progress_config as _pc
 
         in_review = [t for t in self.graph.get_tasks() if t.status == TaskStatus.IN_REVIEW]
         if not in_review:
@@ -266,7 +267,7 @@ class _ReviewMixin:
             results = parallel_map(
                 in_review,
                 self._compute_review,
-                max_workers=_orch._review_concurrency(),
+                max_workers=_pc._review_concurrency(),
                 skip_none=False,
             )
 
