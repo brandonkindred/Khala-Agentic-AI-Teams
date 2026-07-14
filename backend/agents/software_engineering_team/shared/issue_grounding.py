@@ -11,6 +11,11 @@ Public API:
     - ``ground_issue_file_path(file_path, files)`` — blank unknown file anchors.
     - ``drop_ungrounded_issues(...)`` — blank bad paths, then drop issues whose
       checkable phrases are absent from the task grounding corpus.
+
+Contracts:
+    - All public functions are fail-safe: they never raise on unexpected input.
+    - ``drop_ungrounded_issues`` does not mutate its input iterable or the issue
+      objects it keeps (path updates use copies); it returns a new list.
 """
 
 from __future__ import annotations
@@ -23,6 +28,12 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Type
 logger = logging.getLogger(__name__)
 
 IssueT = TypeVar("IssueT")
+
+__all__ = [
+    "extract_checkable_phrases",
+    "ground_issue_file_path",
+    "drop_ungrounded_issues",
+]
 
 # Multi-word Title Case runs only (e.g. "Insurance Provider") — single tokens
 # like ``Index`` or ``HTML`` are skipped to avoid normal code identifiers.
