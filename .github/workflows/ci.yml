@@ -42,7 +42,6 @@ jobs:
       shared_backend: ${{ steps.filter.outputs.shared_backend }}
       branding: ${{ steps.filter.outputs.branding }}
       software_engineering: ${{ steps.filter.outputs.software_engineering }}
-      coding_team: ${{ steps.filter.outputs.coding_team }}
       agent_cognition: ${{ steps.filter.outputs.agent_cognition }}
       backend_any: ${{ steps.filter.outputs.backend_any }}
       needs_integration: ${{ steps.matrix.outputs.needs_integration }}
@@ -163,24 +162,18 @@ jobs:
               - 'backend/agents/agent_registry/**'
               - 'backend/agents/requirements.txt'
               - '.github/workflows/ci.yml'
-            # SE imports coding_team, planning_team, agent_repair_team
-            # from its orchestrator and Temporal activities. agents/api is
-            # the blog research API (see agents/api/README.md) — it's
-            # owned by blogging, listed in the blogging filter below.
+            # SE imports planning_team, agent_repair_team from its orchestrator
+            # and Temporal activities; coding_team is an in-package sub-team
+            # (backend/agents/software_engineering_team/coding_team/), so it's
+            # already covered by the software_engineering_team/** path below.
+            # agents/api is the blog research API (see agents/api/README.md) —
+            # it's owned by blogging, listed in the blogging filter below.
             software_engineering:
               - 'backend/agents/software_engineering_team/**'
-              - 'backend/agents/coding_team/**'
-              - 'backend/agents/coding_team_service/**'
               - 'backend/agents/planning_team/**'
               - 'backend/agents/agent_repair_team/**'
-              # SE/coding_team's Senior SWE imports the shared repo-inspection tools.
+              # SE's Senior SWE imports the shared repo-inspection tools.
               - 'backend/agents/agent_repo_tools/**'
-            # coding_team runs as its own job (its suite is substantial and, unlike
-            # SE, it must stay import-free of software_engineering_team — the
-            # test_no_se_imports guard rides along here).
-            coding_team:
-              - 'backend/agents/coding_team/**'
-              - 'backend/agents/coding_team_service/**'
             # Read-only repo-inspection tools shared by repo-backed agents.
             agent_repo_tools:
               - 'backend/agents/agent_repo_tools/**'
@@ -280,7 +273,6 @@ jobs:
               - 'backend/**'
               # Per-team paths (each has its own filter)
               - '!backend/agents/software_engineering_team/**'
-              - '!backend/agents/coding_team/**'
               - '!backend/agents/planning_team/**'
               - '!backend/agents/agent_repair_team/**'
               - '!backend/agents/agent_repo_tools/**'
@@ -327,7 +319,6 @@ jobs:
           F_BACKEND_ANY: ${{ steps.filter.outputs.backend_any }}
           F_BACKEND_UNCLASSIFIED: ${{ steps.filter_unclassified.outputs.backend_unclassified }}
           F_SOFTWARE_ENGINEERING: ${{ steps.filter.outputs.software_engineering }}
-          F_CODING_TEAM: ${{ steps.filter.outputs.coding_team }}
           F_BLOGGING: ${{ steps.filter.outputs.blogging }}
           F_MARKET_RESEARCH: ${{ steps.filter.outputs.market_research }}
           F_SOC2: ${{ steps.filter.outputs.soc2 }}
@@ -354,15 +345,11 @@ jobs:
                   "extra_requirements": "software_engineering_team/requirements.txt",
                   "editable_install": "software_engineering_team",
                   "needs_node": True,
-                  # Also record shared_*/coding_team_service coverage into a
-                  # data-file artifact so combine-shared-infra can gate the moved
-                  # shared code without re-running these tests (see that job).
-                  "emit_shared_cov": True,
-              },
-              "coding_team": {
-                  "name": "Coding Team",
-                  "tests": "coding_team/tests/",
-                  "source": "coding_team",
+                  # Also record shared_* coverage into a data-file artifact so
+                  # combine-shared-infra can gate the moved shared code without
+                  # re-running these tests (see that job). Includes coding_team,
+                  # an in-package SE sub-team whose tests live in
+                  # software_engineering_team/tests/ alongside SE's own.
                   "emit_shared_cov": True,
               },
               "blogging": {
@@ -449,16 +436,6 @@ jobs:
               changed["investment"] = True
           else:
               changed = per_team
-
-          # The combine-shared-infra gate needs shared_*/coding_team_service
-          # coverage from BOTH the SE and coding_team suites (neither alone
-          # reaches the 90% floor on shared_git / coding_team_service /
-          # shared_llm_recovery). coding_team already pulls SE in via the
-          # `software_engineering` path filter; couple the reverse here so an
-          # SE-only PR still emits the coding_team artifact.
-          if changed.get("software_engineering") or changed.get("coding_team"):
-              changed["software_engineering"] = True
-              changed["coding_team"] = True
 
           entries = [v for k, v in large_teams.items() if changed.get(k)]
           any_misc = any(changed.get(k) for k in misc_teams)
@@ -611,22 +588,21 @@ jobs:
 
   # shared-infra: the neutral packages extracted from software_engineering_team
   # (command runner + error parsing, repo context, LLM recovery, dev models,
-  # shared_git, shared_hitl, shared_run_thread_registry) plus the coding_team_service
-  # composition root. Their unit tests live in the SE and coding_team suites, which now
-  # ALSO record shared coverage into per-suite data-file artifacts (see the
-  # `emit_shared_cov` entries in test-backend). This job re-runs NOTHING — it downloads
-  # those artifacts, `coverage combine`s them, and gates the moved code at the repo's
-  # 90% floor.
-  # Both suites contribute: neither alone reaches 90% on shared_git /
-  # coding_team_service / shared_llm_recovery, so the matrix builder couples them.
-  # shared_git/git_utils.py is omitted with the same integration-heavy rationale
-  # the SE gate used before the extraction (see shared_infra.coveragerc).
+  # shared_git, shared_hitl, shared_run_thread_registry). Their unit tests live
+  # in the SE suite (which now also includes coding_team's tests, an in-package
+  # sub-team moved into software_engineering_team/tests/), which ALSO records
+  # shared coverage into a data-file artifact (see the `emit_shared_cov` entry
+  # in test-backend). This job re-runs NOTHING — it downloads that artifact,
+  # `coverage combine`s it, and gates the moved code at the repo's 90% floor.
+  # shared_git/git_utils.py is omitted with the same integration-heavy
+  # rationale the SE gate used before the shared-infra extraction (see
+  # shared_infra.coveragerc).
   combine-shared-infra:
     name: Test – shared infra packages (coverage combine)
     runs-on: ubuntu-latest
     # always(): still run the shared gate when an UNRELATED matrix entry (e.g.
-    # blogging) fails. A genuine SE/coding failure leaves its artifact absent,
-    # so the download below fails and this job goes red — the correct signal.
+    # blogging) fails. A genuine SE failure leaves its artifact absent, so the
+    # download below fails and this job goes red — the correct signal.
     needs:
       - changes
       - test-backend
@@ -634,8 +610,7 @@ jobs:
       always() &&
       needs.changes.outputs.is_pull_request == 'true' &&
       (needs.changes.outputs.shared_backend == 'true' ||
-       needs.changes.outputs.software_engineering == 'true' ||
-       needs.changes.outputs.coding_team == 'true')
+       needs.changes.outputs.software_engineering == 'true')
     defaults:
       run:
         working-directory: backend/agents
@@ -650,20 +625,20 @@ jobs:
       - run: pip install "coverage>=7.1,<8.0"
       - uses: actions/download-artifact@v4
         with:
-          # Both SE and coding_team emit coverage-data-<source>; merge-multiple
-          # lands both .coverage.<source> files directly in backend/agents/ so
-          # `coverage combine` (which discovers .coverage.* in CWD) picks them up.
+          # SE emits coverage-data-software_engineering; merge-multiple lands
+          # its .coverage.<source> file directly in backend/agents/ so
+          # `coverage combine` (which discovers .coverage.* in CWD) picks it up.
           pattern: coverage-data-*
           merge-multiple: true
           path: backend/agents/
       - run: coverage combine
       # Coverage gate is enforced at 90% line coverage; see CLAUDE.md. --include
-      # is required: shared_infra.coveragerc's omit does not drop SE/coding_team
+      # is required: shared_infra.coveragerc's omit does not drop SE
       # application files, so without it the shared gate would be diluted. omit
       # still wins over --include, so shared_git/git_utils.py stays excluded.
       - run: >-
           coverage report --rcfile=shared_infra.coveragerc
-          --include='*/shared_command_runner/*,*/shared_repo_context/*,*/shared_llm_recovery/*,*/shared_dev_models/*,*/shared_git/*,*/shared_hitl/*,*/shared_run_thread_registry/*,*/coding_team_service/*'
+          --include='*/shared_command_runner/*,*/shared_repo_context/*,*/shared_llm_recovery/*,*/shared_dev_models/*,*/shared_git/*,*/shared_hitl/*,*/shared_run_thread_registry/*'
           --show-missing
           --fail-under=90
 
@@ -777,9 +752,9 @@ jobs:
       # Normal entries: single pytest invocation with --cov.
       # Batched entries (source == "BATCHED"): loop over sub-teams, running
       # pytest once per team to preserve per-team 90% coverage gates.
-      # emit_shared_cov entries (SE + coding_team): additionally measure the
-      # shared_*/coding_team_service packages in the same run and leave a
-      # renamed data file for the combine-shared-infra job. The team's OWN gate
+      # emit_shared_cov entries (SE): additionally measure the shared_*
+      # packages in the same run and leave a renamed data file for the
+      # combine-shared-infra job. The team's OWN gate
       # is re-enforced via a scoped `coverage report --include` so broadening
       # --cov does not fold shared coverage into it — the number is identical to
       # `--cov=<team> --cov-fail-under=90`.
@@ -823,7 +798,6 @@ jobs:
               --cov=shared_git \
               --cov=shared_hitl \
               --cov=shared_run_thread_registry \
-              --cov=coding_team_service \
               $COV_CONFIG_ARG \
               --cov-report=term-missing \
               --cov-fail-under=0
