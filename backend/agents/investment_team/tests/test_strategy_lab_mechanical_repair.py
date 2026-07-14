@@ -17,6 +17,7 @@ from investment_team.models import StrategySpec
 from investment_team.strategy_lab import mechanical_repair as mr
 from investment_team.strategy_lab.mechanical_repair import (
     RepairOutcome,
+    demote_code_path,
     repair_spec,
     select_code_path,
 )
@@ -170,6 +171,36 @@ def test_select_code_path_none_when_already_custom(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(mr, "compile_strategy", _boom)
     assert select_code_path(_make_spec(requires_custom_code=True)) is None
     assert called["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# demote_code_path — the inverse: over-elected custom code back to Path A
+# ---------------------------------------------------------------------------
+
+
+def test_demote_code_path_demotes_compilable_custom_spec() -> None:
+    # An over-elected spec: flagged custom code, but the DSL rules compile cleanly.
+    spec = _make_spec(requires_custom_code=True)
+    action = demote_code_path(spec)
+    assert action is not None
+    assert action.rule == "compiler_demote"
+    assert action.before is True
+    assert action.after is False
+
+
+def test_demote_code_path_none_for_already_compiled_spec() -> None:
+    # A spec already on the compiled path has nothing to demote.
+    assert demote_code_path(_make_spec(requires_custom_code=False)) is None
+
+
+def test_demote_code_path_keeps_genuinely_uncompilable_custom_spec() -> None:
+    # A spec the compiler cannot express (volatility_target without ATR) stays on
+    # custom code — CompilerError is the authoritative "DSL can't express this".
+    spec = _make_spec(
+        requires_custom_code=True,
+        sizing={"kind": "volatility_target", "target_annual_vol": 0.15},
+    )
+    assert demote_code_path(spec) is None
 
 
 # ---------------------------------------------------------------------------

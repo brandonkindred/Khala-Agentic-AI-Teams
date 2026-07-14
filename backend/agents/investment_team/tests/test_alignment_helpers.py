@@ -8,7 +8,9 @@ import pytest
 
 from investment_team.strategy_lab.agents._parse_helpers import extract_json_object as _extract_json
 from investment_team.strategy_lab.agents.alignment import (
+    _coerce_affected_trades,
     _coerce_report,
+    _format_findings_section,
     _parse_legitimate,
 )
 
@@ -122,6 +124,73 @@ def test_coerce_report_blank_proposed_code_treated_as_none() -> None:
         fallback_code="def fallback(): pass",
     )
     assert report.proposed_code is None
+
+
+def test_coerce_report_string_affected_trades_does_not_discard_patch() -> None:
+    """The exact reported failure: the LLM echoes ``affected_trades: ['trade #1']``
+    (strings) into a List[int] field. The old fallback re-raised a ValidationError
+    that failed the loop closed and discarded a usable patch. Now it coerces the
+    ints out, keeps the issue, and preserves ``proposed_code``.
+    """
+    report = _coerce_report(
+        {
+            "aligned": False,
+            "rationale": "entry predicate not satisfied",
+            "issues": [
+                {
+                    "rule_type": "entry_rules",
+                    "description": "Trade #1 entry predicate not satisfied",
+                    "severity": "critical",
+                    "affected_trades": ["trade #1", "trade #2"],
+                }
+            ],
+            "proposed_code": "def fixed(): pass",
+        },
+        fallback_code="def orig(): pass",
+        preserve_proposed_code=True,
+    )
+    assert report.proposed_code == "def fixed(): pass"  # patch survives
+    assert len(report.issues) == 1
+    assert report.issues[0].affected_trades == [1, 2]  # coerced to ints
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (["trade #1", "trade #2"], [1, 2]),
+        ([1, 2, 3], [1, 2, 3]),
+        (["1", "2"], [1, 2]),
+        ("trade #7", [7]),
+        (None, []),
+        ([1.0, 2.0], [1, 2]),
+        ([True, "no-number", "trade #4"], [4]),  # bool dropped, junk dropped
+        ([], []),
+    ],
+)
+def test_coerce_affected_trades(raw, expected) -> None:
+    assert _coerce_affected_trades(raw) == expected
+
+
+def test_format_findings_section_emits_integer_trade_field_not_copyable_token() -> None:
+    """The findings ledger must not hand the LLM a copyable ``trade #N`` string
+    (which it pasted into ``affected_trades``); it renders an explicit integer
+    field instead."""
+    from investment_team.strategy_lab.alignment_findings import AlignmentFinding
+
+    rendered = _format_findings_section(
+        [
+            AlignmentFinding(
+                trade_num=1,
+                rule_id="entry[0]",
+                check_name="entry_signal",
+                passed=False,
+                severity="critical",
+                details="entry predicate not satisfied",
+            )
+        ]
+    )
+    assert "trade_num=1" in rendered
+    assert "trade #1" not in rendered
 
 
 # ---------------------------------------------------------------------------

@@ -82,7 +82,7 @@ from .backtest_cache import BacktestCache
 from .coverage_probe import format_coverage_report
 from .exceptions import SpecImplementabilityError
 from .market_regime import RegimeSummary, compute_regime_summary
-from .mechanical_repair import RepairAction, repair_spec, select_code_path
+from .mechanical_repair import RepairAction, demote_code_path, repair_spec, select_code_path
 from .phases import (
     PHASE_TRANSITION_EVENT_NAME,
     Phase,
@@ -367,6 +367,19 @@ def _mechanical_repair_enabled() -> bool:
     pre-flight and restores the pure LLM-revise behaviour. Default ``true``.
     """
     return _env_flag("STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED")
+
+
+def _demote_compilable_custom_code_enabled() -> bool:
+    """Resolve the "demote a compilable custom-code spec to Path A" toggle.
+
+    Pre: none.
+    Post: returns ``True`` unless ``STRATEGY_LAB_DEMOTE_COMPILABLE_CUSTOM_CODE`` is
+    set to a recognised falsey value. Default ``true`` — a spec the LLM flagged as
+    custom code but which compiles cleanly is over-elected onto the drift-prone
+    custom path, so it is demoted to the faithful compiled path. An operator can
+    disable this if a lossy-but-compilable spec is ever wrongly demoted.
+    """
+    return _env_flag("STRATEGY_LAB_DEMOTE_COMPILABLE_CUSTOM_CODE")
 
 
 MAX_CODE_REFINEMENT_ROUNDS = 50
@@ -1523,11 +1536,17 @@ class StrategyLabOrchestrator:
 
         # Stage 2 — trial compile, only on a readiness-clean spec.
         if deterministic_ready:
+            # Promote: a spec outside the compiler envelope flips ON to custom code.
             compile_action = select_code_path(spec)
+            # Demote: a custom-code spec that compiles cleanly was over-elected onto
+            # the drift-prone custom path — flip it OFF back to the faithful compiled
+            # path. Mutually exclusive with promotion (a spec is one or the other).
+            if compile_action is None and _demote_compilable_custom_code_enabled():
+                compile_action = demote_code_path(spec)
             if compile_action is not None:
                 if pre_repair_spec is None:
                     pre_repair_spec = spec.model_copy(deep=True)
-                spec = spec.model_copy(update={"requires_custom_code": True})
+                spec = spec.model_copy(update={"requires_custom_code": compile_action.after})
                 repair_actions.append(compile_action)
                 # Flipping ``requires_custom_code`` can change the
                 # readiness verdict (it gates which closed-form gates
