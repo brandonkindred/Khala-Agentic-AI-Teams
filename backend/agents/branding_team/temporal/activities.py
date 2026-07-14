@@ -4,8 +4,9 @@ The branding pipeline is decomposed into fine-grained activities the durable
 ``BrandingWorkflow`` drives one at a time, so a worker restart re-runs only the
 unfinished unit instead of the whole ~2-hour pipeline:
 
-- :func:`begin_branding_job_activity` — mark the job RUNNING (head of the old
-  ``_run_branding_core``); returns False if already cancelled.
+- :func:`begin_branding_job_activity` — mark the job RUNNING via the shared
+  ``branding_team.shared.job_store.begin_job`` guard; returns False if already
+  cancelled.
 - :func:`run_branding_phase_activity` — run ONE pipeline phase in isolation via
   ``orchestrator.run_single_phase`` (the per-phase fan-out unit), checkpointing
   its output so a retry after a post-LLM crash skips the expensive re-run.
@@ -13,10 +14,16 @@ unfinished unit instead of the whole ~2-hour pipeline:
   two optional sibling-team integrations (wrap the ``adapters`` module).
 - :func:`finalize_branding_activity` — compliance + assemble ``TeamOutput`` (via
   the orchestrator's shared ``_assemble_team_output``) + persist brand version +
-  mark COMPLETED.
-- :func:`mark_branding_failed_activity` — record a FAILED job row (except-branch
-  of the old ``_run_branding_core``).
+  mark COMPLETED via the shared ``job_store.mark_completed`` guard.
+- :func:`mark_branding_failed_activity` — record a FAILED job row via the shared
+  ``job_store.mark_failed`` guard.
 - :func:`check_branding_cancelled_activity` — cooperative between-phase cancel.
+
+``begin_job``/``mark_completed``/``mark_failed`` (in
+``branding_team.shared.job_store``) are the same guarded cancel-check +
+status-write helpers the thread path uses in ``api.main._run_branding_core``, so
+the RUNNING/COMPLETED/FAILED bookkeeping lives in exactly one place across both
+execution modes.
 
 Each activity is a plain **sync** function (run in the worker's thread-pool
 executor) whose heavy imports live inside the body, keeping module import — which
@@ -63,12 +70,9 @@ def begin_branding_job_activity(job_id: str) -> bool:
           (terminal — the workflow returns without failing).
         - Otherwise sets the row to RUNNING and returns True.
     """
-    from branding_team.shared.job_store import JOB_STATUS_RUNNING, is_job_cancelled, update_job
+    from branding_team.shared.job_store import begin_job
 
-    if is_job_cancelled(job_id):
-        return False
-    update_job(job_id, status=JOB_STATUS_RUNNING)
-    return True
+    return begin_job(job_id)
 
 
 @activity.defn(name="branding_run_phase")
@@ -208,7 +212,7 @@ def finalize_branding_activity(
         VisualIdentityOutput,
     )
     from branding_team.orchestrator import orchestrator
-    from branding_team.shared.job_store import JOB_STATUS_COMPLETED, is_job_cancelled, update_job
+    from branding_team.shared.job_store import mark_completed
     from branding_team.store import get_default_store
     from branding_team.temporal.constants import stop_index
     from shared_temporal import load_checkpoint, save_checkpoint
@@ -266,9 +270,7 @@ def finalize_branding_activity(
             branding_store.append_brand_version(client_id, brand_id, output)
         save_checkpoint(_CHECKPOINT_TEAM, job_id, _FINALIZED_CHECKPOINT, True)
 
-    if is_job_cancelled(job_id):
-        return
-    update_job(job_id, status=JOB_STATUS_COMPLETED, result=output.model_dump())
+    mark_completed(job_id, output.model_dump())
 
 
 @activity.defn(name="branding_mark_failed")
@@ -279,14 +281,12 @@ def mark_branding_failed_activity(job_id: str, error: str) -> None:
         - ``job_id`` refers to an existing job row; ``error`` is a short message.
     Postconditions:
         - Sets the row to FAILED with ``error`` unless the job was cancelled (a
-          cancelled run is terminal, not a failure), matching the except-branch of
-          the old ``_run_branding_core``.
+          cancelled run is terminal, not a failure), via the shared
+          ``job_store.mark_failed`` guard.
     """
-    from branding_team.shared.job_store import JOB_STATUS_FAILED, is_job_cancelled, update_job
+    from branding_team.shared.job_store import mark_failed
 
-    if is_job_cancelled(job_id):
-        return
-    update_job(job_id, status=JOB_STATUS_FAILED, error=error)
+    mark_failed(job_id, error)
 
 
 @activity.defn(name="branding_check_cancelled")

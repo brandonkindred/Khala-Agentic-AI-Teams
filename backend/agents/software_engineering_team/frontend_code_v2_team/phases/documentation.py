@@ -5,8 +5,7 @@ This phase runs after Execution completes and before Deliver.
 It performs a comprehensive documentation review and fix cycle.
 
 The review/fix loop is shared across the code-v2 teams; see
-``shared/phases/documentation.py``. This module wires in the frontend team's
-models.
+``shared/phases/documentation.py``. This module wires in this team's models.
 """
 
 from __future__ import annotations
@@ -44,7 +43,7 @@ def run_documentation_phase(
         documentation agent.
     Postconditions:
         Returns a ``DocumentationPhaseResult``; delegates the loop to
-        ``run_documentation_phase_impl`` with the frontend team's models.
+        ``run_documentation_phase_impl`` with this team's models.
     """
     return run_documentation_phase_impl(
         llm,
