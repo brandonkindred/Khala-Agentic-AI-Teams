@@ -797,6 +797,43 @@ def test_propose_code_fix_raises_on_unparseable_response(monkeypatch) -> None:
     assert exc_info.value.__cause__ is not None
 
 
+def test_propose_code_fix_fails_open_preserving_patch_on_coercion_error(monkeypatch) -> None:
+    """A residual report-coercion error must NOT discard a usable patch. The LLM
+    returned parseable JSON with ``proposed_code``; if ``_coerce_report`` then
+    raises, ``propose_code_fix`` fails OPEN — it preserves the patch (aligned
+    stays False) instead of propagating a fail-closed AlignmentAuditError."""
+    from investment_team.strategy_lab.agents import alignment as alignment_module
+
+    class _StubStrandsAgent:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def __call__(self, _prompt: str) -> str:
+            return (
+                '{"aligned": false, "rationale": "r", "issues": [], '
+                '"proposed_code": "def fixed(): pass", "changes_made": "c"}'
+            )
+
+    monkeypatch.setattr(alignment_module, "Agent", _StubStrandsAgent)
+    monkeypatch.setattr(alignment_module, "get_strands_model", lambda *_a, **_k: None)
+
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("synthetic coercion failure")
+
+    monkeypatch.setattr(alignment_module, "_coerce_report", _boom)
+
+    agent = alignment_module.TradeAlignmentAgent()
+    findings = [
+        AlignmentFinding(trade_num=1, check_name="entry_signal", passed=False, severity="critical")
+    ]
+    report = agent.propose_code_fix(
+        spec=_spec(), code="code-v0", findings=findings, prior_attempts=None
+    )
+    assert report.aligned is False
+    assert report.proposed_code == "def fixed(): pass"  # patch survives the error
+    assert report.alignment_findings == findings
+
+
 # ---------------------------------------------------------------------------
 # `_coerce_report` standalone helper tests
 # ---------------------------------------------------------------------------

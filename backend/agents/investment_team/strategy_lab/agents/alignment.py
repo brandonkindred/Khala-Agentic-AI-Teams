@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -415,7 +416,30 @@ class TradeAlignmentAgent:
         # without this, the loop would dead-end at ``no_proposed_fix``
         # on the very first LLM over-claim and leave the deterministic
         # critical findings unrepaired.
-        report = _coerce_report(parsed, fallback_code=code, preserve_proposed_code=True)
+        try:
+            report = _coerce_report(parsed, fallback_code=code, preserve_proposed_code=True)
+        except Exception as exc:
+            # Fail OPEN, not closed: a residual coercion error must never discard a
+            # usable patch the LLM produced. Preserve ``proposed_code`` directly and
+            # let the orchestrator re-execute it (``aligned`` stays False).
+            logger.debug(
+                "Alignment fix report coercion degraded; preserving raw patch: %s",
+                exc,
+                exc_info=True,
+            )
+            proposed_raw = parsed.get("proposed_code")
+            report = TradeAlignmentReport(
+                aligned=False,
+                rationale=str(parsed.get("rationale", "")).strip(),
+                issues=[],
+                proposed_code=(
+                    str(proposed_raw).strip()
+                    if isinstance(proposed_raw, str) and proposed_raw.strip()
+                    else None
+                ),
+                predicted_aligned_after_fix=False,
+                changes_made=str(parsed.get("changes_made", "")).strip(),
+            )
         # Preserve the deterministic findings on the returned report so
         # the orchestrator's persistence path sees them regardless of
         # what the LLM echoed back.
@@ -448,7 +472,12 @@ def _format_findings_section(findings: List[AlignmentFinding], max_rows: int = 6
         head = f"[{f.severity.upper()}] {f.check_name}"
         if f.rule_id:
             head += f" ({f.rule_id})"
-        head += f" trade #{f.trade_num}"
+        # Render the trade as an explicit integer field, NOT a copyable
+        # ``trade #N`` token. The fix-proposer prompt asks the LLM to echo each
+        # issue's ``affected_trades`` (a List[int]); a ``trade #N`` string was
+        # being copied back verbatim, producing ``affected_trades=['trade #1']``
+        # and a ValidationError that failed the whole loop closed.
+        head += f" [trade_num={f.trade_num}]"
         if f.computed_value is not None and f.expected_value is not None:
             head += f" — computed={f.computed_value:.6g}, expected={f.expected_value:.6g}"
         lines.append(head)
@@ -456,6 +485,34 @@ def _format_findings_section(findings: List[AlignmentFinding], max_rows: int = 6
     if truncated:
         lines.append(f"  ... ({len(ordered) - max_rows} additional findings not shown) ...")
     return "\n".join(lines)
+
+
+def _coerce_affected_trades(value: Any) -> List[int]:
+    """Best-effort coercion of an ``affected_trades`` value into ``List[int]``.
+
+    Pre: ``value`` is whatever the LLM echoed — a list of ints, numeric strings,
+    or human tokens like ``"trade #1"``; a scalar; or ``None``.
+    Post: returns the integers recoverable from it, in order, dropping any element
+    no integer can be parsed from. Never raises. This is what keeps a metadata
+    drift (the LLM copying a ``trade #N`` string into a ``List[int]`` field) from
+    aborting the fix-proposer loop and discarding a usable ``proposed_code`` patch.
+    """
+    if value is None:
+        return []
+    items = value if isinstance(value, (list, tuple)) else [value]
+    out: List[int] = []
+    for item in items:
+        if isinstance(item, bool):
+            continue  # bool is an int subclass but never a trade number
+        if isinstance(item, int):
+            out.append(item)
+        elif isinstance(item, float) and item.is_integer():
+            out.append(int(item))
+        elif isinstance(item, str):
+            match = re.search(r"-?\d+", item)
+            if match:
+                out.append(int(match.group()))
+    return out
 
 
 def _coerce_report(
@@ -487,20 +544,32 @@ def _coerce_report(
     for raw in raw_issues:
         if not isinstance(raw, dict):
             continue
+        # Normalise the one field the LLM most often mis-types: ``affected_trades``
+        # is a List[int], but the findings ledger references human trade numbers the
+        # LLM tends to copy back as strings. Coerce BEFORE validation so the common
+        # case parses on the primary path and never trips the fallback.
+        raw = {**raw, "affected_trades": _coerce_affected_trades(raw.get("affected_trades"))}
         try:
             issues.append(AlignmentIssue.model_validate(raw))
         except Exception:
-            # Best-effort coercion — keep going on a single bad issue
-            issues.append(
-                AlignmentIssue(
-                    rule_type=str(raw.get("rule_type", "entry_rules")),
-                    description=str(raw.get("description", "(unparseable issue)")),
-                    severity=str(raw.get("severity", "warning"))
-                    if str(raw.get("severity", "warning")) in ("info", "warning", "critical")
-                    else "warning",  # type: ignore[arg-type]
-                    affected_trades=list(raw.get("affected_trades") or []),
+            # Best-effort coercion — keep going on a single bad issue. This branch
+            # must NEVER raise: if it did, the ``proposed_code`` extraction below
+            # would be skipped and a usable patch discarded. Drop an issue we still
+            # cannot construct rather than fail the whole report.
+            try:
+                issues.append(
+                    AlignmentIssue(
+                        rule_type=str(raw.get("rule_type", "entry_rules")),
+                        description=str(raw.get("description", "(unparseable issue)")),
+                        severity=str(raw.get("severity", "warning"))
+                        if str(raw.get("severity", "warning")) in ("info", "warning", "critical")
+                        else "warning",  # type: ignore[arg-type]
+                        affected_trades=_coerce_affected_trades(raw.get("affected_trades")),
+                    )
                 )
-            )
+            except Exception:
+                logger.debug("Dropping an unparseable alignment issue: %r", raw, exc_info=True)
+                continue
 
     proposed_code_raw = parsed.get("proposed_code")
     proposed_code = (
