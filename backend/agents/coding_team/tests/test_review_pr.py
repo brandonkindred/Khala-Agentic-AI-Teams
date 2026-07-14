@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from coding_team.github_source import (
+    MAX_REVIEW_COMMENTS_TRAVERSED,
     GitHubAPIError,
     GitHubClient,
     PullRequestDetail,
@@ -201,6 +202,21 @@ class TestListReviewComments:
         with pytest.raises(GitHubAPIError):
             client.list_review_comments("o", "r", 7)
 
+    def test_caps_traversal_at_max_review_comments_traversed(self) -> None:
+        overflow = [
+            {
+                "id": i,
+                "path": "a.py",
+                "line": 1,
+                "body": "x",
+                "html_url": f"https://example/comment/{i}",
+            }
+            for i in range(MAX_REVIEW_COMMENTS_TRAVERSED + 50)
+        ]
+        client = _client_with(lambda _req: httpx.Response(200, json=overflow))
+        comments = client.list_review_comments("o", "r", 7)
+        assert len(comments) == MAX_REVIEW_COMMENTS_TRAVERSED
+
 
 class TestListIssueComments:
     def test_pagination(self) -> None:
@@ -229,6 +245,15 @@ class TestListIssueComments:
         client = _client_with(lambda _req: httpx.Response(403, text="nope"))
         with pytest.raises(GitHubAPIError):
             client.list_issue_comments("o", "r", 7)
+
+    def test_caps_traversal_at_max_review_comments_traversed(self) -> None:
+        overflow = [
+            {"id": i, "body": "x", "html_url": f"https://example/issue-comment/{i}"}
+            for i in range(MAX_REVIEW_COMMENTS_TRAVERSED + 50)
+        ]
+        client = _client_with(lambda _req: httpx.Response(200, json=overflow))
+        comments = client.list_issue_comments("o", "r", 7)
+        assert len(comments) == MAX_REVIEW_COMMENTS_TRAVERSED
 
 
 # ---------------------------------------------------------------------------

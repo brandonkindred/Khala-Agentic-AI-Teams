@@ -28,6 +28,7 @@ DEFAULT_MAX_RETRIES = 3
 RATE_LIMIT_CAP_S = 60
 MAX_ISSUES_TRAVERSED = 1000
 MAX_REVIEW_THREADS_TRAVERSED = 2000
+MAX_REVIEW_COMMENTS_TRAVERSED = 5000
 
 # GraphQL query for review-thread resolution state: GitHub's REST API has no
 # "resolved" field on a review comment, so thread resolution (the "Resolve
@@ -809,17 +810,27 @@ class GitHubClient:
             - ``number`` names an existing pull request.
         Postconditions:
             - Returns one ``ReviewComment`` per existing review comment, in
-              GitHub's response order (oldest first). Raises ``GitHubAPIError``
-              on any non-2xx.
+              GitHub's response order (oldest first), bounded by
+              :data:`MAX_REVIEW_COMMENTS_TRAVERSED` to cap an unbounded
+              traversal on a PR with a pathological number of comments.
+              Raises ``GitHubAPIError`` on any non-2xx.
         """
         path = f"/repos/{owner}/{repo}/pulls/{number}/comments"
         params: Optional[dict[str, Any]] = {"per_page": 100}
         url: Optional[str] = path
         out: list[ReviewComment] = []
+        seen = 0
         while url:
             response = self._check(self._request("GET", url, params=params))
             params = None
             for item in response.json() or []:
+                seen += 1
+                if seen > MAX_REVIEW_COMMENTS_TRAVERSED:
+                    logger.warning(
+                        "list_review_comments hit MAX_REVIEW_COMMENTS_TRAVERSED=%d; stopping",
+                        MAX_REVIEW_COMMENTS_TRAVERSED,
+                    )
+                    return out
                 out.append(_review_comment_from_payload(item))
             url = _parse_next_link(response.headers.get("Link"))
         return out
@@ -836,17 +847,27 @@ class GitHubClient:
             - ``number`` names an existing issue or pull request.
         Postconditions:
             - Returns one ``IssueComment`` per existing conversation comment,
-              in GitHub's response order (oldest first). Raises
-              ``GitHubAPIError`` on any non-2xx.
+              in GitHub's response order (oldest first), bounded by
+              :data:`MAX_REVIEW_COMMENTS_TRAVERSED` to cap an unbounded
+              traversal on a PR with a pathological number of comments.
+              Raises ``GitHubAPIError`` on any non-2xx.
         """
         path = f"/repos/{owner}/{repo}/issues/{number}/comments"
         params: Optional[dict[str, Any]] = {"per_page": 100}
         url: Optional[str] = path
         out: list[IssueComment] = []
+        seen = 0
         while url:
             response = self._check(self._request("GET", url, params=params))
             params = None
             for item in response.json() or []:
+                seen += 1
+                if seen > MAX_REVIEW_COMMENTS_TRAVERSED:
+                    logger.warning(
+                        "list_issue_comments hit MAX_REVIEW_COMMENTS_TRAVERSED=%d; stopping",
+                        MAX_REVIEW_COMMENTS_TRAVERSED,
+                    )
+                    return out
                 out.append(_issue_comment_from_payload(item))
             url = _parse_next_link(response.headers.get("Link"))
         return out
@@ -1161,6 +1182,7 @@ __all__ = [
     "Issue",
     "IssueComment",
     "MAX_ISSUES_TRAVERSED",
+    "MAX_REVIEW_COMMENTS_TRAVERSED",
     "MAX_REVIEW_THREADS_TRAVERSED",
     "NotAnIssueError",
     "PullRequest",

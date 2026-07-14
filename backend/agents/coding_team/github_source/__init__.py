@@ -8,6 +8,7 @@ the existing orchestrator handle the work.
 
 from .client import (
     MAX_ISSUES_TRAVERSED,
+    MAX_REVIEW_COMMENTS_TRAVERSED,
     MAX_REVIEW_THREADS_TRAVERSED,
     GitHubAPIError,
     GitHubClient,
@@ -49,6 +50,7 @@ from .repo_reader import GitHubRepoReader
 
 __all__ = [
     "MAX_ISSUES_TRAVERSED",
+    "MAX_REVIEW_COMMENTS_TRAVERSED",
     "MAX_REVIEW_THREADS_TRAVERSED",
     "ExistingComment",
     "GitHubAPIError",
