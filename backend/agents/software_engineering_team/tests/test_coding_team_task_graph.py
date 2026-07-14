@@ -243,6 +243,30 @@ def test_get_next_eligible_subtask() -> None:
     assert nxt.id == "s2"  # s1 merged → s2 eligible, s3 still blocked
 
 
+def test_get_next_eligible_subtask_skips_in_flight() -> None:
+    """IN_PROGRESS and IN_REVIEW subtasks are not re-selected; the next TO_DO subtask is returned."""
+    from software_engineering_team.coding_team.models import Subtask
+
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task(
+        "t1",
+        title="T1",
+        subtasks=[
+            Subtask(id="s1", title="S1", status=TaskStatus.MERGED),
+            Subtask(id="s2", title="S2", dependencies=["s1"], status=TaskStatus.IN_PROGRESS),
+            Subtask(id="s3", title="S3", dependencies=["s1"], status=TaskStatus.TO_DO),
+        ],
+    )
+    nxt = tg.get_next_eligible_subtask("t1")
+    assert nxt.id == "s3"  # s2 is in flight → skip it, s3 is the next TO_DO
+
+    tg.get_task("t1").subtasks[1].status = TaskStatus.IN_REVIEW
+    assert tg.get_next_eligible_subtask("t1").id == "s3"
+
+    tg.get_task("t1").subtasks[2].dependencies = ["s2"]
+    assert tg.get_next_eligible_subtask("t1") is None  # s2 in review, s3 blocked on s2
+
+
 def test_missing_task_operations_are_safe_noops() -> None:
     """Mutating operations on an unknown task id return falsy/None instead of raising."""
     tg = TaskGraphService(job_id="j1")
