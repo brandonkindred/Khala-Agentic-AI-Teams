@@ -7,6 +7,7 @@ import pytest
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
 
 from llm_service import DummyLLMClient
+from software_engineering_team.shared import llm as llm_mod
 from software_engineering_team.shared.development_plan_writer import write_architecture_plan
 from software_engineering_team.shared.models import ProductRequirements
 from software_engineering_team.tests.conftest import _patch_fenced_response, _strands_model_double
@@ -174,3 +175,50 @@ def test_architecture_agent_recovers_fenced_json_response(
     assert len(result.architecture.components) == 1
     assert result.architecture.components[0].name == "API Gateway"
     assert result.summary == "Fenced architecture summary."
+
+
+def test_architecture_agent_falls_back_to_synthetic_on_unrecoverable_response(
+    monkeypatch, requirements: ProductRequirements
+) -> None:
+    """A genuinely unparseable response (no braces, no fences, no matching
+    prose-prefix pattern) exhausts every ``extract_json_from_response``
+    recovery strategy, so ``complete_json_with_continuation`` raises
+    ``LLMJsonParseError``. This is the one scenario that actually drives the
+    agent's own ``except LLMPermanentError:`` clause (a subclass
+    relationship, not a bare re-raise) into the synthetic-architecture
+    fallback -- distinct from both the shape-check fallback (valid JSON,
+    wrong shape) and the fenced-recovery success path covered above.
+    """
+
+    class _UnparseableAgent:
+        def __call__(self, prompt, **kwargs):
+            return "I cannot produce a structured response for this request."
+
+    monkeypatch.setattr(llm_mod, "Agent", lambda *a, **kw: _UnparseableAgent())
+    agent = ArchitectureExpertAgent(llm_client=_strands_model_double())
+    result = agent.run(ArchitectureInput(requirements=requirements))
+    assert result.architecture.overview
+    assert "Task Manager API" in result.architecture.overview
+    assert len(result.architecture.components) >= 1
+
+
+def test_architecture_agent_falls_back_to_synthetic_on_non_dict_recovery(
+    monkeypatch, requirements: ProductRequirements
+) -> None:
+    """A fenced top-level JSON *array* (not an object) parses successfully
+    via ``extract_json_from_response`` -- no exception is raised -- but the
+    agent's own ``isinstance(data, dict)`` guard must still treat it as a
+    parse failure and degrade to the synthetic-architecture fallback instead
+    of crashing on ``data.get(...)``.
+    """
+
+    class _ArrayAgent:
+        def __call__(self, prompt, **kwargs):
+            return '```json\n["not", "an", "object"]\n```'
+
+    monkeypatch.setattr(llm_mod, "Agent", lambda *a, **kw: _ArrayAgent())
+    agent = ArchitectureExpertAgent(llm_client=_strands_model_double())
+    result = agent.run(ArchitectureInput(requirements=requirements))
+    assert result.architecture.overview
+    assert "Task Manager API" in result.architecture.overview
+    assert len(result.architecture.components) >= 1

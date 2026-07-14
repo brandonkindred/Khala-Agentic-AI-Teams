@@ -8,6 +8,7 @@ from software_engineering_team.ai_agent_development_team.models import (
     IntakeResult,
     Phase,
     ReviewResult,
+    ToolAgentKind,
 )
 from software_engineering_team.ai_agent_development_team.orchestrator import (
     AIAgentDevelopmentTeamLead,
@@ -187,6 +188,40 @@ def test_run_planning_recovers_fenced_json_response(monkeypatch) -> None:
     assert len(result.microtasks) == 1
     assert result.microtasks[0].id == "mt-fenced"
     assert result.summary == "Planned from fenced response"
+
+
+def test_run_planning_skips_invalid_items_and_defaults_unknown_tool_agent(monkeypatch) -> None:
+    """A microtask entry missing ``id`` is dropped, and an unrecognized
+    ``tool_agent`` value falls back to ``ToolAgentKind.GENERAL`` instead of
+    raising."""
+    _patch_fenced_response(
+        monkeypatch,
+        {
+            "microtasks": [
+                {"title": "No id, should be skipped"},
+                "not-a-dict-should-be-skipped",
+                {
+                    "id": "mt-unknown-kind",
+                    "title": "Unknown tool agent kind",
+                    "description": "tool_agent value the model invented",
+                    "tool_agent": "not_a_real_kind",
+                },
+            ],
+            "summary": "Planned with one bad and one recoverable entry",
+        },
+    )
+    intake_result = IntakeResult(system_goal="Build a spec-driven support agent system")
+
+    result = run_planning(
+        llm=_strands_model_double(),
+        task=_build_task(),
+        intake_result=intake_result,
+        spec_content="Spec text",
+    )
+
+    assert len(result.microtasks) == 1
+    assert result.microtasks[0].id == "mt-unknown-kind"
+    assert result.microtasks[0].tool_agent == ToolAgentKind.GENERAL
 
 
 def test_run_deliver_recovers_fenced_json_response(monkeypatch) -> None:
