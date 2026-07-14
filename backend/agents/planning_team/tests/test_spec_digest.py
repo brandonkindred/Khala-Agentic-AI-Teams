@@ -1,6 +1,7 @@
 """Unit tests for planning_team.spec_digest (section-aware map-reduce)."""
 
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -348,3 +349,70 @@ def test_map_reduce_compact_failure_uses_uncompacted_section(monkeypatch):
     # compact_text raised -> fell back to the original chunk, still mapped (no exception).
     assert mapped == [9000]
     assert out == {"parts": [{"ok": 1}]}
+
+
+# --- parallelism ------------------------------------------------------------
+
+
+def test_map_parallelism_delegates_to_env_positive_int(monkeypatch):
+    monkeypatch.setenv("PLANNING_MAP_PARALLELISM", "7")
+    assert spec_digest._map_parallelism() == 7
+    monkeypatch.setenv("PLANNING_MAP_PARALLELISM", "garbage")
+    assert spec_digest._map_parallelism() == spec_digest._DEFAULT_MAP_PARALLELISM
+    monkeypatch.delenv("PLANNING_MAP_PARALLELISM", raising=False)
+    assert spec_digest._map_parallelism() == spec_digest._DEFAULT_MAP_PARALLELISM
+
+
+def test_map_reduce_max_workers_threads_through_to_parallel_map(monkeypatch):
+    llm = MagicMock()
+    llm.get_max_context_tokens.return_value = 1000  # floor 8000 chars
+    text = multi_heading_doc(4, 5000)  # multiple sections -> parallel path
+
+    captured = {}
+
+    def fake_parallel_map(items, fn, *, max_workers, skip_none):
+        captured["max_workers"] = max_workers
+        captured["skip_none"] = skip_none
+        return [fn(item) for item in items]
+
+    monkeypatch.setattr(spec_digest, "parallel_map", fake_parallel_map)
+
+    out = map_reduce(
+        text,
+        llm,
+        content_description="x",
+        map_fn=lambda *a: {"ok": 1},
+        reduce_fn=_identity_reduce,
+        fallback={},
+        max_workers=3,
+    )
+    assert captured["max_workers"] == 3
+    assert captured["skip_none"] is False
+    assert len(out["parts"]) >= 2
+
+
+def test_map_reduce_runs_sections_across_multiple_threads():
+    """With max_workers > 1 and enough sections, map_fn actually runs on >1 thread."""
+    llm = MagicMock()
+    llm.get_max_context_tokens.return_value = 1000  # floor 8000 chars
+    text = multi_heading_doc(8, 5000)
+
+    thread_names = []
+    lock = threading.Lock()
+
+    def _map(section, _llm, idx, total):
+        with lock:
+            thread_names.append(threading.current_thread().name)
+        return {"idx": idx}
+
+    map_reduce(
+        text,
+        llm,
+        content_description="x",
+        map_fn=_map,
+        reduce_fn=_identity_reduce,
+        fallback={},
+        max_workers=4,
+    )
+    assert len(thread_names) == 8
+    assert len(set(thread_names)) > 1

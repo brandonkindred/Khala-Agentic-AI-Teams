@@ -17,7 +17,7 @@ from branding_team.agents import (
     make_ownership_definer,
     make_training_planner,
 )
-from branding_team.graphs.shared import build_agent
+from branding_team.graphs.shared import build_agent, build_fan_out_fan_in
 
 
 def build_phase5_graph() -> Graph:
@@ -36,17 +36,6 @@ def build_phase5_graph() -> Graph:
     """
     builder = GraphBuilder()
 
-    # ── Fan-out: parallel specialist nodes ──────────────────────────
-    ownership = builder.add_node(make_ownership_definer(), node_id="ownership_definer")
-    approval = builder.add_node(
-        make_approval_workflow_designer(), node_id="approval_workflow_designer"
-    )
-    wiki = builder.add_node(make_asset_wiki_planner(), node_id="asset_wiki_planner")
-    training = builder.add_node(make_training_planner(), node_id="training_planner")
-    kpi = builder.add_node(make_kpi_designer(), node_id="kpi_designer")
-    evolution = builder.add_node(make_evolution_framer(), node_id="evolution_framer")
-    rules = builder.add_node(make_brand_rules_codifier(), node_id="brand_rules_codifier")
-
     # ── Fan-in: governance compositor ───────────────────────────────
     compositor_agent = build_agent(
         name="governance_compositor",
@@ -61,22 +50,19 @@ def build_phase5_graph() -> Graph:
     )
     compositor = builder.add_node(compositor_agent, node_id="governance_compositor")
 
-    # ── Entry points (all specialists start in parallel) ────────────
-    builder.set_entry_point("ownership_definer")
-    builder.set_entry_point("approval_workflow_designer")
-    builder.set_entry_point("asset_wiki_planner")
-    builder.set_entry_point("training_planner")
-    builder.set_entry_point("kpi_designer")
-    builder.set_entry_point("evolution_framer")
-    builder.set_entry_point("brand_rules_codifier")
-
-    # ── Edges: every specialist feeds into the compositor ───────────
-    builder.add_edge(ownership, compositor)
-    builder.add_edge(approval, compositor)
-    builder.add_edge(wiki, compositor)
-    builder.add_edge(training, compositor)
-    builder.add_edge(kpi, compositor)
-    builder.add_edge(evolution, compositor)
-    builder.add_edge(rules, compositor)
+    # ── Fan-out: parallel specialist nodes, wired into compositor ───
+    build_fan_out_fan_in(
+        builder,
+        [
+            ("ownership_definer", make_ownership_definer),
+            ("approval_workflow_designer", make_approval_workflow_designer),
+            ("asset_wiki_planner", make_asset_wiki_planner),
+            ("training_planner", make_training_planner),
+            ("kpi_designer", make_kpi_designer),
+            ("evolution_framer", make_evolution_framer),
+            ("brand_rules_codifier", make_brand_rules_codifier),
+        ],
+        compositor,
+    )
 
     return builder.build()

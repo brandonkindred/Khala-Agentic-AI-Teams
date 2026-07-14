@@ -17,6 +17,7 @@ from branding_team.agents import (
     make_purpose_vision_writer,
     make_values_articulator,
 )
+from branding_team.graphs.shared import build_fan_out_fan_in
 
 
 def build_phase1_graph() -> Graph:
@@ -41,29 +42,22 @@ def build_phase1_graph() -> Graph:
     """
     builder = GraphBuilder()
 
-    # --- fan-out: independent specialist nodes ---
-    discovery = builder.add_node(make_discovery_auditor(), node_id="discovery_auditor")
-    purpose = builder.add_node(make_purpose_vision_writer(), node_id="purpose_vision_writer")
-    values = builder.add_node(make_values_articulator(), node_id="values_articulator")
-    audience = builder.add_node(make_audience_segmenter(), node_id="audience_segmenter")
-    diffmap = builder.add_node(make_differentiation_mapper(), node_id="differentiation_mapper")
-
-    # --- fan-in: synthesizer depends on all five ---
+    # --- fan-in: synthesizer depends on all five specialist nodes ---
     synthesizer = builder.add_node(
         make_positioning_synthesizer(), node_id="positioning_synthesizer"
     )
 
-    builder.add_edge(discovery, synthesizer)
-    builder.add_edge(purpose, synthesizer)
-    builder.add_edge(values, synthesizer)
-    builder.add_edge(audience, synthesizer)
-    builder.add_edge(diffmap, synthesizer)
-
-    # --- all fan-out nodes are entry points (parallel start) ---
-    builder.set_entry_point("discovery_auditor")
-    builder.set_entry_point("purpose_vision_writer")
-    builder.set_entry_point("values_articulator")
-    builder.set_entry_point("audience_segmenter")
-    builder.set_entry_point("differentiation_mapper")
+    # --- fan-out: independent specialist nodes, all wired into synthesizer ---
+    build_fan_out_fan_in(
+        builder,
+        [
+            ("discovery_auditor", make_discovery_auditor),
+            ("purpose_vision_writer", make_purpose_vision_writer),
+            ("values_articulator", make_values_articulator),
+            ("audience_segmenter", make_audience_segmenter),
+            ("differentiation_mapper", make_differentiation_mapper),
+        ],
+        synthesizer,
+    )
 
     return builder.build()

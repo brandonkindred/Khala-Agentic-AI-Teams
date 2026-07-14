@@ -1127,3 +1127,8 @@ Token reserves the spec-digestion engine carves out of the model context before 
 per-section prompt — for the phase prompt template/headers and the model's response,
 respectively. Defaults `6000` / `4096`; raise them for prompt-heavy phases or models that
 need more response headroom. Garbage or non-positive values fall back to the defaults.
+
+### PLANNING_MAP_PARALLELISM
+Max concurrent per-section map-phase LLM calls in the spec-digestion engine
+(`planning_team/spec_digest.py`'s `map_reduce`). Default `4`, floor `1` (`1` runs sections
+sequentially). Results merge in deterministic (section) order regardless of completion order.
