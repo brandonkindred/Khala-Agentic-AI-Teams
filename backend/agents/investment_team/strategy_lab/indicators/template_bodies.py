@@ -51,9 +51,10 @@ def _assert_resolved(text: str) -> str:
     m = _UNRESOLVED_MARKER_RE.search(text)
     if m is not None:
         raise ValueError(
-            f"unresolved template marker near {text[m.start():m.start() + 24]!r}; "
-            "every %BARS%/%MISSING%/%CACHE_KEY%/%SELECT%/%CLOSE(...)% token must be "
-            "substituted before the body is emitted"
+            f"unresolved template marker {text[m.start():m.start() + 24]!r} "
+            "survived substitution; every %<MARKER>% token (e.g. %BARS%, "
+            "%MISSING%, %CACHE_KEY%, %SELECT%, %CLOSE(...)%) must be substituted "
+            "before the body is emitted"
         )
     return text
 
@@ -250,6 +251,14 @@ def render_macd_body(
     per-node compile time with int literals; synthesis does it once at
     import time with the *string* ``"fast"``/etc., turning each placeholder
     into its own bound parameter name).
+    The returned body text calls ``math.isnan``/``math.isinf`` and (only on
+    the cold-rebuild path) ``deque()`` unqualified — the emitted module must
+    provide ``import math`` unconditionally and ``from collections import
+    deque`` whenever this body is used; both compilers already guarantee
+    this (factors emits ``import math`` unconditionally and ``deque`` when
+    any ``MACDSignal`` node is present; synthesis emits ``import math``
+    unconditionally and ``deque`` when the spec uses ``macd``) — a future
+    caller of this renderer must do the same.
     Postconditions: returns left-aligned Python source computing all three
     MACD outputs and returning the one ``select_expr`` names; the ``{fast}``/
     ``{slow}``/``{signal}`` placeholders are NOT resolved here.

@@ -352,7 +352,7 @@ class _Compiler:
         self._node_id_memo: Dict[int, str] = {}
         self._synthesized: List[BaseModel] = []
 
-    def _nid(self, node: BaseModel) -> str:
+    def _node_id_cached(self, node: BaseModel) -> str:
         """Memoised ``_node_id`` keyed on object identity.
 
         Postconditions: returns ``_node_id(node)``; repeated calls for the
@@ -387,7 +387,7 @@ class _Compiler:
     # ------------------------------------------------------------------
 
     def _visit(self, node: BaseModel) -> str:
-        node_id = self._nid(node)
+        node_id = self._node_id_cached(node)
         if node_id in self._methods:
             return node_id
 
@@ -607,7 +607,7 @@ class _Compiler:
         # 4-space here at the class-body-pre-indent level).
         sizing_indented = textwrap.indent(sizing_src.rstrip("\n"), "    ")
 
-        genome_hash = self._nid(self.genome)
+        genome_hash = self._node_id_cached(self.genome)
         hypothesis = (self.genome.hypothesis or "").replace('"""', "'''")
 
         # Build the class body at column 0, then indent the whole thing 4
