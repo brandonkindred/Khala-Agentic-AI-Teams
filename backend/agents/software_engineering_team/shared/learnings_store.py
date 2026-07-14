@@ -111,14 +111,20 @@ def _entry_to_row(entry: LearningEntry) -> tuple:
 
     Pure (no I/O): used both by :func:`upsert_learning` (single upsert) and by
     :func:`upsert_learnings_batch` (``executemany``) so the two paths cannot
-    drift on column order or truncation/fingerprint logic.
+    drift on column order, precondition enforcement, or truncation/fingerprint
+    logic.
 
     Preconditions:
-        - ``entry.pattern`` is a non-empty string.
+        - ``entry.pattern`` is a non-empty string — enforced here, not just
+          documented, so every caller (single or batch) gets the same guarantee.
     Postconditions:
         - Returns an 8-element tuple in ``_UPSERT_SQL`` column order, with each
           text field truncated to 8000 chars (see the tsvector note below).
+    Raises:
+        - ``ValueError`` if ``entry.pattern`` is empty or whitespace-only.
     """
+    if not entry.pattern or not entry.pattern.strip():
+        raise ValueError("pattern must be a non-empty string")
     # Bound the text feeding se_learnings.search_tsv (a GENERATED tsvector over
     # ``pattern || ' ' || trigger``): Postgres rejects a tsvector larger than ~1MB,
     # which would make the INSERT raise and the learning be silently dropped.
@@ -159,9 +165,10 @@ def upsert_learning(
         - A repeat of an existing ``(pattern, trigger, category)`` increments
           its ``occurrences`` and refreshes ``last_seen`` and ``counter_measure``
           rather than creating a duplicate.
+    Raises:
+        - ``ValueError`` if ``pattern`` is empty or whitespace-only (via
+          :func:`_entry_to_row`).
     """
-    if not pattern or not pattern.strip():
-        raise ValueError("pattern must be a non-empty string")
     row = _entry_to_row(
         LearningEntry(
             pattern=pattern,
@@ -191,10 +198,14 @@ def upsert_learnings_batch(entries: Sequence[LearningEntry]) -> int:
     logged at DEBUG) — a flush failure never raises into the caller.
 
     Preconditions:
-        - Every element of ``entries`` has a non-empty ``pattern``.
+        - Every element of ``entries`` has a non-empty ``pattern`` — enforced
+          by :func:`_entry_to_row` before any Postgres round trip, so an
+          invalid entry anywhere in the batch fails the whole call atomically.
     Postconditions:
         - Returns the number of entries attempted; 0 when ``entries`` is empty,
           Postgres is disabled, or the write failed.
+    Raises:
+        - ``ValueError`` if any entry's ``pattern`` is empty or whitespace-only.
     """
     if not entries:
         return 0

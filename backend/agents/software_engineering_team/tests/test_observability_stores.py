@@ -63,6 +63,16 @@ def test_upsert_batch_empty_is_noop() -> None:
     assert learnings_store.upsert_learnings_batch([]) == 0
 
 
+def test_upsert_batch_rejects_blank_pattern() -> None:
+    """upsert_learnings_batch rejects a blank pattern anywhere in the batch."""
+    entries = [
+        learnings_store.LearningEntry(pattern="ok"),
+        learnings_store.LearningEntry(pattern="   "),
+    ]
+    with pytest.raises(ValueError):
+        learnings_store.upsert_learnings_batch(entries)
+
+
 def test_upsert_batch_noop_without_postgres() -> None:
     """upsert_learnings_batch is a no-op returning 0 when Postgres is unconfigured."""
     entries = [
