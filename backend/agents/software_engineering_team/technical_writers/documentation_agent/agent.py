@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-
-from strands import Agent
 
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
@@ -21,6 +18,7 @@ from software_engineering_team.shared.git_utils import (
     merge_branch,
     write_files_and_commit,
 )
+from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import DocumentationInput, DocumentationOutput, DocumentationStatus
 from .prompts import (
@@ -218,10 +216,7 @@ class DocumentationAgent:
             if getattr(input_data, "is_final_review", False):
                 readme_prompt = readme_prompt + DOCUMENTATION_FINAL_REVIEW_SUFFIX
             prompt = "\n".join(readme_context)
-            agent = Agent(model=self._model, system_prompt=readme_prompt)
-            result = agent(prompt)
-            raw = str(result).strip()
-            data = json.loads(raw)
+            data = complete_json_with_continuation(self._model, prompt, system_prompt=readme_prompt)
 
             readme_content = data.get("readme_content", "")
             readme_changed = bool(data.get("readme_changed", False))
@@ -302,10 +297,9 @@ class DocumentationAgent:
             if getattr(input_data, "is_final_review", False):
                 contrib_prompt = contrib_prompt + DOCUMENTATION_CONTRIBUTORS_FINAL_REVIEW_SUFFIX
             prompt = "\n".join(contrib_context)
-            agent = Agent(model=self._model, system_prompt=contrib_prompt)
-            result = agent(prompt)
-            raw = str(result).strip()
-            data = json.loads(raw)
+            data = complete_json_with_continuation(
+                self._model, prompt, system_prompt=contrib_prompt
+            )
 
             contributors_content = data.get("contributors_content", "")
             contributors_changed = bool(data.get("contributors_changed", False))

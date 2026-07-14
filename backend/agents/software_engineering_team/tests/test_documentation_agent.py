@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from software_engineering_team.technical_writers.documentation_agent import agent as doc_agent_mod
@@ -15,29 +14,26 @@ from software_engineering_team.technical_writers.documentation_agent.models impo
     DocumentationOutput,
     DocumentationStatus,
 )
+from software_engineering_team.tests.conftest import _patch_fenced_response, _strands_model_double
 
 
-class _FakeAgent:
-    """Simulates a strands Agent. Returns canned JSON for sequential calls."""
+class _FakeCompleteJson:
+    """Simulates complete_json_with_continuation. Returns canned dicts for sequential calls."""
 
     def __init__(self, payloads):
         self._payloads = list(payloads)
         self.calls = []
 
-    def __call__(self, prompt):  # noqa: D401
+    def __call__(self, model, prompt, *, system_prompt=None, **kwargs):
         self.calls.append(prompt)
         if self._payloads:
-            return json.dumps(self._payloads.pop(0))
-        return "{}"
+            return self._payloads.pop(0)
+        return {}
 
 
-def _patch_agent(monkeypatch, payloads):
-    fake = _FakeAgent(payloads)
-
-    def _factory(*args, **kwargs):
-        return fake
-
-    monkeypatch.setattr(doc_agent_mod, "Agent", _factory)
+def _patch_complete_json(monkeypatch, payloads):
+    fake = _FakeCompleteJson(payloads)
+    monkeypatch.setattr(doc_agent_mod, "complete_json_with_continuation", fake)
     monkeypatch.setattr(doc_agent_mod, "get_strands_model", lambda _key=None, **_kw: object())
     return fake
 
@@ -75,7 +71,7 @@ def test_doc_agent_init_accepts_strands_model_instance(monkeypatch) -> None:
 
 def test_doc_agent_run_happy_path(monkeypatch) -> None:
     """Both LLM calls (README + CONTRIBUTORS) succeed and changes are recorded."""
-    _patch_agent(
+    _patch_complete_json(
         monkeypatch,
         [
             {
@@ -126,7 +122,7 @@ def test_doc_agent_run_happy_path(monkeypatch) -> None:
 
 
 def test_doc_agent_run_truncates_long_codebase(monkeypatch) -> None:
-    fake = _patch_agent(
+    fake = _patch_complete_json(
         monkeypatch,
         [
             {"readme_content": "", "readme_changed": False, "summary": "no-op"},
@@ -147,7 +143,7 @@ def test_doc_agent_run_truncates_long_codebase(monkeypatch) -> None:
 
 def test_doc_agent_run_forces_creation_when_no_readme_existed(monkeypatch) -> None:
     """If README didn't exist and LLM returned content, readme_changed is forced True."""
-    _patch_agent(
+    _patch_complete_json(
         monkeypatch,
         [
             {"readme_content": "# new\n", "readme_changed": False, "summary": "create"},
@@ -168,7 +164,7 @@ def test_doc_agent_run_forces_creation_when_no_readme_existed(monkeypatch) -> No
 
 def test_doc_agent_run_detects_real_diff(monkeypatch) -> None:
     """When LLM returns readme_changed=False but text actually differs, forces True."""
-    _patch_agent(
+    _patch_complete_json(
         monkeypatch,
         [
             {"readme_content": "different", "readme_changed": False, "summary": "actually changed"},
@@ -193,20 +189,18 @@ def test_doc_agent_run_readme_llm_error_returns_partial(monkeypatch) -> None:
         def __init__(self):
             self.calls = 0
 
-        def __call__(self, prompt):
+        def __call__(self, model, prompt, *, system_prompt=None, **kwargs):
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("boom")
-            return json.dumps(
-                {
-                    "contributors_content": "* alice",
-                    "contributors_changed": True,
-                    "summary": "ok",
-                }
-            )
+            return {
+                "contributors_content": "* alice",
+                "contributors_changed": True,
+                "summary": "ok",
+            }
 
     fake = _ErrorReadmeFake()
-    monkeypatch.setattr(doc_agent_mod, "Agent", lambda *a, **kw: fake)
+    monkeypatch.setattr(doc_agent_mod, "complete_json_with_continuation", fake)
     monkeypatch.setattr(doc_agent_mod, "get_strands_model", lambda _k=None, **_kw: object())
 
     a = DocumentationAgent()
@@ -220,20 +214,18 @@ def test_doc_agent_run_contributors_llm_error(monkeypatch) -> None:
         def __init__(self):
             self.calls = 0
 
-        def __call__(self, prompt):
+        def __call__(self, model, prompt, *, system_prompt=None, **kwargs):
             self.calls += 1
             if self.calls == 1:
-                return json.dumps(
-                    {
-                        "readme_content": "ok",
-                        "readme_changed": True,
-                        "summary": "readme good",
-                    }
-                )
+                return {
+                    "readme_content": "ok",
+                    "readme_changed": True,
+                    "summary": "readme good",
+                }
             raise RuntimeError("bad json")
 
     fake = _ErrFake()
-    monkeypatch.setattr(doc_agent_mod, "Agent", lambda *a, **kw: fake)
+    monkeypatch.setattr(doc_agent_mod, "complete_json_with_continuation", fake)
     monkeypatch.setattr(doc_agent_mod, "get_strands_model", lambda _k=None, **_kw: object())
 
     a = DocumentationAgent()
@@ -244,7 +236,7 @@ def test_doc_agent_run_contributors_llm_error(monkeypatch) -> None:
 
 def test_doc_agent_final_review_appends_suffix(monkeypatch) -> None:
     """When is_final_review=True, prompts include the FINAL_REVIEW suffixes."""
-    fake = _patch_agent(
+    fake = _patch_complete_json(
         monkeypatch,
         [
             {"readme_content": "x", "readme_changed": True, "summary": "f"},
@@ -271,7 +263,7 @@ def test_doc_agent_final_review_appends_suffix(monkeypatch) -> None:
 
 def test_doc_agent_run_full_workflow_no_changes(monkeypatch, tmp_path: Path) -> None:
     """No-change path: branch created, generate, no files to write, cleanup."""
-    _patch_agent(
+    _patch_complete_json(
         monkeypatch,
         [
             {"readme_content": "", "readme_changed": False, "summary": "nothing"},
@@ -324,7 +316,7 @@ def test_doc_agent_run_full_workflow_branch_create_fails(monkeypatch, tmp_path: 
 
 def test_doc_agent_run_full_workflow_writes_and_merges(monkeypatch, tmp_path: Path) -> None:
     """Happy path: files written, commit, merge OK."""
-    _patch_agent(
+    _patch_complete_json(
         monkeypatch,
         [
             {
@@ -384,7 +376,7 @@ def test_doc_agent_run_full_workflow_writes_and_merges(monkeypatch, tmp_path: Pa
 
 
 def test_doc_agent_run_full_workflow_commit_fails(monkeypatch, tmp_path: Path) -> None:
-    _patch_agent(
+    _patch_complete_json(
         monkeypatch,
         [
             {"readme_content": "x", "readme_changed": True, "summary": "ok"},
@@ -412,7 +404,7 @@ def test_doc_agent_run_full_workflow_commit_fails(monkeypatch, tmp_path: Path) -
 
 
 def test_doc_agent_run_full_workflow_merge_fails(monkeypatch, tmp_path: Path) -> None:
-    _patch_agent(
+    _patch_complete_json(
         monkeypatch,
         [
             {"readme_content": "x", "readme_changed": True, "summary": "ok"},
@@ -526,7 +518,7 @@ def test_doc_agent_run_final_review_uses_extensions(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(doc_agent_mod, "create_feature_branch", lambda *a, **kw: (True, "docs/f"))
     monkeypatch.setattr(doc_agent_mod, "checkout_branch", lambda *a, **kw: (True, ""))
     monkeypatch.setattr(doc_agent_mod, "delete_branch", lambda *a, **kw: (True, ""))
-    _patch_agent(
+    _patch_complete_json(
         monkeypatch,
         [
             {"readme_content": "", "readme_changed": False, "summary": "ok"},
@@ -570,3 +562,53 @@ def test_doc_agent_run_final_review_read_codebase_fails(monkeypatch, tmp_path: P
         completed_task_ids=[],
     )
     assert "Final review skipped" in out.summary
+
+
+# The README and CONTRIBUTORS call sites in run() now route through
+# complete_json_with_continuation() instead of a bare json.loads(). These two tests
+# exercise the real recovery path (Agent is mocked at the shared/llm.py level, not at
+# complete_json_with_continuation itself) to prove a markdown-fenced response no longer
+# crashes the agent.
+
+
+def test_doc_agent_run_readme_recovers_fenced_json_response(monkeypatch) -> None:
+    """README call site: a markdown-fenced JSON response recovers via
+    extract_json_from_response instead of leaving readme_summary on the fail-open
+    "skipped due to error" path."""
+    _patch_fenced_response(
+        monkeypatch,
+        {
+            "readme_content": "# Fenced Project\n",
+            "readme_changed": True,
+            "summary": "fenced readme ok",
+            "suggested_commit_message": "docs: fenced update",
+        },
+    )
+    a = DocumentationAgent(llm_client=_strands_model_double())
+    out = a.run(DocumentationInput(repo_path="/tmp/x", task_id="t1", existing_readme="old"))
+    assert out.readme_changed is True
+    assert out.readme_content == "# Fenced Project\n"
+    assert "fenced readme ok" in out.summary
+    assert "skipped due to error" not in out.summary
+
+
+def test_doc_agent_run_contributors_recovers_fenced_json_response(monkeypatch) -> None:
+    """CONTRIBUTORS call site: a markdown-fenced JSON response recovers via
+    extract_json_from_response instead of leaving contributors_summary on the fail-open
+    "skipped due to error" path."""
+    _patch_fenced_response(
+        monkeypatch,
+        {
+            "contributors_content": "* alice\n* bob",
+            "contributors_changed": True,
+            "summary": "fenced contributors ok",
+        },
+    )
+    a = DocumentationAgent(llm_client=_strands_model_double())
+    out = a.run(
+        DocumentationInput(repo_path="/tmp/x", task_id="t1", existing_contributors="* alice")
+    )
+    assert out.contributors_changed is True
+    assert out.contributors_content == "* alice\n* bob"
+    assert "fenced contributors ok" in out.summary
+    assert "skipped due to error" not in out.summary
