@@ -488,14 +488,19 @@ def test_windowed_vwap_zero_volume_window_falls_back_to_avg_close() -> None:
     # When the trailing window has zero total volume the ratio is undefined; the
     # runtime IndicatorRegistry.vwap falls back to the window's average close, so
     # the probe wrapper must too (otherwise it returns NaN and misses predicates
-    # the engine evaluates against a finite value).
+    # the engine evaluates against a finite value). Uses an explicit large
+    # ``period`` (rather than the DSL's default 20) to exercise the rebase
+    # mechanism at scale, matching this test's original intent from before
+    # VWAP's rolling-window unification (which moved the default off the
+    # harness's full retention ceiling) — capped at 400, the DSL's VWAP
+    # ``period`` upper bound.
     from investment_team.strategy_lab.executor.predicate_evaluator import (
         compute_indicator_series,
     )
-    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
     from investment_team.strategy_lab.spec_dsl import IndicatorRef
 
-    n = STREAMING_WINDOW_BARS + 30
+    large_period = 400
+    n = large_period + 30
     closes = [100.0 + math.sin(i / 2.0) for i in range(n)]
     # Volume only in the first 10 bars, then zero — the late trailing window has
     # zero total volume.
@@ -509,29 +514,32 @@ def test_windowed_vwap_zero_volume_window_falls_back_to_avg_close() -> None:
             "volume": volume,
         }
     )
-    ref = compute_indicator_series(IndicatorRef(name="vwap"), df)
-    win = ind._windowed_vwap(df["high"], df["low"], df["close"], df["volume"])
+    ref = compute_indicator_series(
+        IndicatorRef(name="vwap", params={"period": large_period}), df
+    )
+    win = ind._windowed_vwap(
+        df["high"], df["low"], df["close"], df["volume"], period=large_period
+    )
     # Matches the runtime bar-for-bar, and the zero-volume tail is finite (avg close).
     pd.testing.assert_series_equal(win.reset_index(drop=True), ref.reset_index(drop=True))
     assert not pd.isna(win.iloc[-1])
-    assert win.iloc[-1] == pytest.approx(
-        sum(closes[-STREAMING_WINDOW_BARS:]) / STREAMING_WINDOW_BARS
-    )
+    assert win.iloc[-1] == pytest.approx(sum(closes[-large_period:]) / large_period)
 
 
 def test_windowed_vwap_rebases_to_trailing_window() -> None:
-    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
-
-    n = STREAMING_WINDOW_BARS + 50
+    # Explicit large ``period`` (DSL's VWAP upper bound) — see the zero-volume
+    # test above for why.
+    large_period = 400
+    n = large_period + 50
     high = pd.Series([101.0 + i for i in range(n)])
     low = pd.Series([99.0 + i for i in range(n)])
     close = pd.Series([100.0 + i for i in range(n)])
     volume = pd.Series([1.0] * n)
     full = ind.vwap(high, low, close, volume)
-    win = ind._windowed_vwap(high, low, close, volume)
+    win = ind._windowed_vwap(high, low, close, volume, period=large_period)
     # On a rising series the unbounded VWAP lags far below the trailing-window
     # VWAP (which tracks the recent, higher typical prices).
     assert win.iloc[-1] > full.iloc[-1]
     # Windowed VWAP stays within the trailing window's typical-price range.
     tp = (high + low + close) / 3
-    assert win.iloc[-1] == pytest.approx(tp.iloc[-STREAMING_WINDOW_BARS:].mean(), rel=1e-9)
+    assert win.iloc[-1] == pytest.approx(tp.iloc[-large_period:].mean(), rel=1e-9)

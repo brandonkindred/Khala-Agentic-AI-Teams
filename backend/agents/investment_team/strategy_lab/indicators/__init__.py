@@ -10,16 +10,24 @@ This package houses the host-side indicator math used by:
   ``IndicatorRegistry`` is not yet wired through to the view (the
   consumer-side API mismatch is documented in the view's docstring).
 
-The MACD streaming recurrence is implemented in **three independent
-sites** (registry's :meth:`IndicatorRegistry._macd_value`, the synthesis
-compiler's emitted MACD helper, and the factors compiler's emitted
-MACDSignal helper). Each site re-implements the same fingerprint /
-classify / single-step / signal-EMA logic — there is no shared
-template module today. Parity is enforced by ``tests/test_streaming_indicators.py``
-(registry parity vs. legacy reference) and ``tests/test_strategy_compiler.py``
-(compiled-output parity vs. fresh cold-compute on the same slice).
-Drift between the three implementations IS possible; any change to the
-recurrence must land in all three sites in lockstep.
+The MACD streaming recurrence is implemented in **two independent
+runtimes**: the registry's :meth:`IndicatorRegistry._macd_value` (the
+engine's authoritative per-bar path), and the emitted MACD helper both DSL
+compilers inline into compiled strategy code (the sandbox import whitelist
+forbids the emitted code from importing this package directly, so it can't
+just call the registry). The two compilers no longer hand-duplicate that
+emitted-text logic between themselves: both render it from the single
+canonical body in :mod:`strategy_lab.indicators.template_bodies`
+(``render_macd_body``) — the fingerprint / classify / single-step /
+signal-EMA logic is authored once there. What remains a deliberate,
+tested-for-parity duplication is the registry's own implementation vs. that
+one shared emitted-text template, since the registry runs in-process while
+the template's output runs inside the sandbox. Parity is enforced by
+``tests/test_streaming_indicators.py`` (registry parity vs. legacy
+reference, and the shared-template token audit) and
+``tests/test_strategy_compiler.py`` (compiled-output parity vs. fresh
+cold-compute on the same slice). Any change to the recurrence must land in
+both the registry and ``template_bodies.render_macd_body`` in lockstep.
 
 **Bollinger Bands lockstep** — the registry's incremental
 ``bollinger_bands`` uses the running sum-of-squares variance formula
@@ -34,6 +42,16 @@ inlined ``stochastic`` template was fixed in lockstep to iterate only
 the last ``d_period`` positions for %D (was O(len(history)), now
 O(d_period × k_period) bounded). Any change to the %K / %D recurrence
 must land in both sites together.
+
+**ADX / VWAP shared templates** — like MACD, the ADX and VWAP bodies both
+DSL compilers inline into compiled strategy code are rendered from the
+single canonical bodies in :mod:`strategy_lab.indicators.template_bodies`
+(``render_adx_body`` / ``render_vwap_body``), rather than hand-duplicated
+between ``factors/compiler.py`` and ``synthesis/compiler.py``. As with
+MACD, this is a deliberate, tested-for-parity duplication against the
+registry's own :meth:`IndicatorRegistry.adx` / :meth:`IndicatorRegistry.vwap`
+— any change to either formula must land in both the registry and the
+corresponding ``template_bodies.render_*_body`` in lockstep.
 """
 
 from __future__ import annotations

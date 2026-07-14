@@ -866,32 +866,47 @@ class IndicatorRegistry:
 
     # ----- VWAP ----------------------------------------------------------
 
-    def vwap(self, bars: Sequence[Any]) -> Optional[float]:
-        """Volume-Weighted Average Price, cumulative over ``bars`` at ``bars[-1]``.
+    def vwap(self, bars: Sequence[Any], period: Optional[int] = None) -> Optional[float]:
+        """Volume-Weighted Average Price at ``bars[-1]``.
 
-        Pre: ``bars`` is non-empty. Post: ``Σ(typical·volume) / Σ volume`` over the
-        window (``typical = (high+low+close)/3``); falls back to the mean close when the
-        window's total volume is 0. Deliberately recomputed exactly over the window
-        (O(window)) rather than incrementally like its cumulative sibling
-        :meth:`obv`: VWAP is a ratio whose zero-volume fallback needs the window's
-        close mean, so an exact per-call sum keeps it bit-stable and simple; the
-        per-bar cost is dominated by the bounded window and a same-bar cache hit.
+        Pre: ``bars`` is non-empty; ``period`` is ``None`` or ``>= 1``.
+        Post: ``period=None`` (the default) sums over every bar in ``bars``
+        — cumulative, no reset — preserving this method's original contract
+        for any existing caller that doesn't pass ``period`` (notably
+        ``strategy_indicators.vwap``, the sandbox-exposed scalar function).
+        A ``period`` rolls the window to ``bars[-period:]`` instead, and
+        returns ``None`` if ``len(bars) < period``. Either way:
+        ``Σ(typical·volume) / Σ volume`` over the window (``typical =
+        (high+low+close)/3``), falling back to the mean close when the
+        window's total volume is 0. Deliberately recomputed exactly over the
+        window (O(window)) rather than incrementally like its cumulative
+        sibling :meth:`obv`: VWAP is a ratio whose zero-volume fallback needs
+        the window's close mean, so an exact per-call sum keeps it bit-stable
+        and simple; the per-bar cost is dominated by the bounded window and a
+        same-bar cache hit.
         """
         if not bars:
             return None
-        key = ("vwap",)
-        fp = self._bar_fingerprint(bars)
+        if period is not None and len(bars) < period:
+            return None
+        # ``period`` is part of the cache key (mirroring sma/ema/rsi) so a
+        # strategy referencing both ``vwap(period=10)`` and
+        # ``vwap(period=50)`` on one registry instance gets independent
+        # cache slots instead of one clobbering the other.
+        key = ("vwap", period)
+        window = bars if period is None else bars[-period:]
+        fp = self._bar_fingerprint(window)
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
             return state["value"]
         num = 0.0
         den = 0.0
-        for b in bars:
+        for b in window:
             typical = (float(b.high) + float(b.low) + float(b.close)) / 3.0
             num += typical * float(b.volume)
             den += float(b.volume)
         if den == 0:
-            value = sum(float(b.close) for b in bars) / len(bars)
+            value = sum(float(b.close) for b in window) / len(window)
         else:
             value = num / den
         self._state[key] = {"fp": fp, "value": value}
@@ -1427,3 +1442,92 @@ class IndicatorRegistry:
         value = -50.0 if rng == 0 else -100.0 * (highest - close) / rng
         self._state[key] = {"fp": fp, "value": value}
         return value
+
+
+# ---------------------------------------------------------------------------
+# DSL indicator name -> IndicatorRegistry method dispatch. The single source
+# both ``executor.strategy_indicators.indicator_value`` and
+# ``executor.predicate_evaluator._registry_indicator`` route through — they
+# previously carried two independent, structurally-parallel 16-way if/elif
+# blocks reaching the same registry methods. Placed here (rather than a new
+# module) because this file is already flattened into the sandbox as
+# ``_streaming_indicators.py``, so both callers can reach it without the
+# flat-sandbox harness learning a new file.
+# ---------------------------------------------------------------------------
+
+
+def resolve_indicator(
+    reg: "IndicatorRegistry",
+    name: str,
+    bars: Sequence[Any],
+    *,
+    source: str = "close",
+    **params: Any,
+) -> Optional[float]:
+    """Dispatch DSL indicator ``name`` to its ``IndicatorRegistry`` method.
+
+    Preconditions: ``name`` is a known DSL indicator name; ``params`` carries
+    every param that indicator's registry method requires (callers are
+    responsible for defaults — ``IndicatorRef.params`` and
+    ``strategy_indicators``' validated ``**params`` both already carry them).
+    Postconditions: returns the registry's trailing-bar value for ``bars``,
+    or ``None`` during warm-up — identical to calling the registry method
+    directly with the same arguments.
+    """
+    if name == "sma":
+        return reg.sma(bars, period=int(params["period"]), source=source)
+    if name == "ema":
+        return reg.ema(bars, period=int(params["period"]), source=source)
+    if name == "rsi":
+        return reg.rsi(bars, period=int(params["period"]), source=source)
+    if name == "macd":
+        return reg.macd(
+            bars,
+            fast=int(params["fast"]),
+            slow=int(params["slow"]),
+            signal=int(params["signal"]),
+            source=source,
+            select=str(params["output"]),
+        )
+    if name == "bollinger":
+        return reg.bollinger_bands(
+            bars,
+            period=int(params["period"]),
+            num_std=float(params["num_std"]),
+            source=source,
+            select=str(params["band"]),
+        )
+    if name == "atr":
+        return reg.atr(bars, period=int(params["period"]))
+    if name == "adx":
+        return reg.adx(bars, period=int(params["period"]))
+    if name == "stochastic":
+        return reg.stochastic(
+            bars,
+            k_period=int(params["k_period"]),
+            d_period=int(params["d_period"]),
+            select=str(params["output"]),
+        )
+    if name == "vwap":
+        return reg.vwap(bars, period=int(params["period"]))
+    if name == "donchian":
+        return reg.donchian(bars, period=int(params["period"]), select=str(params["band"]))
+    if name == "keltner":
+        return reg.keltner(
+            bars,
+            period=int(params["period"]),
+            atr_period=int(params["atr_period"]),
+            multiplier=float(params["multiplier"]),
+            select=str(params["band"]),
+        )
+    if name == "obv":
+        return reg.obv(bars)
+    if name == "mfi":
+        return reg.mfi(bars, period=int(params["period"]))
+    if name == "roc":
+        return reg.roc(bars, period=int(params["period"]), source=source)
+    if name == "cci":
+        return reg.cci(bars, period=int(params["period"]))
+    if name == "williams_r":
+        return reg.williams_r(bars, period=int(params["period"]))
+    raise ValueError(f"unknown indicator name: {name!r}")
