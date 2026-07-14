@@ -81,7 +81,7 @@ If you want to build, tinker, and help push the frontier of multi-agent systems 
 
 ## Meet the current roster
 
-Today Khala ships with 23 specialist teams behind one gateway, grouped loosely for navigation into Core Dev, Business, Content, and Personal. This is the **current** roster, not the ceiling — Khala is a system for *making* agentic teams, and the list grows (and prunes itself) as we learn what's useful. The authoritative source is always [`backend/unified_api/config.py`](backend/unified_api/config.py).
+Today Khala ships with 24 specialist teams behind one gateway, grouped loosely for navigation into Core Dev, Business, Content, and Personal. This is the **current** roster, not the ceiling — Khala is a system for *making* agentic teams, and the list grows (and prunes itself) as we learn what's useful. The authoritative source is always [`backend/unified_api/config.py`](backend/unified_api/config.py).
 
 ### Core Dev — build, plan, and evolve software
 
