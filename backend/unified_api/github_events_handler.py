@@ -196,7 +196,7 @@ def _add_comment_reaction(owner: str, repo: str, comment_id: int, token: str | N
     if not comment_id or not token:
         return
     try:
-        from coding_team.github_source.client import GitHubClient
+        from software_engineering_team.coding_team.github_source.client import GitHubClient
 
         with GitHubClient(token) as client:
             client.create_comment_reaction(owner, repo, comment_id, content=content)

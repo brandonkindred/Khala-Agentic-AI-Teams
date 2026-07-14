@@ -55,8 +55,6 @@ scrape_configs:
         labels: { service: nutrition-service, team: nutrition_meal_planning }
       - targets: ["planning-service:8102"]
         labels: { service: planning-service, team: planning }
-      - targets: ["coding-team-service:8103"]
-        labels: { service: coding-team-service, team: coding_team }
       - targets: ["sales-service:8105"]
         labels: { service: sales-service, team: sales_team }
       - targets: ["road-trip-service:8106"]

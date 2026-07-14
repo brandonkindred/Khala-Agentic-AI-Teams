@@ -81,7 +81,7 @@ If you want to build, tinker, and help push the frontier of multi-agent systems 
 
 ## Meet the current roster
 
-Today Khala ships with 20 specialist teams behind one gateway, grouped loosely for navigation into Core Dev, Business, Content, and Personal. This is the **current** roster, not the ceiling — Khala is a system for *making* agentic teams, and the list grows (and prunes itself) as we learn what's useful. The authoritative source is always [`backend/unified_api/config.py`](backend/unified_api/config.py).
+Today Khala ships with 23 specialist teams behind one gateway, grouped loosely for navigation into Core Dev, Business, Content, and Personal. This is the **current** roster, not the ceiling — Khala is a system for *making* agentic teams, and the list grows (and prunes itself) as we learn what's useful. The authoritative source is always [`backend/unified_api/config.py`](backend/unified_api/config.py).
 
 ### Core Dev — build, plan, and evolve software
 
@@ -213,7 +213,6 @@ Growing the collective is a first-class feature, not an afterthought — it's th
 ### Core Dev
 - [`backend/agents/software_engineering_team/`](backend/agents/software_engineering_team/README.md) — the flagship SE pipeline (planning, coding, review, release)
 - [`backend/agents/planning_team/`](backend/agents/planning_team/README.md)
-- [`backend/agents/coding_team/`](backend/agents/coding_team/README.md)
 - [`backend/agents/ai_systems_team/`](backend/agents/ai_systems_team/README.md)
 - [`backend/agents/agent_provisioning_team/`](backend/agents/agent_provisioning_team/README.md)
 - [`backend/agents/agentic_team_provisioning/`](backend/agents/agentic_team_provisioning/)

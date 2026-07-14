@@ -262,6 +262,19 @@ services:
     networks:
       stack: { ipv4_address: 172.28.0.9, aliases: [se-service] }
     restart: unless-stopped
+    # coding_team's code-review path (now served in-process by this container)
+    # loads full diffs + repo context into memory; cap it so a runaway worker
+    # is OOM-killed predictably (docker records OOMKilled=true) instead of the
+    # host kernel picking a victim. This cgroup limit is also what the
+    # team-service memory watchdog samples to warn before the kill. The
+    # deploy.resources is read by swarm; mem_limit/mem_reservation enforce the
+    # same caps under plain `docker compose up`, matching the unified-api service.
+    deploy:
+      resources:
+        limits: { memory: 12G }
+        reservations: { memory: 8G }
+    mem_limit: 12g
+    mem_reservation: 8g
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
       interval: 15s
@@ -612,52 +625,6 @@ services:
       timeout: 5s
       retries: 5
 
-  coding-team-service:
-    build:
-      context: ../backend
-      dockerfile: team_service/Dockerfile
-      args: { TEAM_PORT: "8103" }
-    image: khala-coding-team-service
-    container_name: khala-coding-team-service
-    depends_on:
-      postgres: { condition: service_healthy }
-      temporal: { condition: service_started }
-      job-service: { condition: service_healthy }
-    environment:
-      <<: *team-env-base
-      # Composition root outside the coding_team package: installs the SE-backed
-      # CodeEngineProvider, then serves coding_team.api.main:app. Keeps the
-      # coding_team package free of software_engineering_team imports.
-      TEAM_MODULE: coding_team_service.main
-      TEAM_NAME: coding_team
-      TEAM_PORT: "8103"
-      TEAM_TEMPORAL_WORKER_MODULE: coding_team.temporal.worker
-      TEAM_TEMPORAL_WORKER_FUNC: start_coding_team_temporal_worker_thread
-    volumes: *team-volumes
-    extra_hosts: *team-extra-hosts
-    ports: ["8103:8103"]
-    networks:
-      stack: { ipv4_address: 172.28.0.21, aliases: [coding-team-service] }
-    restart: unless-stopped
-    # The code-review path loads full diffs + repo context into memory; cap it so
-    # a runaway worker is OOM-killed predictably (docker records OOMKilled=true)
-    # instead of the host kernel picking a victim. This cgroup limit is also what
-    # the team-service memory watchdog samples to warn before the kill. The
-    # deploy.resources is read by swarm; mem_limit/mem_reservation enforce the
-    # same caps under plain `docker compose up`, matching the unified-api service.
-    deploy:
-      resources:
-        limits: { memory: 12G }
-        reservations: { memory: 8G }
-    mem_limit: 12g
-    mem_reservation: 8g
-    healthcheck:
-      # backend/team_service/Dockerfile installs curl for this container probe.
-      test: ["CMD", "curl", "-f", "http://localhost:8103/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-
   sales-service:
     build:
       context: ../backend
@@ -892,7 +859,6 @@ services:
       investment-service: { condition: service_healthy }
       nutrition-service: { condition: service_healthy }
       planning-service: { condition: service_healthy }
-      coding-team-service: { condition: service_healthy }
       sales-service: { condition: service_healthy }
       road-trip-service: { condition: service_healthy }
       startup-advisor-service: { condition: service_healthy }
@@ -957,7 +923,10 @@ services:
       INVESTMENT_SERVICE_URL: http://investment-service:8100
       NUTRITION_MEAL_PLANNING_SERVICE_URL: http://nutrition-service:8101
       PLANNING_SERVICE_URL: http://planning-service:8102
-      CODING_TEAM_SERVICE_URL: http://coding-team-service:8103
+      # coding_team is an in-package SE sub-team, served by se-service itself
+      # (mounted unprefixed onto the SE app); /api/coding-team/* keeps resolving
+      # unchanged since the proxy only forwards the path remainder after the prefix.
+      CODING_TEAM_SERVICE_URL: http://se-service:8091
       SALES_TEAM_SERVICE_URL: http://sales-service:8105
       ROAD_TRIP_PLANNING_SERVICE_URL: http://road-trip-service:8106
       STARTUP_ADVISOR_SERVICE_URL: http://startup-advisor-service:8107
@@ -982,7 +951,6 @@ services:
       - "investment-service:172.28.0.18"
       - "nutrition-service:172.28.0.19"
       - "planning-service:172.28.0.20"
-      - "coding-team-service:172.28.0.21"
       - "sales-service:172.28.0.23"
       - "road-trip-service:172.28.0.24"
       - "startup-advisor-service:172.28.0.25"
@@ -1060,7 +1028,6 @@ services:
       - "investment-service:172.28.0.18"
       - "nutrition-service:172.28.0.19"
       - "planning-service:172.28.0.20"
-      - "coding-team-service:172.28.0.21"
       - "sales-service:172.28.0.23"
       - "road-trip-service:172.28.0.24"
       - "startup-advisor-service:172.28.0.25"

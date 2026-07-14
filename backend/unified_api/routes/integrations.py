@@ -36,13 +36,13 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from coding_team.clone_workspace import (
+from shared_postgres import bounded_probe
+from software_engineering_team.coding_team.clone_workspace import (
     PER_ISSUE_DIR_TEMPLATE,
     agent_cache_dir,
     clone_lock_path,
 )
-from coding_team.github_source.client import _pr_detail_from_payload
-from shared_postgres import bounded_probe
+from software_engineering_team.coding_team.github_source.client import _pr_detail_from_payload
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
     get_google_browser_login_credentials,

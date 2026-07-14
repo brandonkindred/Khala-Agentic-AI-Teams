@@ -10,11 +10,16 @@ logger = logging.getLogger(__name__)
 
 
 def _se_startup() -> None:  # pragma: no cover - integration-only ASGI startup hook
-    """Register SE telemetry observers and start the Temporal worker if enabled.
+    """Register SE telemetry observers and start SE's + coding_team's Temporal workers.
 
     Runs after the factory has registered the SE Postgres schema. Each step is
     log-and-continue so a single failure never aborts app startup (and never
     leaks the Postgres pool the factory may have opened).
+
+    Also installs the SE-backed ``CodeEngineProvider`` and starts coding_team's
+    own Temporal worker (on its own task queue) — this is the in-process
+    replacement for what the now-retired standalone ``coding-team-service``
+    container and its ``coding_team_service`` composition root used to do.
     """
     try:
         from software_engineering_team.shared.cost_tracker import register_cost_observer
@@ -30,6 +35,21 @@ def _se_startup() -> None:  # pragma: no cover - integration-only ASGI startup h
         start_se_temporal_worker_thread()
     except Exception as e:
         logger.warning("Could not start SE Temporal worker: %s", e)
+    try:
+        from software_engineering_team.coding_engine_provider import SECodeEngineProvider
+        from software_engineering_team.coding_team.engine_provider import set_engine_provider
+
+        set_engine_provider(SECodeEngineProvider())
+    except Exception as e:
+        logger.warning("Could not install SE-backed CodeEngineProvider for coding_team: %s", e)
+    try:
+        from software_engineering_team.coding_team.temporal.worker import (
+            start_coding_team_temporal_worker_thread,
+        )
+
+        start_coding_team_temporal_worker_thread()
+    except Exception as e:
+        logger.warning("Could not start coding_team Temporal worker: %s", e)
 
 
 def _se_shutdown() -> None:  # pragma: no cover - integration-only ASGI shutdown hook

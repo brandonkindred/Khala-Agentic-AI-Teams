@@ -950,8 +950,8 @@ Default token for the coding team's `POST /api/coding-team/run-from-github` flow
 
 ### GITHUB_API_URL
 Optional override for the GitHub REST base URL used by the coding team's GitHub client
-(`backend/agents/coding_team/github_source/`). Defaults to `https://api.github.com`; set to a GitHub
-Enterprise URL when relevant.
+(`backend/agents/software_engineering_team/coding_team/github_source/`). Defaults to
+`https://api.github.com`; set to a GitHub Enterprise URL when relevant.
 
 ### GITHUB_WEBHOOK_SECRET
 Signing secret for the GitHub webhook receiver `POST /api/integrations/github/events`, which lets a
