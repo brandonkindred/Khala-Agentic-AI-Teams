@@ -289,3 +289,132 @@ def test_check_breadth_case_insensitive() -> None:
     warnings = _warnings(results)
     assert len(warnings) == 1
     assert "QQQ" in warnings[0].details
+
+
+# ── Shared ticker-extraction parity tests (issue consolidation) ─────────────
+#
+# The ``extract_known_tickers`` helper in ``spec_readiness`` is now the single
+# canonical implementation used by BOTH ``spec_readiness._check_universe_set``
+# (via ``_SYMBOL_REGEX``) and ``TargetSymbolCoverageGate._tickers_in_hypothesis``
+# (via direct delegation). These tests assert:
+#   1. The helper's output is consistent with ``spec_readiness``'s word-bounded
+#      / case-insensitive / suffix-canonicalizing behavior on representative
+#      fixtures.
+#   2. ``TargetSymbolCoverageGate._tickers_in_hypothesis`` now matches the
+#      helper — both return the same canonical bare symbols.
+#   3. Suffix variants (``ES=F``, ``EURUSD=X``) that the old
+#      ``target_symbol_coverage._TICKER_RE`` would have missed are now
+#      correctly identified and canonicalized.
+
+
+def test_extract_known_tickers_case_insensitive() -> None:
+    """``extract_known_tickers`` matches lowercase ticker mentions in prose.
+
+    Preconditions: ``text`` contains a lowercase version of a known ticker.
+    Postconditions: the helper returns the upper-cased canonical form,
+    demonstrating case-insensitivity that the old ``_TICKER_RE`` lacked.
+    """
+    from investment_team.strategy_lab.quality_gates.spec_readiness import extract_known_tickers
+
+    # "qqq" is a known ticker (from STOCK_SYMBOLS, stored upper-cased).
+    result = extract_known_tickers("trade qqq on oversold breakouts")
+    assert "QQQ" in result, f"expected 'QQQ' in {result}"
+
+
+def test_extract_known_tickers_word_bounded() -> None:
+    """``extract_known_tickers`` uses word boundaries so a short ticker token
+    that appears as a substring of a longer word is not matched.
+
+    Preconditions: ``text`` contains a known ticker token embedded inside a
+    longer word without word-boundary separation.
+    Postconditions: the embedded form is NOT returned; the helper does not
+    false-match substrings.
+    """
+    from investment_team.strategy_lab.quality_gates.spec_readiness import extract_known_tickers
+
+    # "AAPL" should not match inside "AAPLXYZ" (no word boundary after 'L').
+    result = extract_known_tickers("AAPLXYZ is not a ticker")
+    assert "AAPL" not in result, f"unexpected match inside longer token: {result}"
+
+
+def test_extract_known_tickers_suffix_canonicalization_futures() -> None:
+    """``extract_known_tickers`` strips ``=F`` Yahoo futures suffixes and returns
+    the bare canonical symbol.
+
+    Preconditions: ``text`` contains a futures ticker in Yahoo suffix form.
+    Postconditions: the canonical bare symbol (without ``=F``) is returned.
+    This is new behavior relative to the old ``_TICKER_RE`` in
+    ``target_symbol_coverage.py``, which required all-uppercase tokens and
+    had no suffix stripping.
+    """
+    from investment_team.strategy_lab.quality_gates.spec_readiness import extract_known_tickers
+
+    result = extract_known_tickers("long ES=F on breakouts above the Donchian upper band")
+    assert "ES" in result, f"expected canonical 'ES' from 'ES=F', got {result}"
+    assert "ES=F" not in result, f"raw suffix form must not appear in result: {result}"
+
+
+def test_extract_known_tickers_suffix_canonicalization_forex() -> None:
+    """``extract_known_tickers`` strips ``=X`` Yahoo forex suffixes.
+
+    Preconditions: ``text`` contains a forex ticker in Yahoo suffix form.
+    Postconditions: the canonical bare symbol (without ``=X``) is returned.
+    """
+    from investment_team.strategy_lab.quality_gates.spec_readiness import extract_known_tickers
+
+    result = extract_known_tickers("EURUSD=X breaks support at 1.05")
+    assert "EURUSD" in result, f"expected canonical 'EURUSD' from 'EURUSD=X', got {result}"
+    assert "EURUSD=X" not in result, f"raw suffix form must not appear in result: {result}"
+
+
+def test_target_symbol_coverage_tickers_in_hypothesis_agrees_with_extract_known_tickers() -> None:
+    """``TargetSymbolCoverageGate._tickers_in_hypothesis`` now delegates to
+    ``extract_known_tickers``, so both return identical canonical sets for the
+    same input text.
+
+    Preconditions: a representative hypothesis string with known tickers.
+    Postconditions: the gate's static method and the helper return exactly
+    the same set, proving the two gates cannot reach different conclusions
+    about the same hypothesis text.
+    """
+    from investment_team.strategy_lab.quality_gates.spec_readiness import extract_known_tickers
+    from investment_team.strategy_lab.quality_gates.target_symbol_coverage import (
+        TargetSymbolCoverageGate,
+    )
+
+    hypothesis = "Trade QQQ on RSI oversold breakouts and BTC on volume spikes."
+    assert TargetSymbolCoverageGate._tickers_in_hypothesis(hypothesis) == extract_known_tickers(
+        hypothesis
+    )
+
+
+def test_target_symbol_coverage_gains_case_insensitivity_via_shared_helper() -> None:
+    """After consolidation, ``_tickers_in_hypothesis`` correctly detects a
+    lowercase ticker mention that the old ``_TICKER_RE`` (uppercase-only) would
+    have missed.
+
+    Preconditions: hypothesis contains a lowercase known ticker.
+    Postconditions: the gate's static method returns the upper-cased canonical
+    form, demonstrating the behavior change introduced by the consolidation.
+    """
+    from investment_team.strategy_lab.quality_gates.target_symbol_coverage import (
+        TargetSymbolCoverageGate,
+    )
+
+    result = TargetSymbolCoverageGate._tickers_in_hypothesis("buy qqq when rsi dips below 30")
+    assert "QQQ" in result, f"expected 'QQQ' (case-insensitive match), got {result}"
+
+
+def test_target_symbol_coverage_gains_suffix_stripping_via_shared_helper() -> None:
+    """After consolidation, ``_tickers_in_hypothesis`` canonicalizes ``ES=F``
+    to the bare ``ES`` symbol, matching ``spec_readiness``'s behavior.
+
+    Preconditions: hypothesis contains a futures ticker with a Yahoo ``=F`` suffix.
+    Postconditions: the canonical bare symbol is returned, not the suffix form.
+    """
+    from investment_team.strategy_lab.quality_gates.target_symbol_coverage import (
+        TargetSymbolCoverageGate,
+    )
+
+    result = TargetSymbolCoverageGate._tickers_in_hypothesis("long ES=F above prior day high")
+    assert "ES" in result, f"expected canonical 'ES' from 'ES=F', got {result}"

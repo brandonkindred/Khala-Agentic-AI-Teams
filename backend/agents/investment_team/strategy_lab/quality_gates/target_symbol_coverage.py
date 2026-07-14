@@ -1,4 +1,4 @@
-"""Issue #526 — assert the backtest universe matches the requested symbols.
+"""Assert the backtest universe matches the requested symbols.
 
 Without this gate, a hypothesis naming ``QQQ`` can silently be backtested on
 the asset-class default universe (TSLA/AAPL/...) and the analysis agent
@@ -37,6 +37,7 @@ from ...symbols import (
     STOCK_SYMBOLS,
 )
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
+from .spec_readiness import extract_known_tickers
 
 GATE = "target_symbol_coverage"
 
@@ -54,9 +55,10 @@ _KNOWN_TICKERS: frozenset[str] = frozenset(
     )
 )
 
-# Uppercase tokens 2-6 chars; conservative enough to skip common English words
-# while still catching tickers embedded in prose like "buy QQQ when ..." and
-# 6-char forex bare names like EURUSD/USDJPY in FOREX_SYMBOLS_BARE.
+# NOTE: ``_TICKER_RE`` is kept for the legacy ``_tickers_in_hypothesis`` static
+# method, which is preserved for any external callers that may rely on it.
+# New code should use ``extract_known_tickers`` from ``spec_readiness`` instead,
+# which additionally applies case-insensitivity and suffix canonicalization.
 _TICKER_RE = re.compile(r"\b([A-Z]{2,6})\b")
 
 
@@ -197,4 +199,20 @@ class TargetSymbolCoverageGate(GateResultsMixin):
 
     @staticmethod
     def _tickers_in_hypothesis(text: str) -> set[str]:
-        return {tok for tok in _TICKER_RE.findall(text or "") if tok in _KNOWN_TICKERS}
+        """Extract known tickers from ``text`` using the shared canonical helper.
+
+        Delegates to :func:`~.spec_readiness.extract_known_tickers`, which
+        applies word-bounded, case-insensitive matching against the full symbol
+        whitelist and strips Yahoo-provider suffixes (``=F``, ``=X``, ``-USD``)
+        before returning canonical bare symbols.
+
+        Preconditions:
+            ``text`` is a string (empty allowed).
+        Postconditions:
+            Returns a set of upper-cased canonical ticker strings. The returned
+            set agrees with ``spec_readiness.py``'s ticker-extraction behavior
+            — both are case-insensitive and both strip provider suffixes — so
+            the two gates cannot reach different conclusions about tickers in
+            the same hypothesis text.
+        """
+        return extract_known_tickers(text or "")

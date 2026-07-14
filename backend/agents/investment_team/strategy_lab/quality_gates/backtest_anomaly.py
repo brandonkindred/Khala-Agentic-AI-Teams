@@ -56,6 +56,57 @@ class BacktestAnomalyCtx:
 
 GATE = "backtest_anomaly"
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Anomaly-detection thresholds — named constants following the pattern of
+# cost_stress_realism.py so the rule bodies remain readable and the values
+# can be located and tuned without hunting through rule logic.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Annualised-return ceiling above which a result is almost certainly a data or
+# logic bug rather than a real strategy edge.
+_ANNUALIZED_RETURN_CRITICAL_PCT: float = 200.0
+
+# Win-rate levels: above the critical threshold the result is almost certainly
+# overfit or look-ahead biased; above the warning threshold it warrants review.
+_WIN_RATE_CRITICAL_PCT: float = 95.0
+_WIN_RATE_WARNING_PCT: float = 90.0
+
+# Profit-factor ceiling — above this the result likely reflects data snooping
+# or a strategy-logic bug.
+_PROFIT_FACTOR_CRITICAL: float = 10.0
+
+# Sharpe-ratio levels: above the critical threshold the result almost certainly
+# indicates look-ahead bias or a calculation artifact; above the warning
+# threshold it warrants review for overfitting.
+_SHARPE_CRITICAL: float = 5.0
+_SHARPE_WARNING: float = 3.0
+
+# Average hold-time floor in days on daily-bar data. Sub-day holds on daily
+# bars are a strong indicator of look-ahead bias or intra-bar execution that
+# cannot be replicated live.
+_AVG_HOLD_DAYS_FLOOR: float = 1.0
+
+# Trade-concentration warning: when the largest single trade is this fraction
+# of total absolute P&L, the strategy carries high concentration risk.
+_CONCENTRATION_WARNING_RATIO: float = 0.5
+
+# Look-ahead predictability thresholds.
+# Minimum number of trades-with-signal required before applying the primary
+# (large-sample) critical and warning rate thresholds.
+_LOOKAHEAD_LARGE_SAMPLE_MIN_TRADES: int = 20
+# Agreement rate at which a large sample is considered a critical look-ahead signal.
+_LOOKAHEAD_LARGE_SAMPLE_CRITICAL_RATE: float = 0.95
+# Agreement rate at which a large sample warrants a warning.
+_LOOKAHEAD_LARGE_SAMPLE_WARNING_RATE: float = 0.80
+# Minimum trades-with-signal for the small-sample (perfect-agreement) backstop.
+_LOOKAHEAD_SMALL_SAMPLE_MIN_TRADES: int = 5
+# Perfect agreement rate used by the small-sample backstop.
+_LOOKAHEAD_SMALL_SAMPLE_PERFECT_RATE: float = 0.999
+# Minimum ledger size before the degraded-sample entry-eligibility warning fires.
+_LOOKAHEAD_DEGRADED_SAMPLE_MIN_LEDGER: int = 10
+# Entry-bar resolvability ratio below which the sample is considered degraded.
+_LOOKAHEAD_DEGRADED_SAMPLE_ENTRY_RATIO: float = 0.5
+
 _GENERIC_ZERO_TRADE_DETAILS = (
     "Backtest produced zero trades — strategy code never entered a position."
 )
@@ -189,35 +240,35 @@ class BacktestAnomalyDetector(GateResultsMixin):
     def _check_annualized_return_ceiling(
         self, ctx: BacktestAnomalyCtx
     ) -> Iterable[QualityGateResult]:
-        if ctx.metrics.annualized_return_pct > 200:
+        if ctx.metrics.annualized_return_pct > _ANNUALIZED_RETURN_CRITICAL_PCT:
             return (
                 self._critical(
                     f"Annualized return {ctx.metrics.annualized_return_pct:.1f}% is "
-                    "suspiciously high (>200%) — likely a data or logic bug."
+                    f"suspiciously high (>{_ANNUALIZED_RETURN_CRITICAL_PCT:g}%) — likely a data or logic bug."
                 ),
             )
         return ()
 
     def _check_win_rate(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
         wr = ctx.metrics.win_rate_pct
-        if wr > 95:
+        if wr > _WIN_RATE_CRITICAL_PCT:
             return (
                 self._critical(
-                    f"Win rate {wr:.1f}% exceeds 95% — almost certainly overfitting "
+                    f"Win rate {wr:.1f}% exceeds {_WIN_RATE_CRITICAL_PCT:g}% — almost certainly overfitting "
                     "or lookahead bias."
                 ),
             )
-        if wr > 90:
+        if wr > _WIN_RATE_WARNING_PCT:
             return (
-                self._warning(f"Win rate {wr:.1f}% exceeds 90% — review for possible overfitting."),
+                self._warning(f"Win rate {wr:.1f}% exceeds {_WIN_RATE_WARNING_PCT:g}% — review for possible overfitting."),
             )
         return ()
 
     def _check_profit_factor(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
-        if ctx.metrics.profit_factor > 10:
+        if ctx.metrics.profit_factor > _PROFIT_FACTOR_CRITICAL:
             return (
                 self._critical(
-                    f"Profit factor {ctx.metrics.profit_factor:.1f} exceeds 10 — "
+                    f"Profit factor {ctx.metrics.profit_factor:.1f} exceeds {_PROFIT_FACTOR_CRITICAL:g} — "
                     "likely data snooping or bug."
                 ),
             )
@@ -230,9 +281,9 @@ class BacktestAnomalyDetector(GateResultsMixin):
         # warning to avoid double-rejecting strategies whose IS Sharpe is
         # high but OOS DSR clears.
         sr = ctx.metrics.sharpe_ratio
-        if sr > 5.0:
+        if sr > _SHARPE_CRITICAL:
             details = (
-                f"Sharpe ratio {sr:.2f} exceeds 5.0 — almost certainly indicates "
+                f"Sharpe ratio {sr:.2f} exceeds {_SHARPE_CRITICAL:g} — almost certainly indicates "
                 "look-ahead bias or a calculation artifact. "
                 + (
                     "AcceptanceGate's OOS Deflated Sharpe is the authoritative "
@@ -243,17 +294,17 @@ class BacktestAnomalyDetector(GateResultsMixin):
                 )
             )
             return (self._warning(details) if ctx.dsr_aware else self._critical(details),)
-        if sr > 3.0:
+        if sr > _SHARPE_WARNING:
             return (
                 self._warning(
-                    f"Sharpe ratio {sr:.2f} exceeds 3.0 — review for overfitting or data snooping."
+                    f"Sharpe ratio {sr:.2f} exceeds {_SHARPE_WARNING:g} — review for overfitting or data snooping."
                 ),
             )
         return ()
 
     def _check_avg_hold_time(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
         avg_hold = sum(t.hold_days for t in ctx.trades) / len(ctx.trades)
-        if avg_hold < 1:
+        if avg_hold < _AVG_HOLD_DAYS_FLOOR:
             return (
                 self._critical(
                     f"Average hold time {avg_hold:.1f} days — sub-day holds on "
@@ -268,7 +319,7 @@ class BacktestAnomalyDetector(GateResultsMixin):
         if total_pnl <= 0:
             return ()
         max_single = ctx.max_abs_pnl
-        if max_single / total_pnl > 0.5:
+        if max_single / total_pnl > _CONCENTRATION_WARNING_RATIO:
             return (
                 self._warning(
                     f"Largest single trade is {max_single / total_pnl:.0%} of total "
@@ -412,9 +463,9 @@ class BacktestAnomalyDetector(GateResultsMixin):
         # resolvability tightly; the entry ratio is the more interpretable
         # signal for "the agreement statistic was computed against a
         # smaller-than-expected fraction of the ledger".
-        if len(ctx.trades) >= 10:
+        if len(ctx.trades) >= _LOOKAHEAD_DEGRADED_SAMPLE_MIN_LEDGER:
             entry_ratio = entry_eligible / len(ctx.trades)
-            if entry_ratio < 0.5:
+            if entry_ratio < _LOOKAHEAD_DEGRADED_SAMPLE_ENTRY_RATIO:
                 results.append(
                     self._warning(
                         f"lookahead_bar_predictability ran on a degraded "
@@ -435,7 +486,7 @@ class BacktestAnomalyDetector(GateResultsMixin):
             return tuple(results)
         agreements = entry_agreements + exit_agreements
         rate = agreements / eligible
-        if trades_with_signal >= 20 and rate >= 0.95:
+        if trades_with_signal >= _LOOKAHEAD_LARGE_SAMPLE_MIN_TRADES and rate >= _LOOKAHEAD_LARGE_SAMPLE_CRITICAL_RATE:
             results.append(
                 self._critical(
                     f"Entry+exit bar direction agrees with trade return on "
@@ -446,7 +497,11 @@ class BacktestAnomalyDetector(GateResultsMixin):
                 )
             )
             return tuple(results)
-        if trades_with_signal < 20 and trades_with_signal >= 5 and rate >= 0.999:
+        if (
+            trades_with_signal < _LOOKAHEAD_LARGE_SAMPLE_MIN_TRADES
+            and trades_with_signal >= _LOOKAHEAD_SMALL_SAMPLE_MIN_TRADES
+            and rate >= _LOOKAHEAD_SMALL_SAMPLE_PERFECT_RATE
+        ):
             results.append(
                 self._critical(
                     f"Entry+exit bar direction matches trade return on every "
@@ -457,7 +512,7 @@ class BacktestAnomalyDetector(GateResultsMixin):
                 )
             )
             return tuple(results)
-        if trades_with_signal >= 20 and rate >= 0.80:
+        if trades_with_signal >= _LOOKAHEAD_LARGE_SAMPLE_MIN_TRADES and rate >= _LOOKAHEAD_LARGE_SAMPLE_WARNING_RATE:
             results.append(
                 self._warning(
                     f"Entry+exit bar direction agrees with trade return on "

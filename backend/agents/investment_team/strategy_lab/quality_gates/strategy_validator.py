@@ -15,6 +15,8 @@ from ..spec_dsl import (
     iter_tree_indicator_refs,
 )
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
+from .spec_readiness import _CONCEPT_TERMS_BROAD as _CONCEPT_TERMS
+from .spec_readiness import MAX_POSITION_PCT_CEILING
 
 GATE = "strategy_spec_validator"
 
@@ -32,23 +34,6 @@ _ASSET_MISMATCH: dict[str, re.Pattern[str]] = {
     "commodities": re.compile(r"\b(earnings|dividend|P/E|EPS|market cap)\b", re.IGNORECASE),
 }
 
-# Recognised indicator/concept vocabulary for the hypothesis-vs-rules
-# consistency gate. Word-boundary anchored so substrings like "thematic"
-# don't accidentally match "ema". This vocabulary is deliberately broader than
-# the narrative-fidelity gate's — it also carries strategy-concept words
-# (breakout, mean reversion, momentum, volatility, volume) — but it must still
-# recognise every DSL indicator name, so the channel/volume/momentum additions
-# are mirrored here. ``williams_r`` precedes ``williams`` so the exact DSL token
-# is captured rather than the bare prose alias.
-_CONCEPT_TERMS = re.compile(
-    r"\b(rsi|macd|moving\s+average|ema|sma|bollinger|atr|breakout|"
-    r"mean\s+reversion|momentum|volatility|volume|vwap|stochastic|adx|obv|"
-    r"on[\s-]balance\s+volume|donchian|keltner|mfi|money\s+flow|roc|"
-    r"rate\s+of\s+change|cci|williams_r|williams)\b",
-    re.IGNORECASE,
-)
-
-
 def _concept_mentions(text: str) -> list[tuple[str, frozenset[str]]]:
     """Resolve each recognised term in ``text`` to the indicator(s) it denotes.
 
@@ -58,9 +43,10 @@ def _concept_mentions(text: str) -> list[tuple[str, frozenset[str]]]:
     shared ``_CONCEPT_TO_INDICATOR_NAMES`` map (so "on-balance volume" and the
     DSL token "obv" both yield ``{"obv"}``); a term with no indicator mapping
     (strategy concepts like "breakout"/"momentum") resolves to a singleton of
-    itself so it still compares by surface form. The map is imported lazily to
-    keep this validator's module-load surface light and to reuse the one copy
-    shared with the narrative-fidelity gate rather than duplicating it here.
+    itself so it still compares by surface form. Both ``_CONCEPT_TERMS`` and
+    ``_CONCEPT_TO_INDICATOR_NAMES`` are imported from ``spec_readiness`` so
+    this validator and the narrative-fidelity gate share one copy and cannot
+    diverge.
     """
     from .spec_readiness import _CONCEPT_TO_INDICATOR_NAMES
 
@@ -204,9 +190,11 @@ class StrategySpecValidator(GateResultsMixin):
 
             risk = spec.risk_limits
             max_pos = risk.max_position_pct
-            if max_pos < 1 or max_pos > 25:
+            if max_pos < 1 or max_pos > MAX_POSITION_PCT_CEILING:
                 results.append(
-                    self._critical(f"max_position_pct={max_pos}% is outside safe range [1%, 25%].")
+                    self._critical(
+                        f"max_position_pct={max_pos}% is outside safe range [1%, {MAX_POSITION_PCT_CEILING:g}%]."
+                    )
                 )
 
             # No drawdown check: max drawdown is not a constraint. A Strategy Lab
