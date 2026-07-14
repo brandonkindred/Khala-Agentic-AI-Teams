@@ -5,6 +5,12 @@ the task's requirements, acceptance criteria, spec, architecture overview, or
 submitted file names. This module blanks bad file anchors and drops findings
 whose checkable phrases are absent from that corpus — narrow enough to spare
 phrase-free legitimate findings, strict enough to break hallucination fix loops.
+
+Public API:
+    - ``extract_checkable_phrases(text)`` — Title Case / quoted claims to check.
+    - ``ground_issue_file_path(file_path, files)`` — blank unknown file anchors.
+    - ``drop_ungrounded_issues(...)`` — blank bad paths, then drop issues whose
+      checkable phrases are absent from the task grounding corpus.
 """
 
 from __future__ import annotations
@@ -130,6 +136,10 @@ def drop_ungrounded_issues(
     on_dropped: Optional[Callable[[Any], None]] = None,
 ) -> List[IssueT]:
     """Blank bad paths and drop findings with ungrounded checkable phrases.
+
+    Named for the drop step (the hallucination-loop fix); path blanking is the
+    same fail-safe posture as ``_validate_findings`` and runs first on every
+    issue that is kept.
 
     Preconditions:
         - ``files`` is the submitted path→content map (keys are grounding sources;

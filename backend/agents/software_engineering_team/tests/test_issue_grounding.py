@@ -170,3 +170,64 @@ def test_with_file_path_does_not_mutate_uncopyable_issue():
     # Copy-only policy: path stays as cited when the type cannot be copied.
     assert kept[0].file_path == "missing.py"
     assert plain.file_path == "missing.py"
+
+
+def test_drop_ungrounded_empty_files_dict():
+    """Empty submission: unknown paths blanked (when copyable); phrase-free keeps."""
+    issue = _Issue(description="off-by-one in the loop bound", file_path="any.py")
+    kept = drop_ungrounded_issues(
+        [issue],
+        files={},
+        requirements="Fix loop",
+        acceptance_criteria=None,
+        spec_content="",
+    )
+    assert len(kept) == 1
+    assert kept[0].file_path == ""
+
+
+def test_drop_ungrounded_all_none_acceptance_criteria():
+    kept = drop_ungrounded_issues(
+        [_Issue(description="off-by-one in the loop bound", file_path="a.py")],
+        files={"a.py": "x"},
+        requirements="Fix",
+        acceptance_criteria=[None, None],  # type: ignore[list-item]
+        spec_content="",
+    )
+    assert len(kept) == 1
+
+
+def test_drop_ungrounded_missing_issue_attributes():
+    """Objects lacking description/recommendation/file_path still ground safely."""
+
+    class _Sparse:
+        pass
+
+    kept = drop_ungrounded_issues(
+        [_Sparse()],
+        files={"a.py": "x"},
+        requirements="Anything",
+        acceptance_criteria=[],
+        spec_content="",
+    )
+    assert len(kept) == 1
+
+
+def test_on_dropped_receives_issue_after_path_blanking():
+    files = {"real.py": "x"}
+    fake = _Issue(
+        description='Missing "Phantom Insurer" support',
+        file_path="missing.py",
+    )
+    dropped: list = []
+    kept = drop_ungrounded_issues(
+        [fake],
+        files=files,
+        requirements="No insurers here",
+        acceptance_criteria=[],
+        spec_content="",
+        on_dropped=dropped.append,
+    )
+    assert kept == []
+    assert len(dropped) == 1
+    assert dropped[0].file_path == ""  # blanked before on_dropped
