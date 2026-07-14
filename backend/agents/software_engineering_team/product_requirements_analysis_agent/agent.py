@@ -9,28 +9,24 @@ for the Product Planning Agent.
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 import time
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from strands import Agent
-
 from llm_service import get_client, get_strands_model
 from llm_service.strands_model import resolve_strands_model
-from software_engineering_team.shared.context_sizing import (
-    compute_pra_spec_review_spec_chars,
-    compute_prd_snippet_chars,
-)
-from software_engineering_team.shared.deduplication import dedupe_strings as _dedupe_items
 from software_engineering_team.shared.json_utils import (
     default_decompose_by_sections,
-    parse_json_with_recovery,
 )
 
+# MAX_GAP_ROUNDS / MAX_SOP_ROUNDS are re-exported here for callers/tests that import
+# them from this module.
+from .context_discovery import (
+    inject_context_answers_into_spec,
+    run_context_constraints_discovery,
+)
+from .llm_io import call_llm_json, call_llm_text, parse_llm_json
 from .models import (
     AnalysisPhase,
     AnalysisWorkflowResult,
@@ -42,29 +38,62 @@ from .models import (
     SOPSubPhase,
     SpecCleanupResult,
     SpecReviewResult,
-    ToolGapAnalysis,
-    ToolRecommendation,
 )
-from .prompts import (
-    CONSOLIDATE_QUESTIONS_PROMPT,
-    CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT,
-    GENERATE_QUESTION_RECOMMENDATIONS_PROMPT,
-    PRD_PROMPT,
-    REVIEW_QUESTIONS_ALIGNMENT_PROMPT,
-    SOP_ARCHITECTURE_ANALYSIS_PROMPT,
-    SOP_GENERATE_OPTIONS_PROMPT,
-    SOP_SPEC_EXTRACTION_PROMPT,
-    SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT,
-    SOP_SUB_PHASE_OBJECTIVES,
-    SPEC_CLEANUP_CHUNK_PROMPT,
-    SPEC_CLEANUP_PROMPT,
-    SPEC_CONSISTENCY_CLARIFICATION_PROMPT,
-    SPEC_REVIEW_PROMPT,
-    SPEC_UPDATE_PROMPT,
+from .qa_history import (
+    extract_answer_from_qa_history,
+    format_answered_questions_for_prompt,
+    is_same_decision,
+    parse_qa_history_blocks,
+    read_qa_history,
+    record_answers,
 )
-from .question_data import (
-    SOP_PHASE1_QUESTIONS,
-    _context_discovery_fallback_questions,
+from .question_processing import (
+    add_recommendations,
+    consolidate_open_questions,
+    dedupe_questions_by_answer_similarity,
+    filter_duplicate_questions,
+    filter_organizational_questions,
+    parse_open_question,
+    parse_question_option,
+    parse_spec_review_response,
+    review_question_answer_alignment,
+)
+from .sop_engine import (  # noqa: F401
+    MAX_GAP_ROUNDS,
+    MAX_SOP_ROUNDS,
+    apply_architecture_approval,
+    assess_sub_phase_gaps,
+    build_architecture_approval_questions,
+    build_question_options,
+    evaluate_sop_conditionals,
+    extract_sop_decisions_from_spec,
+    format_architecture_document,
+    generate_spec_aware_options,
+    run_sop_phase1,
+    run_sop_phase2_architecture,
+)
+from .spec_review import (
+    format_context_for_review,
+    run_spec_review,
+)
+from .spec_writing import (
+    _merge_spec_cleanup_results,
+    build_specialist_collaboration_plan,
+    format_answered_questions,
+    generate_prd_document,
+    parse_spec_cleanup_response,
+    run_spec_cleanup,
+    update_spec,
+    update_spec_for_consistency_and_clarity,
+    update_spec_from_duplicates,
+)
+from .user_communication import (
+    apply_all_defaults,
+    apply_answers,
+    communicate_with_user,
+    convert_to_pending_questions,
+    get_default_option,
+    wait_for_answers,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,400 +122,6 @@ def _section_title_from_chunk(chunk: str, max_len: int = 55) -> str:
     if not first_line:
         return ""
     return first_line[:max_len].strip()
-
-
-MAX_SOP_ROUNDS = 5  # Safety limit for multi-round SOP Phase 1 (hardcoded questions)
-MAX_GAP_ROUNDS = 3  # Safety limit for LLM gap-analysis follow-up rounds per sub-phase
-
-
-# ---------------------------------------------------------------------------
-# Constraint Domain Definitions and Analysis
-# ---------------------------------------------------------------------------
-
-CONSTRAINT_DOMAINS_CONFIG = {
-    "infrastructure": {
-        "name": "Deployment/Hosting",
-        "max_layer": 4,
-        "indicators": {
-            1: [  # Platform category
-                ("heroku", 2),
-                ("render", 2),
-                ("railway", 2),  # PaaS → skip to L2
-                ("aws", 2),
-                ("gcp", 2),
-                ("azure", 2),
-                ("google cloud", 2),  # Cloud → L2
-                ("self-hosted", 2),
-                ("on-premises", 2),
-                ("docker", 2),
-                ("kubernetes", 2),
-                ("vercel", 2),
-                ("cloudflare", 2),
-                ("netlify", 2),  # Edge → L2
-                ("paas", 1),
-                ("platform as a service", 1),
-                ("cloud infrastructure", 1),
-                ("cloud-based", 1),
-                ("edge", 1),
-                ("serverless", 1),
-            ],
-            2: [  # Specific provider
-                ("heroku", 3),
-                ("render", 3),
-                ("railway", 3),
-                ("fly.io", 3),
-                ("aws", 3),
-                ("amazon web services", 3),
-                ("gcp", 3),
-                ("google cloud platform", 3),
-                ("azure", 3),
-                ("microsoft azure", 3),
-                ("digitalocean", 3),
-                ("linode", 3),
-                ("vercel", 3),
-                ("cloudflare workers", 3),
-                ("netlify", 3),
-            ],
-            3: [  # Compute model
-                ("lambda", 4),
-                ("cloud functions", 4),
-                ("serverless", 4),
-                ("ecs", 4),
-                ("fargate", 4),
-                ("cloud run", 4),
-                ("container", 4),
-                ("ec2", 4),
-                ("compute engine", 4),
-                ("vm", 4),
-                ("virtual machine", 4),
-                ("app runner", 4),
-                ("elastic beanstalk", 4),
-            ],
-            4: [  # Specific services
-                ("lambda", 4),
-                ("api gateway", 4),
-                ("step functions", 4),
-                ("ecs fargate", 4),
-                ("ecs ec2", 4),
-                ("cloud run", 4),
-                ("app engine", 4),
-                ("app runner", 4),
-            ],
-        },
-    },
-    "frontend": {
-        "name": "Frontend Technology",
-        "max_layer": 4,
-        "indicators": {
-            1: [  # Rendering strategy
-                ("spa", 1),
-                ("single page", 1),
-                ("client-side", 1),
-                ("ssr", 1),
-                ("server-side render", 1),
-                ("server render", 1),
-                ("ssg", 1),
-                ("static site", 1),
-                ("static generation", 1),
-                ("hybrid", 1),
-                ("no frontend", 4),
-                ("api only", 4),
-                ("headless", 4),
-            ],
-            2: [  # Framework
-                ("react", 2),
-                ("angular", 2),
-                ("vue", 2),
-                ("svelte", 2),
-                ("vanilla", 2),
-                ("no framework", 2),
-            ],
-            3: [  # Meta-framework
-                ("next.js", 3),
-                ("nextjs", 3),
-                ("remix", 3),
-                ("nuxt", 3),
-                ("sveltekit", 3),
-                ("create react app", 3),
-                ("cra", 3),
-                ("vite", 3),
-                ("angular cli", 3),
-            ],
-            4: [  # Styling
-                ("tailwind", 4),
-                ("css modules", 4),
-                ("styled-components", 4),
-                ("scss", 4),
-                ("sass", 4),
-                ("emotion", 4),
-                ("css-in-js", 4),
-                ("bootstrap", 4),
-                ("material ui", 4),
-                ("mui", 4),
-                ("chakra", 4),
-            ],
-        },
-    },
-    "backend": {
-        "name": "Backend Technology",
-        "max_layer": 4,
-        "indicators": {
-            1: [  # Architecture
-                ("monolith", 1),
-                ("microservice", 1),
-                ("serverless function", 1),
-                ("bff", 1),
-                ("backend for frontend", 1),
-            ],
-            2: [  # Language
-                ("python", 2),
-                ("node", 2),
-                ("nodejs", 2),
-                ("typescript", 2),
-                ("java", 2),
-                ("kotlin", 2),
-                ("go", 2),
-                ("golang", 2),
-                ("rust", 2),
-                ("c#", 2),
-                (".net", 2),
-                ("ruby", 2),
-            ],
-            3: [  # Framework
-                ("fastapi", 3),
-                ("django", 3),
-                ("flask", 3),
-                ("express", 3),
-                ("nestjs", 3),
-                ("fastify", 3),
-                ("koa", 3),
-                ("spring", 3),
-                ("spring boot", 3),
-                ("quarkus", 3),
-                ("gin", 3),
-                ("echo", 3),
-                ("fiber", 3),
-                ("actix", 3),
-                ("axum", 3),
-                ("rocket", 3),
-                ("rails", 3),
-                ("ruby on rails", 3),
-                ("asp.net", 3),
-            ],
-            4: [  # API style
-                ("rest", 4),
-                ("restful", 4),
-                ("graphql", 4),
-                ("grpc", 4),
-                ("trpc", 4),
-                ("websocket", 4),
-            ],
-        },
-    },
-    "database": {
-        "name": "Database",
-        "max_layer": 4,
-        "indicators": {
-            1: [  # Type
-                ("relational", 1),
-                ("sql", 1),
-                ("document", 1),
-                ("nosql", 1),
-                ("key-value", 1),
-                ("graph", 1),
-                ("time-series", 1),
-            ],
-            2: [  # Hosting model
-                ("rds", 2),
-                ("cloud sql", 2),
-                ("planetscale", 2),
-                ("managed", 2),
-                ("self-managed", 2),
-                ("self-hosted", 2),
-                ("serverless", 2),
-                ("aurora serverless", 2),
-                ("neon", 2),
-            ],
-            3: [  # Specific database
-                ("postgresql", 3),
-                ("postgres", 3),
-                ("mysql", 3),
-                ("mariadb", 3),
-                ("mongodb", 3),
-                ("dynamodb", 3),
-                ("firestore", 3),
-                ("redis", 3),
-                ("cassandra", 3),
-                ("neo4j", 3),
-                ("sqlite", 3),
-                ("supabase", 3),
-            ],
-            4: [  # Additional stores
-                ("redis", 4),
-                ("memcached", 4),
-                ("caching", 4),
-                ("elasticsearch", 4),
-                ("opensearch", 4),
-                ("algolia", 4),
-                ("rabbitmq", 4),
-                ("sqs", 4),
-                ("kafka", 4),
-                ("message queue", 4),
-            ],
-        },
-    },
-    "auth": {
-        "name": "Authentication",
-        "max_layer": 4,
-        "indicators": {
-            1: [  # Strategy
-                ("third-party auth", 1),
-                ("auth provider", 1),
-                ("external auth", 1),
-                ("custom auth", 1),
-                ("self-built auth", 1),
-                ("hybrid auth", 1),
-            ],
-            2: [  # Provider
-                ("auth0", 2),
-                ("clerk", 2),
-                ("firebase auth", 2),
-                ("cognito", 2),
-                ("aws cognito", 2),
-                ("supabase auth", 2),
-                ("keycloak", 2),
-                ("okta", 2),
-                ("fusionauth", 2),
-            ],
-            3: [  # Methods
-                ("oauth", 3),
-                ("oidc", 3),
-                ("openid", 3),
-                ("email/password", 3),
-                ("email password", 3),
-                ("passwordless", 3),
-                ("magic link", 3),
-                ("otp", 3),
-                ("sso", 3),
-                ("saml", 3),
-                ("ldap", 3),
-                ("api key", 3),
-            ],
-            4: [  # Security features
-                ("mfa", 4),
-                ("2fa", 4),
-                ("two-factor", 4),
-                ("multi-factor", 4),
-                ("session", 4),
-                ("jwt", 4),
-                ("token refresh", 4),
-                ("rbac", 4),
-                ("role-based", 4),
-                ("permissions", 4),
-            ],
-        },
-    },
-}
-
-
-def _word_boundary_match(indicator: str, text: str) -> bool:
-    """Check if indicator appears as a whole word/phrase in text.
-
-    Uses regex word boundaries to avoid false positives like 'gin' in 'login'.
-    """
-    pattern = r"\b" + re.escape(indicator) + r"\b"
-    return bool(re.search(pattern, text))
-
-
-def analyze_constraint_status(
-    spec_content: str,
-    answered_questions: List[AnsweredQuestion],
-) -> Dict[str, int]:
-    """Analyze which constraint domains are resolved and to what layer.
-
-    Scans the spec content and answered questions to determine the current
-    resolution level for each constraint domain.
-
-    Args:
-        spec_content: The current specification content.
-        answered_questions: List of questions that have been answered.
-
-    Returns:
-        Dict mapping domain name to resolved layer (0 = unresolved, 1-4 = layer resolved).
-    """
-    status: Dict[str, int] = {domain: 0 for domain in CONSTRAINT_DOMAINS_CONFIG}
-
-    spec_lower = spec_content.lower()
-
-    # Also include answered questions in the analysis
-    answers_text = ""
-    for aq in answered_questions:
-        answers_text += f" {aq.question_text} {aq.selected_answer} "
-    answers_lower = answers_text.lower()
-
-    combined_text = spec_lower + " " + answers_lower
-
-    for domain, config in CONSTRAINT_DOMAINS_CONFIG.items():
-        max_resolved = 0
-        indicators = config.get("indicators", {})
-
-        # Check each layer's indicators using word boundary matching
-        for layer in range(1, config["max_layer"] + 1):
-            layer_indicators = indicators.get(layer, [])
-            for indicator, resolves_to in layer_indicators:
-                if _word_boundary_match(indicator, combined_text):
-                    max_resolved = max(max_resolved, resolves_to)
-
-        status[domain] = min(max_resolved, config["max_layer"])
-
-    return status
-
-
-def generate_constraint_hints(constraint_status: Dict[str, int]) -> str:
-    """Generate hints for the LLM about which constraint layers need questions.
-
-    Args:
-        constraint_status: Dict mapping domain to resolved layer.
-
-    Returns:
-        Formatted string with hints about which domains need attention.
-    """
-    hints = []
-
-    for domain, resolved_layer in constraint_status.items():
-        config = CONSTRAINT_DOMAINS_CONFIG.get(domain, {})
-        max_layer = config.get("max_layer", 4)
-        domain_name = config.get("name", domain)
-
-        if resolved_layer >= max_layer:
-            hints.append(
-                f"- {domain_name}: FULLY RESOLVED (Layer {max_layer}/{max_layer}) - No questions needed"
-            )
-        elif resolved_layer == 0:
-            hints.append(
-                f"- {domain_name}: UNRESOLVED - Ask Layer 1 question (start from the beginning)"
-            )
-        else:
-            next_layer = resolved_layer + 1
-            hints.append(
-                f"- {domain_name}: Resolved to Layer {resolved_layer}/{max_layer} - Ask Layer {next_layer} question"
-            )
-
-    if not hints:
-        return ""
-
-    return (
-        """## CONSTRAINT STATUS (from previous answers)
-
-Based on analysis of the specification and previous answers, here is the current constraint resolution status:
-
-"""
-        + "\n".join(hints)
-        + """
-
-Focus your questions on domains that are NOT fully resolved. Ask ONLY the next layer question for each domain.
-"""
-    )
 
 
 class ProductRequirementsAnalysisAgent:
@@ -1155,90 +790,13 @@ class ProductRequirementsAnalysisAgent:
                 break
         return spec_review_result, current_spec, open_count
 
-    def _merge_spec_review_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Combine issues, gaps, and questions from multiple chunk reviews.
-
-        Kept for potential future chunked fallback; spec review currently uses
-        a single whole-spec LLM call and does not call this.
-
-        Args:
-            results: List of parsed JSON dicts from chunk reviews
-
-        Returns:
-            Merged dict with concatenated lists
-        """
-        merged: Dict[str, Any] = {
-            "issues": [],
-            "gaps": [],
-            "open_questions": [],
-            "summary": "",
-        }
-
-        summaries = []
-        for r in results:
-            if isinstance(r.get("issues"), list):
-                merged["issues"].extend(r["issues"])
-            if isinstance(r.get("gaps"), list):
-                merged["gaps"].extend(r["gaps"])
-            if isinstance(r.get("open_questions"), list):
-                merged["open_questions"].extend(r["open_questions"])
-            if r.get("summary"):
-                summaries.append(str(r["summary"]))
-
-        merged["summary"] = f"Reviewed {len(results)} sections. " + " ".join(summaries[:3])
-        return merged
-
     def _merge_spec_cleanup_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Combine cleanup results from multiple chunks.
-
-        Args:
-            results: List of parsed JSON dicts from chunk cleanup
-
-        Returns:
-            Merged dict with combined validation issues and cleaned spec
-        """
-        merged: Dict[str, Any] = {
-            "is_valid": True,
-            "validation_issues": [],
-            "cleaned_spec": "",
-            "summary": "",
-        }
-
-        cleaned_parts = []
-        for r in results:
-            if r.get("is_valid") is False:
-                merged["is_valid"] = False
-            if isinstance(r.get("validation_issues"), list):
-                merged["validation_issues"].extend(r["validation_issues"])
-            if r.get("cleaned_spec"):
-                cleaned_parts.append(str(r["cleaned_spec"]))
-
-        merged["cleaned_spec"] = "\n\n".join(cleaned_parts)
-        merged["summary"] = f"Cleanup completed for {len(results)} sections"
-        return merged
+        """Delegates to :func:`spec_writing._merge_spec_cleanup_results`."""
+        return _merge_spec_cleanup_results(results)
 
     def _format_context_for_review(self) -> str:
-        """Format context files for inclusion in the spec review prompt."""
-        if not self._context_files:
-            return ""
-
-        from spec_parser import format_context_for_prompt
-
-        formatted = format_context_for_prompt(self._context_files)
-
-        if not formatted:
-            return ""
-
-        return f"""
-
-## Additional Context Files
-
-The following additional files were provided in the project folder. Review these alongside the main specification to understand the full context:
-
-{formatted}
-
----
-"""
+        """Delegates to :func:`spec_review.format_context_for_review`."""
+        return format_context_for_review(self._context_files)
 
     def _run_spec_review(
         self,
@@ -1249,466 +807,56 @@ The following additional files were provided in the project folder. Review these
         answered_questions: Optional[List[AnsweredQuestion]] = None,
         on_chunk_progress: Optional[Callable[[int, int], None]] = None,
     ) -> tuple[SpecReviewResult, str]:
-        """Run the Spec Review phase to identify gaps and questions.
-
-        Args:
-            spec_content: Current specification content.
-            repo_path: Path to the repository.
-            iteration: Current iteration number (for logging/qa_history).
-            spec_version: Version number for updated_spec_vN.md when writing (e.g. from duplicates). If None, iteration is used.
-            answered_questions: List of previously answered questions for constraint analysis.
-            on_chunk_progress: Optional callback (chunk_index, total_chunks) for progress updates during chunked LLM calls.
-
-        Returns:
-            Tuple of (SpecReviewResult, updated_spec_content). The spec may be
-            updated if duplicate questions were found and clarified.
-        """
-        if spec_version is None:
-            spec_version = iteration
-        # Full Q&A for prompt: file history + in-memory answered_questions (current session)
-        qa_from_file = self._read_qa_history(repo_path)
-        qa_for_prompt = qa_from_file
-        if answered_questions:
-            session_block = self._format_answered_questions_for_prompt(answered_questions)
-            if session_block:
-                if qa_for_prompt:
-                    qa_for_prompt += "\n\n## Current session answers\n\n" + session_block
-                else:
-                    qa_for_prompt = "## Current session answers\n\n" + session_block
-        # Optional cap to leave room for spec + instructions (e.g. last 12k chars)
-        if len(qa_for_prompt) > 12000:
-            qa_for_prompt = qa_for_prompt[-12000:]
-            logger.debug("Capped qa_for_prompt to last 12k chars")
-
-        # Analyze constraint status and generate hints for the LLM
-        constraint_status = analyze_constraint_status(spec_content, answered_questions or [])
-        constraint_hints = generate_constraint_hints(constraint_status)
-
-        logger.info("Constraint status: %s", {d: f"L{lvl}" for d, lvl in constraint_status.items()})
-
-        # Build the full content including context files
-        context_section = self._format_context_for_review()
-        full_spec_content = spec_content
-        if context_section:
-            full_spec_content = spec_content + context_section
-            logger.info(
-                "Spec review: Including %d context files in review",
-                len(self._context_files),
-            )
-
-        # Single whole-spec prompt; include full Q&A only when non-empty (edge-empty-qa)
-        max_spec_chars = compute_pra_spec_review_spec_chars(self.llm)
-        if qa_for_prompt:
-            prompt = SPEC_REVIEW_PROMPT.format(
-                spec_content=full_spec_content[:max_spec_chars],
-                constraint_hints=constraint_hints,
-            )
-            prompt += (
-                """
-
-IMPORTANT: The following questions have ALREADY been answered. Do NOT ask these questions again or any variations of them. Only ask NEW questions about topics NOT covered below. The spec and this Q&A are the source of truth.
-
-Previously Answered Questions:
----
-"""
-                + qa_for_prompt
-                + """
----
-"""
-            )
-        else:
-            prompt = SPEC_REVIEW_PROMPT.format(
-                spec_content=full_spec_content[:max_spec_chars],
-                constraint_hints=constraint_hints,
-            )
-
-        if on_chunk_progress is not None:
-            on_chunk_progress(0, 1)
-
-        # Single LLM call for whole-spec review (no decomposition or merge)
-        raw = parse_json_with_recovery(
+        """Delegates to :func:`spec_review.run_spec_review` with this agent's state."""
+        return run_spec_review(
+            self._model,
             self.llm,
-            prompt,
-            agent_name="PRA_spec_review",
+            self._context_files,
+            spec_content,
+            repo_path,
+            iteration=iteration,
+            spec_version=spec_version,
+            answered_questions=answered_questions,
+            on_chunk_progress=on_chunk_progress,
         )
-
-        if not raw:
-            logger.warning("PRA spec_review: No JSON recovered, will retry in next iteration")
-            return (
-                SpecReviewResult(
-                    summary="Spec review JSON parsing failed - will retry",
-                    issues=["JSON parsing failed - response may have been truncated"],
-                    gaps=[],
-                    open_questions=[],
-                ),
-                spec_content,
-            )
-
-        result = self._parse_spec_review_response(raw)
-        updated_spec = spec_content
-
-        # Filter duplicates and clarify spec using full qa_for_prompt (file + session)
-        if qa_for_prompt and result.open_questions:
-            filtered, duplicates = self._filter_duplicate_questions(
-                result.open_questions, qa_for_prompt
-            )
-            result.open_questions = filtered
-
-            if duplicates:
-                logger.info(
-                    "Found %d duplicate questions - clarifying spec with existing answers",
-                    len(duplicates),
-                )
-                updated_spec = self._update_spec_from_duplicates(
-                    duplicates, qa_for_prompt, spec_content, repo_path, spec_version
-                )
-
-        result.open_questions = self._filter_organizational_questions(result.open_questions)
-        return result, updated_spec
 
     def _format_answered_questions_for_prompt(
         self, answered_questions: List[AnsweredQuestion]
     ) -> str:
-        """Format in-memory answered questions in qa_history.md style for inclusion in the LLM prompt.
-
-        Handles empty list and optional fields (rationale, other_text, was_auto_answered, was_default).
-        """
-        if not answered_questions:
-            return ""
-        lines: List[str] = []
-        for aq in answered_questions:
-            lines.append(f"### {aq.question_text}")
-            lines.append(f"**Answer:** {aq.selected_answer}")
-            if aq.rationale:
-                lines.append(f"**Rationale:** {aq.rationale}")
-            if aq.was_auto_answered:
-                lines.append(f"*Auto-answered with {aq.confidence:.0%} confidence*")
-            elif aq.was_default:
-                lines.append("*(Default applied)*")
-            if aq.other_text:
-                lines.append(f"*Custom text:* {aq.other_text}")
-            lines.append("")
-        return "\n".join(lines)
+        """Delegates to :func:`qa_history.format_answered_questions_for_prompt`."""
+        return format_answered_questions_for_prompt(answered_questions)
 
     def _read_qa_history(self, repo_path: Path) -> str:
-        """Read the QA history file if it exists (from plan/product_analysis)."""
-        qa_file = repo_path / "plan" / "product_analysis" / "qa_history.md"
-        if qa_file.exists():
-            try:
-                return qa_file.read_text(encoding="utf-8")
-            except Exception as e:
-                logger.warning("Failed to read qa_history.md: %s", e)
-        return ""
+        """Delegates to :func:`qa_history.read_qa_history`."""
+        return read_qa_history(repo_path)
 
     def _filter_duplicate_questions(
         self,
         new_questions: List[OpenQuestion],
         qa_history: str,
     ) -> tuple[List[OpenQuestion], List[OpenQuestion]]:
-        """Filter out questions that appear to be duplicates of answered ones.
-
-        Uses normalized word stems (e.g. token/tokens, store/stored). Only filters
-        as duplicate when match to qa_history is >= 95%; 50–95% similar questions
-        are kept and may be consolidated elsewhere. Treats spec + Q&A as source of truth.
-
-        Returns:
-            Tuple of (filtered_questions, duplicate_questions).
-            - filtered_questions: Questions that are NOT duplicates (should be asked)
-            - duplicate_questions: Questions that ARE duplicates (already answered)
-        """
-        qa_history_lower = qa_history.lower()
-        filtered = []
-        duplicates = []
-
-        def _stem(w: str) -> str:
-            """Normalize word for matching (e.g. tokens->token, stored->store)."""
-            w = w.strip()
-            if len(w) <= 3:
-                return w
-            if w.endswith("ed") and len(w) > 4:
-                return w[:-2]  # stored -> store
-            if w.endswith("s") and not w.endswith("ss") and len(w) > 4:
-                return w[:-1]  # tokens -> token
-            return w
-
-        for q in new_questions:
-            q_text_lower = q.question_text.lower()
-            # Key words: length > 3, normalized to stems for plural/tense
-            words = [w for w in q_text_lower.split() if len(w) > 3]
-            key_stems = set(_stem(w) for w in words)
-            if not key_stems:
-                filtered.append(q)
-                continue
-            # Count how many stems (or their plural) appear in qa_history
-            matches = sum(
-                1
-                for stem in key_stems
-                if stem in qa_history_lower
-                or (stem + "s") in qa_history_lower
-                or (stem + "ed") in qa_history_lower
-            )
-            match_ratio = matches / len(key_stems)
-            # Only treat as duplicate of an answered question when match >= 90%.
-            # Lower similarity (50–90%) may be consolidated but should not be filtered out.
-            if match_ratio >= 0.90:
-                logger.info(
-                    "Filtering duplicate question (%.0f%% match): %s",
-                    match_ratio * 100,
-                    q.question_text[:60],
-                )
-                duplicates.append(q)
-                continue
-            filtered.append(q)
-
-        if duplicates:
-            logger.info(
-                "Filtered %d duplicate questions based on qa_history",
-                len(duplicates),
-            )
-
-        return filtered, duplicates
+        """Delegates to :func:`question_processing.filter_duplicate_questions`."""
+        return filter_duplicate_questions(new_questions, qa_history)
 
     def _filter_organizational_questions(self, questions: List[OpenQuestion]) -> List[OpenQuestion]:
-        """Remove questions about organizational structure, approval processes, or decision hierarchy.
-
-        The client/user is the source of truth; we do not ask who approves, how decisions
-        are made, or about org structure. A question is considered organizational if any
-        of the configured phrases appear in question_text or (if present) context.
-        """
-        ORGANIZATIONAL_PHRASES = [
-            "decision process",
-            "approval process",
-            "who makes",
-            "final decision",
-            "consensus",
-            "product manager",
-            "stakeholder approval",
-            "organizational structure",
-            "who approves",
-            "sign-off",
-            "sign off",
-            "hierarchy",
-            "reporting",
-        ]
-        kept: List[OpenQuestion] = []
-        for q in questions:
-            text_norm = (q.question_text or "").lower().strip()
-            context_norm = (q.context or "").lower().strip() if q.context else ""
-            is_org = False
-            for phrase in ORGANIZATIONAL_PHRASES:
-                if phrase in text_norm or (context_norm and phrase in context_norm):
-                    is_org = True
-                    break
-            if not is_org:
-                kept.append(q)
-        removed = len(questions) - len(kept)
-        if removed:
-            logger.info(
-                "Filtered %d organizational/process question(s)",
-                removed,
-            )
-        return kept
+        """Delegates to :func:`question_processing.filter_organizational_questions`."""
+        return filter_organizational_questions(questions)
 
     def _extract_answer_from_qa_history(
         self,
         question: OpenQuestion,
         qa_history: str,
     ) -> Optional[AnsweredQuestion]:
-        """Extract a previously recorded answer from qa_history.md for a duplicate question.
-
-        Parses the qa_history.md markdown format to find the best matching Q&A pair.
-
-        Args:
-            question: The duplicate question to find an answer for.
-            qa_history: Raw content of qa_history.md file.
-
-        Returns:
-            AnsweredQuestion if a matching answer was found, None otherwise.
-        """
-        import re
-
-        if not qa_history:
-            return None
-
-        q_text_lower = question.question_text.lower()
-        key_words = [w for w in q_text_lower.split() if len(w) > 4]
-
-        if not key_words:
-            return None
-
-        # Parse qa_history.md sections - format is:
-        # ### Question text
-        # **Answer:** Answer text
-        # **Rationale:** Optional rationale
-        # *(Auto-answered with X% confidence)* or *(Default applied)*
-
-        # Split into Q&A blocks by "### " headers
-        blocks = re.split(r"\n###\s+", qa_history)
-
-        best_match: Optional[tuple[float, str, str, str]] = (
-            None  # (score, question, answer, rationale)
-        )
-
-        for block in blocks[1:]:  # Skip first block (header)
-            lines = block.strip().split("\n")
-            if not lines:
-                continue
-
-            recorded_question = lines[0].strip()
-            recorded_question_lower = recorded_question.lower()
-
-            # Calculate match score
-            matches = sum(1 for w in key_words if w in recorded_question_lower)
-            match_ratio = matches / len(key_words) if key_words else 0
-
-            if match_ratio > 0.5:  # Good enough match
-                # Extract answer from block
-                answer = ""
-                rationale = ""
-
-                for line in lines[1:]:
-                    if line.startswith("**Answer:**"):
-                        answer = line.replace("**Answer:**", "").strip()
-                    elif line.startswith("**Rationale:**"):
-                        rationale = line.replace("**Rationale:**", "").strip()
-
-                if answer and (best_match is None or match_ratio > best_match[0]):
-                    best_match = (match_ratio, recorded_question, answer, rationale)
-
-        if best_match:
-            _, matched_q, answer, rationale = best_match
-            logger.debug(
-                "Extracted answer for duplicate question: '%s' -> '%s'",
-                question.question_text[:40],
-                answer[:40],
-            )
-            return AnsweredQuestion(
-                question_id=question.id,
-                question_text=question.question_text,
-                selected_option_id="from_history",
-                selected_answer=answer,
-                was_auto_answered=False,
-                was_default=False,
-                rationale=rationale or f"Previously answered (matched: {matched_q[:50]})",
-                confidence=0.9,  # High confidence since it was user-answered before
-            )
-
-        return None
+        """Delegates to :func:`qa_history.extract_answer_from_qa_history`."""
+        return extract_answer_from_qa_history(question, qa_history)
 
     def _parse_spec_review_response(self, raw: Any) -> SpecReviewResult:
-        """Parse LLM response into SpecReviewResult.
-
-        Applies deduplication and enforces max limits on issues/gaps to prevent
-        runaway repetitive output from the LLM.
-        """
-        if not isinstance(raw, dict):
-            return SpecReviewResult(summary="Spec review completed (no structured output)")
-
-        raw_issues = raw.get("issues", [])
-        raw_gaps = raw.get("gaps", [])
-        raw_questions = raw.get("open_questions", [])
-
-        # Deduplicate and limit issues/gaps to prevent repetitive LLM output
-        issues = list(raw_issues) if isinstance(raw_issues, list) else []
-        gaps = list(raw_gaps) if isinstance(raw_gaps, list) else []
-
-        original_issue_count = len(issues)
-        original_gap_count = len(gaps)
-
-        issues = _dedupe_items(issues)[:MAX_ISSUES]
-        gaps = _dedupe_items(gaps)[:MAX_GAPS]
-
-        if len(issues) < original_issue_count or len(gaps) < original_gap_count:
-            logger.info(
-                "Deduplicated spec review results: issues %d->%d, gaps %d->%d",
-                original_issue_count,
-                len(issues),
-                original_gap_count,
-                len(gaps),
-            )
-
-        open_questions = []
-        if isinstance(raw_questions, list):
-            for i, q in enumerate(raw_questions):
-                open_questions.append(self._parse_open_question(q, i))
-
-        return SpecReviewResult(
-            issues=issues,
-            gaps=gaps,
-            open_questions=open_questions,
-            summary=str(raw.get("summary", "") or "Spec review complete"),
-        )
+        """Delegates to :func:`question_processing.parse_spec_review_response`."""
+        return parse_spec_review_response(raw)
 
     def _parse_open_question(self, q_data: Any, index: int) -> OpenQuestion:
-        """Parse a single open question from LLM output."""
-        if isinstance(q_data, dict):
-            raw_options = q_data.get("options", [])
-            options = []
-            for i, opt in enumerate(raw_options):
-                options.append(self._parse_question_option(opt, i))
-
-            if options and not any(opt.is_default for opt in options):
-                sorted_opts = sorted(options, key=lambda o: o.confidence, reverse=True)
-                sorted_opts[0] = QuestionOption(
-                    id=sorted_opts[0].id,
-                    label=sorted_opts[0].label,
-                    is_default=True,
-                    rationale=sorted_opts[0].rationale,
-                    confidence=sorted_opts[0].confidence,
-                )
-                options = sorted_opts
-
-            raw_depends = q_data.get("depends_on")
-            if isinstance(raw_depends, (list, tuple)):
-                depends_on = str(raw_depends[0]) if raw_depends else None
-            elif isinstance(raw_depends, str):
-                depends_on = raw_depends
-            else:
-                depends_on = None
-
-            return OpenQuestion(
-                id=str(q_data.get("id", f"q{index}")),
-                question_text=str(q_data.get("question_text", "")),
-                context=str(q_data.get("context", "")),
-                recommendation=str(q_data.get("recommendation", "") or ""),
-                options=options,
-                allow_multiple=bool(q_data.get("allow_multiple", False)),
-                source=str(q_data.get("source", "spec_review")),
-                category=str(q_data.get("category", "general")),
-                priority=str(q_data.get("priority", "medium")),
-                constraint_domain=str(q_data.get("constraint_domain", "")),
-                constraint_layer=int(q_data.get("constraint_layer", 0) or 0),
-                depends_on=depends_on,
-                blocking=bool(q_data.get("blocking", True)),
-                owner=str(q_data.get("owner", "user")),
-                section_impact=list(q_data.get("section_impact", []) or []),
-                due_date=str(q_data.get("due_date", "")),
-                status=str(q_data.get("status", "open")),
-                asked_via=list(q_data.get("asked_via", []) or []),
-            )
-
-        return OpenQuestion(
-            id=f"q{index}",
-            question_text=str(q_data),
-            context="This question was identified during spec review.",
-            recommendation="",
-            options=[
-                QuestionOption(
-                    id="opt1", label="Yes", is_default=True, rationale="", confidence=0.5
-                ),
-                QuestionOption(
-                    id="opt2", label="No", is_default=False, rationale="", confidence=0.5
-                ),
-            ],
-            allow_multiple=False,
-            source="spec_review",
-            blocking=True,
-            owner="user",
-            section_impact=[],
-            due_date="",
-            status="open",
-            asked_via=[],
-        )
+        """Delegates to :func:`question_processing.parse_open_question`."""
+        return parse_open_question(q_data, index)
 
     # ------------------------------------------------------------------
     # SOP Phase 1 & 2 methods
@@ -1716,54 +864,25 @@ Previously Answered Questions:
 
     @staticmethod
     def _parse_llm_json(raw: str) -> Optional[dict]:
-        """Parse JSON from LLM output, stripping markdown code fences if present."""
-        text = raw.strip()
-        if "```" in text:
-            for part in text.split("```"):
-                part = part.strip()
-                if part.lower().startswith("json"):
-                    part = part[4:].strip()
-                if part.startswith("{"):
-                    try:
-                        return json.loads(part)
-                    except json.JSONDecodeError:
-                        continue
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return None
+        """Delegates to :func:`llm_io.parse_llm_json` (fence-aware JSON parse)."""
+        return parse_llm_json(raw)
 
     def _call_llm_text(self, prompt: str) -> str:
-        """Run one Strands ``Agent`` round-trip and return the stripped text.
-
-        Single seam for every raw LLM invocation in this agent; collapses the
-        former ``str(Agent(model=self._model, callback_handler=None)(prompt))``
-        idiom that was copy-pasted across the workflow.
-
-        Preconditions: ``prompt`` is a non-empty string; ``self._model`` is a
-        Strands ``Model``.
-        Postconditions: returns the model's response coerced to ``str`` and
-        whitespace-stripped (possibly empty).
-
-        Raises:
-            ValueError: if ``prompt`` is not a non-empty string. (An explicit
-            raise rather than ``assert`` so the precondition holds under ``-O``.)
-        """
-        if not isinstance(prompt, str) or not prompt:
-            raise ValueError("prompt must be a non-empty string")
-        return str(Agent(model=self._model, callback_handler=None)(prompt)).strip()
-
-    def _call_llm_json(self, prompt: str) -> Optional[dict]:
-        """Run one LLM round-trip and parse the response as a JSON object.
-
-        Builds on :meth:`_call_llm_text` + :meth:`_parse_llm_json` (fence-aware).
+        """Delegates to :func:`llm_io.call_llm_text` with this agent's model.
 
         Preconditions: ``prompt`` is a non-empty string.
-        Postconditions: returns the parsed ``dict`` on success, or ``None`` when
-        the response is empty or not valid JSON (never raises on parse failure).
+        Postconditions: returns the model's stripped text; raises ``ValueError``
+        on an invalid prompt.
         """
-        raw = self._call_llm_text(prompt)
-        return self._parse_llm_json(raw) if raw else None
+        return call_llm_text(self._model, prompt)
+
+    def _call_llm_json(self, prompt: str) -> Optional[dict]:
+        """Delegates to :func:`llm_io.call_llm_json` with this agent's model.
+
+        Postconditions: returns the parsed ``dict`` or ``None`` (never raises on
+        parse failure).
+        """
+        return call_llm_json(self._model, prompt)
 
     def _run_phase(
         self,
@@ -1800,95 +919,12 @@ Previously Answered Questions:
         question_def: Dict[str, Any],
         decisions_map: Dict[str, str],
     ) -> Optional[bool]:
-        """Evaluate whether a conditional SOP question should be asked.
-
-        Returns:
-            True  – question should be asked (condition met or no condition).
-            False – question should NOT be asked (condition not met).
-            None  – parent not yet answered; defer to a later round.
-        """
-        depends_on = question_def.get("depends_on")
-        if not depends_on:
-            return True  # No condition — always ask
-        for parent_id, required_values in depends_on.items():
-            if parent_id not in decisions_map:
-                return None  # Parent not answered yet — defer
-            parent_answer = decisions_map[parent_id]
-            # Check if the parent answer matches any required value (case-insensitive)
-            parent_lower = parent_answer.lower().strip()
-            if not any(
-                v.lower().strip() in parent_lower or parent_lower in v.lower().strip()
-                for v in required_values
-            ):
-                return False  # Condition not met
-        return True
+        """Delegates to :func:`sop_engine.evaluate_sop_conditionals`."""
+        return evaluate_sop_conditionals(question_def, decisions_map)
 
     def _extract_sop_decisions_from_spec(self, spec_content: str) -> List[SOPDecision]:
-        """Scan the spec for answers to SOP Phase 1 questions using an LLM call.
-
-        Returns SOPDecision objects with source='spec' for questions clearly answered
-        by the specification. Returns an empty list on LLM failure.
-        """
-        if not spec_content or not spec_content.strip():
-            return []
-
-        # Build a compact JSON summary of all SOP questions for the prompt
-        questions_summary = []
-        for sub_phase, q_defs in SOP_PHASE1_QUESTIONS.items():
-            for q_def in q_defs:
-                option_labels = [o["label"] for o in q_def.get("options", []) if "label" in o]
-                questions_summary.append(
-                    {
-                        "sop_id": q_def["sop_id"],
-                        "sub_phase": sub_phase.value,
-                        "question": q_def["question_text"],
-                        "options": option_labels,
-                    }
-                )
-
-        prompt = SOP_SPEC_EXTRACTION_PROMPT.format(
-            sop_questions_json=json.dumps(questions_summary, indent=2),
-            spec_content=spec_content[:8000],
-        )
-
-        try:
-            parsed = self._call_llm_json(prompt)
-            if not isinstance(parsed, dict):
-                return []
-            extracted = parsed.get("extracted_decisions", [])
-            if not isinstance(extracted, list):
-                return []
-
-            decisions: List[SOPDecision] = []
-            # Build a reverse lookup for sop_id -> sub_phase
-            id_to_sub_phase: Dict[str, SOPSubPhase] = {}
-            id_to_question: Dict[str, str] = {}
-            for sp, q_defs in SOP_PHASE1_QUESTIONS.items():
-                for q_def in q_defs:
-                    id_to_sub_phase[q_def["sop_id"]] = sp
-                    id_to_question[q_def["sop_id"]] = q_def["question_text"]
-
-            for item in extracted:
-                sop_id = str(item.get("sop_id", ""))
-                if sop_id not in id_to_sub_phase:
-                    continue
-                confidence = float(item.get("confidence", 0.0))
-                if confidence < 0.7:
-                    continue  # Skip low-confidence extractions
-                decisions.append(
-                    SOPDecision(
-                        sop_id=sop_id,
-                        sub_phase=id_to_sub_phase[sop_id],
-                        question_text=id_to_question.get(sop_id, ""),
-                        decision=str(item.get("decision", "")),
-                        source="spec",
-                        confidence=confidence,
-                    )
-                )
-            return decisions
-        except Exception as exc:
-            logger.warning("SOP spec extraction failed, will ask all questions: %s", str(exc))
-            return []
+        """Delegates to :func:`sop_engine.extract_sop_decisions_from_spec`."""
+        return extract_sop_decisions_from_spec(self._model, spec_content)
 
     def _generate_spec_aware_options(
         self,
@@ -1896,43 +932,8 @@ Previously Answered Questions:
         spec_content: str,
         decisions_map: Dict[str, str],
     ) -> List[QuestionOption]:
-        """Generate answer options for a question using the LLM, informed by the spec and prior decisions.
-
-        Returns a list of QuestionOption objects. Falls back to an empty list on failure.
-        """
-        prior_decisions_str = json.dumps(decisions_map, indent=2) if decisions_map else "{}"
-        prompt = SOP_GENERATE_OPTIONS_PROMPT.format(
-            question_text=q_def["question_text"],
-            sop_id=q_def["sop_id"],
-            prior_decisions=prior_decisions_str,
-            spec_excerpt=spec_content[:4000],
-        )
-        try:
-            parsed = self._call_llm_json(prompt)
-            if not isinstance(parsed, dict):
-                return []
-            raw_options = parsed.get("options", [])
-            if not isinstance(raw_options, list):
-                return []
-            options: List[QuestionOption] = []
-            for i, opt in enumerate(raw_options):
-                if not isinstance(opt, dict) or "label" not in opt:
-                    continue
-                options.append(
-                    QuestionOption(
-                        id=opt.get("id", f"opt_gen_{i}"),
-                        label=opt["label"],
-                        is_default=bool(opt.get("is_default", False)),
-                        rationale=str(opt.get("rationale", "")),
-                        confidence=float(opt.get("confidence", 0.5)),
-                    )
-                )
-            return options
-        except Exception as exc:
-            logger.warning(
-                "Spec-aware option generation failed for %s: %s", q_def["sop_id"], str(exc)
-            )
-            return []
+        """Delegates to :func:`sop_engine.generate_spec_aware_options`."""
+        return generate_spec_aware_options(self._model, q_def, spec_content, decisions_map)
 
     def _build_question_options(
         self,
@@ -1940,64 +941,8 @@ Previously Answered Questions:
         spec_content: str,
         decisions_map: Dict[str, str],
     ) -> List[QuestionOption]:
-        """Build options for a question, ensuring at least 3 valid options.
-
-        Uses hardcoded options if >= 3 are available. Otherwise generates spec-aware
-        options via LLM and merges them with any existing hardcoded options.
-        """
-        MIN_OPTIONS = 3
-
-        # Start with hardcoded options
-        hardcoded = q_def.get("options", [])
-        options: List[QuestionOption] = []
-        for i, opt in enumerate(hardcoded):
-            options.append(
-                QuestionOption(
-                    id=opt.get("id", f"opt{i}"),
-                    label=opt["label"],
-                    is_default=opt.get("is_default", False),
-                    rationale=opt.get("rationale", ""),
-                    confidence=0.5,
-                )
-            )
-
-        if len(options) >= MIN_OPTIONS:
-            return options
-
-        # Not enough options — generate spec-aware options via LLM
-        generated = self._generate_spec_aware_options(q_def, spec_content, decisions_map)
-        existing_labels = {o.label.lower() for o in options}
-        for gen_opt in generated:
-            if gen_opt.label.lower() not in existing_labels:
-                options.append(gen_opt)
-                existing_labels.add(gen_opt.label.lower())
-
-        # Ensure "Other" option exists
-        if not any(o.label.lower() == "other" for o in options):
-            options.append(
-                QuestionOption(
-                    id="opt_other",
-                    label="Other",
-                    is_default=False,
-                    rationale="Specify your preference.",
-                    confidence=0.3,
-                )
-            )
-
-        # Final safety: if still < MIN_OPTIONS, add a free-text placeholder
-        if len(options) < MIN_OPTIONS:
-            options.insert(
-                0,
-                QuestionOption(
-                    id="opt_text",
-                    label="(Please type your answer)",
-                    is_default=True,
-                    rationale="",
-                    confidence=0.5,
-                ),
-            )
-
-        return options
+        """Delegates to :func:`sop_engine.build_question_options`."""
+        return build_question_options(self._model, q_def, spec_content, decisions_map)
 
     def _assess_sub_phase_gaps(
         self,
@@ -2006,165 +951,10 @@ Previously Answered Questions:
         all_decisions: List[SOPDecision],
         decisions_map: Dict[str, str],
     ) -> Tuple[bool, List[OpenQuestion]]:
-        """Assess whether a sub-phase is complete and generate follow-up questions for gaps.
-
-        Uses an LLM call to evaluate the sub-phase against its objectives and the
-        information collected so far (from spec + user answers). If gaps remain,
-        the LLM generates targeted follow-up questions with spec-aware options.
-
-        On LLM error or malformed response, returns ``(True, [])`` to gracefully
-        degrade and avoid blocking the workflow.
-
-        Returns (is_complete, follow_up_questions).
-        """
-        objective = SOP_SUB_PHASE_OBJECTIVES.get(sub_phase.value, "")
-        if not objective:
-            return True, []
-
-        # Collect decisions for this sub-phase only
-        sub_phase_decisions = [
-            {
-                "sop_id": d.sop_id,
-                "question": d.question_text,
-                "decision": d.decision,
-                "source": d.source,
-            }
-            for d in all_decisions
-            if d.sub_phase == sub_phase
-        ]
-        # Also include all decisions for cross-referencing
-        all_decisions_summary = [
-            {
-                "sop_id": d.sop_id,
-                "sub_phase": d.sub_phase.value
-                if isinstance(d.sub_phase, SOPSubPhase)
-                else str(d.sub_phase),
-                "decision": d.decision,
-            }
-            for d in all_decisions
-        ]
-        # Build list of existing question IDs so the LLM avoids regenerating them
-        existing_ids_str = ", ".join(sorted(decisions_map.keys())) if decisions_map else "(none)"
-
-        prompt = SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT.format(
-            sub_phase_name=sub_phase.value,
-            sub_phase_objective=objective,
-            spec_excerpt=spec_content[:6000],
-            sub_phase_decisions=json.dumps(sub_phase_decisions, indent=2),
-            all_decisions=json.dumps(all_decisions_summary, indent=2),
-            existing_question_ids=existing_ids_str,
+        """Delegates to :func:`sop_engine.assess_sub_phase_gaps`."""
+        return assess_sub_phase_gaps(
+            self._model, sub_phase, spec_content, all_decisions, decisions_map
         )
-
-        try:
-            parsed = self._call_llm_json(prompt)
-            if not isinstance(parsed, dict):
-                return True, []  # On failure, consider complete to avoid blocking
-
-            is_complete = bool(parsed.get("is_complete", True))
-            if is_complete:
-                logger.info(
-                    "SOP Phase 1: Sub-phase '%s' assessed as COMPLETE: %s",
-                    sub_phase.value,
-                    str(parsed.get("completeness_rationale", "")),
-                )
-                return True, []
-
-            logger.info(
-                "SOP Phase 1: Sub-phase '%s' has GAPS: %s",
-                sub_phase.value,
-                str(parsed.get("completeness_rationale", "")),
-            )
-
-            # Parse follow-up questions
-            raw_questions = parsed.get("follow_up_questions", [])
-            if not isinstance(raw_questions, list):
-                return False, []
-
-            skipped_dupes = 0
-            follow_ups: List[OpenQuestion] = []
-            for rq in raw_questions:
-                if not isinstance(rq, dict) or "question_text" not in rq:
-                    continue
-                q_id = rq.get("id", f"P1.{sub_phase.value[:6]}.gen_{len(follow_ups) + 1}")
-                # Skip if we already have a decision for this question ID
-                if q_id in decisions_map:
-                    skipped_dupes += 1
-                    continue
-
-                # Parse options from LLM response
-                raw_opts = rq.get("options", [])
-                options: List[QuestionOption] = []
-                for i, opt in enumerate(raw_opts):
-                    if not isinstance(opt, dict) or "label" not in opt:
-                        continue
-                    options.append(
-                        QuestionOption(
-                            id=opt.get("id", f"opt_gen_{i}"),
-                            label=opt["label"],
-                            is_default=bool(opt.get("is_default", False)),
-                            rationale=str(opt.get("rationale", "")),
-                            confidence=float(opt.get("confidence", 0.5)),
-                        )
-                    )
-
-                # Ensure minimum 3 options
-                if len(options) < 3:
-                    if not any(o.label.lower() == "other" for o in options):
-                        options.append(
-                            QuestionOption(
-                                id="opt_other",
-                                label="Other",
-                                is_default=False,
-                                rationale="Specify your preference.",
-                                confidence=0.3,
-                            )
-                        )
-                    if len(options) < 3:
-                        options.insert(
-                            0,
-                            QuestionOption(
-                                id="opt_text",
-                                label="(Please type your answer)",
-                                is_default=False,
-                                rationale="",
-                                confidence=0.5,
-                            ),
-                        )
-
-                # Ensure exactly one is_default=True
-                defaults = [o for o in options if o.is_default]
-                if len(defaults) == 0 and options:
-                    options[0] = options[0].model_copy(update={"is_default": True})
-                elif len(defaults) > 1:
-                    for o in defaults[1:]:
-                        idx = options.index(o)
-                        options[idx] = o.model_copy(update={"is_default": False})
-
-                follow_ups.append(
-                    OpenQuestion(
-                        id=q_id,
-                        question_text=rq["question_text"],
-                        context=str(rq.get("context", "")),
-                        category=str(rq.get("category", "general")),
-                        priority=str(rq.get("priority", "high")),
-                        allow_multiple=bool(rq.get("allow_multiple", False)),
-                        source="sop_phase1",
-                        sop_sub_phase=sub_phase.value,
-                        options=options,
-                    )
-                )
-
-            if skipped_dupes:
-                logger.warning(
-                    "SOP Phase 1: Sub-phase '%s' gap analysis generated %d question(s) with duplicate IDs — skipped",
-                    sub_phase.value,
-                    skipped_dupes,
-                )
-
-            return False, follow_ups
-        except Exception as exc:
-            logger.error("Sub-phase gap analysis failed for '%s': %s", sub_phase.value, str(exc))
-            return True, []  # On failure, consider complete to avoid blocking
 
     def _run_sop_phase1(
         self,
@@ -2173,192 +963,8 @@ Previously Answered Questions:
         job_id: str,
         job_updater: Callable,
     ) -> Tuple[List[SOPDecision], str, List[AnsweredQuestion]]:
-        """Run SOP Phase 1: Environment Constraints & Requirements.
-
-        Sequential sub-phase approach:
-        1. Extract answers already present in the spec.
-        2. Iterate through each sub-phase one at a time (DEPLOYMENT, REGULATIONS, ..., PRIORITIES).
-        3. For each sub-phase, first ask the hardcoded SOP questions (with conditional follow-ups).
-        4. Then assess whether the sub-phase is complete using LLM gap analysis.
-        5. If gaps remain, generate and ask follow-up questions until the sub-phase is complete.
-        6. Every question is guaranteed at least 3 answer options informed by the spec.
-
-        Returns (all_decisions, updated_spec, answered_questions).
-        """
-        # Step 1: Extract decisions from spec (single upfront call for efficiency)
-        spec_decisions = self._extract_sop_decisions_from_spec(spec_content)
-        decisions_map: Dict[str, str] = {d.sop_id: d.decision for d in spec_decisions}
-        all_decisions = list(spec_decisions)
-        all_answered: List[AnsweredQuestion] = []
-
-        if spec_decisions:
-            logger.info(
-                "SOP Phase 1: Extracted %d decisions from spec: %s",
-                len(spec_decisions),
-                [d.sop_id for d in spec_decisions],
-            )
-
-        # Step 2: Iterate through sub-phases ONE AT A TIME in order
-        for sub_phase in SOPSubPhase:
-            q_defs = SOP_PHASE1_QUESTIONS.get(sub_phase, [])
-
-            # --- Phase A: Ask hardcoded SOP questions (including conditional follow-ups) ---
-            for round_num in range(1, MAX_SOP_ROUNDS + 1):
-                sub_phase_questions: List[OpenQuestion] = []
-
-                for q_def in q_defs:
-                    sop_id = q_def["sop_id"]
-                    if sop_id in decisions_map:
-                        continue  # Already answered (from spec or prior round)
-
-                    cond_result = self._evaluate_sop_conditionals(q_def, decisions_map)
-                    if cond_result is False:
-                        continue  # Condition not met
-                    if cond_result is None:
-                        continue  # Parent not answered yet — defer to next round within this sub-phase
-
-                    # Build options ensuring at least 3 valid choices, informed by spec
-                    options = self._build_question_options(q_def, spec_content, decisions_map)
-
-                    sub_phase_questions.append(
-                        OpenQuestion(
-                            id=sop_id,
-                            question_text=q_def["question_text"],
-                            context="",
-                            category=q_def.get("category", "general"),
-                            priority="high",
-                            allow_multiple=q_def.get("allow_multiple", False),
-                            source="sop_phase1",
-                            sop_sub_phase=sub_phase.value,
-                            options=options,
-                        )
-                    )
-
-                if not sub_phase_questions:
-                    break  # No more hardcoded questions for this sub-phase
-
-                logger.info(
-                    "SOP Phase 1 sub-phase '%s' round %d: asking %d questions",
-                    sub_phase.value,
-                    round_num,
-                    len(sub_phase_questions),
-                )
-                job_updater(
-                    status_text=f"SOP Phase 1 — {sub_phase.value}: waiting for answers to {len(sub_phase_questions)} question(s)",
-                )
-
-                try:
-                    answered = self._communicate_with_user(
-                        job_id=job_id,
-                        open_questions=sub_phase_questions,
-                        repo_path=repo_path,
-                        iteration=0,
-                    )
-                except Exception as exc:
-                    logger.error(
-                        "SOP Phase 1 communication failed in sub-phase '%s': %s",
-                        sub_phase.value,
-                        exc,
-                    )
-                    raise
-
-                if not answered:
-                    logger.info(
-                        "SOP Phase 1: No answers received for sub-phase '%s' round %d",
-                        sub_phase.value,
-                        round_num,
-                    )
-                    break
-
-                # Record answers as SOPDecision objects
-                for aq in answered:
-                    decision = SOPDecision(
-                        sop_id=aq.question_id,
-                        sub_phase=sub_phase,
-                        question_text=aq.question_text,
-                        decision=aq.selected_answer,
-                        source="user",
-                        confidence=1.0,
-                    )
-                    all_decisions.append(decision)
-                    decisions_map[aq.question_id] = aq.selected_answer
-
-                all_answered.extend(answered)
-                self._record_answers(repo_path, answered, iteration=0)
-
-            # --- Phase B: Gap analysis — generate follow-up questions until sub-phase is complete ---
-            for gap_round in range(1, MAX_GAP_ROUNDS + 1):
-                job_updater(
-                    status_text=f"SOP Phase 1 — {sub_phase.value}: assessing completeness...",
-                )
-                is_complete, follow_ups = self._assess_sub_phase_gaps(
-                    sub_phase,
-                    spec_content,
-                    all_decisions,
-                    decisions_map,
-                )
-                if is_complete or not follow_ups:
-                    logger.info(
-                        "SOP Phase 1: Sub-phase '%s' is complete after %d gap-analysis round(s)",
-                        sub_phase.value,
-                        gap_round,
-                    )
-                    break
-
-                logger.info(
-                    "SOP Phase 1 sub-phase '%s' gap round %d: asking %d follow-up questions",
-                    sub_phase.value,
-                    gap_round,
-                    len(follow_ups),
-                )
-                job_updater(
-                    status_text=f"SOP Phase 1 — {sub_phase.value}: {len(follow_ups)} follow-up question(s) to fill gaps",
-                )
-
-                try:
-                    answered = self._communicate_with_user(
-                        job_id=job_id,
-                        open_questions=follow_ups,
-                        repo_path=repo_path,
-                        iteration=0,
-                    )
-                except Exception as exc:
-                    logger.error(
-                        "SOP Phase 1 gap-analysis communication failed in sub-phase '%s': %s",
-                        sub_phase.value,
-                        exc,
-                    )
-                    raise
-
-                if not answered:
-                    logger.info(
-                        "SOP Phase 1: No answers to gap questions for sub-phase '%s'",
-                        sub_phase.value,
-                    )
-                    break
-
-                for aq in answered:
-                    decision = SOPDecision(
-                        sop_id=aq.question_id,
-                        sub_phase=sub_phase,
-                        question_text=aq.question_text,
-                        decision=aq.selected_answer,
-                        source="user",
-                        confidence=1.0,
-                    )
-                    all_decisions.append(decision)
-                    decisions_map[aq.question_id] = aq.selected_answer
-
-                all_answered.extend(answered)
-                self._record_answers(repo_path, answered, iteration=0)
-
-        # Step 3: Inject all decisions into spec
-        if all_answered:
-            spec_content = self._inject_context_answers_into_spec(
-                spec_content, all_answered, repo_path
-            )
-
-        return all_decisions, spec_content, all_answered
+        """Delegates to :func:`sop_engine.run_sop_phase1`."""
+        return run_sop_phase1(self._model, spec_content, repo_path, job_id, job_updater)
 
     def _run_sop_phase2_architecture(
         self,
@@ -2368,274 +974,35 @@ Previously Answered Questions:
         job_id: str,
         job_updater: Callable,
     ) -> Tuple[ArchitectureAnalysisResult, str]:
-        """Run SOP Phase 2: Architecture Analysis.
-
-        Autonomously analyzes architecture based on spec + Phase 1 decisions,
-        then presents results for user approval.
-
-        Returns (architecture_result, updated_spec).
-        """
-        arch_result = ArchitectureAnalysisResult()
-
-        # Format Phase 1 decisions for the prompt
-        decisions_json = json.dumps(
-            [
-                {
-                    "sop_id": d.sop_id,
-                    "sub_phase": d.sub_phase.value
-                    if isinstance(d.sub_phase, SOPSubPhase)
-                    else str(d.sub_phase),
-                    "question": d.question_text,
-                    "decision": d.decision,
-                    "source": d.source,
-                }
-                for d in sop_decisions
-            ],
-            indent=2,
+        """Delegates to :func:`sop_engine.run_sop_phase2_architecture`."""
+        return run_sop_phase2_architecture(
+            self._model, spec_content, sop_decisions, repo_path, job_id, job_updater
         )
-
-        # Step 1: Architecture analysis LLM call
-        job_updater(status_text="Analyzing architecture based on requirements...")
-        prompt = SOP_ARCHITECTURE_ANALYSIS_PROMPT.format(
-            spec_content=spec_content[:12000],
-            phase1_decisions_json=decisions_json,
-        )
-
-        try:
-            parsed = self._call_llm_json(prompt)
-            if isinstance(parsed, dict):
-                arch_result = ArchitectureAnalysisResult(
-                    architecture_type=str(parsed.get("architecture_type", "")),
-                    architecture_rationale=str(parsed.get("architecture_rationale", "")),
-                    data_types_and_storage=parsed.get("data_types_and_storage", []),
-                    task_types=parsed.get("task_types", []),
-                    tool_gaps=[
-                        ToolGapAnalysis(
-                            gap_description=g.get("gap_description", ""),
-                            recommendations=[
-                                ToolRecommendation(
-                                    name=r.get("name", ""),
-                                    description=r.get("description", ""),
-                                    why_recommended=r.get("why_recommended", ""),
-                                )
-                                for r in g.get("recommendations", [])
-                            ],
-                        )
-                        for g in parsed.get("tool_gaps", [])
-                    ],
-                    diagrams=parsed.get("diagrams", {}),
-                    summary=str(parsed.get("summary", "")),
-                )
-        except Exception as exc:
-            logger.warning("SOP Phase 2 architecture analysis failed: %s", str(exc))
-
-        # Step 2: Generate approval questions
-        if arch_result.architecture_type or arch_result.tool_gaps:
-            job_updater(status_text="Preparing architecture recommendations for approval...")
-            approval_questions = self._build_architecture_approval_questions(arch_result)
-
-            if approval_questions:
-                try:
-                    answered = self._communicate_with_user(
-                        job_id=job_id,
-                        open_questions=approval_questions,
-                        repo_path=repo_path,
-                        iteration=0,
-                    )
-                    if answered:
-                        self._apply_architecture_approval(arch_result, answered)
-                        self._record_answers(repo_path, answered, iteration=0)
-                except Exception as exc:
-                    logger.warning("SOP Phase 2 approval communication failed: %s", str(exc))
-
-        # Step 3: Save architecture document
-        product_analysis_dir = repo_path / PRODUCT_ANALYSIS_SUBDIR
-        product_analysis_dir.mkdir(parents=True, exist_ok=True)
-        arch_doc_path = product_analysis_dir / "architecture_analysis.md"
-        try:
-            arch_doc_content = self._format_architecture_document(arch_result)
-            arch_doc_path.write_text(arch_doc_content, encoding="utf-8")
-            logger.info("Saved architecture analysis to %s", arch_doc_path)
-        except OSError as exc:
-            logger.warning("Failed to save architecture document: %s", exc)
-
-        # Step 4: Inject architecture summary into spec
-        if arch_result.summary:
-            arch_section = "\n\n## Architecture Analysis\n\n"
-            arch_section += arch_result.summary + "\n"
-            if arch_result.architecture_type:
-                arch_section += f"\n**Architecture Type:** {arch_result.architecture_type}\n"
-            spec_content = arch_section + "\n---\n\n" + spec_content
-
-        return arch_result, spec_content
 
     def _build_architecture_approval_questions(
         self, arch_result: ArchitectureAnalysisResult
     ) -> List[OpenQuestion]:
-        """Build approval questions from architecture analysis results."""
-        questions: List[OpenQuestion] = []
-
-        # Architecture type approval
-        if arch_result.architecture_type:
-            options = [
-                QuestionOption(
-                    id="opt_approve",
-                    label=f"Approve {arch_result.architecture_type} architecture",
-                    is_default=True,
-                    rationale=arch_result.architecture_rationale
-                    if arch_result.architecture_rationale
-                    else "",
-                    confidence=0.8,
-                ),
-                QuestionOption(
-                    id="opt_modify",
-                    label="Suggest a different architecture",
-                    is_default=False,
-                    rationale="If the recommended architecture doesn't fit your needs.",
-                    confidence=0.2,
-                ),
-            ]
-            questions.append(
-                OpenQuestion(
-                    id="arch_type_approval",
-                    question_text=f"We recommend a {arch_result.architecture_type} architecture. Do you approve?",
-                    context=arch_result.architecture_rationale
-                    if arch_result.architecture_rationale
-                    else "",
-                    category="architecture",
-                    priority="high",
-                    options=options,
-                    source="sop_phase2",
-                )
-            )
-
-        # Gap tool selection questions
-        for i, gap in enumerate(arch_result.tool_gaps):
-            if len(gap.recommendations) <= 1:
-                continue  # No choice needed
-            options = []
-            for j, rec in enumerate(gap.recommendations):
-                options.append(
-                    QuestionOption(
-                        id=f"opt_gap{i}_{j}",
-                        label=rec.name,
-                        is_default=j == 0,
-                        rationale=rec.why_recommended or rec.description,
-                        confidence=0.7 if j == 0 else 0.4,
-                    )
-                )
-            questions.append(
-                OpenQuestion(
-                    id=f"gap_{i}_selection",
-                    question_text=f"Which tool do you prefer for: {gap.gap_description}?",
-                    context=gap.gap_description,
-                    category="infrastructure",
-                    priority="medium",
-                    options=options,
-                    source="sop_phase2",
-                )
-            )
-
-        return questions
+        """Delegates to :func:`sop_engine.build_architecture_approval_questions`."""
+        return build_architecture_approval_questions(arch_result)
 
     @staticmethod
     def _apply_architecture_approval(
         arch_result: ArchitectureAnalysisResult,
         answered: List[AnsweredQuestion],
     ) -> None:
-        """Apply user approval answers to the architecture result."""
-        for aq in answered:
-            if aq.question_id == "arch_type_approval" and "different" in aq.selected_answer.lower():
-                # User wants a different architecture — note it but keep original as reference
-                if aq.other_text:
-                    arch_result.architecture_type = aq.other_text
-            elif aq.question_id.startswith("gap_") and aq.question_id.endswith("_selection"):
-                # Extract gap index from question_id like "gap_0_selection"
-                try:
-                    gap_idx = int(aq.question_id.split("_")[1])
-                    if 0 <= gap_idx < len(arch_result.tool_gaps):
-                        arch_result.tool_gaps[gap_idx].selected_recommendation = aq.selected_answer
-                except (ValueError, IndexError):
-                    pass
+        """Delegates to :func:`sop_engine.apply_architecture_approval`."""
+        apply_architecture_approval(arch_result, answered)
 
     @staticmethod
     def _format_architecture_document(arch_result: ArchitectureAnalysisResult) -> str:
-        """Format architecture analysis result as a Markdown document."""
-        lines = ["# Architecture Analysis\n"]
-
-        if arch_result.architecture_type:
-            lines.append(f"## Architecture Type: {arch_result.architecture_type}\n")
-            if arch_result.architecture_rationale:
-                lines.append(arch_result.architecture_rationale + "\n")
-
-        if arch_result.data_types_and_storage:
-            lines.append("\n## Data Types and Storage\n")
-            for item in arch_result.data_types_and_storage:
-                dt = item.get("data_type", "Unknown")
-                store = item.get("recommended_store", "TBD")
-                rat = item.get("rationale", "")
-                lines.append(f"- **{dt}** → {store}" + (f" — {rat}" if rat else "") + "\n")
-
-        if arch_result.task_types:
-            lines.append("\n## Task Types\n")
-            for item in arch_result.task_types:
-                task = item.get("task", "Unknown")
-                cls = item.get("classification", "")
-                needs = item.get("compute_needs", "")
-                lines.append(f"- **{task}**: {cls}" + (f" ({needs})" if needs else "") + "\n")
-
-        if arch_result.tool_gaps:
-            lines.append("\n## Gap Analysis\n")
-            for gap in arch_result.tool_gaps:
-                lines.append(f"\n### {gap.gap_description}\n")
-                if gap.selected_recommendation:
-                    lines.append(f"**Selected:** {gap.selected_recommendation}\n")
-                for rec in gap.recommendations:
-                    marker = " ✓" if rec.name == gap.selected_recommendation else ""
-                    lines.append(f"- **{rec.name}**{marker}: {rec.description}")
-                    if rec.why_recommended:
-                        lines.append(f"  — {rec.why_recommended}")
-                    lines.append("\n")
-
-        if arch_result.diagrams:
-            lines.append("\n## Architecture Diagrams\n")
-            for name, content in arch_result.diagrams.items():
-                lines.append(f"\n### {name}\n")
-                lines.append(content + "\n")
-
-        if arch_result.summary:
-            lines.append("\n## Summary\n")
-            lines.append(arch_result.summary + "\n")
-
-        return "\n".join(lines)
+        """Delegates to :func:`sop_engine.format_architecture_document`."""
+        return format_architecture_document(arch_result)
 
     def _run_context_constraints_discovery(
         self, spec_content: str, repo_path: Path
     ) -> List[OpenQuestion]:
-        """Formulate context/constraint questions (project context, deployment, tenets, mandates).
-        Uses LLM with CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT; on empty or invalid response
-        returns a fixed fallback list.
-        """
-        spec_excerpt = (spec_content or "")[:4000]
-        prompt = CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT.format(spec_excerpt=spec_excerpt)
-        try:
-            parsed = self._call_llm_json(prompt)
-            questions_data = parsed.get("open_questions") if isinstance(parsed, dict) else None
-            if not questions_data or not isinstance(questions_data, list):
-                return _context_discovery_fallback_questions()
-            out: List[OpenQuestion] = []
-            for i, q_data in enumerate(questions_data):
-                q = self._parse_open_question(q_data, i)
-                if q.source == "spec_review":
-                    q = q.model_copy(update={"source": "context_discovery"})
-                out.append(q)
-            return out if out else _context_discovery_fallback_questions()
-        except Exception as e:
-            logger.warning(
-                "Context constraints discovery LLM failed, using fallback: %s",
-                str(e),
-            )
-            return _context_discovery_fallback_questions()
+        """Delegates to :func:`context_discovery.run_context_constraints_discovery`."""
+        return run_context_constraints_discovery(self._model, spec_content, repo_path)
 
     def _inject_context_answers_into_spec(
         self,
@@ -2643,258 +1010,36 @@ Previously Answered Questions:
         answered_questions: List[AnsweredQuestion],
         repo_path: Path,
     ) -> str:
-        """Build '## Project context and constraints' section from Q&A and prepend to current_spec."""
-        if not answered_questions:
-            return current_spec
-        section = "## Project context and constraints\n\n"
-        section += self._format_answered_questions(answered_questions)
-        section += "\n\n---\n\n"
-        return section + current_spec
+        """Delegates to :func:`context_discovery.inject_context_answers_into_spec`."""
+        return inject_context_answers_into_spec(current_spec, answered_questions, repo_path)
 
     def _parse_question_option(self, opt_data: Any, index: int) -> QuestionOption:
-        """Parse a single question option from LLM output."""
-        if isinstance(opt_data, dict):
-            return QuestionOption(
-                id=str(opt_data.get("id", f"opt{index}")),
-                label=str(opt_data.get("label", "")),
-                is_default=bool(opt_data.get("is_default", False)),
-                rationale=str(opt_data.get("rationale", "")),
-                confidence=float(opt_data.get("confidence", 0.5)),
-            )
-        return QuestionOption(
-            id=f"opt{index}",
-            label=str(opt_data),
-            is_default=index == 0,
-            rationale="",
-            confidence=0.5,
-        )
+        """Delegates to :func:`question_processing.parse_question_option`."""
+        return parse_question_option(opt_data, index)
 
     def _dedupe_questions_by_answer_similarity(
         self,
         open_questions: List[OpenQuestion],
         answered_questions: List[AnsweredQuestion],
     ) -> List[OpenQuestion]:
-        """Drop open questions whose answer we already have.
-
-        Compares answers (selected_answer from answered_questions) to the option
-        labels of each open question. If any option of an open question is
-        semantically the same as an answer we already have, we do not ask that
-        question again. Preserves order of open_questions.
-        """
-        if not open_questions:
-            return list(open_questions)
-
-        def norm(t: str) -> str:
-            return " ".join((t or "").lower().split()).strip()
-
-        # Build set of existing answers (normalized) we already have
-        existing_answers: List[str] = []
-        for aq in answered_questions:
-            s = norm(aq.selected_answer)
-            if s:
-                existing_answers.append(s)
-            if getattr(aq, "other_text", None) and aq.other_text.strip():
-                o = norm(aq.other_text)
-                if o and o not in existing_answers:
-                    existing_answers.append(o)
-
-        if not existing_answers:
-            return list(open_questions)
-
-        # Same threshold as shared deduplication for "same meaning"
-        SIMILARITY_THRESHOLD = 0.85
-        kept: List[OpenQuestion] = []
-
-        for q in open_questions:
-            if not q.options:
-                # No options: we cannot know what answer this would get; keep it
-                kept.append(q)
-                continue
-            option_labels = [norm(opt.label) for opt in q.options if opt.label]
-            if not option_labels:
-                kept.append(q)
-                continue
-            # If any option is the same as an answer we already have, skip this question
-            already_covered = False
-            for opt_label in option_labels:
-                if not opt_label:
-                    continue
-                for existing in existing_answers:
-                    if SequenceMatcher(None, opt_label, existing).ratio() >= SIMILARITY_THRESHOLD:
-                        logger.info(
-                            "Skipping open question (answer already have): question_id=%s option=%r ~ existing=%r",
-                            q.id,
-                            opt_label[:50],
-                            existing[:50],
-                        )
-                        already_covered = True
-                        break
-                if already_covered:
-                    break
-            if not already_covered:
-                kept.append(q)
-
-        return kept
+        """Delegates to :func:`question_processing.dedupe_questions_by_answer_similarity`."""
+        return dedupe_questions_by_answer_similarity(open_questions, answered_questions)
 
     def _consolidate_open_questions(self, open_questions: List[OpenQuestion]) -> List[OpenQuestion]:
-        """Merge duplicate or semantically equivalent questions before sending to user.
-
-        Uses a single LLM call to identify questions that ask the same thing
-        (e.g. OAuth provider asked multiple ways) and consolidate them into
-        one question per distinct decision, with merged options.
-        """
-        if len(open_questions) <= 1:
-            return list(open_questions)
-
-        questions_json = json.dumps(
-            [
-                {
-                    "question_text": q.question_text,
-                    "context": q.context,
-                    "category": q.category,
-                    "priority": q.priority,
-                    "allow_multiple": q.allow_multiple,
-                    "options": [
-                        {
-                            "id": o.id,
-                            "label": o.label,
-                            "is_default": o.is_default,
-                            "rationale": o.rationale,
-                            "confidence": o.confidence,
-                        }
-                        for o in q.options
-                    ],
-                }
-                for q in open_questions
-            ],
-            indent=2,
-        )
-        prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
-        try:
-            raw = self._call_llm_json(prompt)
-            if not isinstance(raw, dict):
-                return list(open_questions)
-            consolidated = raw.get("consolidated_questions", [])
-            if not isinstance(consolidated, list) or len(consolidated) == 0:
-                return list(open_questions)
-            result = []
-            for i, q_data in enumerate(consolidated):
-                result.append(self._parse_open_question(q_data, i))
-            return result
-        except Exception as e:
-            logger.warning(
-                "Question consolidation failed, using original list: %s",
-                str(e),
-            )
-            return list(open_questions)
+        """Delegates to :func:`question_processing.consolidate_open_questions`."""
+        return consolidate_open_questions(self._model, open_questions)
 
     def _review_question_answer_alignment(
         self, open_questions: List[OpenQuestion]
     ) -> List[OpenQuestion]:
-        """Ensure each question and its options make sense together (e.g. no Yes/No for open-ended questions)."""
-        if len(open_questions) == 0:
-            return []
-        questions_payload = [
-            {
-                "id": q.id,
-                "question_text": q.question_text,
-                "context": q.context,
-                "category": q.category,
-                "priority": q.priority,
-                "allow_multiple": q.allow_multiple,
-                "constraint_domain": q.constraint_domain,
-                "constraint_layer": q.constraint_layer,
-                "depends_on": q.depends_on,
-                "blocking": q.blocking,
-                "owner": q.owner,
-                "section_impact": q.section_impact,
-                "due_date": q.due_date,
-                "status": q.status,
-                "asked_via": q.asked_via,
-                "options": [
-                    {
-                        "id": o.id,
-                        "label": o.label,
-                        "is_default": o.is_default,
-                        "rationale": o.rationale,
-                        "confidence": o.confidence,
-                    }
-                    for o in q.options
-                ],
-            }
-            for q in open_questions
-        ]
-        questions_json = json.dumps(questions_payload, indent=2)
-        prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
-        try:
-            raw = self._call_llm_json(prompt)
-            if not isinstance(raw, dict):
-                return list(open_questions)
-            aligned = raw.get("aligned_questions", [])
-            if not isinstance(aligned, list) or len(aligned) == 0:
-                return list(open_questions)
-            result = []
-            for i, q_data in enumerate(aligned):
-                result.append(self._parse_open_question(q_data, i))
-            return result
-        except Exception as e:
-            logger.warning(
-                "Question-answer alignment review failed, using original list: %s",
-                str(e),
-            )
-            return list(open_questions)
+        """Delegates to :func:`question_processing.review_question_answer_alignment`."""
+        return review_question_answer_alignment(self._model, open_questions)
 
     def _add_recommendations(
         self, open_questions: List[OpenQuestion], spec_content: str
     ) -> List[OpenQuestion]:
-        """Add a short recommendation (which option and why) to each question."""
-        if len(open_questions) == 0:
-            return list(open_questions)
-        questions_payload = [
-            {
-                "id": q.id,
-                "question_text": q.question_text,
-                "context": q.context,
-                "options": [
-                    {
-                        "id": o.id,
-                        "label": o.label,
-                        "rationale": o.rationale,
-                    }
-                    for o in q.options
-                ],
-            }
-            for q in open_questions
-        ]
-        questions_json = json.dumps(questions_payload, indent=2)
-        spec_excerpt = (spec_content or "")[:15000]
-        prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
-            spec_excerpt=spec_excerpt,
-            questions_json=questions_json,
-        )
-        try:
-            raw = self._call_llm_json(prompt)
-            if not isinstance(raw, dict):
-                return list(open_questions)
-            recs = raw.get("recommendations", [])
-            if not isinstance(recs, list):
-                return list(open_questions)
-            rec_by_id = {
-                r.get("id"): str(r.get("recommendation", "") or "")
-                for r in recs
-                if isinstance(r, dict) and r.get("id")
-            }
-            result = []
-            for q in open_questions:
-                rec = rec_by_id.get(q.id, "")
-                result.append(q.model_copy(update={"recommendation": rec}))
-            return result
-        except Exception as e:
-            logger.warning(
-                "Recommendation generation failed, leaving recommendations empty: %s",
-                str(e),
-            )
-            return list(open_questions)
+        """Delegates to :func:`question_processing.add_recommendations`."""
+        return add_recommendations(self._model, open_questions, spec_content)
 
     def _communicate_with_user(
         self,
@@ -2903,217 +1048,38 @@ Previously Answered Questions:
         repo_path: Path,
         iteration: int,
     ) -> List[AnsweredQuestion]:
-        """Send questions to user and wait for response."""
-        if not job_id:
-            raise RuntimeError(
-                "No job_id provided - cannot communicate with user for answers. "
-                "A job_id is required to collect user input."
-            )
-
-        from software_engineering_team.shared.job_store import (
-            add_pending_questions,
-            get_submitted_answers,
-            update_job,
-        )
-
-        pending = self._convert_to_pending_questions(open_questions)
-        add_pending_questions(job_id, pending)
-        try:
-            from unified_api.slack_notifier import notify_open_questions
-
-            notify_open_questions(job_id, pending, source="product-analysis")
-        except ImportError:
-            pass
-
-        update_job(
-            job_id,
-            waiting_for_answers=True,
-            message=f"Waiting for answers to {len(open_questions)} question(s)",
-        )
-
-        logger.info(
-            "Communicate with user: Sent %d questions, waiting for response",
-            len(open_questions),
-        )
-
-        if not self._wait_for_answers(job_id):
-            raise RuntimeError("Job was cancelled or failed while waiting for user answers")
-
-        submitted = get_submitted_answers(job_id)
-        answered = self._apply_answers(open_questions, submitted)
-
-        update_job(job_id, waiting_for_answers=False)
-        self._record_answers(repo_path, answered, iteration)
-
-        return answered
+        """Delegates to :func:`user_communication.communicate_with_user`."""
+        return communicate_with_user(job_id, open_questions, repo_path, iteration)
 
     def _wait_for_answers(self, job_id: str) -> bool:
-        """Wait indefinitely for user to submit answers."""
-        from software_engineering_team.shared.job_store import get_job, is_waiting_for_answers
-
-        while True:
-            if not is_waiting_for_answers(job_id):
-                return True
-
-            job_data = get_job(job_id)
-            if job_data and job_data.get("status") in ("failed", "completed", "cancelled"):
-                return False
-
-            time.sleep(OPEN_QUESTIONS_POLL_INTERVAL)
+        """Delegates to :func:`user_communication.wait_for_answers`."""
+        return wait_for_answers(job_id)
 
     def _convert_to_pending_questions(
         self,
         open_questions: List[OpenQuestion],
     ) -> List[Dict[str, Any]]:
-        """Convert OpenQuestion models to pending question dicts for job store."""
-        pending = []
-        for q in open_questions:
-            options = [
-                {
-                    "id": opt.id,
-                    "label": opt.label,
-                    "is_default": opt.is_default,
-                    "rationale": opt.rationale,
-                    "confidence": opt.confidence,
-                }
-                for opt in q.options
-            ]
-            if not options:
-                options = [{"id": "other", "label": "Provide answer in text field"}]
-
-            rec = getattr(q, "recommendation", None) or ""
-            pending.append(
-                {
-                    "id": q.id,
-                    "question_text": q.question_text,
-                    "context": q.context,
-                    "recommendation": rec if rec else None,
-                    "options": options,
-                    "allow_multiple": q.allow_multiple,
-                    "required": True,
-                    "source": q.source,
-                    "category": q.category,
-                    "priority": q.priority,
-                    "constraint_domain": q.constraint_domain,
-                    "constraint_layer": q.constraint_layer,
-                    "depends_on": q.depends_on,
-                    "blocking": q.blocking,
-                    "owner": q.owner,
-                    "section_impact": q.section_impact,
-                    "due_date": q.due_date,
-                    "status": q.status,
-                    "asked_via": q.asked_via,
-                }
-            )
-        return pending
+        """Delegates to :func:`user_communication.convert_to_pending_questions`."""
+        return convert_to_pending_questions(open_questions)
 
     def _apply_all_defaults(
         self,
         open_questions: List[OpenQuestion],
     ) -> List[AnsweredQuestion]:
-        """Apply default answers to all questions."""
-        answered = []
-        for q in open_questions:
-            default_opt = self._get_default_option(q)
-            answered.append(
-                AnsweredQuestion(
-                    question_id=q.id,
-                    question_text=q.question_text,
-                    selected_option_id=default_opt.id if default_opt else "unknown",
-                    selected_answer=default_opt.label if default_opt else "No default available",
-                    was_default=True,
-                    rationale=default_opt.rationale if default_opt else "",
-                    confidence=default_opt.confidence if default_opt else 0.0,
-                )
-            )
-        return answered
+        """Delegates to :func:`user_communication.apply_all_defaults`."""
+        return apply_all_defaults(open_questions)
 
     def _apply_answers(
         self,
         open_questions: List[OpenQuestion],
         submitted: List[Dict[str, Any]],
     ) -> List[AnsweredQuestion]:
-        """Merge submitted answers with defaults for unanswered questions."""
-        submitted_by_id = {s.get("question_id"): s for s in submitted}
-        answered = []
-
-        for q in open_questions:
-            sub = submitted_by_id.get(q.id)
-            if sub:
-                other_text = sub.get("other_text") or ""
-                was_auto = sub.get("was_auto_answered", False)
-
-                # Handle multi-select questions
-                selected_ids = sub.get("selected_option_ids", [])
-                selected_id = sub.get("selected_option_id", "")
-
-                if selected_ids:
-                    # Multi-select: build combined answer from all selected options
-                    selected_labels = []
-                    for opt_id in selected_ids:
-                        if opt_id == "other" and other_text:
-                            selected_labels.append(other_text)
-                        else:
-                            opt = next((o for o in q.options if o.id == opt_id), None)
-                            if opt:
-                                selected_labels.append(opt.label)
-                    selected_answer = "; ".join(selected_labels) if selected_labels else "Unknown"
-                    # Use first selected ID for backward compatibility
-                    primary_selected_id = selected_ids[0] if selected_ids else ""
-                else:
-                    # Single-select: use the single selected option
-                    selected_ids = [selected_id] if selected_id else []
-                    primary_selected_id = selected_id
-                    if selected_id == "other" and other_text:
-                        selected_answer = other_text
-                    else:
-                        opt = next((o for o in q.options if o.id == selected_id), None)
-                        selected_answer = opt.label if opt else other_text or "Unknown"
-
-                answered.append(
-                    AnsweredQuestion(
-                        question_id=q.id,
-                        question_text=q.question_text,
-                        selected_option_id=primary_selected_id,
-                        selected_option_ids=selected_ids,
-                        selected_answer=selected_answer,
-                        was_auto_answered=was_auto,
-                        was_default=False,
-                        rationale=sub.get("rationale") or "",
-                        confidence=float(sub.get("confidence") or 0.0),
-                        other_text=other_text,
-                    )
-                )
-            else:
-                default_opt = self._get_default_option(q)
-                answered.append(
-                    AnsweredQuestion(
-                        question_id=q.id,
-                        question_text=q.question_text,
-                        selected_option_id=default_opt.id if default_opt else "unknown",
-                        selected_option_ids=[default_opt.id] if default_opt else [],
-                        selected_answer=default_opt.label
-                        if default_opt
-                        else "No default available",
-                        was_default=True,
-                        rationale=default_opt.rationale if default_opt else "",
-                        confidence=default_opt.confidence if default_opt else 0.0,
-                    )
-                )
-
-        return answered
+        """Delegates to :func:`user_communication.apply_answers`."""
+        return apply_answers(open_questions, submitted)
 
     def _get_default_option(self, q: OpenQuestion) -> Optional[QuestionOption]:
-        """Get the default option for a question."""
-        default = next((opt for opt in q.options if opt.is_default), None)
-        if default:
-            return default
-
-        if q.options:
-            sorted_by_confidence = sorted(q.options, key=lambda o: o.confidence, reverse=True)
-            return sorted_by_confidence[0]
-
-        return None
+        """Delegates to :func:`user_communication.get_default_option`."""
+        return get_default_option(q)
 
     def _update_spec(
         self,
@@ -3122,218 +1088,31 @@ Previously Answered Questions:
         repo_path: Path,
         version: int,
     ) -> str:
-        """Update the spec with answered questions. version is used for updated_spec_v{version}.md filename."""
-        answered_text = self._format_answered_questions(answered_questions)
-
-        prompt = SPEC_UPDATE_PROMPT.format(
-            spec_content=current_spec,
-            answered_questions=answered_text,
-        )
-
-        try:
-            updated_spec = self._call_llm_text(prompt)
-        except Exception as e:
-            logger.error("Failed to update spec with LLM: %s", e)
-            return current_spec
-
-        plan_dir = repo_path / "plan" / "product_analysis"
-        plan_dir.mkdir(parents=True, exist_ok=True)
-
-        spec_file = plan_dir / f"updated_spec_v{version}.md"
-        spec_file.write_text(updated_spec, encoding="utf-8")
-        logger.info("Saved updated spec to %s", spec_file)
-
-        latest_file = plan_dir / "updated_spec.md"
-        latest_file.write_text(updated_spec, encoding="utf-8")
-
-        return updated_spec
+        """Delegates to :func:`spec_writing.update_spec`."""
+        return update_spec(self._model, current_spec, answered_questions, repo_path, version)
 
     def _format_answered_questions(
         self,
         answered_questions: List[AnsweredQuestion],
     ) -> str:
-        """Format answered questions for the LLM prompt."""
-        lines = []
-        for aq in answered_questions:
-            lines.append(f"Q: {aq.question_text}")
-            lines.append(f"A: {aq.selected_answer}")
-            if aq.rationale:
-                lines.append(f"Rationale: {aq.rationale}")
-            if aq.was_auto_answered:
-                lines.append(f"(Auto-answered with {aq.confidence:.0%} confidence)")
-            elif aq.was_default:
-                lines.append("(Default applied)")
-            lines.append("")
-        return "\n".join(lines)
+        """Delegates to :func:`spec_writing.format_answered_questions`."""
+        return format_answered_questions(answered_questions)
 
     def _build_specialist_collaboration_plan(
         self,
         cleaned_spec: str,
         answered_questions: List[AnsweredQuestion],
     ) -> str:
-        """Build deterministic recommendations for specialist agents/tooling.
-
-        This gives the PRD writer concrete handoff guidance for areas that often
-        require cross-team collaboration (UX, architecture, risk, data, security).
-        """
-        spec_text = (
-            cleaned_spec + "\n" + self._format_answered_questions(answered_questions)
-        ).lower()
-
-        recommendations: List[str] = []
-
-        def include(label: str, reason: str) -> None:
-            recommendations.append(f"- {label}: {reason}")
-
-        # Always include these core spokes for higher-quality PRDs.
-        include(
-            "Requirements Analyst Agent",
-            "Own FR/NFR decomposition, prioritization, and traceability mapping.",
-        )
-        include(
-            "QA and Acceptance Criteria Agent",
-            "Ensure every Must requirement has verifiable acceptance criteria.",
-        )
-        include(
-            "PRD Critic (Gatekeeper) Agent",
-            "Run completeness/consistency/testability/traceability/pragmatism gates before Final.",
-        )
-
-        if any(
-            k in spec_text
-            for k in [
-                "ui",
-                "ux",
-                "screen",
-                "design",
-                "workflow",
-                "journey",
-                "persona",
-                "onboarding",
-            ]
-        ):
-            include(
-                "UX and Flows Agent",
-                "Define textual workflows, edge cases, accessibility baseline, and screen/IA notes.",
-            )
-            include(
-                "Design System Tool Agent",
-                "Capture reusable component patterns, interaction states, and consistency rules.",
-            )
-            include(
-                "Branding Guidance Agent",
-                "Document tone, visual direction, and brand constraints for product surfaces.",
-            )
-
-        if any(
-            k in spec_text
-            for k in [
-                "architecture",
-                "api",
-                "integration",
-                "service",
-                "event",
-                "database",
-                "deployment",
-            ]
-        ):
-            include(
-                "Architecture Agent",
-                "Define high-level components, interfaces, and data flow boundaries.",
-            )
-            include(
-                "API and Integration Agent",
-                "Specify integration contracts, failure modes, and auth patterns.",
-            )
-
-        if any(
-            k in spec_text
-            for k in ["risk", "assumption", "dependency", "migration", "rollout", "timeline"]
-        ):
-            include(
-                "Risk Analysis Agent",
-                "Maintain risk register with owners, probabilities, impacts, and mitigations.",
-            )
-            include(
-                "Scope and Milestones Planner Agent",
-                "Align MVP/V1/VNext scope to dependencies and timeline options.",
-            )
-
-        if any(
-            k in spec_text
-            for k in ["security", "privacy", "compliance", "pii", "retention", "audit", "auth"]
-        ):
-            include(
-                "Security, Privacy, and Compliance Agent",
-                "Define data handling, retention, authz, and compliance questions.",
-            )
-
-        if any(
-            k in spec_text for k in ["analytics", "kpi", "metric", "dashboard", "event tracking"]
-        ):
-            include(
-                "Data and Analytics Agent",
-                "Define events, KPI ownership, and dashboards tied to goals.",
-            )
-
-        include(
-            "Question Concierge (Human Interface) Agent",
-            "Bundle unresolved questions by owner/impact with due dates and escalation policy.",
-        )
-
-        # Keep deterministic output order and avoid duplicates.
-        seen = set()
-        deduped: List[str] = []
-        for item in recommendations:
-            if item not in seen:
-                seen.add(item)
-                deduped.append(item)
-
-        return "\n".join(deduped)
+        """Delegates to :func:`spec_writing.build_specialist_collaboration_plan`."""
+        return build_specialist_collaboration_plan(cleaned_spec, answered_questions)
 
     def _generate_prd_document(
         self,
         cleaned_spec: str,
         answered_questions: List[AnsweredQuestion],
     ) -> str:
-        """Generate a Product Requirements Document (PRD) from the spec and answers.
-
-        Uses the cleaned, validated spec as the base and integrates resolved answers
-        (including constraint decisions) into a structured PRD suitable for Planning.
-        """
-        # Summarize answered questions for the prompt; this may be empty on the first run
-        answered_summary = self._format_answered_questions(answered_questions)
-
-        # Keep prompt size reasonable while fitting within model context (e.g. 256K)
-        max_chars = compute_prd_snippet_chars(self.llm)
-        cleaned_spec_snippet = cleaned_spec[:max_chars]
-        answered_summary_snippet = answered_summary[:max_chars]
-        specialist_plan = self._build_specialist_collaboration_plan(
-            cleaned_spec=cleaned_spec_snippet,
-            answered_questions=answered_questions,
-        )
-        specialist_plan_snippet = specialist_plan[:max_chars]
-
-        prompt = PRD_PROMPT.format(
-            cleaned_spec=cleaned_spec_snippet,
-            answered_questions_summary=answered_summary_snippet,
-            specialist_collaboration_plan=specialist_plan_snippet,
-        )
-
-        try:
-            prd_content = self._call_llm_text(prompt)
-        except Exception as e:
-            logger.error("Failed to generate PRD with LLM: %s", e)
-            return cleaned_spec
-
-        if not isinstance(prd_content, str) or not prd_content.strip():
-            logger.warning(
-                "Product Requirements Analysis: PRD generation returned empty output, "
-                "falling back to cleaned specification"
-            )
-            return cleaned_spec
-
-        return prd_content
+        """Delegates to :func:`spec_writing.generate_prd_document`."""
+        return generate_prd_document(self._model, self.llm, cleaned_spec, answered_questions)
 
     def _update_spec_from_duplicates(
         self,
@@ -3343,66 +1122,10 @@ Previously Answered Questions:
         repo_path: Path,
         version: int,
     ) -> str:
-        """Update spec using answers from qa_history for duplicate questions.
-
-        When a question is re-asked but was previously answered, this indicates
-        the spec wasn't updated clearly enough. This method extracts the existing
-        answers and re-applies them with emphasis on clarity.
-
-        Args:
-            duplicate_questions: Questions that were filtered as duplicates.
-            qa_history: Raw content of qa_history.md file.
-            current_spec: Current specification content.
-            repo_path: Path to the repository.
-            version: Version number for updated_spec_v{version}.md filename.
-
-        Returns:
-            Updated specification content.
-        """
-        from .prompts import SPEC_CLARIFICATION_PROMPT
-
-        # Extract answers from qa_history for each duplicate
-        extracted_answers: List[AnsweredQuestion] = []
-        for q in duplicate_questions:
-            answer = self._extract_answer_from_qa_history(q, qa_history)
-            if answer:
-                extracted_answers.append(answer)
-
-        if not extracted_answers:
-            logger.debug("No answers extracted from qa_history for duplicates")
-            return current_spec
-
-        logger.info(
-            "Clarifying spec with %d previously answered questions that were re-asked",
-            len(extracted_answers),
+        """Delegates to :func:`spec_writing.update_spec_from_duplicates`."""
+        return update_spec_from_duplicates(
+            self._model, duplicate_questions, qa_history, current_spec, repo_path, version
         )
-
-        # Format the Q&A pairs for the clarification prompt
-        qa_pairs = self._format_answered_questions(extracted_answers)
-
-        prompt = SPEC_CLARIFICATION_PROMPT.format(
-            spec_content=current_spec,
-            duplicate_qa_pairs=qa_pairs,
-        )
-
-        try:
-            clarified_spec = self._call_llm_text(prompt)
-        except Exception as e:
-            logger.error("Failed to clarify spec with LLM: %s", e)
-            return current_spec
-
-        # Save the clarified spec using the same versioned pattern as _update_spec
-        plan_dir = repo_path / "plan" / "product_analysis"
-        plan_dir.mkdir(parents=True, exist_ok=True)
-
-        spec_file = plan_dir / f"updated_spec_v{version}.md"
-        spec_file.write_text(clarified_spec, encoding="utf-8")
-        logger.info("Saved updated spec (clarification) to %s", spec_file)
-
-        latest_file = plan_dir / "updated_spec.md"
-        latest_file.write_text(clarified_spec, encoding="utf-8")
-
-        return clarified_spec
 
     def _update_spec_for_consistency_and_clarity(
         self,
@@ -3413,100 +1136,24 @@ Previously Answered Questions:
         version: int,
         consistency_loop: int,
     ) -> str:
-        """Update spec for clarity and consistency; use QA as source of truth for conflicts.
-
-        Called when deduplication reduces questions by 50%+ so the spec is edited to
-        clarify answers and resolve conflicting information, then re-reviewed.
-        """
-        qa_source = qa_history.strip() if qa_history else ""
-        if all_answered_questions:
-            formatted = self._format_answered_questions(all_answered_questions)
-            qa_source = (qa_source + "\n\n" + formatted).strip() if qa_source else formatted
-        if not qa_source:
-            qa_source = "(No prior Q&A yet; focus on removing internal conflicts and clarifying ambiguous wording.)"
-
-        prompt = SPEC_CONSISTENCY_CLARIFICATION_PROMPT.format(
-            spec_content=current_spec,
-            qa_source=qa_source,
+        """Delegates to :func:`spec_writing.update_spec_for_consistency_and_clarity`."""
+        return update_spec_for_consistency_and_clarity(
+            self._model,
+            current_spec,
+            repo_path,
+            qa_history,
+            all_answered_questions,
+            version,
+            consistency_loop,
         )
-        try:
-            updated_spec = self._call_llm_text(prompt)
-        except Exception as e:
-            logger.error("Failed to update spec for consistency with LLM: %s", e)
-            return current_spec
-
-        plan_dir = repo_path / "plan" / "product_analysis"
-        plan_dir.mkdir(parents=True, exist_ok=True)
-        spec_file = plan_dir / f"updated_spec_consistency_v{version}_loop{consistency_loop}.md"
-        spec_file.write_text(updated_spec, encoding="utf-8")
-        logger.info("Saved consistency-updated spec to %s", spec_file.name)
-        latest_file = plan_dir / "updated_spec.md"
-        latest_file.write_text(updated_spec, encoding="utf-8")
-        return updated_spec
 
     def _parse_qa_history_blocks(self, qa_history: str) -> List[Tuple[int, str, str, str]]:
-        """Parse qa_history.md content into blocks for pruning and rewriting.
-
-        Returns:
-            List of (iteration, question_text, answer, full_block_text).
-        """
-        if not qa_history or not qa_history.strip():
-            return []
-        blocks_out: List[Tuple[int, str, str, str]] = []
-        current_iteration = 1
-        lines = qa_history.split("\n")
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            iter_match = re.match(r"^##\s+Iteration\s+(\d+)", line.strip())
-            if iter_match:
-                current_iteration = int(iter_match.group(1))
-                i += 1
-                continue
-            block_match = re.match(r"^###\s+(.*)$", line)
-            if block_match:
-                question_text = block_match.group(1).strip()
-                answer = ""
-                block_lines = [line]
-                i += 1
-                while i < len(lines):
-                    next_line = lines[i]
-                    if next_line.strip().startswith("### ") or re.match(
-                        r"^##\s+Iteration", next_line.strip()
-                    ):
-                        break
-                    block_lines.append(next_line)
-                    if next_line.strip().startswith("**Answer:**"):
-                        answer = next_line.replace("**Answer:**", "").strip()
-                    elif next_line.strip().startswith("**Rationale:**"):
-                        next_line.replace("**Rationale:**", "").strip()
-                    i += 1
-                full_block_text = "\n".join(block_lines)
-                if question_text or answer:
-                    blocks_out.append((current_iteration, question_text, answer, full_block_text))
-                continue
-            i += 1
-        return blocks_out
+        """Delegates to :func:`qa_history.parse_qa_history_blocks`."""
+        return parse_qa_history_blocks(qa_history)
 
     def _is_same_decision(self, existing_question: str, new_question: str) -> bool:
-        """Return True if the two questions are about the same decision (new answer supersedes old)."""
-        if not existing_question.strip() or not new_question.strip():
-            return False
-        existing_norm = " ".join(existing_question.lower().split())
-        new_norm = " ".join(new_question.lower().split())
-        if existing_norm in new_norm or new_norm in existing_norm:
-            return True
-
-        # Word overlap ratio
-        def words(t: str) -> set:
-            return set(re.sub(r"[^\w\s]", " ", t.lower()).split()) - {"", "the", "a", "an"}
-
-        existing_w = words(existing_question)
-        new_w = words(new_question)
-        if not existing_w or not new_w:
-            return False
-        overlap = len(existing_w & new_w) / max(len(existing_w), len(new_w))
-        return overlap >= 0.5
+        """Delegates to :func:`qa_history.is_same_decision`."""
+        return is_same_decision(existing_question, new_question)
 
     def _record_answers(
         self,
@@ -3514,71 +1161,8 @@ Previously Answered Questions:
         answered_questions: List[AnsweredQuestion],
         iteration: int,
     ) -> None:
-        """Save answered questions to plan/product_analysis/qa_history.md.
-
-        Removes any existing qa_history entry that is the same decision as a new
-        answer (new directive replaces old); then writes pruned history + new iteration.
-        """
-        plan_dir = repo_path / "plan" / "product_analysis"
-        plan_dir.mkdir(parents=True, exist_ok=True)
-        qa_file = plan_dir / "qa_history.md"
-
-        # New iteration section (same format as before)
-        new_section = f"\n## Iteration {iteration}\n\n"
-        for aq in answered_questions:
-            new_section += f"### {aq.question_text}\n"
-            new_section += f"**Answer:** {aq.selected_answer}\n"
-            if aq.rationale:
-                new_section += f"**Rationale:** {aq.rationale}\n"
-            if aq.was_auto_answered:
-                new_section += f"*Auto-answered with {aq.confidence:.0%} confidence*\n"
-            elif aq.was_default:
-                new_section += "*(Default applied)*\n"
-            if aq.other_text:
-                new_section += f"*Custom text:* {aq.other_text}\n"
-            new_section += "\n"
-
-        if not qa_file.exists():
-            content = (
-                "# Q&A History\n\n"
-                "This file records all questions and answers from Product Requirements Analysis.\n"
-                + new_section
-            )
-            with open(qa_file, "w", encoding="utf-8") as f:
-                f.write(content)
-            logger.info("Recorded %d answers to %s", len(answered_questions), qa_file)
-            return
-
-        existing_content = qa_file.read_text(encoding="utf-8")
-        blocks = self._parse_qa_history_blocks(existing_content)
-        remove_indices: set = set()
-        for aq in answered_questions:
-            for idx, (_, block_question, _, _) in enumerate(blocks):
-                if self._is_same_decision(block_question, aq.question_text):
-                    remove_indices.add(idx)
-        kept_blocks = [
-            (it, qt, ans, full)
-            for idx, (it, qt, ans, full) in enumerate(blocks)
-            if idx not in remove_indices
-        ]
-        header = (
-            "# Q&A History\n\n"
-            "This file records all questions and answers from Product Requirements Analysis.\n"
-        )
-        parts = [header]
-        current_iter: Optional[int] = None
-        for it, _qt, _ans, full_block_text in kept_blocks:
-            if current_iter != it:
-                current_iter = it
-                parts.append(f"\n## Iteration {it}\n\n")
-            parts.append(full_block_text)
-            if not full_block_text.endswith("\n"):
-                parts.append("\n")
-        parts.append(new_section)
-        content = "".join(parts)
-        with open(qa_file, "w", encoding="utf-8") as f:
-            f.write(content)
-        logger.info("Recorded %d answers to %s", len(answered_questions), qa_file)
+        """Delegates to :func:`qa_history.record_answers`."""
+        record_answers(repo_path, answered_questions, iteration)
 
     def _run_spec_cleanup(
         self,
@@ -3586,49 +1170,13 @@ Previously Answered Questions:
         repo_path: Path,
         on_chunk_progress: Optional[Callable[[int, int], None]] = None,
     ) -> SpecCleanupResult:
-        """Run the Spec Cleanup phase to validate and clean the spec."""
-        prompt = SPEC_CLEANUP_PROMPT.format(spec_content=spec_content)
-
-        raw = parse_json_with_recovery(
-            llm=self.llm,
-            prompt=prompt,
-            agent_name="PRA_spec_cleanup",
-            decompose_fn=default_decompose_by_sections,
-            merge_fn=self._merge_spec_cleanup_results,
-            original_content=spec_content,
-            chunk_prompt_template=SPEC_CLEANUP_CHUNK_PROMPT,
-            on_chunk_progress=on_chunk_progress,
-        )
-
-        if not raw:
-            # All recovery failed - return the original spec as valid
-            logger.warning("PRA spec_cleanup: No JSON recovered, returning original spec")
-            return SpecCleanupResult(
-                is_valid=True,
-                cleaned_spec=spec_content,
-                summary="Spec cleanup skipped - JSON parsing failed",
-            )
-
-        return self._parse_spec_cleanup_response(raw, spec_content)
+        """Delegates to :func:`spec_writing.run_spec_cleanup`."""
+        return run_spec_cleanup(self.llm, spec_content, repo_path, on_chunk_progress)
 
     def _parse_spec_cleanup_response(
         self,
         raw: Any,
         fallback_spec: str,
     ) -> SpecCleanupResult:
-        """Parse LLM response into SpecCleanupResult."""
-        if not isinstance(raw, dict):
-            return SpecCleanupResult(
-                is_valid=True,
-                cleaned_spec=fallback_spec,
-                summary="Spec cleanup completed (no structured output)",
-            )
-
-        return SpecCleanupResult(
-            is_valid=bool(raw.get("is_valid", True)),
-            validation_issues=list(raw.get("validation_issues", []))
-            if isinstance(raw.get("validation_issues"), list)
-            else [],
-            cleaned_spec=str(raw.get("cleaned_spec", fallback_spec)),
-            summary=str(raw.get("summary", "Spec cleanup complete")),
-        )
+        """Delegates to :func:`spec_writing.parse_spec_cleanup_response`."""
+        return parse_spec_cleanup_response(raw, fallback_spec)
