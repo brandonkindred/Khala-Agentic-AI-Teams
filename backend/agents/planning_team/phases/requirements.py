@@ -9,7 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from planning_team.models import ClientContext, OpenQuestion, OpenQuestionOption
+from planning_team.models import OpenQuestion, OpenQuestionOption
+from planning_team.phases._util import as_client_context, assemble_material
 from planning_team.spec_digest import map_reduce
 from shared_llm_recovery import extract_json_object
 
@@ -152,16 +153,9 @@ def run_requirements(
 
     Returns (context_update, artifacts). artifacts includes open_questions.
     """
-    client_context = context.get("client_context")
-    if isinstance(client_context, dict):
-        client_context = ClientContext(**client_context)
-    brief = context.get("initial_brief") or ""
-    spec = context.get("spec_content") or ""
+    client_context = as_client_context(context.get("client_context"))
     problem = (client_context.problem_summary if client_context else "") or ""
-    if brief and spec:
-        material = f"Brief:\n{brief}\n\nSpec:\n{spec}"
-    else:
-        material = brief or spec or problem or "No brief or spec provided."
+    material = assemble_material(context, extra_fallback=problem)
 
     data = map_reduce(
         material,
