@@ -456,6 +456,40 @@ def assess_sub_phase_gaps(
         return True, []  # On failure, consider complete to avoid blocking
 
 
+def _record_sop_answers(
+    sub_phase: SOPSubPhase,
+    answered: List[AnsweredQuestion],
+    repo_path: Path,
+    decisions_map: Dict[str, str],
+    all_decisions: List[SOPDecision],
+    all_answered: List[AnsweredQuestion],
+) -> None:
+    """Record a round's answers as SOPDecisions and persist them to qa_history.
+
+    Shared by :func:`_run_sop_sub_phase`'s hardcoded-question and gap-analysis
+    rounds, which otherwise duplicated this exact bookkeeping.
+
+    Preconditions: ``answered`` is a non-empty list of :class:`AnsweredQuestion`.
+    Postconditions: mutates ``decisions_map``/``all_decisions``/``all_answered`` in
+        place (they are the caller's own local working copies) and appends to
+        qa_history via :func:`record_answers`.
+    """
+    for aq in answered:
+        decision = SOPDecision(
+            sop_id=aq.question_id,
+            sub_phase=sub_phase,
+            question_text=aq.question_text,
+            decision=aq.selected_answer,
+            source="user",
+            confidence=1.0,
+        )
+        all_decisions.append(decision)
+        decisions_map[aq.question_id] = aq.selected_answer
+
+    all_answered.extend(answered)
+    record_answers(repo_path, answered, iteration=0)
+
+
 def _run_sop_sub_phase(
     model: Any,
     spec_content: str,
@@ -553,21 +587,9 @@ def _run_sop_sub_phase(
             )
             break
 
-        # Record answers as SOPDecision objects
-        for aq in answered:
-            decision = SOPDecision(
-                sop_id=aq.question_id,
-                sub_phase=sub_phase,
-                question_text=aq.question_text,
-                decision=aq.selected_answer,
-                source="user",
-                confidence=1.0,
-            )
-            all_decisions.append(decision)
-            decisions_map[aq.question_id] = aq.selected_answer
-
-        all_answered.extend(answered)
-        record_answers(repo_path, answered, iteration=0)
+        _record_sop_answers(
+            sub_phase, answered, repo_path, decisions_map, all_decisions, all_answered
+        )
     else:
         logger.warning(
             "SOP Phase 1: sub-phase '%s' hit MAX_SOP_ROUNDS (%d) — some hardcoded "
@@ -628,20 +650,9 @@ def _run_sop_sub_phase(
             )
             break
 
-        for aq in answered:
-            decision = SOPDecision(
-                sop_id=aq.question_id,
-                sub_phase=sub_phase,
-                question_text=aq.question_text,
-                decision=aq.selected_answer,
-                source="user",
-                confidence=1.0,
-            )
-            all_decisions.append(decision)
-            decisions_map[aq.question_id] = aq.selected_answer
-
-        all_answered.extend(answered)
-        record_answers(repo_path, answered, iteration=0)
+        _record_sop_answers(
+            sub_phase, answered, repo_path, decisions_map, all_decisions, all_answered
+        )
     else:
         logger.warning(
             "SOP Phase 1: sub-phase '%s' hit MAX_GAP_ROUNDS (%d) — gap analysis may "
