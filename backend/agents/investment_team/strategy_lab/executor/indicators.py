@@ -1,6 +1,12 @@
 """Pre-built technical indicators using only pandas and numpy.
 
-Available in the strategy sandbox via: from indicators import <function_name>
+This module is copied into the strategy sandbox as ``_indicators_impl.py``
+(see ``trading_service.strategy.streaming_harness.StreamingHarness``) — the
+sandbox's real ``indicators.py`` is a copy of ``strategy_indicators.py``'s
+scalar contract, which is what ``from indicators import <function_name>``
+resolves to at runtime. This module is instead consulted in-process by the
+static coverage probe (``coverage_probe/indicator_probe.py``) as the
+reference pandas/numpy implementation.
 
 Every function accepts either a ``pd.Series`` or a sequence the strategy
 already has on hand — a ``list[float]`` or the ``list[Bar]`` that
@@ -409,9 +415,9 @@ def _windowed_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
 
 
 def _windowed_vwap(
-    high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series
+    high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series, period: int = 20
 ) -> pd.Series:
-    """VWAP re-based to the trailing ``STREAMING_WINDOW_BARS`` window (coverage probe only).
+    """VWAP re-based to a trailing ``period``-bar rolling window (coverage probe only).
 
     Preconditions/Postconditions: as :func:`_windowed_obv`, but VWAP is a ratio of
     cumulative sums, so numerator and denominator are each re-based to the window
@@ -419,22 +425,30 @@ def _windowed_vwap(
     ratio is undefined, so — mirroring the runtime ``IndicatorRegistry.vwap`` — the
     value falls back to the window's average close (a finite value the engine
     evaluates predicates against; without this the probe would see NaN and miss
-    those predicates). Keeps the probe's VWAP aligned with the runtime's windowed
-    value instead of an unbounded no-reset cumulative.
-    """
-    # Lazy import — probe-only path; see :func:`_windowed_obv`.
-    from ..runtime_window import STREAMING_WINDOW_BARS
+    those predicates).
 
-    w = STREAMING_WINDOW_BARS
+    ``period`` defaults to 20 — the DSL's default VWAP window — rather than the
+    much larger ``STREAMING_WINDOW_BARS`` retention ceiling used before VWAP's
+    rolling-window unification: the runtime now computes a ``period``-bounded
+    VWAP (default 20), and this probe reference must track whatever ``period``
+    the strategy actually requests to stay aligned with it (the same class of
+    probe/runtime divergence this wrapper exists to prevent in the first place).
+    Also NaN until ``period`` bars exist, matching ``IndicatorRegistry.vwap``'s
+    ``len(bars) < period`` warm-up gate (the runtime returns ``None``, not an
+    early value from a partial window, now that VWAP takes a real ``period``).
+    """
     cum_tp_vol, cum_vol = _vwap_cumulatives(high, low, close, volume)
-    num = _rebase_cumulative(cum_tp_vol, w)
-    den = _rebase_cumulative(cum_vol, w)
+    num = _rebase_cumulative(cum_tp_vol, period)
+    den = _rebase_cumulative(cum_vol, period)
     # Zero-volume-window fallback = trailing-window average close, matching the
-    # runtime. ``rolling(w, min_periods=1).mean()`` is the trailing mean over the
-    # min(t + 1, w) in-window closes — identical to re-basing cumulative close by
-    # cumulative bar-count, but expressed directly.
-    avg_close = _coerce_series(close, "close").rolling(w, min_periods=1).mean()
-    return (num / den.replace(0, np.nan)).where(den != 0, avg_close)
+    # runtime. ``rolling(period, min_periods=1).mean()`` is the trailing mean over
+    # the min(t + 1, period) in-window closes — identical to re-basing cumulative
+    # close by cumulative bar-count, but expressed directly. The min_periods=1
+    # convention only matters pre-warm-up, which the gate below then masks anyway.
+    avg_close = _coerce_series(close, "close").rolling(period, min_periods=1).mean()
+    result = (num / den.replace(0, np.nan)).where(den != 0, avg_close)
+    warmed_up = np.arange(len(result)) >= (period - 1)
+    return result.where(warmed_up)
 
 
 def mfi(
@@ -605,10 +619,14 @@ class IndicatorSpec:
     # Every other scalar must resolve to a positive integer or the
     # dispatcher declines the indicator.
     float_kwargs: frozenset = frozenset()
-    # True for period-less running-total indicators (``vwap``, ``obv``) whose
-    # unbounded full-history value diverges from what the runtime's bounded
+    # True for indicators (``vwap``, ``obv``) whose Series-returning reference
+    # implementation above (:func:`vwap`, :func:`obv`) is an unbounded
+    # full-history running total that diverges from what the runtime's bounded
     # ``StreamingHistoryView`` trades on. Their ``helper`` MUST therefore be a
-    # window-bounded wrapper (``_windowed_*``), enforced by a registry guard test.
+    # window-bounded wrapper (``_windowed_*``), enforced by a registry guard
+    # test. VWAP's window is now the DSL's own rolling ``period`` (unified with
+    # the runtime); OBV's is still the harness's full retention ceiling — both
+    # still need a ``_windowed_*`` wrapper rather than the unbounded reference.
     cumulative: bool = False
 
 
@@ -637,11 +655,10 @@ INDICATORS: Mapping[str, IndicatorSpec] = MappingProxyType(
         ),
         "vwap": IndicatorSpec(
             # Windowed wrapper: the probe must judge VWAP predicates on the same
-            # trailing-window value the runtime trades on, not an unbounded
-            # full-history cumulative (see :func:`_windowed_vwap`).
+            # rolling-window value the runtime trades on (see :func:`_windowed_vwap`).
             helper=_windowed_vwap,
             data_inputs=("high", "low", "close", "volume"),
-            kwarg_names=(),
+            kwarg_names=("period",),
             tuple_arity=None,
             cumulative=True,
         ),

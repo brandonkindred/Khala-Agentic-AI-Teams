@@ -768,7 +768,7 @@ def test_advance_kind_pydantic_round_trip_with_stamped_timestamps_cold_rebuilds(
 # ---------------------------------------------------------------------------
 
 
-def test_factors_compiler_macd_signal_warmup_cache_amortises_same_bar_repeat() -> None:
+def test_factors_compiler_macd_signal_warmup_cache_amortises_same_bar_repeat(monkeypatch) -> None:
     """During the ``[slow, slow + signal - 1)`` warm-up window, the
     factors MACDSignal helper must write ``value=NAN`` to ``_ind_state``
     so same-bar repeat calls share the cache. Prior version returned NAN
@@ -788,6 +788,9 @@ def test_factors_compiler_macd_signal_warmup_cache_amortises_same_bar_repeat() -
     )
 
     # Stub the sandbox `contract` module the compiled output expects.
+    # monkeypatch.setitem restores sys.modules["contract"] to whatever it
+    # was (or removes it) at teardown, so this test can't leak state into
+    # others that import the real module.
     fake = _types.ModuleType("contract")
 
     class _Strategy:
@@ -803,7 +806,7 @@ def test_factors_compiler_macd_signal_warmup_cache_amortises_same_bar_repeat() -
     fake.Strategy = _Strategy
     fake.OrderSide = _OrderSide
     fake.OrderType = _OrderType
-    sys.modules["contract"] = fake
+    monkeypatch.setitem(sys.modules, "contract", fake)
 
     genome = Genome(
         asset_class="stocks",
@@ -850,10 +853,14 @@ def test_factors_compiler_macd_signal_warmup_cache_amortises_same_bar_repeat() -
     result_1 = helper(bars)
     assert math.isnan(result_1)
     # Cache MUST be populated with the NAN value (was not previously —
-    # outer guard returned NAN before any cache write).
+    # outer guard returned NAN before any cache write). ``value`` now holds
+    # all three MACD outputs (macd/signal/histogram) — the shared
+    # render_macd_body template computes them together and dispatches on
+    # ``select`` — so the signal-line NaN this test checks lives under
+    # ``value["signal"]``.
     assert len(strat._ind_state) >= 1
     cached_state = next(iter(strat._ind_state.values()))
-    assert math.isnan(cached_state["value"])
+    assert math.isnan(cached_state["value"]["signal"])
 
     # Second same-bar call must hit the same-bar fast-path. Pin this by
     # identity of the cached dict — a regression that re-cold-rebuilds
@@ -873,7 +880,7 @@ def test_factors_compiler_macd_signal_warmup_cache_amortises_same_bar_repeat() -
     )
 
 
-def test_synthesis_compiler_macd_warmup_cache_amortises_signal_select() -> None:
+def test_synthesis_compiler_macd_warmup_cache_amortises_signal_select(monkeypatch) -> None:
     """During the ``[slow, slow + signal - 1)`` warm-up window for
     ``select='signal'`` / ``'histogram'``, the synthesis MACD helper
     must write the cache with ``sig_val=None`` so same-bar repeat calls
@@ -905,13 +912,13 @@ def test_synthesis_compiler_macd_warmup_cache_amortises_signal_select() -> None:
 
     # ``OrderSide``/``OrderType`` aren't exercised here but the compiler
     # unconditionally emits ``from contract import OrderSide, OrderType,
-    # Strategy``. The stub leaks into ``sys.modules`` for the rest of the
-    # test session; without these attributes any downstream test that
-    # calls ``compile_genome``/``compile_strategy`` fails with ImportError.
+    # Strategy``. monkeypatch.setitem restores sys.modules["contract"] to
+    # whatever it was (or removes it) at teardown, so this stub can't leak
+    # into other tests that import the real module.
     fake.Strategy = _Strategy
     fake.OrderSide = _OrderSide
     fake.OrderType = _OrderType
-    sys.modules["contract"] = fake
+    monkeypatch.setitem(sys.modules, "contract", fake)
 
     from investment_team.models import StrategySpec
 
@@ -1107,18 +1114,20 @@ def test_safe_getattr_propagates_programmer_signals() -> None:
 
 
 def test_normalise_close_canonical_helper_and_inlined_mirrors_stay_in_sync() -> None:
-    """``_normalise_close`` lives once in indicators/streaming.py and is
-    inlined twice in synthesis/compiler.py (new/prev close paths) and
-    twice in factors/compiler.py (same). The sandbox import whitelist
-    forbids importing the host helper, so the inlined mirrors MUST be
-    audited against the canonical for drift.
+    """``_normalise_close`` lives once in indicators/streaming.py; the emitted
+    MACD helper text (inlined — the sandbox import whitelist forbids the
+    emitted code from importing the host helper) derives from exactly one
+    authored copy in ``indicators/template_bodies.py`` (a local ``_norm_close``
+    helper the emitted method defines once and calls for both the current and
+    previous bar), shared by both DSL compilers via ``render_macd_body``.
 
-    This meta-test pins the load-bearing token sets — third-party
-    module allowlist, exact-name allowlist, exception tuple — verbatim
-    across every site. A future contributor extending the canonical
-    (e.g. adding ``cudf`` to the module gate, or ``MemoryError`` to the
-    exception tuple) gets a failing test pointing at every mirror that
-    needs the same edit.
+    This meta-test pins the load-bearing token sets — third-party module
+    allowlist, exact-name allowlist, exception tuple — verbatim across the
+    canonical registry helper and the one shared emitted-text template, and
+    asserts neither compiler re-duplicates the text itself. A future
+    contributor extending the canonical (e.g. adding ``cudf`` to the module
+    gate, or ``MemoryError`` to the exception tuple) gets a failing test
+    pointing at the single template needing the edit.
     """
     import importlib.resources as _res
     import re
@@ -1129,8 +1138,7 @@ def test_normalise_close_canonical_helper_and_inlined_mirrors_stay_in_sync() -> 
     )
     sites = {
         "registry": repo_root / "investment_team/strategy_lab/indicators/streaming.py",
-        "synthesis_compiler": repo_root / "investment_team/strategy_lab/synthesis/compiler.py",
-        "factors_compiler": repo_root / "investment_team/strategy_lab/factors/compiler.py",
+        "template_bodies": repo_root / "investment_team/strategy_lab/indicators/template_bodies.py",
     }
     # Whitespace-collapse: black/ruff may split a tuple literal across
     # lines; collapse whitespace runs into a single space so the token
@@ -1159,9 +1167,10 @@ def test_normalise_close_canonical_helper_and_inlined_mirrors_stay_in_sync() -> 
     ]
     for name, path in sites.items():
         src = _normalise(path.read_text(encoding="utf-8"))
-        # Per-site occurrence count must be >= the minimum mirror count.
-        # Registry: 1 (canonical body). Compilers: 2 (new + prev close).
-        min_count = 1 if name == "registry" else 2
+        # Both sites now carry exactly one canonical copy: the registry's
+        # ``_normalise_close`` function, and template_bodies' ``_norm_close``
+        # local helper (called for both the current and previous bar).
+        min_count = 1
         for tok in required_tokens:
             count = src.count(tok)
             assert count >= min_count, (
@@ -1176,6 +1185,23 @@ def test_normalise_close_canonical_helper_and_inlined_mirrors_stay_in_sync() -> 
             f"site {name!r} missing the __module__ None-guard pattern; "
             "see _normalise_close at indicators/streaming.py"
         )
+
+    # Neither compiler may re-duplicate the inlined text itself — both must
+    # render it from the one shared template.
+    for compiler_path in (
+        repo_root / "investment_team/strategy_lab/synthesis/compiler.py",
+        repo_root / "investment_team/strategy_lab/factors/compiler.py",
+    ):
+        compiler_src = compiler_path.read_text(encoding="utf-8")
+        assert "render_macd_body" in compiler_src, (
+            f"{compiler_path} must render its MACD helper via "
+            "indicators.template_bodies.render_macd_body, not an inlined mirror"
+        )
+        for tok in required_tokens:
+            assert tok not in _normalise(compiler_src), (
+                f"{compiler_path} re-duplicates canonical token {tok!r} inline; "
+                "route it through indicators.template_bodies.render_macd_body instead"
+            )
 
 
 def test_bar_fingerprint_handles_raising_timestamp_property() -> None:

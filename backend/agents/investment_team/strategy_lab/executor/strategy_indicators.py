@@ -43,9 +43,12 @@ except ImportError:  # flat sandbox layout: harness copies the impl as _indicato
 # return byte-identical values to the engine's per-bar reads. The flat sandbox
 # harness copies ``streaming.py`` alongside as ``_streaming_indicators.py``.
 try:  # in-package use
-    from ..indicators.streaming import IndicatorRegistry
+    from ..indicators.streaming import IndicatorRegistry, resolve_indicator
 except ImportError:  # flat sandbox layout
-    from _streaming_indicators import IndicatorRegistry  # type: ignore[no-redef]
+    from _streaming_indicators import (  # type: ignore[no-redef]
+        IndicatorRegistry,
+        resolve_indicator,
+    )
 
 
 class _RegBar:
@@ -204,9 +207,18 @@ def stochastic(high, low, close, k_period=14, d_period=3) -> tuple[float, float]
     )
 
 
-def vwap(high, low, close, volume) -> float:
-    """Latest cumulative VWAP value. See module contract."""
-    return _scalar(IndicatorRegistry().vwap(_ohlc_bars(high, low, close, volume)))
+def vwap(high, low, close, volume, period=20) -> float:
+    """Latest rolling-window VWAP value (default 20-bar window). See module contract.
+
+    Uses the same rolling ``period`` semantics as the DSL / ``ctx.indicator``
+    / engine paths (``reg.vwap(bars, period=...)``), so a value read here is
+    byte-identical to the engine's trailing VWAP for the same bars — the
+    module's cross-path invariant. (The scalar was cumulative before VWAP's
+    rolling-window unification; it now matches every other VWAP surface.)
+    """
+    return _scalar(
+        IndicatorRegistry().vwap(_ohlc_bars(high, low, close, volume), period=int(period))
+    )
 
 
 def donchian_channels(high, low, period=20) -> tuple[float, float, float]:
@@ -372,7 +384,10 @@ _INDICATOR_PARAM_VALIDATORS: dict[str, dict[str, "object"]] = {
         "d_period": _int_in(1, 100),
         "output": _one_of("k", "d"),
     },
-    "vwap": {},
+    # ``ctx.indicator("vwap", ...)`` accepts a rolling ``period`` (unified with
+    # the factors DSL and synthesis's compiled ``vwap`` helper); the standalone
+    # ``vwap()`` scalar function below is unaffected and stays cumulative.
+    "vwap": {"period": _int_in(2, 400)},
     "donchian": {
         "period": _int_in(2, 400),
         "band": _one_of("upper", "middle", "lower"),
@@ -474,37 +489,48 @@ def indicator_value(
 
     reg = IndicatorRegistry()
 
+    # Every branch below only extracts/defaults this call's params and picks
+    # the right bars projection — the actual name -> IndicatorRegistry method
+    # dispatch lives in exactly one place, ``resolve_indicator`` (shared with
+    # ``predicate_evaluator._registry_indicator``, which previously carried a
+    # second, structurally-parallel 16-way if/elif reaching the same methods).
+
     if name in ("sma", "ema"):
         if "period" not in params:
             raise ValueError(f"indicator {name!r} requires a 'period' param")
         bars = _value_bars(_source_values(history, source))
-        method = reg.sma if name == "sma" else reg.ema
-        return method(bars, period=int(params["period"]), source="close")
+        return resolve_indicator(reg, name, bars, source="close", period=int(params["period"]))
 
     if name == "rsi":
         bars = _value_bars(_source_values(history, source))
-        return reg.rsi(bars, period=int(params.get("period", 14)), source="close")
+        return resolve_indicator(
+            reg, name, bars, source="close", period=int(params.get("period", 14))
+        )
 
     if name == "macd":
         bars = _value_bars(_source_values(history, source))
         # Selector value already validated against the allowed set above.
-        return reg.macd(
+        return resolve_indicator(
+            reg,
+            name,
             bars,
+            source="close",
             fast=int(params.get("fast", 12)),
             slow=int(params.get("slow", 26)),
             signal=int(params.get("signal", 9)),
-            source="close",
-            select=str(params.get("output", "macd")),
+            output=str(params.get("output", "macd")),
         )
 
     if name == "bollinger":
         bars = _value_bars(_source_values(history, source))
-        return reg.bollinger_bands(
+        return resolve_indicator(
+            reg,
+            name,
             bars,
+            source="close",
             period=int(params.get("period", 20)),
             num_std=float(params.get("num_std", 2.0)),
-            source="close",
-            select=str(params.get("band", "middle")),
+            band=str(params.get("band", "middle")),
         )
 
     if name == "roc":
@@ -514,7 +540,9 @@ def indicator_value(
         # projected series. This mirrors the sma/ema/rsi/macd/bollinger branches
         # above; the bars carry only a ``close`` field, not the original OHLC.
         bars = _value_bars(_source_values(history, source))
-        return reg.roc(bars, period=int(params.get("period", 12)), source="close")
+        return resolve_indicator(
+            reg, name, bars, source="close", period=int(params.get("period", 12))
+        )
 
     # OHLC-sourced indicators read their fields directly and forbid a `source`
     # override (mirrors spec_dsl's allow_source=False for these names). Reject a
@@ -525,40 +553,46 @@ def indicator_value(
         raise ValueError(f"indicator {name!r} does not accept a 'source' override")
     ohlc = _ohlc_bars_from_history(history)
     if name == "atr":
-        return reg.atr(ohlc, period=int(params.get("period", 14)))
+        return resolve_indicator(reg, name, ohlc, period=int(params.get("period", 14)))
     if name == "adx":
-        return reg.adx(ohlc, period=int(params.get("period", 14)))
+        return resolve_indicator(reg, name, ohlc, period=int(params.get("period", 14)))
     if name == "stochastic":
-        return reg.stochastic(
+        return resolve_indicator(
+            reg,
+            name,
             ohlc,
             k_period=int(params.get("k_period", 14)),
             d_period=int(params.get("d_period", 3)),
-            select=str(params.get("output", "k")),
+            output=str(params.get("output", "k")),
         )
     if name == "donchian":
-        return reg.donchian(
+        return resolve_indicator(
+            reg,
+            name,
             ohlc,
             period=int(params.get("period", 20)),
-            select=str(params.get("band", "middle")),
+            band=str(params.get("band", "middle")),
         )
     if name == "keltner":
-        return reg.keltner(
+        return resolve_indicator(
+            reg,
+            name,
             ohlc,
             period=int(params.get("period", 20)),
             atr_period=int(params.get("atr_period", 10)),
             multiplier=float(params.get("multiplier", 2.0)),
-            select=str(params.get("band", "middle")),
+            band=str(params.get("band", "middle")),
         )
     if name == "obv":
-        return reg.obv(ohlc)
+        return resolve_indicator(reg, name, ohlc)
     if name == "mfi":
-        return reg.mfi(ohlc, period=int(params.get("period", 14)))
+        return resolve_indicator(reg, name, ohlc, period=int(params.get("period", 14)))
     if name == "cci":
-        return reg.cci(ohlc, period=int(params.get("period", 20)))
+        return resolve_indicator(reg, name, ohlc, period=int(params.get("period", 20)))
     if name == "williams_r":
-        return reg.williams_r(ohlc, period=int(params.get("period", 14)))
+        return resolve_indicator(reg, name, ohlc, period=int(params.get("period", 14)))
     if name == "vwap":
-        return reg.vwap(ohlc)
+        return resolve_indicator(reg, name, ohlc, period=int(params.get("period", 20)))
 
     # ``name`` passed the ``_VALID_INDICATORS`` precondition above, so reaching
     # here means a name was added to that table without a dispatch branch. Fail
