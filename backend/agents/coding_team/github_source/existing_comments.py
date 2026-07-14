@@ -35,7 +35,20 @@ from .pr_review_mapping import _normalize_path
 # Below this ratio (difflib.SequenceMatcher over normalized description/body
 # text), a same-location existing comment is treated as a DIFFERENT issue, not
 # a duplicate — two distinct findings can legitimately land on the same line.
+# A reasoned default, not empirically tuned: low enough to tolerate the LLM
+# rephrasing a duplicate finding slightly across review runs, high enough that
+# two distinct findings sharing a line (e.g. a naming nit and a security bug)
+# aren't conflated. Revisit if either failure mode shows up in practice.
 _SIMILARITY_THRESHOLD = 0.6
+
+# Below this length ratio (shorter/longer), skip the similarity check entirely:
+# with T = len_a + len_b and M capped at min(len_a, len_b), the best possible
+# ratio() is 2*min/(min+max) = 2r/(1+r) for length ratio r = min/max. At
+# r = 0.4 that ceiling is 2*0.4/1.4 ≈ 0.571 — already below
+# _SIMILARITY_THRESHOLD — so no pair this filter rejects could have reached
+# the threshold regardless of content; this is a safe O(1) reject, not a
+# heuristic one.
+_LENGTH_RATIO_FLOOR = 0.4
 
 # Inverse of pr_review_mapping._location_prefix: a standalone comment Khala
 # posted itself always starts with this markdown-code location anchor.
@@ -136,14 +149,24 @@ def _similar_enough(a: str, b: str) -> bool:
 
     Postconditions:
         - Returns whether ``SequenceMatcher.ratio()`` (case/whitespace-insensitive)
-          over ``a``/``b`` is at least :data:`_SIMILARITY_THRESHOLD`. Checks the
-          cheaper ``quick_ratio()`` upper bound first and returns False without
-          computing the full (worst-case O(len(a)*len(b))) ``ratio()`` when even
-          that upper bound misses the threshold — safe because ``quick_ratio()``
-          is guaranteed to be >= ``ratio()``, so a match ``ratio()`` could reach
-          can never be masked by this shortcut.
+          over ``a``/``b`` is at least :data:`_SIMILARITY_THRESHOLD`. Returns
+          False immediately, without constructing a ``SequenceMatcher``, when
+          either string is empty or the two lengths differ enough that
+          :data:`_LENGTH_RATIO_FLOOR`'s length-ratio bound already rules out
+          reaching the threshold. Otherwise checks the cheaper ``quick_ratio()``
+          upper bound before computing the full (worst-case
+          O(len(a)*len(b))) ``ratio()``. Both shortcuts are exact, not
+          heuristic: neither can reject a pair whose true ``ratio()`` would
+          have met the threshold.
     """
-    matcher = SequenceMatcher(None, (a or "").strip().lower(), (b or "").strip().lower())
+    a_norm = (a or "").strip().lower()
+    b_norm = (b or "").strip().lower()
+    if not a_norm or not b_norm:
+        return False
+    shorter, longer = sorted((len(a_norm), len(b_norm)))
+    if shorter < longer * _LENGTH_RATIO_FLOOR:
+        return False
+    matcher = SequenceMatcher(None, a_norm, b_norm)
     if matcher.quick_ratio() < _SIMILARITY_THRESHOLD:
         return False
     return matcher.ratio() >= _SIMILARITY_THRESHOLD
@@ -194,7 +217,11 @@ def partition_issues_by_existing_comments(
         - ``issues`` is the reviewer's findings for this PR (already filtered
           to those that belong on this PR — e.g. with ``pre_existing``
           findings already routed elsewhere); ``existing`` is
-          :func:`build_existing_comments`'s output for the same PR.
+          :func:`build_existing_comments`'s output for the same PR. ``existing``
+          may be any iterable, including a one-shot one (e.g. a generator) —
+          it is materialized once up front specifically so each issue can
+          re-scan the full set; a lazy iterable would otherwise be exhausted
+          after the first issue and starve every issue after it.
     Postconditions:
         - Returns ``(kept, dropped, references)``. ``dropped`` holds every
           issue matching an already-RESOLVED existing comment (already
@@ -205,6 +232,9 @@ def partition_issues_by_existing_comments(
           reference to it; an issue with no match, or whose match was dropped,
           has no entry. ``len(kept) + len(dropped) == len(list(issues))``.
     """
+    # Materialized once (not left as whatever iterable was passed in) because
+    # match_existing_comment below re-scans this same collection once per
+    # issue — a one-shot iterator would be exhausted after the first issue.
     existing_list = list(existing)
     kept: list[Any] = []
     dropped: list[Any] = []

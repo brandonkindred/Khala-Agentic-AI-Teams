@@ -189,6 +189,32 @@ def test_match_existing_comment_skips_candidates_with_no_path() -> None:
     assert match_existing_comment(issue, existing) is None
 
 
+def test_match_existing_comment_length_ratio_rejects_without_full_computation() -> None:
+    # description is contained verbatim as a prefix of body, but the length
+    # ratio (10/40 = 0.25) is well below the 0.4 floor: even a full ratio()
+    # computation could reach at most 2*10/50 = 0.4, under the 0.6 threshold,
+    # so rejecting via length alone must agree with rejecting via content.
+    issue = _Issue(file_path="a.py", line=3, description="x" * 10)
+    existing = [
+        ExistingComment(
+            path="a.py",
+            line=3,
+            body="x" * 10 + "y" * 30,
+            html_url="https://x/1",
+            resolved=False,
+        )
+    ]
+    assert match_existing_comment(issue, existing) is None
+
+
+def test_match_existing_comment_empty_description_never_matches() -> None:
+    issue = _Issue(file_path="a.py", line=3, description="")
+    existing = [
+        ExistingComment(path="a.py", line=3, body="", html_url="https://x/1", resolved=False)
+    ]
+    assert match_existing_comment(issue, existing) is None
+
+
 # ---------------------------------------------------------------------------
 # partition_issues_by_existing_comments
 # ---------------------------------------------------------------------------

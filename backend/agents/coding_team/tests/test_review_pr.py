@@ -637,6 +637,7 @@ class _FakeReviewClient:
         # When True, list_review_comments raises — exercises the fail-open path in
         # _fetch_existing_comments (a lookup failure must not fail the review).
         self.fetch_existing_comments_fail = False
+        self.list_review_comments_calls = 0  # counts calls, to assert the fetch is skipped
 
     def __enter__(self) -> "_FakeReviewClient":
         return self
@@ -645,6 +646,7 @@ class _FakeReviewClient:
         return None
 
     def list_review_comments(self, _o: str, _r: str, _n: int) -> list[Any]:
+        self.list_review_comments_calls += 1
         if self.fetch_existing_comments_fail:
             raise GitHubAPIError(500, "existing comments unavailable")
         return list(self.existing_review_comments)
@@ -1710,6 +1712,19 @@ class TestReviewEndpointExistingComments:
         assert job["status"] == "completed"
         assert job["review_summary"]["addressed_issues_dropped"] == 0
         assert job["review_summary"]["total_issues"] == 2
+
+    def test_clean_review_skips_existing_comment_fetch(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        review_app["github"]["agent_output"] = _FakeOutput(issues=[])
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["total_issues"] == 0
+        assert job["review_summary"]["addressed_issues_dropped"] == 0
+        # No findings to de-duplicate: the existing-comment fetch must not run.
+        assert gh.list_review_comments_calls == 0
 
 
 class TestReviewPersistence:

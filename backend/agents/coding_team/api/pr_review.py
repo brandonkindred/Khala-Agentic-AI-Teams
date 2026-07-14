@@ -931,11 +931,17 @@ def _run_pr_review_body(
             # a match against a still-open comment is kept but cross-referenced (see
             # map_issues_to_comments/anchor_to_first_file below) instead of posted as
             # an unexplained duplicate. The fetch is best-effort: any failure yields
-            # [], so this never turns a working review into a failed one.
-            existing_comments = _fetch_existing_comments(client, owner, repo, pr_number)
-            pr_issues, addressed_issues, existing_by_issue = partition_issues_by_existing_comments(
-                pr_issues, existing_comments
-            )
+            # [], so this never turns a working review into a failed one. Skipped
+            # entirely on a clean review (no findings): there is nothing to
+            # de-duplicate, so the up-to-three API calls the fetch makes would be
+            # pure waste.
+            if pr_issues:
+                existing_comments = _fetch_existing_comments(client, owner, repo, pr_number)
+                pr_issues, addressed_issues, existing_by_issue = (
+                    partition_issues_by_existing_comments(pr_issues, existing_comments)
+                )
+            else:
+                addressed_issues, existing_by_issue = [], {}
 
             comments, leftovers = map_issues_to_comments(
                 pr_issues, valid_by_path, existing_by_issue
