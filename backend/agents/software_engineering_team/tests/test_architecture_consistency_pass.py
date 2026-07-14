@@ -367,6 +367,16 @@ def test_coerce_finding_accepts_architecture_and_refactor_categories() -> None:
         {"category": "logic", "description": "wrong category for this pass"},
         {"category": "architecture", "description": ""},
         {"category": "", "description": "no category at all"},
+        {
+            "category": "architecture",
+            "description": "matches the established pattern",
+            "suggestion": "No changes needed.",
+        },
+        {
+            "category": "refactor",
+            "description": "no real duplicate found",
+            "suggestion": "no action required",
+        },
     ],
 )
 def test_coerce_finding_rejects_invalid_items(item: object) -> None:

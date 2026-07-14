@@ -35,6 +35,7 @@ from code_review_agent.models import (
     CodeReviewUnavailableError,
     FileSegment,
     ReviewChunk,
+    is_no_op_suggestion,
 )
 from pydantic import ValidationError
 
@@ -1972,6 +1973,108 @@ def test_pre_existing_tag_is_carried_through_and_defaults_false() -> None:
         ],
     )
     assert [i.pre_existing for i in issues] == [True, True, False, False]
+
+
+@pytest.mark.parametrize(
+    "suggestion",
+    [
+        "No changes needed.",
+        "no changes needed",
+        "No change required",
+        "no change is required",
+        "No code changes needed.",
+        "No action needed.",
+        "no action is required",
+        "No fix needed",
+        "no fixes required",
+        "Nothing to change.",
+        "nothing to fix",
+        "Nothing to do",
+    ],
+)
+def test_is_no_op_suggestion_matches_known_phrasings(suggestion: str) -> None:
+    assert is_no_op_suggestion(suggestion) is True
+
+
+def test_is_no_op_suggestion_spares_blank_and_substantive_text() -> None:
+    assert is_no_op_suggestion("") is False
+    assert is_no_op_suggestion(None) is False
+    assert is_no_op_suggestion("   ") is False
+    # Contains the word "change" but is not, as a whole string, a no-op verdict.
+    assert (
+        is_no_op_suggestion("Change the timeout to 30s and no changes are needed elsewhere.")
+        is False
+    )
+    assert is_no_op_suggestion("Add a null check before dereferencing `user`.") is False
+
+
+@pytest.mark.parametrize(
+    "suggestion",
+    [
+        "No changes needed.",
+        "no changes needed",
+        "No change required",
+        "no change is required",
+        "No code changes needed.",
+        "No action needed.",
+        "no action is required",
+        "No fix needed",
+        "no fixes required",
+        "Nothing to change.",
+        "nothing to fix",
+        "Nothing to do",
+    ],
+)
+def test_issue_with_no_op_suggestion_is_dropped(suggestion: str) -> None:
+    """A finding whose suggested fix says, in full, that nothing needs to
+    change is the reviewer's own admission there is no issue -- it must never
+    be reported."""
+    seg = FileSegment(path="a.py", content="x = 1\ny = 2", total_lines=2)
+    chunk = ReviewChunk(segments=[seg])
+    issues = _issues_from_chunk_output(
+        chunk,
+        [
+            {
+                "description": "informational observation",
+                "severity": "info",
+                "file_path": "a.py",
+                "line": 1,
+                "suggestion": suggestion,
+            }
+        ],
+    )
+    assert issues == []
+
+
+def test_no_op_suggestion_filter_does_not_drop_real_issues() -> None:
+    """A substantive suggestion survives even when it contains a word ('change')
+    the no-op phrasing also uses -- only a whole-string no-op match is dropped."""
+    seg = FileSegment(path="a.py", content="x = 1\ny = 2", total_lines=2)
+    chunk = ReviewChunk(segments=[seg])
+    issues = _issues_from_chunk_output(
+        chunk,
+        [
+            {
+                "description": "off-by-one in the loop bound",
+                "severity": "high",
+                "file_path": "a.py",
+                "line": 1,
+                "suggestion": "Change `range(n)` to `range(n + 1)` to include the last element.",
+            },
+            {
+                "description": "no suggestion given at all",
+                "severity": "low",
+                "file_path": "a.py",
+                "line": 2,
+                # A blank suggestion is not the same as an explicit "no change
+                # needed" -- it must still be reported.
+                "suggestion": "",
+            },
+        ],
+    )
+    assert len(issues) == 2
+    assert issues[0].suggestion.startswith("Change `range(n)`")
+    assert issues[1].suggestion == ""
 
 
 def test_coerce_bool_recognizes_truthy_tokens_only() -> None:

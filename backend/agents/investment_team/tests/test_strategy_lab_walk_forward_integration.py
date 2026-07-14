@@ -730,6 +730,12 @@ def _wire_run_cycle_stubs(
     from investment_team.strategy_lab.agents.alignment import TradeAlignmentReport
     from investment_team.strategy_lab.orchestrator import _MarketDataFetch
 
+    # These stubs bypass the compiler and pin ``requires_custom_code=True`` on
+    # purpose (see the spec_dict comment below), so the design pre-flight must not
+    # demote the spec back to the compiled path — that would defeat the
+    # rule-firing self-skip these fixtures rely on. Keep the intended custom path.
+    monkeypatch.setenv("STRATEGY_LAB_DEMOTE_COMPILABLE_CUSTOM_CODE", "false")
+
     # ``_readiness_price_provider`` now fails closed (NaN) when the live
     # ``MarketDataService.fetch_ohlcv`` returns no bars, so without a stub
     # SpecReadinessGate's Rule 5 critical short-circuits the design phase
