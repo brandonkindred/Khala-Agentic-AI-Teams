@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Dict
 
-from strands import Agent
-
 from llm_service import LLMPermanentError, get_strands_model
 from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.shared.llm import complete_json_with_continuation
 from software_engineering_team.shared.models import (
     ArchitectureComponent,
     ProductRequirements,
@@ -140,16 +138,36 @@ class ArchitectureExpertAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
+        """
+        Initialize the Architecture Expert agent.
+
+        Preconditions:
+            - llm_client is a Strands Model, a raw LLMClient, or None.
+
+        Postconditions:
+            - self._model is set to a resolved Strands Model.
+        """
         # A raw LLMClient doesn't implement the Strands Model interface
         # (stream/update_config/get_config/stateful) directly, so it is
         # wrapped in an LLMClientModel rather than used as-is.
-        _model = resolve_strands_model(
+        self._model = resolve_strands_model(
             llm_client, agent_key="architecture", get_strands_model_fn=get_strands_model
         )
-        self._agent = Agent(model=_model, system_prompt=ARCHITECTURE_PROMPT)
 
     def run(self, input_data: ArchitectureInput) -> ArchitectureOutput:
-        """Design system architecture from requirements."""
+        """
+        Design system architecture from requirements.
+
+        Preconditions:
+            - input_data.requirements is a valid ProductRequirements instance.
+
+        Postconditions:
+            - Returns an ArchitectureOutput whose architecture has a non-empty
+              overview, at least one component, and every REQUIRED_DIAGRAM_KEYS
+              diagram populated -- backfilling a synthetic architecture built
+              from requirements when the LLM response is unusable (non-JSON,
+              non-dict, or missing an overview).
+        """
         logger.info("Architecture Expert: starting design for %s", input_data.requirements.title)
         reqs = input_data.requirements
         context_parts = [
@@ -207,13 +225,19 @@ class ArchitectureExpertAgent:
         prompt = "\n".join(context_parts)
 
         try:
-            result = self._agent(prompt)
-            raw = str(result).strip()
-            data: Dict[str, Any] = json.loads(raw) or {}
+            data: Dict[str, Any] = complete_json_with_continuation(
+                self._model, prompt, system_prompt=ARCHITECTURE_PROMPT
+            )
         except LLMPermanentError:
             logger.warning(
                 "Architecture Expert: LLM returned non-JSON response, falling back to synthetic architecture"
             )
+            data = {}
+
+        # complete_json_with_continuation's wider recovery net can hand back a
+        # non-dict top-level JSON value (e.g. a fenced top-level array); treat
+        # that as a parse failure too instead of crashing on data.get(...) below.
+        if not isinstance(data, dict):
             data = {}
 
         # Detect raw wrapper from JSON parse failure (only "content" key, or no "overview")

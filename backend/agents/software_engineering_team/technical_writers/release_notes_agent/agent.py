@@ -14,9 +14,10 @@ down).
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
+
+from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import (
     ReleaseFailure,
@@ -62,18 +63,24 @@ class ReleaseNotesAgent:
     def run(self, input_data: ReleaseNotesInput) -> ReleaseNotesOutput:
         """Produce markdown + a one-line summary.
 
-        Always returns a populated ``ReleaseNotesOutput`` — never raises.
-        On LLM failure or JSON parse failure, ``llm_failed=True`` is
-        set and ``markdown`` is assembled from a deterministic template.
+        Preconditions:
+            - input_data is a fully constructed ReleaseNotesInput (version,
+              sprint_name, sprint_id always set; stories/failures may be empty).
+
+        Postconditions:
+            - Always returns a populated ReleaseNotesOutput; never raises.
+            - On success, markdown/summary are populated from the LLM response
+              and llm_failed is False.
+            - On LLM failure, a degraded (empty-markdown) response, or JSON
+              parse failure, llm_failed=True and markdown is assembled from
+              the deterministic template in build_fallback_release_notes.
         """
         try:
-            from strands import Agent  # noqa: PLC0415 — optional at import time
-
             payload_json = input_data.model_dump_json()
             prompt = build_user_prompt(payload_json)
-            agent = Agent(model=self._resolve_model(), system_prompt=SYSTEM_PROMPT)
-            raw = str(agent(prompt)).strip()
-            data = json.loads(raw)
+            data = complete_json_with_continuation(
+                self._resolve_model(), prompt, system_prompt=SYSTEM_PROMPT
+            )
             markdown = data.get("markdown") or ""
             summary = data.get("summary") or ""
             if not markdown:
@@ -84,10 +91,7 @@ class ReleaseNotesAgent:
                 return self._fallback(input_data, "empty markdown from LLM")
             return ReleaseNotesOutput(markdown=markdown, summary=summary)
         except Exception as exc:
-            logger.warning(
-                "ReleaseNotesAgent: LLM call failed (%s); using deterministic fallback",
-                exc,
-            )
+            logger.exception("ReleaseNotesAgent: LLM call failed; using deterministic fallback")
             return self._fallback(input_data, str(exc))
 
     @staticmethod

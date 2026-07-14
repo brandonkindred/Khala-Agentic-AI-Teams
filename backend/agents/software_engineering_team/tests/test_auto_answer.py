@@ -1,12 +1,12 @@
 """Tests for ``product_requirements_analysis_agent.auto_answer``.
 
-Covers the format/parse helpers and the public auto-answer wrappers with the
-Strands ``Agent`` mocked out to return canned JSON.
+Covers the format/parse helpers and the public auto-answer wrappers with
+``complete_json_with_continuation`` mocked out to return canned JSON (one test
+instead recovers a markdown-fenced response end-to-end through the real
+shared-helper parsing logic).
 """
 
 from __future__ import annotations
-
-import json
 
 
 def _question(**overrides):
@@ -155,22 +155,16 @@ def test_parse_auto_answer_response_risks_non_list() -> None:
 def test_auto_answer_question_happy(monkeypatch) -> None:
     from software_engineering_team.product_requirements_analysis_agent import auto_answer
 
-    class _FakeAgent:
-        def __init__(self, **kwargs):
-            pass
+    def _fake_complete_json(model, prompt, *, system_prompt=None, **kwargs):
+        return {
+            "selected_option_id": "opt1",
+            "rationale": "It's the best",
+            "confidence": 0.9,
+            "risks": [],
+        }
 
-        def __call__(self, prompt):
-            return json.dumps(
-                {
-                    "selected_option_id": "opt1",
-                    "rationale": "It's the best",
-                    "confidence": 0.9,
-                    "risks": [],
-                }
-            )
-
-    monkeypatch.setattr(auto_answer, "Agent", _FakeAgent)
-    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key: None)
+    monkeypatch.setattr(auto_answer, "complete_json_with_continuation", _fake_complete_json)
+    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key, **kw: None)
     q = _question()
     result = auto_answer.auto_answer_question(
         llm=None, question=q, spec_content="some spec", additional_context="extra"
@@ -182,15 +176,11 @@ def test_auto_answer_question_happy(monkeypatch) -> None:
 def test_auto_answer_question_llm_exception_uses_default(monkeypatch) -> None:
     from software_engineering_team.product_requirements_analysis_agent import auto_answer
 
-    class _FakeAgent:
-        def __init__(self, **kwargs):
-            pass
+    def _raise_complete_json(model, prompt, *, system_prompt=None, **kwargs):
+        raise RuntimeError("LLM down")
 
-        def __call__(self, prompt):
-            raise RuntimeError("LLM down")
-
-    monkeypatch.setattr(auto_answer, "Agent", _FakeAgent)
-    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key: None)
+    monkeypatch.setattr(auto_answer, "complete_json_with_continuation", _raise_complete_json)
+    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key, **kw: None)
     q = _question()
     result = auto_answer.auto_answer_question(llm=None, question=q, spec_content="")
     assert result.selected_option_id == "opt1"  # fell back to default
@@ -200,38 +190,89 @@ def test_auto_answer_question_llm_exception_uses_default(monkeypatch) -> None:
 def test_auto_answer_question_no_options_unknown(monkeypatch) -> None:
     from software_engineering_team.product_requirements_analysis_agent import auto_answer
 
-    class _FakeAgent:
-        def __init__(self, **kwargs):
-            pass
+    def _raise_complete_json(model, prompt, *, system_prompt=None, **kwargs):
+        raise RuntimeError("boom")
 
-        def __call__(self, prompt):
-            raise RuntimeError("boom")
-
-    monkeypatch.setattr(auto_answer, "Agent", _FakeAgent)
-    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key: None)
+    monkeypatch.setattr(auto_answer, "complete_json_with_continuation", _raise_complete_json)
+    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key, **kw: None)
     q = _question(options=[])
     result = auto_answer.auto_answer_question(llm=None, question=q, spec_content="")
     assert result.selected_option_id == "unknown"
 
 
+def test_auto_answer_question_uses_provided_llm_client(monkeypatch) -> None:
+    """A real LLMClient passed as ``llm`` must actually reach
+    get_strands_model(..., client=<that object>) via resolve_strands_model,
+    instead of being silently ignored in favor of a hardcoded default model
+    (the bug an automated review flagged on this migration's own PR).
+
+    Uses a plain ``LLMClient`` (not ``DummyLLMClient``, which also implements
+    the Strands ``Model`` ABC and would short-circuit resolve_strands_model's
+    first branch, returning itself without ever reaching get_strands_model)."""
+    from llm_service import LLMClient
+    from software_engineering_team.product_requirements_analysis_agent import auto_answer
+    from software_engineering_team.tests.conftest import _strands_model_double
+
+    class _PlainLLMClient(LLMClient):
+        def complete_json(self, prompt, *, objective="", **kwargs):
+            raise AssertionError("complete_json_with_continuation is mocked; should not be called")
+
+    calls = []
+
+    def _spy_get_strands_model(agent_key, **kwargs):
+        calls.append((agent_key, kwargs))
+        return _strands_model_double()
+
+    def _fake_complete_json(model, prompt, *, system_prompt=None, **kwargs):
+        return {"selected_option_id": "opt1", "rationale": "used my client", "confidence": 0.9}
+
+    my_llm = _PlainLLMClient()
+    monkeypatch.setattr(auto_answer, "complete_json_with_continuation", _fake_complete_json)
+    monkeypatch.setattr(auto_answer, "get_strands_model", _spy_get_strands_model)
+    q = _question()
+    result = auto_answer.auto_answer_question(llm=my_llm, question=q, spec_content="some spec")
+
+    assert result.selected_option_id == "opt1"
+    assert len(calls) == 1
+    agent_key, kwargs = calls[0]
+    assert agent_key == "product_analysis"
+    assert kwargs.get("client") is my_llm
+
+
+def test_auto_answer_question_recovers_fenced_json_response(monkeypatch) -> None:
+    """End-to-end (no complete_json_with_continuation mocking): a markdown-fenced
+    LLM response is recovered instead of crashing on a bare json.loads, exercising
+    the real extract_json_from_response fallback through the shared helper."""
+    from software_engineering_team.product_requirements_analysis_agent import auto_answer
+    from software_engineering_team.tests.conftest import (
+        _patch_fenced_response,
+        _strands_model_double,
+    )
+
+    payload = {
+        "selected_option_id": "opt1",
+        "rationale": "fenced pick",
+        "confidence": 0.8,
+        "risks": [],
+    }
+    _patch_fenced_response(monkeypatch, payload)
+    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key, **kw: _strands_model_double())
+    q = _question()
+    result = auto_answer.auto_answer_question(llm=None, question=q, spec_content="some spec")
+    assert result.selected_option_id == "opt1"
+    assert result.rationale == "fenced pick"
+
+
 def test_auto_answer_all_questions(monkeypatch) -> None:
     from software_engineering_team.product_requirements_analysis_agent import auto_answer
 
-    class _FakeAgent:
-        def __init__(self, **kwargs):
-            pass
+    def _fake_complete_json(model, prompt, *, system_prompt=None, **kwargs):
+        return {"selected_option_id": "opt1", "rationale": "r", "confidence": 0.7}
 
-        def __call__(self, prompt):
-            return json.dumps(
-                {"selected_option_id": "opt1", "rationale": "r", "confidence": 0.7}
-            )
-
-    monkeypatch.setattr(auto_answer, "Agent", _FakeAgent)
-    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key: None)
+    monkeypatch.setattr(auto_answer, "complete_json_with_continuation", _fake_complete_json)
+    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key, **kw: None)
     questions = [_question(id="q1"), _question(id="q2")]
-    results = auto_answer.auto_answer_all_questions(
-        llm=None, questions=questions, spec_content=""
-    )
+    results = auto_answer.auto_answer_all_questions(llm=None, questions=questions, spec_content="")
     assert len(results) == 2
 
 
@@ -306,17 +347,11 @@ def test_get_auto_answer_for_job_happy(monkeypatch, patched_job_store) -> None:
     from software_engineering_team.product_requirements_analysis_agent import auto_answer
     from software_engineering_team.shared import job_store as js
 
-    class _FakeAgent:
-        def __init__(self, **kwargs):
-            pass
+    def _fake_complete_json(model, prompt, *, system_prompt=None, **kwargs):
+        return {"selected_option_id": "o1", "rationale": "r", "confidence": 0.7}
 
-        def __call__(self, prompt):
-            return json.dumps(
-                {"selected_option_id": "o1", "rationale": "r", "confidence": 0.7}
-            )
-
-    monkeypatch.setattr(auto_answer, "Agent", _FakeAgent)
-    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key: None)
+    monkeypatch.setattr(auto_answer, "complete_json_with_continuation", _fake_complete_json)
+    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key, **kw: None)
     js.create_job("job1", repo_path="/tmp")
     js.update_job(
         "job1",

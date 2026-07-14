@@ -11,34 +11,31 @@ Pure functions parameterized by an explicit Strands ``model`` — no agent state
 
 from __future__ import annotations
 
-import json
 from typing import Any, Optional
 
 from strands import Agent
 
+from llm_service import LLMJsonParseError, extract_json_from_response
+
 
 def parse_llm_json(raw: str) -> Optional[dict]:
-    """Parse JSON from LLM output, stripping markdown code fences if present.
+    """Parse JSON from LLM output via the shared recovery-ladder parser.
+
+    Delegates to :func:`extract_json_from_response` (markdown fences,
+    prose-prefix stripping, trailing-comma repair).
 
     Preconditions: ``raw`` is a string.
-    Postconditions: returns the parsed ``dict`` on success, or ``None`` when the
-        text is not valid JSON; never raises on parse failure.
+    Postconditions: returns a dict on success, None on any parse failure or
+        non-dict recovery; never raises.
     """
     text = raw.strip()
-    if "```" in text:
-        for part in text.split("```"):
-            part = part.strip()
-            if part.lower().startswith("json"):
-                part = part[4:].strip()
-            if part.startswith("{"):
-                try:
-                    return json.loads(part)
-                except json.JSONDecodeError:
-                    continue
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
+    if not text:
         return None
+    try:
+        data = extract_json_from_response(text)
+    except LLMJsonParseError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def call_llm_text(model: Any, prompt: str) -> str:
