@@ -23,6 +23,7 @@ views under their original names so no downstream import changes.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Optional, Tuple
@@ -48,8 +49,6 @@ def _float_gt(threshold: float):
     def check(value: Any) -> None:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"must be numeric (got {type(value).__name__})")
-        import math
-
         if not (math.isfinite(float(value)) and float(value) > threshold):
             raise ValueError(f"must be > {threshold} (got {value})")
 
@@ -89,7 +88,13 @@ class IndicatorDescriptor:
     """
 
     name: str
-    registry_method: str
+    # The emitted/DSL helper method name — i.e. what ``INDICATOR_HELPER_NAME``
+    # maps to and what the compiled strategy class exposes (e.g.
+    # ``donchian_channels``). This is NOT always a live ``IndicatorRegistry``
+    # method name: for donchian/keltner the registry methods are ``reg.donchian``
+    # / ``reg.keltner``, so do not ``getattr(reg, helper_name)`` — the runtime
+    # name → registry-method dispatch lives in ``streaming.resolve_indicator``.
+    helper_name: str
     required: Mapping[str, Callable[[Any], None]]
     optional: Mapping[str, Tuple[Any, Callable[[Any], None]]]
     allow_source: bool
@@ -101,7 +106,7 @@ class IndicatorDescriptor:
 _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     IndicatorDescriptor(
         name="sma",
-        registry_method="sma",
+        helper_name="sma",
         required={"period": _int_in(2, 400)},
         optional={},
         allow_source=True,
@@ -111,7 +116,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="ema",
-        registry_method="ema",
+        helper_name="ema",
         required={"period": _int_in(2, 400)},
         optional={},
         allow_source=True,
@@ -121,7 +126,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="rsi",
-        registry_method="rsi",
+        helper_name="rsi",
         required={},
         optional={"period": (14, _int_in(2, 200))},
         allow_source=True,
@@ -133,7 +138,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="macd",
-        registry_method="macd",
+        helper_name="macd",
         required={},
         optional={
             "fast": (12, _int_in(2, 200)),
@@ -162,7 +167,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="bollinger",
-        registry_method="bollinger_bands",
+        helper_name="bollinger_bands",
         required={},
         optional={
             "period": (20, _int_in(5, 200)),
@@ -184,7 +189,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="atr",
-        registry_method="atr",
+        helper_name="atr",
         required={},
         optional={"period": (14, _int_in(2, 200))},
         allow_source=False,
@@ -195,7 +200,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="adx",
-        registry_method="adx",
+        helper_name="adx",
         required={},
         optional={"period": (14, _int_in(2, 200))},
         allow_source=False,
@@ -206,7 +211,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="stochastic",
-        registry_method="stochastic",
+        helper_name="stochastic",
         required={},
         optional={
             "k_period": (14, _int_in(2, 200)),
@@ -226,7 +231,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="vwap",
-        registry_method="vwap",
+        helper_name="vwap",
         # Rolling window, unified with the factors DSL's VWAP node (which has
         # always taken a ``period``). Synthesis's VWAP was cumulative-over-
         # all-history before this — an explicit, intentional behavior change
@@ -240,7 +245,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="donchian",
-        registry_method="donchian_channels",
+        helper_name="donchian_channels",
         required={},
         optional={
             "period": (20, _int_in(2, 400)),
@@ -253,7 +258,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="keltner",
-        registry_method="keltner_channels",
+        helper_name="keltner_channels",
         required={},
         optional={
             "period": (20, _int_in(2, 400)),
@@ -274,7 +279,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="obv",
-        registry_method="obv",
+        helper_name="obv",
         required={},
         optional={},
         allow_source=False,
@@ -286,7 +291,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="mfi",
-        registry_method="mfi",
+        helper_name="mfi",
         required={},
         optional={"period": (14, _int_in(2, 200))},
         allow_source=False,
@@ -297,7 +302,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="roc",
-        registry_method="roc",
+        helper_name="roc",
         required={},
         optional={"period": (12, _int_in(2, 400))},
         allow_source=True,
@@ -307,7 +312,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="cci",
-        registry_method="cci",
+        helper_name="cci",
         required={},
         optional={"period": (20, _int_in(2, 400))},
         allow_source=False,
@@ -317,7 +322,7 @@ _DESCRIPTORS: Tuple[IndicatorDescriptor, ...] = (
     ),
     IndicatorDescriptor(
         name="williams_r",
-        registry_method="williams_r",
+        helper_name="williams_r",
         required={},
         optional={"period": (14, _int_in(2, 200))},
         allow_source=False,
@@ -379,7 +384,7 @@ INDICATOR_PARAM_SPECS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
 )
 
 INDICATOR_HELPER_NAME: Mapping[str, str] = MappingProxyType(
-    {name: d.registry_method for name, d in INDICATOR_METADATA.items()}
+    {name: d.helper_name for name, d in INDICATOR_METADATA.items()}
 )
 
 INDICATOR_OUTPUT_RANGES: Mapping[str, Tuple[float, float]] = MappingProxyType(

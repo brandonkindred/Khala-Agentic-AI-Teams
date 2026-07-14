@@ -182,7 +182,7 @@ def _compile_synthesis_helper(name: str, params: dict, source: str):
     ns = _exec_module(src)
     strat = ns["CompiledStrategy"]()
     descriptor = INDICATOR_METADATA[name]
-    method = getattr(strat, descriptor.registry_method)
+    method = getattr(strat, descriptor.helper_name)
     # Translate DSL param names to the compiled method's kwarg names via the
     # same emit-args table the compiler itself uses (e.g. macd's DSL
     # "output" -> the method's "select" kwarg).
@@ -429,7 +429,7 @@ def _accepts(check, value) -> bool:
 @pytest.mark.parametrize("name", sorted(INDICATOR_METADATA))
 def test_coverage_probe_registry_kwarg_names_match_registry_metadata(name):
     descriptor = INDICATOR_METADATA[name]
-    spec = INDICATORS[descriptor.registry_method]
+    spec = INDICATORS[descriptor.helper_name]
     expected = {
         dsl_param
         for _emit_kwarg, kind, dsl_param in descriptor.emit_args
@@ -437,7 +437,54 @@ def test_coverage_probe_registry_kwarg_names_match_registry_metadata(name):
     }
     assert set(spec.kwarg_names) == expected, (
         name,
-        descriptor.registry_method,
+        descriptor.helper_name,
         set(spec.kwarg_names),
         expected,
     )
+
+
+# ---------------------------------------------------------------------------
+# VWAP unification completeness: the sandbox-exposed scalar `vwap()` must
+# compute the SAME rolling-window value as the engine/DSL/`ctx.indicator`
+# path and the coverage-probe reference — not the old cumulative value.
+# The scalar is what free-form strategies call (`from indicators import vwap`)
+# and what the coverage probe models via `_windowed_vwap`; a cumulative scalar
+# there diverges from the rolling engine that re-evaluates it (conformance
+# gate) and from the rolling probe that scores it. This test would have caught
+# that divergence.
+# ---------------------------------------------------------------------------
+
+
+def test_scalar_vwap_matches_engine_rolling_not_cumulative():
+    from investment_team.strategy_lab.executor import strategy_indicators as si
+
+    bars = _make_bars(80)
+    highs = [b.high for b in bars]
+    lows = [b.low for b in bars]
+    closes = [b.close for b in bars]
+    vols = [b.volume for b in bars]
+
+    scalar = si.vwap(highs, lows, closes, vols)  # default period=20
+    engine_rolling = IndicatorRegistry().vwap(bars, period=20)
+    engine_cumulative = IndicatorRegistry().vwap(bars)  # period=None -> cumulative
+
+    assert scalar == pytest.approx(engine_rolling, rel=1e-9)
+    # The unification actually changed the value — guard against a silent
+    # revert to cumulative that would still pass the equality above if
+    # rolling and cumulative happened to coincide on some fixture.
+    assert engine_rolling != pytest.approx(engine_cumulative, rel=1e-9)
+    # The scalar also honours an explicit period, matching what INDICATORS
+    # advertises to the probe (`kwarg_names=('period',)`).
+    assert si.vwap(highs, lows, closes, vols, period=30) == pytest.approx(
+        IndicatorRegistry().vwap(bars, period=30), rel=1e-9
+    )
+
+
+def test_render_functions_reject_unresolved_markers():
+    from investment_team.strategy_lab.indicators import template_bodies as tb
+
+    with pytest.raises(ValueError, match="unresolved template marker"):
+        tb._assert_resolved("if len(%BARS%) < 1:\n    return %MISSING%")
+    # A fully-substituted body with `{period}` still present (the caller's to
+    # fill) is accepted unchanged.
+    assert tb._assert_resolved("_w = bars[-{period}:]") == "_w = bars[-{period}:]"

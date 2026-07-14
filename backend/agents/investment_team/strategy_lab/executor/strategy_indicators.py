@@ -207,9 +207,18 @@ def stochastic(high, low, close, k_period=14, d_period=3) -> tuple[float, float]
     )
 
 
-def vwap(high, low, close, volume) -> float:
-    """Latest cumulative VWAP value. See module contract."""
-    return _scalar(IndicatorRegistry().vwap(_ohlc_bars(high, low, close, volume)))
+def vwap(high, low, close, volume, period=20) -> float:
+    """Latest rolling-window VWAP value (default 20-bar window). See module contract.
+
+    Uses the same rolling ``period`` semantics as the DSL / ``ctx.indicator``
+    / engine paths (``reg.vwap(bars, period=...)``), so a value read here is
+    byte-identical to the engine's trailing VWAP for the same bars — the
+    module's cross-path invariant. (The scalar was cumulative before VWAP's
+    rolling-window unification; it now matches every other VWAP surface.)
+    """
+    return _scalar(
+        IndicatorRegistry().vwap(_ohlc_bars(high, low, close, volume), period=int(period))
+    )
 
 
 def donchian_channels(high, low, period=20) -> tuple[float, float, float]:

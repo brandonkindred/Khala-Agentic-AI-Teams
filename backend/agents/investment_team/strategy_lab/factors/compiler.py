@@ -126,6 +126,19 @@ def _lookback(node: BaseModel) -> int:
         # (400) for a primitive that can never contribute a value. Revert
         # to `node.window` once the aux feed lands and the body computes a
         # real OLS residual.
+        #
+        # BACKWARDS-COMPATIBILITY NOTE: MIN_HISTORY is the genome-wide max
+        # over every node's lookback, so lowering this dead node from
+        # `node.window` to 1 also lowers the warm-up gate of the WHOLE
+        # genome when ZScoreResidualOLS was its deepest node. A composite
+        # genome pairing it with a faster live signal (e.g.
+        # ``BoolOr(CrossOver(SMA(5), SMA(10)), CompareGT(ZScoreResidualOLS(window=400), 0))``)
+        # now begins submitting entries as soon as the live branch is warm
+        # (~11 bars) instead of waiting ~400 — an intentional un-inflation
+        # (the dead branch never fired), but one that changes trade timing
+        # and will not bit-reproduce stored backtest artefacts for such
+        # genomes. When the aux feed lands, restoring `node.window` re-raises
+        # the gate and re-baselines again.
         return 1
     if isinstance(node, Skew):
         return node.window + 1

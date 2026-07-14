@@ -29,6 +29,35 @@ def _resolve_close_reads(text: str, close_expr_template: str) -> str:
     return _CLOSE_MACRO_RE.sub(lambda m: close_expr_template.format(obj=m.group(1)), text)
 
 
+# A residual ``%`` followed by an uppercase letter is always an unsubstituted
+# marker (``%BARS%``/``%MISSING%``/``%CACHE_KEY%``/``%SELECT%``/``%CLOSE(...)%``):
+# the emitted indicator bodies contain no other ``%`` (no modulo, no %-formatting).
+_UNRESOLVED_MARKER_RE = re.compile(r"%[A-Z]")
+
+
+def _assert_resolved(text: str) -> str:
+    """Fail loudly if any ``%...%`` marker survived the substitution pass.
+
+    Preconditions: ``text`` is the output of a ``render_*`` function's marker
+    substitution (``{fast}``/``{slow}``/``{period}`` ``.format()`` placeholders
+    may still be present — those are the caller's to fill and are not markers).
+    Postconditions: returns ``text`` unchanged when no ``%<UPPER>`` marker
+    remains; otherwise raises :class:`ValueError` naming the leftover fragment.
+    A future template edit or a caller that forgets/misspells a marker then
+    fails at the render call with a clear message, instead of silently emitting
+    malformed strategy source (an unresolved ``%BARS%`` would not otherwise
+    raise — it would land verbatim in the compiled module).
+    """
+    m = _UNRESOLVED_MARKER_RE.search(text)
+    if m is not None:
+        raise ValueError(
+            f"unresolved template marker near {text[m.start():m.start() + 24]!r}; "
+            "every %BARS%/%MISSING%/%CACHE_KEY%/%SELECT%/%CLOSE(...)% token must be "
+            "substituted before the body is emitted"
+        )
+    return text
+
+
 # ---------------------------------------------------------------------------
 # MACD — streaming-cache classification (expand/slide/cold-rebuild), close
 # normalisation, and iterator-based signal-EMA walk. Computes all three
@@ -231,7 +260,7 @@ def render_macd_body(
         .replace("%CACHE_KEY%", cache_key_expr)
         .replace("%SELECT%", select_expr)
     )
-    return _resolve_close_reads(text, close_expr_template)
+    return _assert_resolved(_resolve_close_reads(text, close_expr_template))
 
 
 # ---------------------------------------------------------------------------
@@ -274,8 +303,17 @@ return 100.0 * abs(_plus_di - _minus_di) / (_plus_di + _minus_di)
 
 
 def render_adx_body(*, bars_var: str, missing: str) -> str:
-    """Render the canonical ADX helper body (``{period}`` left as a placeholder)."""
-    return _ADX_BODY.replace("%BARS%", bars_var).replace("%MISSING%", missing)
+    """Render the canonical ADX helper body.
+
+    Preconditions: ``bars_var`` is the emitted bar-sequence variable name
+    (factors: ``"bars"``; synthesis: ``"history"``) and ``missing`` the
+    caller's warm-up sentinel (``"NAN"`` / ``"None"``).
+    Postconditions: returns left-aligned Python source with the ``{period}``
+    ``.format()`` placeholder left unresolved (the caller fills it — factors
+    with an int literal per node, synthesis once with the string ``"period"``);
+    every ``%...%`` marker is substituted, or :func:`_assert_resolved` raises.
+    """
+    return _assert_resolved(_ADX_BODY.replace("%BARS%", bars_var).replace("%MISSING%", missing))
 
 
 # ---------------------------------------------------------------------------
@@ -298,5 +336,14 @@ return _num / _den
 
 
 def render_vwap_body(*, bars_var: str, missing: str) -> str:
-    """Render the canonical rolling-window VWAP helper body (``{period}`` left as a placeholder)."""
-    return _VWAP_BODY.replace("%BARS%", bars_var).replace("%MISSING%", missing)
+    """Render the canonical rolling-window VWAP helper body.
+
+    Preconditions: ``bars_var`` is the emitted bar-sequence variable name
+    (factors: ``"bars"``; synthesis: ``"history"``) and ``missing`` the
+    caller's warm-up sentinel (``"NAN"`` / ``"None"``).
+    Postconditions: returns left-aligned Python source for a trailing
+    ``{period}``-bar rolling VWAP with the ``{period}`` ``.format()``
+    placeholder left unresolved (the caller fills it); every ``%...%`` marker
+    is substituted, or :func:`_assert_resolved` raises.
+    """
+    return _assert_resolved(_VWAP_BODY.replace("%BARS%", bars_var).replace("%MISSING%", missing))
