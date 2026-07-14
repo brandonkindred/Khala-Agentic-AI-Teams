@@ -89,7 +89,7 @@ def _corpus_text(
 ) -> str:
     parts: List[str] = [
         requirements or "",
-        " ".join(acceptance_criteria or ()),
+        " ".join(a for a in (acceptance_criteria or ()) if a is not None),
         spec_content or "",
         architecture_context or "",
         " ".join(files.keys()),
@@ -98,7 +98,13 @@ def _corpus_text(
 
 
 def _with_file_path(issue: IssueT, file_path: str) -> IssueT:
-    """Return a copy of ``issue`` with ``file_path`` updated when possible."""
+    """Return a copy of ``issue`` with ``file_path`` updated when possible.
+
+    Postconditions:
+        - Never mutates ``issue`` in place.
+        - When the issue type cannot be copied (no ``model_copy`` / not a
+          dataclass), logs a warning and returns ``issue`` unchanged.
+    """
     if getattr(issue, "file_path", None) == file_path:
         return issue
     model_copy = getattr(issue, "model_copy", None)
@@ -106,11 +112,11 @@ def _with_file_path(issue: IssueT, file_path: str) -> IssueT:
         return model_copy(update={"file_path": file_path})
     if is_dataclass(issue) and not isinstance(issue, type):
         return replace(issue, file_path=file_path)
-    try:
-        object.__setattr__(issue, "file_path", file_path)
-        return issue
-    except Exception:
-        return issue
+    logger.warning(
+        "Cannot copy issue of type %s to update file_path; returning unchanged",
+        type(issue).__name__,
+    )
+    return issue
 
 
 def drop_ungrounded_issues(

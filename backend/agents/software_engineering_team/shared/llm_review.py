@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, TypeVar
 
+from software_engineering_team.shared.issue_grounding import drop_ungrounded_issues
 from software_engineering_team.shared.models import Task
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,6 @@ def run_llm_review(
                         )
                     )
     if enable_grounding and issues:
-        from software_engineering_team.shared.issue_grounding import drop_ungrounded_issues
 
         def _on_dropped(issue: Any) -> None:
             logger.warning("LLM code review: dropping ungrounded finding: %s", issue)

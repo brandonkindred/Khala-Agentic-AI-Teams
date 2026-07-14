@@ -206,7 +206,7 @@ def test_run_llm_review_preserves_header_on_oversized_single_line():
     assert all("### bundle.py ###" in prompt for prompt in prompts)  # header on every piece
 
 
-def test_run_llm_review_drops_ungrounded_insurance_hallucination():
+def test_run_llm_review_drops_ungrounded_insurance_hallucination(caplog):
     """Meal-planning task + fabricated Insurance Provider finding is dropped
     before return (regression for the LLM-fallback hallucination loop)."""
 
@@ -222,22 +222,27 @@ def test_run_llm_review_drops_ungrounded_insurance_hallucination():
             ]
         }
 
-    issues = run_llm_review(
-        task=_task(
-            requirements="Build a meal planning UI for weekly menus",
-            description="Meal planner",
-            acceptance_criteria=["user can plan meals for the week"],
-        ),
-        files={"index.html": "<html><body>Meal Planner</body></html>"},
-        prompt_template=_PROMPT,
-        parse_template=parse_insurance,
-        issue_factory=_Issue,
-        invoke_model=lambda _p: "raw",
-        max_chars=60_000,
-        warn_threshold=20,
-        enable_grounding=True,
-    )
+    with caplog.at_level(logging.WARNING, logger="software_engineering_team.shared.llm_review"):
+        issues = run_llm_review(
+            task=_task(
+                requirements="Build a meal planning UI for weekly menus",
+                description="Meal planner",
+                acceptance_criteria=["user can plan meals for the week"],
+            ),
+            files={"index.html": "<html><body>Meal Planner</body></html>"},
+            prompt_template=_PROMPT,
+            parse_template=parse_insurance,
+            issue_factory=_Issue,
+            invoke_model=lambda _p: "raw",
+            max_chars=60_000,
+            warn_threshold=20,
+            enable_grounding=True,
+        )
     assert issues == []
+    assert any(
+        rec.levelno == logging.WARNING and "ZephyrCare" in rec.getMessage()
+        for rec in caplog.records
+    ), "Dropped issue should be logged at WARNING with full payload"
 
 
 def test_run_llm_review_grounding_kill_switch_keeps_ungrounded():

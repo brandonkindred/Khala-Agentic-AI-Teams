@@ -112,3 +112,61 @@ def test_drop_ungrounded_recommendation_only_fabrication():
         spec_content="",
     )
     assert kept == []
+
+
+def test_drop_ungrounded_tolerates_none_in_acceptance_criteria():
+    """None entries in acceptance_criteria must not raise (fail-open via TypeError)."""
+    files = {"app.py": "pass"}
+    issue = _Issue(description="off-by-one in the loop bound", file_path="app.py")
+    kept = drop_ungrounded_issues(
+        [issue],
+        files=files,
+        requirements="Fix loop",
+        acceptance_criteria=["ok", None, "also ok"],  # type: ignore[list-item]
+        spec_content="",
+    )
+    assert len(kept) == 1
+
+
+def test_drop_ungrounded_fails_open_when_issue_raises():
+    """Unexpected errors during grounding keep the issue (fail-open)."""
+
+    class _Boom:
+        file_path = "app.py"
+        recommendation = ""
+
+        @property
+        def description(self) -> str:
+            raise RuntimeError("malformed issue")
+
+    kept = drop_ungrounded_issues(
+        [_Boom()],
+        files={"app.py": "pass"},
+        requirements="anything",
+        acceptance_criteria=[],
+        spec_content="",
+    )
+    assert len(kept) == 1
+
+
+def test_with_file_path_does_not_mutate_uncopyable_issue():
+    """Non-dataclass / non-pydantic issues are left unchanged (no in-place mutate)."""
+
+    class _Plain:
+        def __init__(self) -> None:
+            self.file_path = "missing.py"
+            self.description = "off-by-one in the loop bound"
+            self.recommendation = ""
+
+    plain = _Plain()
+    kept = drop_ungrounded_issues(
+        [plain],
+        files={"real.py": "x"},
+        requirements="Fix loop",
+        acceptance_criteria=[],
+        spec_content="",
+    )
+    assert len(kept) == 1
+    # Copy-only policy: path stays as cited when the type cannot be copied.
+    assert kept[0].file_path == "missing.py"
+    assert plain.file_path == "missing.py"
