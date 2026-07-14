@@ -225,7 +225,9 @@ def _pad_to_minimum_options(
                 confidence=0.3,
             )
         )
-    if len(options) < min_options:
+    if len(options) < min_options and not any(
+        o.label.lower() == "(please type your answer)" for o in options
+    ):
         options.insert(
             0,
             QuestionOption(
@@ -236,6 +238,28 @@ def _pad_to_minimum_options(
                 confidence=0.5,
             ),
         )
+    return options
+
+
+def _ensure_single_default(options: List[QuestionOption]) -> List[QuestionOption]:
+    """Ensure exactly one option has ``is_default=True``.
+
+    Shared by :func:`build_question_options` and :func:`assess_sub_phase_gaps`,
+    both of which combine hardcoded/LLM-generated/padded options that may each
+    carry their own default flag.
+
+    Preconditions: ``options`` is a list of :class:`QuestionOption`.
+    Postconditions: if no option was default, the first becomes default; if more
+        than one was, only the first of those remains default. No-op on an empty
+        list. Mutates and returns ``options``.
+    """
+    defaults = [o for o in options if o.is_default]
+    if len(defaults) == 0 and options:
+        options[0] = options[0].model_copy(update={"is_default": True})
+    elif len(defaults) > 1:
+        for o in defaults[1:]:
+            idx = options.index(o)
+            options[idx] = o.model_copy(update={"is_default": False})
     return options
 
 
@@ -281,7 +305,8 @@ def build_question_options(
             options.append(gen_opt)
             existing_labels.add(gen_opt.label.lower())
 
-    return _pad_to_minimum_options(options, MIN_OPTIONS, text_default=True)
+    options = _pad_to_minimum_options(options, MIN_OPTIONS, text_default=True)
+    return _ensure_single_default(options)
 
 
 def assess_sub_phase_gaps(
@@ -396,17 +421,9 @@ def assess_sub_phase_gaps(
                     )
                 )
 
-            # Ensure minimum 3 options
+            # Ensure minimum 3 options, exactly one of them the default
             options = _pad_to_minimum_options(options, 3, text_default=False)
-
-            # Ensure exactly one is_default=True
-            defaults = [o for o in options if o.is_default]
-            if len(defaults) == 0 and options:
-                options[0] = options[0].model_copy(update={"is_default": True})
-            elif len(defaults) > 1:
-                for o in defaults[1:]:
-                    idx = options.index(o)
-                    options[idx] = o.model_copy(update={"is_default": False})
+            options = _ensure_single_default(options)
 
             follow_ups.append(
                 OpenQuestion(
