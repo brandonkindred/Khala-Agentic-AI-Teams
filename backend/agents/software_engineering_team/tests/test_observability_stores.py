@@ -58,6 +58,30 @@ def test_upsert_noop_without_postgres() -> None:
     assert learnings_store.upsert_learning(pattern="p", trigger="t", counter_measure="c") is False
 
 
+def test_upsert_batch_empty_is_noop() -> None:
+    """upsert_learnings_batch short-circuits to 0 for an empty entry list."""
+    assert learnings_store.upsert_learnings_batch([]) == 0
+
+
+def test_upsert_batch_rejects_blank_pattern() -> None:
+    """upsert_learnings_batch rejects a blank pattern anywhere in the batch."""
+    entries = [
+        learnings_store.LearningEntry(pattern="ok"),
+        learnings_store.LearningEntry(pattern="   "),
+    ]
+    with pytest.raises(ValueError):
+        learnings_store.upsert_learnings_batch(entries)
+
+
+def test_upsert_batch_noop_without_postgres() -> None:
+    """upsert_learnings_batch is a no-op returning 0 when Postgres is unconfigured."""
+    entries = [
+        learnings_store.LearningEntry(pattern="p1"),
+        learnings_store.LearningEntry(pattern="p2"),
+    ]
+    assert learnings_store.upsert_learnings_batch(entries) == 0
+
+
 def test_retrieve_empty_query_returns_empty() -> None:
     """retrieve_learnings returns an empty list for a blank query."""
     assert learnings_store.retrieve_learnings("") == []
