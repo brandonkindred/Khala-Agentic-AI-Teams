@@ -34,8 +34,26 @@ def test_ground_issue_file_path_blanks_unknown_keeps_known():
     files = {"app/index.html": "<html></html>", "src/main.py": "pass"}
     assert ground_issue_file_path("app/index.html", files) == "app/index.html"
     assert ground_issue_file_path("main.py", files) == "src/main.py"  # basename alias
+    assert ground_issue_file_path(r"src\main.py", files) == "src/main.py"  # Windows slash
     assert ground_issue_file_path("missing.py", files) == ""
     assert ground_issue_file_path("", files) == ""
+
+
+def test_drop_ungrounded_grounds_phrase_split_across_newlines():
+    """A Title Case phrase split across lines in requirements still grounds."""
+    kept = drop_ungrounded_issues(
+        [
+            _Issue(
+                description="Meal Planner weekly view is incomplete",
+                file_path="app.py",
+            )
+        ],
+        files={"app.py": "pass"},
+        requirements="Build a Meal\nPlanner with weekly view",
+        acceptance_criteria=[],
+        spec_content="",
+    )
+    assert len(kept) == 1
 
 
 def test_drop_ungrounded_keeps_grounded_and_phrase_free():

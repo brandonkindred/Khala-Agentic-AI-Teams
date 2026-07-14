@@ -149,8 +149,8 @@ def run_llm_review(
             files=files,
             requirements=requirements,
             acceptance_criteria=task.acceptance_criteria,
-            spec_content=spec_content or "",
-            architecture_context=architecture_context or "",
+            spec_content=spec_content,
+            architecture_context=architecture_context,
             on_dropped=_on_dropped,
         )
     return issues

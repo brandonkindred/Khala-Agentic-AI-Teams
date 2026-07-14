@@ -80,7 +80,8 @@ def ground_issue_file_path(file_path: str, files: Dict[str, str]) -> str:
     Postconditions:
         - Exact key match → that key.
         - Unique basename/suffix alias (e.g. ``main.py`` for ``src/main.py``) →
-          the real key.
+          the real key. Backslashes are normalized to ``/`` before matching so
+          Windows-style citations still resolve.
         - Blank, absent, or ambiguous path → ``""``.
         - Never raises.
     """
@@ -89,11 +90,22 @@ def ground_issue_file_path(file_path: str, files: Dict[str, str]) -> str:
         return ""
     if key in files:
         return key
-    normalized = key.lstrip("./")
-    hits = [p for p in files if p == normalized or p.endswith("/" + normalized)]
+    # Forward-slash normalize so Windows-style citations still resolve.
+    normalized = key.replace("\\", "/").lstrip("./")
+    hits = [
+        p
+        for p in files
+        if (pn := p.replace("\\", "/").lstrip("./")) == normalized
+        or pn.endswith("/" + normalized)
+    ]
     if len(hits) == 1:
         return hits[0]
     return ""
+
+
+def _flatten_ws(text: str) -> str:
+    """Collapse runs of whitespace (including newlines) to a single space."""
+    return " ".join((text or "").split())
 
 
 def _build_grounding_corpus(
@@ -104,20 +116,24 @@ def _build_grounding_corpus(
     spec_content: str,
     architecture_context: str,
 ) -> str:
+    # Space-join (not newlines) so a Title Case phrase that was split across
+    # lines in requirements/spec still matches as a substring.
     parts: List[str] = [
-        requirements or "",
-        " ".join(
-            stripped
-            for a in (acceptance_criteria or ())
-            if a is not None
-            for stripped in (str(a).strip(),)
-            if stripped
+        _flatten_ws(requirements or ""),
+        _flatten_ws(
+            " ".join(
+                stripped
+                for a in (acceptance_criteria or ())
+                if a is not None
+                for stripped in (str(a).strip(),)
+                if stripped
+            )
         ),
-        spec_content or "",
-        architecture_context or "",
-        " ".join(files.keys()),
+        _flatten_ws(spec_content or ""),
+        _flatten_ws(architecture_context or ""),
+        _flatten_ws(" ".join(files.keys())),
     ]
-    return "\n".join(parts).lower()
+    return " ".join(p for p in parts if p).lower()
 
 
 def _with_file_path(issue: IssueT, file_path: str) -> IssueT:
