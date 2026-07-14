@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in sys.path:
@@ -40,8 +41,12 @@ def test_as_client_context_ignores_unknown_dict_keys():
 
 
 def test_as_client_context_raises_value_error_on_invalid_field_type():
-    with pytest.raises(ValueError, match="Invalid client_context dict"):
+    with pytest.raises(ValueError, match="Invalid client_context dict") as exc_info:
         as_client_context({"target_users": {"not": "a list"}})
+    # The offending field name and the original ValidationError must survive the
+    # re-raise, not just a generic "invalid dict" message.
+    assert "target_users" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, ValidationError)
 
 
 # --- assemble_material -------------------------------------------------------

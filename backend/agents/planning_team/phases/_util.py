@@ -11,6 +11,9 @@ from planning_team.models import ClientContext
 DEFAULT_MATERIAL_FALLBACK = "No brief or spec provided."
 
 
+# --- client_context coercion -------------------------------------------------
+
+
 def as_client_context(value: Union[ClientContext, Dict[str, Any], None]) -> Optional[ClientContext]:
     """Normalize context['client_context'] (ClientContext, a plain dict, or None) to a ClientContext or None.
 
@@ -30,6 +33,9 @@ def as_client_context(value: Union[ClientContext, Dict[str, Any], None]) -> Opti
         except ValidationError as exc:
             raise ValueError(f"Invalid client_context dict: {exc}") from exc
     return value
+
+
+# --- brief/spec material assembly --------------------------------------------
 
 
 def assemble_material(context: Dict[str, Any], *, default: str = DEFAULT_MATERIAL_FALLBACK) -> str:
