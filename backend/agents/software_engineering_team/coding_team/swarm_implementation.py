@@ -6,7 +6,7 @@ into named collaborators) — pure structural move, no behavior change. Composed
 onto ``CodingTeamSwarm`` in orchestrator.py alongside the assignment and review
 mixins.
 
-A few names used here (``MAX_TASK_REVISIONS``, ``ActivityBridge``, ``_NoopBridge``,
+A few names used here (``MAX_TASK_REVISIONS``, ``ActivityBridge``,
 ``_no_change_revisit_cap``, ``_feature_branch_name``) are defined in
 ``orchestrator.py`` itself. They are referenced via a late-bound module
 reference (``_orch.NAME``, resolved at call time) rather than imported by name at
