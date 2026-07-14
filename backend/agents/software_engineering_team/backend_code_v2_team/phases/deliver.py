@@ -1,12 +1,12 @@
 """
 Deliver phase: write files, commit, and merge to development.
 
-Uses only ``shared.git_utils`` — no code from ``backend_agent``.
+Uses only ``shared.git_utils`` and ``shared.repo_writer`` — no team-specific code.
 
 The orchestration is shared across the code-v2 teams (see
 ``shared/phases/deliver.py``); this module keeps the git-function imports and
 ``_git_ops()`` so tests can monkeypatch git operations at this module boundary,
-and wires in the backend team's models.
+and wires in this team's models.
 """
 
 from __future__ import annotations
@@ -66,8 +66,8 @@ def run_deliver(
 
     If the Git branch management agent is present, delegate all git operations to it
     (merge to development when feature_branch_name is set, or create/write/commit/merge
-    when not). When merge_to_development is False, prepare and commit the feature branch
-    but leave it unmerged for an external Tech Lead review.
+    when not). When merge_to_development is False, commit the feature branch and leave
+    it unmerged, ready for an external Tech Lead review instead of merging/deleting it.
 
     Preconditions:
         ``repo_path`` is a git repo; ``files`` maps relative paths to content.
