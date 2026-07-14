@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 
-# Ensure backend/agents is on path for coding_team and job_service_client
 from fastapi import APIRouter, HTTPException
 
 from software_engineering_team.coding_team import hitl

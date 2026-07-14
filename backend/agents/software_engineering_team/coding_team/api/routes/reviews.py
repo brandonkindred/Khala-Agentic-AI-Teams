@@ -6,7 +6,6 @@ import logging
 import uuid
 from typing import List, Optional
 
-# Ensure backend/agents is on path for coding_team and job_service_client
 from fastapi import APIRouter, HTTPException, Query
 
 from software_engineering_team.coding_team.api import main as _main

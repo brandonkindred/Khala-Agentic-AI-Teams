@@ -14,8 +14,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared_env_config import env_bool
 from shared_git.git_utils import DEVELOPMENT_BRANCH
-
-# Ensure backend/agents is on path for coding_team and job_service_client
 from software_engineering_team.coding_team import hitl
 from software_engineering_team.coding_team.api import main as _main
 from software_engineering_team.coding_team.api.models import (

@@ -20,8 +20,6 @@ from typing import Any, Dict, List, Optional
 from shared_hitl.progress import coerce_progress
 from shared_hitl.validation import validate_answers
 from shared_run_thread_registry import RunThreadRegistry
-
-# Ensure backend/agents is on path for coding_team and job_service_client
 from software_engineering_team.coding_team.api.models import (
     SubmitAnswersRequest,
 )

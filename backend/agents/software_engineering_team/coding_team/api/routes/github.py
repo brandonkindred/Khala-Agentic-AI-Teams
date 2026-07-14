@@ -7,7 +7,6 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict
 
-# Ensure backend/agents is on path for coding_team and job_service_client
 from fastapi import APIRouter, HTTPException
 
 from software_engineering_team.coding_team.api import main as _main
@@ -106,8 +105,3 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
 
     _main._start_hook_thread(job_id, request, plan, issue, token)
     return RunFromGitHubResponse(job_id=job_id, issue_number=issue.number, issue_url=issue.html_url)
-
-
-# ---------------------------------------------------------------------------
-# Pull-request review flow (code reviewer agents review an open PR)
-# ---------------------------------------------------------------------------

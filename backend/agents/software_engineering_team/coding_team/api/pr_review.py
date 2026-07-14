@@ -16,7 +16,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, NamedTuple, Optional
 
-# Ensure backend/agents is on path for coding_team and job_service_client
 from software_engineering_team.coding_team.activity import ActivityBridge
 from software_engineering_team.coding_team.api import main as _main
 from software_engineering_team.coding_team.api.models import (

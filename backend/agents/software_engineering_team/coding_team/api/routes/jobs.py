@@ -12,7 +12,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import List
 
-# Ensure backend/agents is on path for coding_team and job_service_client
 from fastapi import APIRouter, HTTPException
 
 from shared_hitl.status import pending_questions_from_raw
@@ -193,8 +192,3 @@ def get_jobs(active: bool = False) -> List[JobListItem]:
         )
         for j in jobs
     ]
-
-
-# ---------------------------------------------------------------------------
-# GitHub-issue-driven runs
-# ---------------------------------------------------------------------------

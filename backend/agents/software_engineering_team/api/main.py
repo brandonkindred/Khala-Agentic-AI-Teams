@@ -11,7 +11,11 @@ the actual logic:
 * ``state`` — shared mutable globals + pure parse/validation helpers.
 * ``lifecycle`` — ASGI startup/shutdown hooks.
 * ``background`` — orchestrator/runner thread targets.
-* ``routes/*`` — APIRouter modules grouped by concern.
+* ``api.routes.*`` — SE's own APIRouter modules, grouped by concern.
+* ``coding_team.api.routes.*`` — coding_team's APIRouter modules (an in-package
+  sub-team), mounted unprefixed onto this same app so ``/api/coding-team/*``
+  keeps resolving unchanged; see the mounting block below for why
+  ``coding_team.api.main`` is imported first.
 
 Every moved public symbol is re-imported here so ``from …api.main import X`` and
 ``monkeypatch.setattr(main, "X", …)`` keep working unchanged: this module remains
