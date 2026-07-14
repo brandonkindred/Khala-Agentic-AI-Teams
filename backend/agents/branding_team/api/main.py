@@ -35,16 +35,17 @@ from branding_team.orchestrator import orchestrator
 from branding_team.postgres import SCHEMA as BRANDING_POSTGRES_SCHEMA
 from branding_team.shared.job_store import (
     JOB_STATUS_CANCELLED,
-    JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
+    begin_job,
     cancel_job,
     create_job,
     delete_job,
     get_job,
-    is_job_cancelled,
     list_jobs,
+    mark_completed,
+    mark_failed,
     update_job,
 )
 from branding_team.store import get_default_store
@@ -780,9 +781,12 @@ def _run_branding_core(
 ) -> None:
     """Run the branding pipeline for ``job_id`` and record job status.
 
-    Shared by the thread path (via ``_run_branding_background``) and the
-    Temporal activity so the RUNNING → COMPLETED/FAILED bookkeeping and cancel
-    guards live in exactly one place.
+    Used by the thread path (via ``_run_branding_background``). The Temporal
+    activity path (``temporal.activities``) runs the same pipeline as separate
+    durable activities, but both paths drive their RUNNING/COMPLETED/FAILED
+    transitions through the same guarded helpers (``begin_job``/
+    ``mark_completed``/``mark_failed`` in ``branding_team.shared.job_store``),
+    so the cancel-check + status-write sequence lives in exactly one place.
 
     Preconditions:
         - ``job_id`` refers to a job already created in the job store.
@@ -796,9 +800,8 @@ def _run_branding_core(
           as a failed workflow rather than a silently-"completed" one.
     """
     try:
-        if is_job_cancelled(job_id):
+        if not begin_job(job_id):
             return
-        update_job(job_id, status=JOB_STATUS_RUNNING)
         # orchestrator.run has no progress callback, so it never touches the job
         # heartbeat itself. Drive it from a background beater for the duration of the
         # (potentially multi-minute) run so the stale-job monitor doesn't fail a live run.
@@ -814,14 +817,11 @@ def _run_branding_core(
                 include_design_assets=include_design_assets,
                 target_phase=target_phase,
             )
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
+        mark_completed(job_id, result.model_dump())
     except Exception as e:
         logger.exception("Branding job %s failed", job_id)
-        if is_job_cancelled(job_id):
+        if not mark_failed(job_id, str(e)):
             return
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
         raise
 
 
