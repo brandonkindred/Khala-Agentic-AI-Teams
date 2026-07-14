@@ -24,6 +24,7 @@ from .models import (
     FileSegment,
     ReviewChunk,
     coerce_line,
+    is_no_op_suggestion,
 )
 
 # Pattern: a whole line of the form "### path/to/file ###". Anchored to line
@@ -512,6 +513,10 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
         - ``pre_existing`` reflects the LLM's optional per-issue tag (coerced via
           ``_coerce_bool``); it defaults to False when the field is absent, so a
           reviewer/gate that never emits it is unaffected.
+        - An item whose ``suggestion`` is, in its entirety, a no-op phrasing
+          (e.g. "No changes needed.") is dropped (see ``is_no_op_suggestion``):
+          the reviewer's own suggested fix says there is nothing to do, so it
+          is not a reportable issue.
     """
     seg_by_path = {seg.path: seg for seg in chunk.segments}
     issues: List[CodeReviewIssue] = []
@@ -520,6 +525,9 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
             continue
         description = _clean_str(item.get("description"), "")
         if not description:
+            continue
+        suggestion = _clean_str(item.get("suggestion"), "")
+        if is_no_op_suggestion(suggestion):
             continue
         path = _normalize_issue_path(_clean_str(item.get("file_path"), ""), chunk)
         seg = seg_by_path.get(path)
@@ -537,7 +545,7 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
                 line=_validate_line(coerce_line(item.get("line")), seg),
                 start_line=_validate_line(coerce_line(item.get("start_line")), seg),
                 description=description,
-                suggestion=_clean_str(item.get("suggestion"), ""),
+                suggestion=suggestion,
                 pre_existing=_coerce_bool(item.get("pre_existing")),
             )
         )

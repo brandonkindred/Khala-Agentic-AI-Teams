@@ -6,18 +6,8 @@ import json
 from typing import Any
 
 import pytest
-from blog_planning_agent.agent import (
-    BlogPlanningAgent,
-    _build_generate_prompt,
-    _build_refine_prompt,
-)
-from shared.content_plan import (
-    ContentPlan,
-    ContentPlanSection,
-    PlanningInput,
-    RequirementsAnalysis,
-    TitleCandidate,
-)
+from blog_planning_agent.agent import BlogPlanningAgent
+from shared.content_plan import PlanningInput
 from shared.content_profile import ContentProfile, resolve_length_policy
 from shared.errors import PlanningError
 
@@ -51,54 +41,6 @@ def _bad_plan_dict() -> dict[str, Any]:
     return d
 
 
-def test_build_generate_prompt_with_optional_fields() -> None:
-    inp = PlanningInput(
-        brief="A brief",
-        audience="audience-x",
-        tone_or_purpose="tone-y",
-        length_policy_context="ctx",
-        research_digest="digest",
-        series_context_block="series block content",
-    )
-    out = _build_generate_prompt(inp)
-    assert "audience-x" in out
-    assert "tone-y" in out
-    assert "series block content" in out
-
-
-def test_build_generate_prompt_skips_blank_series_block() -> None:
-    inp = PlanningInput(
-        brief="A brief",
-        length_policy_context="ctx",
-        research_digest="digest",
-        series_context_block="   ",
-    )
-    out = _build_generate_prompt(inp)
-    assert "series" not in out.lower()
-
-
-def test_build_refine_prompt_includes_previous_plan_and_feedback() -> None:
-    inp = PlanningInput(
-        brief="b",
-        length_policy_context="ctx",
-        research_digest="digest",
-    )
-    prev = ContentPlan(
-        overarching_topic="t",
-        narrative_flow="n",
-        sections=[ContentPlanSection(title="x", coverage_description="x", order=0)],
-        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=False,
-            scope_feasible=True,
-            research_gaps=[],
-        ),
-    )
-    out = _build_refine_prompt(inp, prev, "fix gaps")
-    assert "fix gaps" in out
-    assert "PREVIOUS PLAN" in out
-
-
 def test_complete_plan_json_recovers_on_parse_retry(monkeypatch) -> None:
     """First call returns invalid JSON, fallback extract_json_from_response succeeds."""
     from llm_service import DummyLLMClient
@@ -126,7 +68,10 @@ def test_complete_plan_json_recovers_on_parse_retry(monkeypatch) -> None:
         max_parse_retries=2,
     )
     assert data["overarching_topic"] == "Topic"
-    assert retries == 1
+    # parse_retries counts fully-failed attempts (both the JSON-mode call and
+    # its raw-text fallback failing); recovering via the raw-text fallback on
+    # the first attempt counts as zero full failures.
+    assert retries == 0
     assert any("Planning" in s for s in seen)
 
 

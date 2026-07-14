@@ -571,13 +571,14 @@ def test_check1_requires_ctx_receiver_for_indicator_credit() -> None:
     [
         "ctx.indicator('ema')",  # missing required period
         "ctx.indicator('ema', perod=20)",  # typo'd param
-        "ctx.indicator('ema', period=20, source='high')",  # valid — ema accepts source
+        "ctx.indicator('ema', period=20)",  # valid — matches the spec's ema ref exactly
     ],
 )
 def test_check1_flags_malformed_ctx_indicator_call(ema_call) -> None:
     # A fully-literal, statically-invalid ctx.indicator read is a critical here,
-    # so it is refined rather than raising at runtime. (The third case is valid
-    # — ema accepts source — and must NOT be flagged.)
+    # so it is refined rather than raising at runtime. (The third case matches the
+    # spec's ``ema`` ref exactly — period 20, default 'close' source — and must NOT
+    # be flagged by the malformed-call or the spec-divergence checker.)
     code = textwrap.dedent(
         f"""
         from contract import Strategy
@@ -604,10 +605,25 @@ def test_check1_flags_malformed_ctx_indicator_call(ema_call) -> None:
     )
     results = CodeConformanceGate().check(code, _ema_rsi_spec())
     malformed = [d for d in _critical_details(results) if "ctx.indicator(" in d]
-    if "source='high'" in ema_call:
-        assert malformed == []  # ema accepts a source override → valid
+    if "period=20)" in ema_call and "perod" not in ema_call:
+        assert malformed == []  # matches the spec ref exactly → valid
     else:
         assert malformed and "ema" in malformed[0]
+
+
+def test_ctx_indicator_source_divergence_from_spec_is_critical() -> None:
+    # The spec's ``ema`` ref uses the default 'close' source; reading it on 'high'
+    # would execute trades that do not implement the specification. The faithfulness
+    # checker flags the divergence so the code is refined before it ever runs.
+    code = _CTX_INDICATOR_CODE.replace(
+        "ctx.indicator('ema', period=20)", "ctx.indicator('ema', period=20, source='high')"
+    )
+    results = CodeConformanceGate().check(code, _ema_rsi_spec())
+    diverged = [
+        d for d in _critical_details(results) if "diverges from the spec" in d and "source=" in d
+    ]
+    assert diverged, _critical_details(results)
+    assert "ema" in diverged[0]
 
 
 def test_check1_skips_validation_for_dynamic_ctx_indicator_args() -> None:
