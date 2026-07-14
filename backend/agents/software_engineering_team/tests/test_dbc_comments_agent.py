@@ -13,29 +13,7 @@ from software_engineering_team.technical_writers.dbc_comments_agent.models impor
     DbcCommentsInput,
     DbcCommentsStatus,
 )
-
-
-def _strands_model_double():
-    """Minimal double satisfying the Strands ``Model`` protocol for isinstance checks."""
-    from strands.models.model import Model as StrandsModel
-
-    class _M(StrandsModel):
-        def __init__(self):
-            pass
-
-        def update_config(self, *a, **kw):
-            pass
-
-        def get_config(self):
-            return {}
-
-        def structured_output(self, *a, **kw):  # pragma: no cover
-            return {}
-
-        async def stream(self, *a, **kw):  # pragma: no cover
-            yield {}
-
-    return _M()
+from software_engineering_team.tests.conftest import _strands_model_double
 
 
 class _FakeCompleteJson:

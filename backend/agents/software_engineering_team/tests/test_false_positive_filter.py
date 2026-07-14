@@ -117,6 +117,26 @@ class _BadJsonStub(DummyLLMClient):
         return super().complete_json(prompt, **kwargs)
 
 
+class _FencedJsonVerdictStub(DummyLLMClient):
+    """Returns the verdicts JSON wrapped in a ```json fence with leading prose.
+
+    Exercises the recovery ladder (``extract_json_from_response``) rather than a
+    bare ``json.loads``: the verification call site must recover a fenced verdict
+    exactly as it recovers any other LLM response shape.
+    """
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:  # type: ignore[override]
+        if "verdicts" in prompt.lower():
+            return (
+                "Here is my assessment:\n"
+                "```json\n"
+                '{"verdicts": [{"index": 0, "is_real_issue": false, "confidence": "high", '
+                '"reasoning": "foo is defined in util.py"}]}\n'
+                "```"
+            )
+        return super().complete_json(prompt, **kwargs)
+
+
 @pytest.fixture(autouse=True)
 def _enable_filter(monkeypatch):
     """The filter is default-on; make tests independent of the ambient env."""
@@ -705,6 +725,15 @@ def test_filter_keeps_on_unparsable_verdict() -> None:
     issues = [_issue()]
     out = filter_false_positives(_BadJsonStub(), _input(), issues)
     assert out == issues
+
+
+def test_filter_recovers_markdown_fenced_verdict() -> None:
+    """A verdicts JSON wrapped in a ```json fence (with leading prose) is recovered
+    via extract_json_from_response, so a confirmed false positive is still dropped —
+    not kept as if the response were unparsable."""
+    issues = [_issue()]
+    out = filter_false_positives(_FencedJsonVerdictStub(), _input(), issues)
+    assert out == []
 
 
 def test_filter_keeps_on_low_confidence_false() -> None:

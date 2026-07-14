@@ -9,7 +9,11 @@ from linting_tool_agent import LintingToolAgent, LintIssue, LintToolInput, LintT
 from linting_tool_agent.linter_runner import detect_linter, parse_lint_output
 from linting_tool_agent.models import LintExecutionResult, LintPlan
 
-from software_engineering_team.tests.conftest import ConfigurableLLM
+from software_engineering_team.tests.conftest import (
+    ConfigurableLLM,
+    _patch_fenced_response,
+    _strands_model_double,
+)
 
 # ---------------------------------------------------------------------------
 # Model construction and serialization
@@ -242,3 +246,40 @@ def test_agent_run_llm_failure_is_non_blocking(tmp_path: Path) -> None:
     assert result.execution_result.success is False
     assert result.edits == []
     assert len(result.linter_issues) == 1
+
+
+def test_agent_run_recovers_markdown_fenced_llm_response(tmp_path: Path, monkeypatch) -> None:
+    """A markdown-fenced JSON reply from the LLM is recovered into real edits
+    instead of crashing the bare ``json.loads`` the tool agent used to run."""
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("import os\nprint('hello')\n")
+
+    _patch_fenced_response(
+        monkeypatch,
+        {
+            "edits": [
+                {
+                    "file_path": "app/main.py",
+                    "old_text": "import os\n",
+                    "new_text": "",
+                }
+            ],
+            "summary": "Removed unused import",
+        },
+    )
+
+    agent = LintingToolAgent(_strands_model_double())
+
+    lint_output = "app/main.py:1:1: F401 `os` imported but unused\n"
+    with (
+        patch("linting_tool_agent.linter_runner._is_command_available", return_value=True),
+        patch("linting_tool_agent.linter_runner.run_command") as mock_cmd,
+    ):
+        mock_cmd.return_value = MagicMock(
+            success=False, output=lint_output, stdout=lint_output, stderr="", exit_code=1
+        )
+        result = agent.run(LintToolInput(repo_path=str(tmp_path), agent_type="backend"))
+
+    assert result.execution_result.success is False
+    assert len(result.edits) == 1
+    assert result.edits[0].file_path == "app/main.py"

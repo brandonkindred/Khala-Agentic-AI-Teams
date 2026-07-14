@@ -327,6 +327,9 @@ class RecursiveProcessor(Generic[T]):
         Raises:
             LLMTruncatedError: If max decomposition depth is exceeded and
                               response is still truncated.
+            LLMJsonParseError: If ``process_fn`` is not provided and the
+                              default LLM call's response cannot be parsed as
+                              JSON at all (via ``extract_json_from_response``).
         """
         from llm_service import LLMTruncatedError
         from software_engineering_team.shared.continuation import MAX_CONTINUATION_CYCLES
@@ -342,16 +345,15 @@ class RecursiveProcessor(Generic[T]):
         try:
             if process_fn:
                 return process_fn(prompt)
-            import json as _json
-
             from strands import Agent as _Agent
 
             from llm_service import get_strands_model
+            from software_engineering_team.shared.llm import extract_json_from_response
 
             _agent = _Agent(model=get_strands_model())
             _result = _agent(prompt)
             _raw = str(_result).strip()
-            return _json.loads(_raw)
+            return extract_json_from_response(_raw)
         except LLMTruncatedError as e:
             context.add_partial_response(e.partial_content)
             if not context.continuation_attempted:

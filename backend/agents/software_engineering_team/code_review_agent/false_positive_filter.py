@@ -34,7 +34,6 @@ Two invariants hold:
 from __future__ import annotations
 
 import ast
-import json
 import logging
 import os
 import re
@@ -49,6 +48,7 @@ from strands.models.model import Model as _StrandsModel
 from llm_service import LLMClient
 from shared_env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
+from software_engineering_team.shared.llm import extract_json_from_response
 
 from .code_boundaries import node_end_line, node_start_line
 from .model_resolution import resolve_code_review_model
@@ -896,7 +896,7 @@ def _verify_group(
         tools=_build_tools(index),
     )
     raw = str(agent(prompt)).strip()
-    data = json.loads(raw)
+    data = extract_json_from_response(raw)
     return _parse_verdicts(data, len(issues))
 
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 import tempfile
 from pathlib import Path
@@ -23,7 +22,6 @@ from devops_team.orchestrator import DEVOPS_REQUIRED_GATE_NAMES, ENV_POLICY
 from devops_team.task_clarifier import DevOpsTaskClarifierAgent, DevOpsTaskClarifierInput
 
 from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.shared import llm as llm_mod
 from software_engineering_team.shared.git_utils import initialize_new_repo
 
 
@@ -1568,43 +1566,10 @@ class TestMainOrchestratorRegistration:
 # ===========================================================================
 
 
-def _strands_model_double():
-    """Minimal double satisfying the Strands ``Model`` protocol for isinstance checks,
-    so agent __init__ resolves ``self._model`` to this instance without touching the
-    real get_client/get_strands_model machinery."""
-    from strands.models.model import Model as StrandsModel
-
-    class _M(StrandsModel):
-        def update_config(self, *a, **kw):
-            pass
-
-        def get_config(self):
-            return {}
-
-        def structured_output(self, *a, **kw):  # pragma: no cover
-            return {}
-
-        async def stream(self, *a, **kw):  # pragma: no cover
-            yield {}
-
-    return _M()
-
-
-def _fenced(payload: Dict[str, Any]) -> str:
-    return "```json\n" + json.dumps(payload) + "\n```"
-
-
-class _FencedAgentInstance:
-    def __init__(self, text: str):
-        self._text = text
-
-    def __call__(self, prompt, **kwargs):
-        return self._text
-
-
-def _patch_fenced_response(monkeypatch, payload: Dict[str, Any]) -> None:
-    text = _fenced(payload)
-    monkeypatch.setattr(llm_mod, "Agent", lambda *a, **kw: _FencedAgentInstance(text))
+from software_engineering_team.tests.conftest import (  # noqa: E402
+    _patch_fenced_response,
+    _strands_model_double,
+)
 
 
 class TestDevOpsAgentsRecoverFencedJson:
