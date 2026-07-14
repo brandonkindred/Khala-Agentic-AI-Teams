@@ -1,9 +1,17 @@
 """
 Coding team orchestrator: plan → Task Graph → assign → implement → review → merge.
 
-Uses a swarm pattern: a Coordinator (Tech Lead) assigns tasks from the graph
-to frontend_v2/backend_v2 implementation workers. Quality gate tools run after each implementation.
-Exposes run_coding_team_orchestrator for in-process call from software_engineering_team.
+Owns the swarm entrypoint (``run_coding_team_orchestrator``) and ``CodingTeamSwarm``
+composition: Tech Lead coordination plus assignment / implementation / review mixins
+that drive frontend_v2/backend_v2 workers through quality gates. Also keeps branch-
+naming and review-evidence helpers that the mixins late-bind.
+
+Extracted collaborators (import those modules for the concerns they own):
+- ``progress_config`` — concurrency/cap env parsers, progress-band math, ``_NoopBridge``
+- ``repo_context`` — file-ceiling repo briefing and incremental ``_RepoContextCache``
+- ``pause_cycle``, ``reasoning_capture``, ``team_routing``, ``worker_factory``,
+  ``swarm_*`` — HITL pauses, thinking flush, stack routing, worker construction,
+  and the assignment / implementation / review mixin bodies
 """
 
 from __future__ import annotations
