@@ -16,6 +16,7 @@ import pytest
 from coding_team.github_source import (
     GitHubAPIError,
     GitHubClient,
+    Issue,
     PullRequestDetail,
     PullRequestFile,
 )
@@ -435,6 +436,9 @@ class _FakeReviewClient:
         self.reaction_fail = False  # create_issue_reaction raises a 403 when True
         self.created_issues: list[dict[str, Any]] = []  # each create_issue call's kwargs
         self.create_issue_fail = False  # create_issue raises a 403 when True
+        self.open_issues: list[Any] = []  # Issue-like objects returned by list_open_issues
+        self.list_open_issues_exc: Optional[Exception] = None
+        self.list_open_issues_calls = 0
 
     def __enter__(self) -> "_FakeReviewClient":
         return self
@@ -516,6 +520,17 @@ class _FakeReviewClient:
             (),
             {"number": number, "html_url": f"https://example/issues/{number}"},
         )()
+
+    def list_open_issues(self, _o: str, _r: str, label: Optional[str] = None) -> Any:
+        """Duplicate-detection's read of existing open issues.
+
+        ``list_open_issues_exc``, when set, is raised instead — exercising the
+        review flow's fail-open degrade-and-continue path.
+        """
+        self.list_open_issues_calls += 1
+        if self.list_open_issues_exc is not None:
+            raise self.list_open_issues_exc
+        return iter(self.open_issues)
 
 
 @pytest.fixture
@@ -2870,6 +2885,153 @@ class TestPreExistingFindings:
         assert resp.status_code == 409
         # No issue was opened for the mismatched repository.
         assert gh.created_issues == []
+
+
+class TestDuplicateProposalDetection:
+    """A pre-existing finding matched to an already-open GitHub issue is offered
+    pre-linked to that issue, not as a fresh "create issue" candidate."""
+
+    def test_matching_open_issue_marks_proposal_matched_and_prelinked(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        gh.open_issues = [
+            Issue(
+                number=42,
+                title="off-by-one error in loop bound",
+                body="",
+                state="open",
+                html_url="https://example/issues/42",
+                labels=(),
+            )
+        ]
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=2,
+                    file_path="legacy.py",
+                    description="off-by-one error in loop bound",
+                    pre_existing=True,
+                )
+            ],
+        )
+        proposals = job["review_summary"]["pending_issue_proposals"]
+        assert len(proposals) == 1
+        assert proposals[0]["matched_existing"] is True
+        assert proposals[0]["issue_number"] == 42
+        assert proposals[0]["issue_url"] == "https://example/issues/42"
+
+    def test_unrelated_open_issue_does_not_mark_proposal_matched(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        gh.open_issues = [
+            Issue(
+                number=42,
+                title="unrelated feature request",
+                body="nothing to do with this",
+                state="open",
+                html_url="https://example/issues/42",
+                labels=(),
+            )
+        ]
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=2,
+                    file_path="legacy.py",
+                    description="off-by-one error in loop bound",
+                    pre_existing=True,
+                )
+            ],
+        )
+        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        assert proposal["matched_existing"] is False
+        assert proposal["issue_url"] is None
+
+    def test_duplicate_check_fetches_open_issues_once_per_review_not_per_finding(
+        self, review_app
+    ) -> None:
+        gh = review_app["github"]["client"]
+        _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high", line=2, file_path="legacy.py", description="latent A", pre_existing=True
+                ),
+                _FakeReviewIssue(
+                    "low", line=3, file_path="legacy.py", description="latent B", pre_existing=True
+                ),
+            ],
+        )
+        assert gh.list_open_issues_calls == 1
+
+    def test_duplicate_check_skipped_when_no_preexisting_findings(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        _run_review_with(review_app, [_FakeReviewIssue("high", line=2)])
+        assert gh.list_open_issues_calls == 0
+
+    def test_duplicate_check_fails_open_on_github_api_error(self, review_app) -> None:
+        """A GitHub failure listing open issues degrades to "no duplicates found"
+        rather than failing the review — the proposal still surfaces, unmatched."""
+        gh = review_app["github"]["client"]
+        gh.list_open_issues_exc = GitHubAPIError(500, "boom")
+        job = _run_review_with(
+            review_app,
+            [_FakeReviewIssue("high", line=2, file_path="legacy.py", pre_existing=True)],
+        )
+        assert job["status"] == "completed"
+        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        assert proposal["matched_existing"] is False
+        assert proposal["issue_url"] is None
+
+    def test_duplicate_check_fails_open_on_unexpected_exception(self, review_app) -> None:
+        """Same fail-open guarantee for a non-API exception (the broad except branch)."""
+        gh = review_app["github"]["client"]
+        gh.list_open_issues_exc = RuntimeError("boom")
+        job = _run_review_with(
+            review_app,
+            [_FakeReviewIssue("high", line=2, file_path="legacy.py", pre_existing=True)],
+        )
+        assert job["status"] == "completed"
+        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        assert proposal["matched_existing"] is False
+        assert proposal["issue_url"] is None
+
+    def test_create_review_issues_never_refiles_a_matched_proposal(self, review_app) -> None:
+        """A proposal pre-linked to an existing issue can never be filed as a new,
+        duplicate GitHub issue via the create-issues endpoint."""
+        gh = review_app["github"]["client"]
+        gh.open_issues = [
+            Issue(
+                number=42,
+                title="off-by-one error in loop bound",
+                body="",
+                state="open",
+                html_url="https://example/issues/42",
+                labels=(),
+            )
+        ]
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=2,
+                    file_path="legacy.py",
+                    description="off-by-one error in loop bound",
+                    pre_existing=True,
+                )
+            ],
+        )
+        resp = review_app["client"].post(
+            f"/reviews/{job['job_id']}/issues", json={"proposal_ids": ["p0"]}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["created"] == []
+        assert gh.created_issues == []
+        assert data["proposals"][0]["issue_url"] == "https://example/issues/42"
 
 
 class TestCreateReviewIssuesUnit:

@@ -7,10 +7,13 @@ from typing import Optional
 
 import pytest
 
+from coding_team.github_source.client import Issue
 from coding_team.github_source.pr_review_mapping import (
+    annotate_duplicate_proposals,
     build_issue_from_proposal,
     build_review_body,
     choose_event,
+    find_matching_open_issue,
     format_comment_body,
     format_issue_comment,
     inline_comment_to_timeline_body,
@@ -467,3 +470,146 @@ def test_build_issue_from_proposal_blank_description_and_title_truncation() -> N
     long_title, _ = build_issue_from_proposal(p_long, pr_number=1, pr_url="u")
     assert len(long_title) <= 120
     assert long_title.endswith("…")
+
+
+# ---------------------------------------------------------------------------
+# find_matching_open_issue / annotate_duplicate_proposals
+# ---------------------------------------------------------------------------
+
+
+def _open_issue(number: int, title: str, body: str = "") -> Issue:
+    return Issue(
+        number=number,
+        title=title,
+        body=body,
+        state="open",
+        html_url=f"https://x/issues/{number}",
+        labels=(),
+    )
+
+
+def test_find_matching_open_issue_location_plus_moderate_text_matches() -> None:
+    proposal = proposal_from_finding(
+        _Issue(file_path="src/a.py", description="null pointer dereference in parser"), 0
+    )
+    # Title is only moderately similar to the headline (ratio ~0.585, between the
+    # two thresholds), but the issue body repeats the exact file_path -- the
+    # location signal makes the looser "with location" bar sufficient.
+    issue = _open_issue(
+        1, "possible null pointer issue in the parser module", body="See `src/a.py:12` for details."
+    )
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
+def test_find_matching_open_issue_moderate_text_without_location_does_not_match() -> None:
+    proposal = proposal_from_finding(
+        _Issue(file_path="src/a.py", description="null pointer dereference in parser"), 0
+    )
+    # Same moderate-similarity title as above (ratio ~0.585, below the "no
+    # location" bar of 0.8), but nothing in the issue mentions the file_path --
+    # moderate similarity alone is not enough.
+    issue = _open_issue(
+        1, "possible null pointer issue in the parser module", body="unrelated notes"
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_strong_text_alone_matches_without_location() -> None:
+    proposal = proposal_from_finding(
+        _Issue(file_path="", description="off-by-one error in loop bound"), 0
+    )
+    issue = _open_issue(1, "off-by-one error in loop bound", body="")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
+def test_find_matching_open_issue_dissimilar_and_no_location_returns_none() -> None:
+    proposal = proposal_from_finding(
+        _Issue(file_path="src/a.py", description="off-by-one error"), 0
+    )
+    issue = _open_issue(1, "unrelated feature request", body="nothing to do with this")
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_empty_open_issues_returns_none() -> None:
+    proposal = proposal_from_finding(
+        _Issue(file_path="src/a.py", description="off-by-one error"), 0
+    )
+    assert find_matching_open_issue(proposal, []) is None
+
+
+def test_find_matching_open_issue_blank_file_path_never_triggers_location_signal() -> None:
+    # Regression: an empty file_path must never "match" via the location signal,
+    # since "" is a substring of every string in Python.
+    proposal = proposal_from_finding(
+        _Issue(file_path="", description="a mildly related headline"), 0
+    )
+    issue = _open_issue(1, "a totally different headline", body="")
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_picks_highest_ratio_among_multiple_matches() -> None:
+    proposal = proposal_from_finding(
+        _Issue(file_path="", description="off-by-one error in loop bound"), 0
+    )
+    close = _open_issue(1, "off-by-one error in the loop bound", body="")
+    exact = _open_issue(2, "off-by-one error in loop bound", body="")
+    assert find_matching_open_issue(proposal, [close, exact]) is exact
+
+
+def test_find_matching_open_issue_ties_break_by_lowest_issue_number() -> None:
+    proposal = proposal_from_finding(
+        _Issue(file_path="", description="off-by-one error in loop bound"), 0
+    )
+    first = _open_issue(5, "off-by-one error in loop bound", body="")
+    second = _open_issue(2, "off-by-one error in loop bound", body="")
+    assert find_matching_open_issue(proposal, [first, second]) is second
+
+
+def test_find_matching_open_issue_threshold_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    proposal = proposal_from_finding(_Issue(file_path="", description="off-by-one error"), 0)
+    issue = _open_issue(1, "unrelated feature request", body="")
+    assert find_matching_open_issue(proposal, [issue]) is None
+    # A very low override turns the otherwise-dissimilar pair into a match.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION", "0.0")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+    # Garbage falls back to the documented default rather than raising.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION", "not-a-float")
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_annotate_duplicate_proposals_marks_matched_and_preserves_order_and_length() -> None:
+    proposals = [
+        proposal_from_finding(
+            _Issue(file_path="", description="off-by-one error in loop bound"), 0
+        ),
+        proposal_from_finding(_Issue(file_path="", description="unrelated latent bug"), 1),
+        proposal_from_finding(_Issue(file_path="", description="another unrelated bug"), 2),
+    ]
+    match = _open_issue(9, "off-by-one error in loop bound", body="")
+    out = annotate_duplicate_proposals(proposals, [match])
+    assert len(out) == 3
+    assert [p["id"] for p in out] == ["p0", "p1", "p2"]
+    assert out[0]["matched_existing"] is True
+    assert out[0]["issue_number"] == 9
+    assert out[0]["issue_url"] == "https://x/issues/9"
+    assert out[1]["matched_existing"] is False
+    assert out[1]["issue_url"] is None
+    assert out[2]["matched_existing"] is False
+    assert out[2]["issue_url"] is None
+
+
+def test_annotate_duplicate_proposals_does_not_mutate_input() -> None:
+    proposals = [
+        proposal_from_finding(_Issue(file_path="", description="off-by-one error in loop bound"), 0)
+    ]
+    match = _open_issue(9, "off-by-one error in loop bound", body="")
+    annotate_duplicate_proposals(proposals, [match])
+    assert proposals[0]["issue_url"] is None
+    assert "matched_existing" not in proposals[0]
+
+
+def test_annotate_duplicate_proposals_empty_open_issues_all_unmatched() -> None:
+    proposals = [proposal_from_finding(_Issue(file_path="", description="off-by-one error"), 0)]
+    out = annotate_duplicate_proposals(proposals, [])
+    assert out[0]["matched_existing"] is False
+    assert out[0]["issue_url"] is None

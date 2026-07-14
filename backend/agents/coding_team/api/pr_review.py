@@ -31,6 +31,7 @@ from coding_team.github_source import (
     GitHubAPIError,
     GitHubRepoReader,
     anchor_to_first_file,
+    annotate_duplicate_proposals,
     build_issue_from_proposal,
     build_review_body,
     choose_event,
@@ -895,6 +896,34 @@ def _run_pr_review_body(
                 else:
                     pr_issues.append(i)
             proposals = [proposal_from_finding(i, idx) for idx, i in enumerate(preexisting_issues)]
+            if proposals:
+                # Duplicate-detection is an enhancement to what the human is offered
+                # to file, not a correctness requirement of the review itself: any
+                # failure listing existing issues (network, auth, rate-limit) must
+                # degrade to "no duplicates found" rather than fail the whole PR
+                # review -- mirroring the GitHubAPIError-tolerant degrade-and-continue
+                # pattern already used above for get_authenticated_login. Only
+                # fetched when there is at least one pre-existing finding, so a clean
+                # PR (or a PR with only in-diff findings) never pays for the extra
+                # GitHub call.
+                try:
+                    open_issues = list(client.list_open_issues(owner, repo))
+                except GitHubAPIError as e:
+                    logger.warning(
+                        "PR review #%s: could not list open issues for duplicate-detection: %s",
+                        pr_number,
+                        e,
+                    )
+                    open_issues = []
+                except Exception:  # noqa: BLE001 - duplicate-detection must never fail the review
+                    logger.warning(
+                        "PR review #%s: unexpected error listing open issues for "
+                        "duplicate-detection",
+                        pr_number,
+                        exc_info=True,
+                    )
+                    open_issues = []
+                proposals = annotate_duplicate_proposals(proposals, open_issues)
 
             comments, leftovers = map_issues_to_comments(pr_issues, valid_by_path)
 
@@ -977,8 +1006,12 @@ def _run_pr_review_body(
                 "files_reviewed": files_reviewed,
                 # Pre-existing bugs the reviewer flagged in unchanged code, offered
                 # to a human on the Code Review page as GitHub-issue candidates.
-                # Not posted on this PR. Each carries a stable ``id`` and starts
-                # with ``issue_url``/``issue_number`` unset until an issue is filed.
+                # Not posted on this PR. Each carries a stable ``id``. ``issue_url``/
+                # ``issue_number`` start unset, UNLESS annotate_duplicate_proposals
+                # already matched the finding to an existing open issue -- in which
+                # case they're pre-filled with that issue's identity and
+                # ``matched_existing`` is True, so the proposal is never offered as
+                # a fresh "create issue" candidate.
                 "pending_issue_proposals": proposals,
             }
             if comments_failed:
@@ -1604,6 +1637,11 @@ def create_review_issues(
           updated proposals to both the job store and the durable review row.
           Idempotent: a proposal already carrying an ``issue_url`` is skipped, so
           a repeated request never opens a duplicate; an unknown id is ignored.
+          ``issue_url`` may already be set before this function ever runs -- when
+          ``annotate_duplicate_proposals`` matched the finding to a pre-existing
+          open issue at review time -- and such a proposal is skipped exactly the
+          same way, so a matched finding can never be filed as a second, duplicate
+          issue.
           Returns ``{"job_id", "created", "proposals"}`` where ``created`` lists
           each newly-opened issue and ``proposals`` is the full, updated
           proposal list.

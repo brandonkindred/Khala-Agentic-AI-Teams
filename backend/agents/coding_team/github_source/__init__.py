@@ -23,9 +23,11 @@ from .dependency_resolver import ReadyCheckResult, is_ready, pick_ready_issue
 from .issue_to_plan import issue_to_plan_input
 from .pr_review_mapping import (
     anchor_to_first_file,
+    annotate_duplicate_proposals,
     build_issue_from_proposal,
     build_review_body,
     choose_event,
+    find_matching_open_issue,
     format_comment_body,
     format_issue_comment,
     inline_comment_to_timeline_body,
@@ -52,9 +54,11 @@ __all__ = [
     "Repo",
     "SubIssue",
     "anchor_to_first_file",
+    "annotate_duplicate_proposals",
     "build_issue_from_proposal",
     "build_review_body",
     "choose_event",
+    "find_matching_open_issue",
     "format_comment_body",
     "format_issue_comment",
     "inline_comment_to_timeline_body",

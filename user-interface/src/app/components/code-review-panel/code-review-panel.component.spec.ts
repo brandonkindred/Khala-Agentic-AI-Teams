@@ -890,4 +890,54 @@ describe('CodeReviewPanelComponent', () => {
     expect(host.querySelector('.cr-proposal__filed')).toBeTruthy();
   });
 
+  it('treats a matched-existing proposal as not open/selectable, same as a filed one', async () => {
+    await setup();
+    const rec = terminalRecordWith([
+      proposal('p0', {
+        issue_number: 42,
+        issue_url: 'https://x/issues/42',
+        matched_existing: true,
+      }),
+    ]);
+    expect(component.openProposals(rec).length).toBe(0);
+  });
+
+  it('renders "already tracked" for a matched proposal and "filed" for a Khala-filed one', async () => {
+    integrationsSpy.getGitHubReviewHistory.mockReturnValue(
+      of([
+        {
+          job_id: 'j9',
+          pr_number: 1,
+          pr_url: 'https://example.com/pull/1',
+          status: 'completed',
+          review_summary: {
+            total_issues: 0,
+            inline_comments: 0,
+            event: 'COMMENT',
+            pending_issue_proposals: [
+              proposal('p0', {
+                description: 'already tracked bug',
+                issue_number: 42,
+                issue_url: 'https://x/issues/42',
+                matched_existing: true,
+              }),
+              proposal('p1', {
+                description: 'freshly filed bug',
+                issue_number: 7,
+                issue_url: 'https://x/issues/7',
+              }),
+            ],
+          },
+          created_at: '2026-01-01T00:00:00Z',
+        } as CodeReviewRunItem,
+      ]),
+    );
+    await setup();
+    component.togglePull(component.pulls[0]);
+    fixture.detectChanges();
+    const host = fixture.nativeElement as HTMLElement;
+    expect(host.querySelector('.cr-proposal__matched')?.textContent).toContain('already tracked');
+    expect(host.querySelector('.cr-proposal__filed')?.textContent).toContain('filed');
+  });
+
 });

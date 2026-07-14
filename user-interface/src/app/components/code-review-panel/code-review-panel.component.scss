@@ -453,6 +453,20 @@
     }
   }
 
+  &__matched {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    font-size: 0.72rem;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+
+    mat-icon {
+      font-size: 1rem;
+      width: 1rem;
+      height: 1rem;
+    }
+  }
+
   &__loc {
     font-size: 0.75rem;
     color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));

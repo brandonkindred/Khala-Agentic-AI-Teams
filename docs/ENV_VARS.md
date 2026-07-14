@@ -600,6 +600,21 @@ a review outage (the failure is still recorded in the job store either way). Thi
 does not affect the distinct "no engine provider configured" deploy-misconfig
 abort, which remains a loud operator-facing comment.
 
+### PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION / PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION
+Similarity-ratio overrides (0.0–1.0) for the `/review-pr` flow's duplicate-issue
+check: before a pre-existing finding is offered to a human as a "file a new
+GitHub issue?" candidate, the reviewed repository's open issues are checked for
+one that already tracks the same bug (`difflib.SequenceMatcher` ratio between the
+finding's description headline and a candidate issue's title, casefolded). A
+match found this way is pre-linked to the existing issue instead of being offered
+for creation. `_WITH_LOCATION` (default `0.5`) applies when the finding's
+`file_path` also appears in the candidate issue's title/body (a corroborating
+structural signal, so a looser text bar is safe); `_NO_LOCATION` (default `0.8`)
+applies otherwise, requiring a near-identical headline/title on text alone. Each
+parses defensively: a missing, blank, unparsable, or out-of-range value falls
+back to its documented default (clamped to `[0.0, 1.0]` when it does parse)
+rather than raising or disabling the check.
+
 ### CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE
 Max entries in the coordinator's process-global map-phase outcome cache. The
 review→fix→re-review loop re-invokes the whole coordinator after every batch fix,

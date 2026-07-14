@@ -113,6 +113,11 @@ export interface PendingIssueProposal {
   suggestion: string;
   issue_number?: number | null;
   issue_url?: string | null;
+  /** True when `issue_url` points at a pre-existing open issue the review matched
+   * to this finding (the backend's duplicate check) rather than one just created
+   * via the "Create GitHub issue(s)" action. Lets the UI say "already tracked"
+   * instead of "filed". */
+  matched_existing?: boolean;
 }
 
 export interface CodeReviewSummary {

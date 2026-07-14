@@ -36,9 +36,10 @@ from __future__ import annotations
 
 import os
 import re
+from difflib import SequenceMatcher
 from typing import Any, Iterable, Optional, Protocol
 
-from .client import scrub_token_from_text
+from .client import Issue, scrub_token_from_text
 
 # GitHub inline review comments on side=RIGHT must target a line the diff adds
 # (`+`) or carries as context (` `). We accept both so the commentable set matches
@@ -469,6 +470,192 @@ def proposal_from_finding(finding: Any, index: int) -> dict[str, Any]:
     }
 
 
+# Similarity thresholds for duplicate-issue detection (see find_matching_open_issue /
+# annotate_duplicate_proposals below). SequenceMatcher.ratio() on casefolded strings;
+# 1.0 is an exact match. Two thresholds, not one: the location signal (the finding's
+# file_path appearing in the candidate issue's title/body) is itself strong
+# corroborating evidence, so a looser text bar is safe once it's present. Without a
+# location match, only a near-identical headline should count -- otherwise a generic
+# short headline would swallow every open issue that happens to touch a similar theme.
+# Both are overridable via env vars (mirroring the PR_REVIEW_EVENT override idiom
+# choose_event already uses in this module) for tuning without a code change.
+_DUPLICATE_TITLE_THRESHOLD_WITH_LOCATION = 0.5
+_DUPLICATE_TITLE_THRESHOLD_NO_LOCATION = 0.8
+
+
+def _duplicate_threshold(env_var: str, default: float) -> float:
+    """Read a float similarity-threshold override from the environment, defensively.
+
+    Postconditions:
+        - Returns ``float(os.environ[env_var])`` clamped to ``[0.0, 1.0]`` when it
+          parses; otherwise returns ``default`` unchanged. A missing var, an
+          empty/whitespace string, or unparsable text all degrade to the default
+          rather than raising -- matches this repo's "garbage -> documented default"
+          convention for numeric env vars (see docs/ENV_VARS.md).
+    """
+    raw = (os.environ.get(env_var) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return max(0.0, min(1.0, value))
+
+
+def _location_appears_in(file_path: str, issue: Issue) -> bool:
+    """True when a finding's file_path is a substring of an existing issue's title/body.
+
+    ``build_issue_from_proposal`` renders exactly `` `file_path:line` `` or
+    `` `file_path` `` into a Khala-filed issue's "**Location:**" line, so this is a
+    cheap, exact structural signal for issues Khala itself opened in a past review --
+    and, incidentally, still fires for a human-filed issue that happens to mention the
+    same path.
+
+    Preconditions:
+        - ``file_path`` is the candidate finding's ``file_path`` (may be empty -- a
+          finding with no location can never structurally match anything).
+    Postconditions:
+        - Returns False when ``file_path`` is empty (an empty string is a substring of
+          every string in Python, which would otherwise make every issue "match" a
+          location-less finding). Otherwise returns True iff ``file_path.casefold()``
+          is a substring of ``issue.title`` or ``issue.body`` (casefolded). Never
+          raises.
+    """
+    if not file_path:
+        return False
+    needle = file_path.casefold()
+    return needle in (issue.title or "").casefold() or needle in (issue.body or "").casefold()
+
+
+def find_matching_open_issue(
+    proposal: dict[str, Any], open_issues: Iterable[Issue]
+) -> Optional[Issue]:
+    """Return the open issue that most likely already tracks this proposal's bug, if any.
+
+    Two independent signals, either sufficient on its own:
+      - Structural + moderate text: the proposal's ``file_path`` appears in the
+        candidate issue's title/body (:func:`_location_appears_in`) AND the
+        proposal's description headline is at least somewhat similar to the issue's
+        title (>= :data:`_DUPLICATE_TITLE_THRESHOLD_WITH_LOCATION`, default 0.5).
+      - Strong text alone: the headline/title similarity clears
+        :data:`_DUPLICATE_TITLE_THRESHOLD_NO_LOCATION` (default 0.8) even without any
+        location match -- covers a finding with a blank ``file_path``, or an issue
+        whose body doesn't happen to repeat the exact path string.
+
+    Pure and side-effect-free: no GitHub/network access. ``open_issues`` must already
+    be a materialized (or safely re-iterable) snapshot -- callers fetch it ONCE per
+    review (e.g. via ``GitHubClient.list_open_issues``) and pass the same snapshot to
+    every proposal, never re-fetching per finding.
+
+    Preconditions:
+        - ``proposal`` is a dict produced by :func:`proposal_from_finding`.
+        - ``open_issues`` yields every open issue currently visible to the caller;
+          pull requests are already excluded by ``GitHubClient.list_open_issues``.
+    Postconditions:
+        - Returns the single best-matching ``Issue`` -- the one with the highest
+          title-similarity ratio among every issue clearing either signal above -- or
+          ``None`` when ``open_issues`` is empty or no issue clears either bar. Ties
+          (equal ratio) favor the lowest issue ``number`` (earliest filed), so the
+          result is deterministic regardless of ``open_issues``' iteration/pagination
+          order. Never raises: a malformed ``Issue`` (blank title/body) is treated as
+          clearing neither signal.
+    """
+    headline = _description_headline(str(proposal.get("description") or "")).casefold()
+    file_path = str(proposal.get("file_path") or "")
+    with_location = _duplicate_threshold(
+        "PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION",
+        _DUPLICATE_TITLE_THRESHOLD_WITH_LOCATION,
+    )
+    no_location = _duplicate_threshold(
+        "PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION", _DUPLICATE_TITLE_THRESHOLD_NO_LOCATION
+    )
+    best: Optional[Issue] = None
+    best_ratio = -1.0
+    for issue in open_issues:
+        ratio = SequenceMatcher(None, headline, (issue.title or "").casefold()).ratio()
+        matches = (_location_appears_in(file_path, issue) and ratio >= with_location) or (
+            ratio >= no_location
+        )
+        if not matches:
+            continue
+        if (
+            best is None
+            or ratio > best_ratio
+            or (ratio == best_ratio and issue.number < best.number)
+        ):
+            best = issue
+            best_ratio = ratio
+    return best
+
+
+def annotate_duplicate_proposals(
+    proposals: list[dict[str, Any]], open_issues: Iterable[Issue]
+) -> list[dict[str, Any]]:
+    """Mark each proposal already tracked by an existing open issue, so it is never
+    offered as a fresh "create issue" candidate.
+
+    Reuses the existing ``issue_number``/``issue_url`` fields -- the same ones
+    ``create_review_issues`` fills in once a NEW issue is filed -- rather than
+    inventing a parallel state: the frontend's ``openProposals()`` filter (``!p.issue_
+    url``) already means "don't offer to create/select this one", and
+    ``create_review_issues`` already treats any proposal carrying ``issue_url`` as
+    filed and skips it (its documented idempotency), so a matched proposal can never
+    be filed a second time even if a caller mistakenly still passed its id. The new
+    ``matched_existing`` field only distinguishes "Khala already filed this" from
+    "this already exists elsewhere" for the frontend's wording -- it does not change
+    either consumer's existing filter logic.
+
+    Preconditions:
+        - ``proposals`` is a list of proposal dicts fresh from
+          :func:`proposal_from_finding` -- every entry's ``issue_url``/
+          ``issue_number`` are still ``None`` (this must run before any proposal is
+          persisted, shown to a human, or filed for this review).
+        - ``open_issues`` is a snapshot of currently-open issues in the target repo,
+          fetched ONCE per review by the caller -- never once per proposal.
+    Postconditions:
+        - Returns a NEW list, same length and order as ``proposals`` (no proposal
+          dropped or reordered -- a matched proposal is still shown to the human,
+          just not offered as creatable). Each returned dict is a copy carrying every
+          field of :func:`proposal_from_finding`'s output plus ``matched_existing:
+          bool``. When :func:`find_matching_open_issue` finds a match, ``issue_
+          number``/``issue_url`` are overwritten with the matched issue's identity
+          (pre-linking the proposal to it) and ``matched_existing`` is True;
+          otherwise the proposal is unchanged apart from ``matched_existing: False``.
+          Never raises -- pure computation over already-fetched data; never mutates
+          an input dict.
+    """
+    open_issues = list(open_issues)
+    out: list[dict[str, Any]] = []
+    for p in proposals:
+        match = find_matching_open_issue(p, open_issues)
+        if match is None:
+            out.append({**p, "matched_existing": False})
+        else:
+            out.append(
+                {
+                    **p,
+                    "matched_existing": True,
+                    "issue_number": match.number,
+                    "issue_url": match.html_url,
+                }
+            )
+    return out
+
+
+def _description_headline(description: str) -> str:
+    """Extract the single-line headline used for both an issue's title and duplicate matching.
+
+    Postconditions:
+        - Returns the first line of ``description``, stripped, or the literal
+          "code review finding" when ``description`` is blank -- the fallback
+          ``_proposal_title`` has always used, now shared so a proposal's
+          generated title and its duplicate-matching text never drift apart.
+    """
+    description = (description or "").strip()
+    return description.splitlines()[0].strip() if description else "code review finding"
+
+
 def _proposal_title(proposal: dict[str, Any]) -> str:
     """Build a concise, single-line GitHub issue title for a proposal.
 
@@ -479,8 +666,7 @@ def _proposal_title(proposal: dict[str, Any]) -> str:
           when the description is blank, so the title is never empty.
     """
     severity = str(proposal.get("severity") or "info").lower()
-    description = str(proposal.get("description") or "").strip()
-    headline = description.splitlines()[0].strip() if description else "code review finding"
+    headline = _description_headline(str(proposal.get("description") or ""))
     prefix = f"[{severity}] "
     budget = _ISSUE_TITLE_MAX - len(prefix)
     if len(headline) > budget:
