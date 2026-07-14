@@ -8,18 +8,27 @@ the existing orchestrator handle the work.
 
 from .client import (
     MAX_ISSUES_TRAVERSED,
+    MAX_REVIEW_THREADS_TRAVERSED,
     GitHubAPIError,
     GitHubClient,
     Issue,
+    IssueComment,
     NotAnIssueError,
     PullRequest,
     PullRequestDetail,
     PullRequestFile,
     Repo,
+    ReviewComment,
     SubIssue,
     scrub_token_from_text,
 )
 from .dependency_resolver import ReadyCheckResult, is_ready, pick_ready_issue
+from .existing_comments import (
+    ExistingComment,
+    build_existing_comments,
+    match_existing_comment,
+    partition_issues_by_existing_comments,
+)
 from .issue_to_plan import issue_to_plan_input
 from .pr_review_mapping import (
     anchor_to_first_file,
@@ -40,18 +49,23 @@ from .repo_reader import GitHubRepoReader
 
 __all__ = [
     "MAX_ISSUES_TRAVERSED",
+    "MAX_REVIEW_THREADS_TRAVERSED",
+    "ExistingComment",
     "GitHubAPIError",
     "GitHubClient",
     "GitHubRepoReader",
     "Issue",
+    "IssueComment",
     "NotAnIssueError",
     "PullRequest",
     "PullRequestDetail",
     "PullRequestFile",
     "ReadyCheckResult",
     "Repo",
+    "ReviewComment",
     "SubIssue",
     "anchor_to_first_file",
+    "build_existing_comments",
     "build_issue_from_proposal",
     "build_review_body",
     "choose_event",
@@ -62,7 +76,9 @@ __all__ = [
     "is_within_diff",
     "issue_to_plan_input",
     "map_issues_to_comments",
+    "match_existing_comment",
     "parse_valid_lines",
+    "partition_issues_by_existing_comments",
     "pick_ready_issue",
     "proposal_from_finding",
     "render_annotated_hunks",

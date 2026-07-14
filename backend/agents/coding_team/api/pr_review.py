@@ -31,6 +31,7 @@ from coding_team.github_source import (
     GitHubAPIError,
     GitHubRepoReader,
     anchor_to_first_file,
+    build_existing_comments,
     build_issue_from_proposal,
     build_review_body,
     choose_event,
@@ -38,6 +39,7 @@ from coding_team.github_source import (
     is_within_diff,
     map_issues_to_comments,
     parse_valid_lines,
+    partition_issues_by_existing_comments,
     proposal_from_finding,
     render_annotated_hunks,
     scrub_token_from_text,
@@ -766,6 +768,32 @@ def _post_file_comments(
     return file_comment_count, standalone
 
 
+def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int) -> List[Any]:
+    """Best-effort fetch of every comment already on the PR, for de-duplicating findings.
+
+    Preconditions:
+        - ``client`` is an open ``GitHubClient``.
+    Postconditions:
+        - Returns ``build_existing_comments(...)`` over the PR's existing
+          review comments, resolved-thread ids, and standalone conversation
+          comments. Any failure fetching any of the three (REST error,
+          transport error, or a GraphQL-lookup failure already degraded to an
+          empty set by ``get_resolved_review_thread_comment_ids`` itself) is
+          logged as a warning and degrades to ``[]`` — this lookup must never
+          fail an otherwise-working review; a failure here only means findings
+          are neither dropped nor cross-referenced on this run, same as a PR
+          with no existing comments at all.
+    """
+    try:
+        review_comments = client.list_review_comments(owner, repo, pr_number)
+        resolved_ids = client.get_resolved_review_thread_comment_ids(owner, repo, pr_number)
+        issue_comments = client.list_issue_comments(owner, repo, pr_number)
+        return build_existing_comments(review_comments, resolved_ids, issue_comments)
+    except GitHubAPIError as e:
+        logger.warning("Could not fetch existing comments for PR #%s: %s", pr_number, e)
+        return []
+
+
 def _run_pr_review_body(
     job_id: str,
     request: ReviewPrRequest,
@@ -896,7 +924,22 @@ def _run_pr_review_body(
                     pr_issues.append(i)
             proposals = [proposal_from_finding(i, idx) for idx, i in enumerate(preexisting_issues)]
 
-            comments, leftovers = map_issues_to_comments(pr_issues, valid_by_path)
+            # Recognize findings that duplicate a comment already on the PR (from a
+            # prior review run, or a human), so an evolving PR does not accumulate
+            # repeat comments every time it is re-reviewed. A match against an
+            # already-RESOLVED comment is dropped (requirement: already addressed);
+            # a match against a still-open comment is kept but cross-referenced (see
+            # map_issues_to_comments/anchor_to_first_file below) instead of posted as
+            # an unexplained duplicate. The fetch is best-effort: any failure yields
+            # [], so this never turns a working review into a failed one.
+            existing_comments = _fetch_existing_comments(client, owner, repo, pr_number)
+            pr_issues, addressed_issues, existing_by_issue = partition_issues_by_existing_comments(
+                pr_issues, existing_comments
+            )
+
+            comments, leftovers = map_issues_to_comments(
+                pr_issues, valid_by_path, existing_by_issue
+            )
 
             # Re-anchor leftover findings (file not in diff) as file-level
             # comments on the first changed file in the diff, so they travel as
@@ -904,7 +947,10 @@ def _run_pr_review_body(
             # comments.  anchor_to_first_file returns None only when valid_by_path
             # is empty — but we already exit early in that case, so the filter is
             # just a safety net.
-            anchored_leftovers = [anchor_to_first_file(issue, valid_by_path) for issue in leftovers]
+            anchored_leftovers = [
+                anchor_to_first_file(issue, valid_by_path, existing_by_issue.get(id(issue)))
+                for issue in leftovers
+            ]
             comments = comments + [c for c in anchored_leftovers if c is not None]
 
             # Two GitHub endpoints, two shapes. Line-anchored comments ride the
@@ -975,6 +1021,10 @@ def _run_pr_review_body(
                 "comments_failed": comments_failed,
                 "event": event,
                 "files_reviewed": files_reviewed,
+                # Findings that matched an already-RESOLVED existing PR comment and
+                # so were dropped rather than re-posted (see
+                # partition_issues_by_existing_comments above).
+                "addressed_issues_dropped": len(addressed_issues),
                 # Pre-existing bugs the reviewer flagged in unchanged code, offered
                 # to a human on the Code Review page as GitHub-issue candidates.
                 # Not posted on this PR. Each carries a stable ``id`` and starts
@@ -1017,6 +1067,9 @@ def _run_pr_review_body(
             if proposals:
                 noun = "bug" if len(proposals) == 1 else "bugs"
                 status_text += f"; {len(proposals)} pre-existing {noun} to review"
+            if addressed_issues:
+                noun = "finding" if len(addressed_issues) == 1 else "findings"
+                status_text += f"; {len(addressed_issues)} already-addressed {noun} skipped"
             # React only when the PR's OWN change is clean. Pre-existing findings
             # are about unchanged code, so they do not withhold the "looks good"
             # signal for the change under review.
