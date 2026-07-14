@@ -14,6 +14,7 @@ from spec_parser import (
 )
 
 from llm_service import DummyLLMClient
+from software_engineering_team.tests.conftest import _patch_fenced_response, _strands_model_double
 
 
 def test_parse_spec_with_llm_uses_dummy() -> None:
@@ -54,6 +55,22 @@ def test_parse_spec_with_llm_raises_on_invalid_structure() -> None:
 
     with pytest.raises(ValueError, match="constraints"):
         parse_spec_with_llm("spec", _BadConstraintsLLM())
+
+
+def test_parse_spec_with_llm_recovers_markdown_fenced_response(monkeypatch) -> None:
+    """A markdown-fenced JSON reply from the LLM is recovered instead of crashing the
+    bare ``json.loads`` the manual parse block used to run."""
+    payload = {
+        "title": "Fenced Project",
+        "description": "Parsed from a fenced response.",
+        "acceptance_criteria": ["Criterion 1"],
+        "constraints": [],
+        "priority": "medium",
+    }
+    _patch_fenced_response(monkeypatch, payload)
+    reqs = parse_spec_with_llm("spec", _strands_model_double())
+    assert reqs.title == "Fenced Project"
+    assert reqs.acceptance_criteria == ["Criterion 1"]
 
 
 def test_load_spec_from_repo(tmp_path) -> None:

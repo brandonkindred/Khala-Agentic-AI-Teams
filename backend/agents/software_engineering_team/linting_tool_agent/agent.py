@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
 from build_fix_specialist.models import CodeEdit, parse_code_edits
-from strands import Agent
 
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .linter_runner import detect_linter, execute_linter
 from .models import LintIssue, LintToolInput, LintToolOutput
@@ -33,15 +32,14 @@ class LintingToolAgent:
         3. **Review** -- use an LLM to produce minimal ``CodeEdit`` fixes for violations.
 
     Invariants:
-        - ``self._agent`` is always a valid Strands ``Agent``.
+        - ``self._model`` is always a resolved Strands ``Model``.
         - ``run()`` never modifies the repository; callers apply returned edits.
     """
 
     def __init__(self, llm_client=None) -> None:
-        _model = resolve_strands_model(
+        self._model = resolve_strands_model(
             llm_client, agent_key="linting_tool_agent", get_strands_model_fn=get_strands_model
         )
-        self._agent = Agent(model=_model, system_prompt=LINT_FIX_PROMPT)
 
     def run(self, input_data: LintToolInput) -> LintToolOutput:
         """Execute the full lint pipeline: plan -> execute -> review.
@@ -157,9 +155,9 @@ class LintingToolAgent:
         )
 
         try:
-            result = self._agent(prompt)
-            raw = str(result).strip()
-            data: Dict[str, Any] = json.loads(raw)
+            data: Dict[str, Any] = complete_json_with_continuation(
+                self._model, prompt, system_prompt=LINT_FIX_PROMPT
+            )
         except Exception as err:
             logger.warning("Lint fix LLM call failed (non-blocking): %s", err)
             return []
