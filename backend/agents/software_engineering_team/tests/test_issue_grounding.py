@@ -56,6 +56,23 @@ def test_drop_ungrounded_grounds_phrase_split_across_newlines():
     assert len(kept) == 1
 
 
+def test_drop_ungrounded_grounds_phrase_with_punctuation_in_corpus():
+    """Corpus 'User.Profile' still grounds extracted phrase 'User Profile'."""
+    kept = drop_ungrounded_issues(
+        [
+            _Issue(
+                description="User Profile page is missing fields",
+                file_path="app.py",
+            )
+        ],
+        files={"app.py": "pass"},
+        requirements="Add a User.Profile settings page",
+        acceptance_criteria=[],
+        spec_content="",
+    )
+    assert len(kept) == 1
+
+
 def test_drop_ungrounded_keeps_grounded_and_phrase_free():
     files = {"index.html": "<html></html>"}
     grounded = _Issue(

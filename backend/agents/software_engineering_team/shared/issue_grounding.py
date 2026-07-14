@@ -103,9 +103,13 @@ def ground_issue_file_path(file_path: str, files: Dict[str, str]) -> str:
     return ""
 
 
-def _flatten_ws(text: str) -> str:
-    """Collapse runs of whitespace (including newlines) to a single space."""
-    return " ".join((text or "").split())
+def _normalize_match_text(text: str) -> str:
+    """Lowercase and collapse punctuation/whitespace to single spaces.
+
+    ``User.Profile`` / ``User-Profile`` / ``User\\nProfile`` all become
+    ``user profile`` so Title Case phrases match across punctuation boundaries.
+    """
+    return " ".join(re.sub(r"[^a-zA-Z0-9]+", " ", text or "").split()).lower()
 
 
 def _build_grounding_corpus(
@@ -116,11 +120,11 @@ def _build_grounding_corpus(
     spec_content: str,
     architecture_context: str,
 ) -> str:
-    # Space-join (not newlines) so a Title Case phrase that was split across
-    # lines in requirements/spec still matches as a substring.
+    # Space-join after punctuation/whitespace normalization so a Title Case
+    # phrase matches whether the corpus spells it with spaces, dots, or dashes.
     parts: List[str] = [
-        _flatten_ws(requirements or ""),
-        _flatten_ws(
+        _normalize_match_text(requirements or ""),
+        _normalize_match_text(
             " ".join(
                 stripped
                 for a in (acceptance_criteria or ())
@@ -129,11 +133,11 @@ def _build_grounding_corpus(
                 if stripped
             )
         ),
-        _flatten_ws(spec_content or ""),
-        _flatten_ws(architecture_context or ""),
-        _flatten_ws(" ".join(files.keys())),
+        _normalize_match_text(spec_content or ""),
+        _normalize_match_text(architecture_context or ""),
+        _normalize_match_text(" ".join(files.keys())),
     ]
-    return " ".join(p for p in parts if p).lower()
+    return " ".join(p for p in parts if p)
 
 
 def _with_file_path(issue: IssueT, file_path: str) -> IssueT:
@@ -185,9 +189,9 @@ def drop_ungrounded_issues(
         - A non-blank ``file_path`` absent from ``files`` (including aliases) is
           blanked; the issue is kept unless content grounding also fails.
         - An issue is dropped only when description or recommendation contains at
-          least one checkable phrase that does not appear (case-insensitive
-          substring) in requirements, acceptance criteria, spec, architecture
-          context, or ``files.keys()``.
+          least one checkable phrase that does not appear (case- and punctuation-
+          insensitive substring) in requirements, acceptance criteria, spec,
+          architecture context, or ``files.keys()``.
         - Phrase-free issues always keep.
         - ``on_dropped``, when provided, is called with the issue (after path
           blanking) for each drop.
@@ -210,7 +214,9 @@ def drop_ungrounded_issues(
             description = getattr(issue, "description", "") or ""
             recommendation = getattr(issue, "recommendation", "") or ""
             phrases = extract_checkable_phrases(f"{description}\n{recommendation}")
-            if phrases and any(phrase.lower() not in corpus for phrase in phrases):
+            if phrases and any(
+                _normalize_match_text(phrase) not in corpus for phrase in phrases
+            ):
                 if on_dropped is not None:
                     on_dropped(issue)
                 continue
