@@ -81,8 +81,12 @@ def test_momentum_k_lookback_is_k_plus_one() -> None:
     assert _lookback(MomentumK(k=5)) == 6
 
 
-def test_zscore_residual_ols_lookback_is_window() -> None:
-    assert _lookback(ZScoreResidualOLS(window=30, vs_symbol="SPY")) == 30
+def test_zscore_residual_ols_lookback_is_minimal_not_window() -> None:
+    """The compiled body unconditionally returns NAN (aux feed not wired), so
+    the lookback must not scale with ``window`` (up to 400) and inflate a
+    genome's MIN_HISTORY for a primitive that can never emit a value."""
+    assert _lookback(ZScoreResidualOLS(window=30, vs_symbol="SPY")) == 1
+    assert _lookback(ZScoreResidualOLS(window=400, vs_symbol="SPY")) == 1
 
 
 def test_skew_lookback_is_window_plus_one() -> None:

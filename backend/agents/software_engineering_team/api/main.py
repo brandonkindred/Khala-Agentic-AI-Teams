@@ -11,7 +11,11 @@ the actual logic:
 * ``state`` — shared mutable globals + pure parse/validation helpers.
 * ``lifecycle`` — ASGI startup/shutdown hooks.
 * ``background`` — orchestrator/runner thread targets.
-* ``routes/*`` — APIRouter modules grouped by concern.
+* ``api.routes.*`` — SE's own APIRouter modules, grouped by concern.
+* ``coding_team.api.routes.*`` — coding_team's APIRouter modules (an in-package
+  sub-team), mounted unprefixed onto this same app so ``/api/coding-team/*``
+  keeps resolving unchanged; see the mounting block below for why
+  ``coding_team.api.main`` is imported first.
 
 Every moved public symbol is re-imported here so ``from …api.main import X`` and
 ``monkeypatch.setattr(main, "X", …)`` keep working unchanged: this module remains
@@ -158,6 +162,35 @@ from software_engineering_team.api.routes import (  # noqa: E402
     status,
 )
 
+# coding_team's own routers, mounted unprefixed onto this same app so
+# /api/coding-team/* (proxied in by unified_api, see unified_api/config.py)
+# keeps resolving to identical paths now that the standalone coding-team
+# service is retired. Aliased to avoid colliding with SE's own `jobs`/`hitl`
+# route-module names above; coding_team's `jobs` router omits `/health` (SE's
+# `status.router` already serves it) so there is no route-path collision.
+#
+# Import coding_team's OWN api.main hub FIRST (unused directly, hence the
+# F401 suppression below): its route modules do `from …api import main as
+# _main`, a circular import that only resolves cleanly when
+# `coding_team.api.main` is already mid-import (as it is when IT is the entry
+# point). Importing the route modules here without going through that hub
+# first makes THIS import the entry point instead, which trips the same cycle
+# from the opposite, unresolved direction (AttributeError: partially
+# initialized module).
+from software_engineering_team.coding_team.api import main as _coding_team_main  # noqa: E402,F401
+from software_engineering_team.coding_team.api.routes import (  # noqa: E402
+    github as coding_team_github,
+)
+from software_engineering_team.coding_team.api.routes import (  # noqa: E402
+    hitl as coding_team_hitl,
+)
+from software_engineering_team.coding_team.api.routes import (  # noqa: E402
+    jobs as coding_team_jobs,
+)
+from software_engineering_team.coding_team.api.routes import (  # noqa: E402
+    reviews as coding_team_reviews,
+)
+
 app.include_router(jobs.router)
 app.include_router(hitl.router)
 app.include_router(execution.router)
@@ -165,3 +198,7 @@ app.include_router(architect.router)
 app.include_router(code_v2.router)
 app.include_router(product_analysis.router)
 app.include_router(status.router)
+app.include_router(coding_team_jobs.router)
+app.include_router(coding_team_hitl.router)
+app.include_router(coding_team_github.router)
+app.include_router(coding_team_reviews.router)

@@ -1300,16 +1300,34 @@ def test_macd_helper_signal_returns_at_minimum_history() -> None:
     assert strat.macd(bars[:33], fast=12, slow=26, signal=9, select="signal") is None
 
 
-def test_vwap_lookback_uses_harness_history_cap() -> None:
-    """VWAP requests the harness retention cap (500 bars).
+def test_vwap_lookback_uses_its_own_rolling_period() -> None:
+    """VWAP requests only its own rolling-window depth (default period 20).
 
-    The sandbox VWAP is cumulative-over-the-series; capping the request
-    at ``_MIN_WINDOW`` (20) would silently make it a 20-bar rolling
-    VWAP and change signal semantics.
+    VWAP is now a rolling window (unified with the factors DSL's VWAP,
+    which has always been rolling) rather than cumulative-over-the-series,
+    so it no longer needs the harness's full retention ceiling — its
+    history request is just its own lookback, like any other windowed
+    indicator.
     """
     entry = EntryRule(
         side="long",
         when=Predicate(lhs=IndicatorRef(name="vwap"), op=">", rhs=0.0),
+    )
+    spec = _spec(entry_rules=[entry])
+    code = compile_strategy(spec)
+    assert "ctx.history(bar.symbol, 20)" in code
+
+
+def test_obv_lookback_uses_harness_history_cap() -> None:
+    """OBV requests the harness retention cap (500 bars).
+
+    OBV is still cumulative-over-the-series; capping the request at
+    ``_MIN_WINDOW`` (20) would silently truncate its running total and
+    change signal semantics.
+    """
+    entry = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="obv"), op=">", rhs=0.0),
     )
     spec = _spec(entry_rules=[entry])
     code = compile_strategy(spec)
@@ -1499,21 +1517,24 @@ def test_requires_custom_code_defensive_on_malformed_string() -> None:
     assert _coerce_requires_custom_code({"value": True}) is False
 
 
-def test_vwap_warmup_min_does_not_block_trading() -> None:
-    """VWAP requests deep history (cumulative) but trades from bar 20.
+def test_obv_warmup_min_does_not_block_trading() -> None:
+    """OBV requests deep history (cumulative) but trades from bar 20.
 
     ``WINDOW`` (history-request depth) and ``WARMUP_MIN`` (gate
     threshold) are decoupled: using a single value would either give
-    VWAP a 20-bar window (wrong semantics) or block every shorter-
-    history backtest entirely.
+    OBV a 20-bar window (wrong semantics) or block every shorter-
+    history backtest entirely. VWAP no longer needs this decoupling —
+    it now requests exactly its own rolling-window lookback (see
+    ``test_vwap_lookback_uses_its_own_rolling_period``) — so OBV is the
+    indicator that exercises it.
     """
     entry = EntryRule(
         side="long",
-        when=Predicate(lhs=IndicatorRef(name="vwap"), op=">", rhs=0.0),
+        when=Predicate(lhs=IndicatorRef(name="obv"), op=">", rhs=0.0),
     )
     spec = _spec(entry_rules=[entry])
     code = compile_strategy(spec)
-    # History request is the deep VWAP depth.
+    # History request is the deep OBV depth.
     assert "ctx.history(bar.symbol, 500)" in code
     # Warm-up gate is the modest floor — trading starts at bar 20.
     assert "WARMUP_MIN = 20" in code
