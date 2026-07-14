@@ -1,4 +1,4 @@
-"""FastAPI app for coding_team: POST /run, GET /status/{job_id}, GET /jobs.
+"""FastAPI app for coding_team: route hub mounting jobs, hitl, github, and reviews routers.
 
 This module is the thin app-assembly hub. Responsibility-focused sub-modules hold
 the actual logic:
