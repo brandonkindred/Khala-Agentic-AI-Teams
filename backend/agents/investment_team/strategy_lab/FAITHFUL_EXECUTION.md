@@ -73,32 +73,41 @@ The inverse of `select_code_path`: in design pre-flight Stage 2, a spec flagged
 this" signal, so genuinely cross-asset / path-dependent specs stay on custom code. Gated by
 `STRATEGY_LAB_DEMOTE_COMPILABLE_CUSTOM_CODE` (default on).
 
-## Follow-up work (not yet implemented)
-
-### S4 — Data-driven reachability probe before backtest
+### 5. Data-driven reachability probe before backtest (`quality_gates/predicate_reachability.py`)
 
 Closed-form reachability (`spec_readiness.py:_check_predicate_reachability`) catches only
 tautologies (`rsi > 100`, `close < close`) — not **data-dependent** dead code: an `all_of`
 whose legs never co-occur, or `sma(5) > sma(200)` that never crosses in the window. The AST
 coverage probe reads `spec.strategy_code` and is blind to the compiled path (the shim has no
 entry `if`s); `realism/rule_firing.py` self-skips custom code and runs only post-hoc as a
-caveat. So a strategy can reach backtest, emit zero trades, and only *then* be flagged.
+caveat. So a strategy could reach backtest, emit zero trades, and only *then* be flagged.
 
-**Proposed:** a pre-backtest probe that evaluates each entry `PredicateTree` against the actual
-historical bar window using the same `executor/predicate_evaluator.py` the engine uses, and
-reports per-leg firing counts. Runs on both paths; turns "dead predicate / zero trades" into an
-authoring-time redesign signal instead of a wasted cycle.
+`PredicateReachabilityProbe` runs in the synthesis loop **before** the backtest and evaluates
+each entry rule's authored `PredicateTree` against the real fetched bars using the same
+`evaluate_tree` the compiled engine uses. It reports per-rule and per-leg firing counts,
+excluding warm-up bars and abstaining when there are too few post-warmup bars to judge. Because
+it uses the engine's own evaluator, on the compiled path "zero fires" provably means "zero entry
+orders" → the finding is **critical**; on the custom path (executed code may differ from the
+spec) it is a **warning**. `all_entries_dead()` distinguishes "the strategy can generate no
+entry at all" from "one rule is dead but others fire", and the per-leg diagnostic names the
+bottleneck (a leg that never holds, or legs that never co-occur). Findings are recorded on the
+gate timeline; routing stays with the existing post-backtest zero-trade path.
 
-### S5 — Design-time spec-quality hard gates
+### 6. Design-time spec-quality hardening (`design_system.md`, `strategy_validator.py`, `orchestrator.py`)
 
-- **`max_position_pct`**: the DSL field is bounded `le=100`, so an LLM can author `100`
-  (default is `6.0`), which three post-hoc gates then flag and mechanical-repair clamps. Bound
-  the field to `le=MAX_POSITION_PCT_CEILING` (25) so the out-of-range value is unconstructable.
-- **Hypothesis/rules consistency** (`strategy_validator.py`): currently a post-hoc **warning**
-  driven by surface-vocabulary matching (`_CONCEPT_TERMS`) of the hypothesis vs. structured
-  `IndicatorRef` names. Promote it to a design-review critique so `DesignAgent.revise` must
-  reconcile narrative and DSL before synthesis, and broaden the vocabulary / compare structured
-  refs on both sides to cut false orphans.
+- **`max_position_pct` ceiling.** The shared `RiskLimits.max_position_pct` field is intentionally
+  bounded `le=100` because the **trading engine** uses full-deployment (100%) values in its own
+  tests, so it cannot be tightened to 25 without breaking the engine. Instead the 25% ceiling is
+  enforced where it belongs — for *specs*: the design prompt now states the ceiling explicitly so
+  the LLM never authors `50`/`100`, backed by the existing `SpecReadinessGate` critical and the
+  deterministic `mechanical_repair` clamp.
+- **Hypothesis/rules consistency.** The check is now **accurate** — the rules side credits
+  concepts a rule reads via a bar-field (`bar.volume`) or an indicator `source` (`source='volume'`),
+  so a volume filter no longer false-orphans a "volume" hypothesis (`_rule_derived_concepts`). The
+  corrected finding is **surfaced to the design reviewer** each round (`check_hypothesis_rules`
+  merged into the reviewer's deterministic findings in `_review_and_handle_critique`), so a
+  genuine narrative/DSL mismatch is reconciled during the design loop rather than only recorded as
+  a pre-synthesis warning. The LLM reviewer adjudicates, so there is no hard-block churn.
 
 ## Test coverage
 
@@ -108,4 +117,9 @@ authoring-time redesign signal instead of a wasted cycle.
 - `tests/test_alignment_helpers.py` — `affected_trades` coercion, patch-survives regression,
   `trade_num` render.
 - `tests/test_strategy_lab_mechanical_repair.py` — `demote_code_path` unit cases.
-- `tests/test_strategy_lab_design_loop.py` — pre-flight demote (on/off) integration.
+- `tests/test_strategy_lab_design_loop.py` — pre-flight demote (on/off) integration; the reviewer
+  receives the hypothesis/rules finding.
+- `tests/test_predicate_reachability.py` — reachable/dead/insufficient verdicts, compiled-critical
+  vs custom-warning, per-leg diagnostics, `all_entries_dead`.
+- `tests/test_strategy_validator.py` — volume-rule false-orphan regression, `_rule_derived_concepts`,
+  `check_hypothesis_rules` flag/empty.
