@@ -472,3 +472,98 @@ def test_structured_rules_do_not_trigger_keyword_scans() -> None:
     warnings = _warnings(results)
     assert not any("mismatched with asset class" in w for w in warnings), warnings
     assert not any("non-computable data" in w for w in warnings), warnings
+
+
+# ---------------------------------------------------------------------------
+# Hypothesis/rules consistency — bar-field / source concept recognition (S5b)
+# ---------------------------------------------------------------------------
+
+
+def _volume_filter_entry() -> EntryRule:
+    """A volume filter that references volume via a bar-field AND a volume source."""
+    from investment_team.strategy_lab.spec_dsl import AllOf
+
+    return EntryRule(
+        side="long",
+        when=AllOf(
+            of=[
+                Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 50})
+                ),
+                Predicate(
+                    lhs="bar.volume",
+                    op=">",
+                    rhs=IndicatorRef(name="sma", params={"period": 20}, source="volume"),
+                ),
+            ]
+        ),
+    )
+
+
+def test_volume_hypothesis_not_orphaned_by_volume_filter_rule() -> None:
+    """Regression: a rule reading volume via ``bar.volume`` / ``source='volume'``
+    must satisfy a hypothesis that mentions volume — previously false-orphaned
+    because only ``IndicatorRef.name`` (``sma``) was read from the rule."""
+    spec = _spec(
+        hypothesis="Enter on a breakout confirmed by rising volume.",
+        entry=[_volume_filter_entry()],
+        exit_=[StopLossRule(pct=0.05)],
+    )
+    warnings = _warnings(StrategySpecValidator().validate(spec))
+    consistency = [w for w in warnings if "Hypothesis/rules consistency" in w]
+    # 'volume' is now recognised on the rules side, so it is NOT an orphan.
+    assert not any("'volume'" in w and "rules don't reference" in w for w in consistency), (
+        consistency
+    )
+
+
+def test_rule_derived_concepts_recognizes_volume() -> None:
+    from investment_team.strategy_lab.quality_gates.strategy_validator import (
+        _rule_derived_concepts,
+    )
+
+    spec = _spec(
+        hypothesis="h",
+        entry=[_volume_filter_entry()],
+        exit_=[StopLossRule(pct=0.05)],
+    )
+    assert "volume" in _rule_derived_concepts(spec)
+
+
+def test_check_hypothesis_rules_flags_genuine_mismatch() -> None:
+    # Hypothesis is about RSI momentum; the only rule uses SMA → genuine mismatch.
+    spec = _spec(
+        hypothesis="An RSI momentum reversal strategy.",
+        entry=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 50})
+                ),
+            )
+        ],
+        exit_=[StopLossRule(pct=0.05)],
+    )
+    results = StrategySpecValidator().check_hypothesis_rules(spec)
+    assert results and results[0].severity == "warning"
+    assert "rsi" in results[0].details and "sma" in results[0].details
+    assert all(r.phase == "design" for r in results)
+
+
+def test_check_hypothesis_rules_empty_when_consistent() -> None:
+    # Hypothesis names the indicator the rule uses → no mismatch, empty result.
+    spec = _spec(
+        hypothesis="A simple RSI oversold entry.",
+        entry=[
+            EntryRule(
+                side="long",
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30),
+            )
+        ],
+        exit_=[
+            SignalExitRule(
+                when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70)
+            )
+        ],
+    )
+    assert StrategySpecValidator().check_hypothesis_rules(spec) == []

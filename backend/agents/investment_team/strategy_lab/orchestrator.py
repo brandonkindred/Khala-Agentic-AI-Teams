@@ -100,6 +100,7 @@ from .quality_gates.cost_stress_realism import CostStressRealismGate
 from .quality_gates.exit_rule_conformance import ExitRuleConformanceGate
 from .quality_gates.models import QualityGateResult, StrategyLabPhase
 from .quality_gates.predicate_conformance import PredicateConformanceGate, _code_conformance_retries
+from .quality_gates.predicate_reachability import PredicateReachabilityProbe
 from .quality_gates.realism import (
     LiquidityRealismGate,
     RegimeCoverageGate,
@@ -760,6 +761,7 @@ class StrategyLabOrchestrator:
         self.regime_coverage_gate = RegimeCoverageGate()
         self.trade_clustering_gate = TradeClusteringGate()
         self.rule_firing_rate_gate = RuleFiringRateGate()
+        self.predicate_reachability_probe = PredicateReachabilityProbe()
         self.convergence_tracker = convergence_tracker or ConvergenceTracker()
         self.market_data_service = MarketDataService()
         # SpecReadinessGate is wired to the live MarketDataService so Rule 5
@@ -1627,10 +1629,19 @@ class StrategyLabOrchestrator:
         """
         if deterministic_ready:
             emit("design_review", {"sub_phase": "started", "round": review_round})
+            # Surface the hypothesis-vs-rules consistency finding to the reviewer so
+            # a narrative/DSL mismatch is reconciled during the design loop (the
+            # reviewer adjudicates and can require a revise) rather than only being
+            # recorded as a pre-synthesis warning after the loop has converged. The
+            # reviewer's findings list is a fresh merge — ``readiness_results`` is
+            # left untouched for the memoization / recording paths.
+            reviewer_findings = list(
+                readiness_results
+            ) + self.strategy_validator.check_hypothesis_rules(spec, phase="design")
             try:
                 critique = self.design_review_agent.run(
                     spec,
-                    readiness_results,
+                    reviewer_findings,
                     prior_critiques=critique_history,
                 )
             except DesignBudgetExhausted as exc:
@@ -2021,6 +2032,26 @@ class StrategyLabOrchestrator:
                 market_data = fetch.data
                 if fetch.should_break:
                     break
+
+            # ── 2b.5: PRE-BACKTEST reachability probe ────────────────
+            # Evaluate the authored entry predicates against the REAL fetched bars
+            # (same evaluator the compiled engine uses) before the backtest runs,
+            # so data-dependent dead code — legs that never co-occur, a cross that
+            # never happens — is surfaced early and per-leg instead of only after a
+            # doomed backtest. Findings are recorded on the timeline (critical on
+            # the compiled path where zero fires ⇒ zero entries; warning on the
+            # custom path where the executed code may differ); they do not
+            # short-circuit the round — the post-backtest zero-trade path still
+            # owns routing.
+            if market_data:
+                reachability = self.predicate_reachability_probe.probe(spec, market_data)
+                self.record_gates(
+                    self.predicate_reachability_probe.to_gate_results(
+                        reachability, spec, phase="synthesis"
+                    ),
+                    all_gate_results,
+                    refinement_round=round_num,
+                )
 
             # ── 2c: EXECUTE (syntax / runtime correctness) ───────────
             emit("backtesting", {"sub_phase": "running_code", "refinement_round": round_num})
