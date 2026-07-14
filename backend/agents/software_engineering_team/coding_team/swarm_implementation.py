@@ -1,10 +1,10 @@
 """CodingTeamSwarm implementation mixin: worker implementation, quality gates, and
 no-change/Tech-Lead escalation.
 
-Extracted from ``orchestrator.py`` (issue: decompose the orchestrator god-file
-into named collaborators) — pure structural move, no behavior change. Composed
-onto ``CodingTeamSwarm`` in orchestrator.py alongside the assignment and review
-mixins.
+Extracted from ``software_engineering_team.coding_team.orchestrator`` (issue:
+decompose the orchestrator god-file into named collaborators) — pure structural
+move, no behavior change. Composed onto ``CodingTeamSwarm`` in that module
+alongside the assignment and review mixins.
 
 A few names used here (``MAX_TASK_REVISIONS``, ``ActivityBridge``,
 ``_no_change_revisit_cap``, ``_feature_branch_name``) are defined in
