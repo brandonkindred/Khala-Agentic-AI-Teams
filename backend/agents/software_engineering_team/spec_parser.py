@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from software_engineering_team.shared.llm import complete_json_with_continuation
 from software_engineering_team.shared.models import ProductRequirements
 
 logger = logging.getLogger(__name__)
@@ -91,19 +92,19 @@ MAX_TOTAL_CONTEXT_SIZE = 500 * 1024
 def parse_spec_with_llm(spec_content: str, llm_client=None) -> ProductRequirements:
     """
     Use LLM to extract structured ProductRequirements from spec content.
+
+    Preconditions:
+        ``spec_content`` is the specification text to parse. ``llm_client``
+        is a Strands ``Model``, an ``LLMClient``, or ``None`` (see
+        :func:`complete_json_with_continuation`); when given a real client,
+        that client is used for the call rather than being silently replaced
+        by a freshly-resolved default model.
+    Postconditions:
+        Returns a ``ProductRequirements`` built from the LLM's parsed JSON
+        response. Raises ``ValueError`` if the parsed response is not a JSON
+        object, or if its ``acceptance_criteria``/``constraints`` fields are
+        present but not lists.
     """
-    import json as _json
-
-    from strands import Agent
-    from strands.models.model import Model as _StrandsModel
-
-    if llm_client is not None and isinstance(llm_client, _StrandsModel):
-        model = llm_client
-    else:
-        from llm_service import get_strands_model
-
-        model = get_strands_model("spec_intake")
-
     logger.info("Parsing spec with LLM (%s chars)", len(spec_content))
     system_prompt = """Parse the following software project specification into a structured format.
 
@@ -121,10 +122,11 @@ Respond with valid JSON only. No explanatory text."""
         "Specification:\n---\n" + spec_content + "\n---"
     )
 
-    agent = Agent(model=model, system_prompt=system_prompt)
-    result = agent(prompt)
-    raw = str(result).strip()
-    data = _json.loads(raw)
+    data = complete_json_with_continuation(llm_client, prompt, system_prompt=system_prompt)
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"LLM returned invalid spec structure: expected a JSON object, got {type(data).__name__}"
+        )
     if not isinstance(data.get("acceptance_criteria"), list):
         raise ValueError(
             f"LLM returned invalid spec structure: 'acceptance_criteria' must be a list, got {type(data.get('acceptance_criteria'))}"
