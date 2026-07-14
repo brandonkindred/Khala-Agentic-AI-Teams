@@ -1,6 +1,6 @@
 # SE Review Prompts: Verbatim Requirement Citation Guardrail
 
-**Status:** Draft 2026-07-14  
+**Status:** Approved 2026-07-14  
 **Date:** 2026-07-14  
 **Type:** Prompt hardening / hallucination prevention for code-review gates  
 **Issue:** GitHub #1275 (PR body only; do not cite in code)
