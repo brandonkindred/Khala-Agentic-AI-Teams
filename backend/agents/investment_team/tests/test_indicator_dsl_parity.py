@@ -197,6 +197,11 @@ def _compile_synthesis_helper(name: str, params: dict, source: str):
 
 @pytest.mark.parametrize("label,node,name,params,source", _PARITY_CASES)
 def test_factors_and_synthesis_agree_on_shared_indicators(label, node, name, params, source):
+    """For every indicator both DSLs share, the compiled factors node and the
+    compiled synthesis helper must agree bar-for-bar — at the warm-up
+    boundary, mid-stream, and full length — on both warm-up state (NaN/None)
+    and numeric value. This is the parity test that would have caught the
+    VWAP rolling-vs-cumulative divergence this PR fixes."""
     factors_fn = _compile_factors_helper(node)
     synth_fn = _compile_synthesis_helper(name, params, source)
 
@@ -219,6 +224,9 @@ def test_factors_and_synthesis_agree_on_shared_indicators(label, node, name, par
 
 
 def test_compile_genome_is_byte_deterministic_for_macd():
+    """Two compiles of the identical genome must produce byte-identical
+    module source — genome hashing and any equality-by-source-text
+    consumer elsewhere in the pipeline depend on this."""
     node = MACDSignal(fast=12, slow=26, signal=9)
     genome = Genome(
         asset_class="stocks",
@@ -231,6 +239,9 @@ def test_compile_genome_is_byte_deterministic_for_macd():
 
 
 def test_compile_strategy_is_byte_deterministic_for_macd():
+    """Synthesis's counterpart to the genome determinism check above — two
+    compiles of the identical spec must produce byte-identical module
+    source."""
     ref = IndicatorRef(name="macd", params={"fast": 12, "slow": 26, "signal": 9})
     entry = EntryRule(side="long", when=Predicate(lhs=ref, op=">", rhs=0.0))
     spec = _spec(entry)
