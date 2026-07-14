@@ -228,6 +228,11 @@ app = create_team_app(
 # a fully-populated hub.
 from software_engineering_team.coding_team.api.routes import github, jobs, reviews  # noqa: E402
 from software_engineering_team.coding_team.api.routes import hitl as hitl_routes  # noqa: E402
+from software_engineering_team.coding_team.api.routes._common import (  # noqa: E402
+    register_job_service_unavailable_handlers,
+)
+
+register_job_service_unavailable_handlers(app)
 
 app.include_router(jobs.router)
 app.include_router(hitl_routes.router)

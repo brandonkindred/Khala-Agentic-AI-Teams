@@ -483,6 +483,22 @@ def test_wait_for_answers_survives_transient_get_job_failure():
     assert state["polls"] >= 5  # the two failing reads did not abort the loop
 
 
+def test_wait_for_answers_survives_connect_timeout():
+    """``ConnectTimeout`` is a TCP handshake that never completed (request never
+    sent). It must be treated like other transient job-service blips so a HITL
+    wait does not crash during a brief job-service restart/startup race."""
+    state = {"polls": 0}
+
+    def get_job(jid):
+        state["polls"] += 1
+        if state["polls"] in (2, 3):
+            raise httpx.ConnectTimeout("timed out")
+        return {"waiting_for_answers": state["polls"] < 5}
+
+    assert hitl.wait_for_answers("j", get_job, sleep=lambda s: None) is True
+    assert state["polls"] >= 5
+
+
 def test_wait_for_answers_sustained_failure_times_out():
     """If the read keeps failing, the loop must actually enter, hit the except path
     each iteration, and end via the timeout bound (returns False) instead of

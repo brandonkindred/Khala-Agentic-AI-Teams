@@ -48,7 +48,10 @@ _IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE"})
 # Transport errors where the request provably never reached the server (no
 # connection was established / acquired from the pool), so a retry can never
 # duplicate work — safe for ANY method.
-_RETRY_ANY_METHOD_ERRORS = (httpx.ConnectError, httpx.PoolTimeout)
+# ``ConnectTimeout`` is a TimeoutException (not a ConnectError subclass): the TCP
+# handshake never completed, so the request was never sent — same safety as
+# ConnectError. Omitting it turns brief job-service startup races into hard 500s.
+_RETRY_ANY_METHOD_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 # Transport errors where the request may already have been sent before the
 # failure (the server closed a stale keep-alive connection, or timed out
 # mid-exchange), so they are retried ONLY for idempotent methods.
@@ -164,9 +167,10 @@ class JobServiceClient:
               transient error / HTTP status error after exhausting retries.
             - Retry is idempotency-aware so a retry can never duplicate a
               non-idempotent operation:
-                * ``ConnectError`` / ``PoolTimeout`` — the request provably never
-                  reached the server (no connection was established / acquired),
-                  so they are retried for ANY method.
+                * ``ConnectError`` / ``ConnectTimeout`` / ``PoolTimeout`` — the
+                  request provably never reached the server (no connection was
+                  established / acquired, or the TCP handshake timed out), so
+                  they are retried for ANY method.
                 * ``ReadTimeout`` / ``WriteTimeout`` / ``RemoteProtocolError`` /
                   ``ReadError`` / ``WriteError`` — the request may already have
                   been sent (e.g. a stale keep-alive connection the server reset,

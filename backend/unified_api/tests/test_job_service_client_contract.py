@@ -204,6 +204,27 @@ def test_post_retried_on_connect_error(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls["n"] == 2
 
 
+def test_post_retried_on_connect_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ConnectTimeout`` is a TCP handshake that never completed — the request
+    never reached the server, same as ``ConnectError``. It must be retried for
+    any method (including non-idempotent POST) so brief job-service startup
+    races do not surface as unhandled ASGI 500s."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    monkeypatch.setattr("job_service_client.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectTimeout("timed out")
+        return httpx.Response(200, json={})
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    client.create_job("j1")
+    assert calls["n"] == 2
+
+
 def test_real_client_retries_on_read_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A pooled keep-alive socket reset by the server/proxy raises ``ReadError``
     ("[Errno 104] Connection reset by peer") while reading the response. Like the
