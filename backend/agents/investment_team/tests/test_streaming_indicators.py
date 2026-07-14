@@ -768,7 +768,7 @@ def test_advance_kind_pydantic_round_trip_with_stamped_timestamps_cold_rebuilds(
 # ---------------------------------------------------------------------------
 
 
-def test_factors_compiler_macd_signal_warmup_cache_amortises_same_bar_repeat() -> None:
+def test_factors_compiler_macd_signal_warmup_cache_amortises_same_bar_repeat(monkeypatch) -> None:
     """During the ``[slow, slow + signal - 1)`` warm-up window, the
     factors MACDSignal helper must write ``value=NAN`` to ``_ind_state``
     so same-bar repeat calls share the cache. Prior version returned NAN
@@ -788,6 +788,9 @@ def test_factors_compiler_macd_signal_warmup_cache_amortises_same_bar_repeat() -
     )
 
     # Stub the sandbox `contract` module the compiled output expects.
+    # monkeypatch.setitem restores sys.modules["contract"] to whatever it
+    # was (or removes it) at teardown, so this test can't leak state into
+    # others that import the real module.
     fake = _types.ModuleType("contract")
 
     class _Strategy:
@@ -803,7 +806,7 @@ def test_factors_compiler_macd_signal_warmup_cache_amortises_same_bar_repeat() -
     fake.Strategy = _Strategy
     fake.OrderSide = _OrderSide
     fake.OrderType = _OrderType
-    sys.modules["contract"] = fake
+    monkeypatch.setitem(sys.modules, "contract", fake)
 
     genome = Genome(
         asset_class="stocks",
@@ -877,7 +880,7 @@ def test_factors_compiler_macd_signal_warmup_cache_amortises_same_bar_repeat() -
     )
 
 
-def test_synthesis_compiler_macd_warmup_cache_amortises_signal_select() -> None:
+def test_synthesis_compiler_macd_warmup_cache_amortises_signal_select(monkeypatch) -> None:
     """During the ``[slow, slow + signal - 1)`` warm-up window for
     ``select='signal'`` / ``'histogram'``, the synthesis MACD helper
     must write the cache with ``sig_val=None`` so same-bar repeat calls
@@ -909,13 +912,13 @@ def test_synthesis_compiler_macd_warmup_cache_amortises_signal_select() -> None:
 
     # ``OrderSide``/``OrderType`` aren't exercised here but the compiler
     # unconditionally emits ``from contract import OrderSide, OrderType,
-    # Strategy``. The stub leaks into ``sys.modules`` for the rest of the
-    # test session; without these attributes any downstream test that
-    # calls ``compile_genome``/``compile_strategy`` fails with ImportError.
+    # Strategy``. monkeypatch.setitem restores sys.modules["contract"] to
+    # whatever it was (or removes it) at teardown, so this stub can't leak
+    # into other tests that import the real module.
     fake.Strategy = _Strategy
     fake.OrderSide = _OrderSide
     fake.OrderType = _OrderType
-    sys.modules["contract"] = fake
+    monkeypatch.setitem(sys.modules, "contract", fake)
 
     from investment_team.models import StrategySpec
 
@@ -1112,11 +1115,11 @@ def test_safe_getattr_propagates_programmer_signals() -> None:
 
 def test_normalise_close_canonical_helper_and_inlined_mirrors_stay_in_sync() -> None:
     """``_normalise_close`` lives once in indicators/streaming.py; the emitted
-    MACD helper text (inlined twice — new/prev close paths — since the
-    sandbox import whitelist forbids the emitted code from importing the
-    host helper) now derives from exactly one authored copy in
-    ``indicators/template_bodies.py``, shared by both DSL compilers via
-    ``render_macd_body``, instead of two independently hand-written mirrors.
+    MACD helper text (inlined — the sandbox import whitelist forbids the
+    emitted code from importing the host helper) derives from exactly one
+    authored copy in ``indicators/template_bodies.py`` (a local ``_norm_close``
+    helper the emitted method defines once and calls for both the current and
+    previous bar), shared by both DSL compilers via ``render_macd_body``.
 
     This meta-test pins the load-bearing token sets — third-party module
     allowlist, exact-name allowlist, exception tuple — verbatim across the
@@ -1164,9 +1167,10 @@ def test_normalise_close_canonical_helper_and_inlined_mirrors_stay_in_sync() -> 
     ]
     for name, path in sites.items():
         src = _normalise(path.read_text(encoding="utf-8"))
-        # Per-site occurrence count must be >= the minimum mirror count.
-        # Registry: 1 (canonical body). Shared template: 2 (new + prev close).
-        min_count = 1 if name == "registry" else 2
+        # Both sites now carry exactly one canonical copy: the registry's
+        # ``_normalise_close`` function, and template_bodies' ``_norm_close``
+        # local helper (called for both the current and previous bar).
+        min_count = 1
         for tok in required_tokens:
             count = src.count(tok)
             assert count >= min_count, (

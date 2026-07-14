@@ -870,7 +870,7 @@ def _format_indicator_ref(ref: IndicatorRef) -> str:
         output = ref.param("output")
         return f"stochastic_{output}({ref.param('k_period')},{ref.param('d_period')})"
     if name == "vwap":
-        return "vwap()"
+        return f"vwap({ref.param('period')})"
     if name == "donchian":
         band = ref.param("band")
         return f"donchian_{band}({ref.param('period')})"

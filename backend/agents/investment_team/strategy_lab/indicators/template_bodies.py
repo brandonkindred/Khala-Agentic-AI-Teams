@@ -1,39 +1,13 @@
-"""Canonical, parameterized method-body TEXT for indicators whose emitted
-template was hand-duplicated between ``factors/compiler.py`` and
-``synthesis/compiler.py`` (MACD's ~200-line streaming cache, ADX's
-directional-movement loop).
+"""Canonical, parameterized method-body TEXT for the indicators whose
+emitted template was hand-duplicated between ``factors/compiler.py`` and
+``synthesis/compiler.py`` (MACD's streaming cache, ADX's directional-
+movement loop).
 
-Host-side only. The returned bodies are Python SOURCE TEXT destined to be
-inlined into a *compiled strategy module* that runs inside the sandbox — but
-this module itself is never flattened into the sandbox and is never imported
-by the emitted code; it only generates the text at compile time. That
-distinction is what lets both DSL compilers share one string source despite
-the sandbox's import whitelist (``quality_gates.code_safety.ALLOWED_IMPORTS``)
-forbidding the emitted code from importing a shared host module directly (see
-``factors/compiler.py``'s module docstring).
-
-Two placeholder families, resolved in two separate passes:
-
-* ``%BARS%`` / ``%MISSING%`` / ``%CACHE_KEY%`` / ``%SELECT%`` /
-  ``%CLOSE(expr)%`` — resolved ONCE per compiler, via plain text
-  substitution, picking that compiler's own naming convention (``bars``/
-  ``NAN`` for factors, ``history``/``None`` for synthesis) and read style
-  (``factors`` is not source-aware — MACD always reads ``.close``;
-  ``synthesis`` is source-aware — MACD reads ``self._src(bar, source)``).
-* ``{fast}`` / ``{slow}`` / ``{signal}`` / ``{period}`` — left as
-  ``str.format()`` placeholders. ``factors/compiler.py`` fills these later,
-  once per compiled node, with int literals (its existing
-  ``_format_primitive`` call is unchanged). ``synthesis/compiler.py`` fills
-  them ONCE at import time with the *string* ``"fast"``/``"period"`` (e.g.
-  ``.format(period="period")``), which turns ``{period}`` into the literal
-  text ``period`` so the emitted method reads its own function argument
-  instead of a baked-in constant.
-
-Both compilers standardise on the underscore-prefixed local-variable
-convention below for the shared portions (regardless of which compiler
-emits them) — no test asserts on exact variable names inside a compiled
-module (only on its behavior), so this is a safe, one-time naming
-normalisation rather than a second naming convention to maintain.
+Two placeholder families, resolved in two passes — see each ``render_*``
+function's docstring for the exact contract. ``%BARS%``/``%MISSING%``/
+``%CACHE_KEY%``/``%SELECT%``/``%CLOSE(expr)%`` are resolved once per
+compiler (text substitution); ``{fast}``/``{slow}``/``{signal}``/
+``{period}`` are left as ``str.format()`` placeholders for the caller.
 """
 
 from __future__ import annotations
@@ -91,6 +65,38 @@ if len(%BARS%) < {slow}:
 # ``_safe_getattr`` — only descriptor/resolution errors are caught;
 # programmer/runtime sentinels propagate).
 _safe_exc = (AttributeError, TypeError, ValueError, RuntimeError, LookupError)
+# Close normalisation mirrors indicators/streaming.py::_normalise_close.
+# Detects third-party bool scalars by top-level module + exact-name
+# allowlist (covers numpy.ma submodules, pyarrow, polars); guards
+# ``__module__`` against None (type()-built classes); catches OverflowError
+# for astronomical-magnitude ints. Shared by the current-bar and prev-bar
+# reads below so the two legs cannot drift from each other.
+def _norm_close(_bar):
+    try:
+        _raw = getattr(_bar, 'close', None)
+    except NotImplementedError:
+        raise
+    except _safe_exc:
+        return None
+    if _raw is None or isinstance(_raw, bool):
+        return None
+    _cls = type(_raw)
+    _mod = getattr(_cls, '__module__', None)
+    _nm = getattr(_cls, '__name__', '')
+    if (
+        isinstance(_mod, str)
+        and isinstance(_nm, str)
+        and _mod.split('.', 1)[0] in ('numpy', 'pandas', 'pyarrow', 'polars')
+        and _nm.lower() in ('bool', 'bool_', 'boolean', 'booleanscalar', 'boolscalar', 'bool8')
+    ):
+        return None
+    try:
+        _val = float(_raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if math.isnan(_val) or math.isinf(_val):
+        return None
+    return _val
 try:
     _symbol = getattr(%BARS%[-1], 'symbol', None)
 except NotImplementedError:
@@ -100,38 +106,7 @@ except _safe_exc:
 _macd_key = %CACHE_KEY%
 _state = self._ind_state.get(_macd_key)
 _last = %BARS%[-1]
-try:
-    _raw_close = getattr(_last, 'close', None)
-except NotImplementedError:
-    raise
-except _safe_exc:
-    _raw_close = None
-# Close normalisation mirrors indicators/streaming.py::_normalise_close.
-# Detects third-party bool scalars by top-level module + exact-name
-# allowlist (covers numpy.ma submodules, pyarrow, polars); guards
-# ``__module__`` against None (type()-built classes); catches OverflowError
-# for astronomical-magnitude ints.
-if _raw_close is None or isinstance(_raw_close, bool):
-    _new_close = None
-else:
-    _cls = type(_raw_close)
-    _mod = getattr(_cls, '__module__', None)
-    _nm = getattr(_cls, '__name__', '')
-    if (
-        isinstance(_mod, str)
-        and isinstance(_nm, str)
-        and _mod.split('.', 1)[0] in ('numpy', 'pandas', 'pyarrow', 'polars')
-        and _nm.lower() in ('bool', 'bool_', 'boolean', 'booleanscalar', 'boolscalar', 'bool8')
-    ):
-        _new_close = None
-    else:
-        try:
-            _new_close = float(_raw_close)
-        except (TypeError, ValueError, OverflowError):
-            _new_close = None
-        else:
-            if math.isnan(_new_close) or math.isinf(_new_close):
-                _new_close = None
+_new_close = _norm_close(_last)
 try:
     _new_ts = getattr(_last, 'timestamp', None)
 except NotImplementedError:
@@ -161,33 +136,7 @@ if _state is not None and len(%BARS%) >= 2:
         # Defer close compute to this leg; avoids a wasted float() in the
         # common id/ts-match path and prevents crashes on non-numeric prev
         # closes.
-        try:
-            _prev_raw_close = getattr(_prev, 'close', None)
-        except NotImplementedError:
-            raise
-        except _safe_exc:
-            _prev_raw_close = None
-        if _prev_raw_close is None or isinstance(_prev_raw_close, bool):
-            _prev_close = None
-        else:
-            _prev_cls = type(_prev_raw_close)
-            _prev_mod = getattr(_prev_cls, '__module__', None)
-            _prev_nm = getattr(_prev_cls, '__name__', '')
-            if (
-                isinstance(_prev_mod, str)
-                and isinstance(_prev_nm, str)
-                and _prev_mod.split('.', 1)[0] in ('numpy', 'pandas', 'pyarrow', 'polars')
-                and _prev_nm.lower() in ('bool', 'bool_', 'boolean', 'booleanscalar', 'boolscalar', 'bool8')
-            ):
-                _prev_close = None
-            else:
-                try:
-                    _prev_close = float(_prev_raw_close)
-                except (TypeError, ValueError, OverflowError):
-                    _prev_close = None
-                else:
-                    if math.isnan(_prev_close) or math.isinf(_prev_close):
-                        _prev_close = None
+        _prev_close = _norm_close(_prev)
         _prev_matches = _prev_close is not None and _prev_fp[3] == _prev_close
     else:
         _prev_matches = False
@@ -261,10 +210,17 @@ def render_macd_body(
 ) -> str:
     """Render the canonical MACD helper body.
 
-    Preconditions: ``close_expr_template`` has exactly one ``{obj}``
-    placeholder; ``cache_key_expr`` and ``select_expr`` are complete Python
-    expression text (may still contain literal ``{fast}``/``{slow}``/
-    ``{signal}`` for the caller's own later ``.format()`` pass).
+    Preconditions: ``bars_var``/``missing`` match the caller's own naming
+    convention (factors: ``"bars"``/``"NAN"``; synthesis: ``"history"``/
+    ``"None"``, source-aware — synthesis passes ``close_expr_template=
+    "self._src({obj}, source)"`` where factors passes ``"{obj}.close"``).
+    ``close_expr_template`` has exactly one ``{obj}`` placeholder;
+    ``cache_key_expr`` and ``select_expr`` are complete Python expression
+    text (may still contain literal ``{fast}``/``{slow}``/``{signal}`` for
+    the caller's own later ``.format()`` pass — factors defers that to
+    per-node compile time with int literals; synthesis does it once at
+    import time with the *string* ``"fast"``/etc., turning each placeholder
+    into its own bound parameter name).
     Postconditions: returns left-aligned Python source computing all three
     MACD outputs and returning the one ``select_expr`` names; the ``{fast}``/
     ``{slow}``/``{signal}`` placeholders are NOT resolved here.
