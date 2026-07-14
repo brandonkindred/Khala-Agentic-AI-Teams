@@ -94,6 +94,8 @@ def _guarded_transition(job_id: str, status: str, **extra_fields) -> bool:
     ``JobServiceClient.cancel_active_job`` for the one place in this stack that
     *is* a conditional update.
     """
+    # TODO(#1280): RACE — a cancel landing here is silently overwritten below;
+    # close this with a conditional update once JobServiceClient exposes one.
     if is_job_cancelled(job_id):
         logger.debug("Skipping transition to %s for job %s — already cancelled", status, job_id)
         return False
