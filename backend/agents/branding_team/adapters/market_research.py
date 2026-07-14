@@ -10,7 +10,7 @@ from typing import Optional
 import httpx
 
 from branding_team.models import BrandingMission, CompetitiveSnapshot
-from branding_team.shared.coro_runner import run_coro
+from branding_team.shared.coro_runner import run_coroutine
 from shared_env_config import env_float
 
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
@@ -129,7 +129,7 @@ async def request_market_research_async(
 def request_market_research(mission: BrandingMission) -> Optional[CompetitiveSnapshot]:
     """Synchronous wrapper over :func:`request_market_research_async` for
     non-async callers (e.g. the orchestrator running in a worker thread)."""
-    return run_coro(request_market_research_async(mission))
+    return run_coroutine(request_market_research_async(mission))
 
 
 def _map_to_competitive_snapshot(data: dict) -> CompetitiveSnapshot:

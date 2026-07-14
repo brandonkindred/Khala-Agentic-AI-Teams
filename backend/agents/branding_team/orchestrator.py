@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, List, Optional
 from pydantic import BaseModel, ValidationError
 from strands.multiagent.graph import GraphBuilder
 
-from branding_team.shared.coro_runner import run_coro
+from branding_team.shared.coro_runner import run_coroutine
 
 from .agents import BrandComplianceAgent
 from .graphs.phase1_strategic_core import build_phase1_graph
@@ -182,7 +182,7 @@ class BrandingTeamOrchestrator:
             f"Create a comprehensive brand strategy for the following company.\n\n"
             f"Branding Mission:\n{serialize_mission(mission)}"
         )
-        result = run_coro(graph.invoke_async(task))
+        result = run_coroutine(graph.invoke_async(task))
 
         # ---- Extract phase outputs from graph node results (table-driven) ----
         strategic_core, narrative, visual_identity, channel_activation, governance = [
@@ -194,7 +194,7 @@ class BrandingTeamOrchestrator:
         checks = self.compliance.evaluate(brand_checks or [], mission)
 
         # ---- Integrations (run concurrently; see _gather_integrations) ----
-        competitive_snapshot, design_asset_result = run_coro(
+        competitive_snapshot, design_asset_result = run_coroutine(
             _gather_integrations(
                 mission, strategic_core, include_market_research, include_design_assets
             )
@@ -261,7 +261,7 @@ class BrandingTeamOrchestrator:
         graph = builder.build()
 
         task = self._phase_task(mission, phase, prior_outputs or {})
-        result = run_coro(graph.invoke_async(task))
+        result = run_coroutine(graph.invoke_async(task))
         return self._extract_phase_output(result, node_id, model_cls)
 
     @staticmethod

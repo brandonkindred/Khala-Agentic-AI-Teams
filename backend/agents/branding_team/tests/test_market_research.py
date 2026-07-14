@@ -145,7 +145,7 @@ def test_request_wraps_transport_errors(monkeypatch) -> None:
 
 def test_request_offloads_when_loop_running(monkeypatch) -> None:
     """request_market_research still works when called from a running loop,
-    exercising the shared coro_runner.run_coro offload path."""
+    exercising the shared coro_runner.run_coroutine offload path."""
     import asyncio
 
     monkeypatch.setenv("UNIFIED_API_BASE_URL", "http://svc")
@@ -157,7 +157,7 @@ def test_request_offloads_when_loop_running(monkeypatch) -> None:
 
     async def _driver():
         # Called synchronously inside a running loop, so request_market_research's
-        # internal run_coro call must offload to a worker thread instead of
+        # internal run_coroutine call must offload to a worker thread instead of
         # calling asyncio.run on the live loop.
         return mr.request_market_research(_mission())
 

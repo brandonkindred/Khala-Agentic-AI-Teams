@@ -131,7 +131,7 @@ def run_market_research_activity(payload: dict[str, Any]) -> Optional[dict[str, 
           thread-mode ``_gather_integrations`` behavior.
     """
     # request_market_research is the sync wrapper over request_market_research_async
-    # (it runs the same coroutine via the shared coro_runner.run_coro helper), so it
+    # (it runs the same coroutine via the shared coro_runner.run_coroutine helper), so it
     # shares the async path's timeout/error handling exactly — used here because
     # activities are sync.
     from branding_team.adapters.market_research import request_market_research

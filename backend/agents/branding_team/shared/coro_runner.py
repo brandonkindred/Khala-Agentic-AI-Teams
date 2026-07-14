@@ -23,7 +23,7 @@ from typing import Awaitable, Optional, TypeVar
 
 from shared_env_config import env_int
 
-__all__ = ["run_coro"]
+__all__ = ["run_coroutine"]
 
 _T = TypeVar("_T")
 
@@ -32,7 +32,7 @@ def _offload_pool_workers() -> int:
     """Worker cap for the lazy offload pool (env-tunable, clamped to >= 1).
 
     Default of 4 avoids serializing concurrent offloaded runs (e.g. multiple
-    async Temporal activities on the same loop each calling ``run_coro``)
+    async Temporal activities on the same loop each calling ``run_coroutine``)
     behind a single worker.
     """
     return env_int("BRANDING_RUN_CORO_OFFLOAD_WORKERS", 4, floor=1)
@@ -43,7 +43,7 @@ _offload_pool_lock = threading.Lock()
 
 
 def _get_offload_pool() -> concurrent.futures.ThreadPoolExecutor:
-    """Return (lazily creating) the shared pool used to offload ``run_coro`` calls.
+    """Return (lazily creating) the shared pool used to offload ``run_coroutine`` calls.
 
     Postconditions:
         Returns the same ``ThreadPoolExecutor`` on every call after the first;
@@ -55,7 +55,7 @@ def _get_offload_pool() -> concurrent.futures.ThreadPoolExecutor:
         time risks a forked child (e.g. a multi-worker deployment that forks
         after import) inheriting a pool object whose threads don't actually
         exist in the child. Lazy creation means the pool is built after any
-        such fork, in whichever process first calls ``run_coro`` from a
+        such fork, in whichever process first calls ``run_coroutine`` from a
         thread with a running loop.
     """
     global _offload_pool
@@ -63,10 +63,10 @@ def _get_offload_pool() -> concurrent.futures.ThreadPoolExecutor:
         with _offload_pool_lock:
             if _offload_pool is None:
                 pool = concurrent.futures.ThreadPoolExecutor(
-                    max_workers=_offload_pool_workers(), thread_name_prefix="branding-run-coro"
+                    max_workers=_offload_pool_workers(), thread_name_prefix="branding-run-coroutine"
                 )
                 # Best-effort cleanup on interpreter exit. Threads in this pool
-                # only run briefly per offloaded coroutine (see run_coro), so
+                # only run briefly per offloaded coroutine (see run_coroutine), so
                 # this should not delay shutdown in practice; wait=False avoids
                 # blocking exit on a stuck run.
                 atexit.register(pool.shutdown, wait=False)
@@ -83,7 +83,7 @@ def _reset_offload_pool_after_fork() -> None:
     inherit a reference to threads that don't exist there. Registering this
     via ``os.register_at_fork`` closes that gap on top of lazy creation: the
     child drops the stale reference and lazily builds its own fresh pool the
-    next time ``run_coro`` needs to offload.
+    next time ``run_coroutine`` needs to offload.
 
     Also unregisters the parent pool's ``atexit`` shutdown callback (a stale
     reference to a pool that doesn't exist in this process) so process exit in
@@ -100,16 +100,16 @@ if hasattr(os, "register_at_fork"):  # POSIX only; no-op on platforms without fo
     os.register_at_fork(after_in_child=_reset_offload_pool_after_fork)
 
 
-def run_coro(coro: Awaitable[_T]) -> _T:
-    """Run *coro* to completion from synchronous code.
+def run_coroutine(coroutine: Awaitable[_T]) -> _T:
+    """Run *coroutine* to completion from synchronous code.
 
     Uses ``asyncio.run`` when no loop runs in this thread; otherwise drives it on
     a shared worker thread (see ``_get_offload_pool``) so we never call
     ``asyncio.run`` inside an active loop.
 
     Preconditions:
-        ``coro`` is an un-awaited coroutine/awaitable. When called from a thread
-        that already has a running loop, ``coro`` MUST NOT depend on objects
+        ``coroutine`` is an un-awaited coroutine/awaitable. When called from a thread
+        that already has a running loop, ``coroutine`` MUST NOT depend on objects
         bound to that loop (e.g. an ``asyncio.Queue`` or lock created on it): the
         offload path runs it on a *new* event loop in another thread, so
         loop-bound objects would fail. Callers (``graph.invoke_async`` and
@@ -127,5 +127,5 @@ def run_coro(coro: Awaitable[_T]) -> _T:
     # asyncio.get_running_loop() only ever returns a *running* loop (it raises
     # RuntimeError otherwise), so a plain None-check is sufficient here.
     if loop is not None:
-        return _get_offload_pool().submit(asyncio.run, coro).result()
-    return asyncio.run(coro)
+        return _get_offload_pool().submit(asyncio.run, coroutine).result()
+    return asyncio.run(coroutine)
