@@ -4,7 +4,7 @@ Pattern B (see ``shared_postgres/README.md``): this module is *pure data* with n
 side effects. The SE FastAPI app's lifespan registers it via
 ``register_team_schemas(SCHEMA)`` (a no-op when ``POSTGRES_HOST`` is unset).
 
-Three tables:
+Four tables:
 
 - ``se_agent_traces`` — one row per LLM call (token counts, ``cost_usd``, latency,
   outcome). The optional Postgres trace sink behind ``SE_TRACE_TO_POSTGRES``; the
@@ -15,6 +15,10 @@ Three tables:
   ``counter_measure``) with a generated full-text-search column, ingested from
   post-mortems and quality-gate rejections and injected back into the Tech Lead's
   Design prompt.
+- ``code_review_runs`` — one row per executed PR code review (coding_team
+  sub-team), so the Code Review page can show every review run for a pull
+  request — with its status and outcome — and have that history survive page
+  reloads and restarts.
 """
 
 from __future__ import annotations
@@ -76,8 +80,34 @@ SCHEMA = TeamSchema(
         )""",
         "CREATE INDEX IF NOT EXISTS idx_se_learnings_tsv ON se_learnings USING GIN(search_tsv)",
         "CREATE INDEX IF NOT EXISTS idx_se_learnings_category ON se_learnings(category)",
+        # One row per PR review run, keyed by the review job id. ``review_summary``
+        # holds the same shape written onto the job (total_issues, inline_comments,
+        # comment_findings, event, files_reviewed).
+        """CREATE TABLE IF NOT EXISTS code_review_runs (
+            job_id          TEXT PRIMARY KEY,
+            owner           TEXT NOT NULL,
+            repo            TEXT NOT NULL,
+            pr_number       INTEGER NOT NULL,
+            pr_url          TEXT,
+            status          TEXT NOT NULL,
+            status_text     TEXT,
+            review_summary  JSONB,
+            error           TEXT,
+            author          TEXT NOT NULL,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            completed_at    TIMESTAMPTZ
+        )""",
+        # The page lists reviews per (repo, PR), newest first.
+        """CREATE INDEX IF NOT EXISTS idx_code_review_runs_pr
+            ON code_review_runs(owner, repo, pr_number, created_at DESC)""",
+        # ``list_reviews`` matches owner/repo case-insensitively (GitHub treats them so, and
+        # rows may carry operator-typed casing while lookups use the canonical GET /user/repos
+        # casing). A functional index on the lowered columns keeps that query sargable — the
+        # plain (owner, repo, …) index above can't serve a ``lower(owner) = lower(%s)`` predicate.
+        """CREATE INDEX IF NOT EXISTS idx_code_review_runs_pr_ci
+            ON code_review_runs(lower(owner), lower(repo), pr_number, created_at DESC)""",
     ],
-    table_names=["se_agent_traces", "se_events", "se_learnings"],
+    table_names=["se_agent_traces", "se_events", "se_learnings", "code_review_runs"],
 )
 
 __all__ = ["SCHEMA"]
