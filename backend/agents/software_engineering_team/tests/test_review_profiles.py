@@ -20,22 +20,56 @@ from code_review_agent.profiles import (
 from code_review_agent.prompts import CODE_REVIEW_PROMPT
 
 from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.shared.prompts import REQUIREMENT_CITATION_GUARDRAIL
 
 # ---------------------------------------------------------------------------
-# Equivalence guard: the default profile reproduces today's reviewer prompt.
+# Equivalence guard: CODE_REVIEW_PROMPT is derived from the profile builder.
 # ---------------------------------------------------------------------------
 
 
 def test_code_review_profile_is_byte_identical_to_legacy_prompt() -> None:
-    """The default CODE_REVIEW profile reproduces the legacy prompt byte-for-byte."""
+    """CODE_REVIEW_PROMPT is an alias of build_review_system_prompt(CODE_REVIEW)."""
     assert build_review_system_prompt(ReviewProfile.CODE_REVIEW) == CODE_REVIEW_PROMPT
 
 
 def test_shared_skeleton_pieces_are_slices_of_legacy_prompt() -> None:
-    """The shared skeleton pieces are exact substrings of the canonical prompt,
-    proving the transcription is exact and pinning the shared contract."""
+    """Shared skeleton pieces remain substrings of the derived CODE_REVIEW prompt."""
     assert _SHARED_ROLE_AND_SETTLED in CODE_REVIEW_PROMPT
     assert _SHARED_OUTPUT_SECTION in CODE_REVIEW_PROMPT
+
+
+def test_requirement_citation_guardrail_in_spec_flavored_sections_only() -> None:
+    """Guardrail sits under Spec Compliance / Coverage items, not Naming/Quality."""
+    code_review = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
+    assert REQUIREMENT_CITATION_GUARDRAIL in code_review
+    # Search after the Spec Compliance checklist item — Naming also appears earlier
+    # in REVIEW_PRIORITY_FRAMEWORK.
+    i_spec = code_review.index("1. **Spec Compliance**")
+    i_guard = code_review.index(REQUIREMENT_CITATION_GUARDRAIL, i_spec)
+    i_naming = code_review.index("2. **Naming Conventions**", i_spec)
+    i_quality = code_review.index("4. **Code Quality**", i_spec)
+    assert i_spec < i_guard < i_naming < i_quality
+
+    spec_conf = build_review_system_prompt(ReviewProfile.SPEC_CONFORMANCE)
+    assert REQUIREMENT_CITATION_GUARDRAIL in spec_conf
+    assert spec_conf.count(REQUIREMENT_CITATION_GUARDRAIL) >= 2
+
+    senior = build_review_system_prompt(ReviewProfile.SENIOR_ARCHITECTURE)
+    assert REQUIREMENT_CITATION_GUARDRAIL in senior
+    i_cov = senior.index("2. **Spec Coverage**")
+    i_g = senior.index(REQUIREMENT_CITATION_GUARDRAIL, i_cov)
+    i_risk = senior.index("3. **Maintainability & Risk**", i_cov)
+    assert i_cov < i_g < i_risk
+
+
+def test_requirement_citation_guardrail_absent_from_non_spec_profiles() -> None:
+    """ACCEPTANCE (already stricter) and DevOps maintainability stay unchanged."""
+    assert REQUIREMENT_CITATION_GUARDRAIL not in build_review_system_prompt(
+        ReviewProfile.DEVOPS_MAINTAINABILITY
+    )
+    assert REQUIREMENT_CITATION_GUARDRAIL not in build_review_system_prompt(
+        ReviewProfile.ACCEPTANCE
+    )
 
 
 # ---------------------------------------------------------------------------

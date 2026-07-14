@@ -3,6 +3,9 @@
 See ``shared/prompts/templates.py`` for the builder implementations.
 """
 
+from software_engineering_team.shared.prompts.requirement_citation import (
+    REQUIREMENT_CITATION_GUARDRAIL,
+)
 from software_engineering_team.shared.prompts.templates import (
     DELIVER_COMMIT_MSG_TEMPLATE,
     DOCUMENTATION_PROBLEM_SOLVE_PROMPT,
@@ -19,6 +22,7 @@ from software_engineering_team.shared.prompts.templates import (
 __all__ = [
     "DELIVER_COMMIT_MSG_TEMPLATE",
     "DOCUMENTATION_PROBLEM_SOLVE_PROMPT",
+    "REQUIREMENT_CITATION_GUARDRAIL",
     "build_batch_fix_prompt",
     "build_code_review_prompt",
     "build_documentation_self_review_prompt",
