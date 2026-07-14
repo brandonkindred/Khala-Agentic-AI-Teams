@@ -955,7 +955,11 @@ class GitHubClient:
                 after = page_info.get("endCursor")
                 if not after:
                     return resolved
-        except (GitHubAPIError, ValueError, KeyError, TypeError) as e:
+        except Exception as e:  # noqa: BLE001 - a resolution-lookup failure must degrade to
+            # an empty set, never fail the review (see the "Never raises" postcondition
+            # above); an enumerated exception tuple here previously included a dead
+            # KeyError (every field access below uses .get()) while still missing the
+            # AttributeError a non-dict GraphQL payload segment would raise.
             logger.warning(
                 "get_resolved_review_thread_comment_ids failed for %s/%s#%s: %s",
                 owner,

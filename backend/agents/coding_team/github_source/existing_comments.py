@@ -136,12 +136,17 @@ def _similar_enough(a: str, b: str) -> bool:
 
     Postconditions:
         - Returns whether ``SequenceMatcher.ratio()`` (case/whitespace-insensitive)
-          over ``a``/``b`` is at least :data:`_SIMILARITY_THRESHOLD`.
+          over ``a``/``b`` is at least :data:`_SIMILARITY_THRESHOLD`. Checks the
+          cheaper ``quick_ratio()`` upper bound first and returns False without
+          computing the full (worst-case O(len(a)*len(b))) ``ratio()`` when even
+          that upper bound misses the threshold — safe because ``quick_ratio()``
+          is guaranteed to be >= ``ratio()``, so a match ``ratio()`` could reach
+          can never be masked by this shortcut.
     """
-    return (
-        SequenceMatcher(None, (a or "").strip().lower(), (b or "").strip().lower()).ratio()
-        >= _SIMILARITY_THRESHOLD
-    )
+    matcher = SequenceMatcher(None, (a or "").strip().lower(), (b or "").strip().lower())
+    if matcher.quick_ratio() < _SIMILARITY_THRESHOLD:
+        return False
+    return matcher.ratio() >= _SIMILARITY_THRESHOLD
 
 
 def match_existing_comment(
