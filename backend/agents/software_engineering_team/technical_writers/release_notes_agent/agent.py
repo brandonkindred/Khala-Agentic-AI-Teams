@@ -91,10 +91,7 @@ class ReleaseNotesAgent:
                 return self._fallback(input_data, "empty markdown from LLM")
             return ReleaseNotesOutput(markdown=markdown, summary=summary)
         except Exception as exc:
-            logger.warning(
-                "ReleaseNotesAgent: LLM call failed (%s); using deterministic fallback",
-                exc,
-            )
+            logger.exception("ReleaseNotesAgent: LLM call failed; using deterministic fallback")
             return self._fallback(input_data, str(exc))
 
     @staticmethod

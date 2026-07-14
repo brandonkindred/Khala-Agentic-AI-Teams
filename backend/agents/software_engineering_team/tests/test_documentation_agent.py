@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from software_engineering_team.technical_writers.documentation_agent import agent as doc_agent_mod
@@ -14,7 +15,7 @@ from software_engineering_team.technical_writers.documentation_agent.models impo
     DocumentationOutput,
     DocumentationStatus,
 )
-from software_engineering_team.tests.conftest import _patch_fenced_response, _strands_model_double
+from software_engineering_team.tests.conftest import _strands_model_double
 
 
 class _FakeCompleteJson:
@@ -571,19 +572,55 @@ def test_doc_agent_run_final_review_read_codebase_fails(monkeypatch, tmp_path: P
 # crashes the agent.
 
 
+class _SequentialAgentInstance:
+    """Callable standing in for one Agent construction, returning a single
+    fixed response -- paired with _patch_sequential_responses so each of
+    DocumentationAgent.run()'s two LLM calls (README, then CONTRIBUTORS) gets
+    its own distinct response instead of both receiving the same payload."""
+
+    def __init__(self, text: str):
+        self._text = text
+
+    def __call__(self, prompt, **kwargs):
+        return self._text
+
+
+def _patch_sequential_responses(monkeypatch, texts: list) -> None:
+    """Monkeypatch llm_mod.Agent so successive constructions (one per
+    complete_json_with_continuation call) return texts[0], then texts[1], in
+    order, instead of one fixed response for every call."""
+    from software_engineering_team.shared import llm as llm_mod
+
+    responses = iter(texts)
+    monkeypatch.setattr(
+        llm_mod, "Agent", lambda *a, **kw: _SequentialAgentInstance(next(responses))
+    )
+
+
 def test_doc_agent_run_readme_recovers_fenced_json_response(monkeypatch) -> None:
     """README call site: a markdown-fenced JSON response recovers via
     extract_json_from_response instead of leaving readme_summary on the fail-open
-    "skipped due to error" path."""
-    _patch_fenced_response(
-        monkeypatch,
+    "skipped due to error" path. The CONTRIBUTORS call (which runs second in the
+    same run()) gets its own distinct, plain-JSON response so it isn't
+    contaminated by the README-shaped fenced payload under test here."""
+    from software_engineering_team.tests.conftest import _fenced
+
+    readme_fenced = _fenced(
         {
             "readme_content": "# Fenced Project\n",
             "readme_changed": True,
             "summary": "fenced readme ok",
             "suggested_commit_message": "docs: fenced update",
-        },
+        }
     )
+    contributors_plain = json.dumps(
+        {
+            "contributors_content": "* alice",
+            "contributors_changed": False,
+            "summary": "contributors unchanged",
+        }
+    )
+    _patch_sequential_responses(monkeypatch, [readme_fenced, contributors_plain])
     a = DocumentationAgent(llm_client=_strands_model_double())
     out = a.run(DocumentationInput(repo_path="/tmp/x", task_id="t1", existing_readme="old"))
     assert out.readme_changed is True
@@ -595,15 +632,26 @@ def test_doc_agent_run_readme_recovers_fenced_json_response(monkeypatch) -> None
 def test_doc_agent_run_contributors_recovers_fenced_json_response(monkeypatch) -> None:
     """CONTRIBUTORS call site: a markdown-fenced JSON response recovers via
     extract_json_from_response instead of leaving contributors_summary on the fail-open
-    "skipped due to error" path."""
-    _patch_fenced_response(
-        monkeypatch,
+    "skipped due to error" path. The README call (which runs first in the same
+    run()) gets its own distinct, plain-JSON response so it isn't contaminated
+    by the CONTRIBUTORS-shaped fenced payload under test here."""
+    from software_engineering_team.tests.conftest import _fenced
+
+    readme_plain = json.dumps(
+        {
+            "readme_content": "# Existing README\n",
+            "readme_changed": False,
+            "summary": "readme unchanged",
+        }
+    )
+    contributors_fenced = _fenced(
         {
             "contributors_content": "* alice\n* bob",
             "contributors_changed": True,
             "summary": "fenced contributors ok",
-        },
+        }
     )
+    _patch_sequential_responses(monkeypatch, [readme_plain, contributors_fenced])
     a = DocumentationAgent(llm_client=_strands_model_double())
     out = a.run(
         DocumentationInput(repo_path="/tmp/x", task_id="t1", existing_contributors="* alice")
