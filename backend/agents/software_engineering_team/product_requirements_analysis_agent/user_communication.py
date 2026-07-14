@@ -19,6 +19,12 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from software_engineering_team.shared.job_store import (
+    add_pending_questions,
+    get_submitted_answers,
+    update_job,
+)
+
 from .models import AnsweredQuestion, OpenQuestion, QuestionOption
 from .qa_history import record_answers
 
@@ -46,12 +52,6 @@ def communicate_with_user(
             "No job_id provided - cannot communicate with user for answers. "
             "A job_id is required to collect user input."
         )
-
-    from software_engineering_team.shared.job_store import (
-        add_pending_questions,
-        get_submitted_answers,
-        update_job,
-    )
 
     pending = convert_to_pending_questions(open_questions)
     add_pending_questions(job_id, pending)

@@ -209,14 +209,16 @@ def _pad_to_minimum_options(
 
     Preconditions: ``options`` is a list of :class:`QuestionOption`; ``min_options``
         is a non-negative int.
-    Postconditions: mutates and returns ``options``; an existing "Other" option
-        (case-insensitive label match) is not duplicated; a no-op if ``options``
-        already has >= ``min_options`` entries.
+    Postconditions: returns a new list, leaving ``options`` unmutated; an existing
+        "Other" option (case-insensitive label match) is not duplicated; returns
+        ``options`` unchanged (by value) if it already has >= ``min_options``
+        entries.
     """
     if len(options) >= min_options:
-        return options
-    if not any(o.label.lower() == "other" for o in options):
-        options.append(
+        return list(options)
+    padded = list(options)
+    if not any(o.label.lower() == "other" for o in padded):
+        padded.append(
             QuestionOption(
                 id="opt_other",
                 label="Other",
@@ -225,10 +227,10 @@ def _pad_to_minimum_options(
                 confidence=0.3,
             )
         )
-    if len(options) < min_options and not any(
-        o.label.lower() == "(please type your answer)" for o in options
+    if len(padded) < min_options and not any(
+        o.label.lower() == "(please type your answer)" for o in padded
     ):
-        options.insert(
+        padded.insert(
             0,
             QuestionOption(
                 id="opt_text",
@@ -238,29 +240,31 @@ def _pad_to_minimum_options(
                 confidence=0.5,
             ),
         )
-    return options
+    return padded
 
 
 def _ensure_single_default(options: List[QuestionOption]) -> List[QuestionOption]:
-    """Ensure exactly one option has ``is_default=True``.
+    """Return a copy of ``options`` with exactly one ``is_default=True`` entry.
 
     Shared by :func:`build_question_options` and :func:`assess_sub_phase_gaps`,
     both of which combine hardcoded/LLM-generated/padded options that may each
     carry their own default flag.
 
     Preconditions: ``options`` is a list of :class:`QuestionOption`.
-    Postconditions: if no option was default, the first becomes default; if more
-        than one was, only the first of those remains default. No-op on an empty
-        list. Mutates and returns ``options``.
+    Postconditions: returns a new list, leaving ``options`` unmutated; if no
+        option was default, the first becomes default; if more than one was,
+        only the first of those remains default. No-op (returns ``[]``) on an
+        empty list.
     """
-    defaults = [o for o in options if o.is_default]
-    if len(defaults) == 0 and options:
-        options[0] = options[0].model_copy(update={"is_default": True})
-    elif len(defaults) > 1:
-        for o in defaults[1:]:
-            idx = options.index(o)
-            options[idx] = o.model_copy(update={"is_default": False})
-    return options
+    if not options:
+        return []
+    default_index = next((i for i, o in enumerate(options) if o.is_default), 0)
+    return [
+        o
+        if o.is_default == (i == default_index)
+        else o.model_copy(update={"is_default": i == default_index})
+        for i, o in enumerate(options)
+    ]
 
 
 def build_question_options(
@@ -462,22 +466,23 @@ def _run_sop_sub_phase(
     decisions_map: Dict[str, str],
     all_decisions: List[SOPDecision],
     all_answered: List[AnsweredQuestion],
-) -> None:
+) -> Tuple[Dict[str, str], List[SOPDecision], List[AnsweredQuestion]]:
     """Run one SOP Phase 1 sub-phase: hardcoded-question rounds, then gap-analysis rounds.
 
     Extracted from :func:`run_sop_phase1` to keep that function a thin per-sub-phase
     orchestrator.
 
-    Mutates ``decisions_map``, ``all_decisions``, and ``all_answered`` in place as
-    the user answers questions; the caller's references remain valid, so there is
-    nothing to return.
-
     Preconditions: ``model`` is a Strands ``Model``; ``job_id`` identifies a live
         job; ``decisions_map``/``all_decisions``/``all_answered`` carry state
         accumulated from any prior sub-phases (for cross-referencing).
-    Postconditions: honors ``MAX_SOP_ROUNDS``/``MAX_GAP_ROUNDS``; propagates
-        communication failures.
+    Postconditions: returns this sub-phase's updated (decisions_map, all_decisions,
+        all_answered); the caller's input collections are not mutated. Honors
+        ``MAX_SOP_ROUNDS``/``MAX_GAP_ROUNDS``; propagates communication failures.
     """
+    decisions_map = dict(decisions_map)
+    all_decisions = list(all_decisions)
+    all_answered = list(all_answered)
+
     q_defs = SOP_PHASE1_QUESTIONS.get(sub_phase, [])
 
     # --- Phase A: Ask hardcoded SOP questions (including conditional follow-ups) ---
@@ -645,6 +650,8 @@ def _run_sop_sub_phase(
             MAX_GAP_ROUNDS,
         )
 
+    return decisions_map, all_decisions, all_answered
+
 
 def run_sop_phase1(
     model: Any,
@@ -686,7 +693,7 @@ def run_sop_phase1(
 
     # Step 2: Iterate through sub-phases ONE AT A TIME in order
     for sub_phase in SOPSubPhase:
-        _run_sop_sub_phase(
+        decisions_map, all_decisions, all_answered = _run_sop_sub_phase(
             model,
             spec_content,
             repo_path,
