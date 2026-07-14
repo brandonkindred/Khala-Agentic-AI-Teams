@@ -236,7 +236,7 @@ def test_run_llm_review_drops_ungrounded_insurance_hallucination(caplog):
             invoke_model=lambda _p: "raw",
             max_chars=60_000,
             warn_threshold=20,
-            enable_grounding=True,
+            enable_llm_review_grounding=True,
         )
     assert issues == []
     assert any(
@@ -246,7 +246,7 @@ def test_run_llm_review_drops_ungrounded_insurance_hallucination(caplog):
 
 
 def test_run_llm_review_grounding_kill_switch_keeps_ungrounded():
-    """enable_grounding=False preserves today's behavior (no drop)."""
+    """enable_llm_review_grounding=False preserves today's behavior (no drop)."""
 
     def parse_insurance(_raw: str):
         return {
@@ -271,7 +271,7 @@ def test_run_llm_review_grounding_kill_switch_keeps_ungrounded():
         invoke_model=lambda _p: "raw",
         max_chars=60_000,
         warn_threshold=20,
-        enable_grounding=False,
+        enable_llm_review_grounding=False,
     )
     assert len(issues) == 1
     assert "Insurance Provider" in issues[0].description

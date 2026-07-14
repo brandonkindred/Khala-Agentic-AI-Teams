@@ -73,6 +73,45 @@ def test_drop_ungrounded_grounds_phrase_with_punctuation_in_corpus():
     assert len(kept) == 1
 
 
+def test_drop_ungrounded_rejects_cross_source_phrase_gluing():
+    """Last word of requirements + first of ACs must not invent a grounded phrase."""
+    fake = _Issue(
+        description="User Profile is incomplete",
+        file_path="app.py",
+    )
+    kept = drop_ungrounded_issues(
+        [fake],
+        files={"app.py": "pass"},
+        requirements="Create the User",
+        acceptance_criteria=["Profile page loads"],
+        spec_content="",
+    )
+    assert kept == []
+
+
+def test_drop_ungrounded_blanks_path_on_pydantic_review_issue():
+    """Production ReviewIssue uses model_copy; bad paths blank without mutating."""
+    from software_engineering_team.shared.v2_models import ReviewIssue
+
+    issue = ReviewIssue(
+        description="off-by-one in the loop bound",
+        file_path="hallucinated.py",
+        severity="medium",
+        source="code_review",
+    )
+    original_path = issue.file_path
+    kept = drop_ungrounded_issues(
+        [issue],
+        files={"real.py": "x = 1"},
+        requirements="Fix loop",
+        acceptance_criteria=[],
+        spec_content="",
+    )
+    assert len(kept) == 1
+    assert kept[0].file_path == ""
+    assert issue.file_path == original_path  # input not mutated
+
+
 def test_drop_ungrounded_keeps_grounded_and_phrase_free():
     files = {"index.html": "<html></html>"}
     grounded = _Issue(

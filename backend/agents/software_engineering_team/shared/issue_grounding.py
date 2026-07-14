@@ -112,32 +112,47 @@ def _normalize_match_text(text: str) -> str:
     return " ".join(re.sub(r"[^a-zA-Z0-9]+", " ", text or "").split()).lower()
 
 
-def _build_grounding_corpus(
+def _grounding_corpus_parts(
     *,
     files: Dict[str, str],
     requirements: str,
     acceptance_criteria: Sequence[str] | None,
     spec_content: str,
     architecture_context: str,
-) -> str:
-    # Space-join after punctuation/whitespace normalization so a Title Case
-    # phrase matches whether the corpus spells it with spaces, dots, or dashes.
-    parts: List[str] = [
-        _normalize_match_text(requirements or ""),
-        _normalize_match_text(
-            " ".join(
-                stripped
-                for a in (acceptance_criteria or ())
-                if a is not None
-                for stripped in (str(a).strip(),)
-                if stripped
-            )
-        ),
-        _normalize_match_text(spec_content or ""),
-        _normalize_match_text(architecture_context or ""),
-        _normalize_match_text(" ".join(files.keys())),
+) -> List[str]:
+    """Normalized corpus parts kept separate to avoid cross-source false matches.
+
+    A phrase must appear entirely inside one part (requirements, ACs, spec,
+    architecture, or file names) — gluing the last word of requirements to the
+    first word of acceptance criteria must not invent a grounded claim.
+    """
+    return [
+        p
+        for p in (
+            _normalize_match_text(requirements or ""),
+            _normalize_match_text(
+                " ".join(
+                    stripped
+                    for a in (acceptance_criteria or ())
+                    if a is not None
+                    for stripped in (str(a).strip(),)
+                    if stripped
+                )
+            ),
+            _normalize_match_text(spec_content or ""),
+            _normalize_match_text(architecture_context or ""),
+            _normalize_match_text(" ".join(files.keys())),
+        )
+        if p
     ]
-    return " ".join(p for p in parts if p)
+
+
+def _phrase_in_corpus(phrase: str, corpus_parts: Sequence[str]) -> bool:
+    """True when the normalized phrase is a substring of any single corpus part."""
+    needle = _normalize_match_text(phrase)
+    if not needle:
+        return True
+    return any(needle in part for part in corpus_parts)
 
 
 def _with_file_path(issue: IssueT, file_path: str) -> IssueT:
@@ -197,7 +212,7 @@ def drop_ungrounded_issues(
           blanking) for each drop.
         - Never raises — on unexpected errors the issue is kept (fail-open).
     """
-    corpus = _build_grounding_corpus(
+    corpus_parts = _grounding_corpus_parts(
         files=files,
         requirements=requirements,
         acceptance_criteria=acceptance_criteria,
@@ -215,7 +230,7 @@ def drop_ungrounded_issues(
             recommendation = getattr(issue, "recommendation", "") or ""
             phrases = extract_checkable_phrases(f"{description}\n{recommendation}")
             if phrases and any(
-                _normalize_match_text(phrase) not in corpus for phrase in phrases
+                not _phrase_in_corpus(phrase, corpus_parts) for phrase in phrases
             ):
                 if on_dropped is not None:
                     on_dropped(issue)

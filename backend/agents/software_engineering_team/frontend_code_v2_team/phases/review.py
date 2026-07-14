@@ -63,7 +63,7 @@ def _run_llm_review(
     task: Task,
     files: Dict[str, str],
     review_context: Optional[ReviewContext] = None,
-    enable_grounding: bool = True,
+    enable_llm_review_grounding: bool = True,
 ) -> List[ReviewIssue]:
     """LLM-based code review when no external review agent is available.
 
@@ -81,8 +81,8 @@ def _run_llm_review(
           hard-truncated to the same per-chunk caps the coordinator's own
           architecture/spec excerpts use (this runs once per chunk, so an
           uncapped document would repeat its full size in every chunk's prompt).
-        - ``enable_grounding`` defaults True; when False, skips ungrounded-claim
-          filtering in the shared helper (kill switch).
+        - ``enable_llm_review_grounding`` defaults True; when False, skips
+          ungrounded-claim filtering in the shared helper (kill switch).
 
     Postconditions:
         - See ``software_engineering_team.shared.llm_review.run_llm_review``:
@@ -126,7 +126,7 @@ def _run_llm_review(
         warn_threshold=MANY_CHUNKS_WARN_THRESHOLD,
         architecture_context=architecture_context,
         spec_content=spec_content,
-        enable_grounding=enable_grounding,
+        enable_llm_review_grounding=enable_llm_review_grounding,
     )
 
 
