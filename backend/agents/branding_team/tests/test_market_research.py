@@ -141,3 +141,25 @@ def test_request_wraps_transport_errors(monkeypatch) -> None:
     _patch_client(monkeypatch, submit=_FakeResp({}, status_code=500), statuses=[])
     with pytest.raises(RuntimeError, match="Market research request failed"):
         mr.request_market_research(_mission())
+
+
+def test_request_offloads_when_loop_running(monkeypatch) -> None:
+    """request_market_research still works when called from a running loop,
+    exercising the shared coro_runner.run_coro offload path."""
+    import asyncio
+
+    monkeypatch.setenv("UNIFIED_API_BASE_URL", "http://svc")
+    _patch_client(
+        monkeypatch,
+        submit=_FakeResp({"job_id": "j3"}),
+        statuses=[_FakeResp({"status": "completed", "result": {"mission_summary": "offloaded"}})],
+    )
+
+    async def _driver():
+        # Called synchronously inside a running loop, so request_market_research's
+        # internal run_coro call must offload to a worker thread instead of
+        # calling asyncio.run on the live loop.
+        return mr.request_market_research(_mission())
+
+    snap = asyncio.run(_driver())
+    assert snap.summary == "offloaded"
