@@ -1,12 +1,14 @@
 """
 Shared content-planning-loop logic for the blogging team.
 
-Extracted from ``blog_planning_agent.agent`` / ``blog_writer_agent.agent``,
-which had re-implemented this control flow nearly identically. The two agents'
-underlying LLM-call primitives differ (``BlogPlanningAgent._call_agent`` vs
+Generates and refines a ``ContentPlan``: generate -> validate -> critic-check
+-> refine or converge, via ``run_content_planning_loop``. The planning and
+writer agents' underlying LLM-call primitives differ
+(``BlogPlanningAgent._call_agent`` vs
 ``BlogWriterAgent._call_agent_json``/``_call_json_raw``), so callers inject
-those as closures captured at call time rather than this module calling an
-LLM client directly.
+those as closures captured at call time (see ``complete_plan_json`` /
+``CompletePlanJsonFn``) rather than this module calling an LLM client
+directly.
 
 ``run_content_planning_loop`` deferred-imports
 ``blog_plan_critic_agent.agent.build_refine_feedback_from_critic`` (only when
