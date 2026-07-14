@@ -2,7 +2,16 @@
 
 The standard create/get/update/list + cancel/is-cancelled/delete + shutdown-sweep
 wrappers come from the shared ``job_store_factory`` so this module only owns the
-team's client singleton.
+team's client singleton. It also exposes three guarded-transition helpers
+(``begin_job``, ``mark_completed``, ``mark_failed``) that check for cancellation
+before writing a new status — the single place the thread path
+(``api.main._run_branding_core``) and the Temporal activities
+(``temporal.activities``) both go through for RUNNING/COMPLETED/FAILED writes.
+
+Note: the cancel-check + status-write is not atomic (no compare-and-swap against
+the underlying store), so a cancel landing in the narrow window between the two
+calls is not closed by these helpers — see ``JobServiceClient.cancel_active_job``
+for the one place in this stack that *is* written as a conditional update.
 """
 
 from __future__ import annotations
@@ -61,6 +70,28 @@ delete_job = _store.delete_job
 mark_all_running_jobs_failed = _store.mark_all_running_jobs_failed
 
 
+def _guarded_transition(job_id: str, status: str, **extra_fields) -> bool:
+    """Write ``status`` (+ ``extra_fields``) to ``job_id`` unless already cancelled.
+
+    The single check-then-write primitive behind ``begin_job``/``mark_completed``/
+    ``mark_failed`` — every RUNNING/COMPLETED/FAILED transition in this team goes
+    through this one function.
+
+    Preconditions:
+        - ``job_id`` refers to an existing job row; ``status`` is one of the
+          ``JOB_STATUS_*`` constants; ``extra_fields`` are ``update_job`` kwargs
+          (e.g. ``result=``/``error=``).
+    Postconditions:
+        - Returns False and makes no write if the job is already cancelled (a
+          cancelled run is terminal — never overwritten with another status).
+        - Otherwise writes ``status``/``extra_fields`` and returns True.
+    """
+    if is_job_cancelled(job_id):
+        return False
+    update_job(job_id, status=status, **extra_fields)
+    return True
+
+
 def begin_job(job_id: str) -> bool:
     """Mark ``job_id`` RUNNING unless it was already cancelled.
 
@@ -75,10 +106,7 @@ def begin_job(job_id: str) -> bool:
         - Returns False and makes no write if the job is already cancelled.
         - Otherwise writes status=RUNNING and returns True.
     """
-    if is_job_cancelled(job_id):
-        return False
-    update_job(job_id, status=JOB_STATUS_RUNNING)
-    return True
+    return _guarded_transition(job_id, JOB_STATUS_RUNNING)
 
 
 def mark_completed(job_id: str, result: dict) -> bool:
@@ -92,10 +120,7 @@ def mark_completed(job_id: str, result: dict) -> bool:
           cancelled run is terminal, not a completion).
         - Otherwise writes status=COMPLETED with ``result`` and returns True.
     """
-    if is_job_cancelled(job_id):
-        return False
-    update_job(job_id, status=JOB_STATUS_COMPLETED, result=result)
-    return True
+    return _guarded_transition(job_id, JOB_STATUS_COMPLETED, result=result)
 
 
 def mark_failed(job_id: str, error: str) -> bool:
@@ -108,7 +133,4 @@ def mark_failed(job_id: str, error: str) -> bool:
           cancelled run is terminal, not a failure).
         - Otherwise writes status=FAILED with ``error`` and returns True.
     """
-    if is_job_cancelled(job_id):
-        return False
-    update_job(job_id, status=JOB_STATUS_FAILED, error=error)
-    return True
+    return _guarded_transition(job_id, JOB_STATUS_FAILED, error=error)
