@@ -31,6 +31,7 @@ from dataclasses import dataclass
 import pytest
 
 from investment_team.models import StrategySpec
+from investment_team.strategy_lab.executor.indicators import INDICATORS
 from investment_team.strategy_lab.executor.strategy_indicators import (
     _INDICATOR_PARAM_VALIDATORS,
 )
@@ -411,3 +412,32 @@ def _accepts(check, value) -> bool:
     except ValueError:
         return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# Coverage-probe param-table parity: executor/indicators.py::INDICATORS
+# (consulted only by the static coverage probe's AST dispatcher) must stay
+# in sync with INDICATOR_METADATA's numeric/float params. Selector params
+# ("output"/"band" — the "select" kind in emit_args) are deliberately
+# excluded: INDICATORS' helpers return the whole tuple (macd/bollinger_bands/
+# stochastic/donchian_channels/keltner_channels all have tuple_arity set),
+# so they have no selector kwarg to match; "source" is likewise excluded —
+# the probe threads it via `data_inputs`, not a kwarg_names entry.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", sorted(INDICATOR_METADATA))
+def test_coverage_probe_registry_kwarg_names_match_registry_metadata(name):
+    descriptor = INDICATOR_METADATA[name]
+    spec = INDICATORS[descriptor.registry_method]
+    expected = {
+        dsl_param
+        for _emit_kwarg, kind, dsl_param in descriptor.emit_args
+        if kind in ("int", "float")
+    }
+    assert set(spec.kwarg_names) == expected, (
+        name,
+        descriptor.registry_method,
+        set(spec.kwarg_names),
+        expected,
+    )
