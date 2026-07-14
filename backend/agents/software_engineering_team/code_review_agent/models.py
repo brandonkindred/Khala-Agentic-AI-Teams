@@ -1,6 +1,7 @@
 """Models for the Code Review agent."""
 
 import logging
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
@@ -72,6 +73,38 @@ class CodeReviewUnavailableError(RuntimeError):
     def __init__(self, message: str, unreviewed: Optional[List[str]] = None) -> None:
         super().__init__(message)
         self.unreviewed: List[str] = list(unreviewed or [])
+
+
+# Whole-string (not substring) match so a real, substantive suggestion that
+# merely mentions "no changes"/"no action" in passing is never dropped -- only
+# a suggestion that IS, in its entirety, an admission that nothing needs to
+# change.
+_NO_OP_SUGGESTION_RE = re.compile(
+    r"^(?:no (?:code )?(?:changes?|fix(?:es)?|action) (?:is |are )?"
+    r"(?:needed|required|necessary)|nothing to (?:change|fix|do))\.?$",
+    re.IGNORECASE,
+)
+
+
+def is_no_op_suggestion(suggestion: str) -> bool:
+    """True when a suggestion states, in full, that no code change is needed.
+
+    A finding whose own suggested fix says "no change(s) needed/required" (or
+    an equivalent no-op phrasing) is the reviewer's own admission that there
+    is nothing to do -- it is not an actionable issue and must not be
+    reported as one.
+
+    Postconditions:
+        - Returns True only when ``suggestion``, stripped, matches a known
+          no-op phrasing in its entirety (case-insensitive); a suggestion
+          that contains such wording alongside other content is NOT a match.
+        - A blank/None suggestion returns False -- no suggestion given is not
+          the same as an explicit "no change needed".
+    """
+    text = (suggestion or "").strip()
+    if not text:
+        return False
+    return bool(_NO_OP_SUGGESTION_RE.match(text))
 
 
 def coerce_line(value: Any) -> Optional[int]:

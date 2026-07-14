@@ -63,7 +63,7 @@ from software_engineering_team.shared.models import SystemArchitecture
 from .architecture_context import render_architecture_context
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for
 from .model_resolution import resolve_code_review_model
-from .models import CodeReviewInput, CodeReviewIssue, coerce_line
+from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_suggestion
 from .profiles import ReviewProfile
 from .prompts import ARCHITECTURE_CONSISTENCY_PROMPT
 from .repo_reader import RepoReader
@@ -174,11 +174,13 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
     Postconditions:
         - Returns None for a non-dict item, an unrecognized/missing
           ``category`` (only ``"architecture"``/``"refactor"`` are accepted —
-          this pass's whole purpose is those two axes), or a blank
-          ``description`` (an unactionable finding is worse than none). An
-          unrecognized ``severity`` defaults to ``"medium"`` rather than being
-          dropped, matching this pass's default-severity guidance. Never
-          raises on malformed input.
+          this pass's whole purpose is those two axes), a blank
+          ``description`` (an unactionable finding is worse than none), or a
+          ``suggestion`` that is, in its entirety, a no-op phrasing (e.g. "No
+          changes needed.") -- see ``is_no_op_suggestion``. An unrecognized
+          ``severity`` defaults to ``"medium"`` rather than being dropped,
+          matching this pass's default-severity guidance. Never raises on
+          malformed input.
     """
     if not isinstance(item, dict):
         return None
@@ -187,6 +189,9 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
         return None
     description = str(item.get("description", "") or "").strip()
     if not description:
+        return None
+    suggestion = str(item.get("suggestion", "") or "").strip()
+    if is_no_op_suggestion(suggestion):
         return None
     severity = str(item.get("severity", "") or "").strip().lower()
     if severity not in _ALLOWED_SEVERITIES:
@@ -197,7 +202,7 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
         file_path=str(item.get("file_path", "") or "").strip(),
         line=coerce_line(item.get("line")),
         description=description,
-        suggestion=str(item.get("suggestion", "") or "").strip(),
+        suggestion=suggestion,
     )
 
 

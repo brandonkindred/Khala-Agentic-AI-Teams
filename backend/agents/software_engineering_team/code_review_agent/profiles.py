@@ -111,7 +111,9 @@ _SHARED_OUTPUT_SECTION = (
     "that exact prefixed number. REQUIRED when the issue is tied to a specific line; OMIT it for "
     "file-wide or structural issues.\n"
     '  - "description": string (clear description of the issue)\n'
-    '  - "suggestion": string (concrete fix recommendation)\n'
+    '  - "suggestion": string (concrete fix recommendation). If there is nothing to change, do NOT '
+    'include the finding in "issues" at all -- a finding whose only "suggestion" would be "no '
+    'changes needed" is not an issue.\n'
     '- "summary": string. A brief, high-level overview for the developer. Do NOT restate what the '
     "PR does or is meant to accomplish. When any issue was found, do NOT praise the implementation "
     "(do not call it sound, well-structured, or well-implemented) and do NOT claim it aligns with "
