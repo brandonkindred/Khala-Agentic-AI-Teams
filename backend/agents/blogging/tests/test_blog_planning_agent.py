@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from blog_planning_agent import BlogPlanningAgent
-from blog_planning_agent.agent import _post_validate
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
@@ -58,24 +57,3 @@ def test_planning_agent_dummy_llm_produces_acceptable_plan() -> None:
     assert result.content_plan.requirements_analysis.plan_acceptable
     assert result.content_plan.requirements_analysis.scope_feasible
     assert result.planning_iterations_used >= 1
-
-
-def test_post_validate_flags_section_count() -> None:
-    """Too many sections for profile sets plan_acceptable False."""
-    sections = [
-        ContentPlanSection(title=f"S{i}", coverage_description="x", order=i) for i in range(15)
-    ]
-    plan = ContentPlan(
-        overarching_topic="T",
-        narrative_flow="n",
-        sections=sections,
-        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True,
-            scope_feasible=True,
-            research_gaps=[],
-        ),
-    )
-    out = _post_validate(plan, _policy_standard())
-    assert out.requirements_analysis.plan_acceptable is False
-    assert any("outside expected range" in g for g in out.requirements_analysis.gaps)

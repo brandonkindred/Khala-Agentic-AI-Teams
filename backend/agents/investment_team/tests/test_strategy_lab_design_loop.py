@@ -749,6 +749,77 @@ def test_trial_compile_runs_on_readiness_clean_spec(monkeypatch: pytest.MonkeyPa
     assert record.strategy.requires_custom_code is True
 
 
+def test_preflight_demotes_overelected_custom_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spec the LLM flagged ``requires_custom_code=True`` but which compiles
+    cleanly is over-elected onto the drift-prone custom path. The pre-flight
+    trial-compile demotes it back to the faithful compiled path: a
+    ``compiler_demote`` design_repair fires and the persisted spec carries
+    ``requires_custom_code=False``."""
+    orch = StrategyLabOrchestrator()
+
+    overelected = {**_spec_dict(), "requires_custom_code": True}
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (overelected, "scripted"))
+    monkeypatch.setattr(
+        orch.design_review_agent, "run", lambda *a, **kw: SpecCritique(ready=True, rationale="ok")
+    )
+
+    revise_calls = {"n": 0}
+
+    def _revise(*_a, **_kw) -> Tuple[Dict[str, Any], str]:
+        revise_calls["n"] += 1
+        return overelected, "should-not-be-used"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+    # Real compiler decides demotion (the RSI spec compiles); stub only the
+    # downstream synthesis + market-data so the cycle completes cheaply.
+    _force_synthesis_skip(monkeypatch, orch, _VALID_CODE)
+    _short_circuit_synthesis(monkeypatch)
+
+    events: list = []
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        on_phase=lambda phase, data: events.append((phase, data)),
+    )
+
+    assert revise_calls["n"] == 0
+    repair_events = [d for p, d in events if p == "design_repair"]
+    assert len(repair_events) == 1
+    assert any(a["rule"] == "compiler_demote" for a in repair_events[0]["actions"])
+    # Demoted to the faithful compiled path.
+    assert record.strategy.requires_custom_code is False
+
+
+def test_preflight_demotion_toggle_off_keeps_custom_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``STRATEGY_LAB_DEMOTE_COMPILABLE_CUSTOM_CODE`` disabled, an
+    over-elected compilable spec is left on the custom path — the escape hatch
+    for a lossy-but-compilable spec an operator wants to keep as custom code."""
+    monkeypatch.setenv("STRATEGY_LAB_DEMOTE_COMPILABLE_CUSTOM_CODE", "false")
+    orch = StrategyLabOrchestrator()
+
+    overelected = {**_spec_dict(), "requires_custom_code": True}
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (overelected, "scripted"))
+    monkeypatch.setattr(
+        orch.design_review_agent, "run", lambda *a, **kw: SpecCritique(ready=True, rationale="ok")
+    )
+    monkeypatch.setattr(orch.design_agent, "revise", lambda *a, **kw: (overelected, "x"))
+    _force_synthesis_skip(monkeypatch, orch, _VALID_CODE)
+    _short_circuit_synthesis(monkeypatch)
+
+    events: list = []
+    record = orch.run_cycle(
+        prior_records=[],
+        config=_config(),
+        on_phase=lambda phase, data: events.append((phase, data)),
+    )
+
+    repair_events = [d for p, d in events if p == "design_repair"]
+    assert not any(a["rule"] == "compiler_demote" for d in repair_events for a in d["actions"])
+    assert record.strategy.requires_custom_code is True
+
+
 def test_budget_exhaustion_after_repair_preserves_repaired_spec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
