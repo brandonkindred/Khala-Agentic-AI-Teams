@@ -142,7 +142,7 @@ def test_format_indicator_ref_handles_all_indicator_families() -> None:
     assert _format_indicator_ref(IndicatorRef(name="atr")) == "atr(14)"
     assert _format_indicator_ref(IndicatorRef(name="adx")) == "adx(14)"
     assert _format_indicator_ref(IndicatorRef(name="stochastic")) == "stochastic_k(14,3)"
-    assert _format_indicator_ref(IndicatorRef(name="vwap")) == "vwap()"
+    assert _format_indicator_ref(IndicatorRef(name="vwap")) == "vwap(20)"
 
 
 def test_format_indicator_ref_with_alt_source_appends_modifier() -> None:

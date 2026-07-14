@@ -66,7 +66,17 @@ class RSI(_NodeBase):
 
 
 class MACDSignal(_NodeBase):
-    """MACD signal-line value (EMA of the MACD line)."""
+    """MACD signal-line value (EMA of the MACD line).
+
+    Lookback is ``slow + signal - 1`` (the signal-EMA seeds once ``signal``
+    macd-line samples exist, the first of which needs ``slow`` bars) — see
+    ``compiler._lookback``'s ``MACDSignal`` branch for the full formula and
+    its cross-reference to ``registry_metadata.lookback_for``. Prior
+    revisions used ``slow + signal`` (one bar later); genomes compiled
+    against that older formula fire signals one bar earlier now, so
+    persisted backtest output predating the fix will not bit-reproduce
+    against re-runs through the corrected compiler.
+    """
 
     type: Literal["macd_signal"] = "macd_signal"
     fast: int = Field(default=12, ge=2, le=200)
@@ -109,7 +119,26 @@ class MomentumK(_NodeBase):
 
 
 class ZScoreResidualOLS(_NodeBase):
-    """Z-score of the rolling-OLS residual of close vs ``vs_symbol`` close."""
+    """Z-score of the rolling-OLS residual of close vs ``vs_symbol`` close.
+
+    ``window`` is NOT currently consulted by ``compiler._lookback`` — the
+    aux cross-symbol feed isn't wired yet (the compiled body unconditionally
+    returns NAN), so the lookback is pinned to a minimal constant instead of
+    ``window`` to avoid inflating a genome's warm-up requirement for a
+    primitive that can never contribute a value. Restore
+    ``compiler._lookback``'s ``ZScoreResidualOLS`` branch to ``node.window``
+    when the aux feed lands and the body computes a real OLS residual.
+
+    BACKWARDS-COMPATIBILITY WARNING: a genome's overall warm-up gate
+    (``MIN_HISTORY``) is the max lookback over every node, so pinning this
+    dead node's lookback to a minimal constant also lowers the warm-up gate
+    of the WHOLE genome when this node was its deepest one. A composite
+    genome pairing it with a faster live signal now begins submitting
+    entries as soon as the live branch is warm instead of waiting up to
+    ``window`` (400) bars — an intentional un-inflation (the dead branch
+    never fired), but one that changes trade timing and will not
+    bit-reproduce stored backtest artefacts for such genomes.
+    """
 
     type: Literal["zscore_residual_ols"] = "zscore_residual_ols"
     window: int = Field(default=60, ge=10, le=400)
