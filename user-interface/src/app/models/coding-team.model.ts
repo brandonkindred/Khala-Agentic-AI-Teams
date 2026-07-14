@@ -96,8 +96,11 @@ export interface CodingTeamJobListItem {
   github_context?: CodingTeamGitHubContext;
 }
 
-/** Summary of a posted PR review (from the /review-pr flow). */
-/** One occurrence of a combined proposal's underlying issue. */
+/**
+ * One occurrence of a combined proposal's underlying issue — the file/line
+ * and per-finding description/suggestion of a single similar finding that
+ * was grouped into a `PendingIssueProposal` with others like it.
+ */
 export interface PendingIssueProposalLocation {
   file_path: string;
   line: number | null;
@@ -128,6 +131,7 @@ export interface PendingIssueProposal {
   issue_url?: string | null;
 }
 
+/** Summary of a posted PR review (from the /review-pr flow), returned by the backend. */
 export interface CodeReviewSummary {
   total_issues: number;
   inline_comments: number;

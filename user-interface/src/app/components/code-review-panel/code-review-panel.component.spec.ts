@@ -705,6 +705,9 @@ describe('CodeReviewPanelComponent', () => {
   // -------------------------------------------------------------------------
   // Pre-existing-bug proposals -> GitHub issues
   // -------------------------------------------------------------------------
+  // Proposal formatting/selection now live in PendingIssueProposalsComponent
+  // (see pending-issue-proposals.component.spec.ts); this component only
+  // gates whether that child is shown and owns the actual create-issues call.
 
   function proposal(id: string, over: Record<string, unknown> = {}): PendingIssueProposal {
     return {
@@ -742,52 +745,10 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.hasProposals(running)).toBe(false);
     const done = terminalRecordWith([proposal('p0')]);
     expect(component.hasProposals(done)).toBe(true);
-    expect(component.proposalsFor(done).length).toBe(1);
-    expect(component.openProposals(done).length).toBe(1);
+    expect(component.hasProposals(terminalRecordWith([]))).toBe(false);
   });
 
-  it('formats a proposal location (path:line, path, or empty)', async () => {
-    await setup();
-    expect(component.proposalLocation(proposal('p0'))).toBe('a.py:3');
-    expect(component.proposalLocation(proposal('p0', { line: null }))).toBe('a.py');
-    expect(component.proposalLocation(proposal('p0', { file_path: '', line: null }))).toBe('');
-  });
-
-  it('formats a combined proposal location as an occurrence count', async () => {
-    await setup();
-    const combined = proposal('p0', {
-      locations: [
-        { file_path: 'a.py', line: 1, description: 'bare import `os`', suggestion: 'scope it' },
-        { file_path: 'b.py', line: 5, description: 'bare import `sys`', suggestion: 'scope it' },
-      ],
-    });
-    expect(component.isCombinedProposal(combined)).toBe(true);
-    expect(component.proposalLocation(combined)).toBe('2 locations');
-    expect(component.isCombinedProposal(proposal('p0'))).toBe(false);
-  });
-
-  it('formats a single location as path:line, path, or empty', async () => {
-    await setup();
-    expect(component.locationText({ file_path: 'a.py', line: 3, description: '', suggestion: '' }))
-      .toBe('a.py:3');
-    expect(component.locationText({ file_path: 'a.py', line: null, description: '', suggestion: '' }))
-      .toBe('a.py');
-    expect(component.locationText({ file_path: '', line: null, description: '', suggestion: '' }))
-      .toBe('');
-  });
-
-  it('toggles proposal selection and tracks the count', async () => {
-    await setup();
-    expect(component.isProposalSelected('j1', 'p0')).toBe(false);
-    component.toggleProposal('j1', 'p0');
-    expect(component.isProposalSelected('j1', 'p0')).toBe(true);
-    expect(component.selectedCount('j1')).toBe(1);
-    component.toggleProposal('j1', 'p0');
-    expect(component.isProposalSelected('j1', 'p0')).toBe(false);
-    expect(component.selectedCount('j1')).toBe(0);
-  });
-
-  it('files selected proposals and merges the updated list back', async () => {
+  it('files the given proposal ids and merges the updated list back', async () => {
     await setup();
     const rec = terminalRecordWith([proposal('p0'), proposal('p1')]);
     integrationsSpy.createGitHubReviewIssues.mockReturnValue(
@@ -802,53 +763,23 @@ describe('CodeReviewPanelComponent', () => {
         ],
       }),
     );
-    component.toggleProposal('j1', 'p0');
-    component.createIssuesFor(rec);
+    component.createIssuesFor(rec, ['p0']);
     expect(integrationsSpy.createGitHubReviewIssues).toHaveBeenCalledWith(
       'acme',
       'widgets',
       'j1',
       ['p0'],
     );
-    // The record's proposals now reflect the filed issue; selection is cleared.
+    // The record's proposals now reflect the filed issue.
     expect(rec.reviewSummary?.pending_issue_proposals?.[0].issue_url).toBe('https://x/issues/5');
-    expect(component.selectedCount('j1')).toBe(0);
-    expect(component.openProposals(rec).length).toBe(1);
     expect(component.isCreatingIssues('j1')).toBe(false);
   });
 
-  it('does nothing when creating issues with no selection', async () => {
+  it('does nothing when creating issues with no ids', async () => {
     await setup();
     const rec = terminalRecordWith([proposal('p0')]);
-    component.createIssuesFor(rec);
+    component.createIssuesFor(rec, []);
     expect(integrationsSpy.createGitHubReviewIssues).not.toHaveBeenCalled();
-  });
-
-  it('drops a proposal skipped server-side from the selection, not just the ones it created', async () => {
-    await setup();
-    const rec = terminalRecordWith([proposal('p0'), proposal('p1')]);
-    // p1 was already filed by another tab before this request landed: the
-    // server skips it (not in `created`) but the returned proposals already
-    // show its issue_url set.
-    integrationsSpy.createGitHubReviewIssues.mockReturnValue(
-      of({
-        job_id: 'j1',
-        created: [
-          { proposal_id: 'p0', issue_number: 5, issue_url: 'https://x/issues/5', title: 't' },
-        ],
-        proposals: [
-          proposal('p0', { issue_number: 5, issue_url: 'https://x/issues/5' }),
-          proposal('p1', { issue_number: 9, issue_url: 'https://x/issues/9' }),
-        ],
-      }),
-    );
-    component.toggleProposal('j1', 'p0');
-    component.toggleProposal('j1', 'p1');
-    component.createIssuesFor(rec);
-    // Both are gone from the selection — p0 because it was just created, p1
-    // because the updated proposal list shows it is no longer open — instead
-    // of p1 lingering selected forever because it was never in `created`.
-    expect(component.selectedCount('j1')).toBe(0);
   });
 
   it('surfaces a create-issue error', async () => {
@@ -857,8 +788,7 @@ describe('CodeReviewPanelComponent', () => {
     integrationsSpy.createGitHubReviewIssues.mockReturnValue(
       throwError(() => ({ error: { detail: 'no scope' } })),
     );
-    component.toggleProposal('j1', 'p0');
-    component.createIssuesFor(rec);
+    component.createIssuesFor(rec, ['p0']);
     expect(component.createIssueErrorFor('j1')).toBe('no scope');
     expect(component.isCreatingIssues('j1')).toBe(false);
   });
