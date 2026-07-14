@@ -164,7 +164,7 @@ def test_auto_answer_question_happy(monkeypatch) -> None:
         }
 
     monkeypatch.setattr(auto_answer, "complete_json_with_continuation", _fake_complete_json)
-    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key: None)
+    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key, **kw: None)
     q = _question()
     result = auto_answer.auto_answer_question(
         llm=None, question=q, spec_content="some spec", additional_context="extra"
@@ -180,7 +180,7 @@ def test_auto_answer_question_llm_exception_uses_default(monkeypatch) -> None:
         raise RuntimeError("LLM down")
 
     monkeypatch.setattr(auto_answer, "complete_json_with_continuation", _raise_complete_json)
-    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key: None)
+    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key, **kw: None)
     q = _question()
     result = auto_answer.auto_answer_question(llm=None, question=q, spec_content="")
     assert result.selected_option_id == "opt1"  # fell back to default
@@ -194,10 +194,49 @@ def test_auto_answer_question_no_options_unknown(monkeypatch) -> None:
         raise RuntimeError("boom")
 
     monkeypatch.setattr(auto_answer, "complete_json_with_continuation", _raise_complete_json)
-    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key: None)
+    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key, **kw: None)
     q = _question(options=[])
     result = auto_answer.auto_answer_question(llm=None, question=q, spec_content="")
     assert result.selected_option_id == "unknown"
+
+
+def test_auto_answer_question_uses_provided_llm_client(monkeypatch) -> None:
+    """A real LLMClient passed as ``llm`` must actually reach
+    get_strands_model(..., client=<that object>) via resolve_strands_model,
+    instead of being silently ignored in favor of a hardcoded default model
+    (the bug an automated review flagged on this migration's own PR).
+
+    Uses a plain ``LLMClient`` (not ``DummyLLMClient``, which also implements
+    the Strands ``Model`` ABC and would short-circuit resolve_strands_model's
+    first branch, returning itself without ever reaching get_strands_model)."""
+    from llm_service import LLMClient
+    from software_engineering_team.product_requirements_analysis_agent import auto_answer
+    from software_engineering_team.tests.conftest import _strands_model_double
+
+    class _PlainLLMClient(LLMClient):
+        def complete_json(self, prompt, *, objective="", **kwargs):
+            raise AssertionError("complete_json_with_continuation is mocked; should not be called")
+
+    calls = []
+
+    def _spy_get_strands_model(agent_key, **kwargs):
+        calls.append((agent_key, kwargs))
+        return _strands_model_double()
+
+    def _fake_complete_json(model, prompt, *, system_prompt=None, **kwargs):
+        return {"selected_option_id": "opt1", "rationale": "used my client", "confidence": 0.9}
+
+    my_llm = _PlainLLMClient()
+    monkeypatch.setattr(auto_answer, "complete_json_with_continuation", _fake_complete_json)
+    monkeypatch.setattr(auto_answer, "get_strands_model", _spy_get_strands_model)
+    q = _question()
+    result = auto_answer.auto_answer_question(llm=my_llm, question=q, spec_content="some spec")
+
+    assert result.selected_option_id == "opt1"
+    assert len(calls) == 1
+    agent_key, kwargs = calls[0]
+    assert agent_key == "product_analysis"
+    assert kwargs.get("client") is my_llm
 
 
 def test_auto_answer_question_recovers_fenced_json_response(monkeypatch) -> None:
@@ -217,7 +256,7 @@ def test_auto_answer_question_recovers_fenced_json_response(monkeypatch) -> None
         "risks": [],
     }
     _patch_fenced_response(monkeypatch, payload)
-    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key: _strands_model_double())
+    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key, **kw: _strands_model_double())
     q = _question()
     result = auto_answer.auto_answer_question(llm=None, question=q, spec_content="some spec")
     assert result.selected_option_id == "opt1"
@@ -231,7 +270,7 @@ def test_auto_answer_all_questions(monkeypatch) -> None:
         return {"selected_option_id": "opt1", "rationale": "r", "confidence": 0.7}
 
     monkeypatch.setattr(auto_answer, "complete_json_with_continuation", _fake_complete_json)
-    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key: None)
+    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key, **kw: None)
     questions = [_question(id="q1"), _question(id="q2")]
     results = auto_answer.auto_answer_all_questions(llm=None, questions=questions, spec_content="")
     assert len(results) == 2
@@ -312,7 +351,7 @@ def test_get_auto_answer_for_job_happy(monkeypatch, patched_job_store) -> None:
         return {"selected_option_id": "o1", "rationale": "r", "confidence": 0.7}
 
     monkeypatch.setattr(auto_answer, "complete_json_with_continuation", _fake_complete_json)
-    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key: None)
+    monkeypatch.setattr(auto_answer, "get_strands_model", lambda key, **kw: None)
     js.create_job("job1", repo_path="/tmp")
     js.update_job(
         "job1",

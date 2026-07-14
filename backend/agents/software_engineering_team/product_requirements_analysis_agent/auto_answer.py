@@ -11,6 +11,7 @@ import logging
 from typing import Any, List, Optional
 
 from llm_service import LLMClient, get_strands_model
+from llm_service.strands_model import resolve_strands_model
 from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import AutoAnswerResult, OpenQuestion, QuestionOption
@@ -128,7 +129,9 @@ def auto_answer_question(
 
     try:
         raw = complete_json_with_continuation(
-            get_strands_model("product_analysis"),
+            resolve_strands_model(
+                llm, agent_key="product_analysis", get_strands_model_fn=get_strands_model
+            ),
             prompt,
             system_prompt="Respond with valid JSON only.",
         )
