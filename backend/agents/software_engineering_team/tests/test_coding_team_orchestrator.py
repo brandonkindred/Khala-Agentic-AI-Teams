@@ -16,6 +16,8 @@ from typing import Any, Dict, List
 import pytest
 
 from software_engineering_team.coding_team import orchestrator as orch_mod
+from software_engineering_team.coding_team import progress_config as progress_mod
+from software_engineering_team.coding_team import repo_context as repo_ctx
 from software_engineering_team.coding_team.models import (
     CodingTeamPlanInput,
     StackSpec,
@@ -1443,7 +1445,7 @@ def test_in_review_task_is_not_reimplemented(tmp_path):
 def test_read_repo_context_includes_markdown(tmp_path):
     """Markdown docs must be visible in repo context so a docs task does not see an 'empty' repo."""
     (tmp_path / "spec.md").write_text("# Spec\nThe plan lives here.")
-    ctx = orch_mod._read_repo_context(tmp_path)
+    ctx = repo_ctx._read_repo_context(tmp_path)
     assert "spec.md" in ctx
     assert "The plan lives here." in ctx
 
@@ -1464,7 +1466,7 @@ def test_read_repo_context_is_not_truncated(tmp_path):
     for i in range(10):
         (tmp_path / f"mod_{i:02d}.py").write_text(f"VALUE_{i:02d} = " + "'" + ("x" * 1000) + "'\n")
 
-    ctx = orch_mod._read_repo_context(tmp_path)
+    ctx = repo_ctx._read_repo_context(tmp_path)
 
     assert big_tail in ctx  # full file contents, not a 500-char prefix
     assert len(ctx) > 4000  # no total-size budget cut the briefing short
@@ -1483,7 +1485,7 @@ def test_read_repo_context_prunes_excluded_dirs(tmp_path):
     git.mkdir()
     (git / "config.py").write_text("GIT_INTERNAL = 1")
 
-    ctx = orch_mod._read_repo_context(tmp_path)
+    ctx = repo_ctx._read_repo_context(tmp_path)
 
     assert "real.py" in ctx
     assert "REAL_SOURCE" in ctx
@@ -1502,7 +1504,7 @@ def test_read_repo_context_skips_special_files_without_hanging(tmp_path):
     os.mkfifo(str(tmp_path / "pipe.py"))  # code-suffixed special file
 
     # If the is_file() guard regressed, this call would block forever on the FIFO.
-    ctx = orch_mod._read_repo_context(tmp_path)
+    ctx = repo_ctx._read_repo_context(tmp_path)
 
     assert "REAL = 1" in ctx
     assert "pipe.py" not in ctx
@@ -1808,13 +1810,13 @@ def test_in_progress_implementation_is_bounded(tmp_path, monkeypatch):
 def test_no_change_revisit_cap_env_parsing(monkeypatch):
     """Cap parses defensively: garbage → default, floored at 1, never disabled."""
     monkeypatch.delenv("CODING_TEAM_NO_CHANGE_REVISIT_CAP", raising=False)
-    assert orch_mod._no_change_revisit_cap() == orch_mod.NO_CHANGE_REVISIT_CAP
+    assert progress_mod._no_change_revisit_cap() == progress_mod.NO_CHANGE_REVISIT_CAP
     monkeypatch.setenv("CODING_TEAM_NO_CHANGE_REVISIT_CAP", "7")
-    assert orch_mod._no_change_revisit_cap() == 7
+    assert progress_mod._no_change_revisit_cap() == 7
     monkeypatch.setenv("CODING_TEAM_NO_CHANGE_REVISIT_CAP", "garbage")
-    assert orch_mod._no_change_revisit_cap() == orch_mod.NO_CHANGE_REVISIT_CAP
+    assert progress_mod._no_change_revisit_cap() == progress_mod.NO_CHANGE_REVISIT_CAP
     monkeypatch.setenv("CODING_TEAM_NO_CHANGE_REVISIT_CAP", "0")
-    assert orch_mod._no_change_revisit_cap() == 1  # floored, guard can never be disabled
+    assert progress_mod._no_change_revisit_cap() == 1  # floored, guard can never be disabled
 
 
 def test_note_revision_progress_counts_no_change_then_resets(tmp_path, monkeypatch):
@@ -2543,15 +2545,15 @@ def test_coding_progress_maps_terminal_share_onto_band():
         )
 
     for base, span in [(0, 95), (30, 65)]:
-        assert orch_mod._coding_progress([], base, span) == base
-        assert orch_mod._coding_progress(tasks(0, 0, 4), base, span) == base
-        half = orch_mod._coding_progress(tasks(1, 1, 2), base, span)
-        full = orch_mod._coding_progress(tasks(3, 1, 0), base, span)
+        assert progress_mod._coding_progress([], base, span) == base
+        assert progress_mod._coding_progress(tasks(0, 0, 4), base, span) == base
+        half = progress_mod._coding_progress(tasks(1, 1, 2), base, span)
+        full = progress_mod._coding_progress(tasks(3, 1, 0), base, span)
         assert base <= half <= full == base + span <= 100
 
     # An impossible band is a caller bug, not something to render.
     with pytest.raises(AssertionError):
-        orch_mod._coding_progress([], 50, 60)
+        progress_mod._coding_progress([], 50, 60)
 
 
 def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeypatch):
@@ -2599,9 +2601,9 @@ def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeyp
 
     progresses = [kw["progress"] for kw in updates if "progress" in kw]
     assert progresses, "orchestrator must write job-level progress"
-    assert progresses[0] == orch_mod._DEFAULT_PROGRESS_BASE
+    assert progresses[0] == progress_mod._DEFAULT_PROGRESS_BASE
     # 1 of 2 tasks terminal mid-run
-    expected_mid = orch_mod._DEFAULT_PROGRESS_BASE + int(orch_mod._DEFAULT_PROGRESS_SPAN / 2)
+    expected_mid = progress_mod._DEFAULT_PROGRESS_BASE + int(progress_mod._DEFAULT_PROGRESS_SPAN / 2)
     assert expected_mid in progresses
     assert progresses[-1] == 100
     assert progresses == sorted(progresses), "progress must be monotone non-decreasing"
@@ -2647,7 +2649,7 @@ def test_orchestrator_resume_never_regresses_progress(tmp_path, monkeypatch):
     )
 
     progresses = [kw["progress"] for kw in updates if "progress" in kw]
-    restored = orch_mod._DEFAULT_PROGRESS_BASE + int(orch_mod._DEFAULT_PROGRESS_SPAN / 2)
+    restored = progress_mod._DEFAULT_PROGRESS_BASE + int(progress_mod._DEFAULT_PROGRESS_SPAN / 2)
     assert progresses[0] == restored, "restored persist must reflect merged tasks"
     assert progresses == sorted(progresses), "no write may regress the bar on resume"
     assert progresses[-1] == 100
@@ -3101,13 +3103,13 @@ def test_review_fanout_exception_fails_only_that_task_once(tmp_path, monkeypatch
 def test_review_concurrency_env_parsing(monkeypatch):
     """CODING_TEAM_REVIEW_CONCURRENCY: default when unset/garbage, floored at 1, honored otherwise."""
     monkeypatch.delenv("CODING_TEAM_REVIEW_CONCURRENCY", raising=False)
-    assert orch_mod._review_concurrency() == orch_mod.REVIEW_CONCURRENCY
+    assert progress_mod._review_concurrency() == progress_mod.REVIEW_CONCURRENCY
     monkeypatch.setenv("CODING_TEAM_REVIEW_CONCURRENCY", "not-a-number")
-    assert orch_mod._review_concurrency() == orch_mod.REVIEW_CONCURRENCY
+    assert progress_mod._review_concurrency() == progress_mod.REVIEW_CONCURRENCY
     monkeypatch.setenv("CODING_TEAM_REVIEW_CONCURRENCY", "0")
-    assert orch_mod._review_concurrency() == 1  # floored so review always progresses
+    assert progress_mod._review_concurrency() == 1  # floored so review always progresses
     monkeypatch.setenv("CODING_TEAM_REVIEW_CONCURRENCY", "7")
-    assert orch_mod._review_concurrency() == 7
+    assert progress_mod._review_concurrency() == 7
 
 
 # --------------------------------------------------- implementation-worker fan-out (worktrees)
@@ -3338,15 +3340,15 @@ def test_implementation_concurrency_env_parsing(monkeypatch):
     """CODING_TEAM_IMPLEMENTATION_CONCURRENCY: default when unset/garbage, floored at 1, honored
     otherwise."""
     monkeypatch.delenv("CODING_TEAM_IMPLEMENTATION_CONCURRENCY", raising=False)
-    assert orch_mod._implementation_concurrency() == orch_mod.IMPLEMENTATION_CONCURRENCY
+    assert progress_mod._implementation_concurrency() == progress_mod.IMPLEMENTATION_CONCURRENCY
     monkeypatch.setenv("CODING_TEAM_IMPLEMENTATION_CONCURRENCY", "not-a-number")
-    assert orch_mod._implementation_concurrency() == orch_mod.IMPLEMENTATION_CONCURRENCY
+    assert progress_mod._implementation_concurrency() == progress_mod.IMPLEMENTATION_CONCURRENCY
     monkeypatch.setenv("CODING_TEAM_IMPLEMENTATION_CONCURRENCY", "0")
     assert (
-        orch_mod._implementation_concurrency() == 1
+        progress_mod._implementation_concurrency() == 1
     )  # floored so implementation always progresses
     monkeypatch.setenv("CODING_TEAM_IMPLEMENTATION_CONCURRENCY", "7")
-    assert orch_mod._implementation_concurrency() == 7
+    assert progress_mod._implementation_concurrency() == 7
 
 
 def test_run_cleans_up_worktrees_on_normal_completion(tmp_path, monkeypatch):
@@ -3434,13 +3436,13 @@ def test_repo_context_cache_matches_read_repo_context(tmp_path):
     """The cache renders the same briefing string as the full-read function for the same state."""
     (tmp_path / "a.py").write_text("A = 1")
     (tmp_path / "b.md").write_text("# doc")
-    cache = orch_mod._RepoContextCache()
-    assert cache.read(tmp_path) == orch_mod._read_repo_context(tmp_path)
+    cache = repo_ctx._RepoContextCache()
+    assert cache.read(tmp_path) == repo_ctx._read_repo_context(tmp_path)
 
 
 def test_repo_context_cache_empty_repo(tmp_path):
     """An empty repo yields the sentinel, identical to _read_repo_context."""
-    cache = orch_mod._RepoContextCache()
+    cache = repo_ctx._RepoContextCache()
     assert cache.read(tmp_path) == "No files found"
 
 
@@ -3448,18 +3450,18 @@ def test_repo_context_cache_reuses_unchanged_rereads_changed(tmp_path, monkeypat
     """A second read re-renders only files whose (mtime, size) changed; unchanged files are reused."""
     (tmp_path / "a.py").write_text("A = 1")
     (tmp_path / "b.py").write_text("B = 1")
-    cache = orch_mod._RepoContextCache()
+    cache = repo_ctx._RepoContextCache()
     first = cache.read(tmp_path)  # populates the cache (renders both)
 
     # Instrument renders that happen AFTER the cache is warm.
     rendered: List[str] = []
-    real_render = orch_mod._render_context_file
+    real_render = repo_ctx._render_context_file
 
     def _counting_render(f, repo_path):
         rendered.append(f.name)
         return real_render(f, repo_path)
 
-    monkeypatch.setattr(orch_mod, "_render_context_file", _counting_render)
+    monkeypatch.setattr(repo_ctx, "_render_context_file", _counting_render)
 
     second = cache.read(tmp_path)
     assert second == first
@@ -3477,7 +3479,7 @@ def test_repo_context_cache_drops_removed_files(tmp_path):
     """A file removed between reads leaves the briefing and the internal cache."""
     (tmp_path / "a.py").write_text("A = 1")
     (tmp_path / "b.py").write_text("B = 1")
-    cache = orch_mod._RepoContextCache()
+    cache = repo_ctx._RepoContextCache()
     cache.read(tmp_path)
 
     (tmp_path / "b.py").unlink()
@@ -3491,7 +3493,7 @@ def test_repo_context_cache_drops_removed_files(tmp_path):
 def test_repo_context_cache_reflects_new_files(tmp_path):
     """A file added between reads appears in the next briefing (mirrors the round-refresh contract)."""
     (tmp_path / "a.py").write_text("A = 1")
-    cache = orch_mod._RepoContextCache()
+    cache = repo_ctx._RepoContextCache()
     cache.read(tmp_path)
 
     (tmp_path / "notes.md").write_text("fresh notes")
@@ -3510,7 +3512,7 @@ def test_render_context_file_returns_none_on_read_error(tmp_path, monkeypatch):
         raise OSError("unreadable")
 
     monkeypatch.setattr(Path, "read_text", _boom)
-    assert orch_mod._render_context_file(f, tmp_path) is None
+    assert repo_ctx._render_context_file(f, tmp_path) is None
 
 
 def test_render_context_file_logs_debug_on_read_error(tmp_path, monkeypatch, caplog):
@@ -3522,8 +3524,8 @@ def test_render_context_file_logs_debug_on_read_error(tmp_path, monkeypatch, cap
         raise OSError("unreadable")
 
     monkeypatch.setattr(Path, "read_text", _boom)
-    with caplog.at_level(logging.DEBUG, logger=orch_mod.logger.name):
-        assert orch_mod._render_context_file(f, tmp_path) is None
+    with caplog.at_level(logging.DEBUG, logger=repo_ctx.logger.name):
+        assert repo_ctx._render_context_file(f, tmp_path) is None
 
     debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
     assert any(str(f) in r.getMessage() for r in debug_records)
@@ -3533,24 +3535,24 @@ def test_render_context_file_logs_debug_on_read_error(tmp_path, monkeypatch, cap
 def test_enumerate_context_files_survives_walk_error(tmp_path, monkeypatch):
     """An os.walk failure is best-effort: it yields no files rather than raising."""
     monkeypatch.setattr(
-        orch_mod.os, "walk", lambda *_a, **_k: (_ for _ in ()).throw(OSError("nope"))
+        repo_ctx.os, "walk", lambda *_a, **_k: (_ for _ in ()).throw(OSError("nope"))
     )
-    assert orch_mod._enumerate_context_files(tmp_path) == []
+    assert repo_ctx._enumerate_context_files(tmp_path) == []
 
 
 def test_repo_context_cache_skips_unstattable_file(tmp_path, monkeypatch):
     """A file that cannot be stat-ed between walk and read is skipped (best-effort)."""
-    monkeypatch.setattr(orch_mod, "_enumerate_context_files", lambda p: [tmp_path / "ghost.py"])
-    cache = orch_mod._RepoContextCache()
+    monkeypatch.setattr(repo_ctx, "_enumerate_context_files", lambda p: [tmp_path / "ghost.py"])
+    cache = repo_ctx._RepoContextCache()
     assert cache.read(tmp_path) == "No files found"  # ghost stat raises → skipped
     assert cache._entries == {}
 
 
 def test_repo_context_cache_logs_debug_on_stat_error(tmp_path, monkeypatch, caplog):
     """A stat failure between walk and stat is logged at DEBUG with exc_info."""
-    monkeypatch.setattr(orch_mod, "_enumerate_context_files", lambda p: [tmp_path / "ghost.py"])
-    cache = orch_mod._RepoContextCache()
-    with caplog.at_level(logging.DEBUG, logger=orch_mod.logger.name):
+    monkeypatch.setattr(repo_ctx, "_enumerate_context_files", lambda p: [tmp_path / "ghost.py"])
+    cache = repo_ctx._RepoContextCache()
+    with caplog.at_level(logging.DEBUG, logger=repo_ctx.logger.name):
         assert cache.read(tmp_path) == "No files found"
 
     debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
@@ -3561,8 +3563,8 @@ def test_repo_context_cache_logs_debug_on_stat_error(tmp_path, monkeypatch, capl
 def test_repo_context_cache_skips_unrenderable_file(tmp_path, monkeypatch):
     """A file whose render fails is skipped and not cached, even when its stat succeeds."""
     (tmp_path / "a.py").write_text("A = 1")
-    monkeypatch.setattr(orch_mod, "_render_context_file", lambda f, root: None)
-    cache = orch_mod._RepoContextCache()
+    monkeypatch.setattr(repo_ctx, "_render_context_file", lambda f, root: None)
+    cache = repo_ctx._RepoContextCache()
     assert cache.read(tmp_path) == "No files found"
     assert cache._entries == {}
 
