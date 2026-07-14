@@ -25,6 +25,10 @@ def run_planning(
         ``tool_agent`` to ``ToolAgentKind.GENERAL``. If no entry survives
         filtering, returns a single baseline blueprint microtask so the
         result is never empty.
+
+    Raises:
+        ValueError: the LLM response parsed to a non-object JSON value (e.g.
+            a bare array) instead of the expected object.
     """
     prompt = (
         f"Goal: {intake_result.system_goal}\n"
@@ -34,6 +38,8 @@ def run_planning(
         f"Spec:\n{(spec_content or '')[:7000]}"
     )
     raw = complete_json_with_continuation(llm, prompt, system_prompt=PLANNING_PROMPT)
+    if not isinstance(raw, dict):
+        raise ValueError(f"Planning LLM response is not a JSON object (got {type(raw).__name__})")
     microtasks = []
     for item in raw.get("microtasks") or []:
         if not isinstance(item, dict) or not item.get("id"):

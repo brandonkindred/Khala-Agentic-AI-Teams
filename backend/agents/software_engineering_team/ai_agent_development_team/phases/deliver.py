@@ -20,6 +20,10 @@ def run_deliver(
     Postconditions:
         Returns a ``DeliverResult`` built from the parsed JSON response, with
         missing fields defaulting to an empty string or empty list.
+
+    Raises:
+        ValueError: the LLM response parsed to a non-object JSON value (e.g.
+            a bare array) instead of the expected object.
     """
     prompt = (
         f"Execution summary: {execution_result.summary}\n"
@@ -28,6 +32,8 @@ def run_deliver(
         f"Review issues: {[issue.description for issue in review_result.issues]}\n"
     )
     raw = complete_json_with_continuation(llm, prompt, system_prompt=DELIVER_PROMPT)
+    if not isinstance(raw, dict):
+        raise ValueError(f"Deliver LLM response is not a JSON object (got {type(raw).__name__})")
     return DeliverResult(
         summary=raw.get("summary", ""),
         handoff_notes=raw.get("handoff_notes") or [],

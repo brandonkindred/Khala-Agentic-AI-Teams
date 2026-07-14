@@ -327,6 +327,9 @@ class RecursiveProcessor(Generic[T]):
         Raises:
             LLMTruncatedError: If max decomposition depth is exceeded and
                               response is still truncated.
+            LLMJsonParseError: If ``process_fn`` is not provided and the
+                              default LLM call's response cannot be parsed as
+                              JSON at all (via ``extract_json_from_response``).
         """
         from llm_service import LLMTruncatedError
         from software_engineering_team.shared.continuation import MAX_CONTINUATION_CYCLES

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from llm_service import DummyLLMClient
 from software_engineering_team.ai_agent_development_team.models import (
     ExecutionResult,
@@ -249,3 +251,44 @@ def test_run_deliver_recovers_fenced_json_response(monkeypatch) -> None:
     assert result.summary == "Fenced delivery package ready"
     assert result.handoff_notes == ["handoff note"]
     assert result.runbook == ["runbook step"]
+
+
+def test_run_intake_raises_on_non_object_json_response(monkeypatch) -> None:
+    """A validly-parsed but non-object JSON response (e.g. a fenced array)
+    must raise ValueError instead of crashing with an unclassified
+    AttributeError on raw.get(...)."""
+    _patch_fenced_response(monkeypatch, ["not", "an", "object"])
+    with pytest.raises(ValueError, match="not a JSON object"):
+        run_intake(llm=_strands_model_double(), task=_build_task(), spec_content="Spec text")
+
+
+def test_run_planning_raises_on_non_object_json_response(monkeypatch) -> None:
+    """A validly-parsed but non-object JSON response (e.g. a fenced array)
+    must raise ValueError instead of crashing with an unclassified
+    AttributeError on raw.get(...)."""
+    _patch_fenced_response(monkeypatch, ["not", "an", "object"])
+    intake_result = IntakeResult(system_goal="Build a spec-driven support agent system")
+    with pytest.raises(ValueError, match="not a JSON object"):
+        run_planning(
+            llm=_strands_model_double(),
+            task=_build_task(),
+            intake_result=intake_result,
+            spec_content="Spec text",
+        )
+
+
+def test_run_deliver_raises_on_non_object_json_response(monkeypatch) -> None:
+    """A validly-parsed but non-object JSON response (e.g. a fenced array)
+    must raise ValueError instead of crashing with an unclassified
+    AttributeError on raw.get(...)."""
+    _patch_fenced_response(monkeypatch, ["not", "an", "object"])
+    execution_result = ExecutionResult(
+        files={"ai_system/system_blueprint.md": "# blueprint"}, summary="executed"
+    )
+    review_result = ReviewResult(passed=True, required_artifacts_ok=True, summary="ok")
+    with pytest.raises(ValueError, match="not a JSON object"):
+        run_deliver(
+            llm=_strands_model_double(),
+            execution_result=execution_result,
+            review_result=review_result,
+        )

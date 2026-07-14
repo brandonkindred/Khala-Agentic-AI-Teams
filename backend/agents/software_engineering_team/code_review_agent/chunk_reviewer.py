@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, Union
 
-from llm_service import LLMClient
+from llm_service import LLMClient, LLMJsonParseError
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_existing_codebase_chars,
@@ -176,6 +176,16 @@ def _run_chunk_review(
           its budget deterministically — no LLM compaction happens here (the
           coordinator already compacted once), so a chunk call never grows the
           prompt or fires extra LLM calls even when upstream compaction failed.
+
+    Raises:
+        LLMJsonParseError: the LLM response could not be parsed as JSON at
+            all, or parsed to a non-object JSON value (e.g. a bare array) —
+            both propagate from ``complete_json_with_continuation`` (the
+            latter via this function's own guard). The coordinator's
+            recovery layer (``mapping.py``) classifies this as a recoverable
+            content failure like any other malformed response.
+        LLMPermanentError: other unrecoverable LLM failures propagate
+            unchanged from ``complete_json_with_continuation``.
     """
     max_chunk_chars = compute_code_review_map_chunk_chars(llm)
     max_spec = compute_code_review_spec_excerpt_chars(llm)
@@ -290,6 +300,19 @@ def _run_chunk_review(
         prompt,
         system_prompt=build_review_system_prompt(input_data.profile),
     )
+    if not isinstance(data, dict):
+        # complete_json_with_continuation's recovery ladder can successfully
+        # parse a fenced non-object JSON value (e.g. a bare array) with no
+        # exception at all. Raise here rather than defaulting to {} so this
+        # takes the same classified-content-failure path a JSONDecodeError
+        # already does in mapping.py's _CONTENT_FAILURE_TYPES (retry a
+        # smaller chunk or degrade to a blocking "not reviewed" finding) —
+        # silently substituting an empty dict would instead make this chunk
+        # look like a clean, fully-reviewed pass with zero issues found.
+        raise LLMJsonParseError(
+            f"Chunk review LLM response is not a JSON object (got {type(data).__name__})",
+            response_preview=str(data)[:500],
+        )
 
     # Issue dicts are passed through raw: normalization (defaults, line
     # coercion, path resolution) happens exactly once, in the coordinator's

@@ -18,6 +18,10 @@ def run_intake(*, llm=None, task: Task, spec_content: str) -> IntakeResult:
     Postconditions:
         Returns an ``IntakeResult`` built from the parsed JSON response, with
         missing fields defaulting to an empty string or empty list.
+
+    Raises:
+        ValueError: the LLM response parsed to a non-object JSON value (e.g.
+            a bare array) instead of the expected object.
     """
     prompt = (
         f"Task title: {task.title or task.id}\n"
@@ -27,6 +31,8 @@ def run_intake(*, llm=None, task: Task, spec_content: str) -> IntakeResult:
         f"Spec:\n{(spec_content or '')[:8000]}"
     )
     raw = complete_json_with_continuation(llm, prompt, system_prompt=INTAKE_PROMPT)
+    if not isinstance(raw, dict):
+        raise ValueError(f"Intake LLM response is not a JSON object (got {type(raw).__name__})")
     return IntakeResult(
         system_goal=raw.get("system_goal", ""),
         constraints=raw.get("constraints") or [],

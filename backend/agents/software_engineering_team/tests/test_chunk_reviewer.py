@@ -83,6 +83,28 @@ def test_chunk_review_raises_llm_json_parse_error_on_non_json_model_output() -> 
         agent.run(_chunk_input())
 
 
+class _NonObjectJsonClient(DummyLLMClient):
+    """DummyLLMClient whose reply is well-formed but non-object JSON (a bare
+    fenced array) -- complete_json_with_continuation's recovery ladder parses
+    this successfully with no exception, so the reviewer's own guard must be
+    the thing that turns it into LLMJsonParseError."""
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+        return '```json\n["not", "an", "object"]\n```'
+
+
+def test_chunk_review_raises_llm_json_parse_error_on_non_object_json_response() -> None:
+    """A validly-parsed but non-object JSON response (e.g. a fenced array) must
+    also raise LLMJsonParseError, not crash with an unclassified AttributeError
+    on data.get(...) -- the latter would bypass mapping.py's bisection/retry
+    recovery entirely and abort the whole submission's review instead of
+    degrading gracefully like any other malformed response.
+    """
+    agent = ChunkReviewAgent(llm=_NonObjectJsonClient())
+    with pytest.raises(LLMJsonParseError):
+        agent.run(_chunk_input())
+
+
 def test_chunk_review_recovers_markdown_fenced_model_response(monkeypatch) -> None:
     """A markdown-fenced JSON reply — the shape a model returns when it wraps its
     JSON answer in a ```json fence despite the "JSON only" system prompt — now

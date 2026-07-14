@@ -103,7 +103,9 @@ def parse_spec_with_llm(spec_content: str, llm_client=None) -> ProductRequiremen
         Returns a ``ProductRequirements`` built from the LLM's parsed JSON
         response. Raises ``ValueError`` if the parsed response is not a JSON
         object, or if its ``acceptance_criteria``/``constraints`` fields are
-        present but not lists.
+        present but not lists. Raises ``LLMJsonParseError`` (propagated
+        unchanged from :func:`complete_json_with_continuation`) if the
+        response cannot be parsed as JSON at all.
     """
     logger.info("Parsing spec with LLM (%s chars)", len(spec_content))
     system_prompt = """Parse the following software project specification into a structured format.
