@@ -10,7 +10,11 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from planning_team.models import OpenQuestion, OpenQuestionOption
-from planning_team.phases._util import as_client_context, assemble_material
+from planning_team.phases._util import (
+    DEFAULT_MATERIAL_FALLBACK,
+    as_client_context,
+    assemble_material,
+)
 from planning_team.spec_digest import map_reduce
 from shared_llm_recovery import extract_json_object
 
@@ -155,7 +159,7 @@ def run_requirements(
     """
     client_context = as_client_context(context.get("client_context"))
     problem = (client_context.problem_summary if client_context else "") or ""
-    material = assemble_material(context, extra_fallback=problem)
+    material = assemble_material(context, default=problem or DEFAULT_MATERIAL_FALLBACK)
 
     data = map_reduce(
         material,

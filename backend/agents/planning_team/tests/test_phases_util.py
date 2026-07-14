@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
@@ -28,6 +30,20 @@ def test_as_client_context_coerces_dict():
     assert result.problem_summary == "Need X"
 
 
+def test_as_client_context_ignores_unknown_dict_keys():
+    # Matches ClientContext's own default pydantic extra="ignore" behavior (unchanged
+    # from the pre-refactor per-phase `ClientContext(**client_context)` call sites).
+    result = as_client_context({"problem_summary": "Need X", "not_a_field": 123})
+    assert isinstance(result, ClientContext)
+    assert result.problem_summary == "Need X"
+    assert not hasattr(result, "not_a_field")
+
+
+def test_as_client_context_raises_value_error_on_invalid_field_type():
+    with pytest.raises(ValueError, match="Invalid client_context dict"):
+        as_client_context({"target_users": {"not": "a list"}})
+
+
 # --- assemble_material -------------------------------------------------------
 
 
@@ -48,16 +64,12 @@ def test_assemble_material_default_fallback():
     assert assemble_material({}) == "No brief or spec provided."
 
 
-def test_assemble_material_extra_fallback_used_before_default():
-    assert assemble_material({}, extra_fallback="Problem summary") == "Problem summary"
+def test_assemble_material_custom_default_used_when_no_brief_or_spec():
+    assert assemble_material({}, default="Problem summary") == "Problem summary"
 
 
-def test_assemble_material_brief_or_spec_takes_priority_over_extra_fallback():
+def test_assemble_material_brief_or_spec_takes_priority_over_custom_default():
     assert (
-        assemble_material({"initial_brief": "Brief text"}, extra_fallback="Problem summary")
+        assemble_material({"initial_brief": "Brief text"}, default="Problem summary")
         == "Brief text"
     )
-
-
-def test_assemble_material_custom_default():
-    assert assemble_material({}, default="Custom default") == "Custom default"
