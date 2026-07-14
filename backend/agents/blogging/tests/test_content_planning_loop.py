@@ -21,7 +21,7 @@ from shared.content_planning_loop import (
     build_generate_plan_prompt,
     build_refine_plan_prompt,
     complete_plan_json,
-    is_planning_done,
+    is_planner_self_eval_done,
     post_validate_plan,
     run_content_planning_loop,
 )
@@ -31,6 +31,10 @@ from shared.errors import PlanningError
 
 def _policy_standard():
     return resolve_length_policy(content_profile=ContentProfile.standard_article)
+
+
+def _policy_short_listicle():
+    return resolve_length_policy(content_profile=ContentProfile.short_listicle)
 
 
 def _good_plan_dict() -> dict[str, Any]:
@@ -92,7 +96,29 @@ def test_post_validate_plan_preserves_in_bounds_plan() -> None:
     assert out.requirements_analysis.plan_acceptable is True
 
 
-def test_is_planning_done() -> None:
+def test_post_validate_plan_uses_bounds_for_the_given_profile() -> None:
+    """10 sections is in-bounds for standard_article (4-10) but out-of-bounds for
+    short_listicle (3-7) — confirms bounds are looked up per-profile, not hardcoded."""
+    plan = ContentPlan(
+        overarching_topic="T",
+        narrative_flow="n",
+        sections=[
+            ContentPlanSection(title=f"S{i}", coverage_description="x", order=i) for i in range(10)
+        ],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+        requirements_analysis=RequirementsAnalysis(
+            plan_acceptable=True, scope_feasible=True, research_gaps=[]
+        ),
+    )
+    assert (
+        post_validate_plan(plan, _policy_standard()).requirements_analysis.plan_acceptable is True
+    )
+    out = post_validate_plan(plan, _policy_short_listicle())
+    assert out.requirements_analysis.plan_acceptable is False
+    assert any("outside expected range" in g for g in out.requirements_analysis.gaps)
+
+
+def test_is_planner_self_eval_done() -> None:
     """True only when both plan_acceptable and scope_feasible are True."""
     plan = ContentPlan(
         overarching_topic="X",
@@ -103,7 +129,7 @@ def test_is_planning_done() -> None:
             plan_acceptable=True, scope_feasible=True, research_gaps=[]
         ),
     )
-    assert is_planning_done(plan) is True
+    assert is_planner_self_eval_done(plan) is True
 
     plan2 = plan.model_copy(
         update={
@@ -112,7 +138,7 @@ def test_is_planning_done() -> None:
             )
         }
     )
-    assert is_planning_done(plan2) is False
+    assert is_planner_self_eval_done(plan2) is False
 
 
 def test_build_generate_plan_prompt_with_optional_fields() -> None:
@@ -279,14 +305,21 @@ class _CriticReport:
 
 
 def test_run_content_planning_loop_with_plan_critic() -> None:
-    """Critic rejects iteration 1 and approves iteration 2; loop converges on the second pass."""
+    """Critic rejects iteration 1 and approves iteration 2; loop converges on the second pass.
+
+    Also captures each call's kwargs to confirm the critic is invoked with the
+    current plan and the loop's own brand/writing/work_dir/research context,
+    not just called with arbitrary arguments.
+    """
 
     class _Critic:
         def __init__(self):
             self.called = 0
+            self.calls: list[dict[str, Any]] = []
 
-        def run(self, **_kw):
+        def run(self, **kw):
             self.called += 1
+            self.calls.append(kw)
             return _CriticReport(approved=self.called > 1)
 
     good = _good_plan_dict()
@@ -296,8 +329,23 @@ def test_run_content_planning_loop_with_plan_critic() -> None:
 
     critic = _Critic()
     result = run_content_planning_loop(
-        **_loop_kwargs(plan_critic=critic, complete_plan_json_fn=complete_fn)
+        **_loop_kwargs(
+            plan_critic=critic,
+            complete_plan_json_fn=complete_fn,
+            brand_spec_prompt="brand-x",
+            writing_guidelines="guidelines-y",
+            work_dir="/tmp/work",
+        )
     )
     assert result.planning_iterations_used == 2
     assert critic.called == 2
     assert result.plan_critic_report == {"status": "approved"}
+
+    for i, call_kwargs in enumerate(critic.calls, start=1):
+        assert isinstance(call_kwargs["plan"], ContentPlan)
+        assert call_kwargs["plan"].overarching_topic == "Topic"
+        assert call_kwargs["brand_spec_prompt"] == "brand-x"
+        assert call_kwargs["writing_guidelines"] == "guidelines-y"
+        assert call_kwargs["research_digest"] == "d"
+        assert call_kwargs["work_dir"] == "/tmp/work"
+        assert call_kwargs["artifact_name"] == f"plan_critic_report_v{i}.json"

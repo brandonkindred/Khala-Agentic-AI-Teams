@@ -50,7 +50,12 @@ def post_validate_plan(plan: ContentPlan, policy: LengthPolicy) -> ContentPlan:
     return plan.model_copy(update={"requirements_analysis": ra})
 
 
-def is_planning_done(plan: ContentPlan) -> bool:
+def is_planner_self_eval_done(plan: ContentPlan) -> bool:
+    """True when the planner's own self-evaluation is satisfied.
+
+    Does not reflect the critic's verdict — the loop's actual termination
+    condition additionally requires the critic's approval when one is wired.
+    """
     ra = plan.requirements_analysis
     return bool(ra.plan_acceptable and ra.scope_feasible)
 
@@ -113,8 +118,11 @@ def complete_plan_json(
     ``call_raw_fn(prompt, system) -> str`` is the retry-attempt call and
     returns raw text; this function appends the retry suffix and parses the
     result via ``extract_json_from_response``.
+
+    Only ``LLMJsonParseError`` is treated as a retryable failure — other
+    exceptions from ``call_json_fn``/``call_raw_fn`` (e.g. network/transport
+    errors) propagate immediately rather than consuming a retry attempt.
     """
-    parse_retries = 0
     last_err: Optional[Exception] = None
     for attempt in range(max_parse_retries):
         if on_llm_request:
@@ -122,7 +130,7 @@ def complete_plan_json(
         try:
             data = call_json_fn(prompt, system)
             if isinstance(data, dict) and data:
-                return data, parse_retries
+                return data, attempt
         except LLMJsonParseError as e:
             last_err = e
             logger.warning("JSON parse failed (attempt %s): %s", attempt + 1, e)
@@ -132,13 +140,10 @@ def complete_plan_json(
                 system,
             )
             data = extract_json_from_response(raw)
-            return data, parse_retries
+            return data, attempt
         except LLMJsonParseError as e:
             last_err = e
             logger.warning("JSON parse retry failed (attempt %s): %s", attempt + 1, e)
-        # Count once per full attempt (both the JSON-mode call and its
-        # raw-text fallback failed), not once per failed sub-call.
-        parse_retries += 1
     msg = f"Planning JSON parse failed after {max_parse_retries} attempts"
     if last_err:
         msg += f": {last_err}"
@@ -195,6 +200,15 @@ def run_content_planning_loop(
     last_plan: Optional[ContentPlan] = None
     last_critic_report: Optional["PlanCriticReport"] = None
 
+    # Deferred import: keeps this module (and blog_planning_agent, which has
+    # historically stayed critic-dependency-free) from hard-importing
+    # blog_plan_critic_agent when no critic is wired. Hoisted here (once,
+    # rather than inside the loop body) since it only depends on whether a
+    # critic is present at all, not on any per-iteration state.
+    build_refine_feedback_from_critic: Optional[Callable[["PlanCriticReport"], str]] = None
+    if plan_critic is not None:
+        from blog_plan_critic_agent.agent import build_refine_feedback_from_critic
+
     for iteration in range(1, max_iterations + 1):
         if iteration == 1:
             prompt = build_generate_plan_prompt(planning_input)
@@ -202,11 +216,7 @@ def run_content_planning_loop(
         else:
             assert last_plan is not None
             if last_critic_report is not None:
-                # Deferred import: keeps this module (and blog_planning_agent,
-                # which has historically stayed critic-dependency-free) from
-                # hard-importing blog_plan_critic_agent when no critic is wired.
-                from blog_plan_critic_agent.agent import build_refine_feedback_from_critic
-
+                assert build_refine_feedback_from_critic is not None
                 feedback = build_refine_feedback_from_critic(last_critic_report)
             else:
                 feedback = (
@@ -249,7 +259,7 @@ def run_content_planning_loop(
             )
         last_plan = plan.model_copy(update={"plan_version": iteration})
 
-        planner_ok = is_planning_done(last_plan)
+        planner_ok = is_planner_self_eval_done(last_plan)
         critic_report: Optional["PlanCriticReport"] = None
         if plan_critic is not None:
             critic_report = plan_critic.run(

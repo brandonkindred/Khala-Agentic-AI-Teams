@@ -3,7 +3,7 @@
 Covers ``_fix_deterministic_violations``, ``_llm_self_review``, ``_self_review``,
 ``_format_feedback_item_line``, and the ``revise()`` no-op paths. The
 ``shared.content_planning_loop`` planning helpers (``post_validate_plan``,
-``is_planning_done``, ``build_generate_plan_prompt``, ``build_refine_plan_prompt``)
+``is_planner_self_eval_done``, ``build_generate_plan_prompt``, ``build_refine_plan_prompt``)
 are tested directly in ``test_content_planning_loop.py`` — not duplicated here.
 """
 
