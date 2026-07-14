@@ -399,11 +399,27 @@ def test_param_validator_bounds_match_registry_metadata(name):
         # The default itself must be accepted by both.
         registry_check(default)
         sandbox_check(default)
-        if isinstance(default, int) and not isinstance(default, bool):
-            for probe in (default - 1, default + 1, default * 1000, -(default * 1000) - 1):
-                registry_ok = _accepts(registry_check, probe)
-                sandbox_ok = _accepts(sandbox_check, probe)
-                assert registry_ok == sandbox_ok, (name, key, probe, registry_ok, sandbox_ok)
+        if isinstance(default, bool):
+            continue
+        if isinstance(default, int):
+            probes = (default - 1, default + 1, default * 1000, -(default * 1000) - 1)
+        elif isinstance(default, float):
+            # Float-appropriate boundary probes: below/above the default,
+            # its negation, zero, and a value far outside any sane bound.
+            probes = (
+                default * 0.5,
+                default * 2.0,
+                -default,
+                0.0,
+                default * 1000.0,
+                -(default * 1000.0) - 1.0,
+            )
+        else:
+            continue
+        for probe in probes:
+            registry_ok = _accepts(registry_check, probe)
+            sandbox_ok = _accepts(sandbox_check, probe)
+            assert registry_ok == sandbox_ok, (name, key, probe, registry_ok, sandbox_ok)
 
 
 def _accepts(check, value) -> bool:
