@@ -123,18 +123,21 @@ def _entry_to_row(entry: LearningEntry) -> tuple:
     # ``pattern || ' ' || trigger``): Postgres rejects a tsvector larger than ~1MB,
     # which would make the INSERT raise and the learning be silently dropped.
     # 8000 chars is ample for a diagnostic snippet.
+    pattern = entry.pattern[:8000]
+    trigger = entry.trigger[:8000]
+    counter_measure = entry.counter_measure[:8000]
+    fp = fingerprint(pattern, trigger, entry.category)
     for _field, _val in (
         ("pattern", entry.pattern),
         ("trigger", entry.trigger),
         ("counter_measure", entry.counter_measure),
     ):
         if len(_val) > 8000:
-            logger.debug("upsert_learning: %s truncated from %d to 8000 chars", _field, len(_val))
-    pattern = entry.pattern[:8000]
-    trigger = entry.trigger[:8000]
-    counter_measure = entry.counter_measure[:8000]
-    fp = fingerprint(pattern, trigger, entry.category)
+            logger.debug(
+                "upsert_learning: %s truncated from %d to 8000 chars (fp=%s)", _field, len(_val), fp
+            )
     now = datetime.now(tz=timezone.utc)
+    # Order matches _UPSERT_SQL: fingerprint, pattern, trigger, counter_measure, source, category, created_at, last_seen
     return (fp, pattern, trigger, counter_measure, entry.source, entry.category, now, now)
 
 
