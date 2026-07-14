@@ -365,7 +365,7 @@ class TaskGraphService:
         Preconditions:
             - ``task_id`` refers to a task in this graph (or the method returns None).
         Postconditions:
-            - The returned subtask, if any, is TO_DO and not already IN_PROGRESS or IN_REVIEW.
+            - The returned subtask, if any, is TO_DO and not already IN_PROGRESS, IN_REVIEW, or MERGED.
         """
         with self._lock:
             task = self._tasks.get(task_id)
