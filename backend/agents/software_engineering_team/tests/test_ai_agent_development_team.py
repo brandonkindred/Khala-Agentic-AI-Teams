@@ -3,11 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 
 from llm_service import DummyLLMClient
-from software_engineering_team.ai_agent_development_team.models import Phase
+from software_engineering_team.ai_agent_development_team.models import (
+    ExecutionResult,
+    IntakeResult,
+    Phase,
+    ReviewResult,
+)
 from software_engineering_team.ai_agent_development_team.orchestrator import (
     AIAgentDevelopmentTeamLead,
 )
+from software_engineering_team.ai_agent_development_team.phases.deliver import run_deliver
+from software_engineering_team.ai_agent_development_team.phases.intake import run_intake
+from software_engineering_team.ai_agent_development_team.phases.planning import run_planning
 from software_engineering_team.shared.models import Task, TaskType
+from software_engineering_team.tests.conftest import _patch_fenced_response, _strands_model_double
 
 
 class FakeLLM(DummyLLMClient):
@@ -126,3 +135,82 @@ def test_ai_agent_development_workflow_problem_solving(tmp_path: Path):
     assert result.problem_solving_result is not None
     assert result.problem_solving_result.resolved is True
     assert result.iterations_used >= 1
+
+
+def test_run_intake_recovers_fenced_json_response(monkeypatch) -> None:
+    """A markdown-fenced LLM response is recovered via complete_json_with_continuation
+    instead of crashing run_intake's former bare json.loads."""
+    _patch_fenced_response(
+        monkeypatch,
+        {
+            "system_goal": "Build a fenced support agent system",
+            "constraints": ["must include MCP"],
+            "risks": ["hallucinations"],
+            "success_metrics": ["90% task success"],
+            "summary": "Intake recovered from fence",
+        },
+    )
+    result = run_intake(llm=_strands_model_double(), task=_build_task(), spec_content="Spec text")
+
+    assert result.system_goal == "Build a fenced support agent system"
+    assert result.constraints == ["must include MCP"]
+    assert result.summary == "Intake recovered from fence"
+
+
+def test_run_planning_recovers_fenced_json_response(monkeypatch) -> None:
+    """A markdown-fenced LLM response is recovered via complete_json_with_continuation
+    instead of crashing run_planning's former bare json.loads."""
+    _patch_fenced_response(
+        monkeypatch,
+        {
+            "microtasks": [
+                {
+                    "id": "mt-fenced",
+                    "title": "Fenced task",
+                    "description": "Created from a fenced response",
+                    "tool_agent": "general",
+                    "depends_on": [],
+                }
+            ],
+            "summary": "Planned from fenced response",
+        },
+    )
+    intake_result = IntakeResult(system_goal="Build a spec-driven support agent system")
+
+    result = run_planning(
+        llm=_strands_model_double(),
+        task=_build_task(),
+        intake_result=intake_result,
+        spec_content="Spec text",
+    )
+
+    assert len(result.microtasks) == 1
+    assert result.microtasks[0].id == "mt-fenced"
+    assert result.summary == "Planned from fenced response"
+
+
+def test_run_deliver_recovers_fenced_json_response(monkeypatch) -> None:
+    """A markdown-fenced LLM response is recovered via complete_json_with_continuation
+    instead of crashing run_deliver's former bare json.loads."""
+    _patch_fenced_response(
+        monkeypatch,
+        {
+            "summary": "Fenced delivery package ready",
+            "handoff_notes": ["handoff note"],
+            "runbook": ["runbook step"],
+        },
+    )
+    execution_result = ExecutionResult(
+        files={"ai_system/system_blueprint.md": "# blueprint"}, summary="executed"
+    )
+    review_result = ReviewResult(passed=True, required_artifacts_ok=True, summary="ok")
+
+    result = run_deliver(
+        llm=_strands_model_double(),
+        execution_result=execution_result,
+        review_result=review_result,
+    )
+
+    assert result.summary == "Fenced delivery package ready"
+    assert result.handoff_notes == ["handoff note"]
+    assert result.runbook == ["runbook step"]

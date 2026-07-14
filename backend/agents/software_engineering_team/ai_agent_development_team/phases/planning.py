@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import json
-
-from strands import Agent
-
-from llm_service import get_strands_model
+from software_engineering_team.shared.llm import complete_json_with_continuation
 from software_engineering_team.shared.models import Task
 
 from ..models import IntakeResult, Microtask, PlanningResult, ToolAgentKind
@@ -16,6 +12,20 @@ from ..prompts import PLANNING_PROMPT
 def run_planning(
     *, llm=None, task: Task, intake_result: IntakeResult, spec_content: str
 ) -> PlanningResult:
+    """Derive an ordered microtask plan from the intake result and spec.
+
+    Preconditions:
+        ``task`` is a valid ``Task``. ``intake_result`` is the ``IntakeResult``
+        produced by the prior phase. ``spec_content`` may be empty or ``None``.
+        ``llm`` is a Strands ``Model``, an ``LLMClient``, or ``None``.
+    Postconditions:
+        Returns a ``PlanningResult`` whose ``microtasks`` are built from the
+        parsed JSON response's ``microtasks`` list, skipping entries that are
+        not a dict or lack an ``id`` and coercing an unrecognized
+        ``tool_agent`` to ``ToolAgentKind.GENERAL``. If no entry survives
+        filtering, returns a single baseline blueprint microtask so the
+        result is never empty.
+    """
     prompt = (
         f"Goal: {intake_result.system_goal}\n"
         f"Constraints: {intake_result.constraints}\n"
@@ -23,13 +33,7 @@ def run_planning(
         f"Task: {task.description}\n"
         f"Spec:\n{(spec_content or '')[:7000]}"
     )
-    from strands.models.model import Model as _StrandsModel
-
-    _model = llm if (llm is not None and isinstance(llm, _StrandsModel)) else get_strands_model()
-    agent = Agent(model=_model, system_prompt=PLANNING_PROMPT)
-    result = agent(prompt)
-    raw_text = str(result).strip()
-    raw = json.loads(raw_text)
+    raw = complete_json_with_continuation(llm, prompt, system_prompt=PLANNING_PROMPT)
     microtasks = []
     for item in raw.get("microtasks") or []:
         if not isinstance(item, dict) or not item.get("id"):
