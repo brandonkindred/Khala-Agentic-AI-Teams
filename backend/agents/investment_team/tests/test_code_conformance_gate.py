@@ -14,10 +14,12 @@ import textwrap
 
 from investment_team.models import StrategySpec
 from investment_team.strategy_lab.quality_gates.code_conformance import (
+    _POSITION_SNAPSHOT_ATTRS,
     CodeConformanceGate,
 )
 from investment_team.strategy_lab.spec_dsl import (
     DEFAULT_SIZING_PAYLOAD,
+    AllOf,
     EntryRule,
     IndicatorRef,
     Predicate,
@@ -1564,3 +1566,273 @@ def test_sizing_does_not_flag_boolean_qty_as_hardcoded_int() -> None:
     # qty assignment, so the sizing fallback also passes — no sizing
     # critical at all.
     assert not any("literal integer" in c or "Every entry" in c for c in crits), crits
+
+
+# ---------------------------------------------------------------------------
+# Check 1b — custom-code faithfulness (spec divergence, falsy guard, position attr)
+# ---------------------------------------------------------------------------
+
+
+def _ema_entry_spec() -> StrategySpec:
+    """Spec whose sole entry reads ``ema(period=20)`` on the default 'close' source."""
+    return _spec(
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="ema", params={"period": 20}),
+                    op=">",
+                    rhs="bar.close",
+                ),
+            )
+        ],
+        exit_rules=[StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+    )
+
+
+def _ctx_ema_code(*, ema_call: str, guard: str) -> str:
+    """Custom on_bar reading ``ema`` via ``ema_call`` and guarding it with ``guard``."""
+    return textwrap.dedent(
+        f"""
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({{"QQQ"}})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = {ema_call}
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and {guard}:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+        """
+    )
+
+
+def test_faithfulness_flags_source_divergence_low_vs_close() -> None:
+    # The reported defect: code reads the moving average on 'low' while the spec
+    # authored 'close'. The executed trades would not implement the spec.
+    code = _ctx_ema_code(
+        ema_call="ctx.indicator('ema', period=20, source='low')",
+        guard="trend is not None and trend > bar.close",
+    )
+    crits = _critical_details(CodeConformanceGate().check(code, _ema_entry_spec()))
+    diverged = [c for c in crits if "diverges from the spec" in c and "source=" in c]
+    assert diverged, crits
+    assert "'low'" in diverged[0]
+
+
+def test_faithfulness_flags_period_divergence() -> None:
+    # A period the spec never authored is a divergence too.
+    code = _ctx_ema_code(
+        ema_call="ctx.indicator('ema', period=200)",
+        guard="trend is not None and trend > bar.close",
+    )
+    crits = _critical_details(CodeConformanceGate().check(code, _ema_entry_spec()))
+    assert [c for c in crits if "diverges from the spec" in c and "period=" in c], crits
+
+
+def test_faithfulness_passes_when_source_and_params_match_spec() -> None:
+    # Exact match to the spec ref (period 20, implicit 'close') → no divergence.
+    code = _ctx_ema_code(
+        ema_call="ctx.indicator('ema', period=20)",
+        guard="trend is not None and trend > bar.close",
+    )
+    crits = _critical_details(CodeConformanceGate().check(code, _ema_entry_spec()))
+    assert not [c for c in crits if "diverges from the spec" in c], crits
+
+
+def test_faithfulness_ignores_indicator_not_required_by_spec() -> None:
+    # Reading an indicator the spec never references is not a faithfulness defect
+    # here (an extra/helper read is another gate's concern), so no divergence.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = ctx.indicator('ema', period=20)
+                aux = ctx.indicator('rsi', period=9, source='high')
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and trend is not None and trend > bar.close:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+        """
+    )
+    crits = _critical_details(CodeConformanceGate().check(code, _ema_entry_spec()))
+    assert not [c for c in crits if "diverges from the spec" in c], crits
+
+
+def test_faithfulness_flags_falsy_guard_on_indicator_value() -> None:
+    # ``if trend and ...`` silently skips the check when trend is 0.0 (or None).
+    code = _ctx_ema_code(
+        ema_call="ctx.indicator('ema', period=20)",
+        guard="trend and trend > bar.close",
+    )
+    crits = _critical_details(CodeConformanceGate().check(code, _ema_entry_spec()))
+    assert [c for c in crits if "bare truthiness" in c], crits
+
+
+def test_faithfulness_falsy_guard_not_flagged_with_explicit_none_check() -> None:
+    code = _ctx_ema_code(
+        ema_call="ctx.indicator('ema', period=20)",
+        guard="trend is not None and trend > bar.close",
+    )
+    crits = _critical_details(CodeConformanceGate().check(code, _ema_entry_spec()))
+    assert not [c for c in crits if "bare truthiness" in c], crits
+
+
+def test_faithfulness_flags_falsy_guard_under_not() -> None:
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = ctx.indicator('ema', period=20)
+                if not trend:
+                    return
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and trend > bar.close:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+        """
+    )
+    crits = _critical_details(CodeConformanceGate().check(code, _ema_entry_spec()))
+    assert [c for c in crits if "bare truthiness" in c], crits
+
+
+def test_faithfulness_flags_unknown_position_attribute() -> None:
+    # ``pos.size`` does not exist on _PositionSnapshot → runtime AttributeError.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = ctx.indicator('ema', period=20)
+                pos = ctx.position(bar.symbol)
+                if pos is not None and pos.size > 0:
+                    return
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and trend is not None and trend > bar.close:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+        """
+    )
+    crits = _critical_details(CodeConformanceGate().check(code, _ema_entry_spec()))
+    assert [c for c in crits if "pos.size" in c and "AttributeError" in c], crits
+
+
+def test_faithfulness_allows_quantity_alias_on_position() -> None:
+    # ``position.quantity`` is a valid read-only alias for ``qty`` now, so a
+    # strategy using the natural name must NOT be flagged.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = ctx.indicator('ema', period=20)
+                pos = ctx.position(bar.symbol)
+                if pos is not None and pos.quantity == 0:
+                    return
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and trend is not None and trend > bar.close:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+        """
+    )
+    crits = _critical_details(CodeConformanceGate().check(code, _ema_entry_spec()))
+    assert not [c for c in crits if ".quantity" in c], crits
+
+
+def test_position_attr_allowlist_matches_snapshot_model() -> None:
+    # The gate's allowlist must stay in sync with the actual model fields (+ the
+    # ``quantity`` alias) so the two can never silently drift apart.
+    from investment_team.trading_service.strategy.contract import _PositionSnapshot
+
+    expected = set(_PositionSnapshot.model_fields) | {"quantity"}
+    assert set(_POSITION_SNAPSHOT_ATTRS) == expected
+
+
+def test_position_snapshot_quantity_aliases_qty() -> None:
+    from investment_team.trading_service.strategy.contract import _PositionSnapshot
+
+    snap = _PositionSnapshot(
+        symbol="QQQ", side="long", qty=7.5, entry_price=100.0, entry_timestamp="t0"
+    )
+    assert snap.quantity == snap.qty == 7.5
+
+
+def test_faithfulness_flags_cross_pairing_of_authorized_fields() -> None:
+    # Spec authorizes sma(period=50, close) AND sma(period=20, volume). Code reads
+    # sma(period=50, source='volume') — each field is individually authorized, but
+    # the *combination* matches no IndicatorRef, so it still diverges.
+    spec = _spec(
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=AllOf(
+                    of=[
+                        Predicate(
+                            lhs="bar.close",
+                            op=">",
+                            rhs=IndicatorRef(name="sma", params={"period": 50}),
+                        ),
+                        Predicate(
+                            lhs="bar.volume",
+                            op=">",
+                            rhs=IndicatorRef(name="sma", params={"period": 20}, source="volume"),
+                        ),
+                    ]
+                ),
+            )
+        ],
+        exit_rules=[StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+    )
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                trend = ctx.indicator('sma', period=50, source='volume')
+                vol = ctx.indicator('sma', period=20, source='volume')
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if (
+                    pos is None
+                    and trend is not None
+                    and vol is not None
+                    and bar.close > trend
+                    and bar.volume > vol
+                ):
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+        """
+    )
+    crits = _critical_details(CodeConformanceGate().check(code, spec))
+    combo = [c for c in crits if "matches no IndicatorRef" in c]
+    assert combo, crits

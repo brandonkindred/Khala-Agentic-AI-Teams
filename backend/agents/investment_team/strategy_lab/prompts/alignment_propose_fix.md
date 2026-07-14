@@ -40,7 +40,9 @@ A JSON object with these fields:
   ``{"rule_type", "description", "severity", "affected_trades"}``.
   Map the gate's ``check_name`` onto ``rule_type`` (``"entry_rules"`` |
   ``"exit_rules"`` | ``"sizing_rules"`` | ``"risk_limits"`` |
-  ``"universe"`` | ``"direction"``).
+  ``"universe"`` | ``"direction"``). ``affected_trades`` MUST be a JSON
+  array of **integers** (the ``trade_num`` values, e.g. ``[1, 2]``) — never
+  strings like ``"trade #1"``.
 - ``proposed_code`` (string) — the **complete** rewritten Python source
   preserving the ``Strategy.on_bar(self, ctx, bar)`` contract and only
   using allowed imports. Do not abridge or use ``# ... rest unchanged``
