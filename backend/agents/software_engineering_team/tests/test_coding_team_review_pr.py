@@ -7,6 +7,7 @@ GitHubClient and a stubbed CodeReviewAgent — no network, no LLM).
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable, Optional
 from unittest.mock import MagicMock
 
@@ -14,10 +15,12 @@ import httpx
 import pytest
 
 from software_engineering_team.coding_team.github_source import (
+    MAX_REVIEW_COMMENTS_TRAVERSED,
     GitHubAPIError,
     GitHubClient,
     PullRequestDetail,
     PullRequestFile,
+    ReviewComment,
 )
 
 from .test_coding_team_github_source import _stub_heavy_modules
@@ -150,6 +153,199 @@ class TestGetPullRequestFiles:
         assert [f.filename for f in files] == ["a.py", "img.png", "new_name.py"]
         assert files[1].patch == ""  # binary file: no patch
         assert files[2].previous_filename == "old_name.py"
+
+
+# ---------------------------------------------------------------------------
+# Client: list_review_comments / list_issue_comments
+# ---------------------------------------------------------------------------
+
+
+class TestListReviewComments:
+    def test_pagination_and_file_level(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            if "page=2" in str(req.url):
+                return httpx.Response(
+                    200,
+                    json=[
+                        {
+                            "id": 2,
+                            "path": "b.py",
+                            "body": "file-level note",
+                            "html_url": "https://example/comment/2",
+                        }
+                    ],
+                )
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 1,
+                        "path": "a.py",
+                        "line": 3,
+                        "body": "line note",
+                        "html_url": "https://example/comment/1",
+                    }
+                ],
+                headers={
+                    "Link": '<https://api.github.com/repos/o/r/pulls/7/comments?page=2>; rel="next"'
+                },
+            )
+
+        client = _client_with(handler)
+        comments = client.list_review_comments("o", "r", 7)
+        assert [c.id for c in comments] == [1, 2]
+        assert comments[0].line == 3
+        assert comments[1].line is None  # file-level: no "line" key in the payload
+
+    def test_error_raises(self) -> None:
+        client = _client_with(lambda _req: httpx.Response(404, text="missing"))
+        with pytest.raises(GitHubAPIError):
+            client.list_review_comments("o", "r", 7)
+
+    def test_caps_traversal_at_max_review_comments_traversed(self) -> None:
+        overflow = [
+            {
+                "id": i,
+                "path": "a.py",
+                "line": 1,
+                "body": "x",
+                "html_url": f"https://example/comment/{i}",
+            }
+            for i in range(MAX_REVIEW_COMMENTS_TRAVERSED + 50)
+        ]
+        client = _client_with(lambda _req: httpx.Response(200, json=overflow))
+        comments = client.list_review_comments("o", "r", 7)
+        assert len(comments) == MAX_REVIEW_COMMENTS_TRAVERSED
+
+
+class TestListIssueComments:
+    def test_pagination(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            if "page=2" in str(req.url):
+                return httpx.Response(
+                    200,
+                    json=[
+                        {"id": 20, "body": "second", "html_url": "https://example/issue-comment/20"}
+                    ],
+                )
+            return httpx.Response(
+                200,
+                json=[{"id": 10, "body": "first", "html_url": "https://example/issue-comment/10"}],
+                headers={
+                    "Link": '<https://api.github.com/repos/o/r/issues/7/comments?page=2>; rel="next"'
+                },
+            )
+
+        client = _client_with(handler)
+        comments = client.list_issue_comments("o", "r", 7)
+        assert [c.id for c in comments] == [10, 20]
+        assert comments[0].body == "first"
+
+    def test_error_raises(self) -> None:
+        client = _client_with(lambda _req: httpx.Response(403, text="nope"))
+        with pytest.raises(GitHubAPIError):
+            client.list_issue_comments("o", "r", 7)
+
+    def test_caps_traversal_at_max_review_comments_traversed(self) -> None:
+        overflow = [
+            {"id": i, "body": "x", "html_url": f"https://example/issue-comment/{i}"}
+            for i in range(MAX_REVIEW_COMMENTS_TRAVERSED + 50)
+        ]
+        client = _client_with(lambda _req: httpx.Response(200, json=overflow))
+        comments = client.list_issue_comments("o", "r", 7)
+        assert len(comments) == MAX_REVIEW_COMMENTS_TRAVERSED
+
+
+# ---------------------------------------------------------------------------
+# Client: get_resolved_review_thread_comment_ids (GraphQL)
+# ---------------------------------------------------------------------------
+
+
+def _review_threads_response(
+    *, has_next_page: bool = False, end_cursor: Optional[str] = None, nodes: Any = ()
+) -> dict[str, Any]:
+    return {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": has_next_page, "endCursor": end_cursor},
+                        "nodes": list(nodes),
+                    }
+                }
+            }
+        }
+    }
+
+
+class TestGetResolvedReviewThreadCommentIds:
+    def test_posts_graphql_and_parses_resolved_ids(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured["url"] = str(req.url)
+            captured["body"] = json.loads(req.content)
+            return httpx.Response(
+                200,
+                json=_review_threads_response(
+                    nodes=[
+                        {"isResolved": True, "comments": {"nodes": [{"databaseId": 1}]}},
+                        {"isResolved": False, "comments": {"nodes": [{"databaseId": 2}]}},
+                    ]
+                ),
+            )
+
+        client = _client_with(handler)
+        resolved = client.get_resolved_review_thread_comment_ids("o", "r", 7)
+        assert resolved == {1}
+        assert captured["url"].endswith("/graphql")
+        assert captured["body"]["variables"] == {
+            "owner": "o",
+            "repo": "r",
+            "number": 7,
+            "after": None,
+        }
+
+    def test_paginates_via_page_info(self) -> None:
+        calls: list[Optional[str]] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            after = json.loads(req.content)["variables"]["after"]
+            calls.append(after)
+            if after is None:
+                return httpx.Response(
+                    200,
+                    json=_review_threads_response(
+                        has_next_page=True,
+                        end_cursor="cursor1",
+                        nodes=[{"isResolved": True, "comments": {"nodes": [{"databaseId": 1}]}}],
+                    ),
+                )
+            return httpx.Response(
+                200,
+                json=_review_threads_response(
+                    nodes=[{"isResolved": True, "comments": {"nodes": [{"databaseId": 2}]}}]
+                ),
+            )
+
+        client = _client_with(handler)
+        resolved = client.get_resolved_review_thread_comment_ids("o", "r", 7)
+        assert resolved == {1, 2}
+        assert calls == [None, "cursor1"]
+
+    def test_degrades_to_empty_set_on_graphql_errors(self) -> None:
+        client = _client_with(
+            lambda _req: httpx.Response(200, json={"errors": [{"message": "nope"}]})
+        )
+        assert client.get_resolved_review_thread_comment_ids("o", "r", 7) == set()
+
+    def test_degrades_to_empty_set_on_http_error(self) -> None:
+        client = _client_with(lambda _req: httpx.Response(500, text="boom"))
+        assert client.get_resolved_review_thread_comment_ids("o", "r", 7) == set()
+
+    def test_degrades_to_empty_set_on_malformed_json(self) -> None:
+        client = _client_with(lambda _req: httpx.Response(200, text="not json"))
+        assert client.get_resolved_review_thread_comment_ids("o", "r", 7) == set()
 
 
 # ---------------------------------------------------------------------------
@@ -435,12 +631,31 @@ class _FakeReviewClient:
         self.reaction_fail = False  # create_issue_reaction raises a 403 when True
         self.created_issues: list[dict[str, Any]] = []  # each create_issue call's kwargs
         self.create_issue_fail = False  # create_issue raises a 403 when True
+        self.existing_review_comments: list[Any] = []  # ReviewComment-shaped stand-ins
+        self.existing_issue_comments: list[Any] = []  # IssueComment-shaped stand-ins
+        self.existing_resolved_ids: set[int] = set()
+        # When True, list_review_comments raises — exercises the fail-open path in
+        # _fetch_existing_comments (a lookup failure must not fail the review).
+        self.fetch_existing_comments_fail = False
+        self.list_review_comments_calls = 0  # counts calls, to assert the fetch is skipped
 
     def __enter__(self) -> "_FakeReviewClient":
         return self
 
     def __exit__(self, *_a: Any) -> None:
         return None
+
+    def list_review_comments(self, _o: str, _r: str, _n: int) -> list[Any]:
+        self.list_review_comments_calls += 1
+        if self.fetch_existing_comments_fail:
+            raise GitHubAPIError(500, "existing comments unavailable")
+        return list(self.existing_review_comments)
+
+    def list_issue_comments(self, _o: str, _r: str, _n: int) -> list[Any]:
+        return list(self.existing_issue_comments)
+
+    def get_resolved_review_thread_comment_ids(self, _o: str, _r: str, _n: int) -> set[int]:
+        return set(self.existing_resolved_ids)
 
     def get_pull_request(self, _o: str, _r: str, n: int) -> PullRequestDetail:
         if self.fail_get_pr:
@@ -1436,6 +1651,82 @@ class TestReviewEndpoint:
         assert "files_skipped" not in job["review_summary"]
         # No partial-coverage disclosure is appended when nothing was skipped.
         assert "were not inspected" not in gh.reviews[-1]["body"]
+
+
+class TestReviewEndpointExistingComments:
+    """The review endpoint recognizes findings already on the PR (see
+    coding_team.github_source.existing_comments): a match against an already
+    RESOLVED comment is dropped, a match against a still-open one is kept and
+    cross-referenced, and a lookup failure degrades gracefully rather than
+    failing the review. Default fixture output is two findings on a.py:
+    line=2 "high"/"desc" (in-diff) and line=999 "low"/"desc" (file-level).
+    """
+
+    def test_drops_finding_matching_resolved_existing_comment(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        gh.existing_review_comments = [
+            ReviewComment(
+                id=1, path="a.py", line=2, body="desc", html_url="https://example/comment/1"
+            )
+        ]
+        gh.existing_resolved_ids = {1}
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["addressed_issues_dropped"] == 1
+        # Only the still-unmatched line=999 finding remains: no line-anchored
+        # comment survives, and it posts as the sole file-level comment.
+        assert job["review_summary"]["total_issues"] == 1
+        assert gh.reviews[0]["comments"] == []
+        assert gh.reviews[0]["event"] == "COMMENT"  # the dropped finding was the only blocking one
+        assert len(gh.review_comments) == 1
+
+    def test_keeps_and_references_finding_matching_unresolved_existing_comment(
+        self, review_app
+    ) -> None:
+        gh = review_app["github"]["client"]
+        gh.existing_review_comments = [
+            ReviewComment(
+                id=1, path="a.py", line=2, body="desc", html_url="https://example/comment/1"
+            )
+        ]
+        # Not in existing_resolved_ids => still open.
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["addressed_issues_dropped"] == 0
+        assert job["review_summary"]["total_issues"] == 2
+        line_comments = [c for c in gh.reviews[0]["comments"] if "line" in c]
+        assert len(line_comments) == 1
+        assert "https://example/comment/1" in line_comments[0]["body"]
+
+    def test_existing_comment_fetch_failure_degrades_gracefully(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        gh.fetch_existing_comments_fail = True
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["addressed_issues_dropped"] == 0
+        assert job["review_summary"]["total_issues"] == 2
+
+    def test_clean_review_skips_existing_comment_fetch(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        review_app["github"]["agent_output"] = _FakeOutput(issues=[])
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["total_issues"] == 0
+        assert job["review_summary"]["addressed_issues_dropped"] == 0
+        # No findings to de-duplicate: the existing-comment fetch must not run.
+        assert gh.list_review_comments_calls == 0
 
 
 class TestReviewPersistence:

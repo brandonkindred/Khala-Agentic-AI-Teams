@@ -290,7 +290,10 @@ export const INDICATOR_SPECS: Record<IndicatorName, IndicatorSpec> = {
       { key: 'output', required: false, default: 'k', kind: 'enum', options: ['k', 'd'] },
     ],
   },
-  vwap: { name: 'vwap', allowSource: false, params: [] },
+  vwap: {
+    name: 'vwap', allowSource: false,
+    params: [{ key: 'period', required: false, default: 20, kind: 'int', min: 2, max: 400 }],
+  },
   donchian: {
     name: 'donchian', allowSource: false,
     params: [
