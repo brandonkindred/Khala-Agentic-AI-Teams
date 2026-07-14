@@ -520,7 +520,7 @@ class _FakeReviewClient:
 
 @pytest.fixture
 def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    _stub_heavy_modules()
+    _stub_heavy_modules(monkeypatch)
 
     from job_service_client_fake import FakeJobServiceClient
 

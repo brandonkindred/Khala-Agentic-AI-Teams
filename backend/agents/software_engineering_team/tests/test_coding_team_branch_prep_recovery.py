@@ -41,20 +41,28 @@ def _ensure_real_modules() -> None:
         sys.modules.pop("software_engineering_team.coding_team.api", None)
 
 
-def _stub_orchestrator_only() -> None:
-    """Keep api.main importable without the heavy agent stack."""
+def _stub_orchestrator_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep api.main importable without the heavy agent stack.
+
+    Installs via ``monkeypatch.setitem`` (not a bare ``sys.modules[...] =
+    stub`` assignment) so pytest automatically reverts this ``sys.modules``
+    entry at the end of the test that requested it — otherwise the stub
+    outlives this test and can leak into an unrelated test (in this file, or
+    another sharing the same xdist worker process) that imports the real
+    ``coding_team.orchestrator`` and gets this no-op stand-in instead.
+    """
     import types
 
     if "software_engineering_team.coding_team.orchestrator" not in sys.modules:
         stub = types.ModuleType("software_engineering_team.coding_team.orchestrator")
         stub.run_coding_team_orchestrator = lambda *a, **kw: None  # type: ignore[attr-defined]
-        sys.modules["software_engineering_team.coding_team.orchestrator"] = stub
+        monkeypatch.setitem(sys.modules, "software_engineering_team.coding_team.orchestrator", stub)
 
 
 @pytest.fixture
-def api():
+def api(monkeypatch):
     _ensure_real_modules()
-    _stub_orchestrator_only()
+    _stub_orchestrator_only(monkeypatch)
     from software_engineering_team.coding_team.api import main as api_main
 
     return api_main

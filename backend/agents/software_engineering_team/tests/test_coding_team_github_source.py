@@ -657,7 +657,7 @@ class TestIssueToPlanInput:
 # ---------------------------------------------------------------------------
 
 
-def _stub_heavy_modules() -> None:
+def _stub_heavy_modules(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     Pre-load lightweight stand-ins for the LLM/agent modules that api.main
     transitively imports. This keeps the endpoint tests insulated from the
@@ -668,6 +668,11 @@ def _stub_heavy_modules() -> None:
 
     # Replace coding_team.orchestrator with a stub exposing only the symbol
     # api.main imports. Tests monkey-patch the function on api.main itself.
+    # monkeypatch.setitem (not a bare sys.modules[...] = stub assignment) so
+    # this entry is automatically reverted at the end of THIS test — otherwise
+    # the stub outlives the test and can leak into an unrelated test (in this
+    # file, or another sharing the same xdist worker process) that needs the
+    # real orchestrator module.
     if "software_engineering_team.coding_team.orchestrator" not in sys.modules or not hasattr(
         sys.modules["software_engineering_team.coding_team.orchestrator"], "_stubbed"
     ):
@@ -678,7 +683,7 @@ def _stub_heavy_modules() -> None:
             return None
 
         stub.run_coding_team_orchestrator = _noop  # type: ignore[attr-defined]
-        sys.modules["software_engineering_team.coding_team.orchestrator"] = stub
+        monkeypatch.setitem(sys.modules, "software_engineering_team.coding_team.orchestrator", stub)
 
     # git_utils now lives in the neutral, stdlib-only shared_git package, so the
     # real module imports cheaply. Importing it (instead of injecting a fake into
@@ -745,7 +750,7 @@ def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
       * git helpers that succeed by default
       * orchestrator no-op that records a merged task
     """
-    _stub_heavy_modules()
+    _stub_heavy_modules(monkeypatch)
 
     from job_service_client_fake import FakeJobServiceClient
 
@@ -1431,9 +1436,9 @@ class TestPrepareIssueBranch:
         return repo
 
     @pytest.fixture
-    def api(self):
+    def api(self, monkeypatch):
         """Import the api module fresh, without the patched_app fixture's stubs."""
-        _stub_heavy_modules()
+        _stub_heavy_modules(monkeypatch)
         from software_engineering_team.coding_team.api import main as api_main
 
         return api_main
@@ -1493,9 +1498,9 @@ class TestGitCredentialThreading:
     """
 
     @pytest.fixture
-    def api(self):
+    def api(self, monkeypatch):
         """Import the api module fresh, without the patched_app fixture's stubs."""
-        _stub_heavy_modules()
+        _stub_heavy_modules(monkeypatch)
         from software_engineering_team.coding_team.api import main as api_main
 
         return api_main
