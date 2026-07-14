@@ -337,7 +337,7 @@ def _run_se_decision_gate(
         - ``([], False)`` when the wait ended without answers (timeout/failure); ``_wait_for_user_answers``
           has already set the failure status on timeout, so the caller just stops.
     """
-    from coding_team.hitl import answers_to_resolved
+    from software_engineering_team.coding_team.hitl import answers_to_resolved
 
     structured = _convert_to_structured_questions(question_texts, source=source)
     if not structured:
@@ -499,7 +499,7 @@ def _build_coding_team_plan_input(
     resolved_questions: Optional[List[Dict[str, Any]]] = None,
 ) -> Any:
     """Build CodingTeamPlanInput from PlanningAdapterResult for coding_team orchestrator."""
-    from coding_team.models import CodingTeamPlanInput
+    from software_engineering_team.coding_team.models import CodingTeamPlanInput
 
     req = adapter_result.requirements
     open_q = getattr(adapter_result, "open_questions", None) or []
@@ -1016,8 +1016,8 @@ def _run_coding_and_finalize(
     Postconditions: the coding-team orchestrator has run to a terminal status for ``job_id`` and the
     SE ``failed_tasks`` / LLM-pause status reflect the persisted snapshot.
     """
-    from coding_team.orchestrator import run_coding_team_orchestrator
     from software_engineering_team.coding_engine_provider import SECodeEngineProvider
+    from software_engineering_team.coding_team.orchestrator import run_coding_team_orchestrator
 
     base, span = PROGRESS_BAND_CODING
     with llm_attribution(team="software_engineering", job_id=job_id, phase="execution"):
@@ -1072,7 +1072,7 @@ def run_failed_tasks(job_id: str) -> None:
     path = Path(repo_path).resolve()
     logger.info("=== Retrying failed tasks for job %s (repo %s) ===", job_id, path)
 
-    from coding_team.models import CodingTeamPlanInput
+    from software_engineering_team.coding_team.models import CodingTeamPlanInput
 
     # On the snapshot-resume path plan_input is barely used (repo_path + any HITL question folding);
     # a PlanningAdapterResult is not available on retry, so build a minimal input from the stored

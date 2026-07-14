@@ -360,21 +360,21 @@ def test_dispatch_allows_pat_owner_to_request_reviews():
 def test_khala_comment_marker_matches_client_constant():
     """The handler keeps its own copy of the marker literal (it must not import the
     coding-team client at module scope); the two must never drift."""
-    from coding_team.github_source.client import KHALA_COMMENT_MARKER
+    from software_engineering_team.coding_team.github_source.client import KHALA_COMMENT_MARKER
 
     assert gh._KHALA_COMMENT_MARKER == KHALA_COMMENT_MARKER
 
 
 def test_add_comment_reaction_noop_without_comment_id():
     fake_client = MagicMock()
-    with patch("coding_team.github_source.client.GitHubClient", return_value=fake_client):
+    with patch("software_engineering_team.coding_team.github_source.client.GitHubClient", return_value=fake_client):
         gh._add_comment_reaction("acme", "widget", 0, "ghp_tok")
     fake_client.create_comment_reaction.assert_not_called()
 
 
 def test_add_comment_reaction_noop_without_token():
     fake_client = MagicMock()
-    with patch("coding_team.github_source.client.GitHubClient", return_value=fake_client):
+    with patch("software_engineering_team.coding_team.github_source.client.GitHubClient", return_value=fake_client):
         # No token → no client built, must not raise.
         gh._add_comment_reaction("acme", "widget", 999, None)
     fake_client.create_comment_reaction.assert_not_called()
@@ -384,7 +384,7 @@ def test_add_comment_reaction_calls_client_with_default_eyes():
     fake_client = MagicMock()
     fake_client.__enter__ = MagicMock(return_value=fake_client)
     fake_client.__exit__ = MagicMock(return_value=False)
-    with patch("coding_team.github_source.client.GitHubClient", return_value=fake_client):
+    with patch("software_engineering_team.coding_team.github_source.client.GitHubClient", return_value=fake_client):
         gh._add_comment_reaction("acme", "widget", 999, "ghp_tok")
     fake_client.create_comment_reaction.assert_called_once_with("acme", "widget", 999, content="eyes")
 
@@ -393,13 +393,15 @@ def test_add_comment_reaction_passes_custom_content():
     fake_client = MagicMock()
     fake_client.__enter__ = MagicMock(return_value=fake_client)
     fake_client.__exit__ = MagicMock(return_value=False)
-    with patch("coding_team.github_source.client.GitHubClient", return_value=fake_client):
+    with patch("software_engineering_team.coding_team.github_source.client.GitHubClient", return_value=fake_client):
         gh._add_comment_reaction("acme", "widget", 999, "ghp_tok", content="confused")
     fake_client.create_comment_reaction.assert_called_once_with("acme", "widget", 999, content="confused")
 
 
 def test_add_comment_reaction_swallows_errors():
-    with patch("coding_team.github_source.client.GitHubClient", side_effect=RuntimeError("boom")):
+    with patch(
+        "software_engineering_team.coding_team.github_source.client.GitHubClient", side_effect=RuntimeError("boom")
+    ):
         # Best-effort: an exception here must not propagate.
         gh._add_comment_reaction("acme", "widget", 999, "ghp_tok")
 
