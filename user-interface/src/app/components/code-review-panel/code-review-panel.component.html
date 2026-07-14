@@ -259,82 +259,12 @@
                        offered as GitHub-issue candidates, one block per run. -->
                   @for (rec of revs; track rec.jobId) {
                     @if (hasProposals(rec)) {
-                      <div class="cr-proposals">
-                        <h4 class="cr-proposals__title">
-                          <mat-icon>bug_report</mat-icon>
-                          Pre-existing bugs found (not on this PR)
-                        </h4>
-                        <p class="cr-proposals__hint">
-                          The reviewer noticed these in code this pull request didn't change, so
-                          they were not commented on the PR. Select the ones worth tracking and file
-                          them as GitHub issues.
-                        </p>
-                        <ul class="cr-proposals__list">
-                          @for (p of proposalsFor(rec); track p.id) {
-                            <li class="cr-proposal">
-                              @if (p.issue_url) {
-                                <span class="cr-proposal__filed">
-                                  <mat-icon>check_circle</mat-icon>
-                                  filed
-                                </span>
-                              } @else {
-                                <label
-                                  class="cr-proposal__select"
-                                  [attr.aria-label]="'Select ' + p.description"
-                                >
-                                  <input
-                                    type="checkbox"
-                                    [checked]="isProposalSelected(rec.jobId, p.id)"
-                                    (change)="toggleProposal(rec.jobId, p.id)"
-                                  />
-                                </label>
-                              }
-                              <span class="cr-chip cr-chip--sev-{{ p.severity }}">{{
-                                p.severity
-                              }}</span>
-                              @if (proposalLocation(p); as loc) {
-                                <code class="cr-proposal__loc">{{ loc }}</code>
-                              }
-                              <span class="cr-proposal__desc">{{ p.description }}</span>
-                              @if (p.issue_url) {
-                                <a
-                                  [href]="p.issue_url"
-                                  target="_blank"
-                                  rel="noopener"
-                                  [attr.aria-label]="'Open issue #' + p.issue_number"
-                                >
-                                  <mat-icon>open_in_new</mat-icon>
-                                </a>
-                              }
-                            </li>
-                          }
-                        </ul>
-                        @if (openProposals(rec).length > 0) {
-                          <div class="cr-proposals__actions">
-                            <button
-                              mat-flat-button
-                              color="primary"
-                              (click)="createIssuesFor(rec)"
-                              [disabled]="
-                                selectedCount(rec.jobId) === 0 || isCreatingIssues(rec.jobId)
-                              "
-                            >
-                              @if (isCreatingIssues(rec.jobId)) {
-                                <mat-spinner diameter="18"></mat-spinner>
-                                Creating…
-                              } @else {
-                                <ng-container>
-                                  <mat-icon>add</mat-icon>
-                                  Create GitHub issue(s) ({{ selectedCount(rec.jobId) }})
-                                </ng-container>
-                              }
-                            </button>
-                          </div>
-                        }
-                        @if (createIssueErrorFor(rec.jobId); as issueError) {
-                          <app-inline-banner variant="error" [message]="issueError" />
-                        }
-                      </div>
+                      <app-pending-issue-proposals
+                        [proposals]="rec.reviewSummary!.pending_issue_proposals!"
+                        [creatingIssues]="isCreatingIssues(rec.jobId)"
+                        [createIssueError]="createIssueErrorFor(rec.jobId)"
+                        (createIssuesRequested)="createIssuesFor(rec, $event)"
+                      />
                     }
                   }
                   }
