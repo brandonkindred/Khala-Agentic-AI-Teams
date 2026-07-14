@@ -861,3 +861,35 @@ def test_process_with_decomposition_helper() -> None:
         assert out == {"hello": "world"}
     finally:
         strands.Agent = orig_agent
+
+
+def test_process_with_decomposition_helper_recovers_fenced_json(monkeypatch) -> None:
+    import json
+
+    import strands
+
+    from software_engineering_team.shared.decomposition import (
+        SectionDecompositionStrategy,
+        process_with_decomposition,
+    )
+
+    payload = {"hello": "world"}
+    fenced = "```json\n" + json.dumps(payload) + "\n```"
+
+    class _FencedAgent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return fenced
+
+    monkeypatch.setattr(strands, "Agent", _FencedAgent)
+
+    out = process_with_decomposition(
+        llm=MagicMock(),
+        prompt="hi",
+        content="hi",
+        agent_name="X",
+        strategy=SectionDecompositionStrategy(),
+    )
+    assert out == payload
