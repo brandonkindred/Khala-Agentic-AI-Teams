@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Khala** is a multi-agent orchestration platform that simulates autonomous software development teams and specialized business functions. It currently mounts **21 enabled agent "teams"** (software engineering, blogging, personal assistant, market research, SOC2 compliance, social marketing, branding, agent provisioning, accessibility audit, AI systems, investment, nutrition & meal planning, planning, coding team, sales, road trip planning, agentic team provisioning, startup advisor, user agent founder, deepthought, job matching) under a single Unified FastAPI app, with an Angular 19 frontend. The authoritative team list lives in `backend/unified_api/config.py` (`TEAM_CONFIGS`).
+**Khala** is a multi-agent orchestration platform that simulates autonomous software development teams and specialized business functions. It currently mounts **24 enabled agent "teams"** (software engineering, blogging, personal assistant, market research, SOC2 compliance, social marketing, branding, agent provisioning, accessibility audit, AI systems, investment, nutrition & meal planning, planning, coding team, sales, road trip planning, agentic team provisioning, startup advisor, user agent founder, deepthought, job matching, user profile, product delivery, agent studio) under a single Unified FastAPI app, with an Angular 19 frontend. The authoritative team list lives in `backend/unified_api/config.py` (`TEAM_CONFIGS`).
 
 ## Repository Structure
 
@@ -14,8 +14,8 @@ One directory per agent team under `backend/agents/` — the authoritative team 
 backend/
   agents/
     software_engineering_team/  # Primary team — full dev pipeline; contains the backend/frontend
-                                # code-v2, devops, planning, integration, and QA sub-teams
-    coding_team/             # Standalone /api/coding-team; SE uses it as a logical sub-team
+                                # code-v2, devops, coding_team (Tech Lead + Task Graph execution,
+                                # still routed at /api/coding-team), planning, integration, and QA sub-teams
     planning_team/           # Client-facing discovery/PRD team (/api/planning)
     product_delivery/        # Persistent Product Delivery Loop (/api/product-delivery)
     llm_service/             # Centralized LLM client (Ollama, Claude)
@@ -127,12 +127,12 @@ Each agent team has a **team-lead orchestrator** that coordinates role-separated
 
 ### Sub-Team Variants
 
-The first three live **inside** `backend/agents/software_engineering_team/`; Coding Team and Planning are standalone modules under `backend/agents/`:
+The first four live **inside** `backend/agents/software_engineering_team/`; Planning is a standalone module under `backend/agents/`:
 
 - **Backend-Code-V2** (`software_engineering_team/backend_code_v2_team/`): 3-layer (Backend Tech Lead → Backend Dev Agent + tool agents for linting, build, code review, security, QA, DbC, git ops)
 - **Frontend-Code-V2** (`software_engineering_team/frontend_code_v2_team/`): 3-layer (Frontend Tech Lead → Frontend Dev Agent + tool agents)
 - **DevOps Team** (`software_engineering_team/devops_team/`): 5-phase (Intake → Change Design → Write Artifacts → Validation → Completion)
-- **Coding Team** (`backend/agents/coding_team/`): standalone module mounted at `/api/coding-team` and used by SE as a logical sub-team (`parent_team_key="software_engineering"`)
+- **Coding Team** (`software_engineering_team/coding_team/`): Tech Lead + stack-specialist workers coordinating a Task Graph; invoked in-process by the SE orchestrator after planning. Still reachable at `/api/coding-team` (its `TeamConfig` entry is unchanged — see Unified API Routing below), now served by the SE process instead of a standalone container.
 - **Planning** (`backend/agents/planning_team/`): standalone client-facing discovery/PRD team mounted at `/api/planning`; SE invokes it through `planning_adapter.py`
 
 ### Unified API Routing

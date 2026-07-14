@@ -19,7 +19,7 @@ from typing import Any, Dict, Literal, Optional, Protocol, Sequence, Tuple
 
 import pandas as pd
 
-from ..indicators.streaming import IndicatorRegistry
+from ..indicators.streaming import IndicatorRegistry, resolve_indicator
 from ..runtime_window import STREAMING_WINDOW_BARS
 from ..spec_dsl import (
     AllOf,
@@ -447,65 +447,13 @@ def _registry_indicator(
     Post: the indicator's scalar value at ``bars[-1]``, or ``None`` during
     warm-up — byte-identical to a fresh ``IndicatorRegistry`` over the same
     ``bars`` (so engine and sandbox ``ctx.indicator`` agree).
+
+    Thin wrapper over ``indicators.streaming.resolve_indicator`` — the single
+    dispatch shared with ``executor.strategy_indicators.indicator_value``,
+    which previously carried a second, structurally-parallel 16-way if/elif
+    reaching the same registry methods.
     """
-    name = ref.name
-    if name == "sma":
-        return reg.sma(bars, period=int(ref.param("period")), source=ref.source)
-    if name == "ema":
-        return reg.ema(bars, period=int(ref.param("period")), source=ref.source)
-    if name == "rsi":
-        return reg.rsi(bars, period=int(ref.param("period")), source=ref.source)
-    if name == "macd":
-        return reg.macd(
-            bars,
-            fast=int(ref.param("fast")),
-            slow=int(ref.param("slow")),
-            signal=int(ref.param("signal")),
-            source=ref.source,
-            select=str(ref.param("output")),
-        )
-    if name == "bollinger":
-        return reg.bollinger_bands(
-            bars,
-            period=int(ref.param("period")),
-            num_std=float(ref.param("num_std")),
-            source=ref.source,
-            select=str(ref.param("band")),
-        )
-    if name == "atr":
-        return reg.atr(bars, period=int(ref.param("period")))
-    if name == "adx":
-        return reg.adx(bars, period=int(ref.param("period")))
-    if name == "stochastic":
-        return reg.stochastic(
-            bars,
-            k_period=int(ref.param("k_period")),
-            d_period=int(ref.param("d_period")),
-            select=str(ref.param("output")),
-        )
-    if name == "vwap":
-        return reg.vwap(bars)
-    if name == "donchian":
-        return reg.donchian(bars, period=int(ref.param("period")), select=str(ref.param("band")))
-    if name == "keltner":
-        return reg.keltner(
-            bars,
-            period=int(ref.param("period")),
-            atr_period=int(ref.param("atr_period")),
-            multiplier=float(ref.param("multiplier")),
-            select=str(ref.param("band")),
-        )
-    if name == "obv":
-        return reg.obv(bars)
-    if name == "mfi":
-        return reg.mfi(bars, period=int(ref.param("period")))
-    if name == "roc":
-        return reg.roc(bars, period=int(ref.param("period")), source=ref.source)
-    if name == "cci":
-        return reg.cci(bars, period=int(ref.param("period")))
-    if name == "williams_r":
-        return reg.williams_r(bars, period=int(ref.param("period")))
-    raise ValueError(f"unknown indicator name: {name!r}")
+    return resolve_indicator(reg, ref.name, bars, source=ref.source, **ref.params)
 
 
 class StreamingHistoryView:
