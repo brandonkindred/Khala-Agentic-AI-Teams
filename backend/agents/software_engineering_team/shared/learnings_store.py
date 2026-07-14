@@ -19,12 +19,26 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from shared_postgres import pg_cursor
 from software_engineering_team.shared.env_config import env_float
 
 logger = logging.getLogger(__name__)
+
+# The single upsert statement shared by the one-shot and batched write paths.
+# Column order here is the contract; :func:`_entry_to_row` produces the matching
+# positional tuple. Keeping both on this string means a column change is one edit.
+_UPSERT_SQL = (
+    "INSERT INTO se_learnings "
+    "(fingerprint, pattern, trigger, counter_measure, source, category, "
+    " occurrences, created_at, last_seen) "
+    "VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s) "
+    "ON CONFLICT (fingerprint) DO UPDATE SET "
+    "  occurrences = se_learnings.occurrences + 1, "
+    "  last_seen = EXCLUDED.last_seen, "
+    "  counter_measure = EXCLUDED.counter_measure"
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +51,17 @@ class Learning:
     source: str
     category: str
     occurrences: int
+
+
+@dataclass(frozen=True)
+class LearningEntry:
+    """One learning to upsert — the batch input unit for :func:`upsert_learnings_batch`."""
+
+    pattern: str
+    trigger: str = ""
+    counter_measure: str = ""
+    source: str = ""
+    category: str = ""
 
 
 def _norm(text: str) -> str:
@@ -81,6 +106,38 @@ def _retention_days() -> float:
     return env_float("SE_LEARNINGS_RETENTION_DAYS", 365.0, 0.0)
 
 
+def _entry_to_row(entry: LearningEntry) -> tuple:
+    """Build the 8-element positional tuple for ``_UPSERT_SQL`` from a ``LearningEntry``.
+
+    Pure (no I/O): used both by :func:`upsert_learning` (single upsert) and by
+    :func:`upsert_learnings_batch` (``executemany``) so the two paths cannot
+    drift on column order or truncation/fingerprint logic.
+
+    Preconditions:
+        - ``entry.pattern`` is a non-empty string.
+    Postconditions:
+        - Returns an 8-element tuple in ``_UPSERT_SQL`` column order, with each
+          text field truncated to 8000 chars (see the tsvector note below).
+    """
+    # Bound the text feeding se_learnings.search_tsv (a GENERATED tsvector over
+    # ``pattern || ' ' || trigger``): Postgres rejects a tsvector larger than ~1MB,
+    # which would make the INSERT raise and the learning be silently dropped.
+    # 8000 chars is ample for a diagnostic snippet.
+    for _field, _val in (
+        ("pattern", entry.pattern),
+        ("trigger", entry.trigger),
+        ("counter_measure", entry.counter_measure),
+    ):
+        if len(_val) > 8000:
+            logger.debug("upsert_learning: %s truncated from %d to 8000 chars", _field, len(_val))
+    pattern = entry.pattern[:8000]
+    trigger = entry.trigger[:8000]
+    counter_measure = entry.counter_measure[:8000]
+    fp = fingerprint(pattern, trigger, entry.category)
+    now = datetime.now(tz=timezone.utc)
+    return (fp, pattern, trigger, counter_measure, entry.source, entry.category, now, now)
+
+
 def upsert_learning(
     *,
     pattern: str,
@@ -102,41 +159,52 @@ def upsert_learning(
     """
     if not pattern or not pattern.strip():
         raise ValueError("pattern must be a non-empty string")
-    # Bound the text feeding se_learnings.search_tsv (a GENERATED tsvector over
-    # ``pattern || ' ' || trigger``): Postgres rejects a tsvector larger than ~1MB,
-    # which would make the INSERT raise and the learning be silently dropped (the
-    # except below returns False). 8000 chars is ample for a diagnostic snippet.
-    for _field, _val in (
-        ("pattern", pattern),
-        ("trigger", trigger),
-        ("counter_measure", counter_measure),
-    ):
-        if len(_val) > 8000:
-            logger.debug("upsert_learning: %s truncated from %d to 8000 chars", _field, len(_val))
-    pattern = pattern[:8000]
-    trigger = trigger[:8000]
-    counter_measure = counter_measure[:8000]
+    row = _entry_to_row(
+        LearningEntry(
+            pattern=pattern,
+            trigger=trigger,
+            counter_measure=counter_measure,
+            source=source,
+            category=category,
+        )
+    )
     try:
         with pg_cursor() as cur:
             if cur is None:
                 return False
-            fp = fingerprint(pattern, trigger, category)
-            now = datetime.now(tz=timezone.utc)
-            cur.execute(
-                "INSERT INTO se_learnings "
-                "(fingerprint, pattern, trigger, counter_measure, source, category, "
-                " occurrences, created_at, last_seen) "
-                "VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s) "
-                "ON CONFLICT (fingerprint) DO UPDATE SET "
-                "  occurrences = se_learnings.occurrences + 1, "
-                "  last_seen = EXCLUDED.last_seen, "
-                "  counter_measure = EXCLUDED.counter_measure",
-                (fp, pattern, trigger, counter_measure, source, category, now, now),
-            )
+            cur.execute(_UPSERT_SQL, row)
         return True
     except Exception:
         logger.debug("failed to upsert learning %r", pattern[:80], exc_info=True)
         return False
+
+
+def upsert_learnings_batch(entries: Sequence[LearningEntry]) -> int:
+    """Batch-upsert pre-built ``LearningEntry`` values via a single ``executemany``.
+
+    The batched path for bulk ingestion (e.g. :mod:`post_mortem_ingest`'s
+    backfill): one Postgres round trip for the whole batch instead of one per
+    entry. Disabled-Postgres / empty-input / failure cases return 0 (failures
+    logged at DEBUG) — a flush failure never raises into the caller.
+
+    Preconditions:
+        - Every element of ``entries`` has a non-empty ``pattern``.
+    Postconditions:
+        - Returns the number of entries attempted; 0 when ``entries`` is empty,
+          Postgres is disabled, or the write failed.
+    """
+    if not entries:
+        return 0
+    rows = [_entry_to_row(entry) for entry in entries]
+    try:
+        with pg_cursor() as cur:
+            if cur is None:
+                return 0
+            cur.executemany(_UPSERT_SQL, rows)
+        return len(rows)
+    except Exception:
+        logger.debug("failed to batch-upsert %d learnings", len(rows), exc_info=True)
+        return 0
 
 
 def retrieve_learnings(
@@ -243,8 +311,10 @@ def prune_learnings(retention_days: float | None = None) -> int:
 
 __all__ = [
     "Learning",
+    "LearningEntry",
     "fingerprint",
     "upsert_learning",
+    "upsert_learnings_batch",
     "retrieve_learnings",
     "count_learnings",
     "prune_learnings",

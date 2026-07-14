@@ -32,12 +32,12 @@ def test_learning_from_failure_requires_agent() -> None:
 
 
 def test_ingest_post_mortems_file_parses_entries(tmp_path, monkeypatch) -> None:
-    """ingest_post_mortems_file parses each failure entry and ingests a learning per agent."""
-    calls: list = []
+    """ingest_post_mortems_file parses each failure entry and batch-ingests one learning per agent."""
+    captured: list = []
     monkeypatch.setattr(
-        post_mortem_ingest,
-        "learning_from_failure",
-        lambda agent, desc, err: calls.append((agent, err)) or True,
+        learnings_store,
+        "upsert_learnings_batch",
+        lambda entries: captured.extend(entries) or len(entries),
     )
     md = tmp_path / "POST_MORTEMS.md"
     md.write_text(
@@ -50,9 +50,10 @@ def test_ingest_post_mortems_file_parses_entries(tmp_path, monkeypatch) -> None:
     )
     n = post_mortem_ingest.ingest_post_mortems_file(md)
     assert n == 2
-    assert calls[0][0] == "backend_dev"
-    assert "KeyError" in calls[0][1]
-    assert calls[1][0] == "frontend_dev"
+    assert captured[0].pattern == "Recovery failure in backend_dev"
+    assert "KeyError" in captured[0].trigger
+    assert captured[1].pattern == "Recovery failure in frontend_dev"
+    assert "TypeError" in captured[1].trigger
 
 
 def test_ingest_missing_file_is_zero() -> None:
