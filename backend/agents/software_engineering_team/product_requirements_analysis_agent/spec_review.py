@@ -1,16 +1,8 @@
 """
 Spec Review phase for the Product Requirements Analysis Agent.
 
-Phase 1 of the workflow: a single whole-spec LLM call that surfaces issues, gaps, and
-open questions. This module builds the review prompt (spec + prior Q&A + constraint
-hints + optional context files), invokes the LLM with JSON recovery, parses the
-result, filters out questions already answered (clarifying the spec in place when a
-previously answered question is re-asked), and drops organizational/process questions.
-
-``run_spec_review`` takes the ``LLMClient`` and Strands ``model`` explicitly, plus the
-context-files dict, the iteration/version bookkeeping (``iteration``, ``spec_version``,
-``answered_questions``), and an optional ``on_chunk_progress`` callback for UI status
-updates.
+Reviews the current specification and produces issues, gaps, and open questions
+for the user, reconciling them against previously answered questions.
 """
 
 from __future__ import annotations

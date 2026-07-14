@@ -1,16 +1,9 @@
 """
 Spec rewriting, cleanup, and PRD generation for the Product Requirements Analysis Agent.
 
-Every LLM step that *produces* new spec text lives here: folding answered questions
-into the spec, re-clarifying it when a previously answered question is re-asked,
-rewriting it for consistency when many questions collapse, the final validation
-cleanup pass, and generating the Product Requirements Document from the cleaned spec.
-Each writer persists versioned artifacts under ``plan/product_analysis`` and falls
-back to the unmodified input on any LLM failure.
-
-The LLM-backed writers take an explicit Strands ``model`` (for raw text calls) and/or
-the ``LLMClient`` (for context sizing and JSON recovery); ``build_specialist_collaboration_plan``
-is the exception — a pure, deterministic keyword-driven helper that needs neither.
+Folds answered questions into the specification, rewrites it for consistency and
+clarity, validates and cleans it, and generates the Product Requirements Document
+from the result.
 """
 
 from __future__ import annotations

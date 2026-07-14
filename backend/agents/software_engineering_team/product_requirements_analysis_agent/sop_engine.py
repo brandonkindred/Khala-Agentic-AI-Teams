@@ -1,32 +1,11 @@
 """
 SOP (Standard Operating Procedure) discovery engine for the Product Requirements Analysis Agent.
 
-The one-time pre-loop discovery that runs before the spec-review cycle, built around
-two human-in-the-loop orchestrators plus their supporting helpers:
-
-* **Phase 1 — Environment constraints** (``run_sop_phase1``): a thin per-sub-phase
-  orchestrator over ``_run_sop_sub_phase``, which — for each sub-phase (deployment,
-  regulations, ... priorities) — asks the hardcoded SOP questions (honoring
-  conditional dependencies and multi-round follow-ups), then fills remaining gaps
-  with LLM-generated follow-up questions until the sub-phase is complete. Every
-  question is guaranteed >= 3 spec-aware options. Supported by
-  ``evaluate_sop_conditionals``, ``extract_sop_decisions_from_spec``,
-  ``generate_spec_aware_options``, ``build_question_options``,
-  ``assess_sub_phase_gaps``, and the shared ``_pad_to_minimum_options``
-  option-padding helper.
-* **Phase 2 — Architecture** (``run_sop_phase2_architecture``): autonomously analyze
-  architecture from the spec plus Phase 1 decisions, present recommendations for
-  user approval, persist an architecture document, and inject a summary into the
-  spec. Supported by ``build_architecture_approval_questions``,
-  ``apply_architecture_approval``, and ``format_architecture_document``.
-
-The project context/constraints discovery pair lives separately in
-:mod:`context_discovery` — ``run_sop_phase1`` calls its
-``inject_context_answers_into_spec`` to fold Phase 1 answers back into the spec.
-
-The two orchestrators call the user-communication phase; the analyzers each make one
-LLM call and degrade gracefully on failure. Functions take an explicit Strands
-``model``.
+The one-time pre-loop discovery that runs before the spec-review cycle: Phase 1
+(``run_sop_phase1``) gathers environment-constraint decisions sub-phase by
+sub-phase; Phase 2 (``run_sop_phase2_architecture``) analyzes and confirms the
+target architecture. Related project context/constraints discovery lives in
+:mod:`context_discovery`.
 """
 
 from __future__ import annotations
