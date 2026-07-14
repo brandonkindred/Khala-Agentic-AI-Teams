@@ -27,6 +27,29 @@ DEFAULT_TIMEOUT_S = 30.0
 DEFAULT_MAX_RETRIES = 3
 RATE_LIMIT_CAP_S = 60
 MAX_ISSUES_TRAVERSED = 1000
+MAX_REVIEW_THREADS_TRAVERSED = 2000
+MAX_REVIEW_COMMENTS_TRAVERSED = 5000
+
+# GraphQL query for review-thread resolution state: GitHub's REST API has no
+# "resolved" field on a review comment, so thread resolution (the "Resolve
+# conversation" button on GitHub) can only be read via GraphQL's `isResolved`.
+_REVIEW_THREADS_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          isResolved
+          comments(first: 100) {
+            nodes { databaseId }
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
 # Appended (as an HTML comment — invisible in GitHub's rendered view) to every issue/PR
 # conversation comment Khala posts, so the "@khala review" webhook can recognize and skip
@@ -105,6 +128,31 @@ class PullRequestFile:
     additions: int
     deletions: int
     previous_filename: Optional[str]
+
+
+@dataclass(frozen=True)
+class ReviewComment:
+    """One existing review comment already on a pull request.
+
+    ``line`` is ``None`` for a file-level comment: GitHub's read-back payload
+    for one omits ``line``/``position`` entirely (there is no ``subject_type``
+    echo to check instead).
+    """
+
+    id: int
+    path: str
+    line: Optional[int]
+    body: str
+    html_url: str
+
+
+@dataclass(frozen=True)
+class IssueComment:
+    """One existing standalone issue/PR conversation comment."""
+
+    id: int
+    body: str
+    html_url: str
 
 
 @dataclass(frozen=True)
@@ -253,6 +301,24 @@ def _pr_file_from_payload(payload: dict[str, Any]) -> PullRequestFile:
         additions=int(payload.get("additions") or 0),
         deletions=int(payload.get("deletions") or 0),
         previous_filename=payload.get("previous_filename"),
+    )
+
+
+def _review_comment_from_payload(payload: dict[str, Any]) -> ReviewComment:
+    return ReviewComment(
+        id=int(payload["id"]),
+        path=payload.get("path") or "",
+        line=payload.get("line"),
+        body=payload.get("body") or "",
+        html_url=payload.get("html_url") or "",
+    )
+
+
+def _issue_comment_from_payload(payload: dict[str, Any]) -> IssueComment:
+    return IssueComment(
+        id=int(payload["id"]),
+        body=payload.get("body") or "",
+        html_url=payload.get("html_url") or "",
     )
 
 
@@ -727,6 +793,182 @@ class GitHubClient:
             url = _parse_next_link(response.headers.get("Link"))
         return out
 
+    def list_review_comments(self, owner: str, repo: str, number: int) -> list[ReviewComment]:
+        """List every existing review comment on a pull request, following ``Link`` pagination.
+
+        Fetches ``GET /repos/{owner}/{repo}/pulls/{number}/comments`` — inline
+        (line-anchored) and file-level review comments alike; a file-level
+        comment is distinguished on read by carrying no ``line`` (GitHub does
+        not echo ``subject_type`` back). Used so a new review run can recognize
+        a finding that duplicates a comment already posted, rather than
+        re-posting it. See :meth:`list_issue_comments` for the separate
+        conversation-comment surface, and
+        :meth:`get_resolved_review_thread_comment_ids` for resolution state
+        (not available on this endpoint).
+
+        Preconditions:
+            - ``number`` names an existing pull request.
+        Postconditions:
+            - Returns one ``ReviewComment`` per existing review comment, in
+              GitHub's response order (oldest first), bounded by
+              :data:`MAX_REVIEW_COMMENTS_TRAVERSED` to cap an unbounded
+              traversal on a PR with a pathological number of comments.
+              Raises ``GitHubAPIError`` on any non-2xx.
+        """
+        path = f"/repos/{owner}/{repo}/pulls/{number}/comments"
+        params: Optional[dict[str, Any]] = {"per_page": 100}
+        url: Optional[str] = path
+        out: list[ReviewComment] = []
+        seen = 0
+        while url:
+            response = self._check(self._request("GET", url, params=params))
+            params = None
+            for item in response.json() or []:
+                seen += 1
+                if seen > MAX_REVIEW_COMMENTS_TRAVERSED:
+                    logger.warning(
+                        "list_review_comments hit MAX_REVIEW_COMMENTS_TRAVERSED=%d; stopping",
+                        MAX_REVIEW_COMMENTS_TRAVERSED,
+                    )
+                    return out
+                out.append(_review_comment_from_payload(item))
+            url = _parse_next_link(response.headers.get("Link"))
+        return out
+
+    def list_issue_comments(self, owner: str, repo: str, number: int) -> list[IssueComment]:
+        """List every existing standalone conversation comment, following ``Link`` pagination.
+
+        Fetches ``GET /repos/{owner}/{repo}/issues/{number}/comments``. A pull
+        request is an issue in GitHub's REST API, so this returns the PR's
+        conversation-tab comments — not review comments (see
+        :meth:`list_review_comments`).
+
+        Preconditions:
+            - ``number`` names an existing issue or pull request.
+        Postconditions:
+            - Returns one ``IssueComment`` per existing conversation comment,
+              in GitHub's response order (oldest first), bounded by
+              :data:`MAX_REVIEW_COMMENTS_TRAVERSED` to cap an unbounded
+              traversal on a PR with a pathological number of comments.
+              Raises ``GitHubAPIError`` on any non-2xx.
+        """
+        path = f"/repos/{owner}/{repo}/issues/{number}/comments"
+        params: Optional[dict[str, Any]] = {"per_page": 100}
+        url: Optional[str] = path
+        out: list[IssueComment] = []
+        seen = 0
+        while url:
+            response = self._check(self._request("GET", url, params=params))
+            params = None
+            for item in response.json() or []:
+                seen += 1
+                if seen > MAX_REVIEW_COMMENTS_TRAVERSED:
+                    logger.warning(
+                        "list_issue_comments hit MAX_REVIEW_COMMENTS_TRAVERSED=%d; stopping",
+                        MAX_REVIEW_COMMENTS_TRAVERSED,
+                    )
+                    return out
+                out.append(_issue_comment_from_payload(item))
+            url = _parse_next_link(response.headers.get("Link"))
+        return out
+
+    def get_resolved_review_thread_comment_ids(
+        self, owner: str, repo: str, number: int
+    ) -> set[int]:
+        """Return the ids of every review comment belonging to a RESOLVED review thread.
+
+        GitHub's REST API has no "resolved" field on a review comment — thread
+        resolution (the "Resolve conversation" button) is exposed only via the
+        GraphQL API's ``isResolved``. Posted through the same
+        ``_request``/``_check`` machinery as every REST call (``_absolute_url``
+        joins ``/graphql`` onto ``base_url`` unchanged), as a ``POST`` with a
+        ``{"query", "variables"}`` body.
+
+        Preconditions:
+            - ``number`` names an existing pull request.
+        Postconditions:
+            - Returns the set of comment ids (``ReviewComment.id`` / GraphQL
+              ``databaseId``, the same numeric id) that belong to a thread
+              GitHub reports as resolved; an id absent from the set is either
+              unresolved or belongs to no thread. Traversal is bounded by
+              :data:`MAX_REVIEW_THREADS_TRAVERSED` threads, mirroring the
+              bounded-list convention used elsewhere in this client (see
+              :data:`MAX_ISSUES_TRAVERSED`).
+            - Never raises: a GraphQL transport/HTTP error, a non-2xx status, a
+              GraphQL-level error in the response body, or an unexpected
+              response shape is logged as a warning and degrades to an empty
+              set — a resolution-lookup failure must not fail an otherwise
+              working review. Treating every comment as unresolved in that case
+              only means a duplicate finding is kept and cross-referenced
+              rather than dropped, never silently lost.
+        """
+        resolved: set[int] = set()
+        after: Optional[str] = None
+        seen = 0
+        try:
+            while True:
+                variables: dict[str, Any] = {
+                    "owner": owner,
+                    "repo": repo,
+                    "number": number,
+                    "after": after,
+                }
+                response = self._check(
+                    self._request(
+                        "POST",
+                        "/graphql",
+                        json={"query": _REVIEW_THREADS_QUERY, "variables": variables},
+                    )
+                )
+                payload = response.json()
+                if payload.get("errors"):
+                    logger.warning(
+                        "get_resolved_review_thread_comment_ids: GraphQL errors for %s/%s#%s: %s",
+                        owner,
+                        repo,
+                        number,
+                        payload["errors"],
+                    )
+                    return resolved
+                pr_data = ((payload.get("data") or {}).get("repository") or {}).get(
+                    "pullRequest"
+                ) or {}
+                threads = pr_data.get("reviewThreads") or {}
+                for node in threads.get("nodes") or []:
+                    seen += 1
+                    if seen > MAX_REVIEW_THREADS_TRAVERSED:
+                        logger.warning(
+                            "get_resolved_review_thread_comment_ids hit "
+                            "MAX_REVIEW_THREADS_TRAVERSED=%d; stopping",
+                            MAX_REVIEW_THREADS_TRAVERSED,
+                        )
+                        return resolved
+                    if not node.get("isResolved"):
+                        continue
+                    for c in (node.get("comments") or {}).get("nodes") or []:
+                        database_id = c.get("databaseId")
+                        if isinstance(database_id, int):
+                            resolved.add(database_id)
+                page_info = threads.get("pageInfo") or {}
+                if not page_info.get("hasNextPage"):
+                    return resolved
+                after = page_info.get("endCursor")
+                if not after:
+                    return resolved
+        except Exception as e:  # noqa: BLE001 - a resolution-lookup failure must degrade to
+            # an empty set, never fail the review (see the "Never raises" postcondition
+            # above); an enumerated exception tuple here previously included a dead
+            # KeyError (every field access below uses .get()) while still missing the
+            # AttributeError a non-dict GraphQL payload segment would raise.
+            logger.warning(
+                "get_resolved_review_thread_comment_ids failed for %s/%s#%s: %s",
+                owner,
+                repo,
+                number,
+                e,
+            )
+            return resolved
+
     def get_file_contents(self, owner: str, repo: str, path: str, ref: str) -> Optional[str]:
         """Return the decoded text of a repository file at ``ref``, or ``None``.
 
@@ -942,12 +1184,16 @@ __all__ = [
     "GitHubAPIError",
     "GitHubClient",
     "Issue",
+    "IssueComment",
     "MAX_ISSUES_TRAVERSED",
+    "MAX_REVIEW_COMMENTS_TRAVERSED",
+    "MAX_REVIEW_THREADS_TRAVERSED",
     "NotAnIssueError",
     "PullRequest",
     "PullRequestDetail",
     "PullRequestFile",
     "Repo",
+    "ReviewComment",
     "SubIssue",
     "scrub_token_from_text",
 ]
