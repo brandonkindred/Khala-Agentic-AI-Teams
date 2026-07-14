@@ -115,11 +115,16 @@ def _run_frontend_code_v2_impl(
             completed_phases.append(p)
         update_job(job_id, completed_phases=completed_phases, **kwargs)
 
+    from software_engineering_team.shared.production_review_agents import (
+        build_production_review_kwargs_in_process,
+    )
+
     result = team_lead.run_workflow(
         repo_path=Path(repo_path),
         task=task,
         architecture=arch,
         job_updater=_job_updater,
+        **build_production_review_kwargs_in_process(),
     )
     final_status = "completed" if result.success else "failed"
     update_job(
@@ -198,11 +203,16 @@ def _run_backend_code_v2_impl(
             completed_phases.append(p)
         update_job(job_id, completed_phases=completed_phases, **kwargs)
 
+    from software_engineering_team.shared.production_review_agents import (
+        build_production_review_kwargs_in_process,
+    )
+
     result = team_lead.run_workflow(
         repo_path=Path(repo_path),
         task=task,
         architecture=arch,
         job_updater=_job_updater,
+        **build_production_review_kwargs_in_process(),
     )
     final_status = "completed" if result.success else "failed"
     update_job(

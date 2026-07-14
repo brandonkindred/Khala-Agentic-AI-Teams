@@ -20,6 +20,9 @@ from software_engineering_team.shared.job_store import (
     JOB_STATUS_FAILED,
     update_job,
 )
+from software_engineering_team.shared.production_review_agents import (
+    build_production_review_kwargs as _build_production_review_kwargs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +131,7 @@ def _run_frontend_code_v2_background(
             task=task,
             architecture=arch,
             job_updater=_job_updater,
+            **_build_production_review_kwargs(),
         )
 
         final_status = "completed" if result.success else "failed"
@@ -206,6 +210,7 @@ def _run_backend_code_v2_background(
             task=task,
             architecture=arch,
             job_updater=_job_updater,
+            **_build_production_review_kwargs(),
         )
 
         final_status = "completed" if result.success else "failed"
