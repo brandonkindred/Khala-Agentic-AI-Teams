@@ -168,6 +168,18 @@ class AgentProvisioningWorkflow:
             retry_policy=DEFAULT_RETRY_POLICY,
         )
 
+    async def _record_account_provisioning(
+        self, job_id: str, tool_results_dump: list[dict]
+    ) -> None:
+        """Checkpoint successful tool results so later-phase failures can resume."""
+        await workflow.execute_activity(
+            _activities.record_account_provisioning_activity,
+            args=[job_id, tool_results_dump],
+            task_queue=TASK_QUEUE,
+            schedule_to_close_timeout=PHASE_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
+        )
+
     @workflow.run
     async def run(
         self,
@@ -189,9 +201,13 @@ class AgentProvisioningWorkflow:
             * On success: all phases ran (or were restored), and
               ``deliver_activity`` has written a terminal completed/failed job
               status.
-            * On tool-provisioning failure: ``compensate_activity`` runs for
-              succeeded tools, ``mark_job_failed_activity`` records the failure,
-              then ``RuntimeError`` is raised (workflow fails).
+            * On any unhandled phase failure (setup, credentials, tools, audit,
+              docs, deliver): ``mark_job_failed_activity`` records terminal
+              failure before the exception propagates (tool failures also
+              compensate succeeded tools first).
+            * After a successful tool fan-out (not a restored skip),
+              ``account_provisioning`` is written to ``completed_phases`` /
+              ``phase_results`` before later phases run.
         Invariants:
             * One Temporal workflow id per ``job_id`` (starter uses a stable
               prefix); resume/restart mint a new run with skip/prior args rather
@@ -203,103 +219,114 @@ class AgentProvisioningWorkflow:
 
         skip = set(skip_phases or [])
         prior = prior_results or {}
+        terminal_failure_recorded = False
 
-        # Phase 1: setup (Docker environment).
-        setup_prior = prior.get("setup") if "setup" in skip else None
-        setup_result = await workflow.execute_activity(
-            _activities.setup_activity,
-            args=[job_id, agent_id, manifest_path, setup_prior],
-            task_queue=TASK_QUEUE,
-            schedule_to_close_timeout=PHASE_TIMEOUT,
-            retry_policy=DEFAULT_RETRY_POLICY,
-        )
-        environment_dump = setup_result.get("environment") if setup_result else None
+        try:
+            # Phase 1: setup (Docker environment).
+            setup_prior = prior.get("setup") if "setup" in skip else None
+            setup_result = await workflow.execute_activity(
+                _activities.setup_activity,
+                args=[job_id, agent_id, manifest_path, setup_prior],
+                task_queue=TASK_QUEUE,
+                schedule_to_close_timeout=PHASE_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+            environment_dump = setup_result.get("environment") if setup_result else None
 
-        # Phase 2: credential generation.
-        creds_prior = (
-            prior.get("credential_generation") if "credential_generation" in skip else None
-        )
-        creds_result = await workflow.execute_activity(
-            _activities.credentials_activity,
-            args=[job_id, agent_id, manifest_path, creds_prior],
-            task_queue=TASK_QUEUE,
-            schedule_to_close_timeout=PHASE_TIMEOUT,
-            retry_policy=DEFAULT_RETRY_POLICY,
-        )
-        credentials_by_tool: dict[str, dict[str, Any]] = creds_result["credentials"]
+            # Phase 2: credential generation.
+            creds_prior = (
+                prior.get("credential_generation") if "credential_generation" in skip else None
+            )
+            creds_result = await workflow.execute_activity(
+                _activities.credentials_activity,
+                args=[job_id, agent_id, manifest_path, creds_prior],
+                task_queue=TASK_QUEUE,
+                schedule_to_close_timeout=PHASE_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+            credentials_by_tool: dict[str, dict[str, Any]] = creds_result["credentials"]
 
-        # Phase 3: fan out per-tool provisioning (or restore from prior).
-        tool_names = await workflow.execute_activity(
-            _activities.list_manifest_tools_activity,
-            args=[manifest_path],
-            task_queue=TASK_QUEUE,
-            schedule_to_close_timeout=PHASE_TIMEOUT,
-            retry_policy=DEFAULT_RETRY_POLICY,
-        )
-        tool_results_dump, succeeded, failures = await self._run_tool_provisioning_phase(
-            job_id,
-            agent_id,
-            manifest_path,
-            tool_names,
-            credentials_by_tool,
-            skip,
-            prior,
-        )
-
-        if failures:
-            await self._compensate_failed_tools(agent_id, succeeded)
-            err = f"Tool provisioning failed for agent {agent_id}: {'; '.join(failures)}"
-            await self._mark_job_failed(job_id, err)
-            raise RuntimeError(err)
-
-        # Phase 4: access audit.
-        audit_prior = prior.get("access_audit") if "access_audit" in skip else None
-        audit_dump = await workflow.execute_activity(
-            _activities.audit_activity,
-            args=[job_id, agent_id, manifest_path, tool_results_dump, audit_prior],
-            task_queue=TASK_QUEUE,
-            schedule_to_close_timeout=PHASE_TIMEOUT,
-            retry_policy=DEFAULT_RETRY_POLICY,
-        )
-
-        # Phase 5: documentation.
-        workspace_path = DEFAULT_WORKSPACE_PATH
-        if environment_dump:
-            workspace_path = environment_dump.get("workspace_path") or DEFAULT_WORKSPACE_PATH
-        doc_prior = prior.get("documentation") if "documentation" in skip else None
-        doc_result = await workflow.execute_activity(
-            _activities.documentation_activity,
-            args=[
+            # Phase 3: fan out per-tool provisioning (or restore from prior).
+            tool_names = await workflow.execute_activity(
+                _activities.list_manifest_tools_activity,
+                args=[manifest_path],
+                task_queue=TASK_QUEUE,
+                schedule_to_close_timeout=PHASE_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+            tool_results_dump, succeeded, failures = await self._run_tool_provisioning_phase(
                 job_id,
                 agent_id,
                 manifest_path,
+                tool_names,
                 credentials_by_tool,
-                tool_results_dump,
-                workspace_path,
-                doc_prior,
-            ],
-            task_queue=TASK_QUEUE,
-            schedule_to_close_timeout=PHASE_TIMEOUT,
-            retry_policy=DEFAULT_RETRY_POLICY,
-        )
-        onboarding_dump = doc_result.get("onboarding") if doc_result else None
+                skip,
+                prior,
+            )
 
-        # Phase 6: deliver + final job_store update.
-        await workflow.execute_activity(
-            _activities.deliver_activity,
-            args=[
-                job_id,
-                agent_id,
-                environment_dump,
-                credentials_by_tool,
-                tool_results_dump,
-                audit_dump,
-                onboarding_dump,
-            ],
-            task_queue=TASK_QUEUE,
-            schedule_to_close_timeout=PHASE_TIMEOUT,
-            retry_policy=DEFAULT_RETRY_POLICY,
-        )
+            if failures:
+                await self._compensate_failed_tools(agent_id, succeeded)
+                err = f"Tool provisioning failed for agent {agent_id}: {'; '.join(failures)}"
+                await self._mark_job_failed(job_id, err)
+                terminal_failure_recorded = True
+                raise RuntimeError(err)
+
+            if "account_provisioning" not in skip:
+                await self._record_account_provisioning(job_id, tool_results_dump)
+
+            # Phase 4: access audit.
+            audit_prior = prior.get("access_audit") if "access_audit" in skip else None
+            audit_dump = await workflow.execute_activity(
+                _activities.audit_activity,
+                args=[job_id, agent_id, manifest_path, tool_results_dump, audit_prior],
+                task_queue=TASK_QUEUE,
+                schedule_to_close_timeout=PHASE_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+
+            # Phase 5: documentation.
+            workspace_path = DEFAULT_WORKSPACE_PATH
+            if environment_dump:
+                workspace_path = environment_dump.get("workspace_path") or DEFAULT_WORKSPACE_PATH
+            doc_prior = prior.get("documentation") if "documentation" in skip else None
+            doc_result = await workflow.execute_activity(
+                _activities.documentation_activity,
+                args=[
+                    job_id,
+                    agent_id,
+                    manifest_path,
+                    credentials_by_tool,
+                    tool_results_dump,
+                    workspace_path,
+                    doc_prior,
+                ],
+                task_queue=TASK_QUEUE,
+                schedule_to_close_timeout=PHASE_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+            onboarding_dump = doc_result.get("onboarding") if doc_result else None
+
+            # Phase 6: deliver + final job_store update.
+            await workflow.execute_activity(
+                _activities.deliver_activity,
+                args=[
+                    job_id,
+                    agent_id,
+                    environment_dump,
+                    credentials_by_tool,
+                    tool_results_dump,
+                    audit_dump,
+                    onboarding_dump,
+                ],
+                task_queue=TASK_QUEUE,
+                schedule_to_close_timeout=PHASE_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+        except Exception as exc:
+            # Tool failures already call ``_mark_job_failed`` before re-raising.
+            if not terminal_failure_recorded:
+                await self._mark_job_failed(job_id, f"Provisioning failed: {exc}")
+            raise
 
 
 @workflow.defn(name="AgentDeprovisioningWorkflow")

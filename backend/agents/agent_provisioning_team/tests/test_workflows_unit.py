@@ -1,5 +1,4 @@
-"""Unit tests for AgentProvisioningWorkflow and the setup_activity
-that previously sat behind the integration marker.
+"""Unit tests for AgentProvisioningWorkflow.
 
 The workflow is exercised by stubbing `workflow.execute_activity` so we
 never need a live Temporal worker — we just verify the workflow's
@@ -8,98 +7,9 @@ control flow (skip / resume, fan-out, failure → compensation, etc.).
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# setup_activity — direct invocation
-# ---------------------------------------------------------------------------
-
-
-def test_setup_activity_progress_path() -> None:
-    """Fresh setup writes progress / completed phase into job_store and returns env dump."""
-    from agent_provisioning_team.models import EnvironmentInfo, SetupResult
-    from agent_provisioning_team.temporal import activities as t_acts
-
-    fake_setup_result = SetupResult(
-        success=True,
-        environment=EnvironmentInfo(container_id="c1", container_name="c1"),
-    )
-    fake_orch = MagicMock()
-    fake_orch.environment_store = MagicMock()
-    fake_orch.tool_agents = {"docker_provisioner": MagicMock()}
-    fake_manifest = MagicMock()
-
-    recorded = []
-
-    def fake_safe(fn, *args, **kwargs):
-        recorded.append({"fn": getattr(fn, "__name__", fn), "args": args, "kwargs": kwargs})
-
-    with (
-        patch.object(t_acts, "_best_effort_job_store", side_effect=fake_safe),
-        patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
-        patch(
-            "agent_provisioning_team.phases.setup.run_setup",
-            return_value=fake_setup_result,
-        ),
-        patch("temporalio.activity.heartbeat"),
-    ):
-        payload = t_acts.setup_activity("j", "a", "default.yaml")
-
-    assert payload["success"] is True
-    assert payload["environment"]["container_id"] == "c1"
-    # mark_job_running + update_job were invoked.
-    fn_names = [r["fn"] for r in recorded]
-    assert "mark_job_running" in fn_names
-    assert "update_job" in fn_names
-    assert "add_completed_phase" in fn_names
-
-
-def test_setup_activity_raises_when_setup_fails() -> None:
-    """Failed setup raises RuntimeError so Temporal can retry the activity."""
-    from agent_provisioning_team.models import SetupResult
-    from agent_provisioning_team.temporal import activities as t_acts
-
-    fake_orch = MagicMock()
-    fake_orch.environment_store = MagicMock()
-    fake_orch.tool_agents = {"docker_provisioner": MagicMock()}
-    fake_manifest = MagicMock()
-
-    with (
-        patch.object(t_acts, "_best_effort_job_store"),
-        patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
-        patch(
-            "agent_provisioning_team.phases.setup.run_setup",
-            return_value=SetupResult(success=False, error="setup boom"),
-        ),
-        patch("temporalio.activity.heartbeat"),
-    ):
-        with pytest.raises(RuntimeError, match="setup boom"):
-            t_acts.setup_activity("j", "a", "default.yaml")
-
-
-def test_setup_activity_restores_from_prior() -> None:
-    """When prior_setup is provided, setup is skipped and the snapshot is restored."""
-    from agent_provisioning_team.temporal import activities as t_acts
-
-    prior = {
-        "success": True,
-        "environment": {
-            "container_id": "c1",
-            "container_name": "c1",
-            "workspace_path": "/w",
-            "status": "running",
-        },
-    }
-    with (
-        patch.object(t_acts, "_best_effort_job_store"),
-        patch("temporalio.activity.heartbeat"),
-    ):
-        payload = t_acts.setup_activity("j", "a", "default.yaml", prior_setup=prior)
-    assert payload["success"] is True
-    assert payload["environment"]["container_id"] == "c1"
-
 
 # ---------------------------------------------------------------------------
 # AgentProvisioningWorkflow — direct .run() invocation
@@ -171,6 +81,7 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
                 "success": True,
                 "provisioner_key": "x",
             },
+            "record_account_provisioning_activity": {"success": True, "tool_results": []},
             "audit_activity": {"passed": True, "verifications": []},
             "documentation_activity": {"success": True, "onboarding": {"summary": "s"}},
             "deliver_activity": {"success": True, "error": None},
@@ -186,6 +97,7 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
     assert "credentials_activity" in fn_names
     # Two tools → two provision activities.
     assert fn_names.count("provision_tool_activity") == 2
+    assert "record_account_provisioning_activity" in fn_names
     assert "audit_activity" in fn_names
     assert "documentation_activity" in fn_names
     assert "deliver_activity" in fn_names
@@ -233,7 +145,7 @@ async def test_workflow_compensates_on_tool_failure(tmp_path) -> None:
     fn_names = [c["name"] for c in stub.calls]
     # Compensate was invoked
     assert "compensate_activity" in fn_names
-    assert "mark_job_failed_activity" in fn_names
+    assert fn_names.count("mark_job_failed_activity") == 1
 
 
 @pytest.mark.asyncio
@@ -289,6 +201,7 @@ async def test_workflow_skips_provisioning_when_resumed(tmp_path) -> None:
     fn_names = [c["name"] for c in stub.calls]
     # No per-tool provisioning happened
     assert "provision_tool_activity" not in fn_names
+    assert "record_account_provisioning_activity" not in fn_names
     # Compensation is skipped because everything in prior was successful
     assert "compensate_activity" not in fn_names
 
@@ -310,6 +223,7 @@ async def test_workflow_resume_rejects_tool_set_mismatch(tmp_path) -> None:
                     "redis": {"tool_name": "redis"},
                 },
             },
+            "mark_job_failed_activity": None,
         }
     )
     prior = {
@@ -332,6 +246,8 @@ async def test_workflow_resume_rejects_tool_set_mismatch(tmp_path) -> None:
                 skip_phases=["account_provisioning"],
                 prior_results=prior,
             )
+
+    assert "mark_job_failed_activity" in [c["name"] for c in stub.calls]
 
 
 @pytest.mark.asyncio
@@ -459,3 +375,40 @@ async def test_workflow_handles_dict_failure_results(tmp_path) -> None:
     with patch.object(wf.workflow, "execute_activity", new=stub):
         with pytest.raises(RuntimeError, match="redis down"):
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+
+@pytest.mark.asyncio
+async def test_workflow_marks_failed_on_audit_error(tmp_path) -> None:
+    """Non-tool phase exceptions must persist terminal failure before re-raising."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "credentials_activity": {
+                "success": True,
+                "credentials": {
+                    "postgresql": {"tool_name": "postgresql"},
+                    "redis": {"tool_name": "redis"},
+                },
+            },
+            "provision_tool_activity": lambda call: {
+                "tool_name": call["args"][2],
+                "success": True,
+                "provisioner_key": "x",
+            },
+            "record_account_provisioning_activity": {"success": True, "tool_results": []},
+            "audit_activity": RuntimeError("audit boom"),
+            "mark_job_failed_activity": None,
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        with pytest.raises(RuntimeError, match="audit boom"):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    fn_names = [c["name"] for c in stub.calls]
+    assert "record_account_provisioning_activity" in fn_names
+    assert fn_names.count("mark_job_failed_activity") == 1

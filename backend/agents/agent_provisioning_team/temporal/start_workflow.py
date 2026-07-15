@@ -13,7 +13,7 @@ import os
 import uuid
 from typing import Any, Coroutine, Optional, TypeVar
 
-from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from temporalio.common import WorkflowIDReusePolicy
 
 from agent_provisioning_team.temporal.constants import (
     DEPROVISION_CLIENT_TIMEOUT_S,
@@ -99,8 +99,9 @@ def start_provisioning_workflow(
     }
     if replace_existing:
         # Hard cutover leaves abandoned executions open under the same stable id.
+        # TERMINATE_IF_RUNNING alone replaces a still-open execution; Temporal
+        # forbids combining it with id_conflict_policy.
         start_kwargs["id_reuse_policy"] = WorkflowIDReusePolicy.TERMINATE_IF_RUNNING
-        start_kwargs["id_conflict_policy"] = WorkflowIDConflictPolicy.TERMINATE_EXISTING
 
     async def _start() -> None:
         client = get_temporal_client()

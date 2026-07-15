@@ -37,9 +37,11 @@ def _load_ctx(manifest_path: str):
     Raises:
         * Propagates import/IO/validation errors from ``load_manifest``.
 
-    ``ProvisioningOrchestrator()`` is intentionally constructed per call — it is
-    cheap and effectively stateless for activity use (stores/clients are created
-    on demand). Caching a process-global instance is unnecessary.
+    ``ProvisioningOrchestrator()`` is intentionally constructed per call. Its
+    ``__init__`` only wires local ``CredentialStore`` / ``EnvironmentStore``
+    (mkdir + optional Fernet key file) and builds in-process provisioner
+    objects — no network or DB pool warmup — so a process-global cache is
+    unnecessary for activity use.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
     from agent_provisioning_team.shared.tool_manifest import load_manifest
@@ -64,7 +66,7 @@ def _best_effort_job_store(fn: Callable[..., Any], *args: Any, **kwargs: Any) ->
             "job_store.%s failed: args=%s kwargs=%s",
             getattr(fn, "__name__", repr(fn)),
             args,
-            list(kwargs),
+            kwargs,
         )
 
 
@@ -452,6 +454,33 @@ def deliver_activity(
         _best_effort_job_store(_js.mark_job_failed, job_id, error=final.error or "Provisioning failed")
 
     return {"success": final.success, "error": final.error}
+
+
+@activity.defn(name="agent_provisioning_record_account_provisioning")
+def record_account_provisioning_activity(
+    job_id: str,
+    tool_results_dump: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Persist a successful account-provisioning checkpoint for ``/resume``.
+
+    Preconditions:
+        * ``job_id`` is non-empty.
+        * ``tool_results_dump`` is the serializable per-tool result list.
+    Postconditions:
+        * ``completed_phases`` includes ``account_provisioning`` and
+          ``phase_results`` carries ``{"success": True, "tool_results": ...}``.
+    """
+    assert job_id, "job_id must be non-empty"
+    payload = {"success": True, "tool_results": list(tool_results_dump)}
+    _best_effort_job_store(_js.add_completed_phase, job_id, "account_provisioning", payload)
+    _best_effort_job_store(
+        _js.update_job,
+        job_id,
+        progress=60,
+        status_text="Account provisioning complete",
+        current_tool=None,
+    )
+    return payload
 
 
 @activity.defn(name="agent_provisioning_compensate")

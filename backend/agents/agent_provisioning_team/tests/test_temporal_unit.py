@@ -262,7 +262,7 @@ def test_start_provisioning_workflow_passes_args(monkeypatch) -> None:
 
 
 def test_start_provisioning_workflow_replace_existing_terminates() -> None:
-    from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+    from temporalio.common import WorkflowIDReusePolicy
 
     from agent_provisioning_team.temporal import start_workflow as sw
     from agent_provisioning_team.temporal.workflows import AgentProvisioningWorkflow
@@ -298,10 +298,7 @@ def test_start_provisioning_workflow_replace_existing_terminates() -> None:
             captured_start["kwargs"]["id_reuse_policy"]
             is WorkflowIDReusePolicy.TERMINATE_IF_RUNNING
         )
-        assert (
-            captured_start["kwargs"]["id_conflict_policy"]
-            is WorkflowIDConflictPolicy.TERMINATE_EXISTING
-        )
+        assert "id_conflict_policy" not in captured_start["kwargs"]
     finally:
         loop.close()
 
@@ -853,3 +850,93 @@ def test_list_manifest_tools_activity_rejects_empty_path() -> None:
 
     with pytest.raises(AssertionError):
         activities.list_manifest_tools_activity("")
+
+# ---------------------------------------------------------------------------
+# setup_activity — moved from test_workflows_unit
+# ---------------------------------------------------------------------------
+
+
+def test_setup_activity_progress_path() -> None:
+    """Fresh setup writes progress / completed phase into job_store and returns env dump."""
+    from agent_provisioning_team.models import EnvironmentInfo, SetupResult
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    fake_setup_result = SetupResult(
+        success=True,
+        environment=EnvironmentInfo(container_id="c1", container_name="c1"),
+    )
+    fake_orch = MagicMock()
+    fake_orch.environment_store = MagicMock()
+    fake_orch.tool_agents = {"docker_provisioner": MagicMock()}
+    fake_manifest = MagicMock()
+
+    recorded = []
+
+    def fake_safe(fn, *args, **kwargs):
+        recorded.append({"fn": getattr(fn, "__name__", fn), "args": args, "kwargs": kwargs})
+
+    with (
+        patch.object(t_acts, "_best_effort_job_store", side_effect=fake_safe),
+        patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
+        patch(
+            "agent_provisioning_team.phases.setup.run_setup",
+            return_value=fake_setup_result,
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        payload = t_acts.setup_activity("j", "a", "default.yaml")
+
+    assert payload["success"] is True
+    assert payload["environment"]["container_id"] == "c1"
+    # mark_job_running + update_job were invoked.
+    fn_names = [r["fn"] for r in recorded]
+    assert "mark_job_running" in fn_names
+    assert "update_job" in fn_names
+    assert "add_completed_phase" in fn_names
+
+
+def test_setup_activity_raises_when_setup_fails() -> None:
+    """Failed setup raises RuntimeError so Temporal can retry the activity."""
+    from agent_provisioning_team.models import SetupResult
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store = MagicMock()
+    fake_orch.tool_agents = {"docker_provisioner": MagicMock()}
+    fake_manifest = MagicMock()
+
+    with (
+        patch.object(t_acts, "_best_effort_job_store"),
+        patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
+        patch(
+            "agent_provisioning_team.phases.setup.run_setup",
+            return_value=SetupResult(success=False, error="setup boom"),
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        with pytest.raises(RuntimeError, match="setup boom"):
+            t_acts.setup_activity("j", "a", "default.yaml")
+
+
+def test_setup_activity_restores_from_prior() -> None:
+    """When prior_setup is provided, setup is skipped and the snapshot is restored."""
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    prior = {
+        "success": True,
+        "environment": {
+            "container_id": "c1",
+            "container_name": "c1",
+            "workspace_path": "/w",
+            "status": "running",
+        },
+    }
+    with (
+        patch.object(t_acts, "_best_effort_job_store"),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        payload = t_acts.setup_activity("j", "a", "default.yaml", prior_setup=prior)
+    assert payload["success"] is True
+    assert payload["environment"]["container_id"] == "c1"
+
+
