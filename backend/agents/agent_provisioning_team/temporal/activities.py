@@ -63,6 +63,17 @@ def setup_activity(
     manifest_path: str,
     prior_setup: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Run (or restore) the Docker/environment setup phase.
+
+    Preconditions:
+        * ``job_id`` / ``agent_id`` / ``manifest_path`` are non-empty.
+        * When ``prior_setup`` is set, it is a serialized setup phase snapshot
+          acceptable to ``restore_setup``.
+    Postconditions:
+        * Returns ``{"success": True, "environment": <dump|None>}``.
+        * Writes setup progress (or restore status) into ``job_store``.
+        * Raises ``RuntimeError`` when a fresh setup fails.
+    """
     from agent_provisioning_team.phases.setup import run_setup
     from agent_provisioning_team.shared.phase_state import restore_setup
 
@@ -110,6 +121,16 @@ def credentials_activity(
     manifest_path: str,
     prior_credentials: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Generate (or restore) per-tool credentials for the agent.
+
+    Preconditions:
+        * ``job_id`` / ``agent_id`` / ``manifest_path`` are non-empty.
+        * When ``prior_credentials`` is set, it is a credential-phase snapshot
+          acceptable to ``restore_credentials``.
+    Postconditions:
+        * Returns ``{"success": True, "credentials": {tool_name: dump, ...}}``.
+        * Raises ``RuntimeError`` when credential generation fails.
+    """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
     from agent_provisioning_team.phases.credential_generation import run_credential_generation
     from agent_provisioning_team.shared.phase_state import restore_credentials
@@ -160,7 +181,18 @@ def provision_tool_activity(
     tools_completed_so_far: int = 0,
     tools_total: int = 0,
 ) -> Dict[str, Any]:
-    """Provision a single tool — one activity per tool so fan-out is natural."""
+    """Provision a single tool — one activity per tool so fan-out is natural.
+
+    Preconditions:
+        * ``tool_name`` appears in the loaded manifest and maps to a known
+          provisioner registry key.
+        * ``credentials_dump`` is a serializable ``GeneratedCredentials`` dump
+          for this tool.
+    Postconditions:
+        * Returns ``ToolProvisionResult.model_dump()`` from the provisioner.
+        * Raises ``RuntimeError`` when the tool or provisioner is unknown.
+        * Updates ``job_store`` with the current tool / phase progress.
+    """
     from agent_provisioning_team.models import GeneratedCredentials
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
     from agent_provisioning_team.shared.tool_manifest import load_manifest
@@ -203,6 +235,16 @@ def audit_activity(
     tool_results_dump: List[Dict[str, Any]],
     prior_audit: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Run (or restore) the access-audit phase after tools are provisioned.
+
+    Preconditions:
+        * ``tool_results_dump`` entries are serializable ``ToolProvisionResult``
+          dumps when ``prior_audit`` is absent.
+        * When ``prior_audit`` is set, it is acceptable to ``restore_access_audit``.
+    Postconditions:
+        * Returns the ``AccessAuditResult`` dump.
+        * Records the phase in ``job_store`` on a fresh audit run.
+    """
     from agent_provisioning_team.models import ToolProvisionResult
     from agent_provisioning_team.phases.access_audit import run_access_audit
     from agent_provisioning_team.shared.phase_state import restore_access_audit
@@ -246,6 +288,16 @@ def documentation_activity(
     workspace_path: str,
     prior_documentation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Generate (or restore) onboarding documentation for the agent.
+
+    Preconditions:
+        * ``credentials_dump`` / ``tool_results_dump`` match the models used by
+          ``run_documentation`` when ``prior_documentation`` is absent.
+        * ``workspace_path`` is a non-empty path string.
+    Postconditions:
+        * Returns ``{"success": <bool>, "onboarding": <dump|None>}``.
+        * Records the documentation phase in ``job_store`` on a fresh run.
+    """
     from agent_provisioning_team.models import GeneratedCredentials, ToolProvisionResult
     from agent_provisioning_team.phases.documentation import run_documentation
     from agent_provisioning_team.shared.phase_state import restore_documentation
@@ -296,6 +348,15 @@ def deliver_activity(
     audit_dump: Optional[Dict[str, Any]],
     onboarding_dump: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    """Finalize provisioning and mark the job completed or failed.
+
+    Preconditions:
+        * Upstream phase dumps (environment / credentials / tools / audit /
+          onboarding) are None or valid model dumps for the deliver phase.
+    Postconditions:
+        * Returns ``{"success": <bool>, "error": <str|None>}``.
+        * Marks the job completed (redacted result) or failed in ``job_store``.
+    """
     from agent_provisioning_team.models import (
         AccessAuditResult,
         EnvironmentInfo,
@@ -362,10 +423,14 @@ def compensate_activity(
 ) -> None:
     """Roll back a partially-provisioned agent (best effort).
 
-    ``succeeded_tools`` entries are dicts with ``tool_name`` and
-    ``provisioner_key`` (registry key, e.g. ``"postgres_provisioner"``).
-    Post-#293 the orchestrator looks provisioners back up by the registry
-    key, not by a class attribute derived from ``tool_name``.
+    Preconditions:
+        * ``agent_id`` identifies the agent whose tools should be rolled back.
+        * ``succeeded_tools`` entries are dicts with ``tool_name`` and
+          ``provisioner_key`` (registry key, e.g. ``"postgres_provisioner"``).
+          The orchestrator looks provisioners up by that registry key.
+    Postconditions:
+        * Invokes ``ProvisioningOrchestrator._compensate`` once. Failures inside
+          compensation are absorbed by the orchestrator (best effort).
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 

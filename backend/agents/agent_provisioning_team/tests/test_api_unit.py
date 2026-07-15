@@ -258,7 +258,7 @@ def test_resume_job_in_running_state_rejected() -> None:
     # validate_job_for_action raises ValueError for non-resumable statuses
     with patch.object(api_main, "get_job", return_value={"status": "running"}):
         r = client.post("/provision/job/j1/resume")
-    assert r.status_code in (400, 404)
+    assert r.status_code == 400
 
 
 def test_resume_job_missing_agent_or_manifest() -> None:

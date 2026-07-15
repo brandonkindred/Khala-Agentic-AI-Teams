@@ -14,6 +14,9 @@ from typing import Any
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+# ``agent_provisioning_team.temporal`` package ``__init__`` has import-time
+# side effects (Pattern A worker boot), so TASK_QUEUE — despite being a plain
+# string — must stay inside the pass-through block with the other package imports.
 with workflow.unsafe.imports_passed_through():
     from agent_provisioning_team.shared.tool_manifest import load_manifest
     from agent_provisioning_team.temporal import activities as _activities
@@ -42,6 +45,111 @@ TOOL_RETRY_POLICY = RetryPolicy(
 @workflow.defn(name="AgentProvisioningWorkflow")
 class AgentProvisioningWorkflow:
     """Per-phase activities with parallel per-tool fan-out."""
+
+    async def _run_tool_provisioning_phase(
+        self,
+        job_id: str,
+        agent_id: str,
+        manifest_path: str,
+        tool_names: list[str],
+        credentials_by_tool: dict[str, dict[str, Any]],
+        skip: set[str],
+        prior: dict[str, Any],
+    ) -> tuple[list[dict], list[dict], list[str]]:
+        """Fan out per-tool provision activities, or restore a prior phase dump.
+
+        Preconditions:
+            * ``tool_names`` are the manifest tool names in order.
+            * ``credentials_by_tool`` is keyed by tool name.
+        Postconditions:
+            * Returns ``(tool_results_dump, succeeded, failures)``.
+            * ``succeeded`` entries carry ``tool_name`` + ``provisioner_key``.
+        """
+        if "account_provisioning" in skip and prior.get("account_provisioning"):
+            # Whole-phase skip (no per-tool resume) matches the prior resume contract.
+            ap = prior["account_provisioning"]
+            tool_results_dump = list(ap.get("tool_results") or [])
+            succeeded: list[dict] = [
+                {
+                    "tool_name": r.get("tool_name"),
+                    "provisioner_key": r.get("provisioner_key"),
+                }
+                for r in tool_results_dump
+                if r.get("success")
+            ]
+            failures: list[str] = [
+                f"{r.get('tool_name')}: {r.get('error')}"
+                for r in tool_results_dump
+                if not r.get("success")
+            ]
+            return tool_results_dump, succeeded, failures
+
+        tools_total = len(tool_names)
+
+        async def _one(idx: int, tool_name: str) -> Any:
+            creds_dump = credentials_by_tool.get(tool_name, {})
+            return await workflow.execute_activity(
+                _activities.provision_tool_activity,
+                args=[
+                    job_id,
+                    agent_id,
+                    tool_name,
+                    manifest_path,
+                    creds_dump,
+                    idx,
+                    tools_total,
+                ],
+                task_queue=TASK_QUEUE,
+                start_to_close_timeout=TOOL_ACTIVITY_TIMEOUT,
+                heartbeat_timeout=TOOL_HEARTBEAT_TIMEOUT,
+                retry_policy=TOOL_RETRY_POLICY,
+            )
+
+        raw_results = await asyncio.gather(
+            *[_one(i, name) for i, name in enumerate(tool_names)],
+            return_exceptions=True,
+        )
+
+        # Carry the registry key with each success so compensation can look the
+        # provisioner back up by provisioner_key.
+        succeeded = []
+        failures = []
+        tool_results_dump = []
+        for name, res in zip(tool_names, raw_results):
+            if isinstance(res, BaseException):
+                failures.append(f"{name}: {res}")
+                tool_results_dump.append({"tool_name": name, "success": False, "error": str(res)})
+            elif isinstance(res, dict) and res.get("success"):
+                succeeded.append(
+                    {
+                        "tool_name": res.get("tool_name", name),
+                        "provisioner_key": res.get("provisioner_key"),
+                    }
+                )
+                tool_results_dump.append(res)
+            else:
+                err = res.get("error") if isinstance(res, dict) else "unknown"
+                failures.append(f"{name}: {err}")
+                tool_results_dump.append(
+                    res if isinstance(res, dict) else {"tool_name": name, "success": False, "error": err}
+                )
+        return tool_results_dump, succeeded, failures
+
+    async def _compensate_failed_tools(self, agent_id: str, succeeded: list[dict]) -> None:
+        """Roll back tools that succeeded when the account-provisioning phase fails.
+
+        Preconditions:
+            * ``succeeded`` entries are ``{tool_name, provisioner_key}`` dicts.
+        Postconditions:
+            * Invokes ``compensate_activity`` once for the partial success set.
+        """
+        await workflow.execute_activity(
+            _activities.compensate_activity,
+            args=[agent_id, succeeded],
+            task_queue=TASK_QUEUE,
+            schedule_to_close_timeout=PHASE_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
+        )
 
     @workflow.run
     async def run(
@@ -82,88 +190,18 @@ class AgentProvisioningWorkflow:
         # Phase 3: fan out per-tool provisioning (or restore from prior).
         manifest = load_manifest(manifest_path)
         tool_names = [t.name for t in manifest.tools]
-
-        if "account_provisioning" in skip and prior.get("account_provisioning"):
-            # V1 mirrors whole-phase skip (no per-tool resume), so do the same here.
-            ap = prior["account_provisioning"]
-            tool_results_dump = list(ap.get("tool_results") or [])
-            succeeded: list[dict] = [
-                {
-                    "tool_name": r.get("tool_name"),
-                    "provisioner_key": r.get("provisioner_key"),
-                }
-                for r in tool_results_dump
-                if r.get("success")
-            ]
-            failures: list[str] = [
-                f"{r.get('tool_name')}: {r.get('error')}"
-                for r in tool_results_dump
-                if not r.get("success")
-            ]
-        else:
-            tools_total = len(tool_names)
-
-            async def _one(idx: int, tool_name: str) -> Any:
-                creds_dump = credentials_by_tool.get(tool_name, {})
-                return await workflow.execute_activity(
-                    _activities.provision_tool_activity,
-                    args=[
-                        job_id,
-                        agent_id,
-                        tool_name,
-                        manifest_path,
-                        creds_dump,
-                        idx,
-                        tools_total,
-                    ],
-                    task_queue=TASK_QUEUE,
-                    start_to_close_timeout=TOOL_ACTIVITY_TIMEOUT,
-                    heartbeat_timeout=TOOL_HEARTBEAT_TIMEOUT,
-                    retry_policy=TOOL_RETRY_POLICY,
-                )
-
-            raw_results = await asyncio.gather(
-                *[_one(i, name) for i, name in enumerate(tool_names)],
-                return_exceptions=True,
-            )
-
-            # Carry the registry key through with each success so compensation
-            # can look the provisioner back up (see #293).
-            succeeded = []
-            failures = []
-            tool_results_dump = []
-            for name, res in zip(tool_names, raw_results):
-                if isinstance(res, BaseException):
-                    failures.append(f"{name}: {res}")
-                    tool_results_dump.append(
-                        {"tool_name": name, "success": False, "error": str(res)}
-                    )
-                elif isinstance(res, dict) and res.get("success"):
-                    succeeded.append(
-                        {
-                            "tool_name": res.get("tool_name", name),
-                            "provisioner_key": res.get("provisioner_key"),
-                        }
-                    )
-                    tool_results_dump.append(res)
-                else:
-                    err = res.get("error") if isinstance(res, dict) else "unknown"
-                    failures.append(f"{name}: {err}")
-                    tool_results_dump.append(
-                        res
-                        if isinstance(res, dict)
-                        else {"tool_name": name, "success": False, "error": err}
-                    )
+        tool_results_dump, succeeded, failures = await self._run_tool_provisioning_phase(
+            job_id,
+            agent_id,
+            manifest_path,
+            tool_names,
+            credentials_by_tool,
+            skip,
+            prior,
+        )
 
         if failures:
-            # Compensation: roll back the ones that did succeed.
-            await workflow.execute_activity(
-                _activities.compensate_activity,
-                args=[agent_id, succeeded],
-                task_queue=TASK_QUEUE,
-                schedule_to_close_timeout=PHASE_TIMEOUT,
-                retry_policy=DEFAULT_RETRY_POLICY,
-            )
+            await self._compensate_failed_tools(agent_id, succeeded)
             raise RuntimeError(
                 f"Tool provisioning failed for agent {agent_id}: {'; '.join(failures)}"
             )

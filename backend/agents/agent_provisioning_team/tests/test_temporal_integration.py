@@ -232,12 +232,17 @@ def test_pattern_a_exports_workflows_and_activities() -> None:
         setup_activity,
     )
     from agent_provisioning_team.temporal.workflows import (
+        AgentDeprovisioningWorkflow,
         AgentProvisioningWorkflow,
     )
 
-    provisioning = [w for w in t.WORKFLOWS if "Provisioning" in w.__name__]
+    provisioning = [w for w in t.WORKFLOWS if w.__name__ == "AgentProvisioningWorkflow"]
+    deprovisioning = [w for w in t.WORKFLOWS if "Deprovisioning" in w.__name__]
+    assert len(t.WORKFLOWS) == 2
     assert len(provisioning) == 1
     assert provisioning[0] is AgentProvisioningWorkflow
+    assert len(deprovisioning) == 1
+    assert deprovisioning[0] is AgentDeprovisioningWorkflow
     for fn in (
         setup_activity,
         credentials_activity,
