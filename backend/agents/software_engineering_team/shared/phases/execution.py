@@ -504,6 +504,7 @@ def _apply_grounding_circuit_breaker_trip(
     *,
     mt: Any,
     cr_outcome: GateOutcome,
+    telemetry_outcome: Optional[GateOutcome],
     grounding_failure_streak: int,
     cycle_limit: int,
     task_id: str,
@@ -529,8 +530,12 @@ def _apply_grounding_circuit_breaker_trip(
     Postconditions:
         Sets REVIEW_FAILED status with breaker-specific notes (distinct from
         retry-exhaustion's message), records ``review_grounding_circuit_breaker``
-        once via ``_record_terminal_gate_failure``, rolls back
-        ``microtask_file_keys`` from ``all_files``, and returns True.
+        once via ``_record_terminal_gate_failure`` using a *rejected* telemetry
+        outcome (the last grounding-bad CR call when available; otherwise a
+        synthetic ``passed=False`` copy of ``cr_outcome`` — never the final
+        ``passed=True`` settle, which ``record_gate_outcome`` would silently
+        skip), rolls back ``microtask_file_keys`` from ``all_files``, and
+        returns True.
     """
     mt.status = review_failed_status
     review_failed_ids.add(mt.id)
@@ -538,7 +543,16 @@ def _apply_grounding_circuit_breaker_trip(
         f"Grounding-failure circuit breaker tripped after {grounding_failure_streak} "
         f"consecutive high-rejection-ratio code review cycles (limit {cycle_limit})."
     )
-    _record_terminal_gate_failure("review_grounding_circuit_breaker", cr_outcome, task_id)
+    record_outcome = telemetry_outcome
+    if record_outcome is None or record_outcome.passed:
+        record_outcome = GateOutcome(
+            passed=False,
+            issues=list(cr_outcome.issues),
+            summary=cr_outcome.summary
+            or "Grounding-failure circuit breaker tripped",
+            raw_issue_count=cr_outcome.raw_issue_count,
+        )
+    _record_terminal_gate_failure("review_grounding_circuit_breaker", record_outcome, task_id)
     logger.warning(
         "[%s] Microtask %s: REVIEW_FAILED - grounding circuit breaker tripped after %d cycles",
         task_id,
@@ -555,6 +569,7 @@ def _apply_cr_section_exit(
     mt: Any,
     cr_outcome: GateOutcome,
     cycle_bad: bool,
+    last_bad_cr_outcome: Optional[GateOutcome],
     grounding_failure_streak: int,
     cycle_limit: int,
     code_review_retry_cap: int,
@@ -580,6 +595,8 @@ def _apply_cr_section_exit(
         Called exactly once per outer cycle, immediately after the CR retry
         sub-loop ends (whether via pass, exhaustion, or an already-handled
         write-path failure reflected in ``phase_failed``).
+        ``last_bad_cr_outcome`` is the last CR ``GateOutcome`` this cycle that
+        marked ``cycle_bad`` (or ``None`` when the cycle was not bad).
     Postconditions:
         Returns ``(phase_failed, grounding_failure_streak)``. The streak is only
         updated when ``phase_failed`` was False on entry (a write-path failure is
@@ -597,6 +614,7 @@ def _apply_cr_section_exit(
         phase_failed = _apply_grounding_circuit_breaker_trip(
             mt=mt,
             cr_outcome=cr_outcome,
+            telemetry_outcome=last_bad_cr_outcome,
             grounding_failure_streak=grounding_failure_streak,
             cycle_limit=cycle_limit,
             task_id=task_id,
@@ -879,7 +897,10 @@ def run_gated_execution_impl(
             total_cycles += 1
             # True iff any CR gate call this outer cycle (initial or retry) was
             # both failing and grounding-heavy; drives the streak below.
+            # ``last_bad_cr_outcome`` keeps the last such call for telemetry when
+            # the breaker trips after a later retry has already flipped CR to pass.
             cycle_bad = False
+            last_bad_cr_outcome: Optional[GateOutcome] = None
 
             # ── Code Review Phase ─────────────────────────────────────────────
             mt.status = gate_config.status_code_review
@@ -919,6 +940,7 @@ def run_gated_execution_impl(
                 ratio_threshold=ratio_threshold,
             ):
                 cycle_bad = True
+                last_bad_cr_outcome = cr_outcome
 
             cr_retry = 0
             while not cr_outcome.passed and cr_retry < code_review_retry_cap:
@@ -998,6 +1020,7 @@ def run_gated_execution_impl(
                     ratio_threshold=ratio_threshold,
                 ):
                     cycle_bad = True
+                    last_bad_cr_outcome = cr_outcome
 
             # Leaving the CR section: tick the streak and resolve breaker-vs-retry-
             # exhaustion once per outer cycle (may raise on-failure="stop").
@@ -1005,6 +1028,7 @@ def run_gated_execution_impl(
                 mt=mt,
                 cr_outcome=cr_outcome,
                 cycle_bad=cycle_bad,
+                last_bad_cr_outcome=last_bad_cr_outcome,
                 grounding_failure_streak=grounding_failure_streak,
                 cycle_limit=cycle_limit,
                 code_review_retry_cap=code_review_retry_cap,

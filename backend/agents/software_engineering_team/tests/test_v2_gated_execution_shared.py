@@ -803,9 +803,10 @@ def test_grounding_circuit_breaker_trips_before_max_cycles(tmp_path, monkeypatch
     assert len(calls) == 1
     gate, result, kw = calls[0]
     assert gate == "review_grounding_circuit_breaker"
-    # The tripping cycle's CR outcome itself passed (fixed on retry); the
-    # breaker fires because the streak hit the limit, not because CR failed.
-    assert result.passed is True
+    # Telemetry must record a rejected outcome even when the tripping cycle's
+    # settled CR passed after a retry — otherwise record_gate_outcome no-ops.
+    assert result.passed is False
+    assert result.raw_issue_count == 4
     assert kw.get("task_id") == "t1"
     assert kw.get("phase") == "execution"
     assert kw.get("job_id") == ""
