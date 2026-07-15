@@ -550,7 +550,7 @@ def test_provision_tool_activity_calls_provisioner() -> None:
 
     fake_provisioner = MagicMock()
     fake_provisioner.provision.return_value = ToolProvisionResult(
-        tool_name="pg", success=True, provisioner_key="postgres_provisioner"
+        tool_name="pg", success=True, provisioner_key=None
     )
 
     fake_tool = MagicMock()
@@ -558,6 +558,7 @@ def test_provision_tool_activity_calls_provisioner() -> None:
     fake_tool.config = {}
     fake_manifest = MagicMock()
     fake_manifest.get_tool.return_value = fake_tool
+    fake_env_store = MagicMock()
 
     with (
         patch.object(activities, "_best_effort_job_store"),
@@ -568,6 +569,10 @@ def test_provision_tool_activity_calls_provisioner() -> None:
         patch(
             "agent_provisioning_team.shared.tool_agent_registry.build_default_tool_agents",
             return_value={"postgres_provisioner": fake_provisioner},
+        ),
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=fake_env_store,
         ),
         patch("temporalio.activity.heartbeat"),
     ):
@@ -583,7 +588,53 @@ def test_provision_tool_activity_calls_provisioner() -> None:
         )
 
     assert payload["success"] is True
+    assert payload["provisioner_key"] == "postgres_provisioner"
     fake_provisioner.provision.assert_called_once()
+    fake_env_store.add_tool.assert_called_once_with("a", "pg")
+
+
+def test_provision_tool_activity_skips_env_store_on_failure() -> None:
+    from agent_provisioning_team.models import GeneratedCredentials, ToolProvisionResult
+    from agent_provisioning_team.temporal import activities
+
+    fake_provisioner = MagicMock()
+    fake_provisioner.provision.return_value = ToolProvisionResult(
+        tool_name="pg", success=False, error="down"
+    )
+    fake_tool = MagicMock()
+    fake_tool.provisioner = "postgres_provisioner"
+    fake_tool.config = {}
+    fake_manifest = MagicMock()
+    fake_manifest.get_tool.return_value = fake_tool
+    fake_env_store = MagicMock()
+
+    with (
+        patch.object(activities, "_best_effort_job_store"),
+        patch(
+            "agent_provisioning_team.shared.tool_manifest.load_manifest",
+            return_value=fake_manifest,
+        ),
+        patch(
+            "agent_provisioning_team.shared.tool_agent_registry.build_default_tool_agents",
+            return_value={"postgres_provisioner": fake_provisioner},
+        ),
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=fake_env_store,
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        creds = GeneratedCredentials(tool_name="pg", username="u", password="p")
+        payload = activities.provision_tool_activity(
+            "j",
+            "a",
+            "pg",
+            "default.yaml",
+            credentials_dump=creds.model_dump(),
+        )
+
+    assert payload["success"] is False
+    fake_env_store.add_tool.assert_not_called()
 
 
 def test_provision_tool_activity_raises_when_tool_missing() -> None:
