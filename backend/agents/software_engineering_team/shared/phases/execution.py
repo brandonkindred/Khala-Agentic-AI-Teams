@@ -758,21 +758,22 @@ def run_gated_execution_impl(
                 )
 
             if not cr_outcome.passed:
-                phase_failed = True
-                mt.status = microtask_status.REVIEW_FAILED
-                review_failed_ids.add(mt.id)
-                mt.notes = f"Code review failed after {code_review_retry_cap} batch fix attempts: {cr_outcome.summary}"
-                _record_terminal_gate_failure("code_review_retry_exhausted", cr_outcome, task_id)
-                logger.warning(
-                    "[%s] Microtask %s: CODE_REVIEW_FAILED after %d batch fix attempts. Issues: %s",
-                    task_id,
-                    mt.id,
-                    code_review_retry_cap,
-                    cr_outcome.summary,
-                )
-                # Rollback: remove this microtask's files from all_files
-                for fk in microtask_file_keys:
-                    all_files.pop(fk, None)
+                if not phase_failed:
+                    phase_failed = True
+                    mt.status = microtask_status.REVIEW_FAILED
+                    review_failed_ids.add(mt.id)
+                    mt.notes = f"Code review failed after {code_review_retry_cap} batch fix attempts: {cr_outcome.summary}"
+                    _record_terminal_gate_failure("code_review_retry_exhausted", cr_outcome, task_id)
+                    logger.warning(
+                        "[%s] Microtask %s: CODE_REVIEW_FAILED after %d batch fix attempts. Issues: %s",
+                        task_id,
+                        mt.id,
+                        code_review_retry_cap,
+                        cr_outcome.summary,
+                    )
+                    # Rollback: remove this microtask's files from all_files
+                    for fk in microtask_file_keys:
+                        all_files.pop(fk, None)
                 if config.on_failure == "stop":
                     raise review_failed_error_cls(
                         mt,

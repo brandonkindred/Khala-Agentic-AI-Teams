@@ -731,3 +731,19 @@ def test_record_gate_outcome_not_called_on_qa_recovered(tmp_path, monkeypatch):
         review_config=_config(cr=1, qa=2, sec=1),
     )
     assert calls == []
+
+
+def test_record_gate_outcome_not_called_on_unsafe_cr_write(tmp_path, monkeypatch):
+    """Write-path failure during code-review retry must not record retry exhaustion."""
+    calls: List[tuple] = []
+    monkeypatch.setattr(
+        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        lambda *a, **k: calls.append((a, k)) or True,
+    )
+    mt = _microtask()
+    cfg = _make_gate_config(code_review_gate=_fail_gate(), batch_fix=_batch_fix_unsafe)
+    _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert "unsafe output path" in mt.notes
+    assert calls == []
