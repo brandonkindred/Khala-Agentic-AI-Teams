@@ -32,23 +32,31 @@ logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
+# Bound how long the API waits for Temporal to accept a start (not full run).
+DEFAULT_START_WORKFLOW_TIMEOUT_S = 30.0
+# Describe-status probe for resume/restart; keep short so HTTP latency stays low.
+DEFAULT_DESCRIBE_TIMEOUT_S = 5.0
+
 
 def _start_workflow_timeout_s() -> float:
-    """Parse ``AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S`` (default 30).
+    """Parse ``AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S``.
 
     Preconditions:
         * Environment value, when set, should be a finite numeric string.
     Postconditions:
         * Returns a float ``>= 1.0``; unparseable / overflowing / non-finite
-          values fall back to ``30.0``.
+          values fall back to ``DEFAULT_START_WORKFLOW_TIMEOUT_S``.
     """
-    raw = os.environ.get("AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S", "30")
+    raw = os.environ.get(
+        "AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S",
+        str(DEFAULT_START_WORKFLOW_TIMEOUT_S),
+    )
     try:
         value = float(raw)
     except (TypeError, ValueError, OverflowError):
-        return 30.0
+        return DEFAULT_START_WORKFLOW_TIMEOUT_S
     if math.isnan(value) or math.isinf(value):
-        return 30.0
+        return DEFAULT_START_WORKFLOW_TIMEOUT_S
     return max(1.0, value)
 
 
@@ -137,7 +145,11 @@ def start_provisioning_workflow(
     )
 
 
-def provisioning_workflow_is_open(job_id: str, *, timeout_s: float = 5.0) -> bool:
+def provisioning_workflow_is_open(
+    job_id: str,
+    *,
+    timeout_s: float = DEFAULT_DESCRIBE_TIMEOUT_S,
+) -> bool:
     """Return True when the stable provisioning workflow for ``job_id`` is still open.
 
     Used by resume/restart so jobs left ``pending``/``running`` after an

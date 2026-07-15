@@ -52,13 +52,10 @@ def _load_ctx(manifest_path: str):
 
 
 def _best_effort_job_store(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
-    """Best-effort job_store call. Store hiccups must never fail the activity.
-
-    Callers pass the real ``job_store`` callable (not a name string) so rename
-    refactoring stays searchable. Incorrect ``*args``/``**kwargs`` for a valid
-    callable are still caught and logged — progress writes must not abort the
-    activity and leave Temporal retries opaque.
-    """
+    """Best-effort job_store call. Store hiccups must never fail the activity."""
+    # Pass the real callable (not a name string) so renames stay searchable.
+    # Incorrect args for a valid callable are still caught — progress writes
+    # must not abort the activity and leave Temporal retries opaque.
     try:
         fn(*args, **kwargs)
     except Exception:
@@ -71,7 +68,7 @@ def _best_effort_job_store(fn: Callable[..., Any], *args: Any, **kwargs: Any) ->
 
 
 def _record_phase_restored(job_id: str, phase: str, progress: int) -> None:
-    """Write a 'phase skipped, restored from prior_results' progress update."""
+    """Record a skipped/restored phase progress update on the job store."""
     logger.info("Skipping %s for job=%s (restored from prior_results)", phase, job_id)
     _best_effort_job_store(
         _js.update_job,
@@ -239,12 +236,15 @@ def provision_tool_activity(
         * Updates ``job_store`` with the current tool / phase progress.
           Does not write ``tools_completed`` — parallel fan-out indexes are not
           completion counts and would race/regress under ``asyncio.gather``.
+    Notes:
+        * ``tool_index`` is reserved for logging / ordered progress aggregators;
+          it is intentionally unused while fan-out progress stays tool-name based.
     """
     from agent_provisioning_team.models import GeneratedCredentials
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
     from agent_provisioning_team.shared.tool_manifest import load_manifest
 
-    _ = tool_index  # reserved for logging / future ordered progress aggregators
+    _ = tool_index
     _best_effort_job_store(
         _js.update_job,
         job_id,
@@ -576,9 +576,9 @@ def deprovision_activity(agent_id: str, force: bool = False) -> Dict[str, Any]:
     Thin durable wrapper over ``ProvisioningOrchestrator.deprovision`` — which
     already deprovisions each tool, tears down the Docker environment, and
     removes encrypted credentials + the environment record, aggregating
-    best-effort errors. Kept as a single activity (v1-style) rather than a
-    per-tool fan-out because deprovision is fast and the existing method already
-    reports per-tool success in its ``details``.
+    best-effort errors. Kept as a single activity rather than a per-tool fan-out
+    because deprovision is fast and the existing method already reports per-tool
+    success in its ``details``.
 
     Preconditions:
         * ``agent_id`` is a non-empty string identifying a (possibly already

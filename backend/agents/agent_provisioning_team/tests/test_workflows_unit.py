@@ -211,8 +211,8 @@ async def test_workflow_skips_provisioning_when_resumed(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_workflow_resume_rejects_tool_set_mismatch(tmp_path) -> None:
-    """Restored account_provisioning must match the current manifest tool set."""
+async def test_workflow_resume_tool_set_mismatch_compensates_prior_successes(tmp_path) -> None:
+    """Mismatch after restore fails the job but rolls back prior successful tools."""
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
@@ -227,6 +227,7 @@ async def test_workflow_resume_rejects_tool_set_mismatch(tmp_path) -> None:
                     "redis": {"tool_name": "redis"},
                 },
             },
+            "compensate_activity": None,
             "mark_job_failed_activity": None,
         }
     )
@@ -242,7 +243,7 @@ async def test_workflow_resume_rejects_tool_set_mismatch(tmp_path) -> None:
         }
     }
     with patch.object(wf.workflow, "execute_activity", new=stub):
-        with pytest.raises(RuntimeError, match="Cannot restore account_provisioning"):
+        with pytest.raises(RuntimeError, match="Tool provisioning failed"):
             await wf.AgentProvisioningWorkflow().run(
                 "job-1",
                 "agent-1",
@@ -251,6 +252,11 @@ async def test_workflow_resume_rejects_tool_set_mismatch(tmp_path) -> None:
                 prior_results=prior,
             )
 
+    compensate_call = _call(stub, "compensate_activity")
+    assert compensate_call["args"][0] == "agent-1"
+    assert compensate_call["args"][1] == [
+        {"tool_name": "postgresql", "provisioner_key": "postgres_provisioner"}
+    ]
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
     assert "Cannot restore account_provisioning" in fail_call["args"][1]
@@ -453,3 +459,104 @@ async def test_workflow_compensates_setup_on_credentials_failure(tmp_path) -> No
     compensate_call = _call(stub, "compensate_activity")
     assert compensate_call["args"] == ["agent-1", []]
     assert "mark_job_failed_activity" in [c["name"] for c in stub.calls]
+
+
+@pytest.mark.asyncio
+async def test_workflow_setup_failure_marks_failed_without_compensate(tmp_path) -> None:
+    """Setup failure has nothing to roll back — mark failed, skip compensate."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "setup_activity": RuntimeError("setup boom"),
+            "mark_job_failed_activity": None,
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        with pytest.raises(RuntimeError, match="setup boom"):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    fn_names = [c["name"] for c in stub.calls]
+    assert "compensate_activity" not in fn_names
+    fail_call = _call(stub, "mark_job_failed_activity")
+    assert fail_call["args"][0] == "job-1"
+    assert "setup boom" in fail_call["args"][1]
+
+
+@pytest.mark.asyncio
+async def test_workflow_marks_failed_on_documentation_error(tmp_path) -> None:
+    """Documentation failure persists terminal failure before re-raising."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "credentials_activity": {
+                "success": True,
+                "credentials": {
+                    "postgresql": {"tool_name": "postgresql"},
+                    "redis": {"tool_name": "redis"},
+                },
+            },
+            "provision_tool_activity": lambda call: {
+                "tool_name": call["args"][2],
+                "success": True,
+                "provisioner_key": "x",
+            },
+            "record_account_provisioning_activity": {"success": True, "tool_results": []},
+            "audit_activity": {"passed": True, "verifications": []},
+            "documentation_activity": RuntimeError("docs boom"),
+            "mark_job_failed_activity": None,
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        with pytest.raises(RuntimeError, match="docs boom"):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    fail_call = _call(stub, "mark_job_failed_activity")
+    assert fail_call["args"][0] == "job-1"
+    assert "docs boom" in fail_call["args"][1]
+
+
+@pytest.mark.asyncio
+async def test_workflow_marks_failed_on_deliver_error(tmp_path) -> None:
+    """Deliver failure persists terminal failure before re-raising."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "credentials_activity": {
+                "success": True,
+                "credentials": {
+                    "postgresql": {"tool_name": "postgresql"},
+                    "redis": {"tool_name": "redis"},
+                },
+            },
+            "provision_tool_activity": lambda call: {
+                "tool_name": call["args"][2],
+                "success": True,
+                "provisioner_key": "x",
+            },
+            "record_account_provisioning_activity": {"success": True, "tool_results": []},
+            "audit_activity": {"passed": True, "verifications": []},
+            "documentation_activity": {"success": True, "onboarding": {"summary": "s"}},
+            "deliver_activity": RuntimeError("deliver boom"),
+            "mark_job_failed_activity": None,
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        with pytest.raises(RuntimeError, match="deliver boom"):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    fail_call = _call(stub, "mark_job_failed_activity")
+    assert fail_call["args"][0] == "job-1"
+    assert "deliver boom" in fail_call["args"][1]

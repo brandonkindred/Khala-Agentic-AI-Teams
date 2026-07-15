@@ -43,7 +43,19 @@ TOOL_RETRY_POLICY = RetryPolicy(
 
 @workflow.defn(name="AgentProvisioningWorkflow")
 class AgentProvisioningWorkflow:
-    """Per-phase activities with parallel per-tool fan-out."""
+    """Sole durable provisioning workflow after the V1/V2 collapse.
+
+    Runs one job through setup → credentials → parallel per-tool provision →
+    audit → documentation → deliver. Resume/restart pass ``skip_phases`` /
+    ``prior_results`` rather than replaying history.
+
+    Invariants:
+        * Stable Temporal workflow id per ``job_id`` (starter prefix).
+        * Tool fan-out uses ``asyncio.gather``; checkpoint + env-store updates
+          happen once after the gather succeeds.
+        * Failures after setup but before account-provisioning success
+          compensate (possibly with an empty tool list) before marking failed.
+    """
 
     async def _run_tool_provisioning_phase(
         self,
@@ -70,12 +82,6 @@ class AgentProvisioningWorkflow:
             tool_results_dump = list(ap.get("tool_results") or [])
             prior_names = {r.get("tool_name") for r in tool_results_dump if r.get("tool_name")}
             current_names = set(tool_names)
-            if prior_names != current_names:
-                raise RuntimeError(
-                    "Cannot restore account_provisioning: prior tool set "
-                    f"{sorted(prior_names)} does not match current manifest "
-                    f"{sorted(current_names)}. Restart the job or align the manifest."
-                )
             succeeded: list[dict] = [
                 {
                     "tool_name": r.get("tool_name"),
@@ -84,6 +90,18 @@ class AgentProvisioningWorkflow:
                 for r in tool_results_dump
                 if r.get("success")
             ]
+            if prior_names != current_names:
+                # Surface as phase failures so the caller compensates ``succeeded``
+                # tool accounts from the prior checkpoint (not an empty list).
+                return (
+                    tool_results_dump,
+                    succeeded,
+                    [
+                        "Cannot restore account_provisioning: prior tool set "
+                        f"{sorted(prior_names)} does not match current manifest "
+                        f"{sorted(current_names)}. Restart the job or align the manifest."
+                    ],
+                )
             failures: list[str] = [
                 f"{r.get('tool_name')}: {r.get('error')}"
                 for r in tool_results_dump

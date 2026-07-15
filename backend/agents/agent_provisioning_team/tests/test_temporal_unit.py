@@ -1036,3 +1036,30 @@ def test_setup_activity_restores_from_prior() -> None:
     assert payload["environment"]["container_id"] == "c1"
 
 
+def test_no_legacy_v2_or_thread_fallback_symbols() -> None:
+    """Hard cutover acceptance: no V2 type, v2 activities, or thread fallback knob.
+
+    Full package scan also lives in ``test_orchestrator``; this keeps the
+    Temporal suite self-contained for the same criterion.
+    """
+    from pathlib import Path
+
+    import agent_provisioning_team
+
+    root = Path(agent_provisioning_team.__file__).resolve().parent
+    forbidden = (
+        "AgentProvisioningWorkflow" + "V2",
+        "_activity" + "_v2",
+        "PROVISION_THREAD_" + "FALLBACK",
+    )
+    hits: list[str] = []
+    for path in root.rglob("*.py"):
+        if "__pycache__" in path.parts or "tests" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            if token in text:
+                hits.append(f"{path.relative_to(root)}:{token}")
+    assert hits == [], f"legacy cutover symbols still present: {hits}"
+
+
