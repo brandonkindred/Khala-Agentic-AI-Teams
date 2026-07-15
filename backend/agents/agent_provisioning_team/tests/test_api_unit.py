@@ -7,7 +7,6 @@ Marked NON-integration so they run on the default unit lane.
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
@@ -488,70 +487,36 @@ def test_list_environments_with_filter() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _graceful_shutdown + _safe_compensate
+# lifespan — Temporal owns in-flight work
 # ---------------------------------------------------------------------------
 
 
-def test_safe_compensate_swallows_exceptions(monkeypatch) -> None:
-    with patch.object(api_main.orchestrator, "_compensate", side_effect=RuntimeError("ugh")):
-        # Must not raise
-        api_main._safe_compensate("a1")
+def test_lifespan_shutdown_does_not_compensate_or_fail_jobs() -> None:
+    """API process exit must not tear down Temporal-owned provision jobs."""
+    compensate_calls: list[str] = []
+    mark_failed_calls: list[str] = []
 
-
-def test_graceful_shutdown_marks_jobs_failed(monkeypatch) -> None:
-    """The graceful shutdown path marks all running jobs failed as a backstop."""
     with (
-        patch.object(api_main, "list_jobs", return_value=[]),
-        patch.object(api_main, "mark_all_running_jobs_failed") as mock_mark,
-    ):
-        asyncio.run(api_main._graceful_shutdown())
-
-    mock_mark.assert_called_once_with("shutdown")
-
-
-def test_graceful_shutdown_list_jobs_failure(monkeypatch) -> None:
-    """If list_jobs raises, shutdown still completes."""
-    with (
-        patch.object(api_main, "list_jobs", side_effect=RuntimeError("db down")),
-        patch.object(api_main, "mark_all_running_jobs_failed"),
-    ):
-        asyncio.run(api_main._graceful_shutdown())
-
-
-def test_graceful_shutdown_mark_all_failure_swallowed(monkeypatch) -> None:
-    with (
-        patch.object(api_main, "list_jobs", return_value=[]),
         patch.object(
-            api_main,
-            "mark_all_running_jobs_failed",
-            side_effect=RuntimeError("io"),
+            api_main.orchestrator,
+            "_compensate",
+            side_effect=lambda agent_id, tool_results: compensate_calls.append(agent_id),
         ),
-    ):
-        asyncio.run(api_main._graceful_shutdown())
-
-
-def test_graceful_shutdown_compensates_inflight_jobs(monkeypatch) -> None:
-    """Active jobs with agent_id get _compensate'd via the safe wrapper."""
-    monkeypatch.setattr(api_main, "COMPENSATE_TIMEOUT_S", 1.0)
-
-    compensated = []
-
-    def fake_compensate(agent_id, tool_results):
-        compensated.append(agent_id)
-
-    with (
+        patch(
+            "agent_provisioning_team.shared.job_store.mark_all_running_jobs_failed",
+            side_effect=lambda reason: mark_failed_calls.append(reason),
+        ),
         patch.object(
             api_main,
             "list_jobs",
-            return_value=[
-                {"agent_id": "a1", "status": "running"},
-                {"agent_id": "a2", "status": "running"},
-                {"status": "running"},  # missing agent_id is skipped
-            ],
+            return_value=[{"agent_id": "a1", "status": "running"}],
         ),
-        patch.object(api_main.orchestrator, "_compensate", side_effect=fake_compensate),
-        patch.object(api_main, "mark_all_running_jobs_failed"),
     ):
-        asyncio.run(api_main._graceful_shutdown())
+        with TestClient(api_main.app):
+            pass
 
-    assert set(compensated) == {"a1", "a2"}
+    assert compensate_calls == []
+    assert mark_failed_calls == []
+    assert not hasattr(api_main, "_graceful_shutdown")
+    assert not hasattr(api_main, "_safe_compensate")
+    assert not hasattr(api_main, "COMPENSATE_TIMEOUT_S")

@@ -1,6 +1,5 @@
 """Tests for agent_provisioning_team API endpoints."""
 
-import time
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -63,9 +62,12 @@ def test_provision_returns_503_when_temporal_disabled():
     assert "Temporal" in resp.json()["detail"]
 
 
-def test_graceful_shutdown_compensates_inflight(monkeypatch):
-    """On lifespan shutdown, any job still marked running gets `_compensate()`-ed
-    and `mark_all_running_jobs_failed` is called as a backstop."""
+def test_lifespan_does_not_fail_running_jobs_on_shutdown(monkeypatch):
+    """Rolling-deploy shutdown must not mark Temporal-owned jobs failed.
+
+    Work is durable in Temporal; compensating agents / marking job-store rows
+    failed here would race workflows that continue on the worker.
+    """
     compensate_calls = []
     mark_failed_calls = []
 
@@ -79,43 +81,16 @@ def test_graceful_shutdown_compensates_inflight(monkeypatch):
         "list_jobs",
         lambda running_only=False: [{"agent_id": "stuck-agent-1", "status": "running"}],
     )
-    monkeypatch.setattr(
-        api_main,
-        "mark_all_running_jobs_failed",
+    # Symbol removed from api.main — patch job_store module to catch any regression.
+    with patch(
+        "agent_provisioning_team.shared.job_store.mark_all_running_jobs_failed",
         lambda reason: mark_failed_calls.append(reason),
-    )
+    ):
+        with TestClient(app) as _c:
+            pass
 
-    # Entering the TestClient context manager runs lifespan startup; exiting runs shutdown.
-    with TestClient(app) as _c:
-        pass
-
-    assert compensate_calls == ["stuck-agent-1"]
-    assert mark_failed_calls == ["shutdown"]
-
-
-def test_compensate_timeout_does_not_block_shutdown(monkeypatch):
-    """A slow `_compensate()` must not hold up graceful shutdown beyond
-    COMPENSATE_TIMEOUT_S."""
-    monkeypatch.setattr(api_main, "COMPENSATE_TIMEOUT_S", 0.2)
-
-    def slow_compensate(agent_id, tool_results):
-        time.sleep(5)  # would block shutdown if not timeout-wrapped
-
-    monkeypatch.setattr(api_main.orchestrator, "_compensate", slow_compensate)
-    monkeypatch.setattr(
-        api_main,
-        "list_jobs",
-        lambda running_only=False: [{"agent_id": "slow-agent", "status": "running"}],
-    )
-    monkeypatch.setattr(api_main, "mark_all_running_jobs_failed", lambda reason: None)
-
-    start = time.monotonic()
-    with TestClient(app) as _c:
-        pass
-    elapsed = time.monotonic() - start
-
-    # Shutdown must return well before the 5s slow_compensate would have finished.
-    assert elapsed < 2.0, f"shutdown was blocked for {elapsed:.2f}s"
+    assert compensate_calls == []
+    assert mark_failed_calls == []
 
 
 def test_deprovision_runs_via_temporal_runner():

@@ -6,8 +6,6 @@ Provides REST API for provisioning, status tracking, and deprovisioning.
 
 import contextlib
 import logging
-import os
-import threading
 import uuid
 from typing import Dict, List, Optional
 
@@ -35,7 +33,6 @@ from ..shared.job_store import (
     create_job,
     get_job,
     list_jobs,
-    mark_all_running_jobs_failed,
     mark_job_failed,
     update_job,
 )
@@ -53,8 +50,6 @@ logger = logging.getLogger(__name__)
 
 init_otel(service_name="agent-provisioning-team", team_key="agent_provisioning")
 
-
-COMPENSATE_TIMEOUT_S = float(os.getenv("COMPENSATE_TIMEOUT_S", "15"))
 
 _TEMPORAL_REQUIRED = "Temporal is required for agent provisioning (set TEMPORAL_ADDRESS)"
 
@@ -107,56 +102,16 @@ def _require_deprovision_runner():
     return run_deprovision_workflow
 
 
-def _safe_compensate(agent_id: str) -> None:
-    try:
-        # Passes [] so the orchestrator only runs the tail (docker teardown,
-        # credential delete, env cleanup). Per-tool rollback on SIGTERM isn't
-        # wired up from here — per-job tool_results aren't plumbed through
-        # job_store today. Tracked alongside #258/#293; out of scope for #293.
-        orchestrator._compensate(agent_id, [])  # noqa: SLF001
-    except Exception:
-        logger.exception("Compensate raised for agent=%s", agent_id)
-
-
-async def _graceful_shutdown() -> None:
-    """Compensate any still-running job (COMPENSATE_TIMEOUT_S per job), then
-    backstop with mark_all_running_jobs_failed.
-
-    Provisioning itself runs as a durable Temporal workflow, so there is no
-    local executor to drain on shutdown; this only cleans up job-store state
-    for jobs the API process still believes are running."""
-    try:
-        active_jobs = list_jobs(running_only=True)
-    except Exception:
-        logger.exception("list_jobs failed during shutdown; skipping per-job compensate")
-        active_jobs = []
-
-    for job in active_jobs:
-        agent_id = job.get("agent_id")
-        if not agent_id:
-            continue
-        t = threading.Thread(target=_safe_compensate, args=(agent_id,), daemon=True)
-        t.start()
-        t.join(timeout=COMPENSATE_TIMEOUT_S)
-        if t.is_alive():
-            logger.warning(
-                "Compensate for agent=%s exceeded %.1fs; moving on",
-                agent_id,
-                COMPENSATE_TIMEOUT_S,
-            )
-
-    try:
-        mark_all_running_jobs_failed("shutdown")
-    except Exception:
-        logger.exception("mark_all_running_jobs_failed failed during shutdown")
-
-
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        yield
-    finally:
-        await _graceful_shutdown()
+    """API lifespan.
+
+    Provisioning/deprovisioning are Temporal-owned. On pod restart this process
+    must not mark running jobs failed or compensate agents — that would race
+    durable workflows that continue on the Temporal worker and may later update
+    the same job_store rows.
+    """
+    yield
 
 
 app = FastAPI(
