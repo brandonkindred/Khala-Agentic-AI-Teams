@@ -374,6 +374,52 @@ class GateOutcome:
     passed: bool
     issues: List[Any] = field(default_factory=list)
     summary: str = ""
+    raw_issue_count: Optional[int] = None
+
+
+def grounding_rejection_ratio(
+    raw_issue_count: Optional[int], kept_count: int
+) -> Optional[float]:
+    """Compute the fraction of raw LLM issues rejected by grounding.
+
+    Preconditions:
+        ``kept_count`` is a non-negative integer count of issues retained after
+        grounding (callers may pass negative values; they are clamped).
+    Postconditions:
+        Returns ``None`` when ``raw_issue_count`` is ``None`` or ``<= 0``;
+        otherwise returns ``(raw - kept) / raw`` with ``kept`` clamped to
+        ``[0, raw_issue_count]``.
+    """
+    if raw_issue_count is None or raw_issue_count <= 0:
+        return None
+    kept = max(0, min(kept_count, raw_issue_count))
+    return (raw_issue_count - kept) / float(raw_issue_count)
+
+
+def cr_call_is_grounding_bad(
+    *,
+    passed: bool,
+    raw_issue_count: Optional[int],
+    kept_count: int,
+    ratio_threshold: float,
+) -> bool:
+    """Return whether a failed code-review call is grounding-heavy.
+
+    Preconditions:
+        ``passed`` reflects the gate outcome; ``kept_count`` is a non-negative
+        integer; ``ratio_threshold`` is a float (clamped to ``[0.0, 1.0]``).
+    Postconditions:
+        Returns ``False`` when ``passed`` is ``True``, when the rejection ratio
+        is undefined, or when the ratio is below the clamped threshold;
+        otherwise returns ``True``.
+    """
+    if passed:
+        return False
+    ratio = grounding_rejection_ratio(raw_issue_count, kept_count)
+    if ratio is None:
+        return False
+    threshold = max(0.0, min(1.0, float(ratio_threshold)))
+    return ratio >= threshold
 
 
 def _terminal_failing_outcome(cr: GateOutcome, qa: GateOutcome, sec: GateOutcome) -> GateOutcome:

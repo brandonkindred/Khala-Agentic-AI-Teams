@@ -209,6 +209,20 @@ class BaseMicrotaskReviewConfig(BaseModel):
             "ungrounded proper-noun claims are dropped"
         ),
     )
+    grounding_failure_cycle_limit: int = Field(
+        default=3,
+        description=(
+            "Consecutive code-review cycles with grounding-heavy rejection before "
+            "the circuit breaker trips and the microtask fails fast"
+        ),
+    )
+    grounding_failure_ratio_threshold: float = Field(
+        default=0.75,
+        description=(
+            "Minimum fraction of raw LLM issues dropped by grounding in a failed "
+            "code-review call to count as a grounding-heavy rejection"
+        ),
+    )
 
 
 class MicrotaskReviewFailedError(Exception):
