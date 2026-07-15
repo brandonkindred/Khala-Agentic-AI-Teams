@@ -2,8 +2,8 @@
 
 Covers the ``deprovision_activity``, ``AgentDeprovisioningWorkflow``, the
 ``run_deprovision_workflow`` dispatch helper, and the ``deprovision_agent``
-endpoint's Temporal-vs-thread branch. No live Temporal server is needed — we
-stub at the ``temporalio``/dispatch boundary.
+endpoint (Temporal-only: HTTP 503 when Temporal is disabled). No live
+Temporal server is needed — we stub at the ``temporalio``/dispatch boundary.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from agent_provisioning_team.models import DeprovisionResponse
 
@@ -159,74 +161,66 @@ def test_run_deprovision_workflow_uses_client_timeout_exceeding_phase_timeout() 
 # ---------------------------------------------------------------------------
 
 
-def test_deprovision_starter_none_when_temporal_disabled() -> None:
+def test_require_deprovision_runner_raises_503_when_temporal_disabled() -> None:
     from agent_provisioning_team.api import main
 
     with patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=False):
-        assert main._deprovision_starter() is None
+        with pytest.raises(HTTPException) as exc_info:
+            main._require_deprovision_runner()
+    assert exc_info.value.status_code == 503
+    assert "Temporal" in exc_info.value.detail
 
 
-def test_deprovision_starter_none_with_thread_fallback(monkeypatch) -> None:
+def test_require_deprovision_runner_returns_callable_when_enabled() -> None:
     from agent_provisioning_team.api import main
 
-    monkeypatch.setenv("PROVISION_THREAD_FALLBACK", "true")
-    assert main._deprovision_starter() is None
-
-
-def test_deprovision_starter_returns_callable_when_enabled(monkeypatch) -> None:
-    from agent_provisioning_team.api import main
-
-    monkeypatch.delenv("PROVISION_THREAD_FALLBACK", raising=False)
     with patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=True):
-        starter = main._deprovision_starter()
-    assert callable(starter)
+        runner = main._require_deprovision_runner()
+    assert callable(runner)
 
 
 def test_deprovision_agent_uses_temporal_when_enabled() -> None:
     from agent_provisioning_team.api import main
 
     dump = {"agent_id": "a", "success": True, "details": {}, "error": None}
-    fake_starter = MagicMock(return_value=dump)
+    fake_runner = MagicMock(return_value=dump)
 
-    with patch.object(main, "_deprovision_starter", return_value=fake_starter):
+    with patch.object(main, "_require_deprovision_runner", return_value=fake_runner):
         resp = main.deprovision_agent("a", force=False)
 
-    fake_starter.assert_called_once_with("a", False)
+    fake_runner.assert_called_once_with("a", False)
     assert isinstance(resp, DeprovisionResponse)
     assert resp.success is True
 
 
 def test_deprovision_agent_degrades_gracefully_on_workflow_failure() -> None:
-    """deprovision_agent must always return a DeprovisionResponse, never raise
-    — matching the pre-Temporal contract of orchestrator.deprovision (which
-    never raises either). An infrastructure-level failure of the Temporal
-    dispatch (client not ready, execute-and-wait timeout, workflow failure)
-    is reported as success=False with the failure in `error`, not as an
-    unhandled 500."""
+    """deprovision_agent must always return a DeprovisionResponse, never raise,
+    once Temporal dispatch has started. An infrastructure-level failure of the
+    Temporal dispatch (client not ready, execute-and-wait timeout, workflow
+    failure) is reported as success=False with the failure in `error`, not as
+    an unhandled 500."""
     from agent_provisioning_team.api import main
 
-    fake_starter = MagicMock(side_effect=RuntimeError("Temporal client not available"))
+    fake_runner = MagicMock(side_effect=RuntimeError("Temporal client not available"))
 
-    with patch.object(main, "_deprovision_starter", return_value=fake_starter):
+    with patch.object(main, "_require_deprovision_runner", return_value=fake_runner):
         resp = main.deprovision_agent("a", force=True)
 
-    fake_starter.assert_called_once_with("a", True)
+    fake_runner.assert_called_once_with("a", True)
     assert isinstance(resp, DeprovisionResponse)
     assert resp.agent_id == "a"
     assert resp.success is False
     assert "Temporal client not available" in resp.error
 
 
-def test_deprovision_agent_falls_back_to_orchestrator() -> None:
-    from agent_provisioning_team.api import main
+def test_deprovision_agent_endpoint_returns_503_when_temporal_disabled() -> None:
+    """DELETE /environments/{agent_id} is Temporal-only: 503, not an
+    in-process orchestrator fallback, when Temporal is disabled."""
+    from agent_provisioning_team.api.main import app
 
-    fallback = DeprovisionResponse(agent_id="a", success=True, details={}, error=None)
+    client = TestClient(app)
+    with patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=False):
+        resp = client.delete("/environments/agent-1")
 
-    with (
-        patch.object(main, "_deprovision_starter", return_value=None),
-        patch.object(main.orchestrator, "deprovision", return_value=fallback) as mock_dep,
-    ):
-        resp = main.deprovision_agent("a", force=True)
-
-    mock_dep.assert_called_once_with("a", force=True)
-    assert resp is fallback
+    assert resp.status_code == 503
+    assert "Temporal" in resp.json()["detail"]

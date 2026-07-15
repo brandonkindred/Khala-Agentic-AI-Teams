@@ -1,10 +1,10 @@
 """Temporal tests for the Agent Provisioning team.
 
-Covers routing, skip_phases/prior_results plumbing on /resume, the
-PROVISION_THREAD_FALLBACK escape hatch, progress writes from v2
-activities, and Pattern A exports. Mocks Temporal at the HTTP boundary
-rather than spinning up WorkflowEnvironment — matches the SE team's
-test_temporal_integration.py style and keeps the suite fast.
+Covers routing (including the Temporal-required 503 path), skip_phases/
+prior_results plumbing on /resume, progress writes from v2 activities, and
+Pattern A exports. Mocks Temporal at the HTTP boundary rather than spinning
+up WorkflowEnvironment — matches the SE team's test_temporal_integration.py
+style and keeps the suite fast.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-from agent_provisioning_team.api import main as api_main
 from agent_provisioning_team.api.main import app
 
 client = TestClient(app)
@@ -26,9 +25,7 @@ def test_provision_routes_to_temporal_when_enabled(
     mock_enabled: MagicMock,
     mock_start: MagicMock,
     mock_create_job: MagicMock,
-    monkeypatch,
 ) -> None:
-    monkeypatch.delenv("PROVISION_THREAD_FALLBACK", raising=False)
     resp = client.post("/provision", json={"agent_id": "t-temporal-1"})
 
     assert resp.status_code == 200
@@ -41,6 +38,19 @@ def test_provision_routes_to_temporal_when_enabled(
     assert kwargs.get("prior_results") is None
 
 
+@patch("agent_provisioning_team.api.main.create_job")
+@patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=False)
+def test_provision_returns_503_when_temporal_disabled(
+    mock_enabled: MagicMock,
+    mock_create_job: MagicMock,
+) -> None:
+    resp = client.post("/provision", json={"agent_id": "t-disabled"})
+
+    assert resp.status_code == 503
+    assert "Temporal" in resp.json()["detail"]
+    mock_create_job.assert_not_called()
+
+
 @patch("agent_provisioning_team.api.main.update_job")
 @patch("agent_provisioning_team.api.main.get_job")
 @patch("agent_provisioning_team.temporal.start_workflow.start_provisioning_workflow")
@@ -50,9 +60,7 @@ def test_resume_passes_skip_phases_and_prior_results(
     mock_start: MagicMock,
     mock_get_job: MagicMock,
     mock_update_job: MagicMock,
-    monkeypatch,
 ) -> None:
-    monkeypatch.delenv("PROVISION_THREAD_FALLBACK", raising=False)
     mock_get_job.return_value = {
         "job_id": "job-resume-1",
         "agent_id": "a1",
@@ -77,32 +85,44 @@ def test_resume_passes_skip_phases_and_prior_results(
     }
 
 
-def test_provision_falls_back_to_thread_path_when_flag_set(monkeypatch) -> None:
-    monkeypatch.setenv("PROVISION_THREAD_FALLBACK", "1")
+@patch("agent_provisioning_team.api.main.get_job")
+@patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=False)
+def test_resume_returns_503_when_temporal_disabled(
+    mock_enabled: MagicMock,
+    mock_get_job: MagicMock,
+) -> None:
+    mock_get_job.return_value = {
+        "job_id": "job-resume-2",
+        "agent_id": "a1",
+        "manifest_path": "default.yaml",
+        "status": "failed",
+        "completed_phases": [],
+        "phase_results": {},
+    }
 
-    with (
-        patch(
-            "agent_provisioning_team.temporal.client.is_temporal_enabled",
-            return_value=True,
-        ),
-        patch(
-            "agent_provisioning_team.temporal.start_workflow.start_provisioning_workflow"
-        ) as mock_start,
-        patch("agent_provisioning_team.api.main.create_job"),
-        patch("agent_provisioning_team.api.main._ensure_executor") as mock_ensure,
-    ):
-        mock_executor = MagicMock()
-        mock_ensure.return_value = mock_executor
+    resp = client.post("/provision/job/job-resume-2/resume")
 
-        resp = client.post("/provision", json={"agent_id": "t-fallback"})
+    assert resp.status_code == 503
+    assert "Temporal" in resp.json()["detail"]
 
-    assert resp.status_code == 200
-    # Fallback forces the thread path, so the Temporal starter must NOT be called.
-    mock_start.assert_not_called()
-    # And the executor must have received the submission.
-    assert mock_executor.submit.called
-    submitted_fn = mock_executor.submit.call_args[0][0]
-    assert submitted_fn is api_main._run_provisioning_background
+
+@patch("agent_provisioning_team.api.main.get_job")
+@patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=False)
+def test_restart_returns_503_when_temporal_disabled(
+    mock_enabled: MagicMock,
+    mock_get_job: MagicMock,
+) -> None:
+    mock_get_job.return_value = {
+        "job_id": "job-restart-1",
+        "agent_id": "a1",
+        "manifest_path": "default.yaml",
+        "status": "completed",
+    }
+
+    resp = client.post("/provision/job/job-restart-1/restart")
+
+    assert resp.status_code == 503
+    assert "Temporal" in resp.json()["detail"]
 
 
 def test_setup_activity_writes_progress_via_update_job() -> None:
@@ -193,9 +213,7 @@ def test_setup_activity_restores_prior_snapshot_without_running_setup() -> None:
         patch.object(t_acts, "_load_ctx") as load_ctx,
     ):
         prior = {"success": True, "environment": None}
-        payload = t_acts.setup_activity(
-            "job-resume", "agent-x", "default.yaml", prior_setup=prior
-        )
+        payload = t_acts.setup_activity("job-resume", "agent-x", "default.yaml", prior_setup=prior)
 
     assert payload == {"success": True, "environment": None}
     real_setup.assert_not_called()

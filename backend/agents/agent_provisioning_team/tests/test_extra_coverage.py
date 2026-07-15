@@ -364,12 +364,11 @@ def test_provisioner_state_save_handles_io_error(tmp_path: Path, monkeypatch) ->
 
 def test_lifespan_runs_cleanly(monkeypatch) -> None:
     """Entering + exiting the TestClient context runs the lifespan hook
-    end-to-end with the executor + shutdown event."""
+    end-to-end (compensate-from-job-store, then mark_all_running_jobs_failed)."""
     from fastapi.testclient import TestClient
 
     from agent_provisioning_team.api import main as api_main
 
-    monkeypatch.setattr(api_main, "_executor", None)
     with (
         patch.object(api_main, "list_jobs", return_value=[]),
         patch.object(api_main, "mark_all_running_jobs_failed"),

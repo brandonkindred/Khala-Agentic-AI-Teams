@@ -1,6 +1,5 @@
 """Tests for agent_provisioning_team API endpoints."""
 
-import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -39,77 +38,29 @@ def test_get_status_not_found():
     assert resp.status_code == 404
 
 
-def test_start_provision_submits_to_executor():
-    """/provision submits to the bounded executor instead of spawning a raw thread."""
+def test_start_provision_starts_temporal_workflow():
+    """/provision dispatches to the Temporal starter returned by
+    _require_provision_starter — there is no thread-executor path."""
+    fake_starter = MagicMock()
     with (
         patch("agent_provisioning_team.api.main.create_job"),
-        patch("agent_provisioning_team.api.main._ensure_executor") as mock_ensure,
+        patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
     ):
-        mock_executor = MagicMock()
-        mock_future = MagicMock()
-        mock_executor.submit.return_value = mock_future
-        mock_ensure.return_value = mock_executor
-
         resp = client.post("/provision", json={"agent_id": "test-agent-001"})
 
     assert resp.status_code == 200
     data = resp.json()
     assert "job_id" in data and len(data["job_id"]) > 0
-    # The submission was routed through the executor, not threading.Thread.
-    assert mock_executor.submit.called
-    submitted_fn = mock_executor.submit.call_args[0][0]
-    assert submitted_fn is api_main._run_provisioning_background
+    fake_starter.assert_called_once()
 
 
-def test_bounded_concurrency_and_429(monkeypatch):
-    """When the pending queue exceeds PROVISION_MAX_QUEUE_DEPTH, /provision returns 429
-    without creating a job row. Concurrency never exceeds max_workers."""
-    from concurrent.futures import ThreadPoolExecutor
+def test_provision_returns_503_when_temporal_disabled():
+    """Provisioning requires Temporal; /provision returns 503 without it."""
+    with patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=False):
+        resp = client.post("/provision", json={"agent_id": "test-agent-002"})
 
-    # Tight limits so we can saturate quickly.
-    small_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="provision-test")
-    monkeypatch.setattr(api_main, "_executor", small_executor)
-    monkeypatch.setattr(api_main, "PROVISION_MAX_QUEUE_DEPTH", 2)
-
-    gate = threading.Event()
-    max_observed = [0]
-    current = [0]
-    lock = threading.Lock()
-
-    def blocking_run(*args, **kwargs):
-        with lock:
-            current[0] += 1
-            max_observed[0] = max(max_observed[0], current[0])
-        gate.wait(timeout=5)
-        with lock:
-            current[0] -= 1
-
-    monkeypatch.setattr(api_main, "_run_provisioning_background", blocking_run)
-    create_job_calls = []
-    monkeypatch.setattr(api_main, "create_job", lambda **kw: create_job_calls.append(kw))
-
-    try:
-        statuses = []
-        # 6 requests: 2 run immediately, 2 queue, 2 should 429.
-        for _ in range(6):
-            resp = client.post("/provision", json={"agent_id": "load-test"})
-            statuses.append(resp.status_code)
-            # Let the executor pick up the first two so they start running.
-            time.sleep(0.02)
-
-        # Release all work so the executor can drain.
-        gate.set()
-        small_executor.shutdown(wait=True)
-
-        assert statuses.count(429) == 2, f"expected 2 × 429, got {statuses}"
-        assert statuses.count(200) == 4, f"expected 4 × 200, got {statuses}"
-        assert max_observed[0] <= 2, f"concurrency exceeded max_workers: {max_observed[0]}"
-        # 429s must not persist job rows.
-        assert len(create_job_calls) == 4
-    finally:
-        small_executor.shutdown(wait=True)
-        # Reset the module-level executor for subsequent tests.
-        monkeypatch.setattr(api_main, "_executor", None)
+    assert resp.status_code == 503
+    assert "Temporal" in resp.json()["detail"]
 
 
 def test_graceful_shutdown_compensates_inflight(monkeypatch):
@@ -167,16 +118,22 @@ def test_compensate_timeout_does_not_block_shutdown(monkeypatch):
     assert elapsed < 2.0, f"shutdown was blocked for {elapsed:.2f}s"
 
 
-def test_deprovision_runs_via_orchestrator():
-    from agent_provisioning_team.models import DeprovisionResponse
-
-    mock_resp = DeprovisionResponse(agent_id="nonexistent-agent", success=False, error="not found")
-    with patch("agent_provisioning_team.api.main.orchestrator") as mock_orch:
-        mock_orch.deprovision.return_value = mock_resp
+def test_deprovision_runs_via_temporal_runner():
+    """DELETE /environments/{id} dispatches through _require_deprovision_runner."""
+    dump = {"agent_id": "nonexistent-agent", "success": False, "details": {}, "error": "not found"}
+    fake_runner = MagicMock(return_value=dump)
+    with patch.object(api_main, "_require_deprovision_runner", return_value=fake_runner):
         resp = client.delete("/environments/nonexistent-agent")
     assert resp.status_code == 200
     data = resp.json()
     assert data["success"] is False
+
+
+def test_deprovision_returns_503_when_temporal_disabled():
+    with patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=False):
+        resp = client.delete("/environments/some-agent")
+    assert resp.status_code == 503
+    assert "Temporal" in resp.json()["detail"]
 
 
 def test_cancel_job_not_found():
