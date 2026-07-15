@@ -873,13 +873,25 @@ def test_compensate_activity_invokes_orchestrator() -> None:
     assert shims[0].success is True
 
 
-def test_mark_job_failed_activity_best_effort() -> None:
+def test_mark_job_failed_activity_writes_job_store() -> None:
     from agent_provisioning_team.temporal import activities
 
-    with patch.object(activities, "_best_effort_job_store") as mock_store:
+    with patch.object(activities._js, "mark_job_failed") as mock_fail:
         activities.mark_job_failed_activity("job-1", "boom")
 
-    mock_store.assert_called_once_with(activities._js.mark_job_failed, "job-1", error="boom")
+    mock_fail.assert_called_once_with("job-1", error="boom")
+
+
+def test_mark_job_failed_activity_raises_when_job_store_fails() -> None:
+    from agent_provisioning_team.temporal import activities
+
+    with patch.object(
+        activities._js,
+        "mark_job_failed",
+        side_effect=RuntimeError("store down"),
+    ):
+        with pytest.raises(RuntimeError, match="store down"):
+            activities.mark_job_failed_activity("job-1", "boom")
 
 
 def test_mark_job_failed_activity_rejects_empty_inputs() -> None:

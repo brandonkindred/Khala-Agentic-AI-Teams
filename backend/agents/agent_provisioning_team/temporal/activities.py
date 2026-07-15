@@ -557,12 +557,14 @@ def mark_job_failed_activity(job_id: str, error: str) -> None:
         * ``job_id`` is non-empty.
         * ``error`` is a non-empty human-readable failure reason.
     Postconditions:
-        * Best-effort ``mark_job_failed`` write via ``job_store`` (never raises
-          from a store hiccup — uses ``_best_effort_job_store``).
+        * ``mark_job_failed`` is written to ``job_store`` so status polls leave
+          ``running``/``pending``.
+        * Raises when the job-store write fails so Temporal retries the
+          terminal status update before the workflow abort completes.
     """
     assert job_id, "job_id must be non-empty"
     assert error, "error must be non-empty"
-    _best_effort_job_store(_js.mark_job_failed, job_id, error=error)
+    _js.mark_job_failed(job_id, error=error)
 
 
 # ---------------------------------------------------------------------------
