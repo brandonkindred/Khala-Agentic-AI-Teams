@@ -1,19 +1,21 @@
 """
 Secure credential storage using Fernet encryption.
 
-Stores generated credentials encrypted at rest in .agent_cache/credentials/
+Stores generated credentials encrypted at rest under
+``${AGENT_CACHE:-.agent_cache}/agent_provisioning/credentials/`` (the same
+durable volume used by job/env state in compose).
 
 Key management
 --------------
 The store understands three sources of keys, in priority order:
 
-1. ``encryption_key=`` constructor argument (tests / explicit wiring).
-2. ``PROVISION_CREDENTIAL_KEY`` env var — comma-separated list of Fernet
-   keys. The FIRST key is always used for new encryptions; trailing keys
-   remain valid for decryption. This enables zero-downtime rotation via
-   ``cryptography.fernet.MultiFernet``.
-3. A key file at ``PA_CREDENTIAL_KEY_FILE`` or the dev fallback
-   ``<storage_dir>/.encryption_key`` (auto-generated in dev).
+    1. ``encryption_key=`` constructor argument (tests / explicit wiring).
+    2. ``PROVISION_CREDENTIAL_KEY`` env var — comma-separated list of Fernet
+       keys. The FIRST key is always used for new encryptions; trailing keys
+       remain valid for decryption. This enables zero-downtime rotation via
+       ``cryptography.fernet.MultiFernet``.
+    3. A key file at ``PA_CREDENTIAL_KEY_FILE`` or the dev fallback
+       ``<storage_dir>/.encryption_key`` (auto-generated in dev).
 
 In production set ``PROVISION_REQUIRE_KEY=1`` to disable the dev fallback
 and hard-fail if no key is configured.
@@ -28,7 +30,22 @@ from typing import Any, Dict, List, Optional
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
-DEFAULT_CREDENTIALS_DIR = Path(".agent_cache/provisioning_credentials")
+
+def default_credentials_dir() -> Path:
+    """Resolve the durable on-disk credential directory.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Returns ``${AGENT_CACHE:-.agent_cache}/agent_provisioning/credentials``
+          as a ``Path`` (directory need not exist yet).
+    """
+    root = Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
+    return root / "agent_provisioning" / "credentials"
+
+
+# Retained for callers/tests that import the historical module constant.
+DEFAULT_CREDENTIALS_DIR = default_credentials_dir()
 
 
 class CredentialStoreConfigError(RuntimeError):
@@ -43,7 +60,7 @@ class CredentialStore:
         storage_dir: Optional[Path] = None,
         encryption_key: Optional[str] = None,
     ) -> None:
-        self.storage_dir = storage_dir or DEFAULT_CREDENTIALS_DIR
+        self.storage_dir = Path(storage_dir) if storage_dir is not None else default_credentials_dir()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
         keys = self._collect_keys(encryption_key)

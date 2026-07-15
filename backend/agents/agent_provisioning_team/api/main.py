@@ -88,7 +88,21 @@ def _is_indeterminate_workflow_start(exc: BaseException) -> bool:
 
 
 def _fail_job_after_start_error(job_id: str, exc: BaseException) -> None:
-    """Mark ``job_id`` failed unless ``exc`` leaves start acceptance indeterminate."""
+    """Mark ``job_id`` failed unless ``exc`` leaves start acceptance indeterminate.
+
+    Preconditions:
+        * ``job_id`` is a non-empty string identifying an existing job row
+          (or a row the job service will accept updates for).
+        * ``exc`` is the exception raised while dispatching the Temporal start.
+    Postconditions:
+        * If ``exc`` is an indeterminate workflow-start timeout
+          (``TimeoutError`` / ``concurrent.futures.TimeoutError``): the job
+          store is left unchanged and a warning is logged — Temporal may still
+          accept and run the workflow.
+        * Otherwise: the job is marked failed via ``mark_job_failed`` with
+          ``error=str(exc)``.
+    """
+    assert job_id, "job_id must be non-empty"
     if _is_indeterminate_workflow_start(exc):
         logger.warning(
             "Temporal start timed out for job=%s; not marking failed (workflow may still run): %s",
@@ -97,6 +111,69 @@ def _fail_job_after_start_error(job_id: str, exc: BaseException) -> None:
         )
         return
     mark_job_failed(job_id, error=str(exc))
+
+
+def _invoke_provision_starter(
+    starter: Any,
+    *,
+    job_id: str,
+    agent_id: str,
+    manifest_path: str,
+    skip_phases: Optional[List[str]],
+    prior_results: Optional[Dict[str, Any]],
+    success_message: str,
+    failure_verb: str,
+    replace_existing: bool = False,
+    indeterminate_status: str = JOB_STATUS_PENDING,
+) -> ProvisionJobResponse:
+    """Dispatch a provision workflow start and normalize success / error responses.
+
+    Preconditions:
+        * ``starter`` is the callable returned by ``_require_provision_starter``.
+        * ``job_id``, ``agent_id``, and ``manifest_path`` are non-empty.
+        * Job-store mutations that prepare the row (create / update / reset)
+          have already run for ``job_id``.
+    Postconditions:
+        * On accepted start: returns ``ProvisionJobResponse`` with
+          ``status=running`` and ``success_message``.
+        * On indeterminate start timeout: does **not** mark the job failed;
+          returns ``ProvisionJobResponse`` with ``job_id`` and
+          ``indeterminate_status`` so the caller can poll
+          ``GET /provision/status/{job_id}``.
+        * On other start failures: marks the job failed (via
+          ``_fail_job_after_start_error``) and raises HTTP 503.
+    """
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
+    assert manifest_path, "manifest_path must be non-empty"
+    try:
+        kwargs: Dict[str, Any] = {
+            "skip_phases": skip_phases,
+            "prior_results": prior_results,
+        }
+        if replace_existing:
+            kwargs["replace_existing"] = True
+        starter(job_id, agent_id, manifest_path, **kwargs)
+    except Exception as exc:
+        _fail_job_after_start_error(job_id, exc)
+        if _is_indeterminate_workflow_start(exc):
+            return ProvisionJobResponse(
+                job_id=job_id,
+                status=indeterminate_status,
+                message=(
+                    f"Temporal {failure_verb} acceptance timed out; the workflow may still "
+                    f"run. Poll GET /provision/status/{job_id}."
+                ),
+            )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to {failure_verb} Temporal workflow: {exc}",
+        ) from exc
+    return ProvisionJobResponse(
+        job_id=job_id,
+        status=JOB_STATUS_RUNNING,
+        message=success_message,
+    )
 
 
 def _validate_job_for_reprovision(
@@ -267,10 +344,12 @@ def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
         * Temporal must be enabled (raises HTTP 503 otherwise, before any
           job-store row is created).
     Postconditions:
-        * On success, a job row exists in ``JOB_STATUS_RUNNING`` and the
-          returned ``ProvisionJobResponse`` carries its ``job_id``.
-        * If dispatch to Temporal itself fails after the job row was
-          created, the job is marked failed and HTTP 503 is raised.
+        * On accepted Temporal start: a job row exists and the returned
+          ``ProvisionJobResponse`` carries its ``job_id`` with ``running`` status.
+        * On indeterminate start timeout: the job is left non-terminal and the
+          response still includes ``job_id`` so the client can poll status.
+        * On other Temporal dispatch failures: the job is marked failed and
+          HTTP 503 is raised.
     """
     starter = _require_provision_starter()
 
@@ -281,24 +360,18 @@ def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
         manifest_path=request.manifest_path,
     )
 
-    try:
-        starter(
-            job_id,
-            request.agent_id,
-            request.manifest_path,
-            skip_phases=None,
-            prior_results=None,
-        )
-    except Exception as exc:
-        _fail_job_after_start_error(job_id, exc)
-        raise HTTPException(
-            status_code=503, detail=f"Failed to start Temporal workflow: {exc}"
-        ) from exc
-
-    return ProvisionJobResponse(
+    return _invoke_provision_starter(
+        starter,
         job_id=job_id,
-        status=JOB_STATUS_RUNNING,
-        message="Provisioning started (Temporal). Poll GET /provision/status/{job_id} for progress.",
+        agent_id=request.agent_id,
+        manifest_path=request.manifest_path,
+        skip_phases=None,
+        prior_results=None,
+        success_message=(
+            "Provisioning started (Temporal). Poll GET /provision/status/{job_id} for progress."
+        ).format(job_id=job_id),
+        failure_verb="start",
+        indeterminate_status=JOB_STATUS_PENDING,
     )
 
 
@@ -445,25 +518,17 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
 
     update_job(job_id, status=JOB_STATUS_RUNNING, error=None)
 
-    try:
-        starter(
-            job_id,
-            agent_id,
-            manifest_path,
-            skip_phases=completed_values,
-            prior_results=phase_results,
-            replace_existing=True,
-        )
-    except Exception as exc:
-        _fail_job_after_start_error(job_id, exc)
-        raise HTTPException(
-            status_code=503, detail=f"Failed to resume Temporal workflow: {exc}"
-        ) from exc
-
-    return ProvisionJobResponse(
+    return _invoke_provision_starter(
+        starter,
         job_id=job_id,
-        status="running",
-        message="Job resumed (Temporal). Skipping completed phases.",
+        agent_id=agent_id,
+        manifest_path=manifest_path,
+        skip_phases=completed_values,
+        prior_results=phase_results,
+        replace_existing=True,
+        success_message="Job resumed (Temporal). Skipping completed phases.",
+        failure_verb="resume",
+        indeterminate_status=JOB_STATUS_RUNNING,
     )
 
 
@@ -482,6 +547,8 @@ def restart_provision_job(job_id: str) -> ProvisionJobResponse:
     Postconditions:
         * On success, the job is reset and a fresh workflow run is started
           with no skipped phases.
+        * On indeterminate start timeout: the reset job is left non-terminal
+          and the response still includes ``job_id`` for polling.
     """
     starter = _require_provision_starter()
     try:
@@ -497,25 +564,17 @@ def restart_provision_job(job_id: str) -> ProvisionJobResponse:
 
     store_reset_job(job_id)
 
-    try:
-        starter(
-            job_id,
-            agent_id,
-            manifest_path,
-            skip_phases=None,
-            prior_results=None,
-            replace_existing=True,
-        )
-    except Exception as exc:
-        _fail_job_after_start_error(job_id, exc)
-        raise HTTPException(
-            status_code=503, detail=f"Failed to restart Temporal workflow: {exc}"
-        ) from exc
-
-    return ProvisionJobResponse(
+    return _invoke_provision_starter(
+        starter,
         job_id=job_id,
-        status="running",
-        message="Job restarted (Temporal) from scratch.",
+        agent_id=agent_id,
+        manifest_path=manifest_path,
+        skip_phases=None,
+        prior_results=None,
+        replace_existing=True,
+        success_message="Job restarted (Temporal) from scratch.",
+        failure_verb="restart",
+        indeterminate_status=JOB_STATUS_PENDING,
     )
 
 

@@ -349,7 +349,7 @@ def test_resume_pending_job_when_no_open_workflow() -> None:
 
 
 def test_provision_start_timeout_does_not_mark_job_failed() -> None:
-    """Indeterminate start timeouts must not write a terminal failed status."""
+    """Indeterminate start timeouts leave the job pollable and return job_id."""
     import concurrent.futures
 
     with (
@@ -363,8 +363,28 @@ def test_provision_start_timeout_does_not_mark_job_failed() -> None:
     ):
         r = client.post("/provision", json={"agent_id": "ag-timeout"})
 
-    assert r.status_code == 503
+    assert r.status_code == 200
+    body = r.json()
+    assert body["job_id"]
+    assert body["status"] == "pending"
+    assert "timed out" in body["message"].lower()
+    assert body["job_id"] in body["message"]
     mock_fail.assert_not_called()
+
+
+def test_credential_store_defaults_under_agent_cache(tmp_path, monkeypatch) -> None:
+    """Encrypted credentials land on the durable AGENT_CACHE volume path."""
+    from agent_provisioning_team.shared.credential_store import (
+        CredentialStore,
+        default_credentials_dir,
+    )
+
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path / "agents"))
+    expected = tmp_path / "agents" / "agent_provisioning" / "credentials"
+    assert default_credentials_dir() == expected
+    store = CredentialStore()
+    assert store.storage_dir == expected
+    assert expected.is_dir()
 
 
 def test_resume_job_missing_agent_or_manifest() -> None:
