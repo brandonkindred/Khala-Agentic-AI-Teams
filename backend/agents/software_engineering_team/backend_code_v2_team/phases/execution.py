@@ -170,7 +170,12 @@ def _code_review_gate(
         review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
     )
-    return GateOutcome(passed=r.passed, issues=r.issues, summary=r.summary)
+    return GateOutcome(
+        passed=r.passed,
+        issues=r.issues,
+        summary=r.summary,
+        raw_issue_count=getattr(r, "raw_issue_count", None),
+    )
 
 
 def _qa_gate(
