@@ -311,6 +311,33 @@ def test_start_provisioning_workflow_raises_without_client() -> None:
             sw.start_provisioning_workflow("j", "a", "default.yaml")
 
 
+def test_start_workflow_timeout_s_defaults_and_clamps(monkeypatch) -> None:
+    from agent_provisioning_team.temporal import start_workflow as sw
+
+    monkeypatch.delenv("AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S", raising=False)
+    assert sw._start_workflow_timeout_s() == 30.0
+
+    monkeypatch.setenv("AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S", "0.25")
+    assert sw._start_workflow_timeout_s() == 1.0
+
+    monkeypatch.setenv("AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S", "12.5")
+    assert sw._start_workflow_timeout_s() == 12.5
+
+    monkeypatch.setenv("AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S", "not-a-number")
+    assert sw._start_workflow_timeout_s() == 30.0
+
+    monkeypatch.setenv("AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S", "inf")
+    assert sw._start_workflow_timeout_s() == 30.0
+
+
+def test_start_workflow_timeout_s_handles_overflow(monkeypatch) -> None:
+    from agent_provisioning_team.temporal import start_workflow as sw
+
+    monkeypatch.setenv("AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S", "999")
+    with patch("builtins.float", side_effect=OverflowError("too large")):
+        assert sw._start_workflow_timeout_s() == 30.0
+
+
 # ---------------------------------------------------------------------------
 # worker.py
 # ---------------------------------------------------------------------------
@@ -823,6 +850,28 @@ def test_mark_job_failed_activity_rejects_empty_inputs() -> None:
         activities.mark_job_failed_activity("", "err")
     with pytest.raises(AssertionError):
         activities.mark_job_failed_activity("job-1", "")
+
+
+def test_record_account_provisioning_sets_tool_counts() -> None:
+    from agent_provisioning_team.temporal import activities
+
+    results = [
+        {"tool_name": "postgresql", "success": True},
+        {"tool_name": "redis", "success": True},
+    ]
+    with patch.object(activities, "_best_effort_job_store") as mock_store:
+        out = activities.record_account_provisioning_activity("job-1", results)
+
+    assert out == {"success": True, "tool_results": results}
+    update_calls = [
+        c for c in mock_store.call_args_list if c.args and c.args[0] is activities._js.update_job
+    ]
+    assert len(update_calls) == 1
+    kwargs = update_calls[0].kwargs
+    assert kwargs["tools_completed"] == 2
+    assert kwargs["tools_total"] == 2
+    assert kwargs["current_tool"] is None
+    assert kwargs["progress"] == 60
 
 
 def test_list_manifest_tools_activity_returns_ordered_names(tmp_path) -> None:

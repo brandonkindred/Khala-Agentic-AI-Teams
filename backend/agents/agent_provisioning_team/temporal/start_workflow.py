@@ -33,11 +33,20 @@ _T = TypeVar("_T")
 
 
 def _start_workflow_timeout_s() -> float:
-    """Parse ``AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S`` (default 30)."""
+    """Parse ``AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S`` (default 30).
+
+    Preconditions:
+        * Environment value, when set, should be a finite numeric string.
+    Postconditions:
+        * Returns a float ``>= 1.0``; unparseable / overflowing / non-finite
+          values fall back to ``30.0``.
+    """
     raw = os.environ.get("AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S", "30")
     try:
         value = float(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        return 30.0
+    if value != value or value in (float("inf"), float("-inf")):  # NaN / ±
         return 30.0
     return max(1.0, value)
 

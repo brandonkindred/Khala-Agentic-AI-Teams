@@ -469,9 +469,14 @@ def record_account_provisioning_activity(
     Postconditions:
         * ``completed_phases`` includes ``account_provisioning`` and
           ``phase_results`` carries ``{"success": True, "tool_results": ...}``.
+        * Job progress reports ``tools_completed`` / ``tools_total`` from the
+          finished result list so status polls no longer show ``0/N``.
     """
     assert job_id, "job_id must be non-empty"
-    payload = {"success": True, "tool_results": list(tool_results_dump)}
+    results = list(tool_results_dump)
+    tools_total = len(results)
+    tools_completed = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
+    payload = {"success": True, "tool_results": results}
     _best_effort_job_store(_js.add_completed_phase, job_id, "account_provisioning", payload)
     _best_effort_job_store(
         _js.update_job,
@@ -479,6 +484,8 @@ def record_account_provisioning_activity(
         progress=60,
         status_text="Account provisioning complete",
         current_tool=None,
+        tools_completed=tools_completed,
+        tools_total=tools_total,
     )
     return payload
 
