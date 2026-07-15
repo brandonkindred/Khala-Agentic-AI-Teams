@@ -125,7 +125,7 @@ class AgentProvisioningWorkflow:
 
         tools_total = len(tool_names)
 
-        async def _one(idx: int, tool_name: str) -> Any:
+        async def _one(tool_name: str) -> Any:
             creds_dump = credentials_by_tool.get(tool_name, {})
             return await workflow.execute_activity(
                 _activities.provision_tool_activity,
@@ -135,7 +135,6 @@ class AgentProvisioningWorkflow:
                     tool_name,
                     manifest_path,
                     creds_dump,
-                    idx,
                     tools_total,
                 ],
                 task_queue=TASK_QUEUE,
@@ -145,7 +144,7 @@ class AgentProvisioningWorkflow:
             )
 
         raw_results = await asyncio.gather(
-            *[_one(i, name) for i, name in enumerate(tool_names)],
+            *[_one(name) for name in tool_names],
             return_exceptions=True,
         )
 
@@ -371,6 +370,7 @@ class AgentProvisioningWorkflow:
         setup_completed = False
         tools_phase_compensated = False
         account_provisioning_done = False
+        succeeded_tools: list[dict] = []
 
         try:
             _, environment_dump = await self._execute_setup_phase(
@@ -398,6 +398,7 @@ class AgentProvisioningWorkflow:
                 skip,
                 prior,
             )
+            succeeded_tools = list(succeeded)
 
             if failures:
                 await self._compensate_failed_tools(agent_id, succeeded)
@@ -440,12 +441,11 @@ class AgentProvisioningWorkflow:
                 onboarding_dump,
             )
         except Exception as exc:
-            # Credentials / manifest-list failures after setup leave a Docker env
-            # (+ maybe credentials) behind; compensate([]) tears those down —
-            # same as the in-process orchestrator. Tool failures already
-            # compensated above.
+            # Pre-tool failures leave Docker/credentials behind → compensate([]).
+            # Fan-out completed but checkpoint/later phase not durable yet →
+            # compensate the tools that already succeeded.
             if setup_completed and not account_provisioning_done and not tools_phase_compensated:
-                await self._compensate_failed_tools(agent_id, [])
+                await self._compensate_failed_tools(agent_id, succeeded_tools)
             if not terminal_failure_recorded:
                 await self._mark_job_failed(job_id, f"Provisioning failed: {exc}")
             raise

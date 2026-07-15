@@ -18,7 +18,9 @@ The Agent Provisioning Team automates the process of setting up development envi
 
 ## Architecture
 
-The team uses a **phase-based workflow** with 6 sequential phases:
+HTTP provisioning and deprovisioning run as durable Temporal workflows
+(`AgentProvisioningWorkflow` / `AgentDeprovisioningWorkflow`). Each workflow
+drives the same **6 sequential phases**:
 
 ```
 1. SETUP              → Create Docker container
@@ -29,7 +31,7 @@ The team uses a **phase-based workflow** with 6 sequential phases:
 6. DELIVER            → Finalize and return results
 ```
 
-Progress is tracked via the job store (updated by Temporal activities) and exposed through REST API endpoints.
+Progress is tracked via the job store (updated by Temporal activities) and exposed through REST API endpoints. `orchestrator.py` remains for unit tests and non-HTTP callers; the REST surface does not invoke it for provision/deprovision.
 
 ## Durable execution (Temporal)
 
@@ -191,11 +193,12 @@ tools:
 ```
 agent_provisioning_team/
 ├── models.py              # Domain models
-├── orchestrator.py        # Phase controller
+├── orchestrator.py        # In-process phase runner (tests / non-HTTP callers)
+├── temporal/              # AgentProvisioningWorkflow + activities (HTTP path)
 ├── phases/                # Phase implementations
 ├── tool_agents/           # Tool provisioners
 ├── shared/                # Stores and utilities
-├── api/                   # FastAPI endpoints
+├── api/                   # FastAPI endpoints (Temporal-only provision/deprovision)
 └── manifests/             # Tool manifest examples
 ```
 

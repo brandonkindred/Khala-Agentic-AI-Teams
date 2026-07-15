@@ -145,6 +145,30 @@ def _validate_job_for_reprovision(
         return data
 
 
+def _ensure_temporal_enabled() -> None:
+    """Raise HTTP 503 when Temporal is disabled or unavailable.
+
+    Preconditions:
+        * None — reads process env / Temporal client state only.
+    Postconditions:
+        * Returns normally when Temporal is enabled.
+        * Raises ``HTTPException(status_code=503)`` when Temporal is disabled,
+          the temporal client module fails to import, or the availability check
+          raises.
+    """
+    try:
+        from agent_provisioning_team.temporal.client import is_temporal_enabled
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
+    try:
+        enabled = is_temporal_enabled()
+    except Exception as exc:
+        logger.exception("Temporal availability check failed")
+        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
+    if not enabled:
+        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE)
+
+
 def _require_provision_starter():
     """Return the ``start_provisioning_workflow`` callable, or raise HTTP 503.
 
@@ -160,18 +184,11 @@ def _require_provision_starter():
         * Raises ``HTTPException(status_code=503)`` otherwise (Temporal
           disabled, or the ``temporal`` submodule fails to import).
     """
+    _ensure_temporal_enabled()
     try:
-        from agent_provisioning_team.temporal.client import is_temporal_enabled
         from agent_provisioning_team.temporal.start_workflow import start_provisioning_workflow
     except ImportError as exc:
         raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
-    try:
-        enabled = is_temporal_enabled()
-    except Exception as exc:
-        logger.exception("Temporal availability check failed")
-        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
-    if not enabled:
-        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE)
     return start_provisioning_workflow
 
 
@@ -188,18 +205,11 @@ def _require_deprovision_runner():
           enabled and importable.
         * Raises ``HTTPException(status_code=503)`` otherwise.
     """
+    _ensure_temporal_enabled()
     try:
-        from agent_provisioning_team.temporal.client import is_temporal_enabled
         from agent_provisioning_team.temporal.start_workflow import run_deprovision_workflow
     except ImportError as exc:
         raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
-    try:
-        enabled = is_temporal_enabled()
-    except Exception as exc:
-        logger.exception("Temporal availability check failed")
-        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
-    if not enabled:
-        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE)
     return run_deprovision_workflow
 
 

@@ -146,6 +146,9 @@ def setup_activity(
         * Writes setup progress (or restore status) into ``job_store``.
         * Raises ``RuntimeError`` when a fresh setup fails.
     """
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
+    assert manifest_path, "manifest_path must be non-empty"
     from agent_provisioning_team.phases.setup import run_setup
     from agent_provisioning_team.shared.phase_state import restore_setup
 
@@ -202,6 +205,9 @@ def credentials_activity(
         * Returns ``{"success": True, "credentials": {tool_name: dump, ...}}``.
         * Raises ``RuntimeError`` when credential generation fails.
     """
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
+    assert manifest_path, "manifest_path must be non-empty"
     from agent_provisioning_team.phases.credential_generation import run_credential_generation
     from agent_provisioning_team.shared.phase_state import restore_credentials
 
@@ -245,7 +251,6 @@ def provision_tool_activity(
     tool_name: str,
     manifest_path: str,
     credentials_dump: Dict[str, Any],
-    tool_index: int = 0,
     tools_total: int = 0,
 ) -> Dict[str, Any]:
     """Provision a single tool — one activity per tool so fan-out is natural.
@@ -268,16 +273,12 @@ def provision_tool_activity(
         * Updates ``job_store`` with the current tool / phase progress.
           Does not write ``tools_completed`` — parallel fan-out indexes are not
           completion counts and would race/regress under ``asyncio.gather``.
-    Notes:
-        * ``tool_index`` is reserved for logging / ordered progress aggregators;
-          it is intentionally unused while fan-out progress stays tool-name based.
     """
     from agent_provisioning_team.models import GeneratedCredentials
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
     from agent_provisioning_team.shared.tool_manifest import load_manifest
 
     assert tools_total > 0, "tools_total must be > 0"
-    _ = tool_index
     _best_effort_job_store(
         _js.update_job,
         job_id,
@@ -333,6 +334,9 @@ def audit_activity(
         * Returns the ``AccessAuditResult`` dump.
         * Records the phase in ``job_store`` on a fresh audit run.
     """
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
+    assert manifest_path, "manifest_path must be non-empty"
     from agent_provisioning_team.models import ToolProvisionResult
     from agent_provisioning_team.phases.access_audit import run_access_audit
     from agent_provisioning_team.shared.phase_state import restore_access_audit
@@ -385,6 +389,10 @@ def documentation_activity(
         * Returns ``{"success": <bool>, "onboarding": <dump|None>}``.
         * Records the documentation phase in ``job_store`` on a fresh run.
     """
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
+    assert manifest_path, "manifest_path must be non-empty"
+    assert workspace_path, "workspace_path must be non-empty"
     from agent_provisioning_team.models import GeneratedCredentials, ToolProvisionResult
     from agent_provisioning_team.phases.documentation import run_documentation
     from agent_provisioning_team.shared.phase_state import restore_documentation
@@ -445,6 +453,8 @@ def deliver_activity(
         * Raises when the terminal job-store write fails so Temporal retries
           (status must not stay running after a successful deliver).
     """
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
     from agent_provisioning_team.models import (
         AccessAuditResult,
         EnvironmentInfo,

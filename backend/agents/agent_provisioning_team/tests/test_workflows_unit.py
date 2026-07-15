@@ -462,6 +462,44 @@ async def test_workflow_compensates_setup_on_credentials_failure(tmp_path) -> No
 
 
 @pytest.mark.asyncio
+async def test_workflow_compensates_succeeded_tools_on_checkpoint_failure(tmp_path) -> None:
+    """Checkpoint failure after fan-out must roll back tools that already succeeded."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "credentials_activity": {
+                "success": True,
+                "credentials": {
+                    "postgresql": {"tool_name": "postgresql"},
+                    "redis": {"tool_name": "redis"},
+                },
+            },
+            "provision_tool_activity": lambda call: {
+                "tool_name": call["args"][2],
+                "success": True,
+                "provisioner_key": f"{call['args'][2]}_provisioner",
+            },
+            "record_account_provisioning_activity": RuntimeError("checkpoint boom"),
+            "compensate_activity": None,
+            "mark_job_failed_activity": None,
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        with pytest.raises(RuntimeError, match="checkpoint boom"):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    compensate_call = _call(stub, "compensate_activity")
+    assert compensate_call["args"][0] == "agent-1"
+    assert {t["tool_name"] for t in compensate_call["args"][1]} == {"postgresql", "redis"}
+    assert "mark_job_failed_activity" in [c["name"] for c in stub.calls]
+
+
+@pytest.mark.asyncio
 async def test_workflow_setup_failure_marks_failed_without_compensate(tmp_path) -> None:
     """Setup failure has nothing to roll back — mark failed, skip compensate."""
     from agent_provisioning_team.temporal import workflows as wf

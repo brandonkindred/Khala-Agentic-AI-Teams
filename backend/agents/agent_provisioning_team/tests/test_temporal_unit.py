@@ -635,7 +635,6 @@ def test_provision_tool_activity_calls_provisioner() -> None:
             "api_token",
             "default.yaml",
             credentials_dump=creds.model_dump(),
-            tool_index=0,
             tools_total=1,
         )
 
