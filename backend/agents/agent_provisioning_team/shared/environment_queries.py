@@ -14,10 +14,14 @@ def get_agent_status_dict(
     """Build a status dict for ``agent_id``, or ``None`` if missing.
 
     Preconditions:
+        * ``store`` is a non-``None`` ``EnvironmentStore``.
         * ``agent_id`` is non-empty.
     Postconditions:
         * Returns a dict with agent/container/tools fields when present.
+        * Returns ``None`` when the agent is absent from ``store``.
     """
+    assert store is not None, "store must be an EnvironmentStore instance"
+    assert agent_id, "agent_id must be non-empty"
     env = store.get(agent_id)
     if env is None:
         return None
@@ -38,10 +42,12 @@ def list_agent_status_dicts(
     """List agent status dicts, optionally filtered by ``status``.
 
     Preconditions:
+        * ``store`` is a non-``None`` ``EnvironmentStore``.
         * ``status``, when set, matches stored environment status strings.
     Postconditions:
         * Returns zero or more status dicts.
     """
+    assert store is not None, "store must be an EnvironmentStore instance"
     return [
         {
             "agent_id": env.agent_id,

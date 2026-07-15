@@ -5,7 +5,7 @@ This is phase 6 (final) of the provisioning workflow.
 """
 
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..models import (
     AccessAuditResult,
@@ -220,6 +220,41 @@ def _redact_details(value):
     if isinstance(value, str):
         return _redact_connection_string(value) if "://" in value and "@" in value else value
     return value
+
+
+def sanitize_tool_results_for_checkpoint(
+    tool_results: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Strip plaintext secrets from tool-result dumps before job-store writes.
+
+    Used by the Temporal account-provisioning checkpoint so ``phase_results`` /
+    resume payloads never carry ``GeneratedCredentials`` dumps or password-
+    bearing connection strings.
+
+    Preconditions:
+        * ``tool_results`` is a list (may be empty); non-dict entries are skipped.
+    Postconditions:
+        * Each retained entry has ``credentials=None`` and ``details`` redacted
+          via the same rules as API response redaction.
+        * ``tool_name``, ``success``, ``permissions``, ``error``, and
+          ``provisioner_key`` are preserved for resume / compensate.
+    """
+    sanitized: List[Dict[str, Any]] = []
+    for raw in tool_results:
+        if not isinstance(raw, dict):
+            continue
+        sanitized.append(
+            {
+                "tool_name": raw.get("tool_name") or "",
+                "success": bool(raw.get("success")),
+                "permissions": list(raw.get("permissions") or []),
+                "error": raw.get("error"),
+                "provisioner_key": raw.get("provisioner_key"),
+                "credentials": None,
+                "details": _redact_details(raw.get("details") or {}),
+            }
+        )
+    return sanitized
 
 
 def _redact_connection_string(conn_str: Optional[str]) -> Optional[str]:

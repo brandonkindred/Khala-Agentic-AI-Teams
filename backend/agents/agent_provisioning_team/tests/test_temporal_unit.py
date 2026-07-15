@@ -992,6 +992,26 @@ def test_record_account_provisioning_sets_tool_counts() -> None:
         {"tool_name": "postgresql", "success": True},
         {"tool_name": "redis", "success": True},
     ]
+    sanitized = [
+        {
+            "tool_name": "postgresql",
+            "success": True,
+            "permissions": [],
+            "error": None,
+            "provisioner_key": None,
+            "credentials": None,
+            "details": {},
+        },
+        {
+            "tool_name": "redis",
+            "success": True,
+            "permissions": [],
+            "error": None,
+            "provisioner_key": None,
+            "credentials": None,
+            "details": {},
+        },
+    ]
     fake_env = MagicMock()
     with (
         patch.object(activities._js, "add_completed_phase") as mock_phase,
@@ -1003,11 +1023,11 @@ def test_record_account_provisioning_sets_tool_counts() -> None:
     ):
         out = activities.record_account_provisioning_activity("job-1", results, "agent-1")
 
-    assert out == {"success": True, "tool_results": results}
+    assert out == {"success": True, "tool_results": sanitized}
     mock_phase.assert_called_once_with(
         "job-1",
         "account_provisioning",
-        {"success": True, "tool_results": results},
+        {"success": True, "tool_results": sanitized},
     )
     mock_update.assert_called_once_with(
         "job-1",
@@ -1018,6 +1038,41 @@ def test_record_account_provisioning_sets_tool_counts() -> None:
         tools_total=2,
     )
     fake_env.add_tools.assert_called_once_with("agent-1", ["postgresql", "redis"])
+
+
+def test_record_account_provisioning_strips_plaintext_secrets() -> None:
+    from agent_provisioning_team.temporal import activities
+
+    results = [
+        {
+            "tool_name": "postgresql",
+            "success": True,
+            "provisioner_key": "postgres_provisioner",
+            "permissions": ["read"],
+            "credentials": {
+                "tool_name": "postgresql",
+                "username": "u",
+                "password": "s3cret",
+                "connection_string": "postgres://u:s3cret@host/db",
+            },
+            "details": {
+                "connection_string": "postgres://u:s3cret@host/db",
+                "db_name": "ok",
+            },
+        }
+    ]
+    with (
+        patch.object(activities._js, "add_completed_phase") as mock_phase,
+        patch.object(activities._js, "update_job"),
+    ):
+        out = activities.record_account_provisioning_activity("job-1", results)
+
+    stored = mock_phase.call_args.args[2]["tool_results"][0]
+    assert stored["credentials"] is None
+    assert stored["details"]["connection_string"] == "***"
+    assert stored["details"]["db_name"] == "ok"
+    assert stored["provisioner_key"] == "postgres_provisioner"
+    assert "s3cret" not in str(out)
 
 
 def test_record_account_provisioning_raises_when_job_store_fails() -> None:

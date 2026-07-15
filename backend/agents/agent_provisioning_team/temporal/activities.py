@@ -579,7 +579,8 @@ def record_account_provisioning_activity(
         * ``agent_id`` is non-empty when environment tool recording is required.
     Postconditions:
         * ``completed_phases`` includes ``account_provisioning`` and
-          ``phase_results`` carries ``{"success": True, "tool_results": ...}``.
+          ``phase_results`` carries sanitized tool results (no plaintext
+          ``credentials``; sensitive ``details`` redacted).
         * Job progress reports ``tools_completed`` / ``tools_total`` from the
           finished result list so status polls no longer show ``0/N``.
         * When ``agent_id`` is set, successful tool names are written once via
@@ -588,10 +589,14 @@ def record_account_provisioning_activity(
           before later phases run (resume depends on this phase being recorded).
     """
     assert job_id, "job_id must be non-empty"
+    from agent_provisioning_team.phases.deliver import sanitize_tool_results_for_checkpoint
+
     results = list(tool_results_dump)
     tools_total = len(results)
     tools_completed = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
-    payload = {"success": True, "tool_results": results}
+    # Job-store checkpoint must not retain plaintext credentials / connection strings.
+    sanitized = sanitize_tool_results_for_checkpoint(results)
+    payload = {"success": True, "tool_results": sanitized}
     _js.add_completed_phase(job_id, "account_provisioning", payload)
     _js.update_job(
         job_id,
