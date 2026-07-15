@@ -229,7 +229,9 @@ def provision_tool_activity(
         * ``credentials_dump`` is a serializable ``GeneratedCredentials`` dump
           for this tool.
     Postconditions:
-        * Returns ``ToolProvisionResult.model_dump()`` from the provisioner.
+        * Returns ``ToolProvisionResult.model_dump()`` from the provisioner
+          with ``provisioner_key`` set to the manifest registry key (needed by
+          ``compensate()`` — built-in provisioners leave it ``None``).
         * Raises ``RuntimeError`` when the tool or provisioner is unknown.
         * Updates ``job_store`` with the current tool / phase progress.
           Does not write ``tools_completed`` — parallel fan-out indexes are not
@@ -267,6 +269,9 @@ def provision_tool_activity(
         config=tool.config,
         credentials=creds,
     )
+    # Mirror run_account_provisioning: stamp the registry key so compensate()
+    # can look the provisioner back up (built-ins leave provisioner_key=None).
+    result.provisioner_key = tool.provisioner
     return result.model_dump()
 
 
