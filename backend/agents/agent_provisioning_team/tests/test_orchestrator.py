@@ -733,12 +733,11 @@ def test_no_legacy_v2_or_thread_fallback_symbols() -> None:
     import agent_provisioning_team
 
     root = Path(agent_provisioning_team.__file__).resolve().parent
-    # Build tokens without embedding the literals as contiguous search targets
-    # elsewhere in this test file.
+    # Plain literals are fine — this file lives under tests/, which is excluded.
     forbidden = (
-        "AgentProvisioningWorkflow" + "V2",
-        "_activity" + "_v2",
-        "PROVISION_THREAD_" + "FALLBACK",
+        "AgentProvisioningWorkflowV2",
+        "_activity_v2",
+        "PROVISION_THREAD_FALLBACK",
     )
     hits: list[str] = []
     for path in root.rglob("*.py"):

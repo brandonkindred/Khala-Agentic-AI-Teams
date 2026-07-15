@@ -104,6 +104,9 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
 
     fn_names = [c["name"] for c in stub.calls]
     assert "setup_activity" in fn_names
+    assert "list_manifest_tools_activity" in fn_names
+    creds_call = _call(stub, "credentials_activity")
+    assert creds_call["args"][4] == _TOOL_SPECS
     assert "credentials_activity" in fn_names
     provision_calls = [c for c in stub.calls if c["name"] == "provision_tool_activity"]
     assert [c["args"][2] for c in provision_calls] == ["postgresql", "redis"]
@@ -463,7 +466,7 @@ async def test_workflow_compensates_setup_on_credentials_failure(tmp_path) -> No
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     compensate_call = _call(stub, "compensate_activity")
-    assert compensate_call["args"] == ["agent-1", []]
+    assert compensate_call["args"] == ["agent-1", [], "job-1"]
     assert "mark_job_failed_activity" in [c["name"] for c in stub.calls]
 
 

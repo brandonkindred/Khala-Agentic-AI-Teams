@@ -203,6 +203,7 @@ def credentials_activity(
     agent_id: str,
     manifest_path: str,
     prior_credentials: Optional[Dict[str, Any]] = None,
+    tool_specs: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Generate (or restore) per-tool credentials for the agent.
 
@@ -210,8 +211,11 @@ def credentials_activity(
         * ``job_id`` / ``agent_id`` / ``manifest_path`` are non-empty.
         * When ``prior_credentials`` is set, it is a credential-phase snapshot
           acceptable to ``restore_credentials``.
+        * When ``tool_specs`` is set (fresh generate path), each entry has a
+          non-empty ``name`` — the same frozen snapshot used for tool fan-out.
     Postconditions:
         * Returns ``{"success": True, "credentials": {tool_name: dump, ...}}``.
+        * Job-store checkpoint never stores plaintext secrets.
         * Raises ``RuntimeError`` when credential generation fails.
     """
     assert job_id, "job_id must be non-empty"
@@ -230,7 +234,28 @@ def credentials_activity(
         # job-store phase_results (which must stay redacted / reference-only).
         stored = get_stored_credentials(agent_id)
         if not stored and snap.credentials:
-            # Legacy checkpoints that still carry plaintext (migrate on read once).
+            # Legacy checkpoints that still carry plaintext: migrate into the
+            # CredentialStore once, then overwrite the job-store checkpoint so
+            # subsequent resumes cannot re-read plaintext.
+            from agent_provisioning_team.shared.credential_store import CredentialStore
+
+            store = CredentialStore()
+            for name, cred in snap.credentials.items():
+                store.store_credentials(
+                    agent_id=agent_id,
+                    tool_name=name,
+                    credentials={
+                        "username": cred.username,
+                        "password": cred.password,
+                        "token": cred.token,
+                    },
+                )
+            tool_names = sorted(snap.credentials.keys()) or list(snap.tool_names)
+            _js.add_completed_phase(
+                job_id,
+                "credential_generation",
+                {"success": True, "tool_names": tool_names, "credentials": {}},
+            )
             return {
                 "success": snap.success,
                 "credentials": {k: v.model_dump() for k, v in snap.credentials.items()},
@@ -252,11 +277,16 @@ def credentials_activity(
         status_text="Generating credentials...",
     )
     orch, manifest = _load_ctx(manifest_path)
+    frozen_names: Optional[List[str]] = None
+    if tool_specs is not None:
+        frozen_names = [str(s.get("name") or "") for s in tool_specs]
+        assert all(frozen_names), "tool_specs entries must include non-empty name"
     activity.heartbeat("credentials")
     result = run_credential_generation(
         agent_id=agent_id,
         manifest=manifest,
         credential_store=orch.credential_store,
+        tool_names=frozen_names,
     )
     if not result.success:
         raise RuntimeError(f"credential generation failed: {result.error}")
@@ -368,8 +398,6 @@ def audit_activity(
     from agent_provisioning_team.models import ToolProvisionResult
     from agent_provisioning_team.phases.access_audit import run_access_audit
     from agent_provisioning_team.shared.phase_state import restore_access_audit
-    from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
-    from agent_provisioning_team.shared.tool_manifest import load_manifest
 
     if prior_audit is not None:
         result = restore_access_audit(prior_audit)
@@ -382,14 +410,11 @@ def audit_activity(
         progress=70,
         status_text="Auditing access permissions...",
     )
-    manifest = load_manifest(manifest_path)
     tool_results = [ToolProvisionResult.model_validate(t) for t in tool_results_dump]
     activity.heartbeat("access_audit")
     result = run_access_audit(
         agent_id=agent_id,
         tool_results=tool_results,
-        manifest=manifest,
-        provisioners=build_default_tool_agents(),
     )
     payload = result.model_dump()
     _js.add_completed_phase(job_id, "access_audit", payload)
@@ -592,6 +617,7 @@ def record_account_provisioning_activity(
 def compensate_activity(
     agent_id: str,
     succeeded_tools: List[Dict[str, Any]],
+    job_id: Optional[str] = None,
 ) -> None:
     """Roll back a partially-provisioned agent (best effort).
 
@@ -600,9 +626,15 @@ def compensate_activity(
         * ``succeeded_tools`` entries are dicts with ``tool_name`` and
           ``provisioner_key`` (registry key, e.g. ``"postgres_provisioner"``).
           The orchestrator looks provisioners up by that registry key.
+        * When ``job_id`` is set, it identifies the job whose completed-phase
+          checkpoints must be cleared after teardown.
     Postconditions:
         * Invokes ``ProvisioningOrchestrator.compensate`` once. Failures inside
           compensation are absorbed by the orchestrator (best effort).
+        * When ``job_id`` is set: clears ``completed_phases`` / ``phase_results``
+          so a later ``/resume`` cannot skip credential_generation (or setup)
+          after CredentialStore / Docker were torn down. Missing jobs are a
+          no-op; job-store write failures raise for Temporal retry.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 
@@ -616,6 +648,10 @@ def compensate_activity(
         for t in succeeded_tools
     ]
     orch.compensate(agent_id, shims)
+    if job_id:
+        # Compensate tears down Docker, env, and CredentialStore — no prior
+        # phase remains safe to skip on resume.
+        _js.clear_completed_phases(job_id)
 
 
 @activity.defn(name="agent_provisioning_mark_job_failed")

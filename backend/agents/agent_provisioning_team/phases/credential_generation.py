@@ -4,7 +4,7 @@ Credential generation phase: Generate passwords and tokens for tools.
 This is phase 2 of the provisioning workflow.
 """
 
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from ..models import (
     CredentialGenerationResult,
@@ -19,30 +19,46 @@ def run_credential_generation(
     manifest: ToolManifest,
     credential_store: Optional[CredentialStore] = None,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    tool_names: Optional[List[str]] = None,
 ) -> CredentialGenerationResult:
     """
     Execute the credential generation phase.
 
-    Generates secure passwords/tokens for each tool in the manifest.
+    Generates secure passwords/tokens for each tool in the manifest
+    (or for an explicit frozen ``tool_names`` snapshot).
 
     Args:
         agent_id: Unique identifier for the agent
-        manifest: Loaded tool manifest
+        manifest: Loaded tool manifest (used when ``tool_names`` is omitted)
         credential_store: Store for persisting credentials
         progress_callback: Callback(tool_name, done, total) for progress updates
+        tool_names: Optional frozen name list; when set, overrides ``manifest.tools``
 
     Returns:
         CredentialGenerationResult with generated credentials per tool
+
+    Preconditions:
+        * ``agent_id`` is non-empty.
+        * When ``tool_names`` is set, every entry is a non-empty string.
+    Postconditions:
+        * Each generated credential is stored in ``credential_store``.
+        * Returned map is keyed by the same tool names that were processed.
     """
+    assert agent_id, "agent_id must be non-empty"
+    if tool_names is not None:
+        assert all(isinstance(n, str) and n for n in tool_names), (
+            "tool_names must be non-empty strings"
+        )
+        names = list(tool_names)
+    else:
+        names = [t.name for t in manifest.tools]
+
     cred_store = credential_store or CredentialStore()
 
     credentials: Dict[str, GeneratedCredentials] = {}
-    tools = manifest.tools
-    total = len(tools)
+    total = len(names)
 
-    for idx, tool in enumerate(tools):
-        tool_name = tool.name
-
+    for idx, tool_name in enumerate(names):
         if progress_callback:
             progress_callback(tool_name, idx, total)
 

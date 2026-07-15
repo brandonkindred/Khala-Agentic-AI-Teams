@@ -175,17 +175,20 @@ class AgentProvisioningWorkflow:
                 )
         return tool_results_dump, succeeded, failures
 
-    async def _compensate_failed_tools(self, agent_id: str, succeeded: list[dict]) -> None:
+    async def _compensate_failed_tools(
+        self, agent_id: str, succeeded: list[dict], job_id: str
+    ) -> None:
         """Roll back tools that succeeded when the account-provisioning phase fails.
 
         Preconditions:
             * ``succeeded`` entries are ``{tool_name, provisioner_key}`` dicts.
+            * ``job_id`` is non-empty (used to clear completed-phase checkpoints).
         Postconditions:
             * Invokes ``compensate_activity`` once for the partial success set.
         """
         await workflow.execute_activity(
             _activities.compensate_activity,
-            args=[agent_id, succeeded],
+            args=[agent_id, succeeded, job_id],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -240,12 +243,13 @@ class AgentProvisioningWorkflow:
         manifest_path: str,
         skip: set[str],
         prior: dict[str, Any],
+        tool_specs: list[dict[str, Any]] | None,
     ) -> dict[str, dict[str, Any]]:
         """Run or restore credential generation; return credentials keyed by tool."""
         creds_prior = prior.get("credential_generation") if "credential_generation" in skip else None
         creds_result = await workflow.execute_activity(
             _activities.credentials_activity,
-            args=[job_id, agent_id, manifest_path, creds_prior],
+            args=[job_id, agent_id, manifest_path, creds_prior, tool_specs],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -391,7 +395,7 @@ class AgentProvisioningWorkflow:
             )
 
             credentials_by_tool = await self._execute_credentials_phase(
-                job_id, agent_id, manifest_path, skip, prior
+                job_id, agent_id, manifest_path, skip, prior, tool_specs
             )
 
             tool_results_dump, succeeded, failures = await self._run_tool_provisioning_phase(
@@ -405,7 +409,7 @@ class AgentProvisioningWorkflow:
             succeeded_tools = list(succeeded)
 
             if failures:
-                await self._compensate_failed_tools(agent_id, succeeded)
+                await self._compensate_failed_tools(agent_id, succeeded, job_id)
                 tools_phase_compensated = True
                 err = f"Tool provisioning failed for agent {agent_id}: {'; '.join(failures)}"
                 await self._mark_job_failed(job_id, err)
@@ -449,7 +453,7 @@ class AgentProvisioningWorkflow:
             # Fan-out completed but checkpoint/later phase not durable yet →
             # compensate the tools that already succeeded.
             if setup_completed and not account_provisioning_done and not tools_phase_compensated:
-                await self._compensate_failed_tools(agent_id, succeeded_tools)
+                await self._compensate_failed_tools(agent_id, succeeded_tools, job_id)
             if not terminal_failure_recorded:
                 await self._mark_job_failed(job_id, f"Provisioning failed: {exc}")
             raise

@@ -284,8 +284,6 @@ class ProvisioningOrchestrator:
             audit_result = run_access_audit(
                 agent_id=agent_id,
                 tool_results=account_result.tool_results,
-                manifest=manifest,
-                provisioners=self.tool_agents,
                 progress_callback=lambda msg: _update(status_text=msg),
             )
 

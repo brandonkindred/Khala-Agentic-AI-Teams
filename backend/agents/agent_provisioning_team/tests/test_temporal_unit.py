@@ -578,15 +578,19 @@ def test_credentials_activity_checkpoint_omits_plaintext_secrets() -> None:
         patch(
             "agent_provisioning_team.phases.credential_generation.run_credential_generation",
             return_value=fake_result,
-        ),
+        ) as mock_run,
         patch("temporalio.activity.heartbeat"),
     ):
-        payload = activities.credentials_activity("j", "a", "default.yaml")
+        specs = [{"name": "pg", "provisioner": "postgres_provisioner", "config": {}}]
+        payload = activities.credentials_activity(
+            "j", "a", "default.yaml", prior_credentials=None, tool_specs=specs
+        )
 
     assert payload["credentials"]["pg"]["password"] == "p"
     checkpoint = mock_phase.call_args.args[2]
     assert checkpoint["tool_names"] == ["pg"]
     assert checkpoint["credentials"] == {}
+    assert mock_run.call_args.kwargs["tool_names"] == ["pg"]
 
 
 def test_credentials_activity_raises_on_failure() -> None:
@@ -871,9 +875,12 @@ def test_compensate_activity_invokes_orchestrator() -> None:
     from agent_provisioning_team.temporal import activities
 
     fake_orch = MagicMock()
-    with patch(
-        "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
-        return_value=fake_orch,
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases") as mock_clear,
     ):
         activities.compensate_activity(
             "agent-1",
@@ -881,6 +888,7 @@ def test_compensate_activity_invokes_orchestrator() -> None:
                 {"tool_name": "pg", "provisioner_key": "postgres_provisioner"},
                 {"tool_name": "redis", "provisioner_key": "redis_provisioner"},
             ],
+            job_id="job-1",
         )
 
     fake_orch.compensate.assert_called_once()
@@ -891,6 +899,60 @@ def test_compensate_activity_invokes_orchestrator() -> None:
     assert shims[0].tool_name == "pg"
     assert shims[0].provisioner_key == "postgres_provisioner"
     assert shims[0].success is True
+    mock_clear.assert_called_once_with("job-1")
+
+
+def test_compensate_activity_clears_phases_so_resume_reruns_credentials() -> None:
+    """After compensate tears down CredentialStore, completed phases must not skip."""
+    from agent_provisioning_team.temporal import activities
+
+    with (
+        patch("agent_provisioning_team.orchestrator.ProvisioningOrchestrator") as Orch,
+        patch.object(activities._js, "clear_completed_phases") as mock_clear,
+    ):
+        Orch.return_value.compensate = MagicMock()
+        activities.compensate_activity("a1", [], job_id="j-comp")
+
+    mock_clear.assert_called_once_with("j-comp")
+
+
+def test_credentials_activity_migrates_legacy_plaintext_and_redacts_checkpoint() -> None:
+    from agent_provisioning_team.models import GeneratedCredentials
+    from agent_provisioning_team.temporal import activities
+
+    legacy = {
+        "pg": GeneratedCredentials(tool_name="pg", username="u", password="legacy-secret"),
+    }
+    store = MagicMock()
+    with (
+        patch.object(activities, "_best_effort_job_store"),
+        patch.object(activities._js, "add_completed_phase") as mock_phase,
+        patch(
+            "agent_provisioning_team.phases.credential_generation.get_stored_credentials",
+            return_value={},
+        ),
+        patch(
+            "agent_provisioning_team.shared.credential_store.CredentialStore",
+            return_value=store,
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        prior = {
+            "success": True,
+            "tool_names": ["pg"],
+            "credentials": {k: v.model_dump() for k, v in legacy.items()},
+        }
+        payload = activities.credentials_activity(
+            "j", "a", "default.yaml", prior_credentials=prior
+        )
+
+    assert payload["credentials"]["pg"]["password"] == "legacy-secret"
+    store.store_credentials.assert_called_once()
+    mock_phase.assert_called_once_with(
+        "j",
+        "credential_generation",
+        {"success": True, "tool_names": ["pg"], "credentials": {}},
+    )
 
 
 def test_mark_job_failed_activity_writes_job_store() -> None:
@@ -1103,9 +1165,9 @@ def test_no_legacy_v2_or_thread_fallback_symbols() -> None:
 
     root = Path(agent_provisioning_team.__file__).resolve().parent
     forbidden = (
-        "AgentProvisioningWorkflow" + "V2",
-        "_activity" + "_v2",
-        "PROVISION_THREAD_" + "FALLBACK",
+        "AgentProvisioningWorkflowV2",
+        "_activity_v2",
+        "PROVISION_THREAD_FALLBACK",
     )
     hits: list[str] = []
     for path in root.rglob("*.py"):
