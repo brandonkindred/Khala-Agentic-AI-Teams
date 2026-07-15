@@ -84,8 +84,8 @@ def test_fe_run_llm_review(monkeypatch):
     monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
     monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
-    issues = _run_llm_review(llm=MagicMock(), task=_task(), files={"x.ts": "code"})
-    assert len(issues) == 1
+    out = _run_llm_review(llm=MagicMock(), task=_task(), files={"x.ts": "code"})
+    assert len(out.issues) == 1
 
 
 def test_fe_run_llm_review_forwards_review_context(monkeypatch):
@@ -198,11 +198,11 @@ def test_fe_run_llm_review_skips_failing_chunk_keeps_others(monkeypatch):
     big = "\n".join(f"function fn_{i:04d}() {{\n  return {i};\n}}" for i in range(2500))
     assert len(big) > MAX_REVIEW_CODE_CHARS  # forces more than one chunk
 
-    issues = _run_llm_review(llm=MagicMock(), task=_task(), files={"big.ts": big})
+    out = _run_llm_review(llm=MagicMock(), task=_task(), files={"big.ts": big})
 
     assert calls["n"] > 1
-    assert len(issues) >= 1
-    assert all(i.description == "real issue" for i in issues)
+    assert len(out.issues) >= 1
+    assert all(i.description == "real issue" for i in out.issues)
 
 
 def test_fe_run_review_clean(monkeypatch, tmp_path: Path):

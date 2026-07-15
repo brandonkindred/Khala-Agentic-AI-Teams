@@ -363,7 +363,7 @@ class GateOutcome:
 
     Each team's gate adapter maps its own review type into this shape: the
     backend maps a ``PhaseReviewResult``; the frontend maps a ``ReviewResult``
-    after filtering issues by ``source``. The skeleton only reads these three
+    after filtering issues by ``source``. The skeleton only reads these
     fields, so it stays decoupled from the per-team review models.
 
     Invariants:

@@ -16,7 +16,7 @@ default), the per-team ``*WorkflowResult``, and backend-only ``PhaseReviewResult
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -78,6 +78,14 @@ class ReviewResult(BaseModel):
     build_ok: bool = Field(default=False)
     lint_ok: bool = Field(default=False)
     summary: str = Field(default="")
+    raw_issue_count: Optional[int] = Field(
+        default=None,
+        description=(
+            "Number of code-review issues the LLM fallback found before grounding "
+            "filtered any out; None when the LLM fallback never ran (e.g. the external "
+            "code_review_agent succeeded) or reported no count."
+        ),
+    )
 
 
 class ProblemSolvingResult(BaseModel):

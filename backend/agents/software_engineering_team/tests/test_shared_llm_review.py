@@ -54,7 +54,7 @@ def test_run_llm_review_parses_issues():
         prompts.append(prompt)
         return "raw"
 
-    issues = run_llm_review(
+    out = run_llm_review(
         task=_task(),
         files={"x.py": "code"},
         prompt_template=_PROMPT,
@@ -66,9 +66,10 @@ def test_run_llm_review_parses_issues():
     )
 
     assert len(prompts) == 1  # single call for a small input
-    assert len(issues) == 1
-    assert issues[0].description == "bad code"
-    assert issues[0].file_path == "x.py"
+    assert len(out.issues) == 1
+    assert out.issues[0].description == "bad code"
+    assert out.issues[0].file_path == "x.py"
+    assert out.raw_issue_count == 1  # nothing grounded away, so raw == kept
 
 
 def test_run_llm_review_skips_blank_files():
@@ -79,7 +80,7 @@ def test_run_llm_review_skips_blank_files():
         calls["n"] += 1
         return "raw"
 
-    issues = run_llm_review(
+    out = run_llm_review(
         task=_task(),
         files={"empty.py": "   \n\t"},
         prompt_template=_PROMPT,
@@ -90,7 +91,8 @@ def test_run_llm_review_skips_blank_files():
         warn_threshold=20,
     )
 
-    assert issues == []
+    assert out.issues == []
+    assert out.raw_issue_count == 0
     assert calls["n"] == 0
 
 
@@ -112,7 +114,7 @@ def test_run_llm_review_chunks_large_file_and_skips_failing_chunk(caplog):
     assert len(big) > 60_000  # forces more than one chunk
 
     with caplog.at_level(logging.WARNING, logger="software_engineering_team.shared.llm_review"):
-        issues = run_llm_review(
+        out = run_llm_review(
             task=_task(),
             files={"big.py": big},
             prompt_template=_PROMPT,
@@ -128,7 +130,8 @@ def test_run_llm_review_chunks_large_file_and_skips_failing_chunk(caplog):
     assert "fn_0000" in joined  # head reviewed
     assert "fn_2499" in joined  # tail reviewed, not truncated
     # First chunk raised; remaining chunks each yield one parsed issue.
-    assert len(issues) == calls["n"] - 1
+    assert len(out.issues) == calls["n"] - 1
+    assert out.raw_issue_count == len(out.issues)  # nothing grounded away here
     # The many-chunks warning fired because chunk count exceeded warn_threshold=0.
     assert any(
         rec.levelno == logging.WARNING and "large review" in rec.getMessage()
@@ -223,7 +226,7 @@ def test_run_llm_review_drops_ungrounded_insurance_hallucination(caplog):
         }
 
     with caplog.at_level(logging.WARNING, logger="software_engineering_team.shared.llm_review"):
-        issues = run_llm_review(
+        out = run_llm_review(
             task=_task(
                 requirements="Build a meal planning UI for weekly menus",
                 description="Meal planner",
@@ -238,7 +241,11 @@ def test_run_llm_review_drops_ungrounded_insurance_hallucination(caplog):
             warn_threshold=20,
             enable_llm_review_grounding=True,
         )
-    assert issues == []
+    assert out.issues == []
+    # The raw count is captured before grounding, so a caller can tell "the LLM
+    # fabricated and grounding caught it" apart from "the LLM found nothing".
+    assert out.raw_issue_count >= 1
+    assert len(out.issues) < out.raw_issue_count
     assert any(
         rec.levelno == logging.WARNING and "ZephyrCare" in rec.getMessage()
         for rec in caplog.records
@@ -259,7 +266,7 @@ def test_run_llm_review_grounding_kill_switch_keeps_ungrounded():
             ]
         }
 
-    issues = run_llm_review(
+    out = run_llm_review(
         task=_task(
             requirements="Build a meal planning UI for weekly menus",
             acceptance_criteria=["user can plan meals for the week"],
@@ -273,5 +280,6 @@ def test_run_llm_review_grounding_kill_switch_keeps_ungrounded():
         warn_threshold=20,
         enable_llm_review_grounding=False,
     )
-    assert len(issues) == 1
-    assert "Insurance Provider" in issues[0].description
+    assert len(out.issues) == 1
+    assert "Insurance Provider" in out.issues[0].description
+    assert out.raw_issue_count == 1  # kill switch still reports the raw count

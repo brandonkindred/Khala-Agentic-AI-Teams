@@ -67,8 +67,8 @@ def test_run_llm_review_parses_issues(monkeypatch):
     monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
     monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
-    issues = _run_llm_review(llm=MagicMock(), task=_task(), files={"x.py": "code"})
-    assert len(issues) == 1
+    out = _run_llm_review(llm=MagicMock(), task=_task(), files={"x.py": "code"})
+    assert len(out.issues) == 1
 
 
 def test_run_llm_review_forwards_review_context(monkeypatch):
@@ -183,11 +183,11 @@ def test_run_llm_review_skips_failing_chunk_keeps_others(monkeypatch):
     big = "\n".join(f"def fn_{i:04d}():\n    return {i}" for i in range(2500))
     assert len(big) > MAX_REVIEW_CODE_CHARS  # forces more than one chunk
 
-    issues = _run_llm_review(llm=MagicMock(), task=_task(), files={"big.py": big})
+    out = _run_llm_review(llm=MagicMock(), task=_task(), files={"big.py": big})
 
     assert calls["n"] > 1  # every chunk was attempted
-    assert len(issues) >= 1  # the failed first chunk did not abort the review
-    assert all(i.description == "real issue" for i in issues)
+    assert len(out.issues) >= 1  # the failed first chunk did not abort the review
+    assert all(i.description == "real issue" for i in out.issues)
 
 
 def test_run_build_verification_no_verifier():

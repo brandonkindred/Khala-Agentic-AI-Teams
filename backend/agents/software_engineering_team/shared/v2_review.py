@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from llm_service import LLMClient
+from software_engineering_team.shared.llm_review import LlmReviewOutput
 from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.review_progress import (
     build_disk_repo_reader,
@@ -193,6 +194,35 @@ def _review_steps_run_sequentially(llm: LLMClient) -> bool:
     return isinstance(getattr(llm, "client", None), DummyLLMClient)
 
 
+def _unwrap_llm_review_result(
+    result: Any, *, raw_issue_count_out: Optional[List[Optional[int]]]
+) -> List[ReviewIssue]:
+    """Split an ``llm_review_fn`` return value into issues, stashing its raw count.
+
+    Preconditions:
+        - ``result`` is either an :class:`LlmReviewOutput` (the real per-team LLM
+          fallback, which always returns one now) or a bare list of issues (a
+          test double / stub that has not adopted the new return type).
+        - ``raw_issue_count_out``, when not ``None``, is a single-element list the
+          caller reads after this returns (a mutable box, since this step's own
+          return type must stay a bare issue list — it is one of several
+          ``step_fns`` thunks fanned out by ``_run_review_steps``, which just
+          concatenates each thunk's returned list).
+
+    Postconditions:
+        - Returns ``result.issues`` (as a fresh list) and writes
+          ``result.raw_issue_count`` into ``raw_issue_count_out[0]`` for an
+          ``LlmReviewOutput``; returns ``result`` unchanged and leaves
+          ``raw_issue_count_out`` untouched for a bare list (there is no
+          raw/grounded distinction to report).
+    """
+    if isinstance(result, LlmReviewOutput):
+        if raw_issue_count_out is not None:
+            raw_issue_count_out[0] = result.raw_issue_count
+        return list(result.issues)
+    return list(result)
+
+
 def _code_review_step(
     *,
     llm: LLMClient,
@@ -203,10 +233,11 @@ def _code_review_step(
     language: str,
     task_id: str,
     task_description: str,
-    llm_review_fn: Callable[..., List[ReviewIssue]],
+    llm_review_fn: Callable[..., Any],
     review_context: Optional[ReviewContext] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     enable_llm_review_grounding: bool = True,
+    raw_issue_count_out: Optional[List[Optional[int]]] = None,
 ) -> List[ReviewIssue]:
     """Independent code-review step: external agent (with LLM fallback), or LLM review alone.
 
@@ -218,12 +249,18 @@ def _code_review_step(
           is the per-team chunking/prompt/parse reviewer (the test patch surface for
           ``Agent`` / ``resolve_text_mode_strands_model``); it must accept
           ``review_context`` so the fallback reviewer sees the same context the
-          external agent path does.
+          external agent path does. It returns an :class:`LlmReviewOutput` in
+          production; a bare issue list is also accepted (see
+          ``_unwrap_llm_review_result``) so a stub runner without a raw count is
+          unaffected.
         - ``review_context`` bundles the caller's system architecture and project specification,
           when available; ``None`` means "nothing to add" so a caller that does not have this
           context yet keeps working unchanged.
         - ``enable_llm_review_grounding`` defaults True; forwarded to the LLM fallback
           (kill switch for ungrounded-claim filtering).
+        - ``raw_issue_count_out``, when provided, is written with the LLM fallback's
+          pre-grounding issue count (see ``_unwrap_llm_review_result``); ``None`` when the
+          fallback never ran (external agent succeeded) or reported no count.
 
     Postconditions:
         - Never raises: an external ``code_review_agent`` failure logs a warning and falls back
@@ -237,12 +274,15 @@ def _code_review_step(
     """
     try:
         if code_review_agent is None:
-            return llm_review_fn(
-                llm=llm,
-                task=task,
-                files=files,
-                review_context=review_context,
-                enable_llm_review_grounding=enable_llm_review_grounding,
+            return _unwrap_llm_review_result(
+                llm_review_fn(
+                    llm=llm,
+                    task=task,
+                    files=files,
+                    review_context=review_context,
+                    enable_llm_review_grounding=enable_llm_review_grounding,
+                ),
+                raw_issue_count_out=raw_issue_count_out,
             )
         try:
             from code_review_agent.models import CodeReviewInput as _CRInput
@@ -281,12 +321,15 @@ def _code_review_step(
                 task_id,
                 exc,
             )
-            return llm_review_fn(
-                llm=llm,
-                task=task,
-                files=files,
-                review_context=review_context,
-                enable_llm_review_grounding=enable_llm_review_grounding,
+            return _unwrap_llm_review_result(
+                llm_review_fn(
+                    llm=llm,
+                    task=task,
+                    files=files,
+                    review_context=review_context,
+                    enable_llm_review_grounding=enable_llm_review_grounding,
+                ),
+                raw_issue_count_out=raw_issue_count_out,
             )
     except Exception as exc:
         logger.warning("[%s] Code review step failed outright: %s", task_id, exc)
@@ -523,6 +566,10 @@ def run_review(
     """
     task_id = task.id
     issues: List[ReviewIssue] = []
+    # Mutable box: _code_review_step must keep returning a bare issue list (it is one of
+    # several step_fns thunks _run_review_steps concatenates), so its LLM fallback's
+    # raw_issue_count is threaded out through this instead of the return value.
+    cr_raw_issue_count: List[Optional[int]] = [None]
 
     # 1. Build verification
     build_ok, build_msg = build_verify_fn(repo_path, build_verifier, task_id)
@@ -585,6 +632,7 @@ def run_review(
                     llm_review_fn=llm_review_fn,
                     review_context=review_context,
                     enable_llm_review_grounding=enable_llm_review_grounding,
+                    raw_issue_count_out=cr_raw_issue_count,
                 ),
                 lambda: _qa_review_step(
                     qa_agent=qa_agent,
@@ -634,6 +682,7 @@ def run_review(
         build_ok=build_ok,
         lint_ok=lint_ok,
         summary=summary,
+        raw_issue_count=cr_raw_issue_count[0],
     )
 
 
@@ -679,6 +728,9 @@ def run_microtask_review(
     task_id = task.id
     microtask_id = microtask.id
     issues: List[ReviewIssue] = []
+    # See run_review's identical box: _code_review_step's raw_issue_count is threaded out
+    # this way because the step itself must keep returning a bare issue list.
+    cr_raw_issue_count: List[Optional[int]] = [None]
 
     logger.info("[%s] %s", task_id, config.microtask_intro(microtask_id, len(files)))
 
@@ -765,6 +817,7 @@ def run_microtask_review(
                     review_context=review_context,
                     detail_callback=detail_callback,
                     enable_llm_review_grounding=enable_llm_review_grounding,
+                    raw_issue_count_out=cr_raw_issue_count,
                 ),
                 lambda: _qa_review_step(
                     qa_agent=qa_agent,
@@ -817,6 +870,7 @@ def run_microtask_review(
         build_ok=build_ok,
         lint_ok=lint_ok,
         summary=summary,
+        raw_issue_count=cr_raw_issue_count[0],
     )
 
 
