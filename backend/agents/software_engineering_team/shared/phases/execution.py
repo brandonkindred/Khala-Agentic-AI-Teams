@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
+from software_engineering_team.shared.gate_outcomes import record_gate_outcome
 from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.repo_writer import UnsafeRepoPathError, write_repo_text_files
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
@@ -373,6 +374,84 @@ class GateOutcome:
     passed: bool
     issues: List[Any] = field(default_factory=list)
     summary: str = ""
+
+
+def _terminal_failing_outcome(cr: GateOutcome, qa: GateOutcome, sec: GateOutcome) -> GateOutcome:
+    """Pick the GateOutcome that best explains a max-cycles REVIEW_FAILED.
+
+    Preconditions:
+        ``cr``, ``qa``, and ``sec`` are the last outcomes of each gate for this
+        microtask (may be the initial passed=True placeholders if a gate never ran).
+    Postconditions:
+        Returns the first outcome with ``passed=False`` in order code review →
+        QA → security; otherwise a synthetic ``GateOutcome(passed=False,
+        summary=\"Max cycles exceeded\")``.
+    """
+    for outcome in (cr, qa, sec):
+        if not outcome.passed:
+            return outcome
+    return GateOutcome(passed=False, summary="Max cycles exceeded")
+
+
+def _record_terminal_gate_failure(gate: str, outcome: Any, task_id: str) -> None:
+    """Best-effort DORA + learning record for a terminal REVIEW_FAILED.
+
+    Preconditions:
+        ``gate`` is a non-empty string (e.g. ``\"code_review_retry_exhausted\"``,
+        ``\"review_max_cycles\"``, or a future ``\"review_grounding_circuit_breaker\"``);
+        ``outcome`` is duck-typed for ``is_rejected`` (``passed`` / ``approved`` /
+        ``all_satisfied``).
+    Postconditions:
+        Calls ``record_gate_outcome`` once with ``job_id=\"\"`` and
+        ``phase=\"execution\"``; never raises into the gated loop.
+    """
+    record_gate_outcome(gate, outcome, job_id="", task_id=task_id, phase="execution")
+
+
+def _apply_code_review_retry_exhausted(
+    *,
+    phase_failed: bool,
+    mt: Any,
+    cr_outcome: GateOutcome,
+    code_review_retry_cap: int,
+    task_id: str,
+    review_failed_ids: set,
+    all_files: Dict[str, str],
+    microtask_file_keys: set,
+    review_failed_status: Any,
+) -> bool:
+    """Mark retry-exhaustion REVIEW_FAILED unless write-path already failed.
+
+    Preconditions:
+        Caller has confirmed ``not cr_outcome.passed`` after the retry loop.
+        When ``phase_failed`` is True, ``write_microtask_output_or_fail`` already
+        marked the microtask and rolled back files.
+    Postconditions:
+        When ``phase_failed`` was False: sets REVIEW_FAILED notes/status, records
+        ``code_review_retry_exhausted``, rolls back ``microtask_file_keys`` from
+        ``all_files``, and returns True.
+        When ``phase_failed`` was True: leaves notes/status/telemetry untouched
+        and returns True (caller still stops the outer review cycle).
+    """
+    if phase_failed:
+        return True
+    mt.status = review_failed_status
+    review_failed_ids.add(mt.id)
+    mt.notes = (
+        f"Code review failed after {code_review_retry_cap} batch fix attempts: "
+        f"{cr_outcome.summary}"
+    )
+    _record_terminal_gate_failure("code_review_retry_exhausted", cr_outcome, task_id)
+    logger.warning(
+        "[%s] Microtask %s: CODE_REVIEW_FAILED after %d batch fix attempts. Issues: %s",
+        task_id,
+        mt.id,
+        code_review_retry_cap,
+        cr_outcome.summary,
+    )
+    for fk in microtask_file_keys:
+        all_files.pop(fk, None)
+    return True
 
 
 @dataclass(frozen=True)
@@ -725,20 +804,17 @@ def run_gated_execution_impl(
                 )
 
             if not cr_outcome.passed:
-                phase_failed = True
-                mt.status = microtask_status.REVIEW_FAILED
-                review_failed_ids.add(mt.id)
-                mt.notes = f"Code review failed after {code_review_retry_cap} batch fix attempts: {cr_outcome.summary}"
-                logger.warning(
-                    "[%s] Microtask %s: CODE_REVIEW_FAILED after %d batch fix attempts. Issues: %s",
-                    task_id,
-                    mt.id,
-                    code_review_retry_cap,
-                    cr_outcome.summary,
+                phase_failed = _apply_code_review_retry_exhausted(
+                    phase_failed=phase_failed,
+                    mt=mt,
+                    cr_outcome=cr_outcome,
+                    code_review_retry_cap=code_review_retry_cap,
+                    task_id=task_id,
+                    review_failed_ids=review_failed_ids,
+                    all_files=all_files,
+                    microtask_file_keys=microtask_file_keys,
+                    review_failed_status=microtask_status.REVIEW_FAILED,
                 )
-                # Rollback: remove this microtask's files from all_files
-                for fk in microtask_file_keys:
-                    all_files.pop(fk, None)
                 if config.on_failure == "stop":
                     raise review_failed_error_cls(
                         mt,
@@ -919,6 +995,11 @@ def run_gated_execution_impl(
                 mt.status = microtask_status.REVIEW_FAILED
                 review_failed_ids.add(mt.id)
                 mt.notes = f"Review cycles exhausted after {total_cycles} iterations"
+                _record_terminal_gate_failure(
+                    "review_max_cycles",
+                    _terminal_failing_outcome(cr_outcome, qa_outcome, sec_outcome),
+                    task_id,
+                )
                 logger.warning(
                     "[%s] Microtask %s: REVIEW_FAILED - exhausted %d total cycles",
                     task_id,
