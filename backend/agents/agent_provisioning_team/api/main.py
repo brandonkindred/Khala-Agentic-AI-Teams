@@ -66,27 +66,10 @@ SHUTDOWN_GRACE_S = float(os.getenv("SHUTDOWN_GRACE_S", "30"))
 COMPENSATE_TIMEOUT_S = float(os.getenv("COMPENSATE_TIMEOUT_S", "15"))
 
 
-def _provision_thread_fallback() -> bool:
-    """Escape hatch: force the legacy thread path even when TEMPORAL_ADDRESS is set.
-
-    Delegates to the shared, single-source-of-truth check in
-    ``temporal.client.provision_thread_fallback_enabled`` — also used by
-    ``sandbox_dispatch.sandbox_temporal_enabled`` — so provisioning, deprovision,
-    and the sandbox lifecycle can never independently drift on which env-var
-    spellings disable Temporal.
-    """
-    from agent_provisioning_team.temporal.client import provision_thread_fallback_enabled
-
-    return provision_thread_fallback_enabled()
-
-
 def _temporal_starter():
     """Return ``start_provisioning_workflow`` when /provision should dispatch
-    to Temporal (V2), else ``None``. Returns None on import error or when the
-    PROVISION_THREAD_FALLBACK escape hatch is set, so callers can branch on a
-    single value."""
-    if _provision_thread_fallback():
-        return None
+    to Temporal, else ``None``. Returns None on import error or when Temporal is
+    off, so callers can branch on a single value."""
     try:
         from agent_provisioning_team.temporal.client import is_temporal_enabled
         from agent_provisioning_team.temporal.start_workflow import start_provisioning_workflow
@@ -100,10 +83,8 @@ def _deprovision_starter():
     should run the deprovision as a durable Temporal workflow, else ``None`` so
     the caller falls back to the in-process ``orchestrator.deprovision`` call.
 
-    Mirrors :func:`_temporal_starter`: honors the ``PROVISION_THREAD_FALLBACK``
-    escape hatch and returns ``None`` on import error or when Temporal is off."""
-    if _provision_thread_fallback():
-        return None
+    Mirrors :func:`_temporal_starter`: returns ``None`` on import error or when
+    Temporal is off."""
     try:
         from agent_provisioning_team.temporal.client import is_temporal_enabled
         from agent_provisioning_team.temporal.start_workflow import run_deprovision_workflow

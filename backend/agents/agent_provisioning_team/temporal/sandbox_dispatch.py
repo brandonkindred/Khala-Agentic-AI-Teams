@@ -41,24 +41,11 @@ logger = logging.getLogger(__name__)
 def sandbox_temporal_enabled() -> bool:
     """True when sandbox lifecycle ops should dispatch to Temporal.
 
-    Gated on ``TEMPORAL_ADDRESS`` being set and the ``PROVISION_THREAD_FALLBACK``
-    escape hatch being off, so one switch forces the whole Agent Provisioning
-    team (provisioning + sandbox) back to in-process execution. The escape-hatch
-    check itself lives in :func:`agent_provisioning_team.temporal.client.provision_thread_fallback_enabled`
-    — the single source of truth shared with ``api/main.py``'s provisioning and
-    deprovision dispatch, so this can never independently drift.
-
     Postconditions:
-        * Returns ``False`` (never raises) when Temporal is unavailable, so the
-          caller falls back to the direct in-process path.
+        * Returns ``is_temporal_enabled()`` — never raises.
     """
-    from agent_provisioning_team.temporal.client import (
-        is_temporal_enabled,
-        provision_thread_fallback_enabled,
-    )
+    from agent_provisioning_team.temporal.client import is_temporal_enabled
 
-    if provision_thread_fallback_enabled():
-        return False
     return is_temporal_enabled()
 
 
