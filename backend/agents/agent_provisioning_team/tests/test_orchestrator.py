@@ -25,12 +25,12 @@ from agent_provisioning_team.models import (
 from agent_provisioning_team.orchestrator import (
     ProvisioningOrchestrator,
     ProvisioningShutdownError,
-    _build_tool_agents,
 )
 from agent_provisioning_team.shared.environment_store import (
     EnvironmentInfo as StoreEnvInfo,
 )
 from agent_provisioning_team.shared.environment_store import EnvironmentStore
+from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
 
 
 def _make_manifest(tmp_path: Path) -> str:
@@ -68,8 +68,8 @@ def _patch_run_setup(monkeypatch, *, success: bool = True, error: str | None = N
     monkeypatch.setattr(orch_mod, "run_setup", fake)
 
 
-def test_build_tool_agents_shim() -> None:
-    out = _build_tool_agents()
+def test_build_default_tool_agents_includes_docker() -> None:
+    out = build_default_tool_agents()
     assert isinstance(out, dict)
     assert "docker_provisioner" in out
 

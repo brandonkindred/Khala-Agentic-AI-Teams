@@ -449,6 +449,9 @@ services:
       TEAM_PORT: "8097"
       TEAM_TEMPORAL_WORKER_MODULE: agent_provisioning_team.temporal.worker
       TEAM_TEMPORAL_WORKER_FUNC: start_agent_provisioning_temporal_worker_thread
+      # Provisioning jobs are Temporal-owned; do not flip them interrupted on
+      # API process restart (would race durable workflows + break /resume).
+      TEAM_SKIP_ACTIVE_JOB_INTERRUPT: "true"
     volumes: *team-volumes
     extra_hosts: *team-extra-hosts
     ports: ["8097:8097"]

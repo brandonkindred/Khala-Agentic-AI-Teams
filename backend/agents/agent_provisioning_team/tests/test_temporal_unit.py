@@ -256,6 +256,52 @@ def test_start_provisioning_workflow_passes_args(monkeypatch) -> None:
         ]
         assert captured_start["kwargs"]["id"] == "agent-provisioning-job-1"
         assert captured_start["kwargs"]["task_queue"] == sw.TASK_QUEUE
+        assert "id_reuse_policy" not in captured_start["kwargs"]
+    finally:
+        loop.close()
+
+
+def test_start_provisioning_workflow_replace_existing_terminates() -> None:
+    from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+
+    from agent_provisioning_team.temporal import start_workflow as sw
+    from agent_provisioning_team.temporal.workflows import AgentProvisioningWorkflow
+
+    fake_client = MagicMock()
+    loop = asyncio.new_event_loop()
+    captured_start: dict = {}
+
+    async def capture_start_workflow(*args, **kwargs):
+        captured_start["args"] = args
+        captured_start["kwargs"] = kwargs
+
+    fake_client.start_workflow = capture_start_workflow
+
+    def fake_run_async(coro):
+        loop.run_until_complete(coro)
+
+    try:
+        with (
+            patch.object(sw, "get_temporal_client", return_value=fake_client),
+            patch.object(sw, "get_temporal_loop", return_value=loop),
+            patch.object(sw, "_run_async", side_effect=fake_run_async),
+        ):
+            sw.start_provisioning_workflow(
+                "job-1",
+                "agent-1",
+                "default.yaml",
+                replace_existing=True,
+            )
+
+        assert captured_start["args"][0] is AgentProvisioningWorkflow.run
+        assert (
+            captured_start["kwargs"]["id_reuse_policy"]
+            is WorkflowIDReusePolicy.TERMINATE_IF_RUNNING
+        )
+        assert (
+            captured_start["kwargs"]["id_conflict_policy"]
+            is WorkflowIDConflictPolicy.TERMINATE_EXISTING
+        )
     finally:
         loop.close()
 
@@ -508,7 +554,7 @@ def test_provision_tool_activity_calls_provisioner() -> None:
             "pg",
             "default.yaml",
             credentials_dump=creds.model_dump(),
-            tools_completed_so_far=0,
+            tool_index=0,
             tools_total=1,
         )
 

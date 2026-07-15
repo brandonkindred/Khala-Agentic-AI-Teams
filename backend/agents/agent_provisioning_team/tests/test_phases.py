@@ -375,10 +375,10 @@ def test_deprovision_tools_filtered() -> None:
     assert results == {"p1": True}
 
 
-def test_build_provisioners_shim() -> None:
-    from agent_provisioning_team.phases.account_provisioning import _build_provisioners
+def test_build_default_tool_agents_for_account_provisioning() -> None:
+    from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
 
-    out = _build_provisioners()
+    out = build_default_tool_agents()
     assert isinstance(out, dict)
     assert "docker_provisioner" in out
 
@@ -492,11 +492,12 @@ def test_generate_audit_report_failed_status() -> None:
     assert "FAILED" in report
 
 
-def test_build_provisioners_audit_shim() -> None:
-    from agent_provisioning_team.phases.access_audit import _build_provisioners
+def test_build_default_tool_agents_for_access_audit() -> None:
+    from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
 
-    out = _build_provisioners()
+    out = build_default_tool_agents()
     assert isinstance(out, dict)
+    assert "docker_provisioner" in out
 
 
 # ---------------------------------------------------------------------------

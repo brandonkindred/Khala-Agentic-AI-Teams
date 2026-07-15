@@ -13,6 +13,8 @@ import os
 import uuid
 from typing import Any, Coroutine, Optional, TypeVar
 
+from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+
 from agent_provisioning_team.temporal.constants import (
     DEPROVISION_CLIENT_TIMEOUT_S,
     TASK_QUEUE,
@@ -64,6 +66,8 @@ def start_provisioning_workflow(
     manifest_path: str,
     skip_phases: Optional[list[str]] = None,
     prior_results: Optional[dict[str, Any]] = None,
+    *,
+    replace_existing: bool = False,
 ) -> None:
     """Start ``AgentProvisioningWorkflow`` for the given job (fire-and-forget).
 
@@ -71,6 +75,9 @@ def start_provisioning_workflow(
         * ``job_id``, ``agent_id``, and ``manifest_path`` are non-empty.
         * The shared Temporal client/loop are available (``TEMPORAL_ADDRESS`` set
           and the worker process has connected).
+        * When ``replace_existing`` is True (resume/restart after hard cutover),
+          any open execution with the same stable workflow id is terminated so
+          abandoned former-type runs do not block migration.
     Postconditions:
         * Temporal has accepted a workflow id ``{WORKFLOW_ID_PREFIX}{job_id}``.
         * ``skip_phases`` / ``prior_results`` are forwarded for ``/resume`` parity.
@@ -86,6 +93,14 @@ def start_provisioning_workflow(
     assert manifest_path, "manifest_path must be non-empty"
 
     workflow_id = f"{WORKFLOW_ID_PREFIX}{job_id}"
+    start_kwargs: dict[str, Any] = {
+        "id": workflow_id,
+        "task_queue": TASK_QUEUE,
+    }
+    if replace_existing:
+        # Hard cutover leaves abandoned executions open under the same stable id.
+        start_kwargs["id_reuse_policy"] = WorkflowIDReusePolicy.TERMINATE_IF_RUNNING
+        start_kwargs["id_conflict_policy"] = WorkflowIDConflictPolicy.TERMINATE_EXISTING
 
     async def _start() -> None:
         client = get_temporal_client()
@@ -100,12 +115,15 @@ def start_provisioning_workflow(
                 list(skip_phases) if skip_phases else None,
                 dict(prior_results) if prior_results else None,
             ],
-            id=workflow_id,
-            task_queue=TASK_QUEUE,
+            **start_kwargs,
         )
 
     _run_async(_start())
-    logger.info("Started AgentProvisioningWorkflow id=%s", workflow_id)
+    logger.info(
+        "Started AgentProvisioningWorkflow id=%s replace_existing=%s",
+        workflow_id,
+        replace_existing,
+    )
 
 
 def run_deprovision_workflow(agent_id: str, force: bool = False) -> dict[str, Any]:

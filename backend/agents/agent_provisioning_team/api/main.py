@@ -32,6 +32,7 @@ from ..models import (
     ProvisionRequest,
     ProvisionStatusResponse,
 )
+from ..shared.environment_queries import get_agent_status_dict, list_agent_status_dicts
 from ..shared.environment_store import EnvironmentStore
 from ..shared.job_store import (
     JOB_STATUS_COMPLETED,
@@ -170,44 +171,13 @@ _environment_store = EnvironmentStore()
 
 
 def _get_agent_status(agent_id: str) -> Optional[Dict[str, Any]]:
-    """Read-only agent status via ``EnvironmentStore`` (no full orchestrator).
-
-    Preconditions:
-        * ``agent_id`` is non-empty.
-    Postconditions:
-        * Returns a status dict when the environment exists, else ``None``.
-    """
-    env = _environment_store.get(agent_id)
-    if env is None:
-        return None
-    return {
-        "agent_id": agent_id,
-        "status": env.status,
-        "container_id": env.container_id,
-        "container_name": env.container_name,
-        "tools_provisioned": env.tools_provisioned,
-        "created_at": env.created_at,
-    }
+    """Read-only agent status via shared ``EnvironmentStore`` queries."""
+    return get_agent_status_dict(_environment_store, agent_id)
 
 
 def _list_agents(status: Optional[str] = None) -> List[Dict[str, Any]]:
-    """List provisioned agents from ``EnvironmentStore``.
-
-    Preconditions:
-        * ``status``, when set, is a filter string matching stored env statuses.
-    Postconditions:
-        * Returns zero or more status dicts (never raises for a missing filter match).
-    """
-    return [
-        {
-            "agent_id": env.agent_id,
-            "status": env.status,
-            "container_name": env.container_name,
-            "tools_provisioned": env.tools_provisioned,
-            "created_at": env.created_at,
-        }
-        for env in _environment_store.list_all(status=status)
-    ]
+    """List provisioned agents via shared ``EnvironmentStore`` queries."""
+    return list_agent_status_dicts(_environment_store, status=status)
 
 
 @app.post(
@@ -413,6 +383,7 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
             manifest_path,
             skip_phases=completed_values,
             prior_results=phase_results,
+            replace_existing=True,
         )
     except Exception as exc:
         _fail_job_after_start_error(job_id, exc)
@@ -464,6 +435,7 @@ def restart_provision_job(job_id: str) -> ProvisionJobResponse:
             manifest_path,
             skip_phases=None,
             prior_results=None,
+            replace_existing=True,
         )
     except Exception as exc:
         _fail_job_after_start_error(job_id, exc)

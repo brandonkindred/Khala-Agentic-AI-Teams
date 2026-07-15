@@ -20,6 +20,7 @@ from .phases.deliver import build_final_result, run_deliver
 from .phases.documentation import run_documentation
 from .phases.setup import cleanup_setup, run_setup
 from .shared.credential_store import CredentialStore
+from .shared.environment_queries import get_agent_status_dict, list_agent_status_dicts
 from .shared.environment_store import EnvironmentStore
 from .shared.logging_context import install_filter as _install_log_filter
 from .shared.phase_state import (
@@ -48,22 +49,15 @@ class ProvisioningShutdownError(Exception):
         super().__init__(f"Provisioning for {agent_id} cancelled during {phase}")
 
 
-# Backwards-compat alias for callers/tests that imported the old name.
-def _build_tool_agents() -> Dict[str, Any]:
-    return build_default_tool_agents()
-
-
 class ProvisioningOrchestrator:
-    """
-    Orchestrator for the agent provisioning workflow.
+    """In-process phase engine used by Temporal activities and tests.
 
-    Coordinates 6 phases:
-    1. SETUP - Create Docker container
-    2. CREDENTIAL_GENERATION - Generate passwords/tokens
-    3. ACCOUNT_PROVISIONING - Create accounts in tools
-    4. ACCESS_AUDIT - Verify least-privilege
-    5. DOCUMENTATION - Generate onboarding docs
-    6. DELIVER - Finalize and return results
+    HTTP provision/resume/restart/deprovision go through Temporal only.
+    Temporal activities call the shared phase functions (and
+    ``compensate`` / ``deprovision``) rather than ``run_workflow``.
+    ``run_workflow`` remains the sequential in-process coordinator for unit
+    tests and any non-HTTP callers that need the same phase semantics with a
+    ``shutdown_event`` / progress callback.
     """
 
     def __init__(
@@ -485,46 +479,9 @@ class ProvisioningOrchestrator:
         )
 
     def get_agent_status(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get the current status of a provisioned agent.
-
-        Args:
-            agent_id: Agent to check
-
-        Returns:
-            Status dict or None if not found
-        """
-        env = self.environment_store.get(agent_id)
-        if env is None:
-            return None
-
-        return {
-            "agent_id": agent_id,
-            "status": env.status,
-            "container_id": env.container_id,
-            "container_name": env.container_name,
-            "tools_provisioned": env.tools_provisioned,
-            "created_at": env.created_at,
-        }
+        """Get the current status of a provisioned agent."""
+        return get_agent_status_dict(self.environment_store, agent_id)
 
     def list_agents(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
-        """
-        List all provisioned agents.
-
-        Args:
-            status: Optional status filter ('running', 'ready', etc.)
-
-        Returns:
-            List of agent status dicts
-        """
-        environments = self.environment_store.list_all(status=status)
-        return [
-            {
-                "agent_id": env.agent_id,
-                "status": env.status,
-                "container_name": env.container_name,
-                "tools_provisioned": env.tools_provisioned,
-                "created_at": env.created_at,
-            }
-            for env in environments
-        ]
+        """List all provisioned agents, optionally filtered by status."""
+        return list_agent_status_dicts(self.environment_store, status=status)

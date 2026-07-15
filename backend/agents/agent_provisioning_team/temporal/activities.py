@@ -216,7 +216,7 @@ def provision_tool_activity(
     tool_name: str,
     manifest_path: str,
     credentials_dump: Dict[str, Any],
-    tools_completed_so_far: int = 0,
+    tool_index: int = 0,
     tools_total: int = 0,
 ) -> Dict[str, Any]:
     """Provision a single tool — one activity per tool so fan-out is natural.
@@ -230,16 +230,19 @@ def provision_tool_activity(
         * Returns ``ToolProvisionResult.model_dump()`` from the provisioner.
         * Raises ``RuntimeError`` when the tool or provisioner is unknown.
         * Updates ``job_store`` with the current tool / phase progress.
+          Does not write ``tools_completed`` — parallel fan-out indexes are not
+          completion counts and would race/regress under ``asyncio.gather``.
     """
     from agent_provisioning_team.models import GeneratedCredentials
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
     from agent_provisioning_team.shared.tool_manifest import load_manifest
 
-    _best_effort_job_store(_js.update_job,
+    _ = tool_index  # reserved for logging / future ordered progress aggregators
+    _best_effort_job_store(
+        _js.update_job,
         job_id,
         current_phase="account_provisioning",
         current_tool=tool_name,
-        tools_completed=tools_completed_so_far,
         tools_total=tools_total,
         status_text=f"Provisioning {tool_name}...",
     )

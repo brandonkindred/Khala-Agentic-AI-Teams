@@ -294,6 +294,47 @@ async def test_workflow_skips_provisioning_when_resumed(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_workflow_resume_rejects_tool_set_mismatch(tmp_path) -> None:
+    """Restored account_provisioning must match the current manifest tool set."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "credentials_activity": {
+                "success": True,
+                "credentials": {
+                    "postgresql": {"tool_name": "postgresql"},
+                    "redis": {"tool_name": "redis"},
+                },
+            },
+        }
+    )
+    prior = {
+        "account_provisioning": {
+            "tool_results": [
+                {
+                    "tool_name": "postgresql",
+                    "success": True,
+                    "provisioner_key": "postgres_provisioner",
+                },
+            ]
+        }
+    }
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        with pytest.raises(RuntimeError, match="Cannot restore account_provisioning"):
+            await wf.AgentProvisioningWorkflow().run(
+                "job-1",
+                "agent-1",
+                manifest_path,
+                skip_phases=["account_provisioning"],
+                prior_results=prior,
+            )
+
+
+@pytest.mark.asyncio
 async def test_workflow_resume_with_prior_failed_tools_compensates(tmp_path) -> None:
     """Resume restoring a prior phase that includes failed tools still compensates."""
     from agent_provisioning_team.temporal import workflows as wf

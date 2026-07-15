@@ -93,6 +93,7 @@ def test_resume_passes_skip_phases_and_prior_results(
         "setup": {"success": True, "environment": None},
         "credential_generation": {"success": True, "credentials": {}},
     }
+    assert kwargs.get("replace_existing") is True
 
 
 @patch("agent_provisioning_team.api.main.get_job")

@@ -22,11 +22,6 @@ from ..shared.tool_manifest import ToolManifest
 from ..tool_agents.base import ToolProvisionerInterface
 
 
-# Backwards-compat shim for older imports/tests.
-def _build_provisioners() -> Dict[str, ToolProvisionerInterface]:
-    return build_default_tool_agents()
-
-
 def run_access_audit(
     agent_id: str,
     tool_results: List[ToolProvisionResult],

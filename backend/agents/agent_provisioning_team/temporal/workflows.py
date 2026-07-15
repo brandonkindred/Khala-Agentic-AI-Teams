@@ -68,6 +68,14 @@ class AgentProvisioningWorkflow:
             # Whole-phase skip (no per-tool resume) matches the prior resume contract.
             ap = prior["account_provisioning"]
             tool_results_dump = list(ap.get("tool_results") or [])
+            prior_names = {r.get("tool_name") for r in tool_results_dump if r.get("tool_name")}
+            current_names = set(tool_names)
+            if prior_names != current_names:
+                raise RuntimeError(
+                    "Cannot restore account_provisioning: prior tool set "
+                    f"{sorted(prior_names)} does not match current manifest "
+                    f"{sorted(current_names)}. Restart the job or align the manifest."
+                )
             succeeded: list[dict] = [
                 {
                     "tool_name": r.get("tool_name"),
