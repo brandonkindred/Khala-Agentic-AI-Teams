@@ -105,8 +105,8 @@ def test_provision_falls_back_to_thread_path_when_flag_set(monkeypatch) -> None:
     assert submitted_fn is api_main._run_provisioning_background
 
 
-def test_setup_activity_v2_writes_progress_via_update_job() -> None:
-    """Invoking setup_activity_v2 directly should push phase + progress into job_store."""
+def test_setup_activity_writes_progress_via_update_job() -> None:
+    """Invoking setup_activity directly should push phase + progress into job_store."""
     from agent_provisioning_team.temporal import activities as t_acts
 
     recorded_updates: list[dict] = []
@@ -164,7 +164,7 @@ def test_setup_activity_v2_writes_progress_via_update_job() -> None:
         # activity.heartbeat raises outside a live Temporal context; stub it.
         patch("temporalio.activity.heartbeat"),
     ):
-        payload = t_acts.setup_activity_v2("job-progress-1", "agent-1", "default.yaml")
+        payload = t_acts.setup_activity("job-progress-1", "agent-1", "default.yaml")
 
     assert payload["success"] is True
     assert recorded_running == ["job-progress-1"]
@@ -175,7 +175,7 @@ def test_setup_activity_v2_writes_progress_via_update_job() -> None:
     assert recorded_completed and recorded_completed[0][1] == "setup"
 
 
-def test_setup_activity_v2_restores_prior_snapshot_without_running_setup() -> None:
+def test_setup_activity_restores_prior_snapshot_without_running_setup() -> None:
     """When prior_setup is passed, skip the real run_setup and return the restored payload."""
     from agent_provisioning_team.temporal import activities as t_acts
 
@@ -193,7 +193,7 @@ def test_setup_activity_v2_restores_prior_snapshot_without_running_setup() -> No
         patch.object(t_acts, "_load_ctx") as load_ctx,
     ):
         prior = {"success": True, "environment": None}
-        payload = t_acts.setup_activity_v2(
+        payload = t_acts.setup_activity(
             "job-resume", "agent-x", "default.yaml", prior_setup=prior
         )
 
@@ -206,12 +206,12 @@ def test_setup_activity_v2_restores_prior_snapshot_without_running_setup() -> No
 def test_pattern_a_exports_workflows_and_activities() -> None:
     import agent_provisioning_team.temporal as t
     from agent_provisioning_team.temporal.activities import (
-        audit_activity_v2,
-        credentials_activity_v2,
-        deliver_activity_v2,
-        documentation_activity_v2,
+        audit_activity,
+        credentials_activity,
+        deliver_activity,
+        documentation_activity,
         provision_tool_activity,
-        setup_activity_v2,
+        setup_activity,
     )
     from agent_provisioning_team.temporal.workflows import (
         AgentProvisioningWorkflow,
@@ -220,11 +220,11 @@ def test_pattern_a_exports_workflows_and_activities() -> None:
     assert AgentProvisioningWorkflow in t.WORKFLOWS
     assert not hasattr(t, "AgentProvisioningWorkflowV2")
     for fn in (
-        setup_activity_v2,
-        credentials_activity_v2,
+        setup_activity,
+        credentials_activity,
         provision_tool_activity,
-        audit_activity_v2,
-        documentation_activity_v2,
-        deliver_activity_v2,
+        audit_activity,
+        documentation_activity,
+        deliver_activity,
     ):
         assert fn in t.ACTIVITIES, f"{fn.__name__} missing from ACTIVITIES"

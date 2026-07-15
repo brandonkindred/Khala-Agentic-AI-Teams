@@ -58,7 +58,7 @@ class AgentProvisioningWorkflow:
         # Phase 1: setup (Docker environment).
         setup_prior = prior.get("setup") if "setup" in skip else None
         setup_result = await workflow.execute_activity(
-            _activities.setup_activity_v2,
+            _activities.setup_activity,
             args=[job_id, agent_id, manifest_path, setup_prior],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
@@ -71,7 +71,7 @@ class AgentProvisioningWorkflow:
             prior.get("credential_generation") if "credential_generation" in skip else None
         )
         creds_result = await workflow.execute_activity(
-            _activities.credentials_activity_v2,
+            _activities.credentials_activity,
             args=[job_id, agent_id, manifest_path, creds_prior],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
@@ -158,7 +158,7 @@ class AgentProvisioningWorkflow:
         if failures:
             # Compensation: roll back the ones that did succeed.
             await workflow.execute_activity(
-                _activities.compensate_activity_v2,
+                _activities.compensate_activity,
                 args=[agent_id, succeeded],
                 task_queue=TASK_QUEUE,
                 schedule_to_close_timeout=PHASE_TIMEOUT,
@@ -171,7 +171,7 @@ class AgentProvisioningWorkflow:
         # Phase 4: access audit.
         audit_prior = prior.get("access_audit") if "access_audit" in skip else None
         audit_dump = await workflow.execute_activity(
-            _activities.audit_activity_v2,
+            _activities.audit_activity,
             args=[job_id, agent_id, manifest_path, tool_results_dump, audit_prior],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
@@ -184,7 +184,7 @@ class AgentProvisioningWorkflow:
             workspace_path = environment_dump.get("workspace_path") or "/workspace"
         doc_prior = prior.get("documentation") if "documentation" in skip else None
         doc_result = await workflow.execute_activity(
-            _activities.documentation_activity_v2,
+            _activities.documentation_activity,
             args=[
                 job_id,
                 agent_id,
@@ -202,7 +202,7 @@ class AgentProvisioningWorkflow:
 
         # Phase 6: deliver + final job_store update.
         await workflow.execute_activity(
-            _activities.deliver_activity_v2,
+            _activities.deliver_activity,
             args=[
                 job_id,
                 agent_id,

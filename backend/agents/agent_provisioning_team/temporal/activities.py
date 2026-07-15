@@ -1,18 +1,11 @@
 """Temporal activities for the Agent Provisioning team.
 
-Two activity surfaces are exposed:
-
-* ``run_provisioning_activity`` — v1, single activity per workflow. Kept for
-  backwards compatibility with ``AgentProvisioningWorkflow`` so in-flight
-  runs can drain during a deploy.
-
-* The ``*_activity_v2`` family — fine-grained, per-phase activities used by
-  ``AgentProvisioningWorkflowV2``. The per-tool provision step is its own
-  activity (``provision_tool_activity``) so a workflow can fan out across
-  tools in parallel with independent retry/heartbeat policies. Each v2
-  activity takes ``job_id`` as its first argument and writes phase/progress
-  updates back to ``job_store`` directly so ``GET /provision/status/{job_id}``
-  shows live progress without any signal plumbing.
+Per-phase activities used by ``AgentProvisioningWorkflow``. The per-tool
+provision step is its own activity (``provision_tool_activity``) so a workflow
+can fan out across tools in parallel with independent retry/heartbeat policies.
+Each activity takes ``job_id`` as its first argument and writes phase/progress
+updates back to ``job_store`` directly so ``GET /provision/status/{job_id}``
+shows live progress without any signal plumbing.
 """
 
 from __future__ import annotations
@@ -29,24 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# v1 — single-shot activity (back-compat)
-# ---------------------------------------------------------------------------
-
-
-@activity.defn(name="run_agent_provisioning")
-def run_provisioning_activity(
-    job_id: str,
-    agent_id: str,
-    manifest_path: str,
-) -> None:
-    """Run the provisioning workflow."""
-    from agent_provisioning_team.api.main import _run_provisioning_background
-
-    _run_provisioning_background(job_id, agent_id, manifest_path)
-
-
-# ---------------------------------------------------------------------------
-# v2 — per-phase, fan-out friendly activities
+# Per-phase, fan-out friendly activities
 # ---------------------------------------------------------------------------
 
 
@@ -81,7 +57,7 @@ def _restored(job_id: str, phase: str, progress: int) -> None:
 
 
 @activity.defn(name="agent_provisioning_setup")
-def setup_activity_v2(
+def setup_activity(
     job_id: str,
     agent_id: str,
     manifest_path: str,
@@ -128,7 +104,7 @@ def setup_activity_v2(
 
 
 @activity.defn(name="agent_provisioning_credentials")
-def credentials_activity_v2(
+def credentials_activity(
     job_id: str,
     agent_id: str,
     manifest_path: str,
@@ -220,7 +196,7 @@ def provision_tool_activity(
 
 
 @activity.defn(name="agent_provisioning_audit")
-def audit_activity_v2(
+def audit_activity(
     job_id: str,
     agent_id: str,
     manifest_path: str,
@@ -261,7 +237,7 @@ def audit_activity_v2(
 
 
 @activity.defn(name="agent_provisioning_documentation")
-def documentation_activity_v2(
+def documentation_activity(
     job_id: str,
     agent_id: str,
     manifest_path: str,
@@ -311,7 +287,7 @@ def documentation_activity_v2(
 
 
 @activity.defn(name="agent_provisioning_deliver")
-def deliver_activity_v2(
+def deliver_activity(
     job_id: str,
     agent_id: str,
     environment_dump: Optional[Dict[str, Any]],
@@ -380,7 +356,7 @@ def deliver_activity_v2(
 
 
 @activity.defn(name="agent_provisioning_compensate")
-def compensate_activity_v2(
+def compensate_activity(
     agent_id: str,
     succeeded_tools: List[Dict[str, Any]],
 ) -> None:

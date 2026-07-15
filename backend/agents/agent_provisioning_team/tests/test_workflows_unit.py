@@ -1,4 +1,4 @@
-"""Unit tests for AgentProvisioningWorkflow and the setup_activity_v2
+"""Unit tests for AgentProvisioningWorkflow and the setup_activity
 that previously sat behind the integration marker.
 
 The workflow is exercised by stubbing `workflow.execute_activity` so we
@@ -13,11 +13,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # ---------------------------------------------------------------------------
-# setup_activity_v2 — direct invocation
+# setup_activity — direct invocation
 # ---------------------------------------------------------------------------
 
 
-def test_setup_activity_v2_progress_path() -> None:
+def test_setup_activity_progress_path() -> None:
     from agent_provisioning_team.models import EnvironmentInfo, SetupResult
     from agent_provisioning_team.temporal import activities as t_acts
 
@@ -44,7 +44,7 @@ def test_setup_activity_v2_progress_path() -> None:
         ),
         patch("temporalio.activity.heartbeat"),
     ):
-        payload = t_acts.setup_activity_v2("j", "a", "default.yaml")
+        payload = t_acts.setup_activity("j", "a", "default.yaml")
 
     assert payload["success"] is True
     assert payload["environment"]["container_id"] == "c1"
@@ -55,7 +55,7 @@ def test_setup_activity_v2_progress_path() -> None:
     assert "add_completed_phase" in fn_names
 
 
-def test_setup_activity_v2_raises_when_setup_fails() -> None:
+def test_setup_activity_raises_when_setup_fails() -> None:
     from agent_provisioning_team.models import SetupResult
     from agent_provisioning_team.temporal import activities as t_acts
 
@@ -74,10 +74,10 @@ def test_setup_activity_v2_raises_when_setup_fails() -> None:
         patch("temporalio.activity.heartbeat"),
     ):
         with pytest.raises(RuntimeError, match="setup boom"):
-            t_acts.setup_activity_v2("j", "a", "default.yaml")
+            t_acts.setup_activity("j", "a", "default.yaml")
 
 
-def test_setup_activity_v2_restores_from_prior() -> None:
+def test_setup_activity_restores_from_prior() -> None:
     from agent_provisioning_team.temporal import activities as t_acts
 
     prior = {
@@ -93,7 +93,7 @@ def test_setup_activity_v2_restores_from_prior() -> None:
         patch.object(t_acts, "_safe"),
         patch("temporalio.activity.heartbeat"),
     ):
-        payload = t_acts.setup_activity_v2("j", "a", "default.yaml", prior_setup=prior)
+        payload = t_acts.setup_activity("j", "a", "default.yaml", prior_setup=prior)
     assert payload["success"] is True
     assert payload["environment"]["container_id"] == "c1"
 
@@ -153,8 +153,8 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
 
     stub = _ExecActivityStub(
         {
-            "setup_activity_v2": {"success": True, "environment": {"workspace_path": "/w"}},
-            "credentials_activity_v2": {
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "credentials_activity": {
                 "success": True,
                 "credentials": {
                     "postgresql": {"tool_name": "postgresql", "username": "u", "password": "p"},
@@ -166,9 +166,9 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
                 "success": True,
                 "provisioner_key": "x",
             },
-            "audit_activity_v2": {"passed": True, "verifications": []},
-            "documentation_activity_v2": {"success": True, "onboarding": {"summary": "s"}},
-            "deliver_activity_v2": {"success": True, "error": None},
+            "audit_activity": {"passed": True, "verifications": []},
+            "documentation_activity": {"success": True, "onboarding": {"summary": "s"}},
+            "deliver_activity": {"success": True, "error": None},
         }
     )
 
@@ -177,13 +177,13 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
         await workflow.run("job-1", "agent-1", manifest_path)
 
     fn_names = [c["name"] for c in stub.calls]
-    assert "setup_activity_v2" in fn_names
-    assert "credentials_activity_v2" in fn_names
+    assert "setup_activity" in fn_names
+    assert "credentials_activity" in fn_names
     # Two tools → two provision activities.
     assert fn_names.count("provision_tool_activity") == 2
-    assert "audit_activity_v2" in fn_names
-    assert "documentation_activity_v2" in fn_names
-    assert "deliver_activity_v2" in fn_names
+    assert "audit_activity" in fn_names
+    assert "documentation_activity" in fn_names
+    assert "deliver_activity" in fn_names
 
 
 @pytest.mark.asyncio
@@ -205,8 +205,8 @@ async def test_workflow_compensates_on_tool_failure(tmp_path) -> None:
 
     stub = _ExecActivityStub(
         {
-            "setup_activity_v2": {"success": True, "environment": {"workspace_path": "/w"}},
-            "credentials_activity_v2": {
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "credentials_activity": {
                 "success": True,
                 "credentials": {
                     "postgresql": {"tool_name": "postgresql"},
@@ -214,7 +214,7 @@ async def test_workflow_compensates_on_tool_failure(tmp_path) -> None:
                 },
             },
             "provision_tool_activity": provision_responder,
-            "compensate_activity_v2": None,
+            "compensate_activity": None,
         }
     )
 
@@ -224,7 +224,7 @@ async def test_workflow_compensates_on_tool_failure(tmp_path) -> None:
 
     fn_names = [c["name"] for c in stub.calls]
     # Compensate was invoked
-    assert "compensate_activity_v2" in fn_names
+    assert "compensate_activity" in fn_names
 
 
 @pytest.mark.asyncio
@@ -235,17 +235,17 @@ async def test_workflow_skips_provisioning_when_resumed(tmp_path) -> None:
 
     stub = _ExecActivityStub(
         {
-            "setup_activity_v2": {"success": True, "environment": {"workspace_path": "/w"}},
-            "credentials_activity_v2": {
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "credentials_activity": {
                 "success": True,
                 "credentials": {
                     "postgresql": {"tool_name": "postgresql"},
                     "redis": {"tool_name": "redis"},
                 },
             },
-            "audit_activity_v2": {"passed": True, "verifications": []},
-            "documentation_activity_v2": {"success": True, "onboarding": {"summary": "s"}},
-            "deliver_activity_v2": {"success": True, "error": None},
+            "audit_activity": {"passed": True, "verifications": []},
+            "documentation_activity": {"success": True, "onboarding": {"summary": "s"}},
+            "deliver_activity": {"success": True, "error": None},
         }
     )
 
@@ -279,7 +279,7 @@ async def test_workflow_skips_provisioning_when_resumed(tmp_path) -> None:
     # No per-tool provisioning happened
     assert "provision_tool_activity" not in fn_names
     # Compensation is skipped because everything in prior was successful
-    assert "compensate_activity_v2" not in fn_names
+    assert "compensate_activity" not in fn_names
 
 
 @pytest.mark.asyncio
@@ -290,15 +290,15 @@ async def test_workflow_resume_with_prior_failed_tools_compensates(tmp_path) -> 
 
     stub = _ExecActivityStub(
         {
-            "setup_activity_v2": {"success": True, "environment": {"workspace_path": "/w"}},
-            "credentials_activity_v2": {
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "credentials_activity": {
                 "success": True,
                 "credentials": {
                     "postgresql": {"tool_name": "postgresql"},
                     "redis": {"tool_name": "redis"},
                 },
             },
-            "compensate_activity_v2": None,
+            "compensate_activity": None,
         }
     )
 
@@ -331,7 +331,7 @@ async def test_workflow_resume_with_prior_failed_tools_compensates(tmp_path) -> 
             )
 
     fn_names = [c["name"] for c in stub.calls]
-    assert "compensate_activity_v2" in fn_names
+    assert "compensate_activity" in fn_names
 
 
 @pytest.mark.asyncio
@@ -350,8 +350,8 @@ async def test_workflow_handles_non_dict_provision_results(tmp_path) -> None:
 
     stub = _ExecActivityStub(
         {
-            "setup_activity_v2": {"success": True, "environment": None},
-            "credentials_activity_v2": {
+            "setup_activity": {"success": True, "environment": None},
+            "credentials_activity": {
                 "success": True,
                 "credentials": {
                     "postgresql": {"tool_name": "postgresql"},
@@ -359,7 +359,7 @@ async def test_workflow_handles_non_dict_provision_results(tmp_path) -> None:
                 },
             },
             "provision_tool_activity": provision_responder,
-            "compensate_activity_v2": None,
+            "compensate_activity": None,
         }
     )
 
@@ -383,8 +383,8 @@ async def test_workflow_handles_dict_failure_results(tmp_path) -> None:
 
     stub = _ExecActivityStub(
         {
-            "setup_activity_v2": {"success": True, "environment": None},
-            "credentials_activity_v2": {
+            "setup_activity": {"success": True, "environment": None},
+            "credentials_activity": {
                 "success": True,
                 "credentials": {
                     "postgresql": {"tool_name": "postgresql"},
@@ -392,7 +392,7 @@ async def test_workflow_handles_dict_failure_results(tmp_path) -> None:
                 },
             },
             "provision_tool_activity": provision_responder,
-            "compensate_activity_v2": None,
+            "compensate_activity": None,
         }
     )
 

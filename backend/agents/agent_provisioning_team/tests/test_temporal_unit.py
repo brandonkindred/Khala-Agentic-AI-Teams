@@ -308,8 +308,8 @@ def test_create_worker_constructs_worker_when_enabled() -> None:
     # Provisioning/deprovision only — sandbox workflows/activities are
     # deliberately excluded (they run on their own SANDBOX_TASK_QUEUE via a
     # separately-booted worker; see start_agent_provisioning_sandbox_temporal_worker_thread).
-    assert len(kwargs["activities"]) == 9
-    assert len(kwargs["workflows"]) == 3
+    assert len(kwargs["activities"]) == 8
+    assert len(kwargs["workflows"]) == 2
 
 
 def test_start_worker_thread_no_op_when_disabled() -> None:
@@ -383,17 +383,8 @@ def test_start_sandbox_worker_thread_uses_distinct_team_key_and_queue() -> None:
 
 
 # ---------------------------------------------------------------------------
-# activities.py — v1 + v2 surfaces
+# activities.py — per-phase activity surfaces
 # ---------------------------------------------------------------------------
-
-
-def test_v1_activity_delegates_to_run_provisioning_background() -> None:
-    from agent_provisioning_team.temporal import activities
-
-    with patch("agent_provisioning_team.api.main._run_provisioning_background") as mock_bg:
-        activities.run_provisioning_activity("job-1", "agent-1", "default.yaml")
-
-    mock_bg.assert_called_once_with("job-1", "agent-1", "default.yaml")
 
 
 def test_safe_swallows_exceptions() -> None:
@@ -420,7 +411,7 @@ def test_restored_writes_status_update() -> None:
     )
 
 
-def test_credentials_activity_v2_restores_from_prior() -> None:
+def test_credentials_activity_restores_from_prior() -> None:
     from agent_provisioning_team.temporal import activities
 
     with (
@@ -428,14 +419,14 @@ def test_credentials_activity_v2_restores_from_prior() -> None:
         patch("temporalio.activity.heartbeat"),
     ):
         prior = {"success": True, "credentials": {}}
-        payload = activities.credentials_activity_v2(
+        payload = activities.credentials_activity(
             "j", "a", "default.yaml", prior_credentials=prior
         )
 
     assert payload == {"success": True, "credentials": {}}
 
 
-def test_credentials_activity_v2_runs_when_no_prior() -> None:
+def test_credentials_activity_runs_when_no_prior() -> None:
     from agent_provisioning_team.models import CredentialGenerationResult, GeneratedCredentials
     from agent_provisioning_team.temporal import activities
 
@@ -464,13 +455,13 @@ def test_credentials_activity_v2_runs_when_no_prior() -> None:
         ),
         patch("temporalio.activity.heartbeat"),
     ):
-        payload = activities.credentials_activity_v2("j", "a", "default.yaml")
+        payload = activities.credentials_activity("j", "a", "default.yaml")
 
     assert payload["success"] is True
     assert "pg" in payload["credentials"]
 
 
-def test_credentials_activity_v2_raises_on_failure() -> None:
+def test_credentials_activity_raises_on_failure() -> None:
     from agent_provisioning_team.models import CredentialGenerationResult
     from agent_provisioning_team.temporal import activities
 
@@ -489,7 +480,7 @@ def test_credentials_activity_v2_raises_on_failure() -> None:
         patch("temporalio.activity.heartbeat"),
     ):
         with pytest.raises(RuntimeError, match="cred boom"):
-            activities.credentials_activity_v2("j", "a", "default.yaml")
+            activities.credentials_activity("j", "a", "default.yaml")
 
 
 def test_provision_tool_activity_calls_provisioner() -> None:
@@ -589,7 +580,7 @@ def test_provision_tool_activity_raises_when_provisioner_missing() -> None:
             )
 
 
-def test_audit_activity_v2_restores_from_prior() -> None:
+def test_audit_activity_restores_from_prior() -> None:
     from agent_provisioning_team.models import AccessAuditResult
     from agent_provisioning_team.temporal import activities
 
@@ -598,14 +589,14 @@ def test_audit_activity_v2_restores_from_prior() -> None:
         patch.object(activities, "_safe"),
         patch("temporalio.activity.heartbeat"),
     ):
-        payload = activities.audit_activity_v2(
+        payload = activities.audit_activity(
             "j", "a", "default.yaml", tool_results_dump=[], prior_audit=prior
         )
 
     assert payload["passed"] is True
 
 
-def test_audit_activity_v2_runs_when_no_prior() -> None:
+def test_audit_activity_runs_when_no_prior() -> None:
     from agent_provisioning_team.models import AccessAuditResult
     from agent_provisioning_team.temporal import activities
 
@@ -627,12 +618,12 @@ def test_audit_activity_v2_runs_when_no_prior() -> None:
         ),
         patch("temporalio.activity.heartbeat"),
     ):
-        payload = activities.audit_activity_v2("j", "a", "default.yaml", tool_results_dump=[])
+        payload = activities.audit_activity("j", "a", "default.yaml", tool_results_dump=[])
 
     assert payload["passed"] is True
 
 
-def test_documentation_activity_v2_restores_from_prior() -> None:
+def test_documentation_activity_restores_from_prior() -> None:
     from agent_provisioning_team.temporal import activities
 
     prior = {"success": True, "onboarding": None}
@@ -640,7 +631,7 @@ def test_documentation_activity_v2_restores_from_prior() -> None:
         patch.object(activities, "_safe"),
         patch("temporalio.activity.heartbeat"),
     ):
-        payload = activities.documentation_activity_v2(
+        payload = activities.documentation_activity(
             "j",
             "a",
             "default.yaml",
@@ -653,7 +644,7 @@ def test_documentation_activity_v2_restores_from_prior() -> None:
     assert payload == {"success": True, "onboarding": None}
 
 
-def test_documentation_activity_v2_runs_when_no_prior() -> None:
+def test_documentation_activity_runs_when_no_prior() -> None:
     from agent_provisioning_team.models import DocumentationResult, OnboardingPacket
     from agent_provisioning_team.temporal import activities
 
@@ -672,7 +663,7 @@ def test_documentation_activity_v2_runs_when_no_prior() -> None:
         ),
         patch("temporalio.activity.heartbeat"),
     ):
-        payload = activities.documentation_activity_v2(
+        payload = activities.documentation_activity(
             "j",
             "a",
             "default.yaml",
@@ -685,7 +676,7 @@ def test_documentation_activity_v2_runs_when_no_prior() -> None:
     assert payload["onboarding"]["summary"] == "s"
 
 
-def test_deliver_activity_v2_success_path() -> None:
+def test_deliver_activity_success_path() -> None:
     from agent_provisioning_team.models import (
         DeliverResult,
         EnvironmentInfo,
@@ -708,7 +699,7 @@ def test_deliver_activity_v2_success_path() -> None:
         patch("agent_provisioning_team.orchestrator.ProvisioningOrchestrator"),
         patch("temporalio.activity.heartbeat"),
     ):
-        payload = activities.deliver_activity_v2(
+        payload = activities.deliver_activity(
             "j",
             "a",
             environment_dump=env.model_dump(),
@@ -724,7 +715,7 @@ def test_deliver_activity_v2_success_path() -> None:
     assert "mark_job_completed" in calls
 
 
-def test_deliver_activity_v2_failure_path() -> None:
+def test_deliver_activity_failure_path() -> None:
     from agent_provisioning_team.models import (
         DeliverResult,
         ProvisioningResult,
@@ -741,7 +732,7 @@ def test_deliver_activity_v2_failure_path() -> None:
         patch("agent_provisioning_team.orchestrator.ProvisioningOrchestrator"),
         patch("temporalio.activity.heartbeat"),
     ):
-        payload = activities.deliver_activity_v2(
+        payload = activities.deliver_activity(
             "j",
             "a",
             environment_dump=None,
@@ -756,7 +747,7 @@ def test_deliver_activity_v2_failure_path() -> None:
     assert "mark_job_failed" in calls
 
 
-def test_compensate_activity_v2_invokes_orchestrator() -> None:
+def test_compensate_activity_invokes_orchestrator() -> None:
     from agent_provisioning_team.temporal import activities
 
     fake_orch = MagicMock()
@@ -764,7 +755,7 @@ def test_compensate_activity_v2_invokes_orchestrator() -> None:
         "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
         return_value=fake_orch,
     ):
-        activities.compensate_activity_v2(
+        activities.compensate_activity(
             "agent-1",
             [
                 {"tool_name": "pg", "provisioner_key": "postgres_provisioner"},

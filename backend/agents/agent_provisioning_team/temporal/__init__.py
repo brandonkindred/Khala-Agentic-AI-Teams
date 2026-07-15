@@ -11,15 +11,14 @@ their docstring below for why).
 """
 
 from agent_provisioning_team.temporal.activities import (
-    audit_activity_v2,
-    compensate_activity_v2,
-    credentials_activity_v2,
-    deliver_activity_v2,
+    audit_activity,
+    compensate_activity,
+    credentials_activity,
+    deliver_activity,
     deprovision_activity,
-    documentation_activity_v2,
+    documentation_activity,
     provision_tool_activity,
-    run_provisioning_activity,
-    setup_activity_v2,
+    setup_activity,
 )
 from agent_provisioning_team.temporal.client import is_temporal_enabled
 from agent_provisioning_team.temporal.constants import TASK_QUEUE
@@ -43,14 +42,13 @@ WORKFLOWS = [
     AgentDeprovisioningWorkflow,
 ]
 ACTIVITIES = [
-    run_provisioning_activity,
-    setup_activity_v2,
-    credentials_activity_v2,
+    setup_activity,
+    credentials_activity,
     provision_tool_activity,
-    audit_activity_v2,
-    documentation_activity_v2,
-    deliver_activity_v2,
-    compensate_activity_v2,
+    audit_activity,
+    documentation_activity,
+    deliver_activity,
+    compensate_activity,
     deprovision_activity,
 ]
 
