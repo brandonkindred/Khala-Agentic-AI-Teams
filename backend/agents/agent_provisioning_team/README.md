@@ -29,7 +29,7 @@ The team uses a **phase-based workflow** with 6 sequential phases:
 6. DELIVER            → Finalize and return results
 ```
 
-Progress is tracked via a file-based job store and exposed through REST API endpoints.
+Progress is tracked via the job store (updated by Temporal activities) and exposed through REST API endpoints.
 
 ## Durable execution (Temporal)
 

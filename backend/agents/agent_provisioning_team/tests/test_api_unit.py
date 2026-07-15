@@ -43,6 +43,17 @@ def test_require_provision_starter_returns_503_when_temporal_check_raises() -> N
     assert exc_info.value.status_code == 503
 
 
+def test_require_provision_starter_returns_503_when_temporal_disabled() -> None:
+    with patch(
+        "agent_provisioning_team.temporal.client.is_temporal_enabled",
+        return_value=False,
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            api_main._require_provision_starter()
+    assert exc_info.value.status_code == 503
+    assert "Temporal" in str(exc_info.value.detail)
+
+
 def test_require_deprovision_runner_returns_503_when_temporal_check_raises() -> None:
     with patch(
         "agent_provisioning_team.temporal.client.is_temporal_enabled",
@@ -283,9 +294,8 @@ def test_resume_job_not_found() -> None:
     assert r.status_code == 404
 
 
-def test_resume_pending_job_with_open_workflow_replaces() -> None:
-    """pending/running resume is allowed; replace_existing terminates any open cutover run."""
-    starter = MagicMock()
+def test_resume_job_in_running_state_rejected_when_workflow_open() -> None:
+    """Active Temporal jobs cannot be resumed (would kill the live run without compensate)."""
     with (
         patch.object(
             api_main,
@@ -294,21 +304,20 @@ def test_resume_pending_job_with_open_workflow_replaces() -> None:
                 "status": "running",
                 "agent_id": "a1",
                 "manifest_path": "default.yaml",
-                "completed_phases": [],
-                "phase_results": {},
             },
         ),
-        patch.object(api_main, "_require_provision_starter", return_value=starter),
-        patch.object(api_main, "update_job"),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=True,
+        ),
     ):
         r = client.post("/provision/job/j1/resume")
-    assert r.status_code == 200
-    starter.assert_called_once()
-    assert starter.call_args.kwargs.get("replace_existing") is True
+    assert r.status_code == 400
+    assert "cannot be resumed" in r.json()["detail"]
 
 
-def test_resume_pending_job_after_start_timeout() -> None:
-    """Indeterminate start timeouts leave pending jobs recoverable via replace_existing."""
+def test_resume_pending_job_when_no_open_workflow() -> None:
+    """Indeterminate start timeouts leave pending jobs recoverable if Temporal never opened."""
     starter = MagicMock()
     with (
         patch.object(
@@ -321,6 +330,10 @@ def test_resume_pending_job_after_start_timeout() -> None:
                 "completed_phases": [],
                 "phase_results": {},
             },
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
         ),
         patch.object(api_main, "_require_provision_starter", return_value=starter),
         patch.object(api_main, "update_job"),

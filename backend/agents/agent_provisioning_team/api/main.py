@@ -74,10 +74,9 @@ PROVISION_RESUMABLE_STATUSES: frozenset[str] = frozenset(
     }
 )
 
-# When start acceptance times out we leave pending/running. Hard cutover can
-# also leave an open execution under the stable id (including abandoned V2 /
-# legacy runs the new worker cannot service). Resume/restart always start with
-# ``replace_existing=True``, so these statuses are recoverable either way.
+# When start acceptance times out we leave pending/running; those are recoverable
+# only if Temporal has no open execution for the stable workflow id. Replacing an
+# open live run would terminate it without compensation and can leak resources.
 _STRANDED_START_STATUSES: frozenset[str] = frozenset(
     {JOB_STATUS_PENDING, JOB_STATUS_RUNNING}
 )
@@ -105,16 +104,16 @@ def _validate_job_for_reprovision(
     allowed_statuses: frozenset[str],
     action_label: str,
 ) -> Dict[str, Any]:
-    """Validate resume/restart, allowing pending/running cutover / start-timeout recovery.
+    """Validate resume/restart, allowing stranded pending/running after start timeout.
 
     Preconditions:
         * ``job_id`` is non-empty.
         * ``allowed_statuses`` is the normal gate for ``action_label``.
     Postconditions:
         * Returns job data when status is allowed, or when status is pending/
-          running (starter uses ``replace_existing=True`` to terminate any open
-          stable-id execution — stranded starts and abandoned cutover leftovers).
-        * Raises ``ValueError`` when the job is missing or otherwise not actionable.
+          running and no open Temporal workflow exists for the stable id.
+        * Raises ``ValueError`` when the job is missing, still has an open
+          workflow, or is otherwise not actionable.
     """
     data = get_job(job_id)
     if not data:
@@ -125,11 +124,23 @@ def _validate_job_for_reprovision(
         status = data.get("status", JOB_STATUS_PENDING)
         if status not in _STRANDED_START_STATUSES:
             raise
+        # Deferred import: api.main is loaded at process boot; pulling
+        # temporal.start_workflow at module top can create import cycles with
+        # the Temporal package self-boot path (Pattern A).
+        from agent_provisioning_team.temporal.start_workflow import (
+            provisioning_workflow_is_open,
+        )
+
+        if provisioning_workflow_is_open(job_id):
+            raise ValueError(
+                f"Job {job_id} is {status} with an active Temporal workflow; "
+                f"cannot be {action_label}"
+            )
         logger.info(
-            "Allowing %s of pending/running job=%s (replace_existing will terminate "
-            "any open Temporal execution under the stable workflow id)",
+            "Allowing %s of stranded job=%s status=%s (no open Temporal workflow)",
             action_label,
             job_id,
+            status,
         )
         return data
 
@@ -534,7 +545,7 @@ def deprovision_agent(
             agent_id=agent_id,
             success=False,
             details={},
-            error=f"Invalid deprovision workflow response: {exc}",
+            error="Invalid deprovision workflow response",
         )
     except RuntimeError as exc:
         # execute_workflow_sync raises this when the shared Temporal client/loop

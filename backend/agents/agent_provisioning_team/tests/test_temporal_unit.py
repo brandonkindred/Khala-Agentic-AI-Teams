@@ -503,6 +503,26 @@ def test_best_effort_job_store_swallows_exceptions() -> None:
         activities._best_effort_job_store(activities._js.create_job, "j", "a", "m")
 
 
+def test_best_effort_job_store_does_not_log_credential_payloads(caplog) -> None:
+    from agent_provisioning_team.temporal import activities
+
+    secrets = {"password": "s3cret", "api_key": "ak-live"}
+    with (
+        caplog.at_level("ERROR"),
+        patch.object(activities._js, "add_completed_phase", side_effect=RuntimeError("boom")),
+    ):
+        activities._best_effort_job_store(
+            activities._js.add_completed_phase,
+            "job-1",
+            "credential_generation",
+            secrets,
+        )
+    joined = " ".join(r.message for r in caplog.records)
+    assert "s3cret" not in joined
+    assert "ak-live" not in joined
+    assert "dict" in joined
+
+
 def test_record_phase_restored_writes_status_update() -> None:
     from agent_provisioning_team.temporal import activities
 
@@ -647,7 +667,12 @@ def test_provision_tool_activity_raises_when_tool_missing() -> None:
         creds = GeneratedCredentials(tool_name="x")
         with pytest.raises(RuntimeError, match="not in manifest"):
             activities.provision_tool_activity(
-                "j", "a", "x", "default.yaml", credentials_dump=creds.model_dump()
+                "j",
+                "a",
+                "x",
+                "default.yaml",
+                credentials_dump=creds.model_dump(),
+                tools_total=1,
             )
 
 
@@ -676,7 +701,12 @@ def test_provision_tool_activity_raises_when_provisioner_missing() -> None:
         creds = GeneratedCredentials(tool_name="x")
         with pytest.raises(RuntimeError, match="unknown provisioner"):
             activities.provision_tool_activity(
-                "j", "a", "x", "default.yaml", credentials_dump=creds.model_dump()
+                "j",
+                "a",
+                "x",
+                "default.yaml",
+                credentials_dump=creds.model_dump(),
+                tools_total=1,
             )
 
 
@@ -789,14 +819,15 @@ def test_deliver_activity_success_path() -> None:
     final = ProvisioningResult(agent_id="a", success=True, environment=env)
 
     with (
-        patch.object(activities, "_best_effort_job_store") as mock_safe,
+        patch.object(activities, "_best_effort_job_store"),
+        patch.object(activities._js, "mark_job_completed") as mock_completed,
         patch("agent_provisioning_team.phases.deliver.run_deliver", return_value=fake_deliver),
         patch("agent_provisioning_team.phases.deliver.build_final_result", return_value=final),
         patch(
             "agent_provisioning_team.phases.deliver.redact_credentials_for_response",
             return_value=final,
         ),
-        patch("agent_provisioning_team.orchestrator.ProvisioningOrchestrator"),
+        patch("agent_provisioning_team.shared.environment_store.EnvironmentStore"),
         patch("temporalio.activity.heartbeat"),
     ):
         payload = activities.deliver_activity(
@@ -810,9 +841,7 @@ def test_deliver_activity_success_path() -> None:
         )
 
     assert payload == {"success": True, "error": None}
-    # Should have called mark_job_completed
-    calls = [getattr(c.args[0], "__name__", c.args[0]) for c in mock_safe.call_args_list]
-    assert "mark_job_completed" in calls
+    mock_completed.assert_called_once()
 
 
 def test_deliver_activity_failure_path() -> None:
@@ -826,10 +855,11 @@ def test_deliver_activity_failure_path() -> None:
     final = ProvisioningResult(agent_id="a", success=False, error="oops")
 
     with (
-        patch.object(activities, "_best_effort_job_store") as mock_safe,
+        patch.object(activities, "_best_effort_job_store"),
+        patch.object(activities._js, "mark_job_failed") as mock_failed,
         patch("agent_provisioning_team.phases.deliver.run_deliver", return_value=fake_deliver),
         patch("agent_provisioning_team.phases.deliver.build_final_result", return_value=final),
-        patch("agent_provisioning_team.orchestrator.ProvisioningOrchestrator"),
+        patch("agent_provisioning_team.shared.environment_store.EnvironmentStore"),
         patch("temporalio.activity.heartbeat"),
     ):
         payload = activities.deliver_activity(
@@ -843,8 +873,42 @@ def test_deliver_activity_failure_path() -> None:
         )
 
     assert payload == {"success": False, "error": "oops"}
-    calls = [getattr(c.args[0], "__name__", c.args[0]) for c in mock_safe.call_args_list]
-    assert "mark_job_failed" in calls
+    mock_failed.assert_called_once_with("j", error="oops")
+
+
+def test_deliver_activity_raises_when_terminal_job_store_fails() -> None:
+    from agent_provisioning_team.models import DeliverResult, ProvisioningResult
+    from agent_provisioning_team.temporal import activities
+
+    fake_deliver = DeliverResult(success=True)
+    final = ProvisioningResult(agent_id="a", success=True)
+
+    with (
+        patch.object(activities, "_best_effort_job_store"),
+        patch.object(
+            activities._js,
+            "mark_job_completed",
+            side_effect=RuntimeError("store down"),
+        ),
+        patch("agent_provisioning_team.phases.deliver.run_deliver", return_value=fake_deliver),
+        patch("agent_provisioning_team.phases.deliver.build_final_result", return_value=final),
+        patch(
+            "agent_provisioning_team.phases.deliver.redact_credentials_for_response",
+            return_value=final,
+        ),
+        patch("agent_provisioning_team.shared.environment_store.EnvironmentStore"),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        with pytest.raises(RuntimeError, match="store down"):
+            activities.deliver_activity(
+                "j",
+                "a",
+                environment_dump=None,
+                credentials_dump={},
+                tool_results_dump=[],
+                audit_dump=None,
+                onboarding_dump=None,
+            )
 
 
 def test_compensate_activity_invokes_orchestrator() -> None:

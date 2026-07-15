@@ -12,7 +12,7 @@ import logging
 import math
 import os
 import uuid
-from typing import Any, Coroutine, Optional, TypeVar
+from typing import Any, Coroutine, TypeVar
 
 from temporalio.common import WorkflowIDReusePolicy
 
@@ -54,8 +54,20 @@ def _start_workflow_timeout_s() -> float:
     try:
         value = float(raw)
     except (TypeError, ValueError, OverflowError):
+        logger.warning(
+            "AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S is not a valid float (%r); "
+            "using default %s",
+            raw,
+            DEFAULT_START_WORKFLOW_TIMEOUT_S,
+        )
         return DEFAULT_START_WORKFLOW_TIMEOUT_S
     if math.isnan(value) or math.isinf(value):
+        logger.warning(
+            "AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S is non-finite (%r); "
+            "using default %s",
+            raw,
+            DEFAULT_START_WORKFLOW_TIMEOUT_S,
+        )
         return DEFAULT_START_WORKFLOW_TIMEOUT_S
     return max(1.0, value)
 
@@ -71,8 +83,10 @@ def _run_async(coro: Coroutine[Any, Any, _T]) -> _T:
     client = get_temporal_client()
     if loop is None or client is None:
         coro.close()
+        address_status = "set" if os.getenv("TEMPORAL_ADDRESS") else "not set"
         raise RuntimeError(
-            "Temporal client not available; is TEMPORAL_ADDRESS set and the Temporal server reachable?"
+            f"Temporal client not available (TEMPORAL_ADDRESS={address_status}); "
+            "is the Temporal server reachable?"
         )
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result(timeout=_start_workflow_timeout_s())
@@ -82,8 +96,8 @@ def start_provisioning_workflow(
     job_id: str,
     agent_id: str,
     manifest_path: str,
-    skip_phases: Optional[list[str]] = None,
-    prior_results: Optional[dict[str, Any]] = None,
+    skip_phases: list[str] | None = None,
+    prior_results: dict[str, Any] | None = None,
     *,
     replace_existing: bool = False,
 ) -> None:
@@ -93,9 +107,9 @@ def start_provisioning_workflow(
         * ``job_id``, ``agent_id``, and ``manifest_path`` are non-empty.
         * The shared Temporal client/loop are available (``TEMPORAL_ADDRESS`` set
           and the worker process has connected).
-        * When ``replace_existing`` is True (resume/restart after hard cutover),
-          any open execution with the same stable workflow id is terminated so
-          abandoned former-type runs do not block migration.
+        * When ``replace_existing`` is True (resume/restart of a stranded job),
+          any leftover open execution with the same stable workflow id is
+          terminated before the fresh start.
     Postconditions:
         * Temporal has accepted a workflow id ``{WORKFLOW_ID_PREFIX}{job_id}``.
         * ``skip_phases`` / ``prior_results`` are forwarded for ``/resume`` parity.
@@ -116,7 +130,6 @@ def start_provisioning_workflow(
         "task_queue": TASK_QUEUE,
     }
     if replace_existing:
-        # Hard cutover leaves abandoned executions open under the same stable id.
         # TERMINATE_IF_RUNNING alone replaces a still-open execution; Temporal
         # forbids combining it with id_conflict_policy.
         start_kwargs["id_reuse_policy"] = WorkflowIDReusePolicy.TERMINATE_IF_RUNNING
@@ -192,9 +205,6 @@ def provisioning_workflow_is_open(
         )
         return True
     except Exception as exc:
-        msg = str(exc).lower()
-        if "not found" in msg or "notfound" in msg.replace(" ", ""):
-            return False
         logger.warning(
             "Describe provisioning workflow id=%s failed (%s); treating as open",
             workflow_id,

@@ -6,6 +6,13 @@ can fan out across tools in parallel with independent retry/heartbeat policies.
 Each activity takes ``job_id`` as its first argument and writes phase/progress
 updates back to ``job_store`` directly so ``GET /provision/status/{job_id}``
 shows live progress without any signal plumbing.
+
+Invariants:
+    * Activities heartbeat periodically for long-running work.
+    * Progress / non-terminal job-store writes are best-effort and must not
+      fail the activity (except durable terminal/checkpoint writes that must
+      raise so Temporal retries).
+    * Each activity validates required arguments with assertions on entry.
 """
 
 from __future__ import annotations
@@ -51,6 +58,28 @@ def _load_ctx(manifest_path: str):
     return orch, manifest
 
 
+def _safe_job_store_log_args(*args: Any, **kwargs: Any) -> tuple[list[str], list[str]]:
+    """Summarize job-store call args without logging credential payloads.
+
+    Preconditions:
+        * None — accepts arbitrary ``*args`` / ``**kwargs`` from a store call.
+    Postconditions:
+        * Returns ``(arg_summaries, kw_summaries)`` with identifiers / types only —
+          never stringifies nested payloads that may contain secrets.
+    """
+
+    def _summarize(value: Any) -> str:
+        if isinstance(value, bool) or value is None:
+            return repr(value)
+        if isinstance(value, (int, float)):
+            return repr(value)
+        if isinstance(value, str):
+            return repr(value) if len(value) <= 64 else f"str(len={len(value)})"
+        return f"{type(value).__name__}"
+
+    return [_summarize(a) for a in args], [f"{k}={_summarize(v)}" for k, v in kwargs.items()]
+
+
 def _best_effort_job_store(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
     """Best-effort job_store call. Store hiccups must never fail the activity."""
     # Pass the real callable (not a name string) so renames stay searchable.
@@ -59,11 +88,12 @@ def _best_effort_job_store(fn: Callable[..., Any], *args: Any, **kwargs: Any) ->
     try:
         fn(*args, **kwargs)
     except Exception:
+        arg_summaries, kw_summaries = _safe_job_store_log_args(*args, **kwargs)
         logger.exception(
             "job_store.%s failed: args=%s kwargs=%s",
             getattr(fn, "__name__", repr(fn)),
-            args,
-            kwargs,
+            arg_summaries,
+            kw_summaries,
         )
 
 
@@ -225,6 +255,8 @@ def provision_tool_activity(
           provisioner registry key.
         * ``credentials_dump`` is a serializable ``GeneratedCredentials`` dump
           for this tool.
+        * ``tools_total`` must be ``> 0`` when called as part of a fan-out
+          (the total number of tools being provisioned in parallel).
     Postconditions:
         * Returns ``ToolProvisionResult.model_dump()`` from the provisioner
           with ``provisioner_key`` set to the manifest registry key (needed by
@@ -244,6 +276,7 @@ def provision_tool_activity(
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
     from agent_provisioning_team.shared.tool_manifest import load_manifest
 
+    assert tools_total > 0, "tools_total must be > 0"
     _ = tool_index
     _best_effort_job_store(
         _js.update_job,
@@ -409,6 +442,8 @@ def deliver_activity(
     Postconditions:
         * Returns ``{"success": <bool>, "error": <str|None>}``.
         * Marks the job completed (redacted result) or failed in ``job_store``.
+        * Raises when the terminal job-store write fails so Temporal retries
+          (status must not stay running after a successful deliver).
     """
     from agent_provisioning_team.models import (
         AccessAuditResult,
@@ -417,12 +452,12 @@ def deliver_activity(
         OnboardingPacket,
         ToolProvisionResult,
     )
-    from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
     from agent_provisioning_team.phases.deliver import (
         build_final_result,
         redact_credentials_for_response,
         run_deliver,
     )
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
 
     _best_effort_job_store(_js.update_job,
         job_id,
@@ -437,7 +472,6 @@ def deliver_activity(
     audit = AccessAuditResult.model_validate(audit_dump) if audit_dump else None
     onboarding = OnboardingPacket.model_validate(onboarding_dump) if onboarding_dump else None
 
-    orch = ProvisioningOrchestrator()
     activity.heartbeat("deliver")
     deliver_result = run_deliver(
         agent_id=agent_id,
@@ -446,7 +480,7 @@ def deliver_activity(
         tool_results=tool_results,
         access_audit=audit,
         onboarding=onboarding,
-        environment_store=orch.environment_store,
+        environment_store=EnvironmentStore(),
     )
 
     final = build_final_result(
@@ -461,9 +495,9 @@ def deliver_activity(
 
     if final.success:
         redacted = redact_credentials_for_response(final)
-        _best_effort_job_store(_js.mark_job_completed, job_id, result=redacted.model_dump())
+        _js.mark_job_completed(job_id, result=redacted.model_dump())
     else:
-        _best_effort_job_store(_js.mark_job_failed, job_id, error=final.error or "Provisioning failed")
+        _js.mark_job_failed(job_id, error=final.error or "Provisioning failed")
 
     return {"success": final.success, "error": final.error}
 
