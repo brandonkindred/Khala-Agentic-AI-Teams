@@ -271,10 +271,10 @@ services:
     # same caps under plain `docker compose up`, matching the unified-api service.
     deploy:
       resources:
-        limits: { memory: 12G }
-        reservations: { memory: 8G }
-    mem_limit: 12g
-    mem_reservation: 8g
+        limits: { memory: 8G }
+        reservations: { memory: 2G }
+    mem_limit: 8g
+    mem_reservation: 2g
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
       interval: 15s

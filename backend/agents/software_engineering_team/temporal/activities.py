@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid as _uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -71,7 +72,6 @@ def _run_frontend_code_v2_impl(
     architecture_overview: str,
 ) -> None:
     """Same logic as _run_frontend_code_v2_background without starting a thread."""
-    import uuid as _uuid
 
     from llm_service import get_client
     from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
@@ -159,7 +159,6 @@ def _run_backend_code_v2_impl(
     architecture_overview: str,
 ) -> None:
     """Same logic as _run_backend_code_v2_background without starting a thread."""
-    import uuid as _uuid
 
     from llm_service import get_client
     from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
