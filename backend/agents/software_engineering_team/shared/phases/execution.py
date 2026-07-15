@@ -363,7 +363,7 @@ class GateOutcome:
 
     Each team's gate adapter maps its own review type into this shape: the
     backend maps a ``PhaseReviewResult``; the frontend maps a ``ReviewResult``
-    after filtering issues by ``source``. The skeleton only reads these three
+    after filtering issues by ``source``. The skeleton only reads these
     fields, so it stays decoupled from the per-team review models.
 
     Invariants:
@@ -374,6 +374,52 @@ class GateOutcome:
     passed: bool
     issues: List[Any] = field(default_factory=list)
     summary: str = ""
+    raw_issue_count: Optional[int] = None
+
+
+def grounding_rejection_ratio(
+    raw_issue_count: Optional[int], kept_count: int
+) -> Optional[float]:
+    """Compute the fraction of raw LLM issues rejected by grounding.
+
+    Preconditions:
+        ``kept_count`` is a non-negative integer count of issues retained after
+        grounding (callers may pass negative values; they are clamped).
+    Postconditions:
+        Returns ``None`` when ``raw_issue_count`` is ``None`` or ``<= 0``;
+        otherwise returns ``(raw - kept) / raw`` with ``kept`` clamped to
+        ``[0, raw_issue_count]``.
+    """
+    if raw_issue_count is None or raw_issue_count <= 0:
+        return None
+    kept = max(0, min(kept_count, raw_issue_count))
+    return (raw_issue_count - kept) / float(raw_issue_count)
+
+
+def cr_call_is_grounding_bad(
+    *,
+    passed: bool,
+    raw_issue_count: Optional[int],
+    kept_count: int,
+    ratio_threshold: float,
+) -> bool:
+    """Return whether a failed code-review call is grounding-heavy.
+
+    Preconditions:
+        ``passed`` reflects the gate outcome; ``kept_count`` is a non-negative
+        integer; ``ratio_threshold`` is a float (clamped to ``[0.0, 1.0]``).
+    Postconditions:
+        Returns ``False`` when ``passed`` is ``True``, when the rejection ratio
+        is undefined, or when the ratio is below the clamped threshold;
+        otherwise returns ``True``.
+    """
+    if passed:
+        return False
+    ratio = grounding_rejection_ratio(raw_issue_count, kept_count)
+    if ratio is None:
+        return False
+    threshold = max(0.0, min(1.0, float(ratio_threshold)))
+    return ratio >= threshold
 
 
 def _terminal_failing_outcome(cr: GateOutcome, qa: GateOutcome, sec: GateOutcome) -> GateOutcome:
@@ -452,6 +498,150 @@ def _apply_code_review_retry_exhausted(
     for fk in microtask_file_keys:
         all_files.pop(fk, None)
     return True
+
+
+def _apply_grounding_circuit_breaker_trip(
+    *,
+    mt: Any,
+    cr_outcome: GateOutcome,
+    telemetry_outcome: Optional[GateOutcome],
+    grounding_failure_streak: int,
+    cycle_limit: int,
+    task_id: str,
+    review_failed_ids: set,
+    all_files: Dict[str, str],
+    microtask_file_keys: set,
+    review_failed_status: Any,
+) -> bool:
+    """Trip the grounding-failure circuit breaker for a hallucination-driven CR loop.
+
+    Mirrors :func:`_apply_code_review_retry_exhausted`'s shape, but for the
+    distinct "consecutive high-rejection-ratio cycles" failure mode: unlike
+    retry exhaustion, this can fire even when ``cr_outcome.passed`` is True for
+    the current cycle (the streak was built by earlier bad calls in this same
+    outer cycle, including ones a later retry then fixed).
+
+    Preconditions:
+        Caller has already confirmed the current outer cycle did not end via a
+        write-path failure (those are marked and rolled back by
+        ``write_microtask_output_or_fail`` and must never be attributed to this
+        breaker), and that ``cycle_limit > 0`` and
+        ``grounding_failure_streak >= cycle_limit``.
+    Postconditions:
+        Sets REVIEW_FAILED status with breaker-specific notes (distinct from
+        retry-exhaustion's message), records ``review_grounding_circuit_breaker``
+        once via ``_record_terminal_gate_failure`` using a *rejected* telemetry
+        outcome (the last grounding-bad CR call when available; otherwise a
+        synthetic ``passed=False`` copy of ``cr_outcome`` — never the final
+        ``passed=True`` settle, which ``record_gate_outcome`` would silently
+        skip), rolls back ``microtask_file_keys`` from ``all_files``, and
+        returns True.
+    """
+    mt.status = review_failed_status
+    review_failed_ids.add(mt.id)
+    mt.notes = (
+        f"Grounding-failure circuit breaker tripped after {grounding_failure_streak} "
+        f"consecutive high-rejection-ratio code review cycles (limit {cycle_limit})."
+    )
+    record_outcome = telemetry_outcome
+    if record_outcome is None or record_outcome.passed:
+        record_outcome = GateOutcome(
+            passed=False,
+            issues=list(cr_outcome.issues),
+            summary=cr_outcome.summary
+            or "Grounding-failure circuit breaker tripped",
+            raw_issue_count=cr_outcome.raw_issue_count,
+        )
+    _record_terminal_gate_failure("review_grounding_circuit_breaker", record_outcome, task_id)
+    logger.warning(
+        "[%s] Microtask %s: REVIEW_FAILED - grounding circuit breaker tripped after %d cycles",
+        task_id,
+        mt.id,
+        grounding_failure_streak,
+    )
+    for fk in microtask_file_keys:
+        all_files.pop(fk, None)
+    return True
+
+
+def _apply_cr_section_exit(
+    *,
+    mt: Any,
+    cr_outcome: GateOutcome,
+    cycle_bad: bool,
+    last_bad_cr_outcome: Optional[GateOutcome],
+    grounding_failure_streak: int,
+    cycle_limit: int,
+    code_review_retry_cap: int,
+    task_id: str,
+    review_failed_ids: set,
+    all_files: Dict[str, str],
+    microtask_file_keys: set,
+    review_failed_status: Any,
+    phase_failed: bool,
+    on_failure: str,
+    review_failed_error_cls: Any,
+    review_result_cls: Any,
+) -> Tuple[bool, int]:
+    """Resolve one outer cycle's code-review section exit: breaker vs retry exhaustion.
+
+    Ticks (or resets) the grounding-failure streak and decides which terminal
+    path — if any — applies, preferring the circuit breaker over ordinary retry
+    exhaustion when both would fire (see the grounding circuit-breaker design doc).
+    Factored out of :func:`run_gated_execution_impl` to keep that function's
+    branch count from growing past the module's C901 budget.
+
+    Preconditions:
+        Called exactly once per outer cycle, immediately after the CR retry
+        sub-loop ends (whether via pass, exhaustion, or an already-handled
+        write-path failure reflected in ``phase_failed``).
+        ``last_bad_cr_outcome`` is the last CR ``GateOutcome`` this cycle that
+        marked ``cycle_bad`` (or ``None`` when the cycle was not bad).
+    Postconditions:
+        Returns ``(phase_failed, grounding_failure_streak)``. The streak is only
+        updated when ``phase_failed`` was False on entry (a write-path failure is
+        never attributed to the breaker) and ``cycle_limit > 0``. If leaving with
+        ``phase_failed=True`` and ``on_failure == \"stop\"``, raises
+        ``review_failed_error_cls`` instead of returning.
+    """
+    if not phase_failed and cycle_limit > 0:
+        grounding_failure_streak = grounding_failure_streak + 1 if cycle_bad else 0
+
+    breaker_tripped = (
+        not phase_failed and cycle_limit > 0 and grounding_failure_streak >= cycle_limit
+    )
+    if breaker_tripped:
+        phase_failed = _apply_grounding_circuit_breaker_trip(
+            mt=mt,
+            cr_outcome=cr_outcome,
+            telemetry_outcome=last_bad_cr_outcome,
+            grounding_failure_streak=grounding_failure_streak,
+            cycle_limit=cycle_limit,
+            task_id=task_id,
+            review_failed_ids=review_failed_ids,
+            all_files=all_files,
+            microtask_file_keys=microtask_file_keys,
+            review_failed_status=review_failed_status,
+        )
+    elif not cr_outcome.passed:
+        phase_failed = _apply_code_review_retry_exhausted(
+            phase_failed=phase_failed,
+            mt=mt,
+            cr_outcome=cr_outcome,
+            code_review_retry_cap=code_review_retry_cap,
+            task_id=task_id,
+            review_failed_ids=review_failed_ids,
+            all_files=all_files,
+            microtask_file_keys=microtask_file_keys,
+            review_failed_status=review_failed_status,
+        )
+
+    if phase_failed and on_failure == "stop":
+        raise review_failed_error_cls(
+            mt,
+            review_result_cls(passed=False, issues=cr_outcome.issues, summary=cr_outcome.summary),
+        )
+    return phase_failed, grounding_failure_streak
 
 
 @dataclass(frozen=True)
@@ -692,12 +882,25 @@ def run_gated_execution_impl(
         qa_outcome = GateOutcome(passed=True)
         sec_outcome = GateOutcome(passed=True)
 
+        # Grounding-failure circuit breaker + issue dedup state, scoped to this
+        # microtask's own review lifecycle (see grounding circuit-breaker design doc).
+        grounding_failure_streak = 0
+        seen_issues: set[tuple[str, str]] = set()
+        cycle_limit = int(getattr(config, "grounding_failure_cycle_limit", 3))
+        ratio_threshold = float(getattr(config, "grounding_failure_ratio_threshold", 0.75))
+
         # ── Sequential Review Gates with Batch Fixes ──────────────────────────
         # Flow: Code Review -> QA -> Security -> Documentation
         # After QA/Security fixes, restart from Code Review
 
         while not phase_failed and total_cycles < max_total_cycles:
             total_cycles += 1
+            # True iff any CR gate call this outer cycle (initial or retry) was
+            # both failing and grounding-heavy; drives the streak below.
+            # ``last_bad_cr_outcome`` keeps the last such call for telemetry when
+            # the breaker trips after a later retry has already flipped CR to pass.
+            cycle_bad = False
+            last_bad_cr_outcome: Optional[GateOutcome] = None
 
             # ── Code Review Phase ─────────────────────────────────────────────
             mt.status = gate_config.status_code_review
@@ -730,6 +933,14 @@ def run_gated_execution_impl(
                 enable_llm_review_grounding=getattr(config, "enable_llm_review_grounding", True),
                 detail_callback=lambda d: _detail_cb(d, current_idx, "code_review"),
             )
+            if cr_call_is_grounding_bad(
+                passed=cr_outcome.passed,
+                raw_issue_count=cr_outcome.raw_issue_count,
+                kept_count=len(cr_outcome.issues),
+                ratio_threshold=ratio_threshold,
+            ):
+                cycle_bad = True
+                last_bad_cr_outcome = cr_outcome
 
             cr_retry = 0
             while not cr_outcome.passed and cr_retry < code_review_retry_cap:
@@ -756,7 +967,7 @@ def run_gated_execution_impl(
                 ps_result = gate_config.run_batch_coding_fixes(
                     llm=llm,
                     microtask=mt,
-                    issues=cr_outcome.issues,
+                    issues=_dedup_issues(list(cr_outcome.issues), seen_issues),
                     current_files=microtask_files,
                     language=planning_result.language,
                     repo_path=str(repo_path),
@@ -802,26 +1013,36 @@ def run_gated_execution_impl(
                     enable_llm_review_grounding=getattr(config, "enable_llm_review_grounding", True),
                     detail_callback=lambda d: _detail_cb(d, current_idx, "code_review"),
                 )
+                if cr_call_is_grounding_bad(
+                    passed=cr_outcome.passed,
+                    raw_issue_count=cr_outcome.raw_issue_count,
+                    kept_count=len(cr_outcome.issues),
+                    ratio_threshold=ratio_threshold,
+                ):
+                    cycle_bad = True
+                    last_bad_cr_outcome = cr_outcome
 
-            if not cr_outcome.passed:
-                phase_failed = _apply_code_review_retry_exhausted(
-                    phase_failed=phase_failed,
-                    mt=mt,
-                    cr_outcome=cr_outcome,
-                    code_review_retry_cap=code_review_retry_cap,
-                    task_id=task_id,
-                    review_failed_ids=review_failed_ids,
-                    all_files=all_files,
-                    microtask_file_keys=microtask_file_keys,
-                    review_failed_status=microtask_status.REVIEW_FAILED,
-                )
-                if config.on_failure == "stop":
-                    raise review_failed_error_cls(
-                        mt,
-                        review_result_cls(
-                            passed=False, issues=cr_outcome.issues, summary=cr_outcome.summary
-                        ),
-                    )
+            # Leaving the CR section: tick the streak and resolve breaker-vs-retry-
+            # exhaustion once per outer cycle (may raise on-failure="stop").
+            phase_failed, grounding_failure_streak = _apply_cr_section_exit(
+                mt=mt,
+                cr_outcome=cr_outcome,
+                cycle_bad=cycle_bad,
+                last_bad_cr_outcome=last_bad_cr_outcome,
+                grounding_failure_streak=grounding_failure_streak,
+                cycle_limit=cycle_limit,
+                code_review_retry_cap=code_review_retry_cap,
+                task_id=task_id,
+                review_failed_ids=review_failed_ids,
+                all_files=all_files,
+                microtask_file_keys=microtask_file_keys,
+                review_failed_status=microtask_status.REVIEW_FAILED,
+                phase_failed=phase_failed,
+                on_failure=config.on_failure,
+                review_failed_error_cls=review_failed_error_cls,
+                review_result_cls=review_result_cls,
+            )
+            if phase_failed:
                 break
 
             # ── QA Testing Phase ──────────────────────────────────────────────
@@ -876,7 +1097,7 @@ def run_gated_execution_impl(
                 ps_result = gate_config.run_batch_coding_fixes(
                     llm=llm,
                     microtask=mt,
-                    issues=qa_outcome.issues,
+                    issues=_dedup_issues(list(qa_outcome.issues), seen_issues),
                     current_files=microtask_files,
                     language=planning_result.language,
                     repo_path=str(repo_path),
@@ -956,7 +1177,7 @@ def run_gated_execution_impl(
                 ps_result = gate_config.run_batch_coding_fixes(
                     llm=llm,
                     microtask=mt,
-                    issues=sec_outcome.issues,
+                    issues=_dedup_issues(list(sec_outcome.issues), seen_issues),
                     current_files=microtask_files,
                     language=planning_result.language,
                     repo_path=str(repo_path),

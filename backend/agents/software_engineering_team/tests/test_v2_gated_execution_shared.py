@@ -192,6 +192,8 @@ def _config(
     sec: int = 1,
     on_failure: str = "stop",
     security_stops: bool = True,
+    grounding_limit: int = 3,
+    grounding_ratio: float = 0.75,
 ) -> be_models.MicrotaskReviewConfig:
     return be_models.MicrotaskReviewConfig(
         code_review_max_retries=cr,
@@ -199,6 +201,8 @@ def _config(
         security_max_retries=sec,
         on_failure=on_failure,
         security_failure_always_stops=security_stops,
+        grounding_failure_cycle_limit=grounding_limit,
+        grounding_failure_ratio_threshold=grounding_ratio,
     )
 
 
@@ -748,3 +752,175 @@ def test_record_gate_outcome_not_called_on_unsafe_cr_write(tmp_path, monkeypatch
     assert mt.status == MS.REVIEW_FAILED
     assert "unsafe output path" in mt.notes
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Grounding-failure circuit breaker + issue dedup
+# ---------------------------------------------------------------------------
+
+
+def _cr_high_ratio_fail(raw: int = 4, kept: int = 0) -> GateOutcome:
+    """A failing CR outcome whose rejection ratio is at/above the default 0.75 threshold."""
+    return GateOutcome(
+        passed=False,
+        issues=[_issue() for _ in range(kept)],
+        summary="hallucinated issues",
+        raw_issue_count=raw,
+    )
+
+
+def test_grounding_circuit_breaker_trips_before_max_cycles(tmp_path, monkeypatch):
+    """Three consecutive high-ratio failing CR cycles trip the breaker well before
+    the ordinary max-cycles budget would exhaust. QA fails once per cycle to force
+    a restart; on the tripping cycle CR itself ends up passed (after its retry fix)
+    but the streak already hit the limit, so the breaker preempts QA entirely."""
+    calls: List[tuple] = []
+    monkeypatch.setattr(
+        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
+    )
+    cr = _ScriptedGate(
+        [
+            _cr_high_ratio_fail(),
+            GateOutcome(passed=True),
+            _cr_high_ratio_fail(),
+            GateOutcome(passed=True),
+            _cr_high_ratio_fail(),
+        ]
+    )
+    qa = _fail_gate("qa")
+    mt = _microtask()
+    cfg = _make_gate_config(code_review_gate=cr, qa_gate=qa)
+    _run(
+        cfg,
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=5, sec=5, on_failure="skip_continue"),
+    )
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert "circuit breaker" in mt.notes
+    assert len(calls) == 1
+    gate, result, kw = calls[0]
+    assert gate == "review_grounding_circuit_breaker"
+    # Telemetry must record a rejected outcome even when the tripping cycle's
+    # settled CR passed after a retry — otherwise record_gate_outcome no-ops.
+    assert result.passed is False
+    assert result.raw_issue_count == 4
+    assert kw.get("task_id") == "t1"
+    assert kw.get("phase") == "execution"
+    assert kw.get("job_id") == ""
+    # 3 outer cycles capped by the breaker, not the 11-cycle max_total_cycles budget.
+    assert cr.calls <= 6
+    assert cr.calls < 2 * (1 + 5 + 5)
+
+
+def test_grounding_low_ratio_no_trip_retry_exhausted(tmp_path, monkeypatch):
+    """A low-ratio failing CR (below threshold) never marks the cycle bad; the
+    microtask still fails via ordinary retry exhaustion, not the breaker."""
+    calls: List[tuple] = []
+    monkeypatch.setattr(
+        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
+    )
+
+    def _low_ratio_gate(**kwargs: Any) -> GateOutcome:
+        return GateOutcome(
+            passed=False,
+            issues=[_issue(), _issue(), _issue()],
+            summary="low ratio",
+            raw_issue_count=4,
+        )
+
+    mt = _microtask()
+    cfg = _make_gate_config(code_review_gate=_low_ratio_gate)
+    _run(cfg, [mt], tmp_path, review_config=_config(cr=2, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert len(calls) == 1
+    gate, _, _ = calls[0]
+    assert gate == "code_review_retry_exhausted"
+
+
+def test_grounding_pass_only_never_trips(tmp_path, monkeypatch):
+    """CR that always passes but reports a high raw_issue_count (heavy grounding
+    drops) never counts as a bad cycle -- passed calls are never grounding-bad."""
+    calls: List[tuple] = []
+    monkeypatch.setattr(
+        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
+    )
+
+    def _pass_high_raw(**kwargs: Any) -> GateOutcome:
+        return GateOutcome(passed=True, issues=[], summary="", raw_issue_count=4)
+
+    qa = _ScriptedGate([GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")] * 4)
+    mt = _microtask()
+    cfg = _make_gate_config(code_review_gate=_pass_high_raw, qa_gate=qa)
+    _run(
+        cfg,
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=5, sec=1, on_failure="skip_continue"),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert calls == []
+
+
+def test_dedup_suppresses_repeated_issue_across_batch_fixes(tmp_path):
+    """The same (file_path, description) issue across two consecutive CR batch-fix
+    calls is not passed to the fixer a second time."""
+    captured: List[List[Any]] = []
+
+    def _capturing_batch_fix(*, issues, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
+        captured.append(list(issues))
+        if detail_callback is not None:
+            detail_callback("fixing")
+        return SimpleNamespace(files=kwargs["current_files"])
+
+    repeat_issue = _issue()
+    cr = _ScriptedGate(
+        [
+            GateOutcome(passed=False, issues=[repeat_issue], summary="bad"),
+            GateOutcome(passed=False, issues=[repeat_issue], summary="still bad"),
+        ]
+    )
+    mt = _microtask()
+    cfg = _make_gate_config(code_review_gate=cr, batch_fix=_capturing_batch_fix)
+    _run(cfg, [mt], tmp_path, review_config=_config(cr=2, on_failure="skip_continue"))
+
+    assert len(captured) == 2
+    assert len(captured[0]) == 1  # first attempt: not yet seen
+    assert captured[1] == []  # exact repeat suppressed on the second attempt
+
+
+def test_grounding_breaker_disabled_never_records(tmp_path, monkeypatch):
+    """``grounding_failure_cycle_limit=0`` disables the breaker outright, even
+    across repeated high-ratio failing CR cycles."""
+    calls: List[tuple] = []
+    monkeypatch.setattr(
+        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
+    )
+    cr = _ScriptedGate(
+        [
+            _cr_high_ratio_fail(),
+            GateOutcome(passed=True),
+            _cr_high_ratio_fail(),
+            GateOutcome(passed=True),
+            _cr_high_ratio_fail(),
+            GateOutcome(passed=True),
+        ]
+    )
+    qa = _fail_gate("qa")
+    mt = _microtask()
+    cfg = _make_gate_config(code_review_gate=cr, qa_gate=qa)
+    _run(
+        cfg,
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=1, sec=1, grounding_limit=0, on_failure="skip_continue"),
+    )
+
+    assert all(gate != "review_grounding_circuit_breaker" for gate, *_ in calls)

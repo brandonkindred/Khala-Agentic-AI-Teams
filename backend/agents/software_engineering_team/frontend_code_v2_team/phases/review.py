@@ -19,7 +19,7 @@ from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_spec_excerpt_chars,
 )
-from software_engineering_team.shared.llm_review import run_llm_review
+from software_engineering_team.shared.llm_review import LlmReviewOutput, run_llm_review
 from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.review_utils import (
     DOC_QUALITY_THRESHOLD,
@@ -64,7 +64,7 @@ def _run_llm_review(
     files: Dict[str, str],
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
-) -> List[ReviewIssue]:
+) -> LlmReviewOutput[ReviewIssue]:
     """LLM-based code review when no external review agent is available.
 
     Thin wrapper that delegates the chunking/prompt/parse orchestration to the
@@ -85,11 +85,13 @@ def _run_llm_review(
           ungrounded-claim filtering in the shared helper (kill switch).
 
     Postconditions:
-        - See ``software_engineering_team.shared.llm_review.run_llm_review``:
-          function-aware chunking with no tail truncation, per-chunk
-          skip-on-failure, single call for small inputs, and a header-preserving
-          hard-split for any chunk that is itself over budget (a single line
-          longer than the cap).
+        - Returns the shared helper's :class:`LlmReviewOutput` unchanged (issues
+          plus their pre-grounding ``raw_issue_count``); see
+          ``software_engineering_team.shared.llm_review.run_llm_review`` for the
+          full contract: function-aware chunking with no tail truncation,
+          per-chunk skip-on-failure, single call for small inputs, and a
+          header-preserving hard-split for any chunk that is itself over budget
+          (a single line longer than the cap).
     """
 
     def _invoke(prompt: str) -> str:

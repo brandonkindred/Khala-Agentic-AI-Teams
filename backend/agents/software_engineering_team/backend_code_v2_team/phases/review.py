@@ -22,7 +22,7 @@ from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_spec_excerpt_chars,
 )
-from software_engineering_team.shared.llm_review import run_llm_review
+from software_engineering_team.shared.llm_review import LlmReviewOutput, run_llm_review
 from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.review_utils import (
     DOC_QUALITY_THRESHOLD,
@@ -73,7 +73,7 @@ def _run_llm_review(
     files: Dict[str, str],
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
-) -> List[ReviewIssue]:
+) -> LlmReviewOutput[ReviewIssue]:
     """LLM-based code review when no external review agent is available.
 
     Thin wrapper that delegates the chunking/prompt/parse orchestration to the
@@ -94,11 +94,13 @@ def _run_llm_review(
           ungrounded-claim filtering in the shared helper (kill switch).
 
     Postconditions:
-        - See ``software_engineering_team.shared.llm_review.run_llm_review``:
-          function-aware chunking with no tail truncation, per-chunk
-          skip-on-failure, single call for small inputs, and a header-preserving
-          hard-split for any chunk that is itself over budget (a single line
-          longer than the cap).
+        - Returns the shared helper's :class:`LlmReviewOutput` unchanged (issues
+          plus their pre-grounding ``raw_issue_count``); see
+          ``software_engineering_team.shared.llm_review.run_llm_review`` for the
+          full contract: function-aware chunking with no tail truncation,
+          per-chunk skip-on-failure, single call for small inputs, and a
+          header-preserving hard-split for any chunk that is itself over budget
+          (a single line longer than the cap).
     """
 
     def _invoke(prompt: str) -> str:
@@ -406,22 +408,21 @@ def run_code_review_phase(
     # Delegates to the shared code-review step (agent call + LLM fallback + outright-failure
     # containment) instead of reimplementing it, so this phase never diverges from run_review's/
     # run_microtask_review's behavior.
-    issues.extend(
-        _code_review_step(
-            llm=llm,
-            task=task,
-            files=files,
-            repo_path=repo_path,
-            code_review_agent=code_review_agent,
-            language=language,
-            task_id=task_id,
-            task_description=f"Microtask: {microtask.description or microtask.title}",
-            llm_review_fn=_run_llm_review,
-            review_context=review_context,
-            detail_callback=detail_callback,
-            enable_llm_review_grounding=enable_llm_review_grounding,
-        )
+    cr_out = _code_review_step(
+        llm=llm,
+        task=task,
+        files=files,
+        repo_path=repo_path,
+        code_review_agent=code_review_agent,
+        language=language,
+        task_id=task_id,
+        task_description=f"Microtask: {microtask.description or microtask.title}",
+        llm_review_fn=_run_llm_review,
+        review_context=review_context,
+        detail_callback=detail_callback,
+        enable_llm_review_grounding=enable_llm_review_grounding,
     )
+    issues.extend(cr_out.issues)
 
     critical_or_high = [i for i in issues if is_blocking(i.severity)]
     passed = build_ok and lint_ok and len(critical_or_high) == 0
@@ -434,6 +435,7 @@ def run_code_review_phase(
         issues=issues,
         summary=summary,
         phase_name="code_review",
+        raw_issue_count=cr_out.raw_issue_count,
     )
 
 
