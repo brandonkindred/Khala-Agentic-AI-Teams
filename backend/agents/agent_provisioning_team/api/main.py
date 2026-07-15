@@ -539,7 +539,7 @@ def deprovision_agent(
     runner = _require_deprovision_runner()
     try:
         return DeprovisionResponse.model_validate(runner(agent_id, force))
-    except ValidationError as exc:
+    except ValidationError:
         logger.exception("Invalid deprovision workflow response for agent=%s", agent_id)
         return DeprovisionResponse(
             agent_id=agent_id,
