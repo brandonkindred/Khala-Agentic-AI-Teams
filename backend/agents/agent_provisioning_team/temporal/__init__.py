@@ -17,6 +17,7 @@ from agent_provisioning_team.temporal.activities import (
     deliver_activity,
     deprovision_activity,
     documentation_activity,
+    mark_job_failed_activity,
     provision_tool_activity,
     setup_activity,
 )
@@ -49,6 +50,7 @@ ACTIVITIES = [
     documentation_activity,
     deliver_activity,
     compensate_activity,
+    mark_job_failed_activity,
     deprovision_activity,
 ]
 

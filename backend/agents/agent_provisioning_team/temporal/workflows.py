@@ -151,6 +151,16 @@ class AgentProvisioningWorkflow:
             retry_policy=DEFAULT_RETRY_POLICY,
         )
 
+    async def _mark_job_failed(self, job_id: str, error: str) -> None:
+        """Persist a terminal failed status for ``job_id`` before aborting the workflow."""
+        await workflow.execute_activity(
+            _activities.mark_job_failed_activity,
+            args=[job_id, error],
+            task_queue=TASK_QUEUE,
+            schedule_to_close_timeout=PHASE_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
+        )
+
     @workflow.run
     async def run(
         self,
@@ -160,6 +170,30 @@ class AgentProvisioningWorkflow:
         skip_phases: list[str] | None = None,
         prior_results: dict[str, Any] | None = None,
     ) -> None:
+        """Run the full provisioning pipeline as durable per-phase activities.
+
+        Preconditions:
+            * ``job_id``, ``agent_id``, and ``manifest_path`` are non-empty.
+            * When ``skip_phases`` is set, each entry is a phase value string and
+              ``prior_results`` contains serializable dumps for those phases
+              (including ``account_provisioning.tool_results`` when that phase
+              is skipped).
+        Postconditions:
+            * On success: all phases ran (or were restored), and
+              ``deliver_activity`` has written a terminal completed/failed job
+              status.
+            * On tool-provisioning failure: ``compensate_activity`` runs for
+              succeeded tools, ``mark_job_failed_activity`` records the failure,
+              then ``RuntimeError`` is raised (workflow fails).
+        Invariants:
+            * One Temporal workflow id per ``job_id`` (starter uses a stable
+              prefix); resume/restart mint a new run with skip/prior args rather
+              than relying on history drain.
+        """
+        assert job_id, "job_id must be non-empty"
+        assert agent_id, "agent_id must be non-empty"
+        assert manifest_path, "manifest_path must be non-empty"
+
         skip = set(skip_phases or [])
         prior = prior_results or {}
 
@@ -202,9 +236,9 @@ class AgentProvisioningWorkflow:
 
         if failures:
             await self._compensate_failed_tools(agent_id, succeeded)
-            raise RuntimeError(
-                f"Tool provisioning failed for agent {agent_id}: {'; '.join(failures)}"
-            )
+            err = f"Tool provisioning failed for agent {agent_id}: {'; '.join(failures)}"
+            await self._mark_job_failed(job_id, err)
+            raise RuntimeError(err)
 
         # Phase 4: access audit.
         audit_prior = prior.get("access_audit") if "access_audit" in skip else None

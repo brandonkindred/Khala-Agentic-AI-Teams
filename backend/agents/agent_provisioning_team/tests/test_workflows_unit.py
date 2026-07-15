@@ -18,6 +18,7 @@ import pytest
 
 
 def test_setup_activity_progress_path() -> None:
+    """Fresh setup writes progress / completed phase into job_store and returns env dump."""
     from agent_provisioning_team.models import EnvironmentInfo, SetupResult
     from agent_provisioning_team.temporal import activities as t_acts
 
@@ -56,6 +57,7 @@ def test_setup_activity_progress_path() -> None:
 
 
 def test_setup_activity_raises_when_setup_fails() -> None:
+    """Failed setup raises RuntimeError so Temporal can retry the activity."""
     from agent_provisioning_team.models import SetupResult
     from agent_provisioning_team.temporal import activities as t_acts
 
@@ -78,6 +80,7 @@ def test_setup_activity_raises_when_setup_fails() -> None:
 
 
 def test_setup_activity_restores_from_prior() -> None:
+    """When prior_setup is provided, setup is skipped and the snapshot is restored."""
     from agent_provisioning_team.temporal import activities as t_acts
 
     prior = {
@@ -147,6 +150,7 @@ tools:
 
 @pytest.mark.asyncio
 async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
+    """Happy path runs setup → credentials → per-tool provision → audit → docs → deliver."""
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
@@ -188,6 +192,7 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_workflow_compensates_on_tool_failure(tmp_path) -> None:
+    """When a tool fails, succeeded tools are compensated and the job is marked failed."""
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
@@ -215,6 +220,7 @@ async def test_workflow_compensates_on_tool_failure(tmp_path) -> None:
             },
             "provision_tool_activity": provision_responder,
             "compensate_activity": None,
+            "mark_job_failed_activity": None,
         }
     )
 
@@ -225,10 +231,12 @@ async def test_workflow_compensates_on_tool_failure(tmp_path) -> None:
     fn_names = [c["name"] for c in stub.calls]
     # Compensate was invoked
     assert "compensate_activity" in fn_names
+    assert "mark_job_failed_activity" in fn_names
 
 
 @pytest.mark.asyncio
 async def test_workflow_skips_provisioning_when_resumed(tmp_path) -> None:
+    """Resume with prior successful account_provisioning skips per-tool fan-out."""
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
@@ -284,6 +292,7 @@ async def test_workflow_skips_provisioning_when_resumed(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_workflow_resume_with_prior_failed_tools_compensates(tmp_path) -> None:
+    """Resume restoring a prior phase that includes failed tools still compensates."""
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
@@ -299,6 +308,7 @@ async def test_workflow_resume_with_prior_failed_tools_compensates(tmp_path) -> 
                 },
             },
             "compensate_activity": None,
+            "mark_job_failed_activity": None,
         }
     )
 
@@ -332,6 +342,7 @@ async def test_workflow_resume_with_prior_failed_tools_compensates(tmp_path) -> 
 
     fn_names = [c["name"] for c in stub.calls]
     assert "compensate_activity" in fn_names
+    assert "mark_job_failed_activity" in fn_names
 
 
 @pytest.mark.asyncio
@@ -360,6 +371,7 @@ async def test_workflow_handles_non_dict_provision_results(tmp_path) -> None:
             },
             "provision_tool_activity": provision_responder,
             "compensate_activity": None,
+            "mark_job_failed_activity": None,
         }
     )
 
@@ -393,6 +405,7 @@ async def test_workflow_handles_dict_failure_results(tmp_path) -> None:
             },
             "provision_tool_activity": provision_responder,
             "compensate_activity": None,
+            "mark_job_failed_activity": None,
         }
     )
 

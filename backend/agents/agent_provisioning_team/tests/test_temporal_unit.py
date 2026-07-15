@@ -308,7 +308,7 @@ def test_create_worker_constructs_worker_when_enabled() -> None:
     # Provisioning/deprovision only — sandbox workflows/activities are
     # deliberately excluded (they run on their own SANDBOX_TASK_QUEUE via a
     # separately-booted worker; see start_agent_provisioning_sandbox_temporal_worker_thread).
-    assert len(kwargs["activities"]) == 8
+    assert len(kwargs["activities"]) == 9
     assert len(kwargs["workflows"]) == 2
 
 

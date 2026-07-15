@@ -193,15 +193,26 @@ def test_deprovision_agent_uses_temporal_when_enabled() -> None:
     assert resp.success is True
 
 
-def test_deprovision_agent_degrades_gracefully_on_workflow_failure() -> None:
-    """deprovision_agent must always return a DeprovisionResponse, never raise,
-    once Temporal dispatch has started. An infrastructure-level failure of the
-    Temporal dispatch (client not ready, execute-and-wait timeout, workflow
-    failure) is reported as success=False with the failure in `error`, not as
-    an unhandled 500."""
+def test_deprovision_agent_returns_503_when_temporal_client_unavailable() -> None:
+    """Client/loop not ready is a 503 (Temporal required), not success=False."""
     from agent_provisioning_team.api import main
 
     fake_runner = MagicMock(side_effect=RuntimeError("Temporal client not available"))
+
+    with patch.object(main, "_require_deprovision_runner", return_value=fake_runner):
+        with pytest.raises(HTTPException) as ei:
+            main.deprovision_agent("a", force=True)
+
+    assert ei.value.status_code == 503
+    assert "Temporal" in str(ei.value.detail)
+
+
+def test_deprovision_agent_degrades_gracefully_on_workflow_failure() -> None:
+    """After Temporal is available, workflow/application failures return
+    ``DeprovisionResponse(success=False)`` rather than an unhandled 500."""
+    from agent_provisioning_team.api import main
+
+    fake_runner = MagicMock(side_effect=RuntimeError("workflow crashed mid-run"))
 
     with patch.object(main, "_require_deprovision_runner", return_value=fake_runner):
         resp = main.deprovision_agent("a", force=True)
@@ -210,7 +221,7 @@ def test_deprovision_agent_degrades_gracefully_on_workflow_failure() -> None:
     assert isinstance(resp, DeprovisionResponse)
     assert resp.agent_id == "a"
     assert resp.success is False
-    assert "Temporal client not available" in resp.error
+    assert "workflow crashed mid-run" in resp.error
 
 
 def test_deprovision_agent_endpoint_returns_503_when_temporal_disabled() -> None:

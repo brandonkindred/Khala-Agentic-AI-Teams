@@ -417,17 +417,33 @@ def deprovision_agent(
     dispatch does not stall the event loop.
 
     Preconditions:
-        * Temporal must be enabled (raises HTTP 503 otherwise).
+        * Temporal must be enabled and the shared client/loop must be ready
+          (raises HTTP 503 otherwise).
     Postconditions:
-        * Once dispatch has started, always returns a ``DeprovisionResponse``
-          — never raises: an infrastructure-level failure of the Temporal
-          dispatch itself (client not ready, timeout, workflow failure) is
-          reported as ``success=False`` with the failure in ``error``, not as
-          an unhandled 500.
+        * Pre-start / Temporal-unavailable failures raise ``HTTPException(503)``.
+        * Once execute-and-wait has begun, workflow/application failures are
+          returned as ``DeprovisionResponse(success=False, ...)`` (not 500).
     """
     runner = _require_deprovision_runner()
     try:
         return DeprovisionResponse.model_validate(runner(agent_id, force))
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        # execute_workflow_sync raises this when the shared Temporal client/loop
+        # never becomes available — same "Temporal required" contract as provision.
+        if "Temporal client not available" in str(exc):
+            raise HTTPException(
+                status_code=503,
+                detail=f"{_TEMPORAL_REQUIRED}: {exc}",
+            ) from exc
+        logger.exception("Durable deprovision failed for agent=%s", agent_id)
+        return DeprovisionResponse(
+            agent_id=agent_id,
+            success=False,
+            details={},
+            error=f"Deprovision workflow failed: {exc}",
+        )
     except Exception as exc:
         logger.exception("Durable deprovision failed for agent=%s", agent_id)
         return DeprovisionResponse(

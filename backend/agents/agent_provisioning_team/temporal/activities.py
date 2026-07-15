@@ -446,6 +446,25 @@ def compensate_activity(
     orch._compensate(agent_id, shims)
 
 
+@activity.defn(name="agent_provisioning_mark_job_failed")
+def mark_job_failed_activity(job_id: str, error: str) -> None:
+    """Record a terminal failure for a provisioning job in ``job_store``.
+
+    Used when the workflow aborts before ``deliver_activity`` (e.g. after tool
+    compensation) so ``GET /provision/status/{job_id}`` does not stay ``running``.
+
+    Preconditions:
+        * ``job_id`` is non-empty.
+        * ``error`` is a non-empty human-readable failure reason.
+    Postconditions:
+        * Best-effort ``mark_job_failed`` write via ``job_store`` (never raises
+          from a store hiccup — uses ``_safe``).
+    """
+    assert job_id, "job_id must be non-empty"
+    assert error, "error must be non-empty"
+    _safe("mark_job_failed", job_id, error=error)
+
+
 # ---------------------------------------------------------------------------
 # Deprovision — single activity wrapping the orchestrator's teardown
 # ---------------------------------------------------------------------------
