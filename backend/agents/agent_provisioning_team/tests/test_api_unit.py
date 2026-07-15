@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -30,6 +31,26 @@ def test_require_provision_starter_is_agent_provisioning_workflow_entry() -> Non
     with patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=True):
         starter = api_main._require_provision_starter()
     assert starter is start_provisioning_workflow
+
+
+def test_require_provision_starter_returns_503_when_temporal_check_raises() -> None:
+    with patch(
+        "agent_provisioning_team.temporal.client.is_temporal_enabled",
+        side_effect=RuntimeError("misconfigured"),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            api_main._require_provision_starter()
+    assert exc_info.value.status_code == 503
+
+
+def test_require_deprovision_runner_returns_503_when_temporal_check_raises() -> None:
+    with patch(
+        "agent_provisioning_team.temporal.client.is_temporal_enabled",
+        side_effect=RuntimeError("misconfigured"),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            api_main._require_deprovision_runner()
+    assert exc_info.value.status_code == 503
 
 
 # ---------------------------------------------------------------------------

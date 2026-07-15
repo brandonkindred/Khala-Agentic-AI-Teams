@@ -43,7 +43,7 @@ TOOL_RETRY_POLICY = RetryPolicy(
 
 @workflow.defn(name="AgentProvisioningWorkflow")
 class AgentProvisioningWorkflow:
-    """Sole durable provisioning workflow after the V1/V2 collapse.
+    """Durable Temporal workflow that orchestrates agent provisioning end-to-end.
 
     Runs one job through setup → credentials → parallel per-tool provision →
     audit → documentation → deliver. Resume/restart pass ``skip_phases`` /
@@ -56,6 +56,47 @@ class AgentProvisioningWorkflow:
         * Failures after setup but before account-provisioning success
           compensate (possibly with an empty tool list) before marking failed.
     """
+
+    @staticmethod
+    def _restore_account_provisioning_from_prior(
+        ap: dict[str, Any],
+        tool_names: list[str],
+    ) -> tuple[list[dict], list[dict], list[str]]:
+        """Rebuild tool phase results from a prior ``account_provisioning`` dump.
+
+        Preconditions:
+            * ``ap`` is the prior ``account_provisioning`` phase payload.
+            * ``tool_names`` are the current manifest tool names in order.
+        Postconditions:
+            * Returns ``(tool_results_dump, succeeded, failures)``.
+        """
+        tool_results_dump = list(ap.get("tool_results") or [])
+        prior_names = {r.get("tool_name") for r in tool_results_dump if r.get("tool_name")}
+        current_names = set(tool_names)
+        succeeded: list[dict] = [
+            {
+                "tool_name": r.get("tool_name"),
+                "provisioner_key": r.get("provisioner_key"),
+            }
+            for r in tool_results_dump
+            if r.get("success")
+        ]
+        if prior_names != current_names:
+            return (
+                tool_results_dump,
+                succeeded,
+                [
+                    "Cannot restore account_provisioning: prior tool set "
+                    f"{sorted(prior_names)} does not match current manifest "
+                    f"{sorted(current_names)}. Restart the job or align the manifest."
+                ],
+            )
+        failures: list[str] = [
+            f"{r.get('tool_name')}: {r.get('error')}"
+            for r in tool_results_dump
+            if not r.get("success")
+        ]
+        return tool_results_dump, succeeded, failures
 
     async def _run_tool_provisioning_phase(
         self,
@@ -77,37 +118,10 @@ class AgentProvisioningWorkflow:
             * ``succeeded`` entries carry ``tool_name`` + ``provisioner_key``.
         """
         if "account_provisioning" in skip and prior.get("account_provisioning"):
-            # Whole-phase skip (no per-tool resume) matches the prior resume contract.
-            ap = prior["account_provisioning"]
-            tool_results_dump = list(ap.get("tool_results") or [])
-            prior_names = {r.get("tool_name") for r in tool_results_dump if r.get("tool_name")}
-            current_names = set(tool_names)
-            succeeded: list[dict] = [
-                {
-                    "tool_name": r.get("tool_name"),
-                    "provisioner_key": r.get("provisioner_key"),
-                }
-                for r in tool_results_dump
-                if r.get("success")
-            ]
-            if prior_names != current_names:
-                # Surface as phase failures so the caller compensates ``succeeded``
-                # tool accounts from the prior checkpoint (not an empty list).
-                return (
-                    tool_results_dump,
-                    succeeded,
-                    [
-                        "Cannot restore account_provisioning: prior tool set "
-                        f"{sorted(prior_names)} does not match current manifest "
-                        f"{sorted(current_names)}. Restart the job or align the manifest."
-                    ],
-                )
-            failures: list[str] = [
-                f"{r.get('tool_name')}: {r.get('error')}"
-                for r in tool_results_dump
-                if not r.get("success")
-            ]
-            return tool_results_dump, succeeded, failures
+            return self._restore_account_provisioning_from_prior(
+                prior["account_provisioning"],
+                tool_names,
+            )
 
         tools_total = len(tool_names)
 
@@ -198,6 +212,120 @@ class AgentProvisioningWorkflow:
             retry_policy=DEFAULT_RETRY_POLICY,
         )
 
+    async def _execute_setup_phase(
+        self,
+        job_id: str,
+        agent_id: str,
+        manifest_path: str,
+        skip: set[str],
+        prior: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Run or restore setup; return ``(setup_result, environment_dump)``."""
+        setup_prior = prior.get("setup") if "setup" in skip else None
+        setup_result = await workflow.execute_activity(
+            _activities.setup_activity,
+            args=[job_id, agent_id, manifest_path, setup_prior],
+            task_queue=TASK_QUEUE,
+            schedule_to_close_timeout=PHASE_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
+        )
+        environment_dump = setup_result.get("environment") if setup_result else None
+        return setup_result, environment_dump
+
+    async def _execute_credentials_phase(
+        self,
+        job_id: str,
+        agent_id: str,
+        manifest_path: str,
+        skip: set[str],
+        prior: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        """Run or restore credential generation; return credentials keyed by tool."""
+        creds_prior = prior.get("credential_generation") if "credential_generation" in skip else None
+        creds_result = await workflow.execute_activity(
+            _activities.credentials_activity,
+            args=[job_id, agent_id, manifest_path, creds_prior],
+            task_queue=TASK_QUEUE,
+            schedule_to_close_timeout=PHASE_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
+        )
+        return creds_result["credentials"]
+
+    async def _execute_audit_phase(
+        self,
+        job_id: str,
+        agent_id: str,
+        manifest_path: str,
+        tool_results_dump: list[dict],
+        skip: set[str],
+        prior: dict[str, Any],
+    ) -> Any:
+        """Run or restore access audit."""
+        audit_prior = prior.get("access_audit") if "access_audit" in skip else None
+        return await workflow.execute_activity(
+            _activities.audit_activity,
+            args=[job_id, agent_id, manifest_path, tool_results_dump, audit_prior],
+            task_queue=TASK_QUEUE,
+            schedule_to_close_timeout=PHASE_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
+        )
+
+    async def _execute_documentation_phase(
+        self,
+        job_id: str,
+        agent_id: str,
+        manifest_path: str,
+        credentials_by_tool: dict[str, dict[str, Any]],
+        tool_results_dump: list[dict],
+        workspace_path: str,
+        skip: set[str],
+        prior: dict[str, Any],
+    ) -> Any:
+        """Run or restore documentation generation."""
+        doc_prior = prior.get("documentation") if "documentation" in skip else None
+        return await workflow.execute_activity(
+            _activities.documentation_activity,
+            args=[
+                job_id,
+                agent_id,
+                manifest_path,
+                credentials_by_tool,
+                tool_results_dump,
+                workspace_path,
+                doc_prior,
+            ],
+            task_queue=TASK_QUEUE,
+            schedule_to_close_timeout=PHASE_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
+        )
+
+    async def _execute_deliver_phase(
+        self,
+        job_id: str,
+        agent_id: str,
+        environment_dump: dict[str, Any] | None,
+        credentials_by_tool: dict[str, dict[str, Any]],
+        tool_results_dump: list[dict],
+        audit_dump: Any,
+        onboarding_dump: Any,
+    ) -> None:
+        """Run deliver and final job-store terminal update."""
+        await workflow.execute_activity(
+            _activities.deliver_activity,
+            args=[
+                job_id,
+                agent_id,
+                environment_dump,
+                credentials_by_tool,
+                tool_results_dump,
+                audit_dump,
+                onboarding_dump,
+            ],
+            task_queue=TASK_QUEUE,
+            schedule_to_close_timeout=PHASE_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
+        )
+
     @workflow.run
     async def run(
         self,
@@ -245,32 +373,15 @@ class AgentProvisioningWorkflow:
         account_provisioning_done = False
 
         try:
-            # Phase 1: setup (Docker environment).
-            setup_prior = prior.get("setup") if "setup" in skip else None
-            setup_result = await workflow.execute_activity(
-                _activities.setup_activity,
-                args=[job_id, agent_id, manifest_path, setup_prior],
-                task_queue=TASK_QUEUE,
-                schedule_to_close_timeout=PHASE_TIMEOUT,
-                retry_policy=DEFAULT_RETRY_POLICY,
+            _, environment_dump = await self._execute_setup_phase(
+                job_id, agent_id, manifest_path, skip, prior
             )
-            environment_dump = setup_result.get("environment") if setup_result else None
             setup_completed = True
 
-            # Phase 2: credential generation.
-            creds_prior = (
-                prior.get("credential_generation") if "credential_generation" in skip else None
+            credentials_by_tool = await self._execute_credentials_phase(
+                job_id, agent_id, manifest_path, skip, prior
             )
-            creds_result = await workflow.execute_activity(
-                _activities.credentials_activity,
-                args=[job_id, agent_id, manifest_path, creds_prior],
-                task_queue=TASK_QUEUE,
-                schedule_to_close_timeout=PHASE_TIMEOUT,
-                retry_policy=DEFAULT_RETRY_POLICY,
-            )
-            credentials_by_tool: dict[str, dict[str, Any]] = creds_result["credentials"]
 
-            # Phase 3: fan out per-tool provisioning (or restore from prior).
             tool_names = await workflow.execute_activity(
                 _activities.list_manifest_tools_activity,
                 args=[manifest_path],
@@ -300,53 +411,33 @@ class AgentProvisioningWorkflow:
                 await self._record_account_provisioning(job_id, agent_id, tool_results_dump)
             account_provisioning_done = True
 
-            # Phase 4: access audit.
-            audit_prior = prior.get("access_audit") if "access_audit" in skip else None
-            audit_dump = await workflow.execute_activity(
-                _activities.audit_activity,
-                args=[job_id, agent_id, manifest_path, tool_results_dump, audit_prior],
-                task_queue=TASK_QUEUE,
-                schedule_to_close_timeout=PHASE_TIMEOUT,
-                retry_policy=DEFAULT_RETRY_POLICY,
+            audit_dump = await self._execute_audit_phase(
+                job_id, agent_id, manifest_path, tool_results_dump, skip, prior
             )
 
-            # Phase 5: documentation.
             workspace_path = DEFAULT_WORKSPACE_PATH
             if environment_dump:
                 workspace_path = environment_dump.get("workspace_path") or DEFAULT_WORKSPACE_PATH
-            doc_prior = prior.get("documentation") if "documentation" in skip else None
-            doc_result = await workflow.execute_activity(
-                _activities.documentation_activity,
-                args=[
-                    job_id,
-                    agent_id,
-                    manifest_path,
-                    credentials_by_tool,
-                    tool_results_dump,
-                    workspace_path,
-                    doc_prior,
-                ],
-                task_queue=TASK_QUEUE,
-                schedule_to_close_timeout=PHASE_TIMEOUT,
-                retry_policy=DEFAULT_RETRY_POLICY,
+            doc_result = await self._execute_documentation_phase(
+                job_id,
+                agent_id,
+                manifest_path,
+                credentials_by_tool,
+                tool_results_dump,
+                workspace_path,
+                skip,
+                prior,
             )
             onboarding_dump = doc_result.get("onboarding") if doc_result else None
 
-            # Phase 6: deliver + final job_store update.
-            await workflow.execute_activity(
-                _activities.deliver_activity,
-                args=[
-                    job_id,
-                    agent_id,
-                    environment_dump,
-                    credentials_by_tool,
-                    tool_results_dump,
-                    audit_dump,
-                    onboarding_dump,
-                ],
-                task_queue=TASK_QUEUE,
-                schedule_to_close_timeout=PHASE_TIMEOUT,
-                retry_policy=DEFAULT_RETRY_POLICY,
+            await self._execute_deliver_phase(
+                job_id,
+                agent_id,
+                environment_dump,
+                credentials_by_tool,
+                tool_results_dump,
+                audit_dump,
+                onboarding_dump,
             )
         except Exception as exc:
             # Credentials / manifest-list failures after setup leave a Docker env

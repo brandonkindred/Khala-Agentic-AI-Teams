@@ -154,7 +154,12 @@ def _require_provision_starter():
         from agent_provisioning_team.temporal.start_workflow import start_provisioning_workflow
     except ImportError as exc:
         raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
-    if not is_temporal_enabled():
+    try:
+        enabled = is_temporal_enabled()
+    except Exception as exc:
+        logger.exception("Temporal availability check failed")
+        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
+    if not enabled:
         raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE)
     return start_provisioning_workflow
 
@@ -177,7 +182,12 @@ def _require_deprovision_runner():
         from agent_provisioning_team.temporal.start_workflow import run_deprovision_workflow
     except ImportError as exc:
         raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
-    if not is_temporal_enabled():
+    try:
+        enabled = is_temporal_enabled()
+    except Exception as exc:
+        logger.exception("Temporal availability check failed")
+        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
+    if not enabled:
         raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE)
     return run_deprovision_workflow
 

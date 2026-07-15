@@ -487,15 +487,16 @@ def record_account_provisioning_activity(
           finished result list so status polls no longer show ``0/N``.
         * When ``agent_id`` is set, successful tool names are written once via
           ``EnvironmentStore.add_tools`` (safe after parallel fan-out).
+        * Raises when job-store writes fail so Temporal retries the checkpoint
+          before later phases run (resume depends on this phase being recorded).
     """
     assert job_id, "job_id must be non-empty"
     results = list(tool_results_dump)
     tools_total = len(results)
     tools_completed = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
     payload = {"success": True, "tool_results": results}
-    _best_effort_job_store(_js.add_completed_phase, job_id, "account_provisioning", payload)
-    _best_effort_job_store(
-        _js.update_job,
+    _js.add_completed_phase(job_id, "account_provisioning", payload)
+    _js.update_job(
         job_id,
         progress=60,
         status_text="Account provisioning complete",

@@ -900,7 +900,8 @@ def test_record_account_provisioning_sets_tool_counts() -> None:
     ]
     fake_env = MagicMock()
     with (
-        patch.object(activities, "_best_effort_job_store") as mock_store,
+        patch.object(activities._js, "add_completed_phase") as mock_phase,
+        patch.object(activities._js, "update_job") as mock_update,
         patch(
             "agent_provisioning_team.shared.environment_store.EnvironmentStore",
             return_value=fake_env,
@@ -909,16 +910,33 @@ def test_record_account_provisioning_sets_tool_counts() -> None:
         out = activities.record_account_provisioning_activity("job-1", results, "agent-1")
 
     assert out == {"success": True, "tool_results": results}
-    update_calls = [
-        c for c in mock_store.call_args_list if c.args and c.args[0] is activities._js.update_job
-    ]
-    assert len(update_calls) == 1
-    kwargs = update_calls[0].kwargs
-    assert kwargs["tools_completed"] == 2
-    assert kwargs["tools_total"] == 2
-    assert kwargs["current_tool"] is None
-    assert kwargs["progress"] == 60
+    mock_phase.assert_called_once_with(
+        "job-1",
+        "account_provisioning",
+        {"success": True, "tool_results": results},
+    )
+    mock_update.assert_called_once_with(
+        "job-1",
+        progress=60,
+        status_text="Account provisioning complete",
+        current_tool=None,
+        tools_completed=2,
+        tools_total=2,
+    )
     fake_env.add_tools.assert_called_once_with("agent-1", ["postgresql", "redis"])
+
+
+def test_record_account_provisioning_raises_when_job_store_fails() -> None:
+    from agent_provisioning_team.temporal import activities
+
+    results = [{"tool_name": "postgresql", "success": True}]
+    with patch.object(
+        activities._js,
+        "add_completed_phase",
+        side_effect=RuntimeError("store down"),
+    ):
+        with pytest.raises(RuntimeError, match="store down"):
+            activities.record_account_provisioning_activity("job-1", results, "agent-1")
 
 
 def test_list_manifest_tools_activity_returns_ordered_names(tmp_path) -> None:

@@ -413,6 +413,8 @@ def test_compensate_skips_when_provisioner_unregistered(tmp_path: Path) -> None:
 
     success_unknown_key = ToolProvisionResult(tool_name="t", success=True, provisioner_key="ghost")
     orch.compensate("a1", [success_unknown_key])
+    # Unknown registry key skips per-tool rollback; docker/env teardown still runs.
+    fake_docker.deprovision.assert_called_once_with("a1")
 
 
 def test_compensate_list_compensations_failure_falls_to_deprovision(tmp_path: Path) -> None:
