@@ -540,21 +540,30 @@ def test_record_phase_restored_writes_status_update() -> None:
 
 
 def test_credentials_activity_restores_from_prior() -> None:
+    from agent_provisioning_team.models import GeneratedCredentials
     from agent_provisioning_team.temporal import activities
 
+    stored = {
+        "pg": GeneratedCredentials(tool_name="pg", username="u", password="secret"),
+    }
     with (
         patch.object(activities, "_best_effort_job_store"),
+        patch(
+            "agent_provisioning_team.phases.credential_generation.get_stored_credentials",
+            return_value=stored,
+        ),
         patch("temporalio.activity.heartbeat"),
     ):
-        prior = {"success": True, "credentials": {}}
+        prior = {"success": True, "tool_names": ["pg"], "credentials": {}}
         payload = activities.credentials_activity(
             "j", "a", "default.yaml", prior_credentials=prior
         )
 
-    assert payload == {"success": True, "credentials": {}}
+    assert payload["success"] is True
+    assert payload["credentials"]["pg"]["password"] == "secret"
 
 
-def test_credentials_activity_runs_when_no_prior() -> None:
+def test_credentials_activity_checkpoint_omits_plaintext_secrets() -> None:
     from agent_provisioning_team.models import CredentialGenerationResult, GeneratedCredentials
     from agent_provisioning_team.temporal import activities
 
@@ -562,14 +571,10 @@ def test_credentials_activity_runs_when_no_prior() -> None:
         success=True,
         credentials={"pg": GeneratedCredentials(tool_name="pg", username="u", password="p")},
     )
-
-    fake_manifest = MagicMock()
-    fake_orch = MagicMock()
-    fake_orch.credential_store = MagicMock()
-
     with (
         patch.object(activities, "_best_effort_job_store"),
-        patch.object(activities, "_load_ctx", return_value=(fake_orch, fake_manifest)),
+        patch.object(activities._js, "add_completed_phase") as mock_phase,
+        patch.object(activities, "_load_ctx", return_value=(MagicMock(), MagicMock())),
         patch(
             "agent_provisioning_team.phases.credential_generation.run_credential_generation",
             return_value=fake_result,
@@ -578,8 +583,10 @@ def test_credentials_activity_runs_when_no_prior() -> None:
     ):
         payload = activities.credentials_activity("j", "a", "default.yaml")
 
-    assert payload["success"] is True
-    assert "pg" in payload["credentials"]
+    assert payload["credentials"]["pg"]["password"] == "p"
+    checkpoint = mock_phase.call_args.args[2]
+    assert checkpoint["tool_names"] == ["pg"]
+    assert checkpoint["credentials"] == {}
 
 
 def test_credentials_activity_raises_on_failure() -> None:
@@ -610,18 +617,8 @@ def test_provision_tool_activity_calls_provisioner() -> None:
         tool_name="generic", success=True, provisioner_key=None
     )
 
-    fake_tool = MagicMock()
-    fake_tool.provisioner = "generic_provisioner"
-    fake_tool.config = {}
-    fake_manifest = MagicMock()
-    fake_manifest.get_tool.return_value = fake_tool
-
     with (
         patch.object(activities, "_best_effort_job_store"),
-        patch(
-            "agent_provisioning_team.shared.tool_manifest.load_manifest",
-            return_value=fake_manifest,
-        ),
         patch(
             "agent_provisioning_team.shared.tool_agent_registry.build_default_tool_agents",
             return_value={"generic_provisioner": fake_provisioner},
@@ -633,64 +630,24 @@ def test_provision_tool_activity_calls_provisioner() -> None:
             "j",
             "a",
             "api_token",
-            "default.yaml",
             credentials_dump=creds.model_dump(),
             tools_total=1,
+            provisioner="generic_provisioner",
+            tool_config={},
         )
 
     assert payload["success"] is True
-    assert payload["provisioner_key"] == "generic_provisioner"
     assert payload["tool_name"] == "api_token"
+    assert payload["provisioner_key"] == "generic_provisioner"
     fake_provisioner.provision.assert_called_once()
-
-
-def test_provision_tool_activity_raises_when_tool_missing() -> None:
-    from agent_provisioning_team.models import GeneratedCredentials
-    from agent_provisioning_team.temporal import activities
-
-    fake_manifest = MagicMock()
-    fake_manifest.get_tool.return_value = None
-
-    with (
-        patch.object(activities, "_best_effort_job_store"),
-        patch(
-            "agent_provisioning_team.shared.tool_manifest.load_manifest",
-            return_value=fake_manifest,
-        ),
-        patch(
-            "agent_provisioning_team.shared.tool_agent_registry.build_default_tool_agents",
-            return_value={},
-        ),
-        patch("temporalio.activity.heartbeat"),
-    ):
-        creds = GeneratedCredentials(tool_name="x")
-        with pytest.raises(RuntimeError, match="not in manifest"):
-            activities.provision_tool_activity(
-                "j",
-                "a",
-                "x",
-                "default.yaml",
-                credentials_dump=creds.model_dump(),
-                tools_total=1,
-            )
 
 
 def test_provision_tool_activity_raises_when_provisioner_missing() -> None:
     from agent_provisioning_team.models import GeneratedCredentials
     from agent_provisioning_team.temporal import activities
 
-    fake_tool = MagicMock()
-    fake_tool.provisioner = "unknown_provisioner"
-    fake_tool.config = {}
-    fake_manifest = MagicMock()
-    fake_manifest.get_tool.return_value = fake_tool
-
     with (
         patch.object(activities, "_best_effort_job_store"),
-        patch(
-            "agent_provisioning_team.shared.tool_manifest.load_manifest",
-            return_value=fake_manifest,
-        ),
         patch(
             "agent_provisioning_team.shared.tool_agent_registry.build_default_tool_agents",
             return_value={},
@@ -703,9 +660,9 @@ def test_provision_tool_activity_raises_when_provisioner_missing() -> None:
                 "j",
                 "a",
                 "x",
-                "default.yaml",
                 credentials_dump=creds.model_dump(),
                 tools_total=1,
+                provisioner="unknown_provisioner",
             )
 
 
@@ -1031,7 +988,11 @@ tools:
 """,
         encoding="utf-8",
     )
-    assert activities.list_manifest_tools_activity(str(manifest)) == ["postgresql", "redis"]
+    out = activities.list_manifest_tools_activity(str(manifest))
+    assert [t["name"] for t in out] == ["postgresql", "redis"]
+    assert out[0]["provisioner"] == "postgres_provisioner"
+    assert out[1]["provisioner"] == "redis_provisioner"
+    assert isinstance(out[0]["config"], dict)
 
 
 def test_list_manifest_tools_activity_rejects_empty_path() -> None:
@@ -1066,6 +1027,7 @@ def test_setup_activity_progress_path() -> None:
 
     with (
         patch.object(t_acts, "_best_effort_job_store", side_effect=fake_safe),
+        patch.object(t_acts._js, "add_completed_phase") as mock_phase,
         patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
         patch(
             "agent_provisioning_team.phases.setup.run_setup",
@@ -1077,11 +1039,11 @@ def test_setup_activity_progress_path() -> None:
 
     assert payload["success"] is True
     assert payload["environment"]["container_id"] == "c1"
-    # mark_job_running + update_job were invoked.
+    # mark_job_running + update_job were invoked as best-effort; checkpoint is durable.
     fn_names = [r["fn"] for r in recorded]
     assert "mark_job_running" in fn_names
     assert "update_job" in fn_names
-    assert "add_completed_phase" in fn_names
+    mock_phase.assert_called_once()
 
 
 def test_setup_activity_raises_when_setup_fails() -> None:

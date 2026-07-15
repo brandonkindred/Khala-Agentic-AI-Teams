@@ -64,9 +64,14 @@ def test_provision_returns_503_when_temporal_disabled(
 @patch("agent_provisioning_team.api.main.update_job")
 @patch("agent_provisioning_team.api.main.get_job")
 @patch("agent_provisioning_team.temporal.start_workflow.start_provisioning_workflow")
+@patch(
+    "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+    return_value=False,
+)
 @patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=True)
 def test_resume_passes_skip_phases_and_prior_results(
     mock_enabled: MagicMock,
+    mock_is_open: MagicMock,
     mock_start: MagicMock,
     mock_get_job: MagicMock,
     mock_update_job: MagicMock,

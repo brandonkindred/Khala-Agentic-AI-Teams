@@ -34,6 +34,7 @@ class SetupSnapshot(_Snapshot):
 class CredentialGenerationSnapshot(_Snapshot):
     success: bool
     credentials: Dict[str, GeneratedCredentials] = {}
+    tool_names: List[str] = []
     error: Optional[str] = None
 
 

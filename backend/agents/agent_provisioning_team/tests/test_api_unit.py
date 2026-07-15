@@ -289,7 +289,10 @@ def test_delete_job_store_returns_false() -> None:
 
 
 def test_resume_job_not_found() -> None:
-    with patch.object(api_main, "get_job", return_value=None):
+    with (
+        patch.object(api_main, "_require_provision_starter", return_value=MagicMock()),
+        patch.object(api_main, "get_job", return_value=None),
+    ):
         r = client.post("/provision/job/missing/resume")
     assert r.status_code == 404
 
@@ -297,6 +300,7 @@ def test_resume_job_not_found() -> None:
 def test_resume_job_in_running_state_rejected_when_workflow_open() -> None:
     """Active Temporal jobs cannot be resumed (would kill the live run without compensate)."""
     with (
+        patch.object(api_main, "_require_provision_starter", return_value=MagicMock()),
         patch.object(
             api_main,
             "get_job",
@@ -364,14 +368,21 @@ def test_provision_start_timeout_does_not_mark_job_failed() -> None:
 
 
 def test_resume_job_missing_agent_or_manifest() -> None:
-    with patch.object(
-        api_main,
-        "get_job",
-        return_value={
-            "status": "failed",
-            "agent_id": "",  # missing
-            "manifest_path": "default.yaml",
-        },
+    with (
+        patch.object(api_main, "_require_provision_starter", return_value=MagicMock()),
+        patch.object(
+            api_main,
+            "get_job",
+            return_value={
+                "status": "failed",
+                "agent_id": "",  # missing
+                "manifest_path": "default.yaml",
+            },
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
+        ),
     ):
         r = client.post("/provision/job/j1/resume")
     assert r.status_code == 400
@@ -391,6 +402,10 @@ def test_resume_job_temporal_path() -> None:
                 "phase_results": {},
             },
         ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
+        ),
         patch.object(api_main, "update_job"),
         patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
     ):
@@ -398,6 +413,28 @@ def test_resume_job_temporal_path() -> None:
 
     assert r.status_code == 200
     fake_starter.assert_called_once()
+
+
+def test_resume_job_rejects_when_workflow_still_open() -> None:
+    with (
+        patch.object(api_main, "_require_provision_starter", return_value=MagicMock()),
+        patch.object(
+            api_main,
+            "get_job",
+            return_value={
+                "status": "failed",
+                "agent_id": "a1",
+                "manifest_path": "default.yaml",
+            },
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=True,
+        ),
+    ):
+        r = client.post("/provision/job/j1/resume")
+    assert r.status_code == 400
+    assert "active Temporal workflow" in r.json()["detail"]
 
 
 def test_resume_job_returns_503_when_temporal_disabled() -> None:
@@ -412,6 +449,10 @@ def test_resume_job_returns_503_when_temporal_disabled() -> None:
                 "completed_phases": [],
                 "phase_results": {},
             },
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
         ),
         patch.object(
             api_main,
@@ -431,16 +472,26 @@ def test_resume_job_returns_503_when_temporal_disabled() -> None:
 
 
 def test_restart_job_not_found() -> None:
-    with patch.object(api_main, "get_job", return_value=None):
+    with (
+        patch.object(api_main, "_require_provision_starter", return_value=MagicMock()),
+        patch.object(api_main, "get_job", return_value=None),
+    ):
         r = client.post("/provision/job/missing/restart")
     assert r.status_code == 404
 
 
 def test_restart_job_missing_agent_or_manifest() -> None:
-    with patch.object(
-        api_main,
-        "get_job",
-        return_value={"status": "completed", "agent_id": "a1", "manifest_path": ""},
+    with (
+        patch.object(api_main, "_require_provision_starter", return_value=MagicMock()),
+        patch.object(
+            api_main,
+            "get_job",
+            return_value={"status": "completed", "agent_id": "a1", "manifest_path": ""},
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
+        ),
     ):
         r = client.post("/provision/job/j1/restart")
     assert r.status_code == 400
@@ -457,6 +508,10 @@ def test_restart_job_temporal_path() -> None:
                 "agent_id": "a1",
                 "manifest_path": "default.yaml",
             },
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
         ),
         patch.object(api_main, "store_reset_job"),
         patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
@@ -476,6 +531,10 @@ def test_restart_job_returns_503_when_temporal_disabled() -> None:
                 "agent_id": "a1",
                 "manifest_path": "default.yaml",
             },
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
         ),
         patch.object(
             api_main,

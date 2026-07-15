@@ -102,8 +102,7 @@ class AgentProvisioningWorkflow:
         self,
         job_id: str,
         agent_id: str,
-        manifest_path: str,
-        tool_names: list[str],
+        tool_specs: list[dict],
         credentials_by_tool: dict[str, dict[str, Any]],
         skip: set[str],
         prior: dict[str, Any],
@@ -111,21 +110,23 @@ class AgentProvisioningWorkflow:
         """Fan out per-tool provision activities, or restore a prior phase dump.
 
         Preconditions:
-            * ``tool_names`` are the manifest tool names in order.
+            * ``tool_specs`` are ``{name, provisioner, config}`` dicts in order.
             * ``credentials_by_tool`` is keyed by tool name.
         Postconditions:
             * Returns ``(tool_results_dump, succeeded, failures)``.
             * ``succeeded`` entries carry ``tool_name`` + ``provisioner_key``.
         """
+        tool_names = [s["name"] for s in tool_specs]
         if "account_provisioning" in skip and prior.get("account_provisioning"):
             return self._restore_account_provisioning_from_prior(
                 prior["account_provisioning"],
                 tool_names,
             )
 
-        tools_total = len(tool_names)
+        tools_total = len(tool_specs)
 
-        async def _one(tool_name: str) -> Any:
+        async def _one(spec: dict) -> Any:
+            tool_name = spec["name"]
             creds_dump = credentials_by_tool.get(tool_name, {})
             return await workflow.execute_activity(
                 _activities.provision_tool_activity,
@@ -133,9 +134,10 @@ class AgentProvisioningWorkflow:
                     job_id,
                     agent_id,
                     tool_name,
-                    manifest_path,
                     creds_dump,
                     tools_total,
+                    spec["provisioner"],
+                    spec.get("config") or {},
                 ],
                 task_queue=TASK_QUEUE,
                 start_to_close_timeout=TOOL_ACTIVITY_TIMEOUT,
@@ -144,7 +146,7 @@ class AgentProvisioningWorkflow:
             )
 
         raw_results = await asyncio.gather(
-            *[_one(name) for name in tool_names],
+            *[_one(spec) for spec in tool_specs],
             return_exceptions=True,
         )
 
@@ -378,22 +380,24 @@ class AgentProvisioningWorkflow:
             )
             setup_completed = True
 
-            credentials_by_tool = await self._execute_credentials_phase(
-                job_id, agent_id, manifest_path, skip, prior
-            )
-
-            tool_names = await workflow.execute_activity(
+            # Freeze manifest tools once for credential + provision phases so a
+            # mid-run file edit cannot change the tool set under us.
+            tool_specs = await workflow.execute_activity(
                 _activities.list_manifest_tools_activity,
                 args=[manifest_path],
                 task_queue=TASK_QUEUE,
                 schedule_to_close_timeout=PHASE_TIMEOUT,
                 retry_policy=DEFAULT_RETRY_POLICY,
             )
+
+            credentials_by_tool = await self._execute_credentials_phase(
+                job_id, agent_id, manifest_path, skip, prior
+            )
+
             tool_results_dump, succeeded, failures = await self._run_tool_provisioning_phase(
                 job_id,
                 agent_id,
-                manifest_path,
-                tool_names,
+                tool_specs,
                 credentials_by_tool,
                 skip,
                 prior,

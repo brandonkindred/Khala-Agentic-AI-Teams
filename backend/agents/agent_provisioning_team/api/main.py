@@ -104,45 +104,44 @@ def _validate_job_for_reprovision(
     allowed_statuses: frozenset[str],
     action_label: str,
 ) -> Dict[str, Any]:
-    """Validate resume/restart, allowing stranded pending/running after start timeout.
+    """Validate resume/restart without replacing a live Temporal execution.
 
     Preconditions:
         * ``job_id`` is non-empty.
         * ``allowed_statuses`` is the normal gate for ``action_label``.
     Postconditions:
-        * Returns job data when status is allowed, or when status is pending/
-          running and no open Temporal workflow exists for the stable id.
-        * Raises ``ValueError`` when the job is missing, still has an open
-          workflow, or is otherwise not actionable.
+        * Returns job data when status is allowed (or stranded pending/running)
+          and no open Temporal workflow exists for the stable id.
+        * Raises ``ValueError`` when the job is missing, has an open workflow,
+          or is otherwise not actionable.
     """
     data = get_job(job_id)
     if not data:
         raise ValueError(f"Job {job_id} not found")
     try:
-        return validate_job_for_action(data, job_id, allowed_statuses, action_label)
+        validate_job_for_action(data, job_id, allowed_statuses, action_label)
     except ValueError:
         status = data.get("status", JOB_STATUS_PENDING)
         if status not in _STRANDED_START_STATUSES:
             raise
-        # Deferred import: api.main is loaded at process boot; pulling
-        # temporal.start_workflow at module top can create import cycles with
-        # the Temporal package self-boot path (Pattern A).
-        from agent_provisioning_team.temporal.start_workflow import (
-            provisioning_workflow_is_open,
-        )
-
-        if provisioning_workflow_is_open(job_id):
-            raise ValueError(
-                f"Job {job_id} is {status} with an active Temporal workflow; "
-                f"cannot be {action_label}"
-            )
         logger.info(
-            "Allowing %s of stranded job=%s status=%s (no open Temporal workflow)",
-            action_label,
+            "Candidate stranded job=%s status=%s for %s; checking Temporal open state",
             job_id,
             status,
+            action_label,
         )
-        return data
+    # Deferred import: api.main is loaded at process boot; pulling
+    # temporal.start_workflow at module top can create import cycles with
+    # the Temporal package self-boot path (Pattern A).
+    from agent_provisioning_team.temporal.start_workflow import (
+        provisioning_workflow_is_open,
+    )
+
+    if provisioning_workflow_is_open(job_id):
+        raise ValueError(
+            f"Job {job_id} has an active Temporal workflow; cannot be {action_label}"
+        )
+    return data
 
 
 def _ensure_temporal_enabled() -> None:
@@ -426,6 +425,7 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
         * On success, the job is set to ``JOB_STATUS_RUNNING`` and the
           workflow is restarted skipping ``completed_phases``.
     """
+    starter = _require_provision_starter()
     try:
         data = _validate_job_for_reprovision(job_id, PROVISION_RESUMABLE_STATUSES, "resumed")
     except ValueError as exc:
@@ -443,7 +443,6 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
     phase_values = {ph.value for ph in Phase}
     completed_values = [p for p in completed if p in phase_values]
 
-    starter = _require_provision_starter()
     update_job(job_id, status=JOB_STATUS_RUNNING, error=None)
 
     try:
@@ -484,6 +483,7 @@ def restart_provision_job(job_id: str) -> ProvisionJobResponse:
         * On success, the job is reset and a fresh workflow run is started
           with no skipped phases.
     """
+    starter = _require_provision_starter()
     try:
         data = _validate_job_for_reprovision(job_id, RESTARTABLE_STATUSES, "restarted")
     except ValueError as exc:
@@ -495,7 +495,6 @@ def restart_provision_job(job_id: str) -> ProvisionJobResponse:
     if not agent_id or not manifest_path:
         raise HTTPException(status_code=400, detail="Job is missing agent_id or manifest_path.")
 
-    starter = _require_provision_starter()
     store_reset_job(job_id)
 
     try:

@@ -58,6 +58,12 @@ tools:
     return str(f)
 
 
+_TOOL_SPECS = [
+    {"name": "postgresql", "provisioner": "postgres_provisioner", "config": {}},
+    {"name": "redis", "provisioner": "redis_provisioner", "config": {}},
+]
+
+
 def _call(stub: _ExecActivityStub, name: str) -> dict:
     return next(c for c in stub.calls if c["name"] == name)
 
@@ -72,7 +78,7 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
-            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "list_manifest_tools_activity": _TOOL_SPECS,
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -127,7 +133,7 @@ async def test_workflow_compensates_on_tool_failure(tmp_path) -> None:
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
-            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "list_manifest_tools_activity": _TOOL_SPECS,
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -163,7 +169,7 @@ async def test_workflow_skips_provisioning_when_resumed(tmp_path) -> None:
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
-            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "list_manifest_tools_activity": _TOOL_SPECS,
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -219,7 +225,7 @@ async def test_workflow_resume_tool_set_mismatch_compensates_prior_successes(tmp
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
-            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "list_manifest_tools_activity": _TOOL_SPECS,
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -272,7 +278,7 @@ async def test_workflow_resume_with_prior_failed_tools_compensates(tmp_path) -> 
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
-            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "list_manifest_tools_activity": _TOOL_SPECS,
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -336,7 +342,7 @@ async def test_workflow_handles_non_dict_provision_results(tmp_path) -> None:
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": None},
-            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "list_manifest_tools_activity": _TOOL_SPECS,
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -375,7 +381,7 @@ async def test_workflow_handles_dict_failure_results(tmp_path) -> None:
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": None},
-            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "list_manifest_tools_activity": _TOOL_SPECS,
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -407,7 +413,7 @@ async def test_workflow_marks_failed_on_audit_error(tmp_path) -> None:
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
-            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "list_manifest_tools_activity": _TOOL_SPECS,
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -470,7 +476,7 @@ async def test_workflow_compensates_succeeded_tools_on_checkpoint_failure(tmp_pa
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
-            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "list_manifest_tools_activity": _TOOL_SPECS,
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -532,7 +538,7 @@ async def test_workflow_marks_failed_on_documentation_error(tmp_path) -> None:
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
-            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "list_manifest_tools_activity": _TOOL_SPECS,
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -570,7 +576,7 @@ async def test_workflow_marks_failed_on_deliver_error(tmp_path) -> None:
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
-            "list_manifest_tools_activity": ["postgresql", "redis"],
+            "list_manifest_tools_activity": _TOOL_SPECS,
             "credentials_activity": {
                 "success": True,
                 "credentials": {
