@@ -235,8 +235,9 @@ def test_pattern_a_exports_workflows_and_activities() -> None:
         AgentProvisioningWorkflow,
     )
 
-    assert AgentProvisioningWorkflow in t.WORKFLOWS
-    assert not hasattr(t, "AgentProvisioningWorkflowV2")
+    provisioning = [w for w in t.WORKFLOWS if "Provisioning" in w.__name__]
+    assert len(provisioning) == 1
+    assert provisioning[0] is AgentProvisioningWorkflow
     for fn in (
         setup_activity,
         credentials_activity,

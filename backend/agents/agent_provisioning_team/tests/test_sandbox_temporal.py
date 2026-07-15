@@ -260,8 +260,6 @@ async def test_sandbox_reaper_workflow_survives_activity_failure() -> None:
 
 def test_sandbox_temporal_enabled_follows_is_temporal_enabled(monkeypatch) -> None:
     monkeypatch.setenv("TEMPORAL_ADDRESS", "localhost:7233")
-    # ensure no leftover fallback env matters — var must be ignored/absent from code
-    monkeypatch.setenv("PROVISION_THREAD_FALLBACK", "1")
     from agent_provisioning_team.temporal import sandbox_dispatch as sd
 
     assert sd.sandbox_temporal_enabled() is True

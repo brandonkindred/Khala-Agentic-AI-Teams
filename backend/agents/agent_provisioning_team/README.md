@@ -33,9 +33,10 @@ Progress is tracked via a file-based job store and exposed through REST API endp
 
 ## Durable execution (Temporal)
 
-Every operation the team performs runs as a durable Temporal workflow/activity
-(decorator "annotations": `@workflow.defn` / `@workflow.run` / `@activity.defn`)
-when `TEMPORAL_ADDRESS` is set, and falls back to an in-process path otherwise.
+Provisioning, resume, restart, and deprovision **require** Temporal
+(`TEMPORAL_ADDRESS` set and worker reachable). The API returns **503** when
+Temporal is unavailable — there is no in-process fallback.
+
 Workflows/activities live in `temporal/`. Provisioning/deprovision are
 registered in the `WORKFLOWS` / `ACTIVITIES` lists in `temporal/__init__.py`,
 served by the single Pattern A worker (task queue `agent-provisioning`) that
@@ -48,26 +49,23 @@ also runs inside the standalone `agent-provisioning-service` team container).
 This keeps the sandbox `Lifecycle` singleton's process-local state from being
 mutated by an activity dispatched into the wrong process — see
 `temporal/constants.py`'s `SANDBOX_TASK_QUEUE` docstring and
-`sandbox/README.md`'s "Durable execution" section for the full rationale. The
-escape hatch `PROVISION_THREAD_FALLBACK=1` forces the in-process path for the
-whole team (including sandbox) even when Temporal is configured.
+`sandbox/README.md`'s "Durable execution" section for the full rationale.
 
 ### Coverage — every team operation → its workflow/activity
 
 | Operation | Entry point | Workflow | Activities |
 |---|---|---|---|
-| Provision (default) | `POST /provision` | `AgentProvisioningWorkflowV2` | `setup` / `credentials` / per-tool `provision_tool` (parallel) / `audit` / `documentation` / `deliver` / `compensate` (`*_activity_v2`) |
-| Provision (legacy) | drain-only | `AgentProvisioningWorkflow` | `run_provisioning_activity` |
-| Resume / restart | `POST /provision/job/{id}/resume`·`/restart` | `AgentProvisioningWorkflowV2` (`skip_phases` + `prior_results`) | same as provision |
-| Deprovision | `DELETE /environments/{agent_id}` | `AgentDeprovisioningWorkflow` (execute-and-wait) | `deprovision_activity` |
+| Provision | `POST /provision` | `AgentProvisioningWorkflow` | `setup` / `credentials` / per-tool `provision_tool` (parallel) / `audit` / `documentation` / `deliver` / `compensate` |
+| Resume / restart | `POST /provision/job/{id}/resume`·`/restart` | `AgentProvisioningWorkflow` (`skip_phases` + `prior_results`) | same |
+| Deprovision | `DELETE /environments/{agent_id}` | `AgentDeprovisioningWorkflow` | `deprovision_activity` |
 | Sandbox warm | `POST /api/agents/sandboxes/{id}/warm`, Agent Console invoke | `SandboxAcquireWorkflow` | `sandbox_acquire_activity` |
 | Sandbox teardown | `DELETE /api/agents/sandboxes/{id}` | `SandboxTeardownWorkflow` | `sandbox_teardown_activity` |
 | Sandbox idle reaper | started once at API boot | `SandboxReaperWorkflow` (self-scheduling, fixed id, `continue_as_new`) | `sandbox_reap_activity` |
 
-Deprovision and sandbox dispatch mirror `_temporal_starter()`: they branch on
-`is_temporal_enabled()` and use `execute_workflow_sync` (sync `DELETE
-/environments` handler) or the non-blocking `execute_workflow_async`
-(`async def` sandbox routes) so the API event loop is never blocked.
+Deprovision uses `execute_workflow_sync` (sync `DELETE /environments` handler).
+Sandbox dispatch branches on `is_temporal_enabled()` and uses
+`execute_workflow_async` (`async def` sandbox routes) so the API event loop is
+never blocked.
 
 ### Sandbox lifecycle invariants
 
