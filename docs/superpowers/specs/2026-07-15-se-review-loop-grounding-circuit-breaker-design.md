@@ -32,8 +32,8 @@
 | Approach | Plumb count on existing review result surfaces | Accurate ratio; matches issue intent |
 | Defaults | `cycle_limit=3`, `ratio=0.75` | Observability is live; avoid aggressive false trips before data accumulates |
 | Kill switch | `grounding_failure_cycle_limit ≤ 0` | No extra boolean required |
-| Evaluate when | After outer-cycle CR settles (post inner retries) | Matches “per cycle” in the issue; lower FP than per inner attempt |
-| Bad cycle | `not passed` **and** ratio ≥ threshold | Passing CR after heavy drops must not accumulate streak |
+| Evaluate when | Once when leaving the CR section of an outer cycle | One streak tick per outer cycle; lower FP than per-attempt ticks |
+| Bad cycle | Any CR call in that outer cycle had `not passed` **and** ratio ≥ threshold | Needed for QA/sec restart loops (CR may pass after a bad failing call); pass-only cycles never count |
 | Missing raw | `None` / `≤0` → not-bad (reset streak) | In-process agent / QA-sec / grounding-off stay safe |
 | Trip recording | `review_grounding_circuit_breaker` via existing helper | Consistent with #1277 telemetry |
 
@@ -49,11 +49,10 @@ PhaseReviewResult / ReviewResult.raw_issue_count
        ↓
 CR gate adapter → GateOutcome.raw_issue_count
        ↓
-run_gated_execution_impl (after outer CR settled)
-  → ratio = (raw - len(issues)) / raw   # only if raw > 0
-  → bad iff not passed and ratio ≥ threshold
-  → streak++ or reset
-  → if streak ≥ limit: REVIEW_FAILED + record gate
+run_gated_execution_impl
+  → on each CR gate call: if not passed and ratio ≥ threshold → cycle_bad
+  → when leaving CR section: streak++ if cycle_bad else reset
+  → if streak ≥ limit: REVIEW_FAILED + record gate (before QA if CR passed)
 ```
 
 Also: per-microtask `seen` set; `_dedup_issues(issues, seen)` before every `run_batch_coding_fixes` (CR/QA/security).
@@ -76,23 +75,34 @@ Also: per-microtask `seen` set; `_dedup_issues(issues, seen)` before every `run_
 - `grounding_failure_cycle_limit: int = 3` (`≤0` disables)
 - `grounding_failure_ratio_threshold: float = 0.75` (clamp to `[0.0, 1.0]` when reading)
 
-**Ratio** for a settled CR `GateOutcome`:
+**Ratio** for a CR `GateOutcome` call:
 
 ```text
 ratio = (raw_issue_count - len(issues)) / raw_issue_count
 ```
 
-only when `raw_issue_count` is an `int > 0`; otherwise not-bad.
+only when `raw_issue_count` is an `int > 0`; otherwise that call is not-bad.
+
+**Why not “settled outcome not passed” alone:** a failing settled CR always ends the
+microtask via retry exhaustion, so multi-outer-cycle streaks cannot accumulate
+that way. Production `max_total_cycles` burns use CR-pass-then-QA/sec-restart.
 
 **Streak** (per microtask, across outer cycles):
 
-- Increment when `not cr_outcome.passed` and ratio ≥ threshold.
-- Else reset to `0` (includes CR pass after heavy drops; includes missing raw).
+- During the CR section, set `cycle_bad` if **any** CR gate call (initial or
+  inner retry) has `not passed` and ratio ≥ threshold.
+- When leaving the CR section (pass → QA, or fail → terminal): if `cycle_bad`
+  then `streak += 1`, else reset to `0`. Pass-only cycles (no failing high-ratio
+  CR call) never increment — including CR pass after drops with no prior bad call.
+- Missing raw on a call does not mark that call bad.
 
 **Trip** (prefer a helper to avoid C901 growth):
 
-- Set `REVIEW_FAILED`, rollback microtask files, distinct diagnostic `mt.notes`.
+- When `streak >= limit` on leaving the CR section: set `REVIEW_FAILED`,
+  rollback microtask files, distinct diagnostic `mt.notes`.
 - `_record_terminal_gate_failure("review_grounding_circuit_breaker", cr_outcome, task_id)`.
+- Prefer breaker over ordinary retry-exhaustion when both would apply; if CR
+  passed this cycle but streak hit the limit, trip before QA.
 - Honor `on_failure` / stop-raise the same way as other terminal CR failures.
 
 ## `_dedup_issues`
