@@ -236,9 +236,9 @@ def test_pattern_a_exports_workflows_and_activities() -> None:
     from agent_provisioning_team.temporal.activities import (
         audit_activity,
         credentials_activity,
-        list_manifest_tools_activity,
         deliver_activity,
         documentation_activity,
+        list_manifest_tools_activity,
         provision_tool_activity,
         setup_activity,
     )

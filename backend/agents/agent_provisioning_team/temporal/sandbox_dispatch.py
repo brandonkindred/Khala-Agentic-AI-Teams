@@ -23,7 +23,11 @@ from agent_provisioning_team.sandbox import (
     DockerUnavailableError,
     SandboxAcquireFailedError,
     UnknownAgentError,
+)
+from agent_provisioning_team.sandbox import (
     acquire as _acquire_sandbox_inprocess,
+)
+from agent_provisioning_team.sandbox import (
     teardown as _teardown_sandbox_inprocess,
 )
 from agent_provisioning_team.sandbox.provisioner import DockerError
