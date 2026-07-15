@@ -255,14 +255,20 @@ def test_resume_job_not_found() -> None:
 
 def test_resume_job_in_running_state_rejected() -> None:
     """Active Temporal jobs cannot be resumed (stable workflow id collision)."""
-    with patch.object(
-        api_main,
-        "get_job",
-        return_value={
-            "status": "running",
-            "agent_id": "a1",
-            "manifest_path": "default.yaml",
-        },
+    with (
+        patch.object(
+            api_main,
+            "get_job",
+            return_value={
+                "status": "running",
+                "agent_id": "a1",
+                "manifest_path": "default.yaml",
+            },
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=True,
+        ),
     ):
         r = client.post("/provision/job/j1/resume")
     assert r.status_code == 400
@@ -270,17 +276,51 @@ def test_resume_job_in_running_state_rejected() -> None:
 
 
 def test_resume_job_in_pending_state_rejected() -> None:
-    with patch.object(
-        api_main,
-        "get_job",
-        return_value={
-            "status": "pending",
-            "agent_id": "a1",
-            "manifest_path": "default.yaml",
-        },
+    with (
+        patch.object(
+            api_main,
+            "get_job",
+            return_value={
+                "status": "pending",
+                "agent_id": "a1",
+                "manifest_path": "default.yaml",
+            },
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=True,
+        ),
     ):
         r = client.post("/provision/job/j1/resume")
     assert r.status_code == 400
+
+
+def test_resume_stranded_pending_job_when_no_open_workflow() -> None:
+    """Indeterminate start timeouts leave pending jobs recoverable if Temporal never opened."""
+    starter = MagicMock()
+    with (
+        patch.object(
+            api_main,
+            "get_job",
+            return_value={
+                "status": "pending",
+                "agent_id": "a1",
+                "manifest_path": "default.yaml",
+                "completed_phases": [],
+                "phase_results": {},
+            },
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
+        ),
+        patch.object(api_main, "_require_provision_starter", return_value=starter),
+        patch.object(api_main, "update_job"),
+    ):
+        r = client.post("/provision/job/j1/resume")
+    assert r.status_code == 200
+    starter.assert_called_once()
+    assert starter.call_args.kwargs.get("replace_existing") is True
 
 
 def test_provision_start_timeout_does_not_mark_job_failed() -> None:

@@ -232,16 +232,15 @@ def provision_tool_activity(
         * Returns ``ToolProvisionResult.model_dump()`` from the provisioner
           with ``provisioner_key`` set to the manifest registry key (needed by
           ``compensate()`` — built-in provisioners leave it ``None``).
-        * On ``result.success``, records the tool via ``EnvironmentStore.add_tool``
-          so ``/environments`` status reflects provisioned tools (mirrors
-          ``run_account_provisioning``).
+        * Does **not** write ``EnvironmentStore`` — parallel fan-out can run in
+          different worker processes, so tool lists are recorded once after the
+          gather in ``record_account_provisioning_activity``.
         * Raises ``RuntimeError`` when the tool or provisioner is unknown.
         * Updates ``job_store`` with the current tool / phase progress.
           Does not write ``tools_completed`` — parallel fan-out indexes are not
           completion counts and would race/regress under ``asyncio.gather``.
     """
     from agent_provisioning_team.models import GeneratedCredentials
-    from agent_provisioning_team.shared.environment_store import EnvironmentStore
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
     from agent_provisioning_team.shared.tool_manifest import load_manifest
 
@@ -276,8 +275,6 @@ def provision_tool_activity(
     # Mirror run_account_provisioning: stamp the registry key so compensate()
     # can look the provisioner back up (built-ins leave provisioner_key=None).
     result.provisioner_key = tool.provisioner
-    if result.success:
-        EnvironmentStore().add_tool(agent_id, tool_name)
     return result.model_dump()
 
 
@@ -471,17 +468,21 @@ def deliver_activity(
 def record_account_provisioning_activity(
     job_id: str,
     tool_results_dump: List[Dict[str, Any]],
+    agent_id: str = "",
 ) -> Dict[str, Any]:
     """Persist a successful account-provisioning checkpoint for ``/resume``.
 
     Preconditions:
         * ``job_id`` is non-empty.
         * ``tool_results_dump`` is the serializable per-tool result list.
+        * ``agent_id`` is non-empty when environment tool recording is required.
     Postconditions:
         * ``completed_phases`` includes ``account_provisioning`` and
           ``phase_results`` carries ``{"success": True, "tool_results": ...}``.
         * Job progress reports ``tools_completed`` / ``tools_total`` from the
           finished result list so status polls no longer show ``0/N``.
+        * When ``agent_id`` is set, successful tool names are written once via
+          ``EnvironmentStore.add_tools`` (safe after parallel fan-out).
     """
     assert job_id, "job_id must be non-empty"
     results = list(tool_results_dump)
@@ -498,6 +499,15 @@ def record_account_provisioning_activity(
         tools_completed=tools_completed,
         tools_total=tools_total,
     )
+    if agent_id:
+        from agent_provisioning_team.shared.environment_store import EnvironmentStore
+
+        names = [
+            r.get("tool_name")
+            for r in results
+            if isinstance(r, dict) and r.get("success") and r.get("tool_name")
+        ]
+        EnvironmentStore().add_tools(agent_id, [n for n in names if isinstance(n, str)])
     return payload
 
 

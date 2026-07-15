@@ -224,6 +224,21 @@ def test_deprovision_agent_degrades_gracefully_on_workflow_failure() -> None:
     assert "workflow crashed mid-run" in resp.error
 
 
+def test_deprovision_agent_handles_invalid_workflow_payload() -> None:
+    """Malformed workflow dicts become success=False instead of an unhandled 500."""
+    from agent_provisioning_team.api import main
+
+    fake_runner = MagicMock(return_value={"unexpected": True})
+
+    with patch.object(main, "_require_deprovision_runner", return_value=fake_runner):
+        resp = main.deprovision_agent("a", force=False)
+
+    assert isinstance(resp, DeprovisionResponse)
+    assert resp.agent_id == "a"
+    assert resp.success is False
+    assert "Invalid deprovision workflow response" in (resp.error or "")
+
+
 def test_deprovision_agent_endpoint_returns_503_when_temporal_disabled() -> None:
     """DELETE /environments/{agent_id} is Temporal-only: 503, not an
     in-process orchestrator fallback, when Temporal is disabled."""

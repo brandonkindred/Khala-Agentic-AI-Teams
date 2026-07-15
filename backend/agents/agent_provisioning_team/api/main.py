@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from temporalio.exceptions import TemporalError
 
 from job_service_client import (
@@ -73,6 +73,12 @@ PROVISION_RESUMABLE_STATUSES: frozenset[str] = frozenset(
     }
 )
 
+# When start acceptance times out we leave pending/running; those are recoverable
+# only if Temporal has no open execution for the stable workflow id.
+_STRANDED_START_STATUSES: frozenset[str] = frozenset(
+    {JOB_STATUS_PENDING, JOB_STATUS_RUNNING}
+)
+
 
 def _is_indeterminate_workflow_start(exc: BaseException) -> bool:
     """True when Temporal may still have accepted the start (caller must not fail the job)."""
@@ -89,6 +95,49 @@ def _fail_job_after_start_error(job_id: str, exc: BaseException) -> None:
         )
         return
     mark_job_failed(job_id, error=str(exc))
+
+
+def _validate_job_for_reprovision(
+    job_id: str,
+    allowed_statuses: frozenset[str],
+    action_label: str,
+) -> Dict[str, Any]:
+    """Validate resume/restart, allowing stranded pending/running after start timeout.
+
+    Preconditions:
+        * ``job_id`` is non-empty.
+        * ``allowed_statuses`` is the normal gate for ``action_label``.
+    Postconditions:
+        * Returns job data when status is allowed, or when status is pending/
+          running and no open Temporal workflow exists for the stable id.
+        * Raises ``ValueError`` when the job is missing, still has an open
+          workflow, or is otherwise not actionable.
+    """
+    data = get_job(job_id)
+    if not data:
+        raise ValueError(f"Job {job_id} not found")
+    try:
+        return validate_job_for_action(data, job_id, allowed_statuses, action_label)
+    except ValueError:
+        status = data.get("status", JOB_STATUS_PENDING)
+        if status not in _STRANDED_START_STATUSES:
+            raise
+        from agent_provisioning_team.temporal.start_workflow import (
+            provisioning_workflow_is_open,
+        )
+
+        if provisioning_workflow_is_open(job_id):
+            raise ValueError(
+                f"Job {job_id} is {status} with an active Temporal workflow; "
+                f"cannot be {action_label}"
+            )
+        logger.info(
+            "Allowing %s of stranded job=%s status=%s (no open Temporal workflow)",
+            action_label,
+            job_id,
+            status,
+        )
+        return data
 
 
 def _require_provision_starter():
@@ -353,9 +402,7 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
           workflow is restarted skipping ``completed_phases``.
     """
     try:
-        data = validate_job_for_action(
-            get_job(job_id), job_id, PROVISION_RESUMABLE_STATUSES, "resumed"
-        )
+        data = _validate_job_for_reprovision(job_id, PROVISION_RESUMABLE_STATUSES, "resumed")
     except ValueError as exc:
         code = 404 if "not found" in str(exc) else 400
         raise HTTPException(status_code=code, detail=str(exc)) from exc
@@ -415,7 +462,7 @@ def restart_provision_job(job_id: str) -> ProvisionJobResponse:
           with no skipped phases.
     """
     try:
-        data = validate_job_for_action(get_job(job_id), job_id, RESTARTABLE_STATUSES, "restarted")
+        data = _validate_job_for_reprovision(job_id, RESTARTABLE_STATUSES, "restarted")
     except ValueError as exc:
         code = 404 if "not found" in str(exc) else 400
         raise HTTPException(status_code=code, detail=str(exc)) from exc
@@ -481,6 +528,14 @@ def deprovision_agent(
         return DeprovisionResponse.model_validate(runner(agent_id, force))
     except HTTPException:
         raise
+    except ValidationError as exc:
+        logger.exception("Invalid deprovision workflow response for agent=%s", agent_id)
+        return DeprovisionResponse(
+            agent_id=agent_id,
+            success=False,
+            details={},
+            error=f"Invalid deprovision workflow response: {exc}",
+        )
     except RuntimeError as exc:
         # execute_workflow_sync raises this when the shared Temporal client/loop
         # never becomes available — same "Temporal required" contract as provision.

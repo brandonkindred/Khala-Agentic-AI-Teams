@@ -102,6 +102,20 @@ def test_environment_store_add_tool(tmp_path: Path) -> None:
     assert store.get("a1").tools_provisioned == ["pg"]
 
 
+def test_environment_store_add_tools_batch(tmp_path: Path) -> None:
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(
+            agent_id="a1",
+            container_id="c1",
+            container_name="c1",
+            workspace_path="/w",
+        )
+    )
+    assert store.add_tools("a1", ["pg", "redis", "pg"]) is True
+    assert store.get("a1").tools_provisioned == ["pg", "redis"]
+
+
 def test_environment_store_add_tool_handles_corrupt(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
     bad = tmp_path / "broken.json"

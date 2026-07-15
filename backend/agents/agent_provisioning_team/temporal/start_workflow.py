@@ -136,6 +136,65 @@ def start_provisioning_workflow(
     )
 
 
+def provisioning_workflow_is_open(job_id: str, *, timeout_s: float = 5.0) -> bool:
+    """Return True when the stable provisioning workflow for ``job_id`` is still open.
+
+    Used by resume/restart so jobs left ``pending``/``running`` after an
+    indeterminate start timeout can be recovered when Temporal never accepted
+    (or already closed) the workflow.
+
+    Preconditions:
+        * ``job_id`` is non-empty.
+    Postconditions:
+        * Returns ``True`` for RUNNING / CONTINUED_AS_NEW, or when the Temporal
+          client/loop is unavailable / describe is indeterminate (conservative:
+          avoid colliding with a live start).
+        * Returns ``False`` when the workflow is missing or in a terminal status.
+    """
+    from temporalio.client import WorkflowExecutionStatus
+    from temporalio.service import RPCError, RPCStatusCode
+
+    assert job_id, "job_id must be non-empty"
+    loop = get_temporal_loop()
+    client = get_temporal_client()
+    if loop is None or client is None:
+        return True
+
+    workflow_id = f"{WORKFLOW_ID_PREFIX}{job_id}"
+
+    async def _status() -> WorkflowExecutionStatus:
+        handle = client.get_workflow_handle(workflow_id)
+        desc = await handle.describe()
+        return desc.status
+
+    try:
+        status = asyncio.run_coroutine_threadsafe(_status(), loop).result(timeout=timeout_s)
+    except RPCError as exc:
+        if exc.status == RPCStatusCode.NOT_FOUND:
+            return False
+        logger.warning(
+            "Describe provisioning workflow id=%s failed (%s); treating as open",
+            workflow_id,
+            exc,
+        )
+        return True
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "not found" in msg or "notfound" in msg.replace(" ", ""):
+            return False
+        logger.warning(
+            "Describe provisioning workflow id=%s failed (%s); treating as open",
+            workflow_id,
+            exc,
+        )
+        return True
+
+    return status in (
+        WorkflowExecutionStatus.RUNNING,
+        WorkflowExecutionStatus.CONTINUED_AS_NEW,
+    )
+
+
 def run_deprovision_workflow(agent_id: str, force: bool = False) -> dict[str, Any]:
     """Run ``AgentDeprovisioningWorkflow`` and block for its result.
 

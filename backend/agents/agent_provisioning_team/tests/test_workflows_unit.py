@@ -58,6 +58,10 @@ tools:
     return str(f)
 
 
+def _call(stub: _ExecActivityStub, name: str) -> dict:
+    return next(c for c in stub.calls if c["name"] == name)
+
+
 @pytest.mark.asyncio
 async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
     """Happy path runs setup → credentials → per-tool provision → audit → docs → deliver."""
@@ -95,8 +99,8 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
     fn_names = [c["name"] for c in stub.calls]
     assert "setup_activity" in fn_names
     assert "credentials_activity" in fn_names
-    # Two tools → two provision activities.
-    assert fn_names.count("provision_tool_activity") == 2
+    provision_calls = [c for c in stub.calls if c["name"] == "provision_tool_activity"]
+    assert [c["args"][2] for c in provision_calls] == ["postgresql", "redis"]
     assert "record_account_provisioning_activity" in fn_names
     assert "audit_activity" in fn_names
     assert "documentation_activity" in fn_names
@@ -110,7 +114,6 @@ async def test_workflow_compensates_on_tool_failure(tmp_path) -> None:
 
     manifest_path = _build_manifest_yaml(tmp_path)
 
-    # One tool succeeds, the other raises.
     def provision_responder(call):
         tool_name = call["args"][2]
         if tool_name == "postgresql":
@@ -142,10 +145,12 @@ async def test_workflow_compensates_on_tool_failure(tmp_path) -> None:
         with pytest.raises(RuntimeError, match="Tool provisioning failed"):
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
-    fn_names = [c["name"] for c in stub.calls]
-    # Compensate was invoked
-    assert "compensate_activity" in fn_names
-    assert fn_names.count("mark_job_failed_activity") == 1
+    compensate_call = _call(stub, "compensate_activity")
+    assert compensate_call["args"][0] == "agent-1"
+    assert compensate_call["args"][1] == [
+        {"tool_name": "postgresql", "provisioner_key": "postgres_provisioner"}
+    ]
+    assert [c["name"] for c in stub.calls].count("mark_job_failed_activity") == 1
 
 
 @pytest.mark.asyncio
@@ -172,22 +177,19 @@ async def test_workflow_skips_provisioning_when_resumed(tmp_path) -> None:
         }
     )
 
-    prior = {
-        "account_provisioning": {
-            "tool_results": [
-                {
-                    "tool_name": "postgresql",
-                    "success": True,
-                    "provisioner_key": "postgres_provisioner",
-                },
-                {
-                    "tool_name": "redis",
-                    "success": True,
-                    "provisioner_key": "redis_provisioner",
-                },
-            ]
-        }
-    }
+    prior_tools = [
+        {
+            "tool_name": "postgresql",
+            "success": True,
+            "provisioner_key": "postgres_provisioner",
+        },
+        {
+            "tool_name": "redis",
+            "success": True,
+            "provisioner_key": "redis_provisioner",
+        },
+    ]
+    prior = {"account_provisioning": {"tool_results": prior_tools}}
 
     with patch.object(wf.workflow, "execute_activity", new=stub):
         await wf.AgentProvisioningWorkflow().run(
@@ -199,11 +201,13 @@ async def test_workflow_skips_provisioning_when_resumed(tmp_path) -> None:
         )
 
     fn_names = [c["name"] for c in stub.calls]
-    # No per-tool provisioning happened
     assert "provision_tool_activity" not in fn_names
     assert "record_account_provisioning_activity" not in fn_names
-    # Compensation is skipped because everything in prior was successful
     assert "compensate_activity" not in fn_names
+
+    assert _call(stub, "audit_activity")["args"][3] == prior_tools
+    assert _call(stub, "documentation_activity")["args"][4] == prior_tools
+    assert _call(stub, "deliver_activity")["args"][4] == prior_tools
 
 
 @pytest.mark.asyncio
@@ -247,7 +251,9 @@ async def test_workflow_resume_rejects_tool_set_mismatch(tmp_path) -> None:
                 prior_results=prior,
             )
 
-    assert "mark_job_failed_activity" in [c["name"] for c in stub.calls]
+    fail_call = _call(stub, "mark_job_failed_activity")
+    assert fail_call["args"][0] == "job-1"
+    assert "Cannot restore account_provisioning" in fail_call["args"][1]
 
 
 @pytest.mark.asyncio
@@ -301,9 +307,11 @@ async def test_workflow_resume_with_prior_failed_tools_compensates(tmp_path) -> 
                 prior_results=prior,
             )
 
-    fn_names = [c["name"] for c in stub.calls]
-    assert "compensate_activity" in fn_names
-    assert "mark_job_failed_activity" in fn_names
+    compensate_call = _call(stub, "compensate_activity")
+    assert compensate_call["args"][1] == [
+        {"tool_name": "postgresql", "provisioner_key": "postgres_provisioner"}
+    ]
+    assert "mark_job_failed_activity" in [c["name"] for c in stub.calls]
 
 
 @pytest.mark.asyncio
@@ -315,7 +323,6 @@ async def test_workflow_handles_non_dict_provision_results(tmp_path) -> None:
 
     def provision_responder(call):
         tool_name = call["args"][2]
-        # Return weird non-dict for one tool
         if tool_name == "redis":
             return None
         return {"tool_name": "postgresql", "success": True, "provisioner_key": "x"}
@@ -340,6 +347,10 @@ async def test_workflow_handles_non_dict_provision_results(tmp_path) -> None:
     with patch.object(wf.workflow, "execute_activity", new=stub):
         with pytest.raises(RuntimeError, match="Tool provisioning failed"):
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    assert _call(stub, "compensate_activity")["args"][1] == [
+        {"tool_name": "postgresql", "provisioner_key": "x"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -376,6 +387,10 @@ async def test_workflow_handles_dict_failure_results(tmp_path) -> None:
         with pytest.raises(RuntimeError, match="redis down"):
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
+    assert _call(stub, "compensate_activity")["args"][1] == [
+        {"tool_name": "postgresql", "provisioner_key": "x"}
+    ]
+
 
 @pytest.mark.asyncio
 async def test_workflow_marks_failed_on_audit_error(tmp_path) -> None:
@@ -411,4 +426,6 @@ async def test_workflow_marks_failed_on_audit_error(tmp_path) -> None:
 
     fn_names = [c["name"] for c in stub.calls]
     assert "record_account_provisioning_activity" in fn_names
-    assert fn_names.count("mark_job_failed_activity") == 1
+    fail_call = _call(stub, "mark_job_failed_activity")
+    assert fail_call["args"][0] == "job-1"
+    assert "audit boom" in fail_call["args"][1]

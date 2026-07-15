@@ -117,15 +117,30 @@ class EnvironmentStore:
 
     def add_tool(self, agent_id: str, tool_name: str) -> bool:
         """Add a tool to the environment's provisioned tools list."""
+        return self.add_tools(agent_id, [tool_name])
+
+    def add_tools(self, agent_id: str, tool_names: List[str]) -> bool:
+        """Add zero or more tools in one read/modify/write under the store lock.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+            * ``tool_names`` may be empty (no-op success when the env exists).
+        Postconditions:
+            * When the env file exists, every non-empty unique name in
+              ``tool_names`` is present in ``tools_provisioned`` (order of first
+              appearance preserved for new names).
+            * Returns ``False`` when the env is missing or the file is corrupt.
+        """
         with _lock:
             path = self._env_file(agent_id)
             if not path.exists():
                 return False
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                tools = data.get("tools_provisioned", [])
-                if tool_name not in tools:
-                    tools.append(tool_name)
+                tools = list(data.get("tools_provisioned", []))
+                for tool_name in tool_names:
+                    if tool_name and tool_name not in tools:
+                        tools.append(tool_name)
                 data["tools_provisioned"] = tools
                 path.write_text(json.dumps(data, indent=2), encoding="utf-8")
                 return True

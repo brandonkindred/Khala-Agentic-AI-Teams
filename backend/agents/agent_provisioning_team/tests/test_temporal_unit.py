@@ -338,6 +338,37 @@ def test_start_workflow_timeout_s_handles_overflow(monkeypatch) -> None:
         assert sw._start_workflow_timeout_s() == 30.0
 
 
+def test_provisioning_workflow_is_open_not_found() -> None:
+    from temporalio.service import RPCError, RPCStatusCode
+
+    from agent_provisioning_team.temporal import start_workflow as sw
+
+    err = RPCError("missing", RPCStatusCode.NOT_FOUND, b"")
+    future = MagicMock()
+    future.result.side_effect = err
+
+    def _submit(coro, _loop):
+        coro.close()
+        return future
+
+    with (
+        patch.object(sw, "get_temporal_client", return_value=MagicMock()),
+        patch.object(sw, "get_temporal_loop", return_value=MagicMock()),
+        patch.object(asyncio, "run_coroutine_threadsafe", side_effect=_submit),
+    ):
+        assert sw.provisioning_workflow_is_open("job-1") is False
+
+
+def test_provisioning_workflow_is_open_when_client_missing() -> None:
+    from agent_provisioning_team.temporal import start_workflow as sw
+
+    with (
+        patch.object(sw, "get_temporal_client", return_value=None),
+        patch.object(sw, "get_temporal_loop", return_value=None),
+    ):
+        assert sw.provisioning_workflow_is_open("job-1") is True
+
+
 # ---------------------------------------------------------------------------
 # worker.py
 # ---------------------------------------------------------------------------
@@ -380,7 +411,12 @@ def test_create_worker_constructs_worker_when_enabled() -> None:
     # Provisioning/deprovision only — sandbox workflows/activities are
     # deliberately excluded (they run on their own SANDBOX_TASK_QUEUE via a
     # separately-booted worker; see start_agent_provisioning_sandbox_temporal_worker_thread).
-    assert len(kwargs["workflows"]) == 2
+    from agent_provisioning_team.temporal.workflows import (
+        AgentDeprovisioningWorkflow,
+        AgentProvisioningWorkflow,
+    )
+
+    assert set(kwargs["workflows"]) == {AgentProvisioningWorkflow, AgentDeprovisioningWorkflow}
 
 
 def test_start_worker_thread_no_op_when_disabled() -> None:
@@ -558,7 +594,6 @@ def test_provision_tool_activity_calls_provisioner() -> None:
     fake_tool.config = {}
     fake_manifest = MagicMock()
     fake_manifest.get_tool.return_value = fake_tool
-    fake_env_store = MagicMock()
 
     with (
         patch.object(activities, "_best_effort_job_store"),
@@ -569,10 +604,6 @@ def test_provision_tool_activity_calls_provisioner() -> None:
         patch(
             "agent_provisioning_team.shared.tool_agent_registry.build_default_tool_agents",
             return_value={"postgres_provisioner": fake_provisioner},
-        ),
-        patch(
-            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
-            return_value=fake_env_store,
         ),
         patch("temporalio.activity.heartbeat"),
     ):
@@ -590,51 +621,6 @@ def test_provision_tool_activity_calls_provisioner() -> None:
     assert payload["success"] is True
     assert payload["provisioner_key"] == "postgres_provisioner"
     fake_provisioner.provision.assert_called_once()
-    fake_env_store.add_tool.assert_called_once_with("a", "pg")
-
-
-def test_provision_tool_activity_skips_env_store_on_failure() -> None:
-    from agent_provisioning_team.models import GeneratedCredentials, ToolProvisionResult
-    from agent_provisioning_team.temporal import activities
-
-    fake_provisioner = MagicMock()
-    fake_provisioner.provision.return_value = ToolProvisionResult(
-        tool_name="pg", success=False, error="down"
-    )
-    fake_tool = MagicMock()
-    fake_tool.provisioner = "postgres_provisioner"
-    fake_tool.config = {}
-    fake_manifest = MagicMock()
-    fake_manifest.get_tool.return_value = fake_tool
-    fake_env_store = MagicMock()
-
-    with (
-        patch.object(activities, "_best_effort_job_store"),
-        patch(
-            "agent_provisioning_team.shared.tool_manifest.load_manifest",
-            return_value=fake_manifest,
-        ),
-        patch(
-            "agent_provisioning_team.shared.tool_agent_registry.build_default_tool_agents",
-            return_value={"postgres_provisioner": fake_provisioner},
-        ),
-        patch(
-            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
-            return_value=fake_env_store,
-        ),
-        patch("temporalio.activity.heartbeat"),
-    ):
-        creds = GeneratedCredentials(tool_name="pg", username="u", password="p")
-        payload = activities.provision_tool_activity(
-            "j",
-            "a",
-            "pg",
-            "default.yaml",
-            credentials_dump=creds.model_dump(),
-        )
-
-    assert payload["success"] is False
-    fake_env_store.add_tool.assert_not_called()
 
 
 def test_provision_tool_activity_raises_when_tool_missing() -> None:
@@ -910,8 +896,15 @@ def test_record_account_provisioning_sets_tool_counts() -> None:
         {"tool_name": "postgresql", "success": True},
         {"tool_name": "redis", "success": True},
     ]
-    with patch.object(activities, "_best_effort_job_store") as mock_store:
-        out = activities.record_account_provisioning_activity("job-1", results)
+    fake_env = MagicMock()
+    with (
+        patch.object(activities, "_best_effort_job_store") as mock_store,
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=fake_env,
+        ),
+    ):
+        out = activities.record_account_provisioning_activity("job-1", results, "agent-1")
 
     assert out == {"success": True, "tool_results": results}
     update_calls = [
@@ -923,6 +916,7 @@ def test_record_account_provisioning_sets_tool_counts() -> None:
     assert kwargs["tools_total"] == 2
     assert kwargs["current_tool"] is None
     assert kwargs["progress"] == 60
+    fake_env.add_tools.assert_called_once_with("agent-1", ["postgresql", "redis"])
 
 
 def test_list_manifest_tools_activity_returns_ordered_names(tmp_path) -> None:

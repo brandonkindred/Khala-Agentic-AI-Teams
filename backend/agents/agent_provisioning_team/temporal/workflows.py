@@ -169,12 +169,12 @@ class AgentProvisioningWorkflow:
         )
 
     async def _record_account_provisioning(
-        self, job_id: str, tool_results_dump: list[dict]
+        self, job_id: str, agent_id: str, tool_results_dump: list[dict]
     ) -> None:
         """Checkpoint successful tool results so later-phase failures can resume."""
         await workflow.execute_activity(
             _activities.record_account_provisioning_activity,
-            args=[job_id, tool_results_dump],
+            args=[job_id, tool_results_dump, agent_id],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -272,8 +272,7 @@ class AgentProvisioningWorkflow:
                 raise RuntimeError(err)
 
             if "account_provisioning" not in skip:
-                await self._record_account_provisioning(job_id, tool_results_dump)
-
+                await self._record_account_provisioning(job_id, agent_id, tool_results_dump)
             # Phase 4: access audit.
             audit_prior = prior.get("access_audit") if "access_audit" in skip else None
             audit_dump = await workflow.execute_activity(
