@@ -118,6 +118,30 @@ def test_record_gate_outcome_with_passed_false(monkeypatch) -> None:
     assert learnings[0]["counter_measure"] == "add guard"
 
 
+def test_record_gate_outcome_passed_true_approved_false_records_rejection(monkeypatch) -> None:
+    """approved=False wins over passed=True through the full record_gate_outcome pipeline."""
+    events: list = []
+    learnings: list = []
+    from software_engineering_team.shared import se_events
+
+    monkeypatch.setattr(
+        se_events, "record_event", lambda etype, **kw: events.append((etype, kw)) or True
+    )
+    monkeypatch.setattr(
+        learnings_store, "upsert_learning", lambda **kw: learnings.append(kw) or True
+    )
+    result = SimpleNamespace(
+        approved=False,
+        passed=True,
+        summary="gate rejected despite passed flag",
+        issues=[SimpleNamespace(description="conflicting flags", recommendation="fix gate")],
+    )
+    ok = gate_outcomes.record_gate_outcome("code_review", result, task_id="t1")
+    assert ok is True
+    assert events and events[0][0] == se_events.GATE_REJECTED
+    assert learnings and learnings[0]["trigger"] == "conflicting flags"
+
+
 def test_record_gate_outcome_emits_event_and_learning(monkeypatch) -> None:
     """A rejected gate emits a GATE_REJECTED event and ingests a learning from the first issue."""
     events: list = []

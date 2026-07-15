@@ -700,6 +700,7 @@ def test_record_gate_outcome_on_max_cycles(tmp_path, monkeypatch):
     gate, result, kw = calls[0]
     assert gate == "review_max_cycles"
     assert result.passed is False
+    assert any(getattr(i, "source", None) == "qa" for i in result.issues)
     assert kw.get("task_id") == "t1"
     assert kw.get("phase") == "execution"
     assert kw.get("job_id") == ""

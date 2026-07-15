@@ -124,10 +124,19 @@ def test_record_gate_outcome_on_max_cycles(tmp_path, monkeypatch):
         "software_engineering_team.shared.phases.execution.record_gate_outcome",
         lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
     )
-    # Use existing max-cycles failing fixture pattern from
-    # test_max_cycles_guarded_still_failing_review_failed
-    ...
-    assert calls[0][0] == "review_max_cycles"
+    mt = _microtask()
+    cfg = _make_gate_config(requires_failing=True, qa_gate=_fail_gate("qa"))
+    _run(cfg, [mt], tmp_path, review_config=_config(cr=0, qa=2, sec=0, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert len(calls) == 1
+    gate, result, kw = calls[0]
+    assert gate == "review_max_cycles"
+    assert result.passed is False
+    assert any(getattr(i, "source", None) == "qa" for i in result.issues)
+    assert kw.get("task_id") == "t1"
+    assert kw.get("phase") == "execution"
+    assert kw.get("job_id") == ""
 
 
 def test_record_gate_outcome_not_called_on_success(tmp_path, monkeypatch):
@@ -158,7 +167,7 @@ def test_record_gate_outcome_not_called_on_qa_recovered(tmp_path, monkeypatch):
 
 Also add a unit-style test for `_terminal_failing_outcome` preference order (cr → qa → sec → synthetic).
 
-- [ ] **Step 2: Run to verify FAIL**
+- [x] **Step 2: Run to verify FAIL**
 
 ```bash
 cd backend && python -m pytest agents/software_engineering_team/tests/test_v2_gated_execution_shared.py -k "record_gate_outcome" -v
@@ -166,7 +175,7 @@ cd backend && python -m pytest agents/software_engineering_team/tests/test_v2_ga
 
 Expected: FAIL (AttributeError / no calls / import missing).
 
-- [ ] **Step 3: Implement helpers + call sites**
+- [x] **Step 3: Implement helpers + call sites**
 
 Near `_dedup_issues` in `execution.py`:
 
@@ -213,7 +222,7 @@ _record_terminal_gate_failure(
 )
 ```
 
-- [ ] **Step 4: Run to verify PASS**
+- [x] **Step 4: Run to verify PASS**
 
 ```bash
 cd backend && python -m pytest \
@@ -223,7 +232,7 @@ cd backend && python -m pytest \
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/agents/software_engineering_team/shared/phases/execution.py \
@@ -235,5 +244,5 @@ git commit -m "feat: record gate outcomes on terminal REVIEW_FAILED paths"
 
 ### Task 3: Verify
 
-- [ ] Full related suite green.
-- [ ] Reserved gate string `review_grounding_circuit_breaker` documented only in design/plan — not wired yet.
+- [x] Full related suite green.
+- [x] Reserved gate string `review_grounding_circuit_breaker` documented only in design/plan — not wired yet.
