@@ -36,12 +36,10 @@ from agent_provisioning_team.temporal.sandbox_workflows import (
 from agent_provisioning_team.temporal.workflows import (
     AgentDeprovisioningWorkflow,
     AgentProvisioningWorkflow,
-    AgentProvisioningWorkflowV2,
 )
 
 WORKFLOWS = [
     AgentProvisioningWorkflow,
-    AgentProvisioningWorkflowV2,
     AgentDeprovisioningWorkflow,
 ]
 ACTIVITIES = [
@@ -88,7 +86,6 @@ __all__ = [
     "SANDBOX_WORKFLOWS",
     "SANDBOX_ACTIVITIES",
     "AgentProvisioningWorkflow",
-    "AgentProvisioningWorkflowV2",
     "AgentDeprovisioningWorkflow",
     "SandboxAcquireWorkflow",
     "SandboxTeardownWorkflow",

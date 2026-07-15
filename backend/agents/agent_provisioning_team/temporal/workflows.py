@@ -1,18 +1,8 @@
 """Temporal workflows for the Agent Provisioning team.
 
-Two workflows are exposed:
-
-* ``AgentProvisioningWorkflow`` — v1, delegates to a single activity. Kept
-  registered so in-flight runs can drain during a deploy, but no longer
-  targeted by the default routing path.
-
-* ``AgentProvisioningWorkflowV2`` — v2, decomposes provisioning into
-  per-phase activities and fans out tool provisioning in parallel via
-  ``asyncio.gather``. Each tool activity has its own retry policy and
-  heartbeat, so a flaky external tool can be retried independently
-  without re-doing the whole job. Accepts ``skip_phases`` /
-  ``prior_results`` on resume so completed phases are restored from the
-  job store instead of re-executed.
+``AgentProvisioningWorkflow`` decomposes provisioning into per-phase activities
+and fans out tool provisioning in parallel via ``asyncio.gather``.
+``AgentDeprovisioningWorkflow`` tears down one agent as a single activity.
 """
 
 from __future__ import annotations
@@ -29,7 +19,6 @@ with workflow.unsafe.imports_passed_through():
     from agent_provisioning_team.temporal import activities as _activities
     from agent_provisioning_team.temporal.constants import TASK_QUEUE
 
-PROVISIONING_TIMEOUT = timedelta(hours=4)
 PHASE_TIMEOUT = timedelta(minutes=20)
 TOOL_ACTIVITY_TIMEOUT = timedelta(minutes=15)
 TOOL_HEARTBEAT_TIMEOUT = timedelta(minutes=2)
@@ -52,27 +41,7 @@ TOOL_RETRY_POLICY = RetryPolicy(
 
 @workflow.defn(name="AgentProvisioningWorkflow")
 class AgentProvisioningWorkflow:
-    """v1: Runs one provisioning job as a single activity."""
-
-    @workflow.run
-    async def run(
-        self,
-        job_id: str,
-        agent_id: str,
-        manifest_path: str,
-    ) -> None:
-        await workflow.execute_activity(
-            _activities.run_provisioning_activity,
-            args=[job_id, agent_id, manifest_path],
-            task_queue=TASK_QUEUE,
-            schedule_to_close_timeout=PROVISIONING_TIMEOUT,
-            retry_policy=DEFAULT_RETRY_POLICY,
-        )
-
-
-@workflow.defn(name="AgentProvisioningWorkflowV2")
-class AgentProvisioningWorkflowV2:
-    """v2: Per-phase activities with parallel per-tool fan-out."""
+    """Per-phase activities with parallel per-tool fan-out."""
 
     @workflow.run
     async def run(
@@ -253,7 +222,7 @@ class AgentProvisioningWorkflowV2:
 class AgentDeprovisioningWorkflow:
     """Deprovision one agent's resources as a single durable activity.
 
-    The teardown counterpart to :class:`AgentProvisioningWorkflowV2`. Dispatched
+    The teardown counterpart to :class:`AgentProvisioningWorkflow`. Dispatched
     execute-and-wait from the ``DELETE /environments/{agent_id}`` handler so the
     HTTP response is the workflow's result.
 

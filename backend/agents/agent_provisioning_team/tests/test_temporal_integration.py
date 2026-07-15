@@ -22,7 +22,7 @@ client = TestClient(app)
 @patch("agent_provisioning_team.api.main.create_job")
 @patch("agent_provisioning_team.temporal.start_workflow.start_provisioning_workflow")
 @patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=True)
-def test_provision_routes_to_v2_when_temporal_enabled(
+def test_provision_routes_to_temporal_when_enabled(
     mock_enabled: MagicMock,
     mock_start: MagicMock,
     mock_create_job: MagicMock,
@@ -215,11 +215,10 @@ def test_pattern_a_exports_workflows_and_activities() -> None:
     )
     from agent_provisioning_team.temporal.workflows import (
         AgentProvisioningWorkflow,
-        AgentProvisioningWorkflowV2,
     )
 
     assert AgentProvisioningWorkflow in t.WORKFLOWS
-    assert AgentProvisioningWorkflowV2 in t.WORKFLOWS
+    assert not hasattr(t, "AgentProvisioningWorkflowV2")
     for fn in (
         setup_activity_v2,
         credentials_activity_v2,

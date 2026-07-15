@@ -1,7 +1,7 @@
-"""Unit tests for AgentProvisioningWorkflowV2 and the setup_activity_v2
+"""Unit tests for AgentProvisioningWorkflow and the setup_activity_v2
 that previously sat behind the integration marker.
 
-WorkflowV2 is exercised by stubbing `workflow.execute_activity` so we
+The workflow is exercised by stubbing `workflow.execute_activity` so we
 never need a live Temporal worker — we just verify the workflow's
 control flow (skip / resume, fan-out, failure → compensation, etc.).
 """
@@ -99,7 +99,7 @@ def test_setup_activity_v2_restores_from_prior() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AgentProvisioningWorkflowV2 — direct .run() invocation
+# AgentProvisioningWorkflow — direct .run() invocation
 #
 # `workflow.execute_activity` is stubbed so we don't need a real
 # Temporal env. The workflow's control-flow assertions are what we care about.
@@ -146,7 +146,7 @@ tools:
 
 
 @pytest.mark.asyncio
-async def test_workflow_v2_happy_path(tmp_path, monkeypatch) -> None:
+async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
@@ -173,7 +173,7 @@ async def test_workflow_v2_happy_path(tmp_path, monkeypatch) -> None:
     )
 
     with patch.object(wf.workflow, "execute_activity", new=stub):
-        workflow = wf.AgentProvisioningWorkflowV2()
+        workflow = wf.AgentProvisioningWorkflow()
         await workflow.run("job-1", "agent-1", manifest_path)
 
     fn_names = [c["name"] for c in stub.calls]
@@ -187,7 +187,7 @@ async def test_workflow_v2_happy_path(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_workflow_v2_compensates_on_tool_failure(tmp_path) -> None:
+async def test_workflow_compensates_on_tool_failure(tmp_path) -> None:
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
@@ -220,7 +220,7 @@ async def test_workflow_v2_compensates_on_tool_failure(tmp_path) -> None:
 
     with patch.object(wf.workflow, "execute_activity", new=stub):
         with pytest.raises(RuntimeError, match="Tool provisioning failed"):
-            await wf.AgentProvisioningWorkflowV2().run("job-1", "agent-1", manifest_path)
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     fn_names = [c["name"] for c in stub.calls]
     # Compensate was invoked
@@ -228,7 +228,7 @@ async def test_workflow_v2_compensates_on_tool_failure(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_workflow_v2_skips_provisioning_when_resumed(tmp_path) -> None:
+async def test_workflow_skips_provisioning_when_resumed(tmp_path) -> None:
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
@@ -267,7 +267,7 @@ async def test_workflow_v2_skips_provisioning_when_resumed(tmp_path) -> None:
     }
 
     with patch.object(wf.workflow, "execute_activity", new=stub):
-        await wf.AgentProvisioningWorkflowV2().run(
+        await wf.AgentProvisioningWorkflow().run(
             "job-1",
             "agent-1",
             manifest_path,
@@ -283,7 +283,7 @@ async def test_workflow_v2_skips_provisioning_when_resumed(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_workflow_v2_resume_with_prior_failed_tools_compensates(tmp_path) -> None:
+async def test_workflow_resume_with_prior_failed_tools_compensates(tmp_path) -> None:
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
@@ -322,7 +322,7 @@ async def test_workflow_v2_resume_with_prior_failed_tools_compensates(tmp_path) 
 
     with patch.object(wf.workflow, "execute_activity", new=stub):
         with pytest.raises(RuntimeError, match="Tool provisioning failed"):
-            await wf.AgentProvisioningWorkflowV2().run(
+            await wf.AgentProvisioningWorkflow().run(
                 "job-1",
                 "agent-1",
                 manifest_path,
@@ -335,20 +335,7 @@ async def test_workflow_v2_resume_with_prior_failed_tools_compensates(tmp_path) 
 
 
 @pytest.mark.asyncio
-async def test_workflow_v1_invokes_single_activity(tmp_path) -> None:
-    """v1 workflow simply delegates to ``run_provisioning_activity``."""
-    from agent_provisioning_team.temporal import workflows as wf
-
-    stub = _ExecActivityStub({"run_provisioning_activity": None})
-    with patch.object(wf.workflow, "execute_activity", new=stub):
-        await wf.AgentProvisioningWorkflow().run("j", "a", "default.yaml")
-
-    fn_names = [c["name"] for c in stub.calls]
-    assert fn_names == ["run_provisioning_activity"]
-
-
-@pytest.mark.asyncio
-async def test_workflow_v2_handles_non_dict_provision_results(tmp_path) -> None:
+async def test_workflow_handles_non_dict_provision_results(tmp_path) -> None:
     """A provision_tool_activity result that isn't a dict (e.g. None) → failure path."""
     from agent_provisioning_team.temporal import workflows as wf
 
@@ -378,11 +365,11 @@ async def test_workflow_v2_handles_non_dict_provision_results(tmp_path) -> None:
 
     with patch.object(wf.workflow, "execute_activity", new=stub):
         with pytest.raises(RuntimeError, match="Tool provisioning failed"):
-            await wf.AgentProvisioningWorkflowV2().run("job-1", "agent-1", manifest_path)
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
 
 @pytest.mark.asyncio
-async def test_workflow_v2_handles_dict_failure_results(tmp_path) -> None:
+async def test_workflow_handles_dict_failure_results(tmp_path) -> None:
     """A provision_tool_activity result dict with success=False → failure path."""
     from agent_provisioning_team.temporal import workflows as wf
 
@@ -411,4 +398,4 @@ async def test_workflow_v2_handles_dict_failure_results(tmp_path) -> None:
 
     with patch.object(wf.workflow, "execute_activity", new=stub):
         with pytest.raises(RuntimeError, match="redis down"):
-            await wf.AgentProvisioningWorkflowV2().run("job-1", "agent-1", manifest_path)
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)

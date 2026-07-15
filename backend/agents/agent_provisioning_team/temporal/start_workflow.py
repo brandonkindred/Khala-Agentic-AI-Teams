@@ -14,7 +14,7 @@ from agent_provisioning_team.temporal.constants import (
 )
 from agent_provisioning_team.temporal.workflows import (
     AgentDeprovisioningWorkflow,
-    AgentProvisioningWorkflowV2,
+    AgentProvisioningWorkflow,
 )
 from shared_temporal import get_temporal_client, get_temporal_loop
 from shared_temporal.runner import execute_workflow_sync
@@ -44,7 +44,7 @@ def start_provisioning_workflow(
     skip_phases: Optional[list[str]] = None,
     prior_results: Optional[dict[str, Any]] = None,
 ) -> None:
-    """Start ``AgentProvisioningWorkflowV2`` for the given job.
+    """Start ``AgentProvisioningWorkflow`` for the given job.
 
     ``skip_phases`` (phase ``.value`` strings) and ``prior_results`` (dict
     keyed by phase value with serialized phase output) are forwarded to
@@ -56,7 +56,7 @@ def start_provisioning_workflow(
     workflow_id = f"{WORKFLOW_ID_PREFIX}{job_id}"
     _run_async(
         client.start_workflow(
-            AgentProvisioningWorkflowV2.run,
+            AgentProvisioningWorkflow.run,
             args=[
                 job_id,
                 agent_id,
@@ -68,7 +68,7 @@ def start_provisioning_workflow(
             task_queue=TASK_QUEUE,
         )
     )
-    logger.info("Started AgentProvisioningWorkflowV2 id=%s", workflow_id)
+    logger.info("Started AgentProvisioningWorkflow id=%s", workflow_id)
 
 
 def run_deprovision_workflow(agent_id: str, force: bool = False) -> dict[str, Any]:

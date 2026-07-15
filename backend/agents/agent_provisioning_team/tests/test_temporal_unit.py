@@ -217,18 +217,20 @@ def test_run_async_raises_without_client(monkeypatch) -> None:
 
 def test_start_provisioning_workflow_passes_args(monkeypatch) -> None:
     from agent_provisioning_team.temporal import start_workflow as sw
+    from agent_provisioning_team.temporal.workflows import AgentProvisioningWorkflow
 
     fake_client = MagicMock()
-    fake_client.start_workflow = AsyncMock()
     loop = asyncio.new_event_loop()
+    captured_start: dict = {}
 
-    captured: dict = {}
+    async def capture_start_workflow(*args, **kwargs):
+        captured_start["args"] = args
+        captured_start["kwargs"] = kwargs
+
+    fake_client.start_workflow = capture_start_workflow
 
     def fake_run_async(coro):
-        # Just close the coroutine without scheduling — we only need to
-        # observe that the right call was queued.
-        coro.close()
-        captured["called"] = True
+        loop.run_until_complete(coro)
 
     with (
         patch.object(sw, "get_temporal_client", return_value=fake_client),
@@ -243,7 +245,16 @@ def test_start_provisioning_workflow_passes_args(monkeypatch) -> None:
             prior_results={"setup": {"success": True}},
         )
 
-    assert captured["called"] is True
+    assert captured_start["args"][0] is AgentProvisioningWorkflow.run
+    assert captured_start["kwargs"]["args"] == [
+        "job-1",
+        "agent-1",
+        "default.yaml",
+        ["setup"],
+        {"setup": {"success": True}},
+    ]
+    assert captured_start["kwargs"]["id"] == "agent-provisioning-job-1"
+    assert captured_start["kwargs"]["task_queue"] == sw.TASK_QUEUE
     loop.close()
 
 
