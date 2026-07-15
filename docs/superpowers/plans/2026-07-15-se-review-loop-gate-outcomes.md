@@ -27,7 +27,7 @@
 **Interfaces:**
 - Produces: `is_rejected(result)` returns `not result.passed` when `passed` is a bool and neither `approved` nor `all_satisfied` is a bool.
 
-- [ ] **Step 1: Extend failing tests**
+- [x] **Step 1: Extend failing tests**
 
 In `test_is_rejected_variants`, add:
 
@@ -40,7 +40,7 @@ assert gate_outcomes.is_rejected(SimpleNamespace(approved=True, passed=False)) i
 
 Also add `test_record_gate_outcome_with_passed_false` asserting a `GateOutcome`-shaped `SimpleNamespace(passed=False, summary=..., issues=[...])` records a learning.
 
-- [ ] **Step 2: Run to verify FAIL**
+- [x] **Step 2: Run to verify FAIL**
 
 ```bash
 cd backend && python -m pytest agents/software_engineering_team/tests/test_learnings_ingest.py::test_is_rejected_variants -v
@@ -48,7 +48,7 @@ cd backend && python -m pytest agents/software_engineering_team/tests/test_learn
 
 Expected: FAIL (assert `None is True` or similar).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `is_rejected`, after `all_satisfied` check:
 
@@ -60,7 +60,7 @@ if isinstance(passed, bool):
 
 Update the docstring/postconditions to mention `passed`.
 
-- [ ] **Step 4: Run to verify PASS**
+- [x] **Step 4: Run to verify PASS**
 
 ```bash
 cd backend && python -m pytest agents/software_engineering_team/tests/test_learnings_ingest.py -v -k "is_rejected or record_gate_outcome"
@@ -68,7 +68,7 @@ cd backend && python -m pytest agents/software_engineering_team/tests/test_learn
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/agents/software_engineering_team/shared/gate_outcomes.py \
