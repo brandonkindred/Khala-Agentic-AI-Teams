@@ -72,11 +72,15 @@ def test_ingest_file_without_failure_entries_is_zero(tmp_path) -> None:
 
 
 def test_is_rejected_variants() -> None:
-    """is_rejected reads approved/all_satisfied flags and returns None when neither is present."""
+    """is_rejected reads approved/all_satisfied/passed; returns None when none present."""
     assert gate_outcomes.is_rejected(SimpleNamespace(approved=False)) is True
     assert gate_outcomes.is_rejected(SimpleNamespace(approved=True)) is False
     assert gate_outcomes.is_rejected(SimpleNamespace(all_satisfied=False)) is True
     assert gate_outcomes.is_rejected(SimpleNamespace(all_satisfied=True)) is False
+    assert gate_outcomes.is_rejected(SimpleNamespace(passed=False)) is True
+    assert gate_outcomes.is_rejected(SimpleNamespace(passed=True)) is False
+    # approved wins when both approved and passed are present
+    assert gate_outcomes.is_rejected(SimpleNamespace(approved=True, passed=False)) is False
     assert gate_outcomes.is_rejected(SimpleNamespace()) is None
 
 
@@ -84,6 +88,34 @@ def test_record_gate_outcome_on_pass_is_noop(monkeypatch) -> None:
     """record_gate_outcome is a no-op (returns False) when the gate passed."""
     monkeypatch.setattr(gate_outcomes, "_first_issue", lambda r: None)
     assert gate_outcomes.record_gate_outcome("qa", SimpleNamespace(approved=True)) is False
+    assert gate_outcomes.record_gate_outcome("code_review", SimpleNamespace(passed=True)) is False
+
+
+def test_record_gate_outcome_with_passed_false(monkeypatch) -> None:
+    """GateOutcome-shaped results (passed=False) record a rejection like approved=False."""
+    events: list = []
+    learnings: list = []
+    from software_engineering_team.shared import se_events
+
+    monkeypatch.setattr(
+        se_events, "record_event", lambda etype, **kw: events.append((etype, kw)) or True
+    )
+    monkeypatch.setattr(
+        learnings_store, "upsert_learning", lambda **kw: learnings.append(kw) or True
+    )
+    result = SimpleNamespace(
+        passed=False,
+        summary="needs fixes",
+        issues=[SimpleNamespace(description="missing null check", recommendation="add guard")],
+    )
+    ok = gate_outcomes.record_gate_outcome(
+        "code_review_retry_exhausted", result, task_id="t1", phase="execution"
+    )
+    assert ok is True
+    assert events and events[0][0] == se_events.GATE_REJECTED
+    assert learnings and learnings[0]["category"] == "code_review_retry_exhausted"
+    assert learnings[0]["trigger"] == "missing null check"
+    assert learnings[0]["counter_measure"] == "add guard"
 
 
 def test_record_gate_outcome_emits_event_and_learning(monkeypatch) -> None:
