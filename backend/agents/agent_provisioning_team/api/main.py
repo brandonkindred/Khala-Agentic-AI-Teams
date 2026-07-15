@@ -8,7 +8,7 @@ import concurrent.futures
 import contextlib
 import logging
 import uuid
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,7 +32,7 @@ from ..models import (
     ProvisionRequest,
     ProvisionStatusResponse,
 )
-from ..orchestrator import ProvisioningOrchestrator
+from ..shared.environment_store import EnvironmentStore
 from ..shared.job_store import (
     JOB_STATUS_COMPLETED,
     JOB_STATUS_PENDING,
@@ -166,7 +166,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-orchestrator = ProvisioningOrchestrator()
+_environment_store = EnvironmentStore()
+
+
+def _get_agent_status(agent_id: str) -> Optional[Dict[str, Any]]:
+    """Read-only agent status via ``EnvironmentStore`` (no full orchestrator).
+
+    Preconditions:
+        * ``agent_id`` is non-empty.
+    Postconditions:
+        * Returns a status dict when the environment exists, else ``None``.
+    """
+    env = _environment_store.get(agent_id)
+    if env is None:
+        return None
+    return {
+        "agent_id": agent_id,
+        "status": env.status,
+        "container_id": env.container_id,
+        "container_name": env.container_name,
+        "tools_provisioned": env.tools_provisioned,
+        "created_at": env.created_at,
+    }
+
+
+def _list_agents(status: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List provisioned agents from ``EnvironmentStore``.
+
+    Preconditions:
+        * ``status``, when set, is a filter string matching stored env statuses.
+    Postconditions:
+        * Returns zero or more status dicts (never raises for a missing filter match).
+    """
+    return [
+        {
+            "agent_id": env.agent_id,
+            "status": env.status,
+            "container_name": env.container_name,
+            "tools_provisioned": env.tools_provisioned,
+            "created_at": env.created_at,
+        }
+        for env in _environment_store.list_all(status=status)
+    ]
 
 
 @app.post(
@@ -459,8 +500,9 @@ def deprovision_agent(
           (raises HTTP 503 otherwise).
     Postconditions:
         * Pre-start / Temporal-unavailable failures raise ``HTTPException(503)``.
-        * Once execute-and-wait has begun, workflow/application failures are
-          returned as ``DeprovisionResponse(success=False, ...)`` (not 500).
+        * Once execute-and-wait has begun, workflow/application failures and
+          client-wait timeouts (``TimeoutError``) are returned as
+          ``DeprovisionResponse(success=False, ...)`` (not 500).
     """
     runner = _require_deprovision_runner()
     try:
@@ -491,6 +533,16 @@ def deprovision_agent(
             details={},
             error=f"Deprovision workflow failed: {exc}",
         )
+    except (TimeoutError, concurrent.futures.TimeoutError) as exc:
+        # Client wait exceeded DEPROVISION_CLIENT_TIMEOUT_S; the workflow may
+        # still be running on Temporal — do not 500 the HTTP caller.
+        logger.exception("Durable deprovision timed out for agent=%s", agent_id)
+        return DeprovisionResponse(
+            agent_id=agent_id,
+            success=False,
+            details={},
+            error=f"Deprovision workflow timed out waiting for result: {exc}",
+        )
 
 
 class AgentStatusResponse(BaseModel):
@@ -512,7 +564,7 @@ class AgentStatusResponse(BaseModel):
 )
 def get_agent_status(agent_id: str) -> AgentStatusResponse:
     """Get status of a provisioned agent."""
-    status = orchestrator.get_agent_status(agent_id)
+    status = _get_agent_status(agent_id)
 
     if status is None:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
@@ -536,7 +588,7 @@ def list_agents(
     status: Optional[str] = Query(None, description="Filter by status (running, ready, etc.)"),
 ) -> AgentListResponse:
     """List all provisioned agents."""
-    agents_data = orchestrator.list_agents(status=status)
+    agents_data = _list_agents(status=status)
 
     agents = [
         AgentStatusResponse(

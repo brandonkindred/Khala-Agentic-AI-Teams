@@ -19,7 +19,7 @@ from temporalio.common import RetryPolicy
 # string — must stay inside the pass-through block with the other package imports.
 with workflow.unsafe.imports_passed_through():
     from agent_provisioning_team.temporal import activities as _activities
-    from agent_provisioning_team.temporal.constants import TASK_QUEUE
+    from agent_provisioning_team.temporal.constants import DEFAULT_WORKSPACE_PATH, TASK_QUEUE
 
 PHASE_TIMEOUT = timedelta(minutes=20)
 TOOL_ACTIVITY_TIMEOUT = timedelta(minutes=15)
@@ -255,9 +255,9 @@ class AgentProvisioningWorkflow:
         )
 
         # Phase 5: documentation.
-        workspace_path = "/workspace"
+        workspace_path = DEFAULT_WORKSPACE_PATH
         if environment_dump:
-            workspace_path = environment_dump.get("workspace_path") or "/workspace"
+            workspace_path = environment_dump.get("workspace_path") or DEFAULT_WORKSPACE_PATH
         doc_prior = prior.get("documentation") if "documentation" in skip else None
         doc_result = await workflow.execute_activity(
             _activities.documentation_activity,

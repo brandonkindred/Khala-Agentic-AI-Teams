@@ -232,30 +232,32 @@ def test_start_provisioning_workflow_passes_args(monkeypatch) -> None:
     def fake_run_async(coro):
         loop.run_until_complete(coro)
 
-    with (
-        patch.object(sw, "get_temporal_client", return_value=fake_client),
-        patch.object(sw, "get_temporal_loop", return_value=loop),
-        patch.object(sw, "_run_async", side_effect=fake_run_async),
-    ):
-        sw.start_provisioning_workflow(
+    try:
+        with (
+            patch.object(sw, "get_temporal_client", return_value=fake_client),
+            patch.object(sw, "get_temporal_loop", return_value=loop),
+            patch.object(sw, "_run_async", side_effect=fake_run_async),
+        ):
+            sw.start_provisioning_workflow(
+                "job-1",
+                "agent-1",
+                "default.yaml",
+                skip_phases=["setup"],
+                prior_results={"setup": {"success": True}},
+            )
+
+        assert captured_start["args"][0] is AgentProvisioningWorkflow.run
+        assert captured_start["kwargs"]["args"] == [
             "job-1",
             "agent-1",
             "default.yaml",
-            skip_phases=["setup"],
-            prior_results={"setup": {"success": True}},
-        )
-
-    assert captured_start["args"][0] is AgentProvisioningWorkflow.run
-    assert captured_start["kwargs"]["args"] == [
-        "job-1",
-        "agent-1",
-        "default.yaml",
-        ["setup"],
-        {"setup": {"success": True}},
-    ]
-    assert captured_start["kwargs"]["id"] == "agent-provisioning-job-1"
-    assert captured_start["kwargs"]["task_queue"] == sw.TASK_QUEUE
-    loop.close()
+            ["setup"],
+            {"setup": {"success": True}},
+        ]
+        assert captured_start["kwargs"]["id"] == "agent-provisioning-job-1"
+        assert captured_start["kwargs"]["task_queue"] == sw.TASK_QUEUE
+    finally:
+        loop.close()
 
 
 def test_start_provisioning_workflow_raises_without_client() -> None:
@@ -760,3 +762,48 @@ def test_compensate_activity_invokes_orchestrator() -> None:
     assert shims[0].tool_name == "pg"
     assert shims[0].provisioner_key == "postgres_provisioner"
     assert shims[0].success is True
+
+
+def test_mark_job_failed_activity_best_effort() -> None:
+    from agent_provisioning_team.temporal import activities
+
+    with patch.object(activities, "_best_effort_job_store") as mock_store:
+        activities.mark_job_failed_activity("job-1", "boom")
+
+    mock_store.assert_called_once_with(activities._js.mark_job_failed, "job-1", error="boom")
+
+
+def test_mark_job_failed_activity_rejects_empty_inputs() -> None:
+    from agent_provisioning_team.temporal import activities
+
+    with pytest.raises(AssertionError):
+        activities.mark_job_failed_activity("", "err")
+    with pytest.raises(AssertionError):
+        activities.mark_job_failed_activity("job-1", "")
+
+
+def test_list_manifest_tools_activity_returns_ordered_names(tmp_path) -> None:
+    from agent_provisioning_team.temporal import activities
+
+    manifest = tmp_path / "m.yaml"
+    manifest.write_text(
+        """
+version: "1.0"
+tools:
+  - name: postgresql
+    provisioner: postgres_provisioner
+    config: {database_prefix: "x_"}
+  - name: redis
+    provisioner: redis_provisioner
+    config: {key_prefix: "k:"}
+""",
+        encoding="utf-8",
+    )
+    assert activities.list_manifest_tools_activity(str(manifest)) == ["postgresql", "redis"]
+
+
+def test_list_manifest_tools_activity_rejects_empty_path() -> None:
+    from agent_provisioning_team.temporal import activities
+
+    with pytest.raises(AssertionError):
+        activities.list_manifest_tools_activity("")

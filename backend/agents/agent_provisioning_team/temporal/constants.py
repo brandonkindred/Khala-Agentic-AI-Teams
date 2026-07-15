@@ -78,3 +78,6 @@ SANDBOX_TEARDOWN_CLIENT_TIMEOUT_S = env_int(
 DEPROVISION_CLIENT_TIMEOUT_S = env_int(
     "AGENT_PROVISIONING_DEPROVISION_CLIENT_TIMEOUT_S", 20 * 60 + CLIENT_TIMEOUT_MARGIN_S, floor=1
 )
+
+# Default in-container workspace path when setup did not persist one.
+DEFAULT_WORKSPACE_PATH = os.getenv("AGENT_PROVISIONING_DEFAULT_WORKSPACE_PATH", "/workspace").strip() or "/workspace"

@@ -471,16 +471,32 @@ def test_deprovision_returns_503_when_temporal_disabled() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_deprovision_timeout_returns_success_false() -> None:
+    """Client-side wait timeout must not surface as an unhandled 500."""
+    import concurrent.futures
+
+    with patch.object(
+        api_main,
+        "_require_deprovision_runner",
+        return_value=MagicMock(side_effect=concurrent.futures.TimeoutError()),
+    ):
+        r = client.delete("/environments/a1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is False
+    assert "timed out" in body["error"].lower()
+
+
 def test_get_environment_not_found() -> None:
-    with patch.object(api_main.orchestrator, "get_agent_status", return_value=None):
+    with patch.object(api_main, "_get_agent_status", return_value=None):
         r = client.get("/environments/missing")
     assert r.status_code == 404
 
 
 def test_get_environment_returns_status() -> None:
     with patch.object(
-        api_main.orchestrator,
-        "get_agent_status",
+        api_main,
+        "_get_agent_status",
         return_value={
             "agent_id": "a1",
             "status": "ready",
@@ -501,7 +517,7 @@ def test_get_environment_returns_status() -> None:
 
 
 def test_list_environments_empty() -> None:
-    with patch.object(api_main.orchestrator, "list_agents", return_value=[]):
+    with patch.object(api_main, "_list_agents", return_value=[]):
         r = client.get("/environments")
     assert r.status_code == 200
     assert r.json()["agents"] == []
@@ -521,7 +537,7 @@ def test_list_environments_with_filter() -> None:
             }
         ]
 
-    with patch.object(api_main.orchestrator, "list_agents", side_effect=fake_list):
+    with patch.object(api_main, "_list_agents", side_effect=fake_list):
         r = client.get("/environments?status=ready")
     assert r.status_code == 200
     assert captured["status"] == "ready"
@@ -535,15 +551,9 @@ def test_list_environments_with_filter() -> None:
 
 def test_lifespan_shutdown_does_not_compensate_or_fail_jobs() -> None:
     """API process exit must not tear down Temporal-owned provision jobs."""
-    compensate_calls: list[str] = []
     mark_failed_calls: list[str] = []
 
     with (
-        patch.object(
-            api_main.orchestrator,
-            "compensate",
-            side_effect=lambda agent_id, tool_results: compensate_calls.append(agent_id),
-        ),
         patch(
             "agent_provisioning_team.shared.job_store.mark_all_running_jobs_failed",
             side_effect=lambda reason: mark_failed_calls.append(reason),
@@ -557,8 +567,8 @@ def test_lifespan_shutdown_does_not_compensate_or_fail_jobs() -> None:
         with TestClient(api_main.app):
             pass
 
-    assert compensate_calls == []
     assert mark_failed_calls == []
+    assert not hasattr(api_main, "orchestrator")
     assert not hasattr(api_main, "_graceful_shutdown")
     assert not hasattr(api_main, "_safe_compensate")
     assert not hasattr(api_main, "COMPENSATE_TIMEOUT_S")
