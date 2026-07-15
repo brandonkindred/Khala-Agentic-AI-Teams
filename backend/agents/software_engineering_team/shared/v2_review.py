@@ -22,10 +22,11 @@ fans them out concurrently via :func:`_run_review_steps` (a thin wrapper over
 ``shared_concurrency.parallel_map``), unless ``llm`` is a
 :class:`~llm_service.clients.dummy.DummyLLMClient` (or a Strands wrapper around
 one), which forces sequential execution because the scripted test doubles are
-not thread-safe. Each step never raises: an outright runner failure is contained
-to a synthetic issue for that step alone, so one step failing never drops the
-other two steps' findings (see ``_code_review_step`` / ``_qa_review_step`` /
-``_security_review_step``).
+not thread-safe. Each step returns a :class:`_ReviewStepResult` (issues plus an
+optional pre-grounding ``raw_issue_count`` from the CR LLM fallback) and never
+raises: an outright runner failure is contained to a synthetic issue for that
+step alone, so one step failing never drops the other two steps' findings
+(see ``_code_review_step`` / ``_qa_review_step`` / ``_security_review_step``).
 
 Preconditions:
     - ``ReviewConfig`` is constructed once per team (see each team's
@@ -63,6 +64,21 @@ logger = logging.getLogger(__name__)
 # The microtask build-failure recommendation is identical across teams, so it is
 # a shared constant rather than a config knob.
 _MICROTASK_BUILD_FAIL_RECOMMENDATION = "Fix build errors before proceeding."
+
+
+@dataclass(frozen=True)
+class _ReviewStepResult:
+    """Output of one independent review step (code review, QA, or security).
+
+    Preconditions:
+        - ``issues`` is the step's contribution (possibly empty); never ``None``.
+    Postconditions / Invariants:
+        - ``raw_issue_count`` is set only by the code-review LLM fallback
+          (pre-grounding count); QA and security leave it ``None``.
+    """
+
+    issues: List[ReviewIssue]
+    raw_issue_count: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -194,33 +210,25 @@ def _review_steps_run_sequentially(llm: LLMClient) -> bool:
     return isinstance(getattr(llm, "client", None), DummyLLMClient)
 
 
-def _unwrap_llm_review_result(
-    result: Any, *, raw_issue_count_out: Optional[List[Optional[int]]]
-) -> List[ReviewIssue]:
-    """Split an ``llm_review_fn`` return value into issues, stashing its raw count.
+def _unwrap_llm_review_result(result: Any) -> _ReviewStepResult:
+    """Split an ``llm_review_fn`` return value into a :class:`_ReviewStepResult`.
 
     Preconditions:
         - ``result`` is either an :class:`LlmReviewOutput` (the real per-team LLM
           fallback, which always returns one now) or a bare list of issues (a
           test double / stub that has not adopted the new return type).
-        - ``raw_issue_count_out``, when not ``None``, is a single-element list the
-          caller reads after this returns (a mutable box, since this step's own
-          return type must stay a bare issue list — it is one of several
-          ``step_fns`` thunks fanned out by ``_run_review_steps``, which just
-          concatenates each thunk's returned list).
 
     Postconditions:
-        - Returns ``result.issues`` (as a fresh list) and writes
-          ``result.raw_issue_count`` into ``raw_issue_count_out[0]`` for an
-          ``LlmReviewOutput``; returns ``result`` unchanged and leaves
-          ``raw_issue_count_out`` untouched for a bare list (there is no
-          raw/grounded distinction to report).
+        - Returns ``result.issues`` (as a fresh list) and ``result.raw_issue_count``
+          for an ``LlmReviewOutput``; returns the bare list with
+          ``raw_issue_count=None`` when there is no raw/grounded distinction to report.
     """
     if isinstance(result, LlmReviewOutput):
-        if raw_issue_count_out is not None:
-            raw_issue_count_out[0] = result.raw_issue_count
-        return list(result.issues)
-    return list(result)
+        return _ReviewStepResult(
+            issues=list(result.issues),
+            raw_issue_count=result.raw_issue_count,
+        )
+    return _ReviewStepResult(issues=list(result))
 
 
 def _code_review_step(
@@ -237,8 +245,7 @@ def _code_review_step(
     review_context: Optional[ReviewContext] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     enable_llm_review_grounding: bool = True,
-    raw_issue_count_out: Optional[List[Optional[int]]] = None,
-) -> List[ReviewIssue]:
+) -> _ReviewStepResult:
     """Independent code-review step: external agent (with LLM fallback), or LLM review alone.
 
     Preconditions:
@@ -258,11 +265,11 @@ def _code_review_step(
           context yet keeps working unchanged.
         - ``enable_llm_review_grounding`` defaults True; forwarded to the LLM fallback
           (kill switch for ungrounded-claim filtering).
-        - ``raw_issue_count_out``, when provided, is written with the LLM fallback's
-          pre-grounding issue count (see ``_unwrap_llm_review_result``); ``None`` when the
-          fallback never ran (external agent succeeded) or reported no count.
 
     Postconditions:
+        - Returns a :class:`_ReviewStepResult`: ``issues`` from the agent or LLM fallback,
+          and ``raw_issue_count`` from the LLM fallback when it ran (``None`` when the
+          external agent succeeded or a bare-list stub reported no count).
         - Never raises: an external ``code_review_agent`` failure logs a warning and falls back
           to the LLM reviewer, matching this step's long-standing solo behavior. The LLM fallback
           itself (used both here and when ``code_review_agent`` is None) is also guarded — any
@@ -282,7 +289,6 @@ def _code_review_step(
                     review_context=review_context,
                     enable_llm_review_grounding=enable_llm_review_grounding,
                 ),
-                raw_issue_count_out=raw_issue_count_out,
             )
         try:
             from code_review_agent.models import CodeReviewInput as _CRInput
@@ -305,16 +311,18 @@ def _code_review_step(
                 detail_callback,
                 repo_reader=build_disk_repo_reader(repo_path),
             )
-            return [
-                ReviewIssue(
-                    source="code_review",
-                    severity=getattr(item, "severity", "medium"),
-                    description=getattr(item, "description", str(item)),
-                    file_path=getattr(item, "file_path", ""),
-                    recommendation=getattr(item, "recommendation", ""),
-                )
-                for item in getattr(cr_result, "issues", [])
-            ]
+            return _ReviewStepResult(
+                issues=[
+                    ReviewIssue(
+                        source="code_review",
+                        severity=getattr(item, "severity", "medium"),
+                        description=getattr(item, "description", str(item)),
+                        file_path=getattr(item, "file_path", ""),
+                        recommendation=getattr(item, "recommendation", ""),
+                    )
+                    for item in getattr(cr_result, "issues", [])
+                ]
+            )
         except Exception as exc:
             logger.warning(
                 "[%s] Code review agent failed: %s. Next step -> Using LLM fallback for code review",
@@ -329,18 +337,19 @@ def _code_review_step(
                     review_context=review_context,
                     enable_llm_review_grounding=enable_llm_review_grounding,
                 ),
-                raw_issue_count_out=raw_issue_count_out,
             )
     except Exception as exc:
         logger.warning("[%s] Code review step failed outright: %s", task_id, exc)
-        return [
-            ReviewIssue(
-                source="code_review",
-                severity="high",
-                description=f"Code review could not complete: {exc}",
-                recommendation="Investigate and re-run code review; findings from this run are incomplete.",
-            )
-        ]
+        return _ReviewStepResult(
+            issues=[
+                ReviewIssue(
+                    source="code_review",
+                    severity="high",
+                    description=f"Code review could not complete: {exc}",
+                    recommendation="Investigate and re-run code review; findings from this run are incomplete.",
+                )
+            ]
+        )
 
 
 def _qa_review_step(
@@ -352,38 +361,43 @@ def _qa_review_step(
     task_id: str,
     qa_agent_fn: Callable[..., List[ReviewIssue]],
     context: str = "",
-) -> List[ReviewIssue]:
+) -> _ReviewStepResult:
     """Independent QA step.
 
     Preconditions: ``qa_agent_fn`` is the per-team QA runner (the test patch
         surface for ``_run_qa_agent``).
     Postconditions:
-        - Returns ``[]`` when ``qa_agent`` is None. Otherwise never raises: an outright QA-agent
-          failure is reported as a synthetic high-severity issue rather than propagating — a bare
-          exception here would previously have aborted the whole review; fanning this step out
-          concurrently with code review/security must not make that worse.
+        - Returns an empty :class:`_ReviewStepResult` when ``qa_agent`` is None.
+          Otherwise never raises: an outright QA-agent failure is reported as a
+          synthetic high-severity issue rather than propagating — a bare exception
+          here would previously have aborted the whole review; fanning this step
+          out concurrently with code review/security must not make that worse.
     """
     if qa_agent is None:
-        return []
+        return _ReviewStepResult(issues=[])
     try:
-        return qa_agent_fn(
-            qa_agent=qa_agent,
-            files=files,
-            language=language,
-            task_description=task_description,
-            task_id=task_id,
-            context=context,
+        return _ReviewStepResult(
+            issues=qa_agent_fn(
+                qa_agent=qa_agent,
+                files=files,
+                language=language,
+                task_description=task_description,
+                task_id=task_id,
+                context=context,
+            )
         )
     except Exception as exc:
         logger.warning("[%s] QA agent step failed outright: %s", task_id, exc)
-        return [
-            ReviewIssue(
-                source="qa",
-                severity="high",
-                description=f"QA agent failed and could not complete review: {exc}",
-                recommendation="Investigate and re-run the QA agent; findings from this run are incomplete.",
-            )
-        ]
+        return _ReviewStepResult(
+            issues=[
+                ReviewIssue(
+                    source="qa",
+                    severity="high",
+                    description=f"QA agent failed and could not complete review: {exc}",
+                    recommendation="Investigate and re-run the QA agent; findings from this run are incomplete.",
+                )
+            ]
+        )
 
 
 def _security_review_step(
@@ -395,63 +409,76 @@ def _security_review_step(
     task_id: str,
     security_agent_fn: Callable[..., List[ReviewIssue]],
     context: str = "",
-) -> List[ReviewIssue]:
+) -> _ReviewStepResult:
     """Independent security step.
 
     Preconditions: ``security_agent_fn`` is the per-team security runner (the
         test patch surface for ``_run_security_agent``).
     Postconditions:
-        - Returns ``[]`` when ``security_agent`` is None. Otherwise never raises: an outright
-          security-agent failure is reported as a synthetic critical-severity issue rather than
-          propagating (see ``_qa_review_step`` for the identical rationale).
+        - Returns an empty :class:`_ReviewStepResult` when ``security_agent`` is None.
+          Otherwise never raises: an outright security-agent failure is reported as
+          a synthetic critical-severity issue rather than propagating (see
+          ``_qa_review_step`` for the identical rationale).
     """
     if security_agent is None:
-        return []
+        return _ReviewStepResult(issues=[])
     try:
-        return security_agent_fn(
-            security_agent=security_agent,
-            files=files,
-            language=language,
-            task_description=task_description,
-            task_id=task_id,
-            context=context,
+        return _ReviewStepResult(
+            issues=security_agent_fn(
+                security_agent=security_agent,
+                files=files,
+                language=language,
+                task_description=task_description,
+                task_id=task_id,
+                context=context,
+            )
         )
     except Exception as exc:
         logger.warning("[%s] Security agent step failed outright: %s", task_id, exc)
-        return [
-            ReviewIssue(
-                source="security",
-                severity="critical",
-                description=f"Security agent failed and could not complete review: {exc}",
-                recommendation=(
-                    "Investigate and re-run the security agent; findings from this run are incomplete."
-                ),
-            )
-        ]
+        return _ReviewStepResult(
+            issues=[
+                ReviewIssue(
+                    source="security",
+                    severity="critical",
+                    description=f"Security agent failed and could not complete review: {exc}",
+                    recommendation=(
+                        "Investigate and re-run the security agent; findings from this run are incomplete."
+                    ),
+                )
+            ]
+        )
 
 
 def _run_review_steps(
-    step_fns: List[Callable[[], List[ReviewIssue]]], *, llm: LLMClient
-) -> List[ReviewIssue]:
+    step_fns: List[Callable[[], _ReviewStepResult]], *, llm: LLMClient
+) -> _ReviewStepResult:
     """Run the code-review/QA/security step thunks, fanned out unless ``llm`` requires sequencing.
 
     Preconditions:
-        - Each element of ``step_fns`` never raises (see ``_code_review_step``/``_qa_review_step``/
-          ``_security_review_step``) — required because ``parallel_map`` fast-fails (cancels the
-          round's other pending steps and re-raises) on the first worker exception.
+        - Each element of ``step_fns`` returns a :class:`_ReviewStepResult` and never
+          raises (see ``_code_review_step``/``_qa_review_step``/``_security_review_step``) —
+          required because ``parallel_map`` fast-fails (cancels the round's other pending
+          steps and re-raises) on the first worker exception.
     Postconditions:
-        - Returns every step's issues concatenated in ``step_fns`` order, regardless of which
-          step's underlying call actually completed first.
+        - Returns every step's issues concatenated in ``step_fns`` order, regardless of
+          which step's underlying call actually completed first, plus the first non-``None``
+          ``raw_issue_count`` among those steps (the CR LLM fallback).
     """
     if _review_steps_run_sequentially(llm) or len(step_fns) <= 1:
-        return [issue for step in step_fns for issue in step()]
-    # Imported lazily, matching coding_team.swarm_review/coding_team.orchestrator's identical
-    # parallel_map import — keeps the module import light for callers that never hit the
-    # concurrent branch (e.g. every DummyLLMClient-backed test).
-    from shared_concurrency import parallel_map
+        results = [step() for step in step_fns]
+    else:
+        # Imported lazily, matching coding_team.swarm_review/coding_team.orchestrator's identical
+        # parallel_map import — keeps the module import light for callers that never hit the
+        # concurrent branch (e.g. every DummyLLMClient-backed test).
+        from shared_concurrency import parallel_map
 
-    results = parallel_map(step_fns, lambda fn: fn(), max_workers=len(step_fns), skip_none=False)
-    return [issue for step_issues in results for issue in step_issues]
+        results = parallel_map(step_fns, lambda fn: fn(), max_workers=len(step_fns), skip_none=False)
+    issues = [issue for step_result in results for issue in step_result.issues]
+    raw_issue_count = next(
+        (step_result.raw_issue_count for step_result in results if step_result.raw_issue_count is not None),
+        None,
+    )
+    return _ReviewStepResult(issues=issues, raw_issue_count=raw_issue_count)
 
 
 def _run_tool_agents_review(
@@ -566,10 +593,6 @@ def run_review(
     """
     task_id = task.id
     issues: List[ReviewIssue] = []
-    # Mutable box: _code_review_step must keep returning a bare issue list (it is one of
-    # several step_fns thunks _run_review_steps concatenates), so its LLM fallback's
-    # raw_issue_count is threaded out through this instead of the return value.
-    cr_raw_issue_count: List[Optional[int]] = [None]
 
     # 1. Build verification
     build_ok, build_msg = build_verify_fn(repo_path, build_verifier, task_id)
@@ -617,43 +640,41 @@ def run_review(
     # output, they only contribute to the shared `issues` list — so fan them out concurrently
     # (unless `llm` requires sequential calls; see _review_steps_run_sequentially). Step 6 (tool
     # agents) depends on the combined result of these three and must run after.
-    issues.extend(
-        _run_review_steps(
-            [
-                lambda: _code_review_step(
-                    llm=llm,
-                    task=task,
-                    files=execution_result.files,
-                    repo_path=repo_path,
-                    code_review_agent=code_review_agent,
-                    language=language,
-                    task_id=task_id,
-                    task_description=task.description or "",
-                    llm_review_fn=llm_review_fn,
-                    review_context=review_context,
-                    enable_llm_review_grounding=enable_llm_review_grounding,
-                    raw_issue_count_out=cr_raw_issue_count,
-                ),
-                lambda: _qa_review_step(
-                    qa_agent=qa_agent,
-                    files=execution_result.files,
-                    language=language,
-                    task_description=task.description or "",
-                    task_id=task_id,
-                    qa_agent_fn=qa_agent_fn,
-                ),
-                lambda: _security_review_step(
-                    security_agent=security_agent,
-                    files=execution_result.files,
-                    language=language,
-                    task_description=task.description or "",
-                    task_id=task_id,
-                    security_agent_fn=security_agent_fn,
-                ),
-            ],
-            llm=llm,
-        )
+    fan_out = _run_review_steps(
+        [
+            lambda: _code_review_step(
+                llm=llm,
+                task=task,
+                files=execution_result.files,
+                repo_path=repo_path,
+                code_review_agent=code_review_agent,
+                language=language,
+                task_id=task_id,
+                task_description=task.description or "",
+                llm_review_fn=llm_review_fn,
+                review_context=review_context,
+                enable_llm_review_grounding=enable_llm_review_grounding,
+            ),
+            lambda: _qa_review_step(
+                qa_agent=qa_agent,
+                files=execution_result.files,
+                language=language,
+                task_description=task.description or "",
+                task_id=task_id,
+                qa_agent_fn=qa_agent_fn,
+            ),
+            lambda: _security_review_step(
+                security_agent=security_agent,
+                files=execution_result.files,
+                language=language,
+                task_description=task.description or "",
+                task_id=task_id,
+                security_agent_fn=security_agent_fn,
+            ),
+        ],
+        llm=llm,
     )
+    issues.extend(fan_out.issues)
 
     # 6. Domain-specific review from tool agents
     _run_tool_agents_review(
@@ -682,7 +703,7 @@ def run_review(
         build_ok=build_ok,
         lint_ok=lint_ok,
         summary=summary,
-        raw_issue_count=cr_raw_issue_count[0],
+        raw_issue_count=fan_out.raw_issue_count,
     )
 
 
@@ -728,9 +749,6 @@ def run_microtask_review(
     task_id = task.id
     microtask_id = microtask.id
     issues: List[ReviewIssue] = []
-    # See run_review's identical box: _code_review_step's raw_issue_count is threaded out
-    # this way because the step itself must keep returning a bare issue list.
-    cr_raw_issue_count: List[Optional[int]] = [None]
 
     logger.info("[%s] %s", task_id, config.microtask_intro(microtask_id, len(files)))
 
@@ -801,46 +819,44 @@ def run_microtask_review(
     microtask_desc = f"Microtask: {microtask.description or microtask.title}"
     microtask_ctx = f" for microtask {microtask_id}"
 
-    issues.extend(
-        _run_review_steps(
-            [
-                lambda: _code_review_step(
-                    llm=llm,
-                    task=task,
-                    files=files,
-                    repo_path=repo_path,
-                    code_review_agent=code_review_agent,
-                    language=language,
-                    task_id=task_id,
-                    task_description=microtask_desc,
-                    llm_review_fn=llm_review_fn,
-                    review_context=review_context,
-                    detail_callback=detail_callback,
-                    enable_llm_review_grounding=enable_llm_review_grounding,
-                    raw_issue_count_out=cr_raw_issue_count,
-                ),
-                lambda: _qa_review_step(
-                    qa_agent=qa_agent,
-                    files=files,
-                    language=language,
-                    task_description=microtask_desc,
-                    task_id=task_id,
-                    qa_agent_fn=qa_agent_fn,
-                    context=microtask_ctx,
-                ),
-                lambda: _security_review_step(
-                    security_agent=security_agent,
-                    files=files,
-                    language=language,
-                    task_description=microtask_desc,
-                    task_id=task_id,
-                    security_agent_fn=security_agent_fn,
-                    context=microtask_ctx,
-                ),
-            ],
-            llm=llm,
-        )
+    fan_out = _run_review_steps(
+        [
+            lambda: _code_review_step(
+                llm=llm,
+                task=task,
+                files=files,
+                repo_path=repo_path,
+                code_review_agent=code_review_agent,
+                language=language,
+                task_id=task_id,
+                task_description=microtask_desc,
+                llm_review_fn=llm_review_fn,
+                review_context=review_context,
+                detail_callback=detail_callback,
+                enable_llm_review_grounding=enable_llm_review_grounding,
+            ),
+            lambda: _qa_review_step(
+                qa_agent=qa_agent,
+                files=files,
+                language=language,
+                task_description=microtask_desc,
+                task_id=task_id,
+                qa_agent_fn=qa_agent_fn,
+                context=microtask_ctx,
+            ),
+            lambda: _security_review_step(
+                security_agent=security_agent,
+                files=files,
+                language=language,
+                task_description=microtask_desc,
+                task_id=task_id,
+                security_agent_fn=security_agent_fn,
+                context=microtask_ctx,
+            ),
+        ],
+        llm=llm,
     )
+    issues.extend(fan_out.issues)
 
     _run_tool_agents_review(
         config,
@@ -870,7 +886,7 @@ def run_microtask_review(
         build_ok=build_ok,
         lint_ok=lint_ok,
         summary=summary,
-        raw_issue_count=cr_raw_issue_count[0],
+        raw_issue_count=fan_out.raw_issue_count,
     )
 
 

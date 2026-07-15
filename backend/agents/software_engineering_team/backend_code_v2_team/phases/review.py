@@ -407,26 +407,22 @@ def run_code_review_phase(
         detail_callback("Running code review...")
     # Delegates to the shared code-review step (agent call + LLM fallback + outright-failure
     # containment) instead of reimplementing it, so this phase never diverges from run_review's/
-    # run_microtask_review's behavior. The step itself must keep returning a bare issue list, so
-    # its LLM fallback's raw_issue_count is threaded out through this mutable box instead.
-    cr_raw_issue_count: List[Optional[int]] = [None]
-    issues.extend(
-        _code_review_step(
-            llm=llm,
-            task=task,
-            files=files,
-            repo_path=repo_path,
-            code_review_agent=code_review_agent,
-            language=language,
-            task_id=task_id,
-            task_description=f"Microtask: {microtask.description or microtask.title}",
-            llm_review_fn=_run_llm_review,
-            review_context=review_context,
-            detail_callback=detail_callback,
-            enable_llm_review_grounding=enable_llm_review_grounding,
-            raw_issue_count_out=cr_raw_issue_count,
-        )
+    # run_microtask_review's behavior.
+    cr_out = _code_review_step(
+        llm=llm,
+        task=task,
+        files=files,
+        repo_path=repo_path,
+        code_review_agent=code_review_agent,
+        language=language,
+        task_id=task_id,
+        task_description=f"Microtask: {microtask.description or microtask.title}",
+        llm_review_fn=_run_llm_review,
+        review_context=review_context,
+        detail_callback=detail_callback,
+        enable_llm_review_grounding=enable_llm_review_grounding,
     )
+    issues.extend(cr_out.issues)
 
     critical_or_high = [i for i in issues if is_blocking(i.severity)]
     passed = build_ok and lint_ok and len(critical_or_high) == 0
@@ -439,7 +435,7 @@ def run_code_review_phase(
         issues=issues,
         summary=summary,
         phase_name="code_review",
-        raw_issue_count=cr_raw_issue_count[0],
+        raw_issue_count=cr_out.raw_issue_count,
     )
 
 
