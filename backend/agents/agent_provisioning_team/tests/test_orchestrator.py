@@ -724,3 +724,26 @@ def test_run_workflow_uses_default_workspace_when_env_missing(tmp_path: Path, mo
         },
     )
     assert captured_workspace["ws"] == "/workspace"
+
+
+def test_no_legacy_v2_or_thread_fallback_symbols() -> None:
+    """Hard cutover: no V2 workflow type, v2 activities, or thread fallback knob."""
+    import agent_provisioning_team
+
+    root = Path(agent_provisioning_team.__file__).resolve().parent
+    # Build tokens without embedding the literals as contiguous search targets
+    # elsewhere in this test file.
+    forbidden = (
+        "AgentProvisioningWorkflow" + "V2",
+        "_activity" + "_v2",
+        "PROVISION_THREAD_" + "FALLBACK",
+    )
+    hits: list[str] = []
+    for path in root.rglob("*.py"):
+        if "__pycache__" in path.parts or "tests" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            if token in text:
+                hits.append(f"{path.relative_to(root)}:{token}")
+    assert hits == [], f"legacy cutover symbols still present: {hits}"

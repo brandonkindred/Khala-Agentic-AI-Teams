@@ -216,6 +216,7 @@ def test_run_async_raises_without_client(monkeypatch) -> None:
 
 
 def test_start_provisioning_workflow_passes_args(monkeypatch) -> None:
+    """Provision starter must start AgentProvisioningWorkflow (single type, no V1/V2)."""
     from agent_provisioning_team.temporal import start_workflow as sw
     from agent_provisioning_team.temporal.workflows import AgentProvisioningWorkflow
 
@@ -586,11 +587,11 @@ def test_provision_tool_activity_calls_provisioner() -> None:
 
     fake_provisioner = MagicMock()
     fake_provisioner.provision.return_value = ToolProvisionResult(
-        tool_name="pg", success=True, provisioner_key=None
+        tool_name="generic", success=True, provisioner_key=None
     )
 
     fake_tool = MagicMock()
-    fake_tool.provisioner = "postgres_provisioner"
+    fake_tool.provisioner = "generic_provisioner"
     fake_tool.config = {}
     fake_manifest = MagicMock()
     fake_manifest.get_tool.return_value = fake_tool
@@ -603,15 +604,15 @@ def test_provision_tool_activity_calls_provisioner() -> None:
         ),
         patch(
             "agent_provisioning_team.shared.tool_agent_registry.build_default_tool_agents",
-            return_value={"postgres_provisioner": fake_provisioner},
+            return_value={"generic_provisioner": fake_provisioner},
         ),
         patch("temporalio.activity.heartbeat"),
     ):
-        creds = GeneratedCredentials(tool_name="pg", username="u", password="p")
+        creds = GeneratedCredentials(tool_name="api_token", username="u", password="p")
         payload = activities.provision_tool_activity(
             "j",
             "a",
-            "pg",
+            "api_token",
             "default.yaml",
             credentials_dump=creds.model_dump(),
             tool_index=0,
@@ -619,7 +620,8 @@ def test_provision_tool_activity_calls_provisioner() -> None:
         )
 
     assert payload["success"] is True
-    assert payload["provisioner_key"] == "postgres_provisioner"
+    assert payload["provisioner_key"] == "generic_provisioner"
+    assert payload["tool_name"] == "api_token"
     fake_provisioner.provision.assert_called_once()
 
 

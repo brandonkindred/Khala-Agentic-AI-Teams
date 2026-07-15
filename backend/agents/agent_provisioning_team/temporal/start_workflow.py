@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import uuid
 from typing import Any, Coroutine, Optional, TypeVar
@@ -46,7 +47,7 @@ def _start_workflow_timeout_s() -> float:
         value = float(raw)
     except (TypeError, ValueError, OverflowError):
         return 30.0
-    if value != value or value in (float("inf"), float("-inf")):  # NaN / ±
+    if math.isnan(value) or math.isinf(value):
         return 30.0
     return max(1.0, value)
 

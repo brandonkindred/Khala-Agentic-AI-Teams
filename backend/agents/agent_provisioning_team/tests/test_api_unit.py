@@ -23,6 +23,15 @@ from agent_provisioning_team.models import (
 client = TestClient(app)
 
 
+def test_require_provision_starter_is_agent_provisioning_workflow_entry() -> None:
+    """API provision/resume/restart must start AgentProvisioningWorkflow via the Temporal starter."""
+    from agent_provisioning_team.temporal.start_workflow import start_provisioning_workflow
+
+    with patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=True):
+        starter = api_main._require_provision_starter()
+    assert starter is start_provisioning_workflow
+
+
 # ---------------------------------------------------------------------------
 # Health + root endpoints
 # ---------------------------------------------------------------------------
@@ -71,7 +80,7 @@ def test_provision_returns_503_when_temporal_disabled() -> None:
         patch.object(
             api_main,
             "_require_provision_starter",
-            side_effect=HTTPException(status_code=503, detail=api_main._TEMPORAL_REQUIRED),
+            side_effect=HTTPException(status_code=503, detail=api_main._TEMPORAL_REQUIRED_MESSAGE),
         ),
     ):
         r = client.post("/provision", json={"agent_id": "ag-no-temporal"})
@@ -395,7 +404,7 @@ def test_resume_job_returns_503_when_temporal_disabled() -> None:
         patch.object(
             api_main,
             "_require_provision_starter",
-            side_effect=HTTPException(status_code=503, detail=api_main._TEMPORAL_REQUIRED),
+            side_effect=HTTPException(status_code=503, detail=api_main._TEMPORAL_REQUIRED_MESSAGE),
         ),
     ):
         r = client.post("/provision/job/j1/resume")
@@ -459,7 +468,7 @@ def test_restart_job_returns_503_when_temporal_disabled() -> None:
         patch.object(
             api_main,
             "_require_provision_starter",
-            side_effect=HTTPException(status_code=503, detail=api_main._TEMPORAL_REQUIRED),
+            side_effect=HTTPException(status_code=503, detail=api_main._TEMPORAL_REQUIRED_MESSAGE),
         ),
     ):
         r = client.post("/provision/job/j1/restart")
@@ -499,7 +508,7 @@ def test_deprovision_returns_503_when_temporal_disabled() -> None:
     with patch.object(
         api_main,
         "_require_deprovision_runner",
-        side_effect=HTTPException(status_code=503, detail=api_main._TEMPORAL_REQUIRED),
+        side_effect=HTTPException(status_code=503, detail=api_main._TEMPORAL_REQUIRED_MESSAGE),
     ):
         r = client.delete("/environments/a1")
     assert r.status_code == 503

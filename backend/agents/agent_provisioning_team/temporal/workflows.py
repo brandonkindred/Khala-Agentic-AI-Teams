@@ -220,6 +220,9 @@ class AgentProvisioningWorkflow:
         skip = set(skip_phases or [])
         prior = prior_results or {}
         terminal_failure_recorded = False
+        setup_completed = False
+        tools_phase_compensated = False
+        account_provisioning_done = False
 
         try:
             # Phase 1: setup (Docker environment).
@@ -232,6 +235,7 @@ class AgentProvisioningWorkflow:
                 retry_policy=DEFAULT_RETRY_POLICY,
             )
             environment_dump = setup_result.get("environment") if setup_result else None
+            setup_completed = True
 
             # Phase 2: credential generation.
             creds_prior = (
@@ -266,6 +270,7 @@ class AgentProvisioningWorkflow:
 
             if failures:
                 await self._compensate_failed_tools(agent_id, succeeded)
+                tools_phase_compensated = True
                 err = f"Tool provisioning failed for agent {agent_id}: {'; '.join(failures)}"
                 await self._mark_job_failed(job_id, err)
                 terminal_failure_recorded = True
@@ -273,6 +278,8 @@ class AgentProvisioningWorkflow:
 
             if "account_provisioning" not in skip:
                 await self._record_account_provisioning(job_id, agent_id, tool_results_dump)
+            account_provisioning_done = True
+
             # Phase 4: access audit.
             audit_prior = prior.get("access_audit") if "access_audit" in skip else None
             audit_dump = await workflow.execute_activity(
@@ -322,7 +329,12 @@ class AgentProvisioningWorkflow:
                 retry_policy=DEFAULT_RETRY_POLICY,
             )
         except Exception as exc:
-            # Tool failures already call ``_mark_job_failed`` before re-raising.
+            # Credentials / manifest-list failures after setup leave a Docker env
+            # (+ maybe credentials) behind; compensate([]) tears those down —
+            # same as the in-process orchestrator. Tool failures already
+            # compensated above.
+            if setup_completed and not account_provisioning_done and not tools_phase_compensated:
+                await self._compensate_failed_tools(agent_id, [])
             if not terminal_failure_recorded:
                 await self._mark_job_failed(job_id, f"Provisioning failed: {exc}")
             raise

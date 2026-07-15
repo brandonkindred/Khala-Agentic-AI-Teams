@@ -274,7 +274,11 @@ def provision_tool_activity(
     )
     # Mirror run_account_provisioning: stamp the registry key so compensate()
     # can look the provisioner back up (built-ins leave provisioner_key=None).
+    # Also force tool_name to the manifest entry name — provisioners may return
+    # their own stem (e.g. generic_provisioner → "generic") which would break
+    # resume tool-set matching and EnvironmentStore recording.
     result.provisioner_key = tool.provisioner
+    result.tool_name = tool_name
     return result.model_dump()
 
 

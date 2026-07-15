@@ -429,3 +429,27 @@ async def test_workflow_marks_failed_on_audit_error(tmp_path) -> None:
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
     assert "audit boom" in fail_call["args"][1]
+
+
+@pytest.mark.asyncio
+async def test_workflow_compensates_setup_on_credentials_failure(tmp_path) -> None:
+    """After setup succeeds, credential failure must compensate (tear down env)."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "credentials_activity": RuntimeError("cred boom"),
+            "compensate_activity": None,
+            "mark_job_failed_activity": None,
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        with pytest.raises(RuntimeError, match="cred boom"):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    compensate_call = _call(stub, "compensate_activity")
+    assert compensate_call["args"] == ["agent-1", []]
+    assert "mark_job_failed_activity" in [c["name"] for c in stub.calls]

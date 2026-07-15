@@ -25,6 +25,7 @@ from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 
 from ..models import (
     DeprovisionResponse,
+    Phase,
     ProvisioningResult,
     ProvisionJobResponse,
     ProvisionJobsListResponse,
@@ -59,7 +60,7 @@ logger = logging.getLogger(__name__)
 init_otel(service_name="agent-provisioning-team", team_key="agent_provisioning")
 
 
-_TEMPORAL_REQUIRED = "Temporal is required for agent provisioning (set TEMPORAL_ADDRESS)"
+_TEMPORAL_REQUIRED_MESSAGE = "Temporal is required for agent provisioning (set TEMPORAL_ADDRESS)"
 
 # Resume is for interrupted/failed jobs only. ``running``/``pending`` share a stable
 # Temporal workflow id (``agent-provisioning-{job_id}``); a second start fails with
@@ -122,6 +123,9 @@ def _validate_job_for_reprovision(
         status = data.get("status", JOB_STATUS_PENDING)
         if status not in _STRANDED_START_STATUSES:
             raise
+        # Deferred import: api.main is loaded at process boot; pulling
+        # temporal.start_workflow at module top can create import cycles with
+        # the Temporal package self-boot path (Pattern A).
         from agent_provisioning_team.temporal.start_workflow import (
             provisioning_workflow_is_open,
         )
@@ -159,9 +163,9 @@ def _require_provision_starter():
         from agent_provisioning_team.temporal.client import is_temporal_enabled
         from agent_provisioning_team.temporal.start_workflow import start_provisioning_workflow
     except ImportError as exc:
-        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED) from exc
+        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
     if not is_temporal_enabled():
-        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED)
+        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE)
     return start_provisioning_workflow
 
 
@@ -182,9 +186,9 @@ def _require_deprovision_runner():
         from agent_provisioning_team.temporal.client import is_temporal_enabled
         from agent_provisioning_team.temporal.start_workflow import run_deprovision_workflow
     except ImportError as exc:
-        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED) from exc
+        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
     if not is_temporal_enabled():
-        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED)
+        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE)
     return run_deprovision_workflow
 
 
@@ -415,8 +419,6 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
     completed = data.get("completed_phases", [])
     phase_results = data.get("phase_results", {})
 
-    from ..models import Phase
-
     phase_values = {ph.value for ph in Phase}
     completed_values = [p for p in completed if p in phase_values]
 
@@ -526,8 +528,6 @@ def deprovision_agent(
     runner = _require_deprovision_runner()
     try:
         return DeprovisionResponse.model_validate(runner(agent_id, force))
-    except HTTPException:
-        raise
     except ValidationError as exc:
         logger.exception("Invalid deprovision workflow response for agent=%s", agent_id)
         return DeprovisionResponse(
@@ -542,7 +542,7 @@ def deprovision_agent(
         if "Temporal client not available" in str(exc):
             raise HTTPException(
                 status_code=503,
-                detail=f"{_TEMPORAL_REQUIRED}: {exc}",
+                detail=f"{_TEMPORAL_REQUIRED_MESSAGE}: {exc}",
             ) from exc
         logger.exception("Durable deprovision failed for agent=%s", agent_id)
         return DeprovisionResponse(
