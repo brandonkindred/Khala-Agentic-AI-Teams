@@ -1,26 +1,5 @@
-"""
-Shared Execution-phase leaf helpers for the code-v2 teams.
-
-Holds the pieces that were byte-identical between the backend and frontend
-execution phases — issue dedup, the review-dependency container, the
-microtask-file writer, ``generate_microtask_files`` (produce one microtask's
-output via its tool-runner or the general coder), the general (non-specialist)
-microtask coder, and the non-gated ``run_execution`` loop. The stack-specific
-``EXECUTION_PROMPT`` divergence (backend injects ``{language_conventions}``,
-frontend does not) is handled via the team's
-:class:`~software_engineering_team.shared.stack_profile.StackProfile`.
-
-The gated per-microtask loop is lifted here too, as ``run_gated_execution_impl``
-parameterised by a :class:`GatedExecutionConfig` — the same seam ``v2_review.py``
-uses with ``ReviewConfig``. The two teams' review-gate architectures still diverge
-(backend calls three separate ``run_{code_review,qa,security}_testing_phase``
-functions returning a ``PhaseReviewResult``; frontend calls one unified
-``run_microtask_review()`` three times and filters issues by ``source``), so each
-team injects that difference as three gate-adapter callables that normalise their
-result into a :class:`GateOutcome`; every other divergence (per-phase status enum,
-retry-cap formula, max-cycles semantics, startup log) is a plain config field. The
-loop skeleton itself — dependency skip, coding gate, the ``while not phase_failed``
-review cycle, rollback, documentation self-review, progress emission — is shared.
+"""Shared Execution-phase leaf helpers for the code-v2 teams, including the
+gated per-microtask review loop (``run_gated_execution_impl``).
 """
 
 from __future__ import annotations
@@ -159,6 +138,10 @@ def _run_general_microtask_impl(
     runner: LlmRunner,
 ) -> Dict[str, str]:
     """Use the LLM to implement a general (non-specialist) microtask.
+
+    Stack-specific ``EXECUTION_PROMPT`` divergence is owned by ``StackProfile``:
+    backend templates include a ``{language_conventions}`` slot; frontend
+    templates do not.
 
     Preconditions:
         ``execution_prompt`` carries a ``{language_conventions}`` slot iff
@@ -663,7 +646,11 @@ class GatedExecutionConfig:
     models: PhaseModels
     run_general_microtask: Callable[..., Dict[str, str]]
     # Gate adapters: ``(*, llm, task, microtask, repo_path, files, deps,
-    # detail_callback) -> GateOutcome``. They own the per-team review-model fork.
+    # detail_callback) -> GateOutcome``. Backend wraps separate
+    # ``run_{code_review,qa,security}_testing_phase`` calls returning
+    # ``PhaseReviewResult``; frontend calls unified ``run_microtask_review()``
+    # three times and filters issues by ``source``. Both normalize to
+    # ``GateOutcome``.
     run_code_review_gate: Callable[..., GateOutcome]
     run_qa_gate: Callable[..., GateOutcome]
     run_security_gate: Callable[..., GateOutcome]
