@@ -27,8 +27,9 @@ _ISSUE_FIX_ATTRS = ("recommendation", "suggestion", "remediation")
 def is_rejected(result: Any) -> Optional[bool]:
     """Return ``True`` if the gate rejected, ``False`` if it passed, ``None`` if unknown.
 
-    Postconditions: reads ``approved`` (pass=True) or ``all_satisfied``
-        (pass=True); returns ``None`` when neither attribute is present.
+    Postconditions: precedence is ``approved`` (pass=True), then ``all_satisfied``
+        (pass=True), then ``passed`` (pass=True — shared ``GateOutcome`` shape);
+        returns ``None`` when none of those attributes is a bool.
     """
     approved = getattr(result, "approved", None)
     if isinstance(approved, bool):
@@ -36,6 +37,9 @@ def is_rejected(result: Any) -> Optional[bool]:
     satisfied = getattr(result, "all_satisfied", None)
     if isinstance(satisfied, bool):
         return not satisfied
+    passed = getattr(result, "passed", None)
+    if isinstance(passed, bool):
+        return not passed
     return None
 
 
