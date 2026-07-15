@@ -204,7 +204,9 @@ class AgentProvisioningWorkflow:
             * On any unhandled phase failure (setup, credentials, tools, audit,
               docs, deliver): ``mark_job_failed_activity`` records terminal
               failure before the exception propagates (tool failures also
-              compensate succeeded tools first).
+              compensate succeeded tools first). Credentials / manifest-list
+              failures after setup call ``compensate_activity`` with an empty
+              succeeded list to tear down the Docker env / credentials.
             * After a successful tool fan-out (not a restored skip),
               ``account_provisioning`` is written to ``completed_phases`` /
               ``phase_results`` before later phases run.
