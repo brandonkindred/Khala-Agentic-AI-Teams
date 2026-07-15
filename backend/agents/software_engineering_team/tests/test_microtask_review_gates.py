@@ -622,6 +622,9 @@ class TestBackendRunExecutionWithReviewGates:
             enable_llm_review_grounding=True,
         )
         assert not any("Insurance Provider" in (i.description or "") for i in dropped.issues)
+        # The fabrication was found (and counted) before grounding dropped it, so the
+        # PhaseReviewResult still reports the LLM fallback's raw pre-grounding count.
+        assert dropped.raw_issue_count == 1
 
         kept = run_code_review_phase(
             llm=MagicMock(),
@@ -632,3 +635,4 @@ class TestBackendRunExecutionWithReviewGates:
             enable_llm_review_grounding=False,
         )
         assert any("Insurance Provider" in (i.description or "") for i in kept.issues)
+        assert kept.raw_issue_count == 1  # kill switch still reports the raw count
