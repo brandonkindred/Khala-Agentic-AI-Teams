@@ -635,3 +635,99 @@ def test_documentation_unsafe_path_is_skipped(tmp_path):
 
     assert mt.status == MS.COMPLETED  # unsafe doc path is best-effort, skipped
     assert "../escape.md" not in result.files
+
+
+# ---------------------------------------------------------------------------
+# Terminal gate-outcome observability
+# ---------------------------------------------------------------------------
+
+
+def test_terminal_failing_outcome_prefers_cr_then_qa_then_sec():
+    """_terminal_failing_outcome returns the first still-failing gate in cr→qa→sec order."""
+    from software_engineering_team.shared.phases.execution import _terminal_failing_outcome
+
+    cr_fail = GateOutcome(passed=False, issues=[_issue("code_review")], summary="cr")
+    qa_fail = GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")
+    sec_fail = GateOutcome(passed=False, issues=[_issue("security")], summary="sec")
+    all_pass = GateOutcome(passed=True)
+
+    assert _terminal_failing_outcome(cr_fail, qa_fail, sec_fail) is cr_fail
+    assert _terminal_failing_outcome(all_pass, qa_fail, sec_fail) is qa_fail
+    assert _terminal_failing_outcome(all_pass, all_pass, sec_fail) is sec_fail
+    synthetic = _terminal_failing_outcome(all_pass, all_pass, all_pass)
+    assert synthetic.passed is False
+    assert synthetic.summary == "Max cycles exceeded"
+
+
+def test_record_gate_outcome_on_code_review_retry_exhausted(tmp_path, monkeypatch):
+    """Code-review retry exhaustion records exactly one terminal gate outcome."""
+    calls: List[tuple] = []
+    monkeypatch.setattr(
+        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
+    )
+    mt = _microtask()
+    _run(
+        _make_gate_config(code_review_gate=_fail_gate()),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, on_failure="skip_continue"),
+    )
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert len(calls) == 1
+    gate, result, kw = calls[0]
+    assert gate == "code_review_retry_exhausted"
+    assert result.passed is False
+    assert kw.get("task_id") == "t1"
+    assert kw.get("phase") == "execution"
+    assert kw.get("job_id") == ""
+
+
+def test_record_gate_outcome_on_max_cycles(tmp_path, monkeypatch):
+    """Max-cycles REVIEW_FAILED records exactly one outcome with gate=review_max_cycles."""
+    calls: List[tuple] = []
+    monkeypatch.setattr(
+        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
+    )
+    mt = _microtask()
+    cfg = _make_gate_config(requires_failing=True, qa_gate=_fail_gate("qa"))
+    _run(cfg, [mt], tmp_path, review_config=_config(cr=0, qa=2, sec=0, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert len(calls) == 1
+    gate, result, kw = calls[0]
+    assert gate == "review_max_cycles"
+    assert result.passed is False
+    assert kw.get("task_id") == "t1"
+    assert kw.get("phase") == "execution"
+    assert kw.get("job_id") == ""
+
+
+def test_record_gate_outcome_not_called_on_success(tmp_path, monkeypatch):
+    """Happy-path completion must not record a gate rejection."""
+    calls: List[tuple] = []
+    monkeypatch.setattr(
+        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        lambda *a, **k: calls.append((a, k)) or True,
+    )
+    _run(_make_gate_config(), [_microtask()], tmp_path, review_config=_config())
+    assert calls == []
+
+
+def test_record_gate_outcome_not_called_on_qa_recovered(tmp_path, monkeypatch):
+    """Mid-loop QA fail → fix → pass is not a terminal failure; no recording."""
+    calls: List[tuple] = []
+    monkeypatch.setattr(
+        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        lambda *a, **k: calls.append((a, k)) or True,
+    )
+    qa = _ScriptedGate([GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")])
+    _run(
+        _make_gate_config(qa_gate=qa),
+        [_microtask()],
+        tmp_path,
+        review_config=_config(cr=1, qa=2, sec=1),
+    )
+    assert calls == []
