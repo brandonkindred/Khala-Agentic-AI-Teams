@@ -408,6 +408,52 @@ def _record_terminal_gate_failure(gate: str, outcome: Any, task_id: str) -> None
     record_gate_outcome(gate, outcome, job_id="", task_id=task_id, phase="execution")
 
 
+def _apply_code_review_retry_exhausted(
+    *,
+    phase_failed: bool,
+    mt: Any,
+    cr_outcome: GateOutcome,
+    code_review_retry_cap: int,
+    task_id: str,
+    review_failed_ids: set,
+    all_files: Dict[str, str],
+    microtask_file_keys: set,
+    review_failed_status: Any,
+) -> bool:
+    """Mark retry-exhaustion REVIEW_FAILED unless write-path already failed.
+
+    Preconditions:
+        Caller has confirmed ``not cr_outcome.passed`` after the retry loop.
+        When ``phase_failed`` is True, ``write_microtask_output_or_fail`` already
+        marked the microtask and rolled back files.
+    Postconditions:
+        When ``phase_failed`` was False: sets REVIEW_FAILED notes/status, records
+        ``code_review_retry_exhausted``, rolls back ``microtask_file_keys`` from
+        ``all_files``, and returns True.
+        When ``phase_failed`` was True: leaves notes/status/telemetry untouched
+        and returns True (caller still stops the outer review cycle).
+    """
+    if phase_failed:
+        return True
+    mt.status = review_failed_status
+    review_failed_ids.add(mt.id)
+    mt.notes = (
+        f"Code review failed after {code_review_retry_cap} batch fix attempts: "
+        f"{cr_outcome.summary}"
+    )
+    _record_terminal_gate_failure("code_review_retry_exhausted", cr_outcome, task_id)
+    logger.warning(
+        "[%s] Microtask %s: CODE_REVIEW_FAILED after %d batch fix attempts. Issues: %s",
+        task_id,
+        mt.id,
+        code_review_retry_cap,
+        cr_outcome.summary,
+    )
+    for fk in microtask_file_keys:
+        all_files.pop(fk, None)
+    return True
+
+
 @dataclass(frozen=True)
 class GatedExecutionConfig:
     """Per-team knobs for :func:`run_gated_execution_impl`.
@@ -758,22 +804,17 @@ def run_gated_execution_impl(
                 )
 
             if not cr_outcome.passed:
-                if not phase_failed:
-                    phase_failed = True
-                    mt.status = microtask_status.REVIEW_FAILED
-                    review_failed_ids.add(mt.id)
-                    mt.notes = f"Code review failed after {code_review_retry_cap} batch fix attempts: {cr_outcome.summary}"
-                    _record_terminal_gate_failure("code_review_retry_exhausted", cr_outcome, task_id)
-                    logger.warning(
-                        "[%s] Microtask %s: CODE_REVIEW_FAILED after %d batch fix attempts. Issues: %s",
-                        task_id,
-                        mt.id,
-                        code_review_retry_cap,
-                        cr_outcome.summary,
-                    )
-                    # Rollback: remove this microtask's files from all_files
-                    for fk in microtask_file_keys:
-                        all_files.pop(fk, None)
+                phase_failed = _apply_code_review_retry_exhausted(
+                    phase_failed=phase_failed,
+                    mt=mt,
+                    cr_outcome=cr_outcome,
+                    code_review_retry_cap=code_review_retry_cap,
+                    task_id=task_id,
+                    review_failed_ids=review_failed_ids,
+                    all_files=all_files,
+                    microtask_file_keys=microtask_file_keys,
+                    review_failed_status=microtask_status.REVIEW_FAILED,
+                )
                 if config.on_failure == "stop":
                     raise review_failed_error_cls(
                         mt,
