@@ -33,11 +33,11 @@ def test_setup_activity_progress_path() -> None:
 
     recorded = []
 
-    def fake_safe(fn_name, *args, **kwargs):
-        recorded.append({"fn": fn_name, "args": args, "kwargs": kwargs})
+    def fake_safe(fn, *args, **kwargs):
+        recorded.append({"fn": getattr(fn, "__name__", fn), "args": args, "kwargs": kwargs})
 
     with (
-        patch.object(t_acts, "_safe", side_effect=fake_safe),
+        patch.object(t_acts, "_best_effort_job_store", side_effect=fake_safe),
         patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
         patch(
             "agent_provisioning_team.phases.setup.run_setup",
@@ -67,7 +67,7 @@ def test_setup_activity_raises_when_setup_fails() -> None:
     fake_manifest = MagicMock()
 
     with (
-        patch.object(t_acts, "_safe"),
+        patch.object(t_acts, "_best_effort_job_store"),
         patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
         patch(
             "agent_provisioning_team.phases.setup.run_setup",
@@ -93,7 +93,7 @@ def test_setup_activity_restores_from_prior() -> None:
         },
     }
     with (
-        patch.object(t_acts, "_safe"),
+        patch.object(t_acts, "_best_effort_job_store"),
         patch("temporalio.activity.heartbeat"),
     ):
         payload = t_acts.setup_activity("j", "a", "default.yaml", prior_setup=prior)
@@ -158,6 +158,7 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": ["postgresql", "redis"],
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -211,6 +212,7 @@ async def test_workflow_compensates_on_tool_failure(tmp_path) -> None:
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": ["postgresql", "redis"],
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -244,6 +246,7 @@ async def test_workflow_skips_provisioning_when_resumed(tmp_path) -> None:
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": ["postgresql", "redis"],
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -300,6 +303,7 @@ async def test_workflow_resume_with_prior_failed_tools_compensates(tmp_path) -> 
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": ["postgresql", "redis"],
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -362,6 +366,7 @@ async def test_workflow_handles_non_dict_provision_results(tmp_path) -> None:
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": None},
+            "list_manifest_tools_activity": ["postgresql", "redis"],
             "credentials_activity": {
                 "success": True,
                 "credentials": {
@@ -396,6 +401,7 @@ async def test_workflow_handles_dict_failure_results(tmp_path) -> None:
     stub = _ExecActivityStub(
         {
             "setup_activity": {"success": True, "environment": None},
+            "list_manifest_tools_activity": ["postgresql", "redis"],
             "credentials_activity": {
                 "success": True,
                 "credentials": {

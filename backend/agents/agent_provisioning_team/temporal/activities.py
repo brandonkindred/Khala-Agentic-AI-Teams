@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from temporalio import activity
 
@@ -27,7 +27,20 @@ logger = logging.getLogger(__name__)
 
 
 def _load_ctx(manifest_path: str):
-    """Lazy import to keep the worker's import graph minimal."""
+    """Build a fresh orchestrator and load the agent tool manifest.
+
+    Preconditions:
+        * ``manifest_path`` is a readable YAML path (or registry key accepted by
+          ``load_manifest``).
+    Postconditions:
+        * Returns ``(ProvisioningOrchestrator, ToolManifest)``.
+    Raises:
+        * Propagates import/IO/validation errors from ``load_manifest``.
+
+    ``ProvisioningOrchestrator()`` is intentionally constructed per call — it is
+    cheap and effectively stateless for activity use (stores/clients are created
+    on demand). Caching a process-global instance is unnecessary.
+    """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
     from agent_provisioning_team.shared.tool_manifest import load_manifest
 
@@ -36,24 +49,54 @@ def _load_ctx(manifest_path: str):
     return orch, manifest
 
 
-def _safe(fn_name: str, *args: Any, **kwargs: Any) -> None:
-    """Best-effort job_store call. A job_store hiccup must never fail the activity."""
+def _best_effort_job_store(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    """Best-effort job_store call. Store hiccups must never fail the activity.
+
+    Callers pass the real ``job_store`` callable (not a name string) so rename
+    refactoring stays searchable. Incorrect ``*args``/``**kwargs`` for a valid
+    callable are still caught and logged — progress writes must not abort the
+    activity and leave Temporal retries opaque.
+    """
     try:
-        getattr(_js, fn_name)(*args, **kwargs)
+        fn(*args, **kwargs)
     except Exception:
-        logger.exception("job_store.%s failed: args=%s kwargs=%s", fn_name, args, list(kwargs))
+        logger.exception(
+            "job_store.%s failed: args=%s kwargs=%s",
+            getattr(fn, "__name__", repr(fn)),
+            args,
+            list(kwargs),
+        )
 
 
-def _restored(job_id: str, phase: str, progress: int) -> None:
-    """Common 'phase skipped, restored from prior_results' progress write."""
+def _record_phase_restored(job_id: str, phase: str, progress: int) -> None:
+    """Write a 'phase skipped, restored from prior_results' progress update."""
     logger.info("Skipping %s for job=%s (restored from prior_results)", phase, job_id)
-    _safe(
-        "update_job",
+    _best_effort_job_store(
+        _js.update_job,
         job_id,
         current_phase=phase,
         progress=progress,
         status_text=f"Restored {phase} from previous run",
     )
+
+
+@activity.defn(name="agent_provisioning_list_manifest_tools")
+def list_manifest_tools_activity(manifest_path: str) -> List[str]:
+    """Return ordered tool names from the agent manifest (workflow-safe I/O).
+
+    Temporal workflows must not read files directly. This activity loads the
+    manifest outside the deterministic workflow sandbox.
+
+    Preconditions:
+        * ``manifest_path`` is non-empty and readable by ``load_manifest``.
+    Postconditions:
+        * Returns tool names in manifest order.
+    """
+    assert manifest_path, "manifest_path must be non-empty"
+    from agent_provisioning_team.shared.tool_manifest import load_manifest
+
+    manifest = load_manifest(manifest_path)
+    return [t.name for t in manifest.tools]
 
 
 @activity.defn(name="agent_provisioning_setup")
@@ -77,18 +120,17 @@ def setup_activity(
     from agent_provisioning_team.phases.setup import run_setup
     from agent_provisioning_team.shared.phase_state import restore_setup
 
-    _safe("mark_job_running", job_id)
+    _best_effort_job_store(_js.mark_job_running, job_id)
 
     if prior_setup is not None:
         snap = restore_setup(prior_setup)
-        _restored(job_id, "setup", 15)
+        _record_phase_restored(job_id, "setup", 15)
         return {
             "success": snap.success,
             "environment": snap.environment.model_dump() if snap.environment else None,
         }
 
-    _safe(
-        "update_job",
+    _best_effort_job_store(_js.update_job,
         job_id,
         current_phase="setup",
         progress=5,
@@ -109,8 +151,8 @@ def setup_activity(
         "success": True,
         "environment": result.environment.model_dump() if result.environment else None,
     }
-    _safe("add_completed_phase", job_id, "setup", payload)
-    _safe("update_job", job_id, progress=15, status_text="Setup complete")
+    _best_effort_job_store(_js.add_completed_phase, job_id, "setup", payload)
+    _best_effort_job_store(_js.update_job, job_id, progress=15, status_text="Setup complete")
     return payload
 
 
@@ -131,28 +173,24 @@ def credentials_activity(
         * Returns ``{"success": True, "credentials": {tool_name: dump, ...}}``.
         * Raises ``RuntimeError`` when credential generation fails.
     """
-    from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
     from agent_provisioning_team.phases.credential_generation import run_credential_generation
     from agent_provisioning_team.shared.phase_state import restore_credentials
-    from agent_provisioning_team.shared.tool_manifest import load_manifest
 
     if prior_credentials is not None:
         snap = restore_credentials(prior_credentials)
-        _restored(job_id, "credential_generation", 30)
+        _record_phase_restored(job_id, "credential_generation", 30)
         return {
             "success": snap.success,
             "credentials": {k: v.model_dump() for k, v in snap.credentials.items()},
         }
 
-    _safe(
-        "update_job",
+    _best_effort_job_store(_js.update_job,
         job_id,
         current_phase="credential_generation",
         progress=20,
         status_text="Generating credentials...",
     )
-    orch = ProvisioningOrchestrator()
-    manifest = load_manifest(manifest_path)
+    orch, manifest = _load_ctx(manifest_path)
     activity.heartbeat("credentials")
     result = run_credential_generation(
         agent_id=agent_id,
@@ -166,8 +204,8 @@ def credentials_activity(
         "success": True,
         "credentials": {k: v.model_dump() for k, v in result.credentials.items()},
     }
-    _safe("add_completed_phase", job_id, "credential_generation", payload)
-    _safe("update_job", job_id, progress=30, status_text="Credentials generated")
+    _best_effort_job_store(_js.add_completed_phase, job_id, "credential_generation", payload)
+    _best_effort_job_store(_js.update_job, job_id, progress=30, status_text="Credentials generated")
     return payload
 
 
@@ -197,11 +235,11 @@ def provision_tool_activity(
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
     from agent_provisioning_team.shared.tool_manifest import load_manifest
 
-    _safe(
-        "update_job",
+    _best_effort_job_store(_js.update_job,
         job_id,
         current_phase="account_provisioning",
         current_tool=tool_name,
+        tools_completed=tools_completed_so_far,
         tools_total=tools_total,
         status_text=f"Provisioning {tool_name}...",
     )
@@ -253,11 +291,10 @@ def audit_activity(
 
     if prior_audit is not None:
         result = restore_access_audit(prior_audit)
-        _restored(job_id, "access_audit", 75)
+        _record_phase_restored(job_id, "access_audit", 75)
         return result.model_dump()
 
-    _safe(
-        "update_job",
+    _best_effort_job_store(_js.update_job,
         job_id,
         current_phase="access_audit",
         progress=70,
@@ -273,8 +310,8 @@ def audit_activity(
         provisioners=build_default_tool_agents(),
     )
     payload = result.model_dump()
-    _safe("add_completed_phase", job_id, "access_audit", payload)
-    _safe("update_job", job_id, progress=80, status_text="Access audit complete")
+    _best_effort_job_store(_js.add_completed_phase, job_id, "access_audit", payload)
+    _best_effort_job_store(_js.update_job, job_id, progress=80, status_text="Access audit complete")
     return payload
 
 
@@ -305,14 +342,13 @@ def documentation_activity(
 
     if prior_documentation is not None:
         snap = restore_documentation(prior_documentation)
-        _restored(job_id, "documentation", 90)
+        _record_phase_restored(job_id, "documentation", 90)
         return {
             "success": snap.success,
             "onboarding": snap.onboarding.model_dump() if snap.onboarding else None,
         }
 
-    _safe(
-        "update_job",
+    _best_effort_job_store(_js.update_job,
         job_id,
         current_phase="documentation",
         progress=85,
@@ -333,8 +369,8 @@ def documentation_activity(
         "success": result.success,
         "onboarding": result.onboarding.model_dump() if result.onboarding else None,
     }
-    _safe("add_completed_phase", job_id, "documentation", payload)
-    _safe("update_job", job_id, progress=92, status_text="Documentation complete")
+    _best_effort_job_store(_js.add_completed_phase, job_id, "documentation", payload)
+    _best_effort_job_store(_js.update_job, job_id, progress=92, status_text="Documentation complete")
     return payload
 
 
@@ -371,8 +407,7 @@ def deliver_activity(
         run_deliver,
     )
 
-    _safe(
-        "update_job",
+    _best_effort_job_store(_js.update_job,
         job_id,
         current_phase="deliver",
         progress=95,
@@ -409,9 +444,9 @@ def deliver_activity(
 
     if final.success:
         redacted = redact_credentials_for_response(final)
-        _safe("mark_job_completed", job_id, result=redacted.model_dump())
+        _best_effort_job_store(_js.mark_job_completed, job_id, result=redacted.model_dump())
     else:
-        _safe("mark_job_failed", job_id, error=final.error or "Provisioning failed")
+        _best_effort_job_store(_js.mark_job_failed, job_id, error=final.error or "Provisioning failed")
 
     return {"success": final.success, "error": final.error}
 
@@ -429,7 +464,7 @@ def compensate_activity(
           ``provisioner_key`` (registry key, e.g. ``"postgres_provisioner"``).
           The orchestrator looks provisioners up by that registry key.
     Postconditions:
-        * Invokes ``ProvisioningOrchestrator._compensate`` once. Failures inside
+        * Invokes ``ProvisioningOrchestrator.compensate`` once. Failures inside
           compensation are absorbed by the orchestrator (best effort).
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
@@ -443,7 +478,7 @@ def compensate_activity(
         )
         for t in succeeded_tools
     ]
-    orch._compensate(agent_id, shims)
+    orch.compensate(agent_id, shims)
 
 
 @activity.defn(name="agent_provisioning_mark_job_failed")
@@ -458,11 +493,11 @@ def mark_job_failed_activity(job_id: str, error: str) -> None:
         * ``error`` is a non-empty human-readable failure reason.
     Postconditions:
         * Best-effort ``mark_job_failed`` write via ``job_store`` (never raises
-          from a store hiccup — uses ``_safe``).
+          from a store hiccup — uses ``_best_effort_job_store``).
     """
     assert job_id, "job_id must be non-empty"
     assert error, "error must be non-empty"
-    _safe("mark_job_failed", job_id, error=error)
+    _best_effort_job_store(_js.mark_job_failed, job_id, error=error)
 
 
 # ---------------------------------------------------------------------------

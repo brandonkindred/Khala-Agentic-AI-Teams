@@ -18,7 +18,6 @@ from temporalio.common import RetryPolicy
 # side effects (Pattern A worker boot), so TASK_QUEUE — despite being a plain
 # string — must stay inside the pass-through block with the other package imports.
 with workflow.unsafe.imports_passed_through():
-    from agent_provisioning_team.shared.tool_manifest import load_manifest
     from agent_provisioning_team.temporal import activities as _activities
     from agent_provisioning_team.temporal.constants import TASK_QUEUE
 
@@ -222,8 +221,13 @@ class AgentProvisioningWorkflow:
         credentials_by_tool: dict[str, dict[str, Any]] = creds_result["credentials"]
 
         # Phase 3: fan out per-tool provisioning (or restore from prior).
-        manifest = load_manifest(manifest_path)
-        tool_names = [t.name for t in manifest.tools]
+        tool_names = await workflow.execute_activity(
+            _activities.list_manifest_tools_activity,
+            args=[manifest_path],
+            task_queue=TASK_QUEUE,
+            schedule_to_close_timeout=PHASE_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
+        )
         tool_results_dump, succeeded, failures = await self._run_tool_provisioning_phase(
             job_id,
             agent_id,

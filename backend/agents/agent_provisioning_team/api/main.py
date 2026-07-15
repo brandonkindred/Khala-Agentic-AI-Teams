@@ -4,6 +4,7 @@ FastAPI endpoints for the Agent Provisioning Team.
 Provides REST API for provisioning, status tracking, and deprovisioning.
 """
 
+import concurrent.futures
 import contextlib
 import logging
 import uuid
@@ -12,8 +13,14 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from temporalio.exceptions import TemporalError
 
-from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
+from job_service_client import (
+    JOB_STATUS_FAILED,
+    JOB_STATUS_INTERRUPTED,
+    RESTARTABLE_STATUSES,
+    validate_job_for_action,
+)
 from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 
 from ..models import (
@@ -52,6 +59,35 @@ init_otel(service_name="agent-provisioning-team", team_key="agent_provisioning")
 
 
 _TEMPORAL_REQUIRED = "Temporal is required for agent provisioning (set TEMPORAL_ADDRESS)"
+
+# Resume is for interrupted/failed jobs only. ``running``/``pending`` share a stable
+# Temporal workflow id (``agent-provisioning-{job_id}``); a second start fails with
+# WorkflowAlreadyStartedError while the original keeps running — marking failed on
+# that error would corrupt a live job.
+PROVISION_RESUMABLE_STATUSES: frozenset[str] = frozenset(
+    {
+        JOB_STATUS_FAILED,
+        JOB_STATUS_INTERRUPTED,
+        "agent_crash",
+    }
+)
+
+
+def _is_indeterminate_workflow_start(exc: BaseException) -> bool:
+    """True when Temporal may still have accepted the start (caller must not fail the job)."""
+    return isinstance(exc, (TimeoutError, concurrent.futures.TimeoutError))
+
+
+def _fail_job_after_start_error(job_id: str, exc: BaseException) -> None:
+    """Mark ``job_id`` failed unless ``exc`` leaves start acceptance indeterminate."""
+    if _is_indeterminate_workflow_start(exc):
+        logger.warning(
+            "Temporal start timed out for job=%s; not marking failed (workflow may still run): %s",
+            job_id,
+            exc,
+        )
+        return
+    mark_job_failed(job_id, error=str(exc))
 
 
 def _require_provision_starter():
@@ -170,7 +206,7 @@ def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
             prior_results=None,
         )
     except Exception as exc:
-        mark_job_failed(job_id, error=str(exc))
+        _fail_job_after_start_error(job_id, exc)
         raise HTTPException(
             status_code=503, detail=f"Failed to start Temporal workflow: {exc}"
         ) from exc
@@ -306,7 +342,9 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
           workflow is restarted skipping ``completed_phases``.
     """
     try:
-        data = validate_job_for_action(get_job(job_id), job_id, RESUMABLE_STATUSES, "resumed")
+        data = validate_job_for_action(
+            get_job(job_id), job_id, PROVISION_RESUMABLE_STATUSES, "resumed"
+        )
     except ValueError as exc:
         code = 404 if "not found" in str(exc) else 400
         raise HTTPException(status_code=code, detail=str(exc)) from exc
@@ -336,7 +374,7 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
             prior_results=phase_results,
         )
     except Exception as exc:
-        mark_job_failed(job_id, error=str(exc))
+        _fail_job_after_start_error(job_id, exc)
         raise HTTPException(
             status_code=503, detail=f"Failed to resume Temporal workflow: {exc}"
         ) from exc
@@ -387,7 +425,7 @@ def restart_provision_job(job_id: str) -> ProvisionJobResponse:
             prior_results=None,
         )
     except Exception as exc:
-        mark_job_failed(job_id, error=str(exc))
+        _fail_job_after_start_error(job_id, exc)
         raise HTTPException(
             status_code=503, detail=f"Failed to restart Temporal workflow: {exc}"
         ) from exc
@@ -444,7 +482,8 @@ def deprovision_agent(
             details={},
             error=f"Deprovision workflow failed: {exc}",
         )
-    except Exception as exc:
+    except TemporalError as exc:
+        # Expected Temporal / workflow execution failures — return as payload, not 500.
         logger.exception("Durable deprovision failed for agent=%s", agent_id)
         return DeprovisionResponse(
             agent_id=agent_id,

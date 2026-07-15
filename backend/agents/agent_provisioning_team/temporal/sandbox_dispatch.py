@@ -19,6 +19,14 @@ import uuid
 
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from agent_provisioning_team.sandbox import (
+    DockerUnavailableError,
+    SandboxAcquireFailedError,
+    UnknownAgentError,
+    acquire as _acquire_sandbox_inprocess,
+    teardown as _teardown_sandbox_inprocess,
+)
+from agent_provisioning_team.sandbox.provisioner import DockerError
 from agent_provisioning_team.sandbox.state import SandboxHandle
 from agent_provisioning_team.temporal.constants import (
     SANDBOX_ACQUIRE_CLIENT_TIMEOUT_S,
@@ -33,6 +41,7 @@ from agent_provisioning_team.temporal.sandbox_workflows import (
     SandboxReaperWorkflow,
     SandboxTeardownWorkflow,
 )
+from shared_temporal import translate_workflow_failure
 from shared_temporal.runner import execute_workflow_async, start_workflow_sync
 
 logger = logging.getLogger(__name__)
@@ -65,9 +74,7 @@ async def acquire_sandbox(agent_id: str) -> SandboxHandle:
     assert agent_id, "agent_id must be non-empty"
     if sandbox_temporal_enabled():
         return await acquire_sandbox_via_temporal(agent_id)
-    from agent_provisioning_team.sandbox import acquire as _acquire
-
-    return await _acquire(agent_id)
+    return await _acquire_sandbox_inprocess(agent_id)
 
 
 async def teardown_sandbox(agent_id: str) -> None:
@@ -82,9 +89,7 @@ async def teardown_sandbox(agent_id: str) -> None:
     if sandbox_temporal_enabled():
         await teardown_sandbox_via_temporal(agent_id)
         return
-    from agent_provisioning_team.sandbox import teardown as _teardown
-
-    await _teardown(agent_id)
+    await _teardown_sandbox_inprocess(agent_id)
 
 
 async def acquire_sandbox_via_temporal(agent_id: str) -> SandboxHandle:
@@ -130,14 +135,6 @@ def _reraise_sandbox_error(exc: Exception) -> None:
     A client-side ``asyncio.TimeoutError`` (which carries no ``.type``) has no
     match and is left for the caller to re-raise unchanged.
     """
-    from agent_provisioning_team.sandbox import (
-        DockerUnavailableError,
-        SandboxAcquireFailedError,
-        UnknownAgentError,
-    )
-    from agent_provisioning_team.sandbox.provisioner import DockerError
-    from shared_temporal import translate_workflow_failure
-
     translate_workflow_failure(
         exc,
         {

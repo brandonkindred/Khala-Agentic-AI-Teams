@@ -306,7 +306,7 @@ def test_run_workflow_resume_restores_all_phases(tmp_path: Path, monkeypatch) ->
 
 
 def test_run_workflow_account_provisioning_failure_compensates(tmp_path: Path, monkeypatch) -> None:
-    """A failed account provisioning rolls back via _compensate."""
+    """A failed account provisioning rolls back via compensate."""
     from agent_provisioning_team import orchestrator as orch_mod
 
     _patch_run_setup(monkeypatch)
@@ -367,7 +367,7 @@ def test_compensate_swallows_docker_failure(tmp_path: Path) -> None:
         tool_agents={"docker_provisioner": fake_docker},
     )
     # Should not raise
-    orch._compensate("a1", [])
+    orch.compensate("a1", [])
 
 
 def test_compensate_skips_unsuccessful_tool_results(tmp_path: Path) -> None:
@@ -386,7 +386,7 @@ def test_compensate_skips_unsuccessful_tool_results(tmp_path: Path) -> None:
         provisioner_key="some_provisioner",
     )
 
-    orch._compensate("a1", [failed])
+    orch.compensate("a1", [failed])
     fake_prov.deprovision.assert_not_called()
     fake_prov.list_compensations.assert_not_called()
 
@@ -400,7 +400,7 @@ def test_compensate_skips_when_no_provisioner_key(tmp_path: Path, caplog) -> Non
 
     # No provisioner_key
     success_no_key = ToolProvisionResult(tool_name="t", success=True)
-    orch._compensate("a1", [success_no_key])
+    orch.compensate("a1", [success_no_key])
     fake_prov.deprovision.assert_not_called()
 
 
@@ -412,7 +412,7 @@ def test_compensate_skips_when_provisioner_unregistered(tmp_path: Path) -> None:
     )
 
     success_unknown_key = ToolProvisionResult(tool_name="t", success=True, provisioner_key="ghost")
-    orch._compensate("a1", [success_unknown_key])
+    orch.compensate("a1", [success_unknown_key])
 
 
 def test_compensate_list_compensations_failure_falls_to_deprovision(tmp_path: Path) -> None:
@@ -426,7 +426,7 @@ def test_compensate_list_compensations_failure_falls_to_deprovision(tmp_path: Pa
     )
 
     success = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
-    orch._compensate("a1", [success])
+    orch.compensate("a1", [success])
     fake_prov.deprovision.assert_called_once()
 
 
@@ -447,7 +447,7 @@ def test_compensate_replay_failure_continues(tmp_path: Path) -> None:
     )
 
     success = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
-    orch._compensate("a1", [success])
+    orch.compensate("a1", [success])
     # Replay attempted for both records (continues despite failure)
     assert fake_prov.replay_compensation.call_count == 2
 
@@ -461,7 +461,7 @@ def test_compensate_credential_cleanup_failure_swallowed(tmp_path: Path) -> None
         environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
         tool_agents={"docker_provisioner": MagicMock()},
     )
-    orch._compensate("a1", [])
+    orch.compensate("a1", [])
 
 
 def test_compensate_environment_cleanup_failure_swallowed(tmp_path: Path, monkeypatch) -> None:
@@ -472,7 +472,7 @@ def test_compensate_environment_cleanup_failure_swallowed(tmp_path: Path, monkey
         environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
         tool_agents={"docker_provisioner": MagicMock()},
     )
-    orch._compensate("a1", [])
+    orch.compensate("a1", [])
 
 
 def test_compensate_post_replay_state_cleanup_failure(tmp_path: Path) -> None:
@@ -488,7 +488,7 @@ def test_compensate_post_replay_state_cleanup_failure(tmp_path: Path) -> None:
         tool_agents={"x": fake_prov, "docker_provisioner": MagicMock()},
     )
     success = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
-    orch._compensate("a1", [success])
+    orch.compensate("a1", [success])
 
 
 # ---------------------------------------------------------------------------
@@ -615,7 +615,7 @@ def test_list_agents_filters_by_status(tmp_path: Path) -> None:
 
 
 def test_run_workflow_shutdown_mid_workflow(tmp_path: Path, monkeypatch) -> None:
-    """If shutdown event flips between phases, _compensate runs + raise fires."""
+    """If shutdown event flips between phases, compensate runs + raise fires."""
     from agent_provisioning_team import orchestrator as orch_mod
 
     _patch_run_setup(monkeypatch)

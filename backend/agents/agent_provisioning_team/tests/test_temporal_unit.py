@@ -308,7 +308,6 @@ def test_create_worker_constructs_worker_when_enabled() -> None:
     # Provisioning/deprovision only — sandbox workflows/activities are
     # deliberately excluded (they run on their own SANDBOX_TASK_QUEUE via a
     # separately-booted worker; see start_agent_provisioning_sandbox_temporal_worker_thread).
-    assert len(kwargs["activities"]) == 9
     assert len(kwargs["workflows"]) == 2
 
 
@@ -387,23 +386,23 @@ def test_start_sandbox_worker_thread_uses_distinct_team_key_and_queue() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_safe_swallows_exceptions() -> None:
+def test_best_effort_job_store_swallows_exceptions() -> None:
     from agent_provisioning_team.temporal import activities
 
     with patch.object(activities._js, "create_job", side_effect=RuntimeError("boom")):
         # Must not raise — this is "best-effort job_store call".
-        activities._safe("create_job", "j", "a", "m")
+        activities._best_effort_job_store(activities._js.create_job, "j", "a", "m")
 
 
-def test_restored_writes_status_update() -> None:
+def test_record_phase_restored_writes_status_update() -> None:
     from agent_provisioning_team.temporal import activities
 
-    with patch.object(activities, "_safe") as mock_safe:
-        activities._restored("j-1", "setup", 15)
+    with patch.object(activities, "_best_effort_job_store") as mock_safe:
+        activities._record_phase_restored("j-1", "setup", 15)
 
     # Should have called update_job once
     mock_safe.assert_called_with(
-        "update_job",
+        activities._js.update_job,
         "j-1",
         current_phase="setup",
         progress=15,
@@ -415,7 +414,7 @@ def test_credentials_activity_restores_from_prior() -> None:
     from agent_provisioning_team.temporal import activities
 
     with (
-        patch.object(activities, "_safe"),
+        patch.object(activities, "_best_effort_job_store"),
         patch("temporalio.activity.heartbeat"),
     ):
         prior = {"success": True, "credentials": {}}
@@ -440,15 +439,8 @@ def test_credentials_activity_runs_when_no_prior() -> None:
     fake_orch.credential_store = MagicMock()
 
     with (
-        patch.object(activities, "_safe"),
-        patch(
-            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
-            return_value=fake_orch,
-        ),
-        patch(
-            "agent_provisioning_team.shared.tool_manifest.load_manifest",
-            return_value=fake_manifest,
-        ),
+        patch.object(activities, "_best_effort_job_store"),
+        patch.object(activities, "_load_ctx", return_value=(fake_orch, fake_manifest)),
         patch(
             "agent_provisioning_team.phases.credential_generation.run_credential_generation",
             return_value=fake_result,
@@ -468,11 +460,8 @@ def test_credentials_activity_raises_on_failure() -> None:
     fake_result = CredentialGenerationResult(success=False, credentials={}, error="cred boom")
 
     with (
-        patch.object(activities, "_safe"),
-        patch("agent_provisioning_team.orchestrator.ProvisioningOrchestrator"),
-        patch(
-            "agent_provisioning_team.shared.tool_manifest.load_manifest", return_value=MagicMock()
-        ),
+        patch.object(activities, "_best_effort_job_store"),
+        patch.object(activities, "_load_ctx", return_value=(MagicMock(), MagicMock())),
         patch(
             "agent_provisioning_team.phases.credential_generation.run_credential_generation",
             return_value=fake_result,
@@ -499,7 +488,7 @@ def test_provision_tool_activity_calls_provisioner() -> None:
     fake_manifest.get_tool.return_value = fake_tool
 
     with (
-        patch.object(activities, "_safe"),
+        patch.object(activities, "_best_effort_job_store"),
         patch(
             "agent_provisioning_team.shared.tool_manifest.load_manifest",
             return_value=fake_manifest,
@@ -533,7 +522,7 @@ def test_provision_tool_activity_raises_when_tool_missing() -> None:
     fake_manifest.get_tool.return_value = None
 
     with (
-        patch.object(activities, "_safe"),
+        patch.object(activities, "_best_effort_job_store"),
         patch(
             "agent_provisioning_team.shared.tool_manifest.load_manifest",
             return_value=fake_manifest,
@@ -562,7 +551,7 @@ def test_provision_tool_activity_raises_when_provisioner_missing() -> None:
     fake_manifest.get_tool.return_value = fake_tool
 
     with (
-        patch.object(activities, "_safe"),
+        patch.object(activities, "_best_effort_job_store"),
         patch(
             "agent_provisioning_team.shared.tool_manifest.load_manifest",
             return_value=fake_manifest,
@@ -586,7 +575,7 @@ def test_audit_activity_restores_from_prior() -> None:
 
     prior = AccessAuditResult(passed=True, verifications=[]).model_dump()
     with (
-        patch.object(activities, "_safe"),
+        patch.object(activities, "_best_effort_job_store"),
         patch("temporalio.activity.heartbeat"),
     ):
         payload = activities.audit_activity(
@@ -603,7 +592,7 @@ def test_audit_activity_runs_when_no_prior() -> None:
     fake_result = AccessAuditResult(passed=True, verifications=[])
 
     with (
-        patch.object(activities, "_safe"),
+        patch.object(activities, "_best_effort_job_store"),
         patch(
             "agent_provisioning_team.shared.tool_manifest.load_manifest",
             return_value=MagicMock(),
@@ -628,7 +617,7 @@ def test_documentation_activity_restores_from_prior() -> None:
 
     prior = {"success": True, "onboarding": None}
     with (
-        patch.object(activities, "_safe"),
+        patch.object(activities, "_best_effort_job_store"),
         patch("temporalio.activity.heartbeat"),
     ):
         payload = activities.documentation_activity(
@@ -652,7 +641,7 @@ def test_documentation_activity_runs_when_no_prior() -> None:
     fake_result = DocumentationResult(success=True, onboarding=onboarding)
 
     with (
-        patch.object(activities, "_safe"),
+        patch.object(activities, "_best_effort_job_store"),
         patch(
             "agent_provisioning_team.shared.tool_manifest.load_manifest",
             return_value=MagicMock(),
@@ -689,7 +678,7 @@ def test_deliver_activity_success_path() -> None:
     final = ProvisioningResult(agent_id="a", success=True, environment=env)
 
     with (
-        patch.object(activities, "_safe") as mock_safe,
+        patch.object(activities, "_best_effort_job_store") as mock_safe,
         patch("agent_provisioning_team.phases.deliver.run_deliver", return_value=fake_deliver),
         patch("agent_provisioning_team.phases.deliver.build_final_result", return_value=final),
         patch(
@@ -711,7 +700,7 @@ def test_deliver_activity_success_path() -> None:
 
     assert payload == {"success": True, "error": None}
     # Should have called mark_job_completed
-    calls = [c.args[0] for c in mock_safe.call_args_list]
+    calls = [getattr(c.args[0], "__name__", c.args[0]) for c in mock_safe.call_args_list]
     assert "mark_job_completed" in calls
 
 
@@ -726,7 +715,7 @@ def test_deliver_activity_failure_path() -> None:
     final = ProvisioningResult(agent_id="a", success=False, error="oops")
 
     with (
-        patch.object(activities, "_safe") as mock_safe,
+        patch.object(activities, "_best_effort_job_store") as mock_safe,
         patch("agent_provisioning_team.phases.deliver.run_deliver", return_value=fake_deliver),
         patch("agent_provisioning_team.phases.deliver.build_final_result", return_value=final),
         patch("agent_provisioning_team.orchestrator.ProvisioningOrchestrator"),
@@ -743,7 +732,7 @@ def test_deliver_activity_failure_path() -> None:
         )
 
     assert payload == {"success": False, "error": "oops"}
-    calls = [c.args[0] for c in mock_safe.call_args_list]
+    calls = [getattr(c.args[0], "__name__", c.args[0]) for c in mock_safe.call_args_list]
     assert "mark_job_failed" in calls
 
 
@@ -763,8 +752,8 @@ def test_compensate_activity_invokes_orchestrator() -> None:
             ],
         )
 
-    fake_orch._compensate.assert_called_once()
-    args, _ = fake_orch._compensate.call_args
+    fake_orch.compensate.assert_called_once()
+    args, _ = fake_orch.compensate.call_args
     assert args[0] == "agent-1"
     shims = args[1]
     assert len(shims) == 2

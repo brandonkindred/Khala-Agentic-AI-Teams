@@ -94,7 +94,7 @@ def run_account_provisioning(
                 credentials=tool_creds,
             )
 
-            # Stamp the registry key so _compensate() can look the provisioner
+            # Stamp the registry key so compensate() can look the provisioner
             # back up by key rather than by the fragile class attribute
             # `tool_name` (see #293).
             result.provisioner_key = provisioner_name

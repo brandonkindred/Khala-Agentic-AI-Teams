@@ -1,9 +1,15 @@
-"""Start Agent Provisioning Temporal workflows from sync API."""
+"""Start Agent Provisioning Temporal workflows from sync API.
+
+``start_provisioning_workflow`` is fire-and-forget (returns as soon as Temporal
+accepts the start). ``run_deprovision_workflow`` is execute-and-wait because the
+HTTP ``DELETE`` handler must return the deprovision payload in the response.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from typing import Any, Coroutine, Optional, TypeVar
 
@@ -21,20 +27,35 @@ from shared_temporal.runner import execute_workflow_sync
 
 logger = logging.getLogger(__name__)
 
-START_WORKFLOW_TIMEOUT = 30
-
 _T = TypeVar("_T")
 
 
+def _start_workflow_timeout_s() -> float:
+    """Parse ``AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S`` (default 30)."""
+    raw = os.environ.get("AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S", "30")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 30.0
+    return max(1.0, value)
+
+
 def _run_async(coro: Coroutine[Any, Any, _T]) -> _T:
+    """Block until ``coro`` completes on the shared Temporal event loop.
+
+    Used for fire-and-forget ``client.start_workflow`` (not
+    ``execute_workflow_sync``): we only need the start to be accepted, not the
+    full workflow result. Deprovision uses execute-and-wait instead.
+    """
     loop = get_temporal_loop()
     client = get_temporal_client()
     if loop is None or client is None:
+        coro.close()
         raise RuntimeError(
-            "Temporal client not available; is the Agent Provisioning worker running?"
+            "Temporal client not available; is TEMPORAL_ADDRESS set and the Temporal server reachable?"
         )
     future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=START_WORKFLOW_TIMEOUT)
+    return future.result(timeout=_start_workflow_timeout_s())
 
 
 def start_provisioning_workflow(
@@ -44,18 +65,33 @@ def start_provisioning_workflow(
     skip_phases: Optional[list[str]] = None,
     prior_results: Optional[dict[str, Any]] = None,
 ) -> None:
-    """Start ``AgentProvisioningWorkflow`` for the given job.
+    """Start ``AgentProvisioningWorkflow`` for the given job (fire-and-forget).
 
-    ``skip_phases`` (phase ``.value`` strings) and ``prior_results`` (dict
-    keyed by phase value with serialized phase output) are forwarded to
-    the workflow so ``/resume`` keeps parity with the thread path.
+    Preconditions:
+        * ``job_id``, ``agent_id``, and ``manifest_path`` are non-empty.
+        * The shared Temporal client/loop are available (``TEMPORAL_ADDRESS`` set
+          and the worker process has connected).
+    Postconditions:
+        * Temporal has accepted a workflow id ``{WORKFLOW_ID_PREFIX}{job_id}``.
+        * ``skip_phases`` / ``prior_results`` are forwarded for ``/resume`` parity.
+    Raises:
+        * ``RuntimeError`` when the Temporal client/loop is unavailable.
+        * ``concurrent.futures.TimeoutError`` when start acceptance exceeds
+          ``AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S`` (the start coroutine may
+          still complete afterward — callers must not treat this as a proven
+          non-start).
     """
-    client = get_temporal_client()
-    if client is None:
-        raise RuntimeError("Temporal client not available")
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
+    assert manifest_path, "manifest_path must be non-empty"
+
     workflow_id = f"{WORKFLOW_ID_PREFIX}{job_id}"
-    _run_async(
-        client.start_workflow(
+
+    async def _start() -> None:
+        client = get_temporal_client()
+        # ``_run_async`` already guards for None client/loop; this narrows the type.
+        assert client is not None
+        await client.start_workflow(
             AgentProvisioningWorkflow.run,
             args=[
                 job_id,
@@ -67,7 +103,8 @@ def start_provisioning_workflow(
             id=workflow_id,
             task_queue=TASK_QUEUE,
         )
-    )
+
+    _run_async(_start())
     logger.info("Started AgentProvisioningWorkflow id=%s", workflow_id)
 
 

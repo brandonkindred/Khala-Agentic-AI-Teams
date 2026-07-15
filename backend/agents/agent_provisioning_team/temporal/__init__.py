@@ -17,6 +17,7 @@ from agent_provisioning_team.temporal.activities import (
     deliver_activity,
     deprovision_activity,
     documentation_activity,
+    list_manifest_tools_activity,
     mark_job_failed_activity,
     provision_tool_activity,
     setup_activity,
@@ -44,6 +45,7 @@ WORKFLOWS = [
 ]
 ACTIVITIES = [
     setup_activity,
+    list_manifest_tools_activity,
     credentials_activity,
     provision_tool_activity,
     audit_activity,

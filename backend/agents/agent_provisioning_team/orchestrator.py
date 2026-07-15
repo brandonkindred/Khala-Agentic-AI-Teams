@@ -40,7 +40,7 @@ JobUpdater = Callable[..., None]
 class ProvisioningShutdownError(Exception):
     """Raised when the provisioning workflow is cancelled mid-flight
     because the FastAPI app is shutting down. After raising, the orchestrator
-    has already invoked `_compensate()` to roll back partial state."""
+    has already invoked `compensate()` to roll back partial state."""
 
     def __init__(self, agent_id: str, phase: str) -> None:
         self.agent_id = agent_id
@@ -117,7 +117,7 @@ class ProvisioningOrchestrator:
             )
 
         # Tracks the latest tool_results the orchestrator has produced, so a
-        # shutdown check mid-workflow can pass them to `_compensate()` to
+        # shutdown check mid-workflow can pass them to `compensate()` to
         # deprovision any tools that succeeded before cancellation.
         tool_results_ref: List[Any] = []
 
@@ -131,7 +131,7 @@ class ProvisioningOrchestrator:
                     agent_id,
                     phase_name,
                 )
-                self._compensate(agent_id, tool_results_ref)
+                self.compensate(agent_id, tool_results_ref)
                 raise ProvisioningShutdownError(agent_id=agent_id, phase=phase_name)
 
         def _update(
@@ -263,7 +263,7 @@ class ProvisioningOrchestrator:
                     agent_id,
                     account_result.error,
                 )
-                self._compensate(agent_id, account_result.tool_results)
+                self.compensate(agent_id, account_result.tool_results)
                 return ProvisioningResult(
                     agent_id=agent_id,
                     current_phase=Phase.ACCOUNT_PROVISIONING,
@@ -353,16 +353,17 @@ class ProvisioningOrchestrator:
         )
         return final_result
 
-    def _compensate(
+    def compensate(
         self,
         agent_id: str,
         tool_results: List[Any],
     ) -> None:
         """Roll back partial provisioning after a phase failure.
 
-        Best-effort: deprovisions any tools that did succeed, tears down the
-        Docker environment, and removes encrypted credentials so a failed
-        run doesn't leak resources or secrets to disk.
+        Public entry point for Temporal ``compensate_activity`` and in-process
+        shutdown compensation. Best-effort: deprovisions any tools that did
+        succeed, tears down the Docker environment, and removes encrypted
+        credentials so a failed run doesn't leak resources or secrets to disk.
         """
         # Look each successfully-provisioned tool back up by its registry key
         # (stamped onto the result in run_account_provisioning). Prior to #293

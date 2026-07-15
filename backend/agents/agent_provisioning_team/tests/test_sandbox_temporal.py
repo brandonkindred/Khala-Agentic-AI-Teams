@@ -279,7 +279,7 @@ async def test_acquire_sandbox_falls_back_to_direct() -> None:
     direct = AsyncMock(return_value=_handle())
     with (
         patch.object(sd, "sandbox_temporal_enabled", return_value=False),
-        patch("agent_provisioning_team.sandbox.acquire", new=direct),
+        patch.object(sd, "_acquire_sandbox_inprocess", new=direct),
     ):
         out = await sd.acquire_sandbox("blog.writer")
 
@@ -312,7 +312,7 @@ async def test_teardown_sandbox_falls_back_to_direct() -> None:
     direct = AsyncMock()
     with (
         patch.object(sd, "sandbox_temporal_enabled", return_value=False),
-        patch("agent_provisioning_team.sandbox.teardown", new=direct),
+        patch.object(sd, "_teardown_sandbox_inprocess", new=direct),
     ):
         await sd.teardown_sandbox("blog.writer")
 
@@ -450,7 +450,7 @@ def test_reraise_mapping_covers_every_sandbox_exception_type() -> None:
     def fake_translate(exc, mapping):
         captured["mapping"] = mapping
 
-    with patch("shared_temporal.translate_workflow_failure", new=fake_translate):
+    with patch.object(sd, "translate_workflow_failure", new=fake_translate):
         sd._reraise_sandbox_error(RuntimeError("dummy"))
 
     assert set(captured["mapping"]) == expected

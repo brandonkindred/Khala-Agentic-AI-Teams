@@ -254,10 +254,52 @@ def test_resume_job_not_found() -> None:
 
 
 def test_resume_job_in_running_state_rejected() -> None:
-    # validate_job_for_action raises ValueError for non-resumable statuses
-    with patch.object(api_main, "get_job", return_value={"status": "running"}):
+    """Active Temporal jobs cannot be resumed (stable workflow id collision)."""
+    with patch.object(
+        api_main,
+        "get_job",
+        return_value={
+            "status": "running",
+            "agent_id": "a1",
+            "manifest_path": "default.yaml",
+        },
+    ):
         r = client.post("/provision/job/j1/resume")
     assert r.status_code == 400
+    assert "cannot be resumed" in r.json()["detail"]
+
+
+def test_resume_job_in_pending_state_rejected() -> None:
+    with patch.object(
+        api_main,
+        "get_job",
+        return_value={
+            "status": "pending",
+            "agent_id": "a1",
+            "manifest_path": "default.yaml",
+        },
+    ):
+        r = client.post("/provision/job/j1/resume")
+    assert r.status_code == 400
+
+
+def test_provision_start_timeout_does_not_mark_job_failed() -> None:
+    """Indeterminate start timeouts must not write a terminal failed status."""
+    import concurrent.futures
+
+    with (
+        patch("agent_provisioning_team.api.main.create_job"),
+        patch.object(
+            api_main,
+            "_require_provision_starter",
+            return_value=MagicMock(side_effect=concurrent.futures.TimeoutError()),
+        ),
+        patch.object(api_main, "mark_job_failed") as mock_fail,
+    ):
+        r = client.post("/provision", json={"agent_id": "ag-timeout"})
+
+    assert r.status_code == 503
+    mock_fail.assert_not_called()
 
 
 def test_resume_job_missing_agent_or_manifest() -> None:
@@ -499,7 +541,7 @@ def test_lifespan_shutdown_does_not_compensate_or_fail_jobs() -> None:
     with (
         patch.object(
             api_main.orchestrator,
-            "_compensate",
+            "compensate",
             side_effect=lambda agent_id, tool_results: compensate_calls.append(agent_id),
         ),
         patch(

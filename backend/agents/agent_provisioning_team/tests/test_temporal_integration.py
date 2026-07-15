@@ -29,6 +29,16 @@ def test_provision_routes_to_temporal_when_enabled(
     resp = client.post("/provision", json={"agent_id": "t-temporal-1"})
 
     assert resp.status_code == 200
+    mock_create_job.assert_called_once()
+    create_kwargs = mock_create_job.call_args.kwargs or {}
+    create_args = mock_create_job.call_args.args
+    # create_job(job_id=..., agent_id=..., manifest_path=...)
+    if create_kwargs:
+        assert create_kwargs.get("agent_id") == "t-temporal-1"
+        assert create_kwargs.get("manifest_path") == "default.yaml"
+    else:
+        assert create_args[1] == "t-temporal-1"
+        assert create_args[2] == "default.yaml"
     mock_start.assert_called_once()
     args, kwargs = mock_start.call_args
     # Positional: (job_id, agent_id, manifest_path)
@@ -226,6 +236,7 @@ def test_pattern_a_exports_workflows_and_activities() -> None:
     from agent_provisioning_team.temporal.activities import (
         audit_activity,
         credentials_activity,
+        list_manifest_tools_activity,
         deliver_activity,
         documentation_activity,
         provision_tool_activity,
@@ -245,6 +256,7 @@ def test_pattern_a_exports_workflows_and_activities() -> None:
     assert deprovisioning[0] is AgentDeprovisioningWorkflow
     for fn in (
         setup_activity,
+        list_manifest_tools_activity,
         credentials_activity,
         provision_tool_activity,
         audit_activity,
