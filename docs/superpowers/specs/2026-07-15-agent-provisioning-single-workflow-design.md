@@ -4,14 +4,27 @@
 **Date:** 2026-07-15  
 **Type:** Breaking Temporal cutover for Agent Provisioning
 
+## Hard rule (non-negotiable)
+
+**No backward compatibility. No drain period. No dual registration.**
+
+Implementation must not:
+
+- Keep V1 or V2 workflow types registered “so in-flight runs can finish”
+- Add aliases, shims, adapters, or rename wrappers that preserve old Temporal type names
+- Leave `PROVISION_THREAD_FALLBACK`, thread-pool provision runners, or any in-process provision/deprovision HTTP path
+- Document or test a “legacy / drain-only / temporary dual-path” mode
+
+On deploy, old workflow executions of former type names are abandoned. Callers that need work done again use `/resume` or `/restart` against the new single workflow — that is job-store resume, not Temporal history drain.
+
 ## Problem
 
 Agent Provisioning currently registers two Temporal workflows:
 
-- `AgentProvisioningWorkflow` (v1) — single activity wrapping the in-process orchestrator; kept only so in-flight runs can drain.
-- `AgentProvisioningWorkflowV2` — per-phase activities with parallel per-tool fan-out, resume via `skip_phases` / `prior_results`, and compensation on tool failure.
+- `AgentProvisioningWorkflow` (v1) — single activity wrapping the in-process orchestrator (exists for drain/compat today; **must be deleted**, not kept through a deploy window).
+- `AgentProvisioningWorkflowV2` — per-phase activities with parallel per-tool fan-out, resume via `skip_phases` / `prior_results`, and compensation on tool failure (behavior to keep; **type name and class suffix must go**).
 
-The API already starts only V2. V1 exists solely for backward-compatible drain. A parallel escape hatch (`PROVISION_THREAD_FALLBACK` / thread-pool `_run_provisioning_background`) still lets provision, resume, restart, and deprovision run in-process when Temporal is off or the flag is set.
+The API already starts only V2. V1 exists solely for drain/compat. A parallel escape hatch (`PROVISION_THREAD_FALLBACK` / thread-pool `_run_provisioning_background`) still lets provision, resume, restart, and deprovision run in-process when Temporal is off or the flag is set.
 
 That dual surface is accidental complexity: two workflow types, `_v2`-suffixed Python activity symbols, and a dispatch matrix that can silently downgrade off Temporal.
 
@@ -19,7 +32,7 @@ That dual surface is accidental complexity: two workflow types, `_v2`-suffixed P
 
 1. Exactly one provisioning workflow: `AgentProvisioningWorkflow` (today’s V2 behavior and Temporal type name).
 2. Drop all `_v2` suffixes from Python activity symbols; keep existing non-versioned Temporal activity names.
-3. Delete V1 workflow, `run_provisioning_activity`, and every provision/deprovision thread fallback.
+3. Delete V1 workflow, `run_provisioning_activity`, and every provision/deprovision thread fallback **in the same change** — not retained for a later PR.
 4. Require Temporal for provision, resume, restart, and deprovision HTTP entrypoints — no silent downgrade.
 5. Update tests and team docs so nothing describes “legacy,” “drain-only,” or “V2” as a second path.
 
@@ -27,8 +40,8 @@ That dual surface is accidental complexity: two workflow types, `_v2`-suffixed P
 
 - Changing phase/orchestrator business logic (setup, credentials, tools, audit, docs, deliver, compensate).
 - Merging or renaming sandbox Temporal workflows (`SandboxAcquireWorkflow`, `SandboxTeardownWorkflow`, `SandboxReaperWorkflow`).
-- Preserving in-flight V1 or V2 workflow histories across deploy (explicitly non-compatible).
-- Bridging adapters, shims, aliases, or dual-registration during cutover.
+- Any compatibility layer for old Temporal type names or in-process HTTP provision.
+- Staged rollout that keeps both workflows registered for any duration.
 
 ## Decisions
 
@@ -40,7 +53,7 @@ That dual surface is accidental complexity: two workflow types, `_v2`-suffixed P
 | Thread path | Remove entirely for provision + deprovision HTTP | User choice B + approach 1 |
 | Missing Temporal | HTTP **503** with clear detail | Fail loud; no fallback |
 | Deprovision | Same Temporal-only rule as provision | Avoid a leftover escape hatch |
-| Compatibility | None | No drain registration, no aliases |
+| Compatibility / drain | **Forbidden** | No dual registration, aliases, shims, or “finish in-flight first” worker |
 
 ## Architecture
 
@@ -122,15 +135,16 @@ Worker registration (`temporal/__init__.py`) exports only the surviving workflow
 
 ## Migration / deploy implications
 
-This is a hard cutover:
+Hard cutover in one change set — **not** a drain window:
 
-1. Deploy stops registering V1 and the old V2 Temporal type name.
-2. Any open workflows of type `AgentProvisioningWorkflow` (old single-activity) or `AgentProvisioningWorkflowV2` will not continue on the new worker.
-3. Operators must ensure no critical provision/deprovision jobs are in flight (or accept restart via `/resume` / `/restart` against the new workflow).
-4. Local/dev without Temporal cannot provision via the API — Temporal must be up.
+1. The new worker registers only the single `AgentProvisioningWorkflow` (+ deprovision + sandbox as today).
+2. Open executions typed as old `AgentProvisioningWorkflow` (single-activity) or `AgentProvisioningWorkflowV2` stop progressing; there is no drain worker and no dual registration.
+3. Re-run unfinished jobs via `/resume` or `/restart` (job-store prior phases → new workflow). That is not Temporal history compatibility.
+4. Local/dev without Temporal cannot provision or deprovision via the API — Temporal must be up.
 
 ## Success criteria
 
-- Grep shows no `AgentProvisioningWorkflowV2`, `run_provisioning_activity`, `*_activity_v2`, or `PROVISION_THREAD_FALLBACK` in the team package (except historical changelog notes if any — prefer removing from live README).
-- One provisioning workflow registered; API has no in-process provision/deprovision fallback.
-- Team tests updated and green for the new surface.
+- Grep shows no `AgentProvisioningWorkflowV2`, `run_provisioning_activity`, `*_activity_v2`, or `PROVISION_THREAD_FALLBACK` in the team package (prefer removing from live README too; do not leave “drain-only” wording).
+- `WORKFLOWS` never lists both an old and new provisioning type in the same revision.
+- API has no in-process provision/deprovision fallback.
+- Team tests updated and green for the new surface; no tests encode a drain or dual-path success case.
