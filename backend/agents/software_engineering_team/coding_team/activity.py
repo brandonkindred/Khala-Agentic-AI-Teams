@@ -130,3 +130,32 @@ class ActivityBridge:
             self._update_fn(current_activity=None)
         except Exception as e:  # noqa: BLE001 — observability must not break execution
             logger.warning("activity clear failed (ignored): %s", e)
+
+
+class _NoopBridge:
+    """Stand-in progress bridge used when a real ActivityBridge can't be built.
+
+    Progress reporting is observability only: if the bridge fails to construct,
+    the code review must still run (without live progress) rather than be
+    silently skipped. ``__call__`` and ``clear`` are no-ops.
+    """
+
+    def __call__(self, *_args: Any, **_kwargs: Any) -> None:
+        """Drop a progress report.
+
+        Preconditions:
+            - None.
+        Postconditions:
+            - No-op; no side effects.
+        """
+        return None
+
+    def clear(self) -> None:
+        """Clear the (absent) progress activity.
+
+        Preconditions:
+            - None.
+        Postconditions:
+            - No-op; no side effects.
+        """
+        return None

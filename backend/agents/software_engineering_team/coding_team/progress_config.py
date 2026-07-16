@@ -85,35 +85,6 @@ def _implementation_concurrency() -> int:
     )
 
 
-class _NoopBridge:
-    """Stand-in progress bridge used when a real ActivityBridge can't be built.
-
-    Progress reporting is observability only: if the bridge fails to construct,
-    the code review must still run (without live progress) rather than be
-    silently skipped. ``__call__`` and ``clear`` are no-ops.
-    """
-
-    def __call__(self, *_args: Any, **_kwargs: Any) -> None:
-        """Drop a progress report.
-
-        Preconditions:
-            - None.
-        Postconditions:
-            - No-op; no side effects.
-        """
-        return None
-
-    def clear(self) -> None:
-        """Clear the (absent) progress activity.
-
-        Preconditions:
-            - None.
-        Postconditions:
-            - No-op; no side effects.
-        """
-        return None
-
-
 # Default job-level progress band for the coding phase. The caller owns the band
 # allocation: the parent pipeline (software_engineering_team) maps its earlier phases
 # onto lower sub-ranges and passes the coding team its slice via the

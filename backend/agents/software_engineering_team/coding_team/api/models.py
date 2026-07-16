@@ -179,11 +179,20 @@ class ReviewPrRequest(BaseModel):
 
 
 class ReviewPrResponse(BaseModel):
+    """Response for ``POST /review-pr``: the started review job's id, PR number/url,
+    and initial status, plus the server-clock start time (``created_at``) used to
+    compute a live review duration on one clock."""
+
     job_id: str
     pr_number: int
     pr_url: str
     status: str = "pending"
     message: str = "Review started. Poll GET /status/{job_id} for progress."
+    # Server-clock start time of the review, so the UI can compute a live duration
+    # from server timestamps at both ends (start here, completion from job status)
+    # rather than mixing the browser clock in. Optional: absent when the start
+    # timestamp is unavailable, in which case the UI falls back to its own clock.
+    created_at: Optional[datetime] = None
 
 
 class ReviewRunItem(BaseModel):

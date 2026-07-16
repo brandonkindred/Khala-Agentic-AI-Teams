@@ -25,6 +25,7 @@ import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
 import type { PrReviewRecord } from './pr-review-record.model';
+import { terminalTimestamp } from './review-metrics';
 
 // Re-exported so existing importers of `PrReviewRecord` from this module keep working;
 // the interface now lives in ./pr-review-record.model so both this panel and its
@@ -328,12 +329,16 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
 
   private toRecord(item: CodeReviewRunItem, repo: GitHubRepoItem): PrReviewRecord {
     const parsed = Date.parse(item.created_at);
+    // completed_at is present only on terminal runs; an unparseable/absent value
+    // leaves completedAt undefined so the row shows no duration.
+    const completed = item.completed_at ? Date.parse(item.completed_at) : NaN;
     return {
       jobId: item.job_id,
       prNumber: item.pr_number,
       owner: repo.owner,
       repo: repo.name,
       startedAt: Number.isNaN(parsed) ? Date.now() : parsed,
+      completedAt: Number.isNaN(completed) ? undefined : completed,
       status: item.status,
       statusText: item.status_text,
       reviewSummary: item.review_summary,
@@ -395,12 +400,17 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
       .subscribe({
         next: (resp: RunPrReviewResponse) => {
           this.starting.delete(key);
+          // Prefer the server-clock start time so the live duration is computed from
+          // server timestamps at both ends (this start + the server completion stamped
+          // in startPolling), avoiding a browser-vs-server clock-skew mismatch. Fall
+          // back to the browser clock when the server didn't supply one.
+          const parsedStart = resp.created_at ? Date.parse(resp.created_at) : NaN;
           const record: PrReviewRecord = {
             jobId: resp.job_id,
             prNumber: pull.number,
             owner: repo.owner,
             repo: repo.name,
-            startedAt: Date.now(),
+            startedAt: Number.isNaN(parsedStart) ? Date.now() : parsedStart,
             status: resp.status,
             prUrl: resp.pr_url,
           };
@@ -455,6 +465,11 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
         record.prUrl = status.github_pr_url ?? record.prUrl;
         record.error = status.error;
         if (isCodingTeamTerminalStatus(status.status)) {
+          // Stamp the completion time when the run first goes terminal so the row can
+          // show a duration without a reload, using the server's terminal timestamp
+          // (see terminalTimestamp) rather than the browser clock. `??=` so a value
+          // from a prior hydrate is never overwritten.
+          record.completedAt ??= terminalTimestamp(status);
           this.disposePoller(record.jobId);
         }
         this.cdr.markForCheck();
