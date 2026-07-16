@@ -4304,11 +4304,12 @@ class StrategyLabOrchestrator:
         # ``DesignReviewAgent`` marked the spec ready. The short-circuit
         # branch above returns before reaching this point, so reaching
         # this line implies the gate has passed for this design attempt.
-        assert design_outcome.ready, (
-            "DESIGN_REVIEW → CODE_SYNTHESIS boundary invariant violated: "
-            "design_outcome.ready is False but the short-circuit branch "
-            "did not return. This is a bug in _run_design_attempt."
-        )
+        if not design_outcome.ready:
+            raise RuntimeError(
+                "DESIGN_REVIEW → CODE_SYNTHESIS boundary invariant violated: "
+                "design_outcome.ready is False but the short-circuit branch "
+                "did not return. This is a bug in _run_design_attempt."
+            )
         _emit_phase_transition(
             emit,
             from_phase=Phase.DESIGN_REVIEW,
