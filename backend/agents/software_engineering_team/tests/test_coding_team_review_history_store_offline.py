@@ -6,13 +6,18 @@ store's behaviour is verified even on a run without a database.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import software_engineering_team.coding_team.review_history_store as store
 
 
 def test_writes_are_noop_when_postgres_disabled(monkeypatch) -> None:
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: False)
     # None of these touch the database; none raise; reads return [].
-    store.record_review_start("j", "o", "r", 1, "u", "alice")
+    # record_review_start still returns its server-clock created_at (used by the UI
+    # for a live duration) even when persistence is disabled.
+    started = store.record_review_start("j", "o", "r", 1, "u", "alice")
+    assert isinstance(started, datetime)
     store.update_review("j", status="running")
     assert store.list_reviews("o", "r") == []
 
@@ -24,8 +29,9 @@ def test_writes_swallow_db_errors_and_reads_degrade(monkeypatch) -> None:
         raise RuntimeError("db down")
 
     monkeypatch.setattr(store, "get_conn", _boom)
-    # Best-effort: a DB failure is logged, never raised.
-    store.record_review_start("j", "o", "r", 1, "u", "alice")
+    # Best-effort: a DB failure is logged, never raised — and the created_at is still
+    # returned so the caller has a start time even when the write fails.
+    assert isinstance(store.record_review_start("j", "o", "r", 1, "u", "alice"), datetime)
     store.update_review(
         "j",
         status="completed",

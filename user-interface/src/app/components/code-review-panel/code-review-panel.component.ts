@@ -416,12 +416,17 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
       .subscribe({
         next: (resp: RunPrReviewResponse) => {
           this.starting.delete(key);
+          // Prefer the server-clock start time so the live duration is computed from
+          // server timestamps at both ends (this start + the server completion stamped
+          // in startPolling), avoiding a browser-vs-server clock-skew mismatch. Fall
+          // back to the browser clock when the server didn't supply one.
+          const parsedStart = resp.created_at ? Date.parse(resp.created_at) : NaN;
           const record: PrReviewRecord = {
             jobId: resp.job_id,
             prNumber: pull.number,
             owner: repo.owner,
             repo: repo.name,
-            startedAt: Date.now(),
+            startedAt: Number.isNaN(parsedStart) ? Date.now() : parsedStart,
             status: resp.status,
             prUrl: resp.pr_url,
           };

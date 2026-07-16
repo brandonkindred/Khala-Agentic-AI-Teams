@@ -763,6 +763,44 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.reviewDuration(rec2)).not.toBeNull();
   });
 
+  it('uses the server-clock created_at as the start time so live durations use one clock', async () => {
+    await setup();
+    apiSpy.getJobStatus.mockReturnValue(
+      of({
+        job_id: 'j1',
+        status: 'completed',
+        last_activity_at: '2026-03-01T00:05:00Z', // server completion
+        review_summary: { total_issues: 0, inline_comments: 0, event: 'APPROVE' },
+      }),
+    );
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(
+      of({
+        job_id: 'j1',
+        pr_number: 1,
+        pr_url: 'u',
+        status: 'pending',
+        message: '',
+        created_at: '2026-03-01T00:00:00Z', // server start
+      }),
+    );
+    component.startReview(component.pulls[0]);
+    const rec = component.reviewsFor(1)[0];
+    expect(rec.startedAt).toBe(Date.parse('2026-03-01T00:00:00Z'));
+    vi.advanceTimersByTime(5000); // poll -> terminal, completedAt from server timestamp
+    // Both ends are server timestamps -> an exact, skew-free 5-minute duration.
+    expect(rec.completedAt).toBe(Date.parse('2026-03-01T00:05:00Z'));
+    expect(component.reviewDuration(rec)).toBe('5m 0s');
+  });
+
+  it('falls back to the browser clock for the start time when created_at is absent', async () => {
+    await setup();
+    // The default runGitHubReviewPr mock carries no created_at.
+    component.startReview(component.pulls[0]);
+    const rec = component.reviewsFor(1)[0];
+    expect(Number.isNaN(rec.startedAt)).toBe(false);
+    expect(rec.startedAt).toBeGreaterThan(0);
+  });
+
   // -------------------------------------------------------------------------
   // Teardown
   // -------------------------------------------------------------------------

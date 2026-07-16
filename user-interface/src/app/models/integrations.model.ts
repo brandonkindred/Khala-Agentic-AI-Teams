@@ -230,6 +230,9 @@ export interface RunPrReviewResponse {
   pr_url: string;
   status: string;
   message: string;
+  /** ISO-8601 server-clock start time of the review, used to compute a live
+   * duration on server timestamps at both ends. Absent falls back to the browser clock. */
+  created_at?: string;
 }
 
 /** TradingView MCP config response (GET/PUT/DELETE /api/integrations/tradingview). */

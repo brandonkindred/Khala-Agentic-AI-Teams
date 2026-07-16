@@ -1345,6 +1345,9 @@ class RunPrReviewResponse(BaseModel):
     pr_url: str
     status: str = "pending"
     message: str = "Review started. Poll GET /api/coding-team/status/{job_id} for progress."
+    # ISO-8601 server-clock start time, forwarded from the coding team so the UI can
+    # compute a live review duration on server timestamps at both ends. Optional.
+    created_at: str | None = None
 
 
 class CodeReviewRunItem(BaseModel):
@@ -2670,6 +2673,7 @@ async def _start_pr_review(
             pr_url=data["pr_url"],
             status=data.get("status", "pending"),
             message=data.get("message", ""),
+            created_at=data.get("created_at"),
         )
     except (KeyError, TypeError) as e:
         raise HTTPException(

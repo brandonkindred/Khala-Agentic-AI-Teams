@@ -802,6 +802,9 @@ class TestReviewEndpoint:
         assert resp.status_code == 200
         data = resp.json()
         assert data["pr_number"] == 7
+        # The response carries a server-clock start time so the UI computes a live
+        # duration on one clock (this start + the completion from job status).
+        assert data["created_at"]
         gh = review_app["github"]["client"]
         # One review submitted, REQUEST_CHANGES (high severity, author != reviewer).
         assert len(gh.reviews) == 1
