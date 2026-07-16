@@ -515,14 +515,20 @@ async def test_workflow_compensates_succeeded_tools_on_checkpoint_failure(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_workflow_setup_failure_marks_failed_without_compensate(tmp_path) -> None:
-    """Setup failure has nothing to roll back — mark failed, skip compensate."""
+async def test_workflow_setup_failure_compensates_and_marks_failed(tmp_path) -> None:
+    """Setup failure must compensate (tear down a partial container) then mark failed.
+
+    ``setup_activity`` runs ``docker run`` before the phase completes, so a raise
+    can leave a live container behind. The workflow compensates with an empty
+    succeeded list — idempotent when nothing was created — before marking failed.
+    """
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
     stub = _ExecActivityStub(
         {
             "setup_activity": RuntimeError("setup boom"),
+            "compensate_activity": None,
             "mark_job_failed_activity": None,
         }
     )
@@ -531,8 +537,8 @@ async def test_workflow_setup_failure_marks_failed_without_compensate(tmp_path) 
         with pytest.raises(RuntimeError, match="setup boom"):
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
-    fn_names = [c["name"] for c in stub.calls]
-    assert "compensate_activity" not in fn_names
+    compensate_call = _call(stub, "compensate_activity")
+    assert compensate_call["args"] == ["agent-1", [], "job-1"]
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
     assert "setup boom" in fail_call["args"][1]
