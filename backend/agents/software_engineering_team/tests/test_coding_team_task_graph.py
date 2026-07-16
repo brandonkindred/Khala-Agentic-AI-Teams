@@ -56,6 +56,25 @@ def test_assign_task_to_agent_deps_satisfied() -> None:
     assert tg.assign_task_to_agent("t2", "agent-b") is True
 
 
+def test_assign_task_to_agent_rejects_non_todo_task() -> None:
+    """A task not in TO_DO cannot be (re)assigned — prevents two agents on one task."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1", title="T1")
+    assert tg.assign_task_to_agent("t1", "agent-a") is True  # t1 -> IN_PROGRESS
+    # A different, free agent must NOT be able to steal the in-progress task.
+    assert tg.assign_task_to_agent("t1", "agent-b") is False
+    assert tg.get_task("t1").assigned_agent_id == "agent-a"
+    assert tg.get_task_for_agent("agent-b") is None
+    # Nor can it be assigned once in review, merged, or failed.
+    tg.set_task_in_review("t1")
+    assert tg.assign_task_to_agent("t1", "agent-b") is False
+    tg.mark_branch_merged("t1")
+    assert tg.assign_task_to_agent("t1", "agent-b") is False
+    tg.add_task("t2", title="T2")
+    tg.update_task("t2", status=TaskStatus.FAILED)
+    assert tg.assign_task_to_agent("t2", "agent-c") is False
+
+
 def test_get_task_for_agent_returns_none_when_no_assignment() -> None:
     """get_task_for_agent returns None when agent has no active task."""
     tg = TaskGraphService(job_id="j1")
