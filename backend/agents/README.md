@@ -55,7 +55,7 @@ From `backend/`:
 python run_unified_api.py
 ```
 
-This mounts all 20 enabled team APIs behind one server on port `8080` by default.
+This mounts all 24 enabled team APIs behind one server on port `8080` by default.
 
 ## Running individual team APIs
 
