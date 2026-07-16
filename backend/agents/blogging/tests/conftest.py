@@ -40,6 +40,23 @@ _BLOG_JOB_HELPERS = (
 
 
 @pytest.fixture
+def patched_blog_job_store(monkeypatch, fake_job_client) -> Any:
+    """Back ``shared.blog_job_store`` with the in-memory fake job client.
+
+    Replaces the module-level ``_client`` factory so every store operation lands in
+    the per-test ``FakeJobServiceClient``. Unlike ``patched_client``, this does not
+    import ``api/main`` — store-only test modules should not pay that import cost.
+
+    Apply per-module with
+    ``pytestmark = pytest.mark.usefixtures("patched_blog_job_store")``.
+    """
+    from shared import blog_job_store as bjs
+
+    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
+    return fake_job_client
+
+
+@pytest.fixture
 def patched_client(monkeypatch, fake_job_client) -> Any:
     """Back the blogging API with the in-memory fake job store.
 
@@ -203,3 +220,52 @@ class CallTrackingMockModel(Model):
         yield {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": text}}}
         yield {"contentBlockStop": {"contentBlockIndex": 0}}
         yield {"messageStop": {"stopReason": "end_turn"}}
+
+
+def make_content_plan(**overrides: Any) -> Any:
+    """Build a minimal, valid ``ContentPlan``; override any field via ``overrides``.
+
+    Fills every required field with a sensible default — a single section, a single
+    title candidate, and a passing ``RequirementsAnalysis`` — so a caller supplies only
+    the fields its test cares about. ``overrides`` pass straight through to the
+    ``ContentPlan(...)`` constructor, so any field (``sections``, ``title_candidates``,
+    ``overarching_topic``, ``target_reader``, …) can be replaced.
+
+    Returns a ``ContentPlan`` (typed ``Any`` to keep the import local to this helper).
+    """
+    from shared.content_plan import (
+        ContentPlan,
+        ContentPlanSection,
+        RequirementsAnalysis,
+        TitleCandidate,
+    )
+
+    defaults: dict[str, Any] = {
+        "overarching_topic": "Topic",
+        "narrative_flow": "Start here, then there, then conclude.",
+        "sections": [ContentPlanSection(title="One", coverage_description="A", order=0)],
+        "title_candidates": [TitleCandidate(title="T", probability_of_success=0.9)],
+        "requirements_analysis": RequirementsAnalysis(
+            plan_acceptable=True, scope_feasible=True, research_gaps=[]
+        ),
+    }
+    defaults.update(overrides)
+    return ContentPlan(**defaults)
+
+
+def make_planning_phase_result(*, plan: Any = None, **overrides: Any) -> Any:
+    """Wrap a ``ContentPlan`` in a valid ``PlanningPhaseResult``.
+
+    ``plan`` defaults to ``make_content_plan()``. ``overrides`` pass straight through to
+    the ``PlanningPhaseResult(...)`` constructor (e.g. ``planning_iterations_used``).
+    """
+    from shared.content_plan import PlanningPhaseResult
+
+    defaults: dict[str, Any] = {
+        "content_plan": plan if plan is not None else make_content_plan(),
+        "planning_iterations_used": 1,
+        "parse_retry_count": 0,
+        "planning_wall_ms_total": 10.0,
+    }
+    defaults.update(overrides)
+    return PlanningPhaseResult(**defaults)

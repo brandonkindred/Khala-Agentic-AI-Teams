@@ -135,7 +135,7 @@ class _BlogPlanningAgentRunner:
 
 
 def make_blog_planning_agent() -> _BlogPlanningAgentRunner:
-    """Zero-arg factory consumed by the Agent Console sandbox (issue #263).
+    """Zero-arg factory consumed by the Agent Console sandbox.
 
     Wires an ``llm_service``-provided LLM client (env-configured: Ollama in
     production, ``DummyLLMClient`` when ``LLM_PROVIDER=dummy``) into a

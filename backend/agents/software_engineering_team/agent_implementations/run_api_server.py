@@ -16,8 +16,8 @@ import sys
 from pathlib import Path
 
 # Ensure software_engineering_team and agents are on sys.path (works when run as module or script).
-# software_engineering_team must come BEFORE agents so we load software_engineering_team/api,
-# not agents/api (Blog API).
+# software_engineering_team must come BEFORE agents so a bare ``api`` import resolves to
+# this team's api/ package rather than another team's.
 _team_dir = Path(__file__).resolve().parent.parent
 _agents_dir = _team_dir.parent
 # Remove any existing entries to avoid duplicates, then add in correct order.
@@ -37,10 +37,10 @@ from llm_service import get_llm_config_summary  # noqa: E402
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Run software_engineering_team API (not agents/api which is the Blog API)
+# Run software_engineering_team API.
 if __name__ == "__main__":
     logger.info("LLM config: %s", get_llm_config_summary())
-    # Use explicit path so we load software_engineering_team/api, not agents/api
+    # Bare ``api`` resolves to this team's api/ package via the sys.path ordering above.
     import api.main as app_module
 
     uvicorn.run(

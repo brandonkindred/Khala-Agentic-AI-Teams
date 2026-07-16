@@ -9,7 +9,7 @@ lands in a per-test in-memory dict.
 import os
 import subprocess
 
-# Load api.main from this team's api/ (avoids conflict with agents/api/main.py)
+# Load api.main from this team's api/ package via its fully-qualified path.
 import sys
 import time
 import uuid
