@@ -13,7 +13,6 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput  # noqa: E402
-from blog_research_agent.models import ResearchReference  # noqa: E402
 from blog_writer_agent import BlogWriterAgent, ReviseWriterInput, WriterInput  # noqa: E402
 from shared.content_plan import (  # noqa: E402
     ContentPlan,
@@ -26,19 +25,12 @@ from shared.style_loader import load_style_file  # noqa: E402
 from llm_service import DummyLLMClient  # noqa: E402
 
 # Keep in sync with DRAFT_EDITOR_ITERATIONS in blog_writing_process_v2.py
-DRAFT_EDITOR_ITERATIONS = 500
+DRAFT_EDITOR_ITERATIONS = 30
 
 _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
 STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
 BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 
-CONTEXT_BRIEF = "LLM observability best practices for large enterprises."
-PLACEHOLDER_REF = ResearchReference(
-    title="LLM Observability Guide",
-    url="https://example.com/observability",
-    summary="Best practices for monitoring LLMs in production.",
-    key_points=["Tracing", "Cost attribution", "Prompt versioning"],
-)
 CONTENT_PLAN = ContentPlan(
     overarching_topic="LLM observability for enterprises",
     narrative_flow="Problem, practices, wrap-up.",

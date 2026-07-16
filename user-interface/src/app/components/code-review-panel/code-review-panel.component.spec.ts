@@ -407,6 +407,80 @@ describe('CodeReviewPanelComponent', () => {
     expect(component['pollers'].has('j1')).toBe(false);
   });
 
+  // -------------------------------------------------------------------------
+  // Review-duration timestamps (server-clock start + terminal completion)
+  // -------------------------------------------------------------------------
+
+  it('maps created_at and completed_at from history into the record', async () => {
+    integrationsSpy.getGitHubReviewHistory.mockReturnValue(
+      of([
+        {
+          job_id: 'c1',
+          pr_number: 1,
+          status: 'completed',
+          review_summary: { total_issues: 0, inline_comments: 0, event: 'APPROVE' },
+          created_at: '2026-02-01T00:00:00Z',
+          completed_at: '2026-02-01T00:01:30Z',
+        },
+        {
+          job_id: 'c2',
+          pr_number: 1,
+          status: 'completed',
+          created_at: '2026-02-01T00:00:00Z',
+          completed_at: 'not-a-real-date', // unparseable -> completedAt undefined
+        },
+      ] as CodeReviewRunItem[]),
+    );
+    await setup();
+    const [withTime, badTime] = component.reviewsFor(1);
+    expect(withTime.completedAt).toBe(Date.parse('2026-02-01T00:01:30Z'));
+    expect(badTime.completedAt).toBeUndefined();
+  });
+
+  it('uses the server-clock created_at from the start response as the record start time', async () => {
+    await setup();
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(
+      of({
+        job_id: 'j1',
+        pr_number: 1,
+        pr_url: 'u',
+        status: 'pending',
+        message: '',
+        created_at: '2026-03-01T00:00:00Z',
+      }),
+    );
+    component.startReview(component.pulls[0]);
+    expect(component.reviewsFor(1)[0].startedAt).toBe(Date.parse('2026-03-01T00:00:00Z'));
+  });
+
+  it('falls back to the browser clock for the start time when created_at is absent', async () => {
+    await setup();
+    // The default runGitHubReviewPr mock carries no created_at.
+    component.startReview(component.pulls[0]);
+    const rec = component.reviewsFor(1)[0];
+    expect(Number.isNaN(rec.startedAt)).toBe(false);
+    expect(rec.startedAt).toBeGreaterThan(0);
+  });
+
+  it('stamps completedAt from the terminal updated_at when a live poll goes terminal', async () => {
+    await setup();
+    // A stale-failed job bumps updated_at to the terminal time but leaves
+    // last_activity_at frozen; the duration must use the terminal updated_at.
+    apiSpy.getJobStatus.mockReturnValue(
+      of({
+        job_id: 'j1',
+        status: 'failed',
+        last_activity_at: '2026-03-01T00:02:00Z', // frozen at last activity
+        updated_at: '2026-03-01T00:10:00Z', // terminal transition time (wins)
+      }),
+    );
+    component.startReview(component.pulls[0]);
+    const rec = component.reviewsFor(1)[0];
+    expect(rec.completedAt).toBeUndefined(); // not terminal yet
+    vi.advanceTimersByTime(5000); // one poll tick -> terminal
+    expect(rec.completedAt).toBe(Date.parse('2026-03-01T00:10:00Z'));
+  });
+
   it('stops polling once a review reaches a terminal status', async () => {
     await setup();
     apiSpy.getJobStatus.mockReturnValue(

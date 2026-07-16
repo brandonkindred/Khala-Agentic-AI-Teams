@@ -13,6 +13,9 @@ export interface PrReviewRecord {
   repo: string;
   /** Milliseconds since epoch when the review started (for the table timestamp). */
   startedAt: number;
+  /** Milliseconds since epoch when the review reached a terminal state, if known.
+   * Drives the row's duration; absent while the review is still running. */
+  completedAt?: number;
   status: string;
   statusText?: string;
   reviewSummary?: CodeReviewSummary;
