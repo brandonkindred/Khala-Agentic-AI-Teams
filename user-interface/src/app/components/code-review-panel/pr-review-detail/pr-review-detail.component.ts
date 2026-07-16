@@ -9,6 +9,7 @@ import { isCodingTeamTerminalStatus } from '../../../models/job-status.model';
 import { InlineBannerComponent } from '../../../shared/inline-banner/inline-banner.component';
 import { PendingIssueProposalsComponent } from '../pending-issue-proposals/pending-issue-proposals.component';
 import type { PrReviewRecord } from '../pr-review-record.model';
+import { reviewDuration, severityEntries } from '../review-metrics';
 
 /**
  * The expanded detail panel for a single pull request in the Code Review page:
@@ -69,6 +70,11 @@ export class PrReviewDetailComponent {
 
   /** Emitted when the user asks to file issues for a run's selected proposals. */
   @Output() createIssuesRequested = new EventEmitter<{ record: PrReviewRecord; ids: string[] }>();
+
+  // Per-review metric helpers are pure functions in `review-metrics.ts` (unit-tested
+  // there in isolation). Exposed as fields so the template calls them unchanged.
+  readonly severityEntries = severityEntries;
+  readonly reviewDuration = reviewDuration;
 
   /**
    * True once a single review run has reached a terminal state.

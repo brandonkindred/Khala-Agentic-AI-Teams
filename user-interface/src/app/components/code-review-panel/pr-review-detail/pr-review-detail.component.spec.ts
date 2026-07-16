@@ -166,16 +166,18 @@ describe('PrReviewDetailComponent', () => {
     expect(el().querySelector('.cr-reviews-table')).toBeNull();
   });
 
-  it('renders one row per review run with status, outcome, findings, started, and link', async () => {
+  it('renders one row per review run with status, outcome, findings, severity, started, and duration', async () => {
     const completed = record({
       jobId: 'done',
       status: 'completed',
       prUrl: 'https://example.com/pull/1',
+      completedAt: Date.parse('2026-01-01T09:32:00Z'), // 2m after startedAt (09:30)
       reviewSummary: {
         total_issues: 3,
         inline_comments: 2,
         comment_findings: 1,
         event: 'REQUEST_CHANGES',
+        severity_counts: { critical: 1, high: 0, medium: 2 },
       },
     });
     const running = record({ jobId: 'live', status: 'running' });
@@ -183,7 +185,7 @@ describe('PrReviewDetailComponent', () => {
     const rows = el().querySelectorAll('.cr-reviews-table tbody tr');
     expect(rows.length).toBe(2);
 
-    // Completed run: outcome chip, findings chips, working link, no spinner.
+    // Completed run: outcome chip, findings chips, non-zero severity chips, duration, no spinner.
     const done = rows[0];
     expect(done.querySelector('.cr-job-status')?.textContent).toContain('completed');
     expect(done.querySelector('mat-spinner')).toBeNull();
@@ -192,16 +194,55 @@ describe('PrReviewDetailComponent', () => {
     expect(findings).toContain('3 finding(s)');
     expect(findings).toContain('2 inline');
     expect(findings).toContain('1 comments');
-    const link = done.querySelector('a[aria-label="Open PR"]') as HTMLAnchorElement;
-    expect(link?.getAttribute('href')).toBe('https://example.com/pull/1');
+    // Only non-zero severity levels render, in critical→info order.
+    const sevChips = Array.from(done.querySelectorAll('[class*="cr-chip--sev-"]'));
+    expect(sevChips.map((c) => c.textContent?.trim())).toEqual(['1 critical', '2 medium']);
+    expect(done.querySelector('.cr-chip--sev-high')).toBeNull();
+    // The last cell (Duration) shows the computed elapsed time.
+    const doneCells = done.querySelectorAll('td');
+    expect(doneCells[doneCells.length - 1].textContent?.trim()).toBe('2m 0s');
+    // The per-run link column is gone; the PR link is hoisted to the header.
+    expect(done.querySelector('a[aria-label="Open PR"]')).toBeNull();
 
-    // Running run: spinner shown, outcome/findings/link fall back to a dash.
+    // Running run: spinner shown, outcome/findings/severity/duration fall back to a dash.
     const live = rows[1];
     expect(live.querySelector('.cr-job-status')?.textContent).toContain('running');
     expect(live.querySelector('mat-spinner')).toBeTruthy();
     expect(live.querySelector('.cr-chip--event')).toBeNull();
     expect(live.querySelector('.cr-findings')).toBeNull();
-    expect(live.querySelector('a[aria-label="Open PR"]')).toBeNull();
+    expect(live.querySelector('[class*="cr-chip--sev-"]')).toBeNull();
+    const liveCells = live.querySelectorAll('td');
+    expect(liveCells[liveCells.length - 1].textContent?.trim()).toBe('—'); // duration
+  });
+
+  it('hoists a single PR link into the detail header and drops the per-row link', async () => {
+    await setup({
+      pull: makePull({ html_url: 'https://example.com/pull/9' }),
+      reviews: [record({ jobId: 'r1', status: 'completed', prUrl: 'https://example.com/pull/9' })],
+    });
+    const host = el();
+    // The PR link lives once in the detail header, sourced from the PR's html_url.
+    const link = host.querySelector('.cr-pull-detail__link') as HTMLAnchorElement | null;
+    expect(link).toBeTruthy();
+    expect(link?.getAttribute('href')).toBe('https://example.com/pull/9');
+    // No per-run link remains inside the reviews table.
+    expect(host.querySelector('.cr-reviews-table tbody a')).toBeNull();
+  });
+
+  it('shows an em dash for severity when a run has no severity counts', async () => {
+    await setup({
+      reviews: [
+        record({
+          jobId: 'r1',
+          status: 'completed',
+          reviewSummary: { total_issues: 0, inline_comments: 0, event: 'APPROVE' },
+        }),
+      ],
+    });
+    const cells = el().querySelector('.cr-reviews-table tbody tr')!.querySelectorAll('td');
+    // Columns: Status | Outcome | Findings | Severity | Started | Duration.
+    expect(cells[3].textContent?.trim()).toBe('—'); // severity
+    expect(el().querySelector('[class*="cr-chip--sev-"]')).toBeNull();
   });
 
   it('shows a run error in the outcome cell without a spinner', async () => {

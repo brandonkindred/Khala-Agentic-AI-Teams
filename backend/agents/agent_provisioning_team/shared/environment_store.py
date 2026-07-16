@@ -61,6 +61,14 @@ class EnvironmentInfo:
         created_at: ISO-8601 timestamp of when the record was first created.
         updated_at: ISO-8601 timestamp of the most recent status/field update;
             defaults to ``created_at`` when not explicitly supplied.
+
+    Invariants:
+        * ``tools_provisioned`` is always a ``list`` (never ``None``) —
+          construction coerces a ``None`` argument to ``[]``.
+        * ``created_at`` is always an ISO-8601 timestamp string — construction
+          defaults it to the current UTC time when not supplied.
+        * ``updated_at`` is always an ISO-8601 timestamp string — construction
+          defaults it to ``created_at`` when not supplied.
     """
 
     def __init__(
@@ -76,6 +84,21 @@ class EnvironmentInfo:
         created_at: Optional[str] = None,
         updated_at: Optional[str] = None,
     ) -> None:
+        """Construct an environment record.
+
+        Preconditions:
+            * ``agent_id``, ``container_id``, ``container_name`` are non-empty
+              strings.
+            * ``ssh_port`` is a valid port number.
+        Postconditions:
+            * All fields are set from the corresponding arguments.
+            * ``tools_provisioned`` is ``[]`` when ``None`` is passed, else the
+              given list.
+            * ``created_at`` is the current UTC time in ISO format when not
+              supplied, else the given value.
+            * ``updated_at`` is ``created_at`` when not supplied, else the
+              given value.
+        """
         self.agent_id = agent_id
         self.container_id = container_id
         self.container_name = container_name
@@ -88,6 +111,17 @@ class EnvironmentInfo:
         self.updated_at = updated_at or self.created_at
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize this record to a plain dict for JSON persistence.
+
+        Preconditions:
+            * None beyond a constructed instance.
+        Postconditions:
+            * Returns a ``Dict[str, Any]`` with exactly the keys
+              ``agent_id``, ``container_id``, ``container_name``,
+              ``ssh_host``, ``ssh_port``, ``workspace_path``, ``status``,
+              ``tools_provisioned``, ``created_at``, ``updated_at``,
+              mirroring instance state.
+        """
         return {
             "agent_id": self.agent_id,
             "container_id": self.container_id,
@@ -103,6 +137,19 @@ class EnvironmentInfo:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "EnvironmentInfo":
+        """Reconstruct a record from its serialized dict form.
+
+        Preconditions:
+            * ``data`` is a ``Dict[str, Any]`` containing at least the
+              required keys ``agent_id``, ``container_id``,
+              ``container_name`` (raises ``KeyError`` otherwise).
+        Postconditions:
+            * Returns a new ``EnvironmentInfo`` populated from ``data``,
+              applying the same defaults as ``__init__`` for optional fields
+              (``ssh_host``, ``ssh_port``, ``workspace_path``, ``status``,
+              ``tools_provisioned``, ``created_at``, ``updated_at``) when
+              absent from ``data``.
+        """
         return cls(
             agent_id=data["agent_id"],
             container_id=data["container_id"],

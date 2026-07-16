@@ -637,3 +637,25 @@ def test_planning_architecture_fn_agent_raises_returns_none():
     fn = orchestrator._make_planning_architecture_fn(agent)
 
     assert fn(spec_content="Spec", prd_content=None, repo_path="/x", client_context=None) is None
+
+
+def test_run_architecture_for_planning_module_level_success():
+    """The module-level function itself (not just the factory closure) returns the overview."""
+    agent = _mock_arch_agent(overview="Direct overview")
+
+    result = orchestrator._run_architecture_for_planning(
+        agent, spec_content="# Spec", prd_content=None, repo_path="/x", client_context=None
+    )
+
+    assert result == "Direct overview"
+
+
+def test_run_architecture_for_planning_module_level_agent_raises_returns_none():
+    """Calling the module-level function directly still swallows agent exceptions to None."""
+    agent = _mock_arch_agent(raises=RuntimeError("boom"))
+
+    result = orchestrator._run_architecture_for_planning(
+        agent, spec_content="Spec", prd_content=None, repo_path="/x", client_context=None
+    )
+
+    assert result is None

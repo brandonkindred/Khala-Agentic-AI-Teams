@@ -1,6 +1,18 @@
 """
 Job store for coding_team: persists job status and task graph snapshot via the job service.
 Used for status API and resume; task graph snapshot and agent_task_map are stored on the job.
+
+Invariants:
+    - Job lifecycle: a job starts ``pending``, moves to ``running``, and ends in exactly one
+      terminal status: ``completed``, ``completed_with_failures``, ``already_complete``,
+      ``failed``, or ``cancelled``. ``waiting_for_user`` is a substate of ``running`` — a paused
+      job still owns its checkout and issue, so it counts as active (see
+      ``NON_TERMINAL_STATUSES``) even though no worker thread is currently driving it.
+    - ``create_job`` is idempotent: the job service upserts on ``(team, job_id)``, so calling it
+      again for the same ``job_id`` overwrites the existing record rather than erroring.
+    - ``update_job`` (and the narrower wrappers built on it, e.g. ``update_job_task_graph``,
+      ``heartbeat_job``) require the job to already exist; they patch fields on the job service's
+      record and do not create one.
 """
 
 from __future__ import annotations
