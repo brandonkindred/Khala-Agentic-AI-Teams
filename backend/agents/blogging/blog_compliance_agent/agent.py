@@ -173,7 +173,10 @@ class BlogComplianceAgent:
                 # Temporal (or the caller) owns the retry instead of a blocking sleep here.
                 raise
             except Exception as e:
-                logger.warning(
+                # logger.exception captures the full traceback at ERROR level so an
+                # unexpected/programming error (AttributeError, TypeError, …) is visible
+                # in logs even though we fail closed with a fallback report below.
+                logger.exception(
                     "Compliance LLM failed after agent retries; using fallback report: %s",
                     e,
                 )

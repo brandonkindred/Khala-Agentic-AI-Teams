@@ -126,7 +126,10 @@ class BlogFactCheckAgent:
                 # the whole stage, instead of being masked as a terminal FactCheckError.
                 raise
             except Exception as e:
-                logger.error("Fact-check failed: %s", e)
+                # logger.exception captures the full traceback at ERROR level so an
+                # unexpected/programming error is visible before being wrapped in the
+                # domain FactCheckError (which the gate funnel treats as a BloggingError).
+                logger.exception("Fact-check failed: %s", e)
                 raise FactCheckError(f"Fact-check failed: {e}", cause=e) from e
 
         if data is None:

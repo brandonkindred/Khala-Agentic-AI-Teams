@@ -2106,6 +2106,11 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
             # precedence: cancellation first, then a transient LLM-transport error
             # (prefer a Temporal stage retry over a terminal domain failure), then the
             # fact-check domain error, then the compliance one (input order).
+            #
+            # The three passes are deliberate: each pass scans BOTH gates for a
+            # higher-priority error class before falling through, so cancellation from
+            # *either* gate wins over a transient from the other, which in turn wins over
+            # any domain error — a single positional pass could not express that ordering.
             gate_errors = [e for e in (fact_error, compliance_error) if e is not None]
             for gate_error in gate_errors:
                 if isinstance(gate_error, CancelledError) or _is_external_cancellation(gate_error):

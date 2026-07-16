@@ -15,7 +15,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 _blogging_root = Path(__file__).resolve().parent.parent
 if (
@@ -173,7 +173,11 @@ else:
 # hang until the wait cleared. Temporal remains the durable path for high HITL
 # concurrency. Tunable via BLOGGING_ASYNC_MAX_WORKERS (clamped to >= 1, default 16).
 _ASYNC_JOB_MAX_WORKERS = env_int("BLOGGING_ASYNC_MAX_WORKERS", 16, floor=1)
-_ASYNC_JOB_QUEUE: "queue.Queue[Optional[tuple]]" = queue.Queue()
+# A queue item is a ``(target, args)`` pair, or ``None`` (a stop sentinel dequeued to
+# retire a worker). Spelling the payload out documents the contract for readers/type
+# checkers instead of a bare ``tuple``.
+JobItem = Optional[Tuple[Callable[..., Any], Tuple[Any, ...]]]
+_ASYNC_JOB_QUEUE: "queue.Queue[JobItem]" = queue.Queue()
 _ASYNC_JOB_WORKERS_STARTED = False
 _ASYNC_JOB_WORKERS_LOCK = threading.Lock()
 
@@ -188,22 +192,23 @@ def _async_job_worker() -> None:
           (the job funcs already fail their own job-store entry); the loop runs until the
           process exits (daemon threads are reclaimed at interpreter shutdown) or a
           ``None`` sentinel is dequeued.
+
+    Note: no ``task_done()``/``Queue.join()`` coordination — nothing ever joins the queue
+    (workers are daemons reclaimed at shutdown), so a per-item ``task_done()`` would only
+    imply a completion barrier that does not exist.
     """
     while True:
         item = _ASYNC_JOB_QUEUE.get()
-        job_id = "unknown"
+        if item is None:
+            return
+        target, args = item
+        # Both async targets take job_id as their first positional arg; capture it up
+        # front so a crash can be correlated with the specific job in the logs.
+        job_id = args[0] if args else "unknown"
         try:
-            if item is None:
-                return
-            target, args = item
-            # Both async targets take job_id as their first positional arg; capture it
-            # up front so a crash can be correlated with the specific job in the logs.
-            job_id = args[0] if args else "unknown"
             target(*args)
         except Exception:
             logger.exception("Async blogging job worker crashed on job %s", job_id)
-        finally:
-            _ASYNC_JOB_QUEUE.task_done()
 
 
 def _ensure_async_workers() -> None:

@@ -231,3 +231,29 @@ def test_copy_editor_transient_error_reraises(monkeypatch, kind) -> None:
     )
     with pytest.raises(err_cls):
         agent.run(CopyEditorInput(draft="# d\n\nsome body text here"))
+
+
+def test_copy_editor_unexpected_error_fails_closed(monkeypatch) -> None:
+    """A non-transient, non-JSON LLM/programming error fails closed with a manual-review
+    fallback instead of crashing the draft stage."""
+    from blog_copy_editor_agent import agent as ce_mod
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise RuntimeError("unexpected model failure")
+
+    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
+    )
+
+    result = agent.run(CopyEditorInput(draft="# d\n\nsome body text here"))
+
+    assert isinstance(result, CopyEditorOutput)
+    assert "manually" in result.summary.lower()
+    # No LLM-derived feedback survives the fallback (length injection may still add items,
+    # but none carry an LLM-authored issue about the prose itself).
+    assert isinstance(result.feedback_items, list)

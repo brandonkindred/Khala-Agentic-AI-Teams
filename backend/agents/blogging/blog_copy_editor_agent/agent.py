@@ -208,9 +208,11 @@ class BlogCopyEditorAgent:
         )
         # The LLM client already exhausts its own 429 / transient-transport retry budgets
         # before raising, so the copy editor adds no second blocking retry: a transient
-        # (or any other) LLM error propagates unwrapped for the Temporal activity funnel to
-        # retry the whole stage (thread mode fails the job). Only JSON-parse failures are
-        # handled here — one cheap, local strict re-prompt, then a manual-review fallback.
+        # LLM error (LLMRateLimitError/LLMTemporaryError) re-raises for the Temporal
+        # activity funnel to retry the whole stage (thread mode fails the job). A
+        # JSON-parse failure gets one cheap strict re-prompt then a manual-review
+        # fallback; any other unexpected error also fails closed with that fallback so a
+        # single bad copy-edit never crashes the draft stage.
         for json_attempt in range(2):
             try:
                 result = agent(
@@ -238,9 +240,20 @@ class BlogCopyEditorAgent:
             except (LLMRateLimitError, LLMTemporaryError):
                 # Transient transport error after the client's own retries: re-raise so
                 # Temporal (or the caller) owns the retry rather than a blocking sleep here.
-                # (Any other non-JSON error likewise propagates — the copy editor fails
-                # loudly instead of retrying in-process.)
                 raise
+            except Exception as e:
+                # Any other unexpected error (a non-transient LLM failure, or a bug like
+                # AttributeError) fails closed with a manual-review fallback — matching the
+                # compliance agent. The traceback is logged at ERROR level so the root
+                # cause stays visible rather than being silently swallowed.
+                logger.exception(
+                    "Copy editor LLM failed unexpectedly; using fallback output: %s", e
+                )
+                data = {
+                    "summary": "Copy editor could not complete review. Please review the draft manually.",
+                    "feedback_items": [],
+                }
+                break
 
         if not data:
             data = {
