@@ -7,7 +7,7 @@ that drive frontend_v2/backend_v2 workers through quality gates. Also keeps bran
 naming and review-evidence helpers that the mixins late-bind.
 
 Extracted collaborators (import those modules for the concerns they own):
-- ``progress_config`` — concurrency/cap env parsers, progress-band math, ``_NoopBridge``
+- ``progress_config`` — concurrency/cap env parsers, progress-band math
 - ``repo_context`` — file-ceiling repo briefing and incremental ``_RepoContextCache``
 - ``pause_cycle``, ``reasoning_capture``, ``team_routing``, ``worker_factory``,
   ``swarm_*`` — HITL pauses, thinking flush, stack routing, worker construction,
