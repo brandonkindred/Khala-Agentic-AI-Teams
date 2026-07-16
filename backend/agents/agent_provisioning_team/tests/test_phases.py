@@ -870,3 +870,209 @@ def test_redact_details_handles_list() -> None:
     out = _redact_details([{"password": "x"}, {"safe": "y"}])
     assert out[0]["password"] == "***"
     assert out[1]["safe"] == "y"
+
+
+# -------------------------------------------------------------------------
+# documentation phase LLM summary / getting-started happy + fallback paths.
+# -------------------------------------------------------------------------
+
+
+def test_documentation_uses_llm_summary_when_configured(tmp_path: Path) -> None:
+    from agent_provisioning_team.phases import documentation as doc_mod
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    captured = {}
+
+    class _StubLLM:
+        is_configured = True
+
+        def complete(self, req):
+            captured["called"] = True
+            return "FAKE_LLM_SUMMARY"
+
+    stub = _StubLLM()
+    with patch.object(doc_mod, "_LLM", stub):
+        result = doc_mod.run_documentation(
+            agent_id="a1",
+            manifest=ToolManifest(),
+            credentials={},
+            tool_results=[],
+            workspace_path=str(tmp_path),
+        )
+    assert result.success is True
+    assert "FAKE_LLM_SUMMARY" in result.onboarding.summary
+
+
+def test_documentation_llm_summary_falls_back_on_exception(tmp_path: Path) -> None:
+    from agent_provisioning_team.phases import documentation as doc_mod
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    class _BoomLLM:
+        is_configured = True
+
+        def complete(self, req):
+            raise RuntimeError("api down")
+
+    with patch.object(doc_mod, "_LLM", _BoomLLM()):
+        result = doc_mod.run_documentation(
+            agent_id="a1",
+            manifest=ToolManifest(),
+            credentials={},
+            tool_results=[],
+            workspace_path=str(tmp_path),
+        )
+    # Falls back to deterministic template
+    assert "tool(s) configured" in result.onboarding.summary
+
+
+def test_documentation_uses_llm_getting_started_when_configured(tmp_path: Path) -> None:
+    from agent_provisioning_team.models import (
+        GeneratedCredentials,
+        ToolProvisionResult,
+    )
+    from agent_provisioning_team.phases import documentation as doc_mod
+    from agent_provisioning_team.shared.tool_manifest import ToolDefinition, ToolManifest
+
+    manifest = ToolManifest(
+        tools=[
+            ToolDefinition(
+                name="redis",
+                provisioner="redis_provisioner",
+                config={},
+                onboarding={
+                    "description": "Redis",
+                    "env_var": "REDIS_URL",
+                    "getting_started": "",  # empty → triggers LLM path
+                },
+            ),
+        ]
+    )
+
+    class _StubLLM:
+        is_configured = True
+
+        def complete(self, req):
+            return "FAKE_TOOL_DOC"
+
+    with patch.object(doc_mod, "_LLM", _StubLLM()):
+        result = doc_mod.run_documentation(
+            agent_id="a1",
+            manifest=manifest,
+            credentials={
+                "redis": GeneratedCredentials(tool_name="redis", connection_string="redis://x")
+            },
+            tool_results=[
+                ToolProvisionResult(
+                    tool_name="redis",
+                    success=True,
+                    permissions=["+@all"],
+                    provisioner_key="redis_provisioner",
+                )
+            ],
+            workspace_path=str(tmp_path),
+        )
+
+    # LLM-generated docs appear in the tool's getting_started field
+    assert any("FAKE_TOOL_DOC" in t.getting_started for t in result.onboarding.tools)
+
+
+def test_documentation_llm_getting_started_falls_back_on_exception(tmp_path: Path) -> None:
+    from agent_provisioning_team.models import (
+        GeneratedCredentials,
+        ToolProvisionResult,
+    )
+    from agent_provisioning_team.phases import documentation as doc_mod
+    from agent_provisioning_team.shared.tool_manifest import ToolDefinition, ToolManifest
+
+    manifest = ToolManifest(
+        tools=[
+            ToolDefinition(
+                name="redis",
+                provisioner="redis_provisioner",
+                config={},
+                onboarding={
+                    "description": "Redis",
+                    "env_var": "REDIS_URL",
+                    "getting_started": "",
+                },
+            ),
+        ]
+    )
+
+    class _BoomLLM:
+        is_configured = True
+
+        def complete(self, req):
+            raise RuntimeError("api down")
+
+    with patch.object(doc_mod, "_LLM", _BoomLLM()):
+        result = doc_mod.run_documentation(
+            agent_id="a1",
+            manifest=manifest,
+            credentials={
+                "redis": GeneratedCredentials(tool_name="redis", connection_string="redis://x")
+            },
+            tool_results=[
+                ToolProvisionResult(
+                    tool_name="redis",
+                    success=True,
+                    permissions=["+@all"],
+                    provisioner_key="redis_provisioner",
+                )
+            ],
+            workspace_path=str(tmp_path),
+        )
+    # Falls back to deterministic template (mentions env var).
+    assert any("REDIS_URL" in t.getting_started for t in result.onboarding.tools)
+
+
+def test_documentation_getting_started_template_substitutes_username(tmp_path: Path) -> None:
+    """{username} and {connection_string} placeholders get substituted from creds.extra."""
+    from agent_provisioning_team.models import (
+        GeneratedCredentials,
+        ToolProvisionResult,
+    )
+    from agent_provisioning_team.phases.documentation import run_documentation
+    from agent_provisioning_team.shared.tool_manifest import ToolDefinition, ToolManifest
+
+    manifest = ToolManifest(
+        tools=[
+            ToolDefinition(
+                name="pg",
+                provisioner="postgres_provisioner",
+                config={},
+                onboarding={
+                    "description": "PG",
+                    "getting_started": "user={username} extra={port}",
+                },
+            ),
+        ]
+    )
+
+    creds = GeneratedCredentials(
+        tool_name="pg",
+        username="u1",
+        password="p",
+        connection_string="conn",
+        extra={"port": 5432},
+    )
+    tool_results = [
+        ToolProvisionResult(
+            tool_name="pg",
+            success=True,
+            permissions=["ALL"],
+            provisioner_key="postgres_provisioner",
+        )
+    ]
+
+    result = run_documentation(
+        agent_id="a1",
+        manifest=manifest,
+        credentials={"pg": creds},
+        tool_results=tool_results,
+        workspace_path=str(tmp_path),
+    )
+
+    rendered = result.onboarding.tools[0].getting_started
+    assert "user=u1" in rendered
+    assert "extra=5432" in rendered

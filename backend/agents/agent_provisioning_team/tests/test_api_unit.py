@@ -710,3 +710,19 @@ def test_lifespan_shutdown_does_not_compensate_or_fail_jobs() -> None:
     assert not hasattr(api_main, "_graceful_shutdown")
     assert not hasattr(api_main, "_safe_compensate")
     assert not hasattr(api_main, "COMPENSATE_TIMEOUT_S")
+
+
+# -------------------------------------------------------------------------
+# FastAPI lifespan enter/exit smoke.
+# -------------------------------------------------------------------------
+
+
+def test_lifespan_runs_cleanly(monkeypatch) -> None:
+    """Entering + exiting the TestClient context runs the lifespan hook end-to-end."""
+    from fastapi.testclient import TestClient
+
+    from agent_provisioning_team.api import main as api_main
+
+    with TestClient(api_main.app) as c:
+        r = c.get("/health")
+        assert r.status_code == 200

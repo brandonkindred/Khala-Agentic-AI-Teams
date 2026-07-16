@@ -1124,3 +1124,21 @@ def test_redis_init_uses_env_defaults(monkeypatch) -> None:
     assert prov.host == "rhost"
     assert prov.port == 12345
     assert prov.admin_password == "rp"
+
+
+# -------------------------------------------------------------------------
+# Canonical anatomy preamble exposed on a provisioner instance.
+# -------------------------------------------------------------------------
+
+
+def test_canonical_anatomy_prompt_preamble_via_instance(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.provisioner_state import ProvisionerStateStore
+    from agent_provisioning_team.tool_agents.generic_provisioner import GenericProvisionerTool
+
+    prov = GenericProvisionerTool("x")
+    prov._state = ProvisionerStateStore("generic_x_provisioner", storage_dir=tmp_path)
+    text = prov.canonical_anatomy_prompt_preamble()
+    assert isinstance(text, str)
+    assert text.strip()
+    assert "anatomy" in text.lower() or "Khala" in text
+    assert "Input" in text or "Output" in text or "Tools" in text
