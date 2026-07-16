@@ -26,7 +26,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from branding_team.api.main import app
 from branding_team.models import BrandPhase
 
 # ---------------------------------------------------------------------------
@@ -1017,10 +1016,14 @@ def test_signal_branding_cancel_swallows_errors() -> None:
 # _submit_brand_run dispatch branch (integration — uses the job service)
 # ---------------------------------------------------------------------------
 
-client = TestClient(app)
+@pytest.fixture
+def branding_client() -> TestClient:
+    from branding_team.api.main import app
+
+    return TestClient(app)
 
 
-def _make_brand() -> tuple[str, str]:
+def _make_brand(client: TestClient) -> tuple[str, str]:
     cid = client.post("/clients", json={"name": "Temporal Client"}).json()["id"]
     bid = client.post(
         f"/clients/{cid}/brands",
@@ -1034,18 +1037,18 @@ def _make_brand() -> tuple[str, str]:
 
 
 @pytest.mark.integration
-def test_run_dispatches_via_temporal_when_enabled() -> None:
+def test_run_dispatches_via_temporal_when_enabled(branding_client: TestClient) -> None:
     import shared_temporal
     from branding_team.api import main as main_mod
 
-    cid, bid = _make_brand()
+    cid, bid = _make_brand(branding_client)
     spy = MagicMock()
     with (
         patch.object(shared_temporal, "is_temporal_enabled", return_value=True),
         patch("branding_team.temporal.start_workflow.start_branding_workflow", spy),
         patch.object(main_mod._run_executor, "submit") as mock_submit,
     ):
-        resp = client.post(
+        resp = branding_client.post(
             f"/clients/{cid}/brands/{bid}/run",
             json={"human_approved": True, "target_phase": "strategic_core"},
         )
@@ -1064,10 +1067,10 @@ def test_run_dispatches_via_temporal_when_enabled() -> None:
 
 
 @pytest.mark.integration
-def test_run_temporal_dispatch_failure_returns_503_and_fails_job() -> None:
+def test_run_temporal_dispatch_failure_returns_503_and_fails_job(branding_client: TestClient) -> None:
     import shared_temporal
 
-    cid, bid = _make_brand()
+    cid, bid = _make_brand(branding_client)
     with (
         patch.object(shared_temporal, "is_temporal_enabled", return_value=True),
         patch(
@@ -1075,7 +1078,7 @@ def test_run_temporal_dispatch_failure_returns_503_and_fails_job() -> None:
             side_effect=RuntimeError("worker down"),
         ),
     ):
-        resp = client.post(
+        resp = branding_client.post(
             f"/clients/{cid}/brands/{bid}/run",
             json={"human_approved": True},
         )
@@ -1083,7 +1086,7 @@ def test_run_temporal_dispatch_failure_returns_503_and_fails_job() -> None:
     assert resp.status_code == 503
     # The dispatch failure must transition the created job row to FAILED (not
     # leave it stuck PENDING). Find this brand's job in the list and check it.
-    jobs = client.get("/branding/jobs").json()["jobs"]
+    jobs = branding_client.get("/branding/jobs").json()["jobs"]
     brand_jobs = [j for j in jobs if j["brand_id"] == bid]
     assert brand_jobs, "expected a job row created for the brand"
     assert brand_jobs[0]["status"] == "failed"
