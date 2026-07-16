@@ -13,7 +13,7 @@ import json
 
 
 def _make_agent():
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import DummyLLMClient
 
@@ -30,7 +30,7 @@ def _make_agent():
 
 
 def test_identify_uncertainty_questions_returns_items(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
     monkeypatch.setattr(
@@ -53,7 +53,7 @@ def test_identify_uncertainty_questions_returns_items(monkeypatch) -> None:
 
 
 def test_identify_uncertainty_questions_empty_array(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
     monkeypatch.setattr(BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": "[]")
@@ -62,7 +62,7 @@ def test_identify_uncertainty_questions_empty_array(monkeypatch) -> None:
 
 def test_identify_uncertainty_questions_no_array(monkeypatch) -> None:
     """No JSON array in response → empty list."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
     monkeypatch.setattr(
@@ -72,7 +72,7 @@ def test_identify_uncertainty_questions_no_array(monkeypatch) -> None:
 
 
 def test_identify_uncertainty_questions_malformed_items_skipped(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
     monkeypatch.setattr(
@@ -90,7 +90,7 @@ def test_identify_uncertainty_questions_malformed_items_skipped(monkeypatch) -> 
 
 
 def test_identify_uncertainty_questions_llm_error(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
 
@@ -107,7 +107,7 @@ def test_identify_uncertainty_questions_llm_error(monkeypatch) -> None:
 
 
 def test_analyze_feedback_returns_updates(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
     monkeypatch.setattr(
@@ -124,7 +124,7 @@ def test_analyze_feedback_returns_updates(monkeypatch) -> None:
 
 
 def test_analyze_feedback_no_updates(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
     monkeypatch.setattr(
@@ -136,7 +136,7 @@ def test_analyze_feedback_no_updates(monkeypatch) -> None:
 
 
 def test_analyze_feedback_non_dict(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", lambda self, p, **kw: "garbage")
@@ -144,7 +144,7 @@ def test_analyze_feedback_non_dict(monkeypatch) -> None:
 
 
 def test_analyze_feedback_malformed_skipped(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
     monkeypatch.setattr(
@@ -163,7 +163,7 @@ def test_analyze_feedback_malformed_skipped(monkeypatch) -> None:
 
 
 def test_analyze_feedback_error(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
 
@@ -180,7 +180,7 @@ def test_analyze_feedback_error(monkeypatch) -> None:
 
 
 def test_revise_from_user_feedback_happy(monkeypatch, tmp_path) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
     monkeypatch.setattr(
@@ -215,7 +215,7 @@ def test_revise_from_user_feedback_empty_draft() -> None:
 
 def test_revise_from_user_feedback_no_marker_then_json_fallback(monkeypatch) -> None:
     """LLM returns no ---DRAFT--- marker but JSON fallback works."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
     call_count = {"i": 0}
@@ -239,8 +239,8 @@ def test_revise_from_user_feedback_no_marker_then_json_fallback(monkeypatch) -> 
 
 
 def test_generate_escalation_summary_happy(monkeypatch) -> None:
-    from blog_copy_editor_agent.models import FeedbackItem
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
     monkeypatch.setattr(
@@ -261,7 +261,7 @@ def test_generate_escalation_summary_happy(monkeypatch) -> None:
 
 
 def test_generate_escalation_summary_handles_error(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
 
@@ -285,10 +285,10 @@ def test_generate_escalation_summary_handles_error(monkeypatch) -> None:
 
 def test_revise_with_feedback_batches(monkeypatch, tmp_path) -> None:
     """revise() with a non-empty feedback list runs through batch revision."""
-    from blog_copy_editor_agent.models import FeedbackItem
-    from blog_writer_agent.agent import BlogWriterAgent
-    from blog_writer_agent.models import ReviseWriterInput, RevisionPlan
-    from shared.content_plan import (
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput, RevisionPlan
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -335,10 +335,10 @@ def test_revise_with_feedback_batches(monkeypatch, tmp_path) -> None:
 
 def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> None:
     """If all retries fail and json fallback fails, return original draft."""
-    from blog_copy_editor_agent.models import FeedbackItem
-    from blog_writer_agent.agent import BlogWriterAgent
-    from blog_writer_agent.models import ReviseWriterInput, RevisionPlan
-    from shared.content_plan import (
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput, RevisionPlan
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -390,10 +390,10 @@ def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> 
 
 def test_revise_generate_revision_plan_happy(monkeypatch) -> None:
     """_generate_revision_plan parses structured response."""
-    from blog_copy_editor_agent.models import FeedbackItem
-    from blog_writer_agent.agent import BlogWriterAgent
-    from blog_writer_agent.models import ReviseWriterInput
-    from shared.content_plan import (
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -442,10 +442,10 @@ def test_revise_generate_revision_plan_happy(monkeypatch) -> None:
 
 
 def test_revise_generate_revision_plan_empty_response(monkeypatch) -> None:
-    from blog_copy_editor_agent.models import FeedbackItem
-    from blog_writer_agent.agent import BlogWriterAgent
-    from blog_writer_agent.models import ReviseWriterInput
-    from shared.content_plan import (
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -478,10 +478,10 @@ def test_revise_generate_revision_plan_empty_response(monkeypatch) -> None:
 
 def test_revise_generate_revision_plan_error_falls_back(monkeypatch) -> None:
     """When the structured plan fails, fall back to a plain text plan."""
-    from blog_copy_editor_agent.models import FeedbackItem
-    from blog_writer_agent.agent import BlogWriterAgent
-    from blog_writer_agent.models import ReviseWriterInput
-    from shared.content_plan import (
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,

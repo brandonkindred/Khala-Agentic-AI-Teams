@@ -49,7 +49,7 @@ def patched_client(monkeypatch, fake_job_client) -> Any:
     this fixture do not pay the ``api/main`` import cost.
     """
     from _api_test_utils import api_main
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
     for name in _BLOG_JOB_HELPERS:

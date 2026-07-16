@@ -6,9 +6,9 @@ import asyncio
 import logging
 from typing import Any, Dict
 
-from blogging.temporal.client import get_temporal_client, get_temporal_loop
-from blogging.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX_FULL_PIPELINE
-from blogging.temporal.workflows import BlogFullPipelineWorkflow
+from agents.blogging.temporal.client import get_temporal_client, get_temporal_loop
+from agents.blogging.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX_FULL_PIPELINE
+from agents.blogging.temporal.workflows import BlogFullPipelineWorkflow
 
 logger = logging.getLogger(__name__)
 

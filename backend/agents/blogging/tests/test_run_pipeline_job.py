@@ -19,12 +19,12 @@ import pytest
 @pytest.fixture
 def patched_client(monkeypatch, fake_job_client):
     """Make `shared.blog_job_store._client` return the in-memory fake."""
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
     # Also patch the blogging.shared alias if the alternate module path was loaded
     try:
-        from blogging.shared import blog_job_store as bjs_alt
+        from agents.blogging.shared import blog_job_store as bjs_alt
 
         monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
     except ImportError:
@@ -37,7 +37,7 @@ def _setup_artifacts_root(monkeypatch, tmp_path: Path) -> None:
 
 
 def _make_pipeline_doubles():
-    from shared.content_plan import (
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         PlanningPhaseResult,
@@ -68,8 +68,8 @@ def _make_pipeline_doubles():
 
 
 def test_run_blog_full_pipeline_job_completes(monkeypatch, tmp_path: Path, patched_client) -> None:
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     _setup_artifacts_root(monkeypatch, tmp_path)
 
@@ -94,8 +94,8 @@ def test_run_blog_full_pipeline_job_completes(monkeypatch, tmp_path: Path, patch
 def test_run_blog_full_pipeline_job_completes_needs_review(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     _setup_artifacts_root(monkeypatch, tmp_path)
 
@@ -121,7 +121,7 @@ def _import_errors_used_by_run_pipeline_job():
     objects — in dual-layout runtimes ``blogging.shared.errors`` is a distinct module
     whose classes never match. Returns (BloggingError, PlanningError, DraftError).
     """
-    from shared.errors import BloggingError, DraftError, PlanningError
+    from agents.blogging.shared.errors import BloggingError, DraftError, PlanningError
 
     return BloggingError, PlanningError, DraftError
 
@@ -129,8 +129,8 @@ def _import_errors_used_by_run_pipeline_job():
 def test_run_blog_full_pipeline_job_planning_error(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     _, PlanningError, _ = _import_errors_used_by_run_pipeline_job()
     _setup_artifacts_root(monkeypatch, tmp_path)
@@ -154,8 +154,8 @@ def test_run_blog_full_pipeline_job_planning_error(
 def test_run_blog_full_pipeline_job_blogging_error(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     _, _, DraftError = _import_errors_used_by_run_pipeline_job()
     _setup_artifacts_root(monkeypatch, tmp_path)
@@ -176,8 +176,8 @@ def test_run_blog_full_pipeline_job_blogging_error(
 def test_run_blog_full_pipeline_job_unknown_error(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     _setup_artifacts_root(monkeypatch, tmp_path)
 
@@ -202,8 +202,8 @@ def test_run_blog_full_pipeline_job_job_updater_failure_swallowed(
     store write raises, exercising make_job_updater's swallow path (rather than just
     asserting completion of a clean run).
     """
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     _setup_artifacts_root(monkeypatch, tmp_path)
 
@@ -246,7 +246,7 @@ def _deny_import(name):
 
 def test_mark_job_cancelled_tolerates_missing_modules(monkeypatch) -> None:
     """mark_job_cancelled still returns True when the shared modules are absent."""
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     monkeypatch.setattr(rpj, "_import_shared", _deny_import)
     assert rpj.mark_job_cancelled("jid") is True
@@ -254,7 +254,7 @@ def test_mark_job_cancelled_tolerates_missing_modules(monkeypatch) -> None:
 
 def test_mark_job_cancelled_swallows_update_errors(monkeypatch) -> None:
     """A failing update_blog_job inside mark_job_cancelled is swallowed."""
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     def raising_update(job_id, **kwargs):
         raise RuntimeError("store down")
@@ -265,7 +265,7 @@ def test_mark_job_cancelled_swallows_update_errors(monkeypatch) -> None:
 
 def test_make_job_updater_tolerates_missing_event_bus(monkeypatch) -> None:
     """The updater never raises when the SSE bus module is absent."""
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     monkeypatch.setattr(rpj, "_import_shared", _deny_import)
     updater = rpj.make_job_updater("jid")
@@ -274,7 +274,7 @@ def test_make_job_updater_tolerates_missing_event_bus(monkeypatch) -> None:
 
 def test_run_blog_full_pipeline_job_degrades_without_job_store(monkeypatch, tmp_path: Path) -> None:
     """With the shared modules unavailable, the run degrades to no-store mode without raising."""
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     _setup_artifacts_root(monkeypatch, tmp_path)
     monkeypatch.setattr(rpj, "_import_shared", _deny_import)

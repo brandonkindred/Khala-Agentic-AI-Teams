@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 def _agent():
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import DummyLLMClient
 
@@ -16,8 +16,8 @@ def _agent():
 
 
 def _writer_input(**overrides):
-    from blog_writer_agent.models import WriterInput
-    from shared.content_plan import (
+    from agents.blogging.blog_writer_agent.models import WriterInput
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -43,7 +43,7 @@ def _writer_input(**overrides):
 
 
 def test_writer_run_happy_with_all_options(monkeypatch, tmp_path) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent()
     monkeypatch.setattr(
@@ -69,8 +69,8 @@ def test_writer_run_happy_with_all_options(monkeypatch, tmp_path) -> None:
 
 
 def test_writer_run_empty_outline_returns_placeholder(monkeypatch) -> None:
-    from blog_writer_agent.models import WriterInput
-    from shared.content_plan import (
+    from agents.blogging.blog_writer_agent.models import WriterInput
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -95,7 +95,7 @@ def test_writer_run_empty_outline_returns_placeholder(monkeypatch) -> None:
 
 def test_writer_run_no_marker_returns_placeholder(monkeypatch) -> None:
     """LLM returns text without ---DRAFT--- marker — placeholder returned."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent()
     monkeypatch.setattr(
@@ -110,7 +110,7 @@ def test_writer_run_no_marker_returns_placeholder(monkeypatch) -> None:
 
 def test_writer_run_call_agent_throws_then_json_fallback(monkeypatch) -> None:
     """_call_agent raises; _call_agent_json succeeds with a draft."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent()
     monkeypatch.setattr(
@@ -130,7 +130,7 @@ def test_writer_run_call_agent_throws_then_json_fallback(monkeypatch) -> None:
 
 def test_writer_run_call_agent_throws_and_fallback_also_fails(monkeypatch) -> None:
     """Both _call_agent and _call_agent_json fail — placeholder returned."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent()
     monkeypatch.setattr(
@@ -149,7 +149,7 @@ def test_writer_run_call_agent_throws_and_fallback_also_fails(monkeypatch) -> No
 
 def test_writer_run_default_length_guidance(monkeypatch) -> None:
     """When length_guidance is empty, the default 'TARGET LENGTH' block is appended."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent()
     captured = {"prompt": ""}
@@ -165,10 +165,10 @@ def test_writer_run_default_length_guidance(monkeypatch) -> None:
 
 
 def test_writer_revise_single_item_happy(monkeypatch) -> None:
-    from blog_copy_editor_agent.models import FeedbackItem
-    from blog_writer_agent.agent import BlogWriterAgent
-    from blog_writer_agent.models import ReviseWriterInput
-    from shared.content_plan import (
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -207,10 +207,10 @@ def test_writer_revise_single_item_happy(monkeypatch) -> None:
 
 def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
     """All 2 attempts at _call_agent fail; _call_agent_json succeeds."""
-    from blog_copy_editor_agent.models import FeedbackItem
-    from blog_writer_agent.agent import BlogWriterAgent
-    from blog_writer_agent.models import ReviseWriterInput
-    from shared.content_plan import (
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -257,10 +257,10 @@ def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
 
 def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -> None:
     """All retries + fallback fail → original draft returned."""
-    from blog_copy_editor_agent.models import FeedbackItem
-    from blog_writer_agent.agent import BlogWriterAgent
-    from blog_writer_agent.models import ReviseWriterInput
-    from shared.content_plan import (
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -307,9 +307,9 @@ def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -
 
 def test_writer_build_revise_single_item_prompt(monkeypatch) -> None:
     """Smoke test the prompt building helper with title + stories + length_guidance."""
-    from blog_copy_editor_agent.models import FeedbackItem
-    from blog_writer_agent.models import ReviseWriterInput
-    from shared.content_plan import (
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -351,9 +351,9 @@ def test_writer_build_revise_single_item_prompt(monkeypatch) -> None:
 
 
 def test_writer_build_revise_single_item_prompt_default_length() -> None:
-    from blog_copy_editor_agent.models import FeedbackItem
-    from blog_writer_agent.models import ReviseWriterInput
-    from shared.content_plan import (
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,

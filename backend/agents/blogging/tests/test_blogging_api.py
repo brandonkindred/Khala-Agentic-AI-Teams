@@ -27,7 +27,7 @@ app = _api_main.app
 
 @pytest.fixture(autouse=True)
 def _patched_blog_client(monkeypatch, fake_job_client):
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
     return fake_job_client
@@ -66,7 +66,7 @@ def test_list_job_artifacts_404_when_job_missing(client: TestClient) -> None:
 
 def test_list_job_artifacts_404_when_no_work_dir(client: TestClient) -> None:
     """GET /job/{id}/artifacts returns 404 when job exists but has no work_dir."""
-    from shared.blog_job_store import create_blog_job
+    from agents.blogging.shared.blog_job_store import create_blog_job
 
     job_id = str(uuid.uuid4())
     create_blog_job(job_id, "Brief")
@@ -80,7 +80,7 @@ def test_list_job_artifacts_200_when_artifacts_exist(
     client: TestClient, artifacts_dir: Path
 ) -> None:
     """GET /job/{id}/artifacts returns 200 with list of existing artifact names."""
-    from shared.blog_job_store import create_blog_job, update_blog_job
+    from agents.blogging.shared.blog_job_store import create_blog_job, update_blog_job
 
     job_id = str(uuid.uuid4())
     create_blog_job(job_id, "Brief")
@@ -102,7 +102,7 @@ def test_list_job_artifacts_200_when_artifacts_exist(
 
 def test_get_job_artifact_content_404_invalid_name(client: TestClient, artifacts_dir: Path) -> None:
     """GET /job/{id}/artifacts/{name} returns 404 when artifact_name is not in ARTIFACT_NAMES."""
-    from shared.blog_job_store import create_blog_job, update_blog_job
+    from agents.blogging.shared.blog_job_store import create_blog_job, update_blog_job
 
     job_id = str(uuid.uuid4())
     create_blog_job(job_id, "Brief")
@@ -115,7 +115,7 @@ def test_get_job_artifact_content_404_invalid_name(client: TestClient, artifacts
 
 def test_get_job_artifact_content_200(client: TestClient, artifacts_dir: Path) -> None:
     """GET /job/{id}/artifacts/{name} returns 200 with { name, content } for valid artifact."""
-    from shared.blog_job_store import create_blog_job, update_blog_job
+    from agents.blogging.shared.blog_job_store import create_blog_job, update_blog_job
 
     job_id = str(uuid.uuid4())
     create_blog_job(job_id, "Brief")
@@ -138,7 +138,7 @@ def test_get_job_artifact_download_returns_attachment(
     client: TestClient, artifacts_dir: Path
 ) -> None:
     """GET /job/{id}/artifacts/{name}?download=true returns Content-Disposition attachment with filename."""
-    from shared.blog_job_store import create_blog_job, update_blog_job
+    from agents.blogging.shared.blog_job_store import create_blog_job, update_blog_job
 
     job_id = str(uuid.uuid4())
     create_blog_job(job_id, "Brief")
@@ -152,7 +152,7 @@ def test_get_job_artifact_download_returns_attachment(
 
 def test_approve_job_400_when_not_terminal(client: TestClient) -> None:
     """POST /job/{id}/approve returns 400 when job status is not completed or needs_human_review."""
-    from shared.blog_job_store import create_blog_job
+    from agents.blogging.shared.blog_job_store import create_blog_job
 
     job_id = str(uuid.uuid4())
     create_blog_job(job_id, "Brief")
@@ -162,7 +162,7 @@ def test_approve_job_400_when_not_terminal(client: TestClient) -> None:
 
 def test_approve_job_200_and_includes_approved_at(client: TestClient) -> None:
     """POST /job/{id}/approve returns 200 and response includes approved_at when job is completed."""
-    from shared.blog_job_store import create_blog_job, update_blog_job
+    from agents.blogging.shared.blog_job_store import create_blog_job, update_blog_job
 
     job_id = str(uuid.uuid4())
     create_blog_job(job_id, "Brief")
@@ -176,7 +176,11 @@ def test_approve_job_200_and_includes_approved_at(client: TestClient) -> None:
 
 def test_unapprove_job_200(client: TestClient) -> None:
     """POST /job/{id}/unapprove returns 200 and clears approved_at."""
-    from shared.blog_job_store import approve_blog_job, create_blog_job, update_blog_job
+    from agents.blogging.shared.blog_job_store import (
+        approve_blog_job,
+        create_blog_job,
+        update_blog_job,
+    )
 
     job_id = str(uuid.uuid4())
     create_blog_job(job_id, "Brief")

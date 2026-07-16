@@ -8,7 +8,7 @@ import pytest
 
 
 def _make_planning_result(iterations: int = 1, critic_report: dict | None = None):
-    from shared.content_plan import (
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         PlanningPhaseResult,
@@ -40,8 +40,8 @@ def _make_planning_result(iterations: int = 1, critic_report: dict | None = None
 
 def test_run_planning_writes_artifacts_and_returns_result(monkeypatch, tmp_path: Path) -> None:
     import agent_implementations.blog_writing_process_v2 as v2
-    from blog_research_agent.models import ResearchBriefInput
-    from shared.content_profile import ContentProfile, resolve_length_policy
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
 
     ppr = _make_planning_result(iterations=2, critic_report={"status": "PASS"})
 
@@ -77,8 +77,8 @@ def test_run_planning_writes_artifacts_and_returns_result(monkeypatch, tmp_path:
 
 def test_run_planning_without_work_dir_or_critic_report(monkeypatch) -> None:
     import agent_implementations.blog_writing_process_v2 as v2
-    from blog_research_agent.models import ResearchBriefInput
-    from shared.content_profile import ContentProfile, resolve_length_policy
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
 
     ppr = _make_planning_result(critic_report=None)
 
@@ -107,8 +107,8 @@ def test_run_planning_without_work_dir_or_critic_report(monkeypatch) -> None:
 
 def test_run_planning_job_updater_swallows_errors(monkeypatch, tmp_path: Path) -> None:
     import agent_implementations.blog_writing_process_v2 as v2
-    from blog_research_agent.models import ResearchBriefInput
-    from shared.content_profile import ContentProfile, resolve_length_policy
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
 
     ppr = _make_planning_result(critic_report=None)
 
@@ -140,9 +140,9 @@ def test_run_planning_job_updater_swallows_errors(monkeypatch, tmp_path: Path) -
 
 def test_run_planning_propagates_blogging_error(monkeypatch) -> None:
     import agent_implementations.blog_writing_process_v2 as v2
-    from blog_research_agent.models import ResearchBriefInput
-    from shared.content_profile import ContentProfile, resolve_length_policy
-    from shared.errors import PlanningError
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+    from agents.blogging.shared.errors import PlanningError
 
     class _FakeAgent:
         def __init__(self, **_kw):
@@ -169,9 +169,9 @@ def test_run_planning_propagates_blogging_error(monkeypatch) -> None:
 
 def test_run_planning_wraps_unknown_exception(monkeypatch) -> None:
     import agent_implementations.blog_writing_process_v2 as v2
-    from blog_research_agent.models import ResearchBriefInput
-    from shared.content_profile import ContentProfile, resolve_length_policy
-    from shared.errors import PlanningError
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+    from agents.blogging.shared.errors import PlanningError
 
     class _FakeAgent:
         def __init__(self, **_kw):
@@ -199,7 +199,7 @@ def test_run_planning_wraps_unknown_exception(monkeypatch) -> None:
 
 def test_extract_plan_keywords_returns_filtered_unique() -> None:
     import agent_implementations.blog_writing_process_v2 as v2
-    from shared.content_plan import (
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,

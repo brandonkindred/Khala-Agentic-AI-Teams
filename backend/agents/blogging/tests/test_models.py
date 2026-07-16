@@ -1,4 +1,4 @@
-from blog_research_agent.models import (
+from agents.blogging.blog_research_agent.models import (
     ResearchAgentOutput,
     ResearchBriefInput,
     ResearchReference,

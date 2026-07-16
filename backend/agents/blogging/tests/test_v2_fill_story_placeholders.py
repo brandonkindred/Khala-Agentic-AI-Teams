@@ -8,7 +8,7 @@ import pytest
 
 
 def _plan():
-    from shared.content_plan import (
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -28,11 +28,11 @@ def _plan():
 
 @pytest.fixture
 def patched_client(monkeypatch, fake_job_client):
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
     try:
-        from blogging.shared import blog_job_store as bjs_alt
+        from agents.blogging.shared import blog_job_store as bjs_alt
 
         monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
     except ImportError:
@@ -42,7 +42,9 @@ def patched_client(monkeypatch, fake_job_client):
 
 def test_fill_story_placeholders_no_placeholders_returns_input(monkeypatch) -> None:
     """When no [Author: ...] placeholders exist, return original draft and stories."""
-    from agent_implementations.blog_writing_process_v2 import _fill_story_placeholders
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _fill_story_placeholders,
+    )
 
     out_draft, out_stories = _fill_story_placeholders(
         draft_text="# Draft\nBody with no placeholders.",
@@ -63,9 +65,9 @@ def test_fill_story_placeholders_no_placeholders_returns_input(monkeypatch) -> N
 def test_fill_story_placeholders_user_skips_all(monkeypatch, patched_client, tmp_path) -> None:
     """User skips all placeholders → re-draft path with skip instruction."""
     import agent_implementations.blog_writing_process_v2 as v2
-    from blog_writer_agent.models import WriterOutput
-    from ghost_writer_agent.models import StoryElicitationResult
-    from shared import blog_job_store as bjs
+    from agents.blogging.blog_writer_agent.models import WriterOutput
+    from agents.blogging.ghost_writer_agent.models import StoryElicitationResult
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -108,9 +110,9 @@ def test_fill_story_placeholders_user_provides_narrative(
 ) -> None:
     """User provides a story → narrative collected and re-drafted."""
     import agent_implementations.blog_writing_process_v2 as v2
-    from blog_writer_agent.models import WriterOutput
-    from ghost_writer_agent.models import StoryElicitationResult
-    from shared import blog_job_store as bjs
+    from agents.blogging.blog_writer_agent.models import WriterOutput
+    from agents.blogging.ghost_writer_agent.models import StoryElicitationResult
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -156,8 +158,8 @@ def test_fill_story_placeholders_redraft_fails_keeps_original(
 ) -> None:
     """When re-draft raises, keep original draft."""
     import agent_implementations.blog_writing_process_v2 as v2
-    from ghost_writer_agent.models import StoryElicitationResult
-    from shared import blog_job_store as bjs
+    from agents.blogging.ghost_writer_agent.models import StoryElicitationResult
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -200,7 +202,7 @@ def test_fill_story_placeholders_redraft_fails_keeps_original(
 def test_fill_story_placeholders_cancelled_break(monkeypatch, patched_client, tmp_path) -> None:
     """If job goes to cancelled mid-loop, break out."""
     import agent_implementations.blog_writing_process_v2 as v2
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(
@@ -223,7 +225,7 @@ def test_fill_story_placeholders_cancelled_break(monkeypatch, patched_client, tm
 
     class _StubAgent:
         def run(self, *a, **kw):
-            from blog_writer_agent.models import WriterOutput
+            from agents.blogging.blog_writer_agent.models import WriterOutput
 
             return WriterOutput(draft="# Should not get here")
 

@@ -11,7 +11,7 @@ from pydantic import HttpUrl
 
 def _make_agent(monkeypatch, json_responses: List | None = None):
     """Build a ResearchAgent with _call_json stubbed to return a queue of responses."""
-    from blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
 
     from llm_service import DummyLLMClient
 
@@ -33,7 +33,7 @@ def _make_agent(monkeypatch, json_responses: List | None = None):
 
 
 def test_research_agent_init_validation() -> None:
-    from blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
 
     from llm_service import DummyLLMClient
 
@@ -45,8 +45,8 @@ def test_research_agent_init_validation() -> None:
 
 def test_research_agent_call_json_strips_fences(monkeypatch) -> None:
     """_call_json delegates to a Strands Agent and strips markdown fences."""
-    from blog_research_agent import agent as ra_mod
-    from blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent import agent as ra_mod
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
 
     from llm_service import DummyLLMClient
 
@@ -64,7 +64,7 @@ def test_research_agent_call_json_strips_fences(monkeypatch) -> None:
 
 def test_research_agent_run_happy_path(monkeypatch) -> None:
     """End-to-end smoke test with all seams mocked."""
-    from blog_research_agent.models import (
+    from agents.blogging.blog_research_agent.models import (
         CandidateResult,
         ResearchBriefInput,
         SourceDocument,
@@ -133,8 +133,8 @@ def test_research_agent_run_happy_path(monkeypatch) -> None:
 
 def test_research_agent_run_no_results_path(monkeypatch) -> None:
     """When web_search returns nothing, the pipeline still completes (empty references)."""
-    from blog_research_agent.agent import ResearchAgent
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     a = _make_agent(
         monkeypatch,
@@ -157,8 +157,8 @@ def test_research_agent_run_no_results_path(monkeypatch) -> None:
 
 def test_research_agent_run_handles_arxiv_failure(monkeypatch) -> None:
     """ArXiv search failure is swallowed (best-effort)."""
-    from blog_research_agent.models import ResearchBriefInput
-    from blog_research_agent.tools.arxiv_search import ArxivSearchError
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.tools.arxiv_search import ArxivSearchError
 
     a = _make_agent(
         monkeypatch,
@@ -172,7 +172,7 @@ def test_research_agent_run_handles_arxiv_failure(monkeypatch) -> None:
     a.web_search = mock_search
 
     # Make arxiv search raise
-    from blog_research_agent import agent as ra_mod
+    from agents.blogging.blog_research_agent import agent as ra_mod
 
     def boom(*args, **kwargs):
         raise ArxivSearchError("nope")
@@ -184,8 +184,8 @@ def test_research_agent_run_handles_arxiv_failure(monkeypatch) -> None:
 
 def test_research_agent_run_with_cache_resume(monkeypatch, tmp_path) -> None:
     """ResearchAgent resumes from cache when a checkpoint exists."""
-    from blog_research_agent.agent_cache import AgentCache
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     cache = AgentCache(tmp_path / "cache")
     brief = ResearchBriefInput(brief="cached brief", max_results=3)
@@ -209,8 +209,8 @@ def test_research_agent_run_with_cache_resume(monkeypatch, tmp_path) -> None:
 
 
 def test_research_agent_synthesize_overview_no_references() -> None:
-    from blog_research_agent.agent import ResearchAgent
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     from llm_service import DummyLLMClient
 
@@ -220,7 +220,7 @@ def test_research_agent_synthesize_overview_no_references() -> None:
 
 
 def _doc(n: int):
-    from blog_research_agent.models import SourceDocument
+    from agents.blogging.blog_research_agent.models import SourceDocument
 
     return SourceDocument(
         url=HttpUrl(f"https://example.com/{n}"),
@@ -237,8 +237,8 @@ def test_score_documents_propagates_attribution_into_workers(monkeypatch) -> Non
     """Regression: the per-document scoring fan-out must run inside a copy of the
     caller's context so LLM attribution / request-id reach the worker threads
     (raw ThreadPoolExecutor submission used to drop them)."""
-    from blog_research_agent.agent import ResearchAgent
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     from llm_service import (
         DummyLLMClient,
@@ -266,8 +266,8 @@ def test_score_documents_propagates_attribution_into_workers(monkeypatch) -> Non
 
 def test_summarize_documents_propagates_attribution_into_workers(monkeypatch) -> None:
     """Same contract for the per-document summarization fan-out."""
-    from blog_research_agent.agent import ResearchAgent
-    from blog_research_agent.models import ResearchBriefInput, ResearchReference
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput, ResearchReference
 
     from llm_service import (
         DummyLLMClient,
