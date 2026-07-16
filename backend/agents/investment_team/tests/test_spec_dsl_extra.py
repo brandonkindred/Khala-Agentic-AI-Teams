@@ -9,6 +9,7 @@ predicate-side validators.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -258,12 +259,12 @@ def test_format_sizing_rule_unknown_raises() -> None:
 
 
 def test_predicate_rejects_unknown_lhs_string() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         Predicate(lhs="bar.foo", op=">", rhs=1.0)  # type: ignore[arg-type]
 
 
 def test_predicate_rejects_unknown_rhs_string() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         Predicate(lhs="bar.close", op=">", rhs="bar.foo")  # type: ignore[arg-type]
 
 
@@ -273,19 +274,19 @@ def test_predicate_rejects_unknown_rhs_string() -> None:
 
 
 def test_stoploss_rejects_invalid_pct() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         StopLossRule(pct=2.0)  # > 1.0 invalid
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         StopLossRule(pct=0.0)  # not > 0
 
 
 def test_takeprofit_rejects_zero() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         TakeProfitRule(pct=0.0)
 
 
 def test_sizing_rule_rejects_invalid_fraction() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         FixedFractionSizing(fraction=0.0)
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         FixedFractionSizing(fraction=1.5)

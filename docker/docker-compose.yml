@@ -664,6 +664,7 @@ services:
     container_name: khala-road-trip-service
     depends_on:
       postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base
@@ -1034,6 +1035,7 @@ services:
       - "agentic-team-provisioning-service:172.28.0.26"
       - "user-agent-founder-service:172.28.0.27"
       - "deepthought-service:172.28.0.28"
+      - "job-matching-service:172.28.0.31"
     ports:
       - "9090:9090"
     networks:
