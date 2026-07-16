@@ -368,20 +368,35 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
   // Slack save + advanced + connect/disconnect
   // ---------------------------------------------------------------------
 
-  it('saveSettings posts settings and handles success/error', () => {
+  it('saveSettings posts settings (incl. signing secret) and handles success/error', () => {
     fixture.detectChanges();
     component.slackEnabled = true;
     component.defaultChannel = ' #ops ';
+    component.signingSecret = '  connected-secret  ';
     component.saveSettings();
     expect(api.updateSlackConfig).toHaveBeenCalledWith(expect.objectContaining({
       enabled: true,
       default_channel: '#ops',
+      signing_secret: 'connected-secret',
     }));
     expect(snackBar.open).toHaveBeenCalledWith('Settings saved.', 'Dismiss', { duration: 3000 });
 
     api.updateSlackConfig.mockReturnValue(throwError(() => ({ message: 'oops' })));
     component.saveSettings();
     expect(component.error).toBe('oops');
+  });
+
+  it('renders the signing-secret input in the OAuth-connected settings view', () => {
+    // ngOnInit → loadSlackConfig resets oauthConnected from the mock, so set the
+    // connected state AFTER initial change detection (same pattern as connectedCount).
+    fixture.detectChanges();
+    component.expanded = 'slack';
+    component.oauthConnected = true;
+    fixture.detectChanges();
+    const inputs = fixture.nativeElement.querySelectorAll('input[placeholder="Slack app signing secret"]');
+    // Present in the connected view so a connected workspace can set the secret the
+    // fail-closed events endpoint now requires (regression guard: was only in Advanced).
+    expect(inputs.length).toBe(1);
   });
 
   it('saveAdvanced requires webhook for webhook mode', () => {
@@ -440,6 +455,37 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
     component.webhookUrl = '';
     component.saveAdvanced();
     expect(api.updateSlackConfig).toHaveBeenCalled();
+  });
+
+  it('saveAdvanced sends the trimmed signing secret', () => {
+    fixture.detectChanges();
+    component.slackEnabled = true;
+    component.mode = 'webhook';
+    component.webhookUrl = 'https://hooks.slack.com/services/T0/B0/' + 'x'.repeat(40);
+    component.signingSecret = '  s3cr3t  ';
+    component.saveAdvanced();
+    expect(api.updateSlackConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ signing_secret: 's3cr3t' }),
+    );
+  });
+
+  it('loadSlackConfig reflects signing_secret_configured and clears the input', () => {
+    api.getSlackConfig.mockReturnValue(
+      of({
+        enabled: true,
+        webhook_configured: false,
+        bot_token_configured: false,
+        channel_display_name: '',
+        default_channel: '',
+        notify_open_questions: true,
+        notify_pa_responses: true,
+        signing_secret_configured: true,
+      }),
+    );
+    component.signingSecret = 'typed-but-should-clear';
+    component.loadSlackConfig();
+    expect(component.signingSecretConfigured).toBe(true);
+    expect(component.signingSecret).toBe('');
   });
 
   it('botTokenInvalid and webhookUrlInvalid edge cases', () => {
@@ -614,6 +660,9 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
     expect(component.hasUnsavedChanges()).toBe(true);
     component.googleAccountPassword = '';
     component.tradingViewToken = 'tv-secret';
+    expect(component.hasUnsavedChanges()).toBe(true);
+    component.tradingViewToken = '';
+    component.signingSecret = 'slack-signing-secret';
     expect(component.hasUnsavedChanges()).toBe(true);
   });
 
