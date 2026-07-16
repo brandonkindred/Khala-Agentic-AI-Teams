@@ -814,6 +814,28 @@ def _location_appears_in(file_path: str, issue: Issue) -> bool:
     )
 
 
+# Matches the location line(s) build_issue_from_proposal renders: either the
+# single-location "- **Location:** `path`"/"`path:line`" line, or each bullet
+# of a combined proposal's "### Locations" section ("- `path:line` — ...").
+# Both start with "- " followed by a backtick-quoted path.
+_ISSUE_LOCATION_LINE_RE = re.compile(r"^-\s(?:\*\*Location:\*\*\s*)?`[^`]+`", re.MULTILINE)
+
+
+def _issue_declares_a_location(issue: Issue) -> bool:
+    """True when the issue body contains at least one Khala-rendered location line.
+
+    Postconditions:
+        - Returns True iff ``issue.body`` contains a line matching
+          :data:`_ISSUE_LOCATION_LINE_RE` (the exact structure
+          ``build_issue_from_proposal`` renders) -- regardless of which path it
+          names. Used only to distinguish "this issue is silent about location"
+          (any text-only similarity is still plausibly the same bug) from "this
+          issue explicitly names a location" (see :func:`find_matching_open_issue`).
+          Never raises.
+    """
+    return bool(_ISSUE_LOCATION_LINE_RE.search(issue.body or ""))
+
+
 def find_matching_open_issue(
     proposal: dict[str, Any], open_issues: Iterable[Issue]
 ) -> Optional[Issue]:
@@ -840,7 +862,12 @@ def find_matching_open_issue(
         guards against two headlines that share a long templated prefix/suffix
         around one differing keyword (e.g. "hardcoded secret in config" vs
         "hardcoded timeout in config") scoring a deceptively high character ratio
-        despite describing unrelated bugs.
+        despite describing unrelated bugs. This signal is suppressed outright when
+        the proposal names a ``file_path`` that does NOT appear in the candidate
+        issue (:func:`_location_appears_in` is False) while the issue nonetheless
+        explicitly declares some location (:func:`_issue_declares_a_location`) --
+        a generic headline (e.g. "missing null check") should not pre-link two
+        findings the issue itself says live in different files.
 
     A candidate issue's title is compared after :func:`_normalized_issue_title`
     strips Khala's own severity-prefix/occurrences-suffix wrapper (if present), so
@@ -914,9 +941,21 @@ def find_matching_open_issue(
                 ratio = text_ratio
                 best_text = text
         token_overlap = _jaccard_similarity(headline_tokens, _tokenize_for_similarity(best_text))
-        text_alone_matches = ratio >= no_location and token_overlap >= no_location_token_overlap
+        location_present = _location_appears_in(file_path, issue)
+        # A located proposal whose file_path is absent from an issue that
+        # nonetheless explicitly names some other location is explicit
+        # counter-evidence, not silence -- the generic-headline text-alone
+        # fallback below must not override it.
+        declares_conflicting_location = (
+            bool(file_path) and not location_present and _issue_declares_a_location(issue)
+        )
+        text_alone_matches = (
+            ratio >= no_location
+            and token_overlap >= no_location_token_overlap
+            and not declares_conflicting_location
+        )
         location_matches = (
-            _location_appears_in(file_path, issue)
+            location_present
             and ratio >= with_location
             and token_overlap >= with_location_token_overlap
         )

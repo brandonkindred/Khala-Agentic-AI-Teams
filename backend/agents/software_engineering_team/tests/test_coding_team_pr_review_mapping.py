@@ -909,6 +909,37 @@ def test_find_matching_open_issue_ignores_description_section_when_absent() -> N
     assert find_matching_open_issue(proposal, [issue]) is None
 
 
+def test_find_matching_open_issue_generic_headline_does_not_override_conflicting_location() -> None:
+    # Regression (Codex-flagged): a generic/short headline can be identical
+    # between two genuinely distinct findings. When the proposal names its own
+    # file_path and the candidate issue explicitly declares a DIFFERENT
+    # location, that's counter-evidence the text-alone signal must not
+    # override -- without this, "missing null check" in b.py would wrongly
+    # pre-link to an existing issue about the same headline in a.py.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="b.py", severity="high", description="missing null check")], 0
+    )
+    issue = _open_issue(
+        1,
+        "[high] missing null check",
+        body="- **Location:** `a.py`\n\n### Description\nmissing null check",
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_generic_headline_matches_when_issue_is_silent_on_location() -> (
+    None
+):
+    # Control for the regression above: an issue that names NO location at
+    # all (silent, not conflicting) must still match via the text-alone
+    # signal as before -- the fix only suppresses an explicit mismatch.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="b.py", description="off-by-one error in loop bound")], 0
+    )
+    issue = _open_issue(1, "off-by-one error in loop bound", body="")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
 def test_annotate_duplicate_proposals_marks_matched_and_preserves_order_and_length() -> None:
     proposals = [
         proposal_from_findings(
