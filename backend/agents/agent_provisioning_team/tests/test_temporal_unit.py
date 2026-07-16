@@ -203,9 +203,10 @@ def test_connect_temporal_client_raises_on_failure(monkeypatch) -> None:
 def test_run_async_raises_without_client(monkeypatch) -> None:
     from agent_provisioning_team.temporal import start_workflow as sw
 
-    with (
-        patch.object(sw, "get_temporal_loop", return_value=None),
-        patch.object(sw, "get_temporal_client", return_value=None),
+    with patch.object(
+        sw,
+        "_await_client",
+        side_effect=RuntimeError("Temporal client not available; is the team's worker running?"),
     ):
         coro = asyncio.sleep(0)
         try:
@@ -262,7 +263,8 @@ def test_start_provisioning_workflow_passes_args(monkeypatch) -> None:
         loop.close()
 
 
-def test_start_provisioning_workflow_replace_existing_terminates() -> None:
+def test_start_provisioning_workflow_replace_existing_allows_duplicate() -> None:
+    """Resume/restart reuses a closed workflow id without terminating a live sibling."""
     from temporalio.common import WorkflowIDReusePolicy
 
     from agent_provisioning_team.temporal import start_workflow as sw
@@ -295,10 +297,7 @@ def test_start_provisioning_workflow_replace_existing_terminates() -> None:
             )
 
         assert captured_start["args"][0] is AgentProvisioningWorkflow.run
-        assert (
-            captured_start["kwargs"]["id_reuse_policy"]
-            is WorkflowIDReusePolicy.TERMINATE_IF_RUNNING
-        )
+        assert captured_start["kwargs"]["id_reuse_policy"] is WorkflowIDReusePolicy.ALLOW_DUPLICATE
         assert "id_conflict_policy" not in captured_start["kwargs"]
     finally:
         loop.close()
@@ -307,7 +306,11 @@ def test_start_provisioning_workflow_replace_existing_terminates() -> None:
 def test_start_provisioning_workflow_raises_without_client() -> None:
     from agent_provisioning_team.temporal import start_workflow as sw
 
-    with patch.object(sw, "get_temporal_client", return_value=None):
+    with patch.object(
+        sw,
+        "_await_client",
+        side_effect=RuntimeError("Temporal client not available; is the team's worker running?"),
+    ):
         with pytest.raises(RuntimeError, match="Temporal client not available"):
             sw.start_provisioning_workflow("j", "a", "default.yaml")
 

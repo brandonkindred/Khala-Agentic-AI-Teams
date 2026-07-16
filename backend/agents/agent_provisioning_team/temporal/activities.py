@@ -237,6 +237,8 @@ def credentials_activity(
             # Legacy checkpoints that still carry plaintext: migrate into the
             # CredentialStore once, then overwrite the job-store checkpoint so
             # subsequent resumes cannot re-read plaintext.
+            # ``store_credentials`` overwrites per tool and is safe under Temporal
+            # activity retry — do not swallow store failures (retry until durable).
             from agent_provisioning_team.shared.credential_store import CredentialStore
 
             store = CredentialStore()

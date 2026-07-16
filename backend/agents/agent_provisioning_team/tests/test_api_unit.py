@@ -93,7 +93,7 @@ def test_provision_routes_to_temporal_when_enabled() -> None:
     fake_starter = MagicMock()
 
     with (
-        patch("agent_provisioning_team.api.main.create_job"),
+        patch("agent_provisioning_team.api.main.create_job") as mock_create_job,
         patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
     ):
         r = client.post("/provision", json={"agent_id": "ag-temporal"})
@@ -101,6 +101,8 @@ def test_provision_routes_to_temporal_when_enabled() -> None:
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "running"
+    mock_create_job.assert_called_once()
+    assert mock_create_job.call_args.kwargs["agent_id"] == "ag-temporal"
     fake_starter.assert_called_once()
 
 
@@ -340,12 +342,13 @@ def test_resume_pending_job_when_no_open_workflow() -> None:
             return_value=False,
         ),
         patch.object(api_main, "_require_provision_starter", return_value=starter),
-        patch.object(api_main, "update_job"),
+        patch.object(api_main, "update_job") as mock_update,
     ):
         r = client.post("/provision/job/j1/resume")
     assert r.status_code == 200
     starter.assert_called_once()
     assert starter.call_args.kwargs.get("replace_existing") is True
+    mock_update.assert_called_once_with("j1", status="running", error=None)
 
 
 def test_provision_start_timeout_does_not_mark_job_failed() -> None:
@@ -353,7 +356,7 @@ def test_provision_start_timeout_does_not_mark_job_failed() -> None:
     import concurrent.futures
 
     with (
-        patch("agent_provisioning_team.api.main.create_job"),
+        patch("agent_provisioning_team.api.main.create_job") as mock_create_job,
         patch.object(
             api_main,
             "_require_provision_starter",
@@ -369,22 +372,9 @@ def test_provision_start_timeout_does_not_mark_job_failed() -> None:
     assert body["status"] == "pending"
     assert "timed out" in body["message"].lower()
     assert body["job_id"] in body["message"]
+    mock_create_job.assert_called_once()
+    assert mock_create_job.call_args.kwargs["agent_id"] == "ag-timeout"
     mock_fail.assert_not_called()
-
-
-def test_credential_store_defaults_under_agent_cache(tmp_path, monkeypatch) -> None:
-    """Encrypted credentials land on the durable AGENT_CACHE volume path."""
-    from agent_provisioning_team.shared.credential_store import (
-        CredentialStore,
-        default_credentials_dir,
-    )
-
-    monkeypatch.setenv("AGENT_CACHE", str(tmp_path / "agents"))
-    expected = tmp_path / "agents" / "agent_provisioning" / "credentials"
-    assert default_credentials_dir() == expected
-    store = CredentialStore()
-    assert store.storage_dir == expected
-    assert expected.is_dir()
 
 
 def test_resume_job_missing_agent_or_manifest() -> None:
@@ -426,13 +416,14 @@ def test_resume_job_temporal_path() -> None:
             "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
             return_value=False,
         ),
-        patch.object(api_main, "update_job"),
+        patch.object(api_main, "update_job") as mock_update,
         patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
     ):
         r = client.post("/provision/job/j1/resume")
 
     assert r.status_code == 200
     fake_starter.assert_called_once()
+    mock_update.assert_called_once_with("j1", status="running", error=None)
 
 
 def test_resume_job_rejects_when_workflow_still_open() -> None:
@@ -533,11 +524,12 @@ def test_restart_job_temporal_path() -> None:
             "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
             return_value=False,
         ),
-        patch.object(api_main, "store_reset_job"),
+        patch.object(api_main, "store_reset_job") as mock_reset,
         patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
     ):
         r = client.post("/provision/job/j1/restart")
     assert r.status_code == 200
+    mock_reset.assert_called_once_with("j1")
     fake_starter.assert_called_once()
 
 
@@ -580,18 +572,21 @@ def test_deprovision_returns_runner_result() -> None:
     assert r.status_code == 200
     assert r.json()["agent_id"] == "a1"
     assert r.json()["success"] is True
+    fake_runner.assert_called_once_with("a1", False)
 
 
 def test_deprovision_with_force_flag() -> None:
     captured = {}
 
     def fake_runner(agent_id, force=False):
+        captured["agent_id"] = agent_id
         captured["force"] = force
         return {"agent_id": agent_id, "success": True, "details": {}, "error": None}
 
     with patch.object(api_main, "_require_deprovision_runner", return_value=fake_runner):
         r = client.delete("/environments/a1?force=true")
     assert r.status_code == 200
+    assert captured["agent_id"] == "a1"
     assert captured["force"] is True
 
 
@@ -628,9 +623,10 @@ def test_deprovision_timeout_returns_success_false() -> None:
 
 
 def test_get_environment_not_found() -> None:
-    with patch.object(api_main, "_get_agent_status", return_value=None):
+    with patch.object(api_main, "_get_agent_status", return_value=None) as mock_status:
         r = client.get("/environments/missing")
     assert r.status_code == 404
+    mock_status.assert_called_once_with("missing")
 
 
 def test_get_environment_returns_status() -> None:
@@ -644,11 +640,12 @@ def test_get_environment_returns_status() -> None:
             "container_name": "agent-a1",
             "tools_provisioned": ["postgresql"],
         },
-    ):
+    ) as mock_status:
         r = client.get("/environments/a1")
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "ready"
+    mock_status.assert_called_once_with("a1")
 
 
 # ---------------------------------------------------------------------------
@@ -657,10 +654,11 @@ def test_get_environment_returns_status() -> None:
 
 
 def test_list_environments_empty() -> None:
-    with patch.object(api_main, "_list_agents", return_value=[]):
+    with patch.object(api_main, "_list_agents", return_value=[]) as mock_list:
         r = client.get("/environments")
     assert r.status_code == 200
     assert r.json()["agents"] == []
+    mock_list.assert_called_once_with(status=None)
 
 
 def test_list_environments_with_filter() -> None:

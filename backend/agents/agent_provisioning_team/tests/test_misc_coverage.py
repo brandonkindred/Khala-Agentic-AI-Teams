@@ -165,6 +165,21 @@ def test_build_provisioning_graph_returns_graph() -> None:
 
 # ---------------------------------------------------------------------------
 # credential_store — additional paths
+
+
+def test_credential_store_defaults_under_agent_cache(tmp_path: Path, monkeypatch) -> None:
+    """Encrypted credentials land on the durable AGENT_CACHE volume path."""
+    from agent_provisioning_team.shared.credential_store import (
+        CredentialStore,
+        default_credentials_dir,
+    )
+
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path / "agents"))
+    expected = tmp_path / "agents" / "agent_provisioning" / "credentials"
+    assert default_credentials_dir() == expected
+    store = CredentialStore()
+    assert store.storage_dir == expected
+    assert expected.is_dir()
 # ---------------------------------------------------------------------------
 
 

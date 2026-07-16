@@ -52,12 +52,17 @@ class ProvisioningShutdownError(Exception):
 class ProvisioningOrchestrator:
     """In-process phase engine used by Temporal activities and tests.
 
-    HTTP provision/resume/restart/deprovision go through Temporal only.
-    Temporal activities call the shared phase functions (and
-    ``compensate`` / ``deprovision``) rather than ``run_workflow``.
-    ``run_workflow`` remains the sequential in-process coordinator for unit
-    tests and any non-HTTP callers that need the same phase semantics with a
-    ``shutdown_event`` / progress callback.
+    HTTP provision/resume/restart/deprovision go through Temporal only — that
+    path is the production source of truth for phase ordering, compensation,
+    and durable checkpoints.
+
+    Temporal activities call the shared phase functions (and ``compensate`` /
+    ``deprovision``) rather than ``run_workflow``. ``run_workflow`` remains a
+    sequential in-process coordinator for unit tests and any non-HTTP callers
+    that need the same phase *functions* with a ``shutdown_event`` / progress
+    callback. Do not extend ``run_workflow`` with behavior that the Temporal
+    workflow does not also implement; prefer changing shared phase modules so
+    both paths stay aligned.
     """
 
     def __init__(

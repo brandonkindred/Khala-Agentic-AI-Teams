@@ -26,7 +26,7 @@ from agent_provisioning_team.temporal.workflows import (
     AgentProvisioningWorkflow,
 )
 from shared_temporal import get_temporal_client, get_temporal_loop
-from shared_temporal.runner import execute_workflow_sync
+from shared_temporal.runner import _await_client, execute_workflow_sync
 
 logger = logging.getLogger(__name__)
 
@@ -78,16 +78,20 @@ def _run_async(coro: Coroutine[Any, Any, _T]) -> _T:
     Used for fire-and-forget ``client.start_workflow`` (not
     ``execute_workflow_sync``): we only need the start to be accepted, not the
     full workflow result. Deprovision uses execute-and-wait instead.
+
+    Preconditions:
+        * ``coro`` is a Temporal client coroutine scheduled onto the worker loop.
+    Postconditions:
+        * Returns the coroutine result once Temporal accepts the call.
+    Raises:
+        * ``RuntimeError`` when the worker client/loop never becomes ready
+          within the shared client-ready timeout (cold-start race).
+        * ``concurrent.futures.TimeoutError`` when start acceptance exceeds
+          ``AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S``.
     """
-    loop = get_temporal_loop()
-    client = get_temporal_client()
-    if loop is None or client is None:
-        coro.close()
-        address_status = "set" if os.getenv("TEMPORAL_ADDRESS") else "not set"
-        raise RuntimeError(
-            f"Temporal client not available (TEMPORAL_ADDRESS={address_status}); "
-            "is the Temporal server reachable?"
-        )
+    # Wait briefly for the worker thread to populate client/loop — immediate
+    # None is a cold-start race, not a terminal Temporal outage.
+    _, loop = _await_client()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result(timeout=_start_workflow_timeout_s())
 
@@ -105,16 +109,21 @@ def start_provisioning_workflow(
 
     Preconditions:
         * ``job_id``, ``agent_id``, and ``manifest_path`` are non-empty.
-        * The shared Temporal client/loop are available (``TEMPORAL_ADDRESS`` set
-          and the worker process has connected).
-        * When ``replace_existing`` is True (resume/restart of a stranded job),
-          any leftover open execution with the same stable workflow id is
-          terminated before the fresh start.
+        * The shared Temporal client/loop become available within the client-ready
+          wait (``TEMPORAL_ADDRESS`` set and the worker process connecting).
+        * When ``replace_existing`` is True (resume/restart after a closed prior
+          run), callers have already rejected an open execution via
+          ``provisioning_workflow_is_open``; this start uses
+          ``ALLOW_DUPLICATE`` so a concurrent second start fails with
+          ``WorkflowAlreadyStartedError`` instead of ``TERMINATE_IF_RUNNING``
+          (which would kill the first run without compensation).
     Postconditions:
         * Temporal has accepted a workflow id ``{WORKFLOW_ID_PREFIX}{job_id}``.
         * ``skip_phases`` / ``prior_results`` are forwarded for ``/resume`` parity.
     Raises:
         * ``RuntimeError`` when the Temporal client/loop is unavailable.
+        * ``temporalio.exceptions.WorkflowAlreadyStartedError`` when another
+          open run already owns the stable workflow id (concurrent resume/restart).
         * ``concurrent.futures.TimeoutError`` when start acceptance exceeds
           ``AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S`` (the start coroutine may
           still complete afterward — callers must not treat this as a proven
@@ -130,13 +139,14 @@ def start_provisioning_workflow(
         "task_queue": TASK_QUEUE,
     }
     if replace_existing:
-        # TERMINATE_IF_RUNNING alone replaces a still-open execution; Temporal
-        # forbids combining it with id_conflict_policy.
-        start_kwargs["id_reuse_policy"] = WorkflowIDReusePolicy.TERMINATE_IF_RUNNING
+        # Reuse the stable id after a closed prior run. Never TERMINATE_IF_RUNNING:
+        # a concurrent resume/restart must not kill an in-flight sibling without
+        # compensation — Temporal rejects the duplicate start instead.
+        start_kwargs["id_reuse_policy"] = WorkflowIDReusePolicy.ALLOW_DUPLICATE
 
     async def _start() -> None:
         client = get_temporal_client()
-        # ``_run_async`` already guards for None client/loop; this narrows the type.
+        # ``_run_async`` / ``_await_client`` already guards for None; this narrows the type.
         assert client is not None
         await client.start_workflow(
             AgentProvisioningWorkflow.run,

@@ -168,7 +168,7 @@ class AgentProvisioningWorkflow:
                 )
                 tool_results_dump.append(res)
             else:
-                err = res.get("error") if isinstance(res, dict) else "unknown"
+                err = (res.get("error") if isinstance(res, dict) else None) or "unknown"
                 failures.append(f"{name}: {err}")
                 tool_results_dump.append(
                     res if isinstance(res, dict) else {"tool_name": name, "success": False, "error": err}
@@ -452,10 +452,28 @@ class AgentProvisioningWorkflow:
             # Pre-tool failures leave Docker/credentials behind → compensate([]).
             # Fan-out completed but checkpoint/later phase not durable yet →
             # compensate the tools that already succeeded.
+            # Nested try/except: compensation / terminal writes must not mask
+            # the original failure if Temporal activity retries are exhausted.
             if setup_completed and not account_provisioning_done and not tools_phase_compensated:
-                await self._compensate_failed_tools(agent_id, succeeded_tools, job_id)
+                try:
+                    await self._compensate_failed_tools(agent_id, succeeded_tools, job_id)
+                except Exception as comp_exc:
+                    workflow.logger.error(
+                        "Compensation failed after provisioning error for job=%s: %s (original=%s)",
+                        job_id,
+                        comp_exc,
+                        exc,
+                    )
             if not terminal_failure_recorded:
-                await self._mark_job_failed(job_id, f"Provisioning failed: {exc}")
+                try:
+                    await self._mark_job_failed(job_id, f"Provisioning failed: {exc}")
+                except Exception as mark_exc:
+                    workflow.logger.error(
+                        "mark_job_failed failed after provisioning error for job=%s: %s (original=%s)",
+                        job_id,
+                        mark_exc,
+                        exc,
+                    )
             raise
 
 

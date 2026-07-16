@@ -4,7 +4,10 @@ The Temporal connection helpers now live in ``shared_temporal.client`` so every
 team shares one cached client and event loop (one source of truth) — and, in
 particular, one ``DataConverter`` with the shared gzip payload codec
 (``shared_temporal.codec``). This module stays as a compatibility shim for
-existing ``agent_provisioning_team.temporal.client`` imports.
+existing ``agent_provisioning_team.temporal.client`` imports (worker, API,
+sandbox dispatch, package ``__init__``). Prefer importing from
+``shared_temporal.client`` in new code; do not remove this shim while those
+call sites remain.
 """
 
 from __future__ import annotations

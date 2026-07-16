@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
-from temporalio.exceptions import TemporalError
+from temporalio.exceptions import TemporalError, WorkflowAlreadyStartedError
 
 from job_service_client import (
     JOB_STATUS_FAILED,
@@ -99,6 +99,8 @@ def _fail_job_after_start_error(job_id: str, exc: BaseException) -> None:
           (``TimeoutError`` / ``concurrent.futures.TimeoutError``): the job
           store is left unchanged and a warning is logged — Temporal may still
           accept and run the workflow.
+        * If ``exc`` is ``WorkflowAlreadyStartedError``: the job is left
+          unchanged (a concurrent start already owns the live run).
         * Otherwise: the job is marked failed via ``mark_job_failed`` with
           ``error=str(exc)``.
     """
@@ -106,6 +108,13 @@ def _fail_job_after_start_error(job_id: str, exc: BaseException) -> None:
     if _is_indeterminate_workflow_start(exc):
         logger.warning(
             "Temporal start timed out for job=%s; not marking failed (workflow may still run): %s",
+            job_id,
+            exc,
+        )
+        return
+    if isinstance(exc, WorkflowAlreadyStartedError):
+        logger.warning(
+            "Temporal workflow already started for job=%s; not marking failed: %s",
             job_id,
             exc,
         )
@@ -140,6 +149,8 @@ def _invoke_provision_starter(
           returns ``ProvisionJobResponse`` with ``job_id`` and
           ``indeterminate_status`` so the caller can poll
           ``GET /provision/status/{job_id}``.
+        * On ``WorkflowAlreadyStartedError``: raises HTTP 409 without failing
+          the job (concurrent resume/restart lost the race).
         * On other start failures: marks the job failed (via
           ``_fail_job_after_start_error``) and raises HTTP 503.
     """
@@ -154,6 +165,15 @@ def _invoke_provision_starter(
         if replace_existing:
             kwargs["replace_existing"] = True
         starter(job_id, agent_id, manifest_path, **kwargs)
+    except WorkflowAlreadyStartedError as exc:
+        _fail_job_after_start_error(job_id, exc)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A provisioning workflow is already running for job {job_id}; "
+                f"poll GET /provision/status/{job_id}."
+            ),
+        ) from exc
     except Exception as exc:
         _fail_job_after_start_error(job_id, exc)
         if _is_indeterminate_workflow_start(exc):
