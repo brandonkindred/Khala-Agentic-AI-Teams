@@ -144,16 +144,22 @@ def run_setup(
         # the ownership signal, so re-provisioning a completed "ready" agent whose
         # register transiently fails does not destroy it.
         #
-        # env_store.get never raises (its contract swallows malformed/IO errors
-        # and returns None), so call it directly — a raise here would be a real
-        # contract violation and should surface, not be masked into a teardown.
+        # Ownership evidence combines the record read BEFORE this attempt's
+        # register (``existing``, captured at the top of run_setup) with a fresh
+        # read. The pre-write copy matters because register's write is not atomic:
+        # a failed write can truncate/corrupt the prior record, and a post-failure
+        # read would then see it as absent and wrongly reclaim a live container.
+        # The fresh read additionally catches a concurrent job that registered
+        # after our pre-check. env_store.get never raises (its contract swallows
+        # malformed/IO errors and returns None), so call it directly — a raise
+        # here would be a real contract violation and should surface.
         #
         # NOTE: not atomic — a container we created can be adopted by a concurrent
         # job before this rollback runs, so this still races concurrent
         # provisioning of the same agent_id. Fully closing that race needs
         # agent-level serialization, tracked as separate follow-up work.
         reused = bool(result.details.get("reused", False))
-        owned_by_other = reused and env_store.get(agent_id) is not None
+        owned_by_other = reused and (existing is not None or env_store.get(agent_id) is not None)
         if not owned_by_other:
             try:
                 teardown = docker.deprovision(agent_id)

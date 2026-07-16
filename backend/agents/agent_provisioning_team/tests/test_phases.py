@@ -219,6 +219,53 @@ def test_run_setup_preserves_ready_agent_on_reused_container(tmp_path: Path) -> 
     docker.deprovision.assert_not_called()
 
 
+def test_run_setup_preserves_ready_agent_when_register_corrupts_record(tmp_path: Path) -> None:
+    """Rollback must use pre-write ownership evidence, not just a post-failure read.
+
+    ``register``'s write is not atomic, so a failed write can truncate/corrupt the
+    prior record and a fresh read would then see it as absent. For a reused
+    container the rollback must still recognize the record captured *before* the
+    write and preserve the live container.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import (
+        EnvironmentInfo as StoreEnvInfo,
+    )
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    ready_env = StoreEnvInfo(
+        agent_id="a8",
+        container_id="c-existing",
+        container_name="agent-a8",
+        ssh_host="localhost",
+        ssh_port=22008,
+        workspace_path="/workspace/a8",
+        status="ready",
+    )
+    # Pre-check (top of run_setup) sees the ready record; any later read sees the
+    # corrupted/absent record left by a register write that failed mid-way.
+    env_store = MagicMock()
+    env_store.get.side_effect = [ready_env, None]
+    env_store.register.side_effect = RuntimeError("register boom")
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={"container_id": "c-existing", "container_name": "agent-a8", "reused": True},
+    )
+
+    with pytest.raises(RuntimeError, match="register boom"):
+        run_setup(
+            agent_id="a8",
+            manifest=ToolManifest(),
+            environment_store=env_store,
+            docker_provisioner=docker,
+        )
+
+    docker.deprovision.assert_not_called()
+
+
 def test_run_setup_reclaims_reused_orphan_with_no_env_record(tmp_path: Path) -> None:
     """Reclaim a *reused* container that has no env record (a retry orphan).
 
