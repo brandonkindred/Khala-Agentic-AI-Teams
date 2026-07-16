@@ -12,8 +12,14 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 from strands import Agent
+from strands.types.exceptions import EventLoopException
 
-from llm_service import LLMJsonParseError, extract_json_from_response
+from llm_service import (
+    LLMJsonParseError,
+    LLMRateLimitError,
+    LLMTemporaryError,
+    extract_json_from_response,
+)
 from llm_service.backoff import rate_limit_retry_delay
 
 from .models import CopyEditorInput, CopyEditorOutput, FeedbackItem
@@ -32,6 +38,11 @@ _LLM_RETRY_MAX_DELAY_SECONDS = 60.0
 _MAX_CONTENT_PLAN_CHARS = 12000
 # For technical deep dives, a draft below this fraction of soft_min_words is flagged as thin.
 _THIN_DRAFT_RATIO = 0.88
+# Only these errors are treated as transient and retried. LLMTemporaryError/LLMRateLimitError
+# are what llm_service raises once its own HTTP retries are exhausted; OSError covers builtin
+# transport faults (TimeoutError and ConnectionError both subclass it). Everything else —
+# programming bugs and permanent LLM errors — must surface immediately, not be masked by retries.
+_TRANSIENT_LLM_ERRORS = (LLMTemporaryError, LLMRateLimitError, OSError)
 
 
 class BlogCopyEditorAgent:
@@ -201,7 +212,10 @@ class BlogCopyEditorAgent:
         Postconditions:
             - Returns a dict; on an unrecoverable JSON parse it returns a fallback dict
               carrying a "summary" and empty "feedback_items" rather than raising.
-            - Raises only when a transport/timeout error persists past the retry budget.
+            - Retries only transient errors (``_TRANSIENT_LLM_ERRORS``, unwrapped from
+              strands' ``EventLoopException``). Non-transient errors — programming bugs
+              and permanent LLM errors — propagate immediately, and any transient error
+              still failing after the round budget is re-raised.
         """
         if on_llm_request:
             on_llm_request("Reviewing draft for style and clarity...")
@@ -240,7 +254,15 @@ class BlogCopyEditorAgent:
                         }
                         break
                 except Exception as e:
-                    if llm_round >= _MAX_COPY_EDITOR_LLM_ROUNDS - 1:
+                    # strands wraps model failures in EventLoopException; unwrap to classify.
+                    cause = e.original_exception if isinstance(e, EventLoopException) else e
+                    # Non-transient errors (programming bugs, permanent LLM errors) will never
+                    # succeed on retry — re-raise immediately instead of masking them. Transient
+                    # transport/timeout/rate-limit errors are retried until the round budget runs out.
+                    if (
+                        not isinstance(cause, _TRANSIENT_LLM_ERRORS)
+                        or llm_round >= _MAX_COPY_EDITOR_LLM_ROUNDS - 1
+                    ):
                         raise
                     wait = rate_limit_retry_delay(
                         llm_round, _LLM_RETRY_BASE_DELAY_SECONDS, _LLM_RETRY_MAX_DELAY_SECONDS

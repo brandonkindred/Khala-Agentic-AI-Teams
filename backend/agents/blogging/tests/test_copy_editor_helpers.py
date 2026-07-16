@@ -13,8 +13,9 @@ import pytest
 from blog_copy_editor_agent import BlogCopyEditorAgent
 from blog_copy_editor_agent.models import CopyEditorInput, FeedbackItem
 from blog_copy_editor_agent.prompts import COPY_EDITOR_PROMPT
+from strands.types.exceptions import EventLoopException
 
-from llm_service import DummyLLMClient, LLMJsonParseError
+from llm_service import DummyLLMClient, LLMJsonParseError, LLMTemporaryError
 
 
 def _make_agent(style: str = "Style", brand: str = "Brand") -> BlogCopyEditorAgent:
@@ -292,8 +293,8 @@ def test_invoke_llm_json_parse_exhausted_returns_fallback(monkeypatch) -> None:
     assert data["feedback_items"] == []
 
 
-def test_invoke_llm_transport_error_then_success(monkeypatch) -> None:
-    """A transport error backs off (sleep patched) and the next round succeeds."""
+def test_invoke_llm_transient_error_then_success(monkeypatch) -> None:
+    """A transient LLM error backs off (sleep patched) and the next round succeeds."""
     from blog_copy_editor_agent import agent as ce_mod
 
     monkeypatch.setattr(ce_mod.time, "sleep", lambda s: None)
@@ -303,7 +304,7 @@ def test_invoke_llm_transport_error_then_success(monkeypatch) -> None:
     def side_effect(prompt: str) -> str:
         calls["n"] += 1
         if calls["n"] == 1:
-            raise RuntimeError("connection reset")
+            raise LLMTemporaryError("connection reset")
         return json.dumps({"summary": "after retry", "feedback_items": []})
 
     _patch_agent(monkeypatch, side_effect)
@@ -314,20 +315,82 @@ def test_invoke_llm_transport_error_then_success(monkeypatch) -> None:
     assert calls["n"] == 2
 
 
-def test_invoke_llm_transport_error_exhausts_and_raises(monkeypatch) -> None:
-    """Persistent transport errors propagate once the retry budget is spent."""
+def test_invoke_llm_wrapped_transient_error_retries(monkeypatch) -> None:
+    """A transient error wrapped in strands' EventLoopException is unwrapped and retried."""
+    from blog_copy_editor_agent import agent as ce_mod
+
+    monkeypatch.setattr(ce_mod.time, "sleep", lambda s: None)
+    agent = _make_agent()
+    calls = {"n": 0}
+
+    def side_effect(prompt: str) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise EventLoopException(LLMTemporaryError("5xx from provider"))
+        return json.dumps({"summary": "recovered after wrap", "feedback_items": []})
+
+    _patch_agent(monkeypatch, side_effect)
+
+    data = agent._invoke_editor_llm("base")
+
+    assert data["summary"] == "recovered after wrap"
+    assert calls["n"] == 2
+
+
+def test_invoke_llm_transient_error_exhausts_and_raises(monkeypatch) -> None:
+    """Persistent transient errors propagate once the retry budget is spent."""
     from blog_copy_editor_agent import agent as ce_mod
 
     monkeypatch.setattr(ce_mod.time, "sleep", lambda s: None)
     agent = _make_agent()
 
     def side_effect(prompt: str) -> str:
-        raise RuntimeError("still down")
+        raise LLMTemporaryError("still down")
 
     _patch_agent(monkeypatch, side_effect)
 
-    with pytest.raises(RuntimeError, match="still down"):
+    with pytest.raises(LLMTemporaryError, match="still down"):
         agent._invoke_editor_llm("base")
+
+
+def test_invoke_llm_non_transient_error_raises_immediately(monkeypatch) -> None:
+    """A programming bug is not retried — it surfaces on the first attempt."""
+    from blog_copy_editor_agent import agent as ce_mod
+
+    slept = {"n": 0}
+    monkeypatch.setattr(ce_mod.time, "sleep", lambda s: slept.__setitem__("n", slept["n"] + 1))
+    agent = _make_agent()
+    calls = {"n": 0}
+
+    def side_effect(prompt: str) -> str:
+        calls["n"] += 1
+        raise AttributeError("bug: 'NoneType' has no attribute 'x'")
+
+    _patch_agent(monkeypatch, side_effect)
+
+    with pytest.raises(AttributeError, match="NoneType"):
+        agent._invoke_editor_llm("base")
+    assert calls["n"] == 1  # no retry
+    assert slept["n"] == 0  # no backoff
+
+
+def test_invoke_llm_wrapped_non_transient_error_raises_immediately(monkeypatch) -> None:
+    """A bug wrapped in EventLoopException is unwrapped, judged non-transient, and re-raised."""
+    from blog_copy_editor_agent import agent as ce_mod
+
+    monkeypatch.setattr(ce_mod.time, "sleep", lambda s: None)
+    agent = _make_agent()
+    calls = {"n": 0}
+
+    def side_effect(prompt: str) -> str:
+        calls["n"] += 1
+        raise EventLoopException(TypeError("bug: unsupported operand"))
+
+    _patch_agent(monkeypatch, side_effect)
+
+    with pytest.raises(EventLoopException):
+        agent._invoke_editor_llm("base")
+    assert calls["n"] == 1  # no retry
 
 
 def test_invoke_llm_empty_json_object_uses_final_fallback(monkeypatch) -> None:
