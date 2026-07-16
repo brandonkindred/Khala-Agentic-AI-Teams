@@ -966,7 +966,21 @@ def _run_pr_review_body(
                         exc_info=True,
                     )
                     open_issues = []
-                proposals = annotate_duplicate_proposals(proposals, open_issues)
+                try:
+                    proposals = annotate_duplicate_proposals(proposals, open_issues)
+                except Exception:  # noqa: BLE001 - duplicate-detection must never fail the review
+                    logger.warning(
+                        "PR review #%s: duplicate annotation failed, proceeding without "
+                        "duplicate detection",
+                        pr_number,
+                        exc_info=True,
+                    )
+                    # annotate_duplicate_proposals is the only place matched_existing
+                    # gets set; fall back to marking every proposal unmatched by hand
+                    # so downstream consumers (frontend, create_review_issues) always
+                    # see the field, exactly as they would on a clean "no duplicates
+                    # found" outcome.
+                    proposals = [{**p, "matched_existing": False} for p in proposals]
 
             # Recognize findings that duplicate a comment already on the PR (from a
             # prior review run, or a human), so an evolving PR does not accumulate

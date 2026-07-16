@@ -3343,6 +3343,27 @@ class TestDuplicateProposalDetection:
         assert proposal["matched_existing"] is False
         assert proposal["issue_url"] is None
 
+    def test_duplicate_check_fails_open_when_annotation_itself_raises(
+        self, review_app, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: listing open issues can succeed while annotate_duplicate_proposals
+        itself raises (e.g. a bug in the matching logic) -- this must degrade to "no
+        duplicates found" exactly like a listing failure, not fail the whole review."""
+        from software_engineering_team.coding_team.api import pr_review
+
+        def _raise(*_a, **_k):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(pr_review, "annotate_duplicate_proposals", _raise)
+        job = _run_review_with(
+            review_app,
+            [_FakeReviewIssue("high", line=2, file_path="legacy.py", pre_existing=True)],
+        )
+        assert job["status"] == "completed"
+        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        assert proposal["matched_existing"] is False
+        assert proposal["issue_url"] is None
+
     def test_create_review_issues_never_refiles_a_matched_proposal(self, review_app) -> None:
         """A proposal pre-linked to an existing issue can never be filed as a new,
         duplicate GitHub issue via the create-issues endpoint."""
@@ -3584,11 +3605,13 @@ class TestCreateReviewIssuesUnit:
         assert saved == {"p0": True, "p1": False}
 
     def test_multiple_failures_wrapped_in_composite_error(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Regression: when more than one proposal fails, the caller must see every
         failure, not just whichever happened to be first -- a plain re-raise of one
-        error would misleadingly suggest only that one proposal had a problem."""
+        error would misleadingly suggest only that one proposal had a problem. Every
+        failure must also still be logged, regardless of which one ends up in the
+        composite exception."""
         from software_engineering_team.coding_team.api import main as api_main
         from software_engineering_team.coding_team.api import pr_review
 
@@ -3626,8 +3649,12 @@ class TestCreateReviewIssuesUnit:
         monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
         monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
 
-        with pytest.raises(pr_review.MultipleIssueCreationErrors) as exc_info:
-            pr_review.create_review_issues("job1", ["p0", "p1"], token="t")
+        with caplog.at_level("WARNING"):
+            with pytest.raises(pr_review.MultipleIssueCreationErrors) as exc_info:
+                pr_review.create_review_issues("job1", ["p0", "p1"], token="t")
+        logged = caplog.text
+        assert "p0" in logged and "boom-a" in logged
+        assert "p1" in logged and "boom-b" in logged
         assert set(exc_info.value.failures) == {"p0", "p1"}
         message = str(exc_info.value)
         assert "p0" in message and "p1" in message
@@ -3730,50 +3757,6 @@ class TestCreateReviewIssuesUnit:
         out = pr_review.create_review_issues("job1", ["p0", "p0", "p0"], token="t")
         assert len(calls) == 1
         assert [c["proposal_id"] for c in out["created"]] == ["p0"]
-
-    def test_multiple_failures_are_all_logged(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Only the first failure (by request order) is re-raised to the caller, but
-        every failure must be logged — an operator debugging why proposal p1 wasn't
-        filed must not find zero information about it just because p0's error is the
-        one that propagated to the HTTP response."""
-        from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review
-
-        job = {
-            "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
-            "status": "completed",
-            "review_summary": {
-                "pending_issue_proposals": [
-                    {"id": "p0", "description": "a", "issue_url": None},
-                    {"id": "p1", "description": "b", "issue_url": None},
-                ]
-            },
-        }
-        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
-        monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
-        monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
-
-        class _Client:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_a):
-                return None
-
-            def create_issue(self, _o, _r, *, title, body, labels=None):
-                if "### Description\na" in body:
-                    raise GitHubAPIError(403, "boom-a")
-                raise GitHubAPIError(500, "boom-b")
-
-        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
-        with caplog.at_level("WARNING"):
-            with pytest.raises(GitHubAPIError):
-                pr_review.create_review_issues("job1", ["p0", "p1"], token="t")
-        logged = caplog.text
-        assert "p0" in logged and "boom-a" in logged
-        assert "p1" in logged and "boom-b" in logged
 
     def test_persist_swallows_store_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A failure persisting the updated proposals never fails the request — the
