@@ -454,6 +454,7 @@ def plan_project_activity(
         def _run_architecture(spec_content, prd_content, rp, client_context):
             from architecture_expert.models import ArchitectureInput
 
+            from software_engineering_team.orchestrator import _DEFAULT_TECHNOLOGY_PREFERENCES
             from software_engineering_team.shared.models import ProductRequirements
 
             req_desc = (spec_content or "").strip()
@@ -468,9 +469,14 @@ def plan_project_activity(
                 metadata={},
             )
             features_doc = prd_content or ""
+            technology_preferences = (
+                list(client_context["tech_constraints"])
+                if client_context and client_context.get("tech_constraints")
+                else list(_DEFAULT_TECHNOLOGY_PREFERENCES)
+            )
             arch_input = ArchitectureInput(
                 requirements=reqs,
-                technology_preferences=["Python", "FastAPI", "PostgreSQL", "Docker"],
+                technology_preferences=technology_preferences,
                 project_overview={"features_and_functionality_doc": features_doc, "goals": ""},
                 features_and_functionality_doc=features_doc or None,
             )

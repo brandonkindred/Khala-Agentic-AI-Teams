@@ -420,6 +420,9 @@ def _build_planning_answer_callback(job_id: str) -> Callable[[list], list]:
     return _cb
 
 
+_DEFAULT_TECHNOLOGY_PREFERENCES = ["Python", "FastAPI", "PostgreSQL", "Docker"]
+
+
 def _run_architecture_for_planning(
     arch_agent: Any,
     spec_content: str,
@@ -441,6 +444,10 @@ def _run_architecture_for_planning(
     Postconditions:
         - Returns ``architecture.overview`` (possibly ``""``) on success, or ``None`` when
           the agent yields no architecture or raises.
+        - ``technology_preferences`` passed to the architecture agent are drawn from
+          ``client_context["tech_constraints"]`` (the ``ClientContext.tech_constraints``
+          gathered during Planning intake/discovery) when present and non-empty, falling
+          back to ``_DEFAULT_TECHNOLOGY_PREFERENCES`` otherwise.
     Invariants:
         - Never propagates an exception into the Planning workflow.
     """
@@ -456,6 +463,11 @@ def _run_architecture_for_planning(
     acceptance = ["Deliver according to spec and planning artifacts."]
     if client_context and client_context.get("success_criteria"):
         acceptance = list(client_context["success_criteria"])
+    technology_preferences = (
+        list(client_context["tech_constraints"])
+        if client_context and client_context.get("tech_constraints")
+        else list(_DEFAULT_TECHNOLOGY_PREFERENCES)
+    )
     requirements = ProductRequirements(
         title="Project",
         description=req_desc,
@@ -492,7 +504,7 @@ def _run_architecture_for_planning(
     }
     arch_input = ArchitectureInput(
         requirements=requirements,
-        technology_preferences=["Python", "FastAPI", "PostgreSQL", "Docker"],
+        technology_preferences=technology_preferences,
         project_overview=project_overview,
         features_and_functionality_doc=features_doc or None,
     )

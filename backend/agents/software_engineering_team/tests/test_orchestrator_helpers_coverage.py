@@ -586,6 +586,33 @@ def test_planning_architecture_fn_success_criteria_override_acceptance():
     assert arch_input.requirements.acceptance_criteria == ["c1", "c2"]
 
 
+def test_planning_architecture_fn_no_tech_constraints_uses_default_preferences():
+    """Without client_context tech_constraints, the module default preferences are used."""
+    agent = _mock_arch_agent()
+    fn = orchestrator._make_planning_architecture_fn(agent)
+
+    fn(spec_content="Spec", prd_content=None, repo_path="/x", client_context=None)
+
+    arch_input = agent.run.call_args.args[0]
+    assert arch_input.technology_preferences == orchestrator._DEFAULT_TECHNOLOGY_PREFERENCES
+
+
+def test_planning_architecture_fn_tech_constraints_override_default_preferences():
+    """client_context tech_constraints replace the default technology_preferences."""
+    agent = _mock_arch_agent()
+    fn = orchestrator._make_planning_architecture_fn(agent)
+
+    fn(
+        spec_content="Spec",
+        prd_content=None,
+        repo_path="/x",
+        client_context={"tech_constraints": ["Go", "Kubernetes"]},
+    )
+
+    arch_input = agent.run.call_args.args[0]
+    assert arch_input.technology_preferences == ["Go", "Kubernetes"]
+
+
 def test_planning_architecture_fn_problem_and_opportunity_build_features_and_goals():
     """problem_summary and opportunity_statement feed both the features doc and goals."""
     agent = _mock_arch_agent()
