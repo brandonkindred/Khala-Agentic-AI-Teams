@@ -312,16 +312,13 @@ class CredentialStore:
         return f"agent_{safe_agent_id}_{safe_tool}"[:63]
 
     def _agent_file(self, agent_id: str) -> Path:
-        """Get the credentials file path for an agent in the primary store.
+        """Return the credentials file path for ``agent_id`` in the primary store.
 
-        Preconditions:
-            * ``agent_id`` is a safe filename component (``[A-Za-z0-9._-]+`` with
-              no ``..``); otherwise ``ValueError`` is raised. Every reader/writer
-              (``_agent_file_candidates``, ``store_credentials``) evaluates this
-              first, so the guard prevents a malicious ``agent_id`` from reading
-              or overwriting encrypted secrets outside ``storage_dir``.
-        Postconditions:
-            * Returns a path strictly inside ``storage_dir``.
+        Raises ``ValueError`` (via :func:`safe_path_component`) if ``agent_id`` is
+        not a safe filename component. Every reader/writer
+        (``_agent_file_candidates``, ``store_credentials``) evaluates this first,
+        so a malicious ``agent_id`` cannot read or overwrite encrypted secrets
+        outside ``storage_dir``. The returned path is always inside ``storage_dir``.
         """
         return self.storage_dir / f"{safe_path_component(agent_id, kind='agent_id')}.enc"
 

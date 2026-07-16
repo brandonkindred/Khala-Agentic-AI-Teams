@@ -75,9 +75,33 @@ def test_require_deprovision_runner_returns_503_when_temporal_check_raises() -> 
 _TRAVERSAL_IDS = ["../../etc/passwd", "a/b", "..\\..\\x", "/etc/passwd", "..", "."]
 
 
+# End-to-end via the real FastAPI stack: the request-model validator rejects a
+# traversal agent_id in the POST body before any handler/Temporal code runs.
+@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
+def test_provision_endpoint_returns_422_for_traversal_agent_id(bad_id: str) -> None:
+    r = client.post("/provision", json={"agent_id": bad_id})
+    assert r.status_code == 422
+
+
+def test_get_environment_endpoint_returns_422_for_encoded_traversal() -> None:
+    # ``%2e%2e`` reaches the handler as ``..`` (Starlette does not collapse it),
+    # so the path-param guard surfaces a real 422 through the HTTP stack.
+    r = client.get("/environments/%2e%2e")
+    assert r.status_code == 422
+
+
+def test_provision_endpoint_accepts_dotted_agent_id() -> None:
+    """A legitimate dotted id passes validation and reaches the handler (503 without Temporal)."""
+    r = client.post("/provision", json={"agent_id": "blog.writer"})
+    assert r.status_code != 422
+
+
+# Path params bypass the request-model validator, so the {agent_id} routes call
+# ``_require_safe_agent_id`` themselves. These handlers are sync ``def``s, so
+# calling them directly exercises that guard exactly as FastAPI's threadpool
+# would (and reliably covers traversal shapes that URL-encoding would mangle).
 @pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
 def test_get_agent_status_rejects_traversal_agent_id(bad_id: str) -> None:
-    """The {agent_id} path param is validated to a 422 before hitting the store."""
     with pytest.raises(HTTPException) as exc_info:
         api_main.get_agent_status(bad_id)
     assert exc_info.value.status_code == 422
@@ -99,9 +123,11 @@ def test_provision_request_rejects_traversal_agent_id(bad_id: str) -> None:
         DeprovisionRequest(agent_id=bad_id)
 
 
-def test_provision_request_allows_dotted_agent_id() -> None:
-    assert ProvisionRequest(agent_id="blog.writer").agent_id == "blog.writer"
-    assert DeprovisionRequest(agent_id="blog.writer").agent_id == "blog.writer"
+@pytest.mark.parametrize("good_id", ["blog.writer", "agent-001", "a..b"])
+def test_provision_request_allows_valid_agent_id(good_id: str) -> None:
+    # Dotted ids — including a harmless embedded double-dot — are accepted.
+    assert ProvisionRequest(agent_id=good_id).agent_id == good_id
+    assert DeprovisionRequest(agent_id=good_id).agent_id == good_id
 
 
 # ---------------------------------------------------------------------------

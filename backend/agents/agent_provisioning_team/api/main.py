@@ -68,13 +68,9 @@ def _require_safe_agent_id(agent_id: str) -> str:
     """Validate an ``agent_id`` path parameter before it reaches the stores.
 
     Path parameters bypass the request-model ``field_validator``, so the
-    ``{agent_id}`` routes call this to mirror that guard.
-
-    Preconditions:
-        * ``agent_id`` is a safe filename component (``[A-Za-z0-9._-]+``, no ``..``).
-    Postconditions:
-        * Returns ``agent_id`` unchanged, or raises ``HTTPException(422)`` so a
-          traversal attempt surfaces as a clean client error rather than a 500.
+    ``{agent_id}`` routes call this to mirror that guard. Returns ``agent_id``
+    unchanged, or raises ``HTTPException(422)`` if it is not a safe filename
+    component — so a traversal attempt is a clean client error, not a 500.
     """
     try:
         return safe_path_component(agent_id, kind="agent_id")

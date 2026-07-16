@@ -112,16 +112,13 @@ class EnvironmentStore:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
     def _env_file(self, agent_id: str) -> Path:
-        """Get the environment file path for an agent in the primary store.
+        """Return the environment file path for ``agent_id`` in the primary store.
 
-        Preconditions:
-            * ``agent_id`` is a safe filename component (``[A-Za-z0-9._-]+`` with
-              no ``..``); otherwise ``ValueError`` is raised. This is the single
-              chokepoint every public method routes through (``_env_file_candidates``
-              and ``_write_env_data`` both evaluate it first), so the guard blocks
-              path traversal on every read and write path.
-        Postconditions:
-            * Returns a path strictly inside ``storage_dir``.
+        Raises ``ValueError`` (via :func:`safe_path_component`) if ``agent_id`` is
+        not a safe filename component, so path traversal is blocked at the single
+        chokepoint every public method routes through — ``_env_file_candidates``
+        and ``_write_env_data`` both evaluate it first. The returned path is
+        always strictly inside ``storage_dir``.
         """
         return self.storage_dir / f"{safe_path_component(agent_id, kind='agent_id')}.json"
 

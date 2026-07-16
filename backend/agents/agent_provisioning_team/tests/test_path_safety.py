@@ -17,6 +17,8 @@ from agent_provisioning_team.shared.path_safety import safe_path_component
         "at-team-proc-slug-name",
         "A.B_c-1",
         "git",  # provisioner name
+        "a..b",  # embedded double-dot is not a traversal (no separator) -> allowed
+        "..foo",  # leading dots without a separator stay inside the store dir
     ],
 )
 def test_safe_path_component_accepts_valid_ids(value: str) -> None:
@@ -34,7 +36,6 @@ def test_safe_path_component_accepts_valid_ids(value: str) -> None:
         "..",  # bare parent token
         ".",  # bare current-dir token
         "",  # empty
-        "a..b",  # embedded double-dot
         "a b",  # whitespace
         "a\x00b",  # NUL byte
         "café",  # non-ASCII

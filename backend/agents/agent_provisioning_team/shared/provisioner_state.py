@@ -110,12 +110,10 @@ class ProvisionerStateStore:
     def __init__(self, provisioner_name: str, storage_dir: Optional[Path] = None) -> None:
         """Bind the store to one provisioner's JSON file.
 
-        Preconditions:
-            * ``provisioner_name`` is a safe filename component
-              (``[A-Za-z0-9._-]+`` with no ``..``); otherwise ``ValueError`` is
-              raised. It is interpolated into both ``self.path`` and the ``_save``
-              tempfile prefix, so validating it once here keeps every write inside
-              ``storage_dir``.
+        Raises ``ValueError`` if ``provisioner_name`` is not a safe filename
+        component: it is interpolated into both ``self.path`` and the ``_save``
+        tempfile prefix, so validating it here keeps every write inside
+        ``storage_dir``.
         """
         self.provisioner_name = safe_path_component(provisioner_name, kind="provisioner_name")
         self.storage_dir = storage_dir or DEFAULT_STATE_DIR

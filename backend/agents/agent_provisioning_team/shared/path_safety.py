@@ -15,35 +15,35 @@ from __future__ import annotations
 
 import re
 
-# Filenames are built as ``f"{value}.<ext>"``. Permit only the characters real
-# identifiers use — alphanumerics plus dot, hyphen, underscore — and nothing
-# that can change directories or escape the store (``/``, ``\``, NUL,
-# whitespace). ``..`` matches this class yet still traverses, so it is rejected
-# explicitly by ``safe_path_component``.
+# A safe component matches this class AND is not the directory token "." or
+# "..". The class already forbids separators ("/", "\"), NUL bytes, and
+# whitespace, so a "``..``" can only change directories when it is the *entire*
+# component (rejected in ``safe_path_component`` below); a double dot inside a
+# longer name such as "a..b" is not a traversal and is allowed.
 _SAFE_COMPONENT = re.compile(r"[A-Za-z0-9._-]+")
 
 
 def safe_path_component(value: str, *, kind: str = "identifier") -> str:
-    """Return ``value`` unchanged iff it is safe to embed in a filename.
+    """Validate that ``value`` is safe to embed in a filename and return it.
 
-    Preconditions:
-        * ``value`` is a ``str`` matching ``[A-Za-z0-9._-]+`` and containing no
-          ``..`` segment. Empty strings, path separators (``/`` or ``\\``), NUL
-          bytes, whitespace, and ``.``/``..`` traversal tokens all violate the
-          precondition.
-    Postconditions:
-        * Returns ``value`` byte-for-byte when the precondition holds, so callers
-          that key files by the identifier round-trip unchanged.
-        * Raises ``ValueError`` (never silently coerces) otherwise — the caller
-          supplied an identifier that would escape the storage directory.
+    A value is safe when it matches ``[A-Za-z0-9._-]+`` and is not the bare
+    directory token ``.`` or ``..``. That set covers every real identifier —
+    slugs, UUIDs, and dotted names such as ``blog.writer`` — while excluding
+    anything that could change directories: path separators (``/``, ``\\``),
+    NUL bytes, and whitespace are already outside the character class. A double
+    dot *inside* a longer name (e.g. ``a..b``) is harmless, because the class
+    forbids separators, so ``..`` can only traverse when it is the whole
+    component — and such names are therefore accepted.
 
-    ``kind`` only customises the error message (e.g. ``"agent_id"``).
+    Returns ``value`` byte-for-byte when it is safe, so callers that key files
+    by the identifier round-trip unchanged. Raises ``ValueError`` (never
+    silently coerces) otherwise. ``kind`` only customises the error message
+    (e.g. ``"agent_id"``).
     """
     if (
         not isinstance(value, str)
         or _SAFE_COMPONENT.fullmatch(value) is None
-        or ".." in value
-        or value == "."
+        or value in (".", "..")
     ):
         raise ValueError(f"unsafe {kind} for a filesystem path: {value!r}")
     return value
