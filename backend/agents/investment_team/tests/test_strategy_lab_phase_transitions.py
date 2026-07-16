@@ -606,3 +606,19 @@ def test_build_spec_from_dict_routes_unsupported_class_to_redesign() -> None:
     assert "bonds" in exc.value.evidence
     assert exc.value.failure_phase == "design"
     assert exc.value.last_spec is not None
+
+
+def test_build_spec_from_dict_treats_blank_asset_class_as_stocks() -> None:
+    """A present-but-blank ``asset_class`` (``None``/``""``/whitespace) is the
+    'unspecified' case, not a genuinely-unsupported *named* class: it defaults to
+    ``stocks`` (matching ``normalize_asset_class``) rather than tripping the strict
+    validator and forcing a spurious redesign loop. The strict normalizer raises on
+    blanks, so an unguarded probe on the raw value would misread an omitted class as
+    ``SpecImplementabilityError`` and abort the cycle."""
+    orch = StrategyLabOrchestrator()
+
+    for blank in (None, "", "   "):
+        payload = _spec_dict()
+        payload["asset_class"] = blank
+        spec = orch._build_spec_from_dict(payload, strategy_id="strat-blank")
+        assert spec.asset_class == "stocks"
