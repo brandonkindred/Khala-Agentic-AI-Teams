@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .path_safety import safe_path_component
+from .path_safety import candidate_paths, safe_path_component
 
 
 def default_environments_dir() -> Path:
@@ -123,10 +123,15 @@ class EnvironmentStore:
         return self.storage_dir / f"{safe_path_component(agent_id, kind='agent_id')}.json"
 
     def _env_file_candidates(self, agent_id: str) -> List[Path]:
-        """Primary path first, then legacy locations from before the AGENT_CACHE move."""
-        return [self._env_file(agent_id)] + [
-            legacy / f"{agent_id}.json" for legacy in legacy_environments_dirs()
-        ]
+        """Primary path first, then legacy locations from before the AGENT_CACHE move.
+
+        Every candidate — primary and legacy — is built from the same guarded
+        ``agent_id`` via :func:`candidate_paths`, so the traversal guard is
+        unconditional and does not rely on the primary being evaluated first.
+        """
+        return candidate_paths(
+            agent_id, self.storage_dir, legacy_environments_dirs(), ".json", kind="agent_id"
+        )
 
     def _read_env_data(self, agent_id: str) -> tuple[Optional[Dict[str, Any]], Optional[Path]]:
         """Load environment JSON from the primary or a legacy path.

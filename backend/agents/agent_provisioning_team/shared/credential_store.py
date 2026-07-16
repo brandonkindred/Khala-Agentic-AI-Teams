@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
-from .path_safety import safe_path_component
+from .path_safety import candidate_paths, safe_path_component
 
 
 def default_credentials_dir() -> Path:
@@ -323,10 +323,15 @@ class CredentialStore:
         return self.storage_dir / f"{safe_path_component(agent_id, kind='agent_id')}.enc"
 
     def _agent_file_candidates(self, agent_id: str) -> List[Path]:
-        """Primary path first, then legacy locations from before the AGENT_CACHE move."""
-        return [self._agent_file(agent_id)] + [
-            legacy / f"{agent_id}.enc" for legacy in legacy_credentials_dirs()
-        ]
+        """Primary path first, then legacy locations from before the AGENT_CACHE move.
+
+        Both the primary and legacy candidates are built from the same guarded
+        ``agent_id`` via :func:`candidate_paths`, so a traversal id is rejected
+        regardless of path ordering.
+        """
+        return candidate_paths(
+            agent_id, self.storage_dir, legacy_credentials_dirs(), ".enc", kind="agent_id"
+        )
 
     def _read_agent_credentials(
         self, agent_id: str

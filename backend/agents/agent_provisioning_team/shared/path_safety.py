@@ -14,6 +14,8 @@ rule cannot drift between call sites.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
+from pathlib import Path
 
 # A safe component matches this class AND is not the directory token "." or
 # "..". The class already forbids separators ("/", "\"), NUL bytes, and
@@ -47,3 +49,28 @@ def safe_path_component(value: str, *, kind: str = "identifier") -> str:
     ):
         raise ValueError(f"unsafe {kind} for a filesystem path: {value!r}")
     return value
+
+
+def candidate_paths(
+    identifier: str,
+    primary_dir: Path,
+    legacy_dirs: Iterable[Path],
+    extension: str,
+    *,
+    kind: str = "identifier",
+) -> list[Path]:
+    """Build the ``[primary, *legacy]`` record paths for a store, guarding once.
+
+    Stores keyed by an identifier look a record up in the primary store first,
+    then in the pre-``AGENT_CACHE`` legacy directories. Both the environment and
+    credential stores share this shape, differing only in ``extension``
+    (``.json`` vs ``.enc``) and their legacy directory list.
+
+    ``identifier`` is validated with :func:`safe_path_component` exactly once and
+    the validated value is reused for every candidate, so **no** path — primary
+    or legacy — is ever built from an unchecked identifier, independent of
+    evaluation order. Raises ``ValueError`` on an unsafe identifier before any
+    path is constructed. ``extension`` is appended verbatim (e.g. ``".json"``).
+    """
+    filename = f"{safe_path_component(identifier, kind=kind)}{extension}"
+    return [primary_dir / filename, *(legacy / filename for legacy in legacy_dirs)]
