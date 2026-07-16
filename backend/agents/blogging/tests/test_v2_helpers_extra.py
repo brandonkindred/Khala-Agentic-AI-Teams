@@ -1,4 +1,7 @@
-"""More v2 helper coverage: title-selection variants and small gaps."""
+"""More v2 helper coverage: title-selection variants and small gaps.
+
+Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
+"""
 
 from __future__ import annotations
 

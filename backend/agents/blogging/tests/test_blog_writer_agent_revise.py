@@ -1,4 +1,7 @@
-"""Tests for BlogWriterAgent.revise (plan-first batch feedback processing)."""
+"""Tests for BlogWriterAgent.revise (plan-first batch feedback processing).
+
+Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
+"""
 
 from __future__ import annotations
 

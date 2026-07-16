@@ -3,6 +3,8 @@
 These tests drive the critic directly via a fake Strands Agent so we can
 exercise the full parse → coerce → report path without hitting an LLM, plus
 an integration test that runs the critic inside BlogPlanningAgent.run.
+
+Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
 """
 
 from __future__ import annotations

@@ -5,6 +5,8 @@ The helper handles a multi-round rating workflow. We exercise:
 * job cancelled mid-wait → returns None
 * title selected (user "loved" a title) → returns title
 * pending like/dislike feedback → triggers replacement title generation
+
+Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
 """
 
 from __future__ import annotations

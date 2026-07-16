@@ -1,4 +1,7 @@
-"""Tests for blog_writing_process_v2._fill_story_placeholders."""
+"""Tests for blog_writing_process_v2._fill_story_placeholders.
+
+Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
+"""
 
 from __future__ import annotations
 

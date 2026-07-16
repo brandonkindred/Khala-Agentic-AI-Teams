@@ -1,4 +1,7 @@
-"""Tests for the blog writer agent."""
+"""Tests for the blog writer agent.
+
+Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
+"""
 
 import re
 

@@ -40,7 +40,7 @@ _BLOG_JOB_HELPERS = (
 
 
 @pytest.fixture(autouse=True)
-def _patched_blog_client(monkeypatch, fake_job_client) -> Any:
+def patched_blog_client(monkeypatch, fake_job_client) -> Any:
     """Back ``shared.blog_job_store`` with the in-memory fake for every test in this package."""
     from shared import blog_job_store as bjs
 

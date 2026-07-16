@@ -4,6 +4,8 @@ Tests:
 * All gates PASS → status=PASS
 * Gates FAIL on iter 1, PASS on iter 2 → status=PASS
 * Gates never pass → status=NEEDS_HUMAN_REVIEW
+
+Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
 """
 
 from __future__ import annotations
