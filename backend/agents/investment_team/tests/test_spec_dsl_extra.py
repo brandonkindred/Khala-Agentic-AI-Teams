@@ -9,6 +9,7 @@ predicate-side validators.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -258,7 +259,7 @@ def test_format_sizing_rule_unknown_raises() -> None:
 
 
 def test_predicate_rejects_unknown_lhs_string() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         Predicate(lhs="bar.foo", op=">", rhs=1.0)  # type: ignore[arg-type]
 
 
