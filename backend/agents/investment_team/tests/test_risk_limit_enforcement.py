@@ -84,6 +84,24 @@ def test_risk_limits_accepts_none() -> None:
     assert isinstance(spec.risk_limits, RiskLimits)
 
 
+def test_build_spec_from_dict_with_null_risk_limits_defaults() -> None:
+    """A design-agent payload carrying ``"risk_limits": null`` (present but
+    None, not merely omitted) must resolve to the same defaults as an omitted
+    key rather than threading a bare ``None`` through to ``StrategySpec``."""
+    from investment_team.strategy_lab.orchestrator import build_spec_from_dict
+
+    strategy_dict = {
+        "asset_class": "stocks",
+        "hypothesis": "h",
+        "signal_definition": "s",
+        "timeframe": "1d",
+        "risk_limits": None,
+    }
+    spec = build_spec_from_dict(strategy_dict, strategy_id="s1")
+    assert isinstance(spec.risk_limits, RiskLimits)
+    assert spec.risk_limits == RiskLimits()
+
+
 def test_risk_limits_passes_through_explicit_instance() -> None:
     explicit = RiskLimits(max_position_pct=10, max_open_positions=3)
     spec = _base_spec(risk_limits=explicit)

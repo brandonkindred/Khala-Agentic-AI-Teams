@@ -35,8 +35,8 @@ _TOOL_AGENT_EXISTING_CODE_CHARS = 6_000
 # microtask on top of the code/QA/security review cycles already spent, so a
 # smaller budget here is intentional, not an oversight -- kept separate so tuning
 # one never silently changes the other.
-_GATED_DOC_SELF_REVIEW_MIN_ITERATIONS = 1
-_GATED_DOC_SELF_REVIEW_MAX_ITERATIONS = 2
+_GATED_DOC_SELF_REVIEW_MIN_ITERS = 1
+_GATED_DOC_SELF_REVIEW_MAX_ITERS = 2
 _GATED_DOC_SELF_REVIEW_QUALITY_THRESHOLD = 0.9
 
 
@@ -1440,8 +1440,8 @@ def _run_documentation_phase(
         "[%s] Microtask %s: Running documentation self-review (%d-%d iterations)",
         task_id,
         mt.id,
-        _GATED_DOC_SELF_REVIEW_MIN_ITERATIONS,
-        _GATED_DOC_SELF_REVIEW_MAX_ITERATIONS,
+        _GATED_DOC_SELF_REVIEW_MIN_ITERS,
+        _GATED_DOC_SELF_REVIEW_MAX_ITERS,
     )
 
     if progress_callback:
@@ -1488,8 +1488,8 @@ def _run_documentation_phase(
         documentation=doc_files,
         code_files=microtask_files,
         task_description=task.description or "",
-        min_iterations=_GATED_DOC_SELF_REVIEW_MIN_ITERATIONS,
-        max_iterations=_GATED_DOC_SELF_REVIEW_MAX_ITERATIONS,
+        min_iterations=_GATED_DOC_SELF_REVIEW_MIN_ITERS,
+        max_iterations=_GATED_DOC_SELF_REVIEW_MAX_ITERS,
         quality_threshold=_GATED_DOC_SELF_REVIEW_QUALITY_THRESHOLD,
         detail_callback=lambda d: detail_cb(d, current_idx, "documentation"),
     )
