@@ -420,6 +420,8 @@ def _build_planning_answer_callback(job_id: str) -> Callable[[list], list]:
     return _cb
 
 
+# Fallback technology_preferences for the Architecture Expert when the client hasn't
+# specified tech_constraints during Planning intake/discovery; this repo's own stack.
 _DEFAULT_TECHNOLOGY_PREFERENCES = ["Python", "FastAPI", "PostgreSQL", "Docker"]
 
 

@@ -7,6 +7,7 @@ they run in the worker process and update the job store. No threads are started.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 from pathlib import Path
@@ -445,50 +446,18 @@ def plan_project_activity(
 
         agents = _get_agents()
 
-        from software_engineering_team.orchestrator import _make_planning_job_updater
+        from software_engineering_team.orchestrator import (
+            _make_planning_job_updater,
+            _run_architecture_for_planning,
+        )
 
         # Shared with the thread path: rescales Planning's own 0-100 progress onto
         # the planning band so the Temporal bar stays monotone into the coding phase.
         _planning_updater = _make_planning_job_updater(job_id)
 
-        def _run_architecture(spec_content, prd_content, rp, client_context):
-            from architecture_expert.models import ArchitectureInput
-
-            from software_engineering_team.orchestrator import _DEFAULT_TECHNOLOGY_PREFERENCES
-            from software_engineering_team.shared.models import ProductRequirements
-
-            req_desc = (spec_content or "").strip()
-            if prd_content:
-                req_desc = (req_desc + "\n\n" + prd_content.strip()).strip()
-            reqs = ProductRequirements(
-                title="Project",
-                description=req_desc or "See planning artifacts.",
-                acceptance_criteria=["Deliver according to spec."],
-                constraints=[],
-                priority="medium",
-                metadata={},
-            )
-            features_doc = prd_content or ""
-            technology_preferences = (
-                list(client_context["tech_constraints"])
-                if client_context and client_context.get("tech_constraints")
-                else list(_DEFAULT_TECHNOLOGY_PREFERENCES)
-            )
-            arch_input = ArchitectureInput(
-                requirements=reqs,
-                technology_preferences=technology_preferences,
-                project_overview={"features_and_functionality_doc": features_doc, "goals": ""},
-                features_and_functionality_doc=features_doc or None,
-            )
-            try:
-                arch_output = agents["architecture"].run(arch_input)
-                return (
-                    (arch_output.architecture.overview or "")
-                    if arch_output and arch_output.architecture
-                    else None
-                )
-            except Exception:
-                return None
+        # Reuses the thread path's implementation so architecture-input construction
+        # (including technology_preferences derivation) is defined in exactly one place.
+        _run_architecture = functools.partial(_run_architecture_for_planning, agents["architecture"])
 
         planning_result = run_planning_workflow(
             repo_path=str(path),
