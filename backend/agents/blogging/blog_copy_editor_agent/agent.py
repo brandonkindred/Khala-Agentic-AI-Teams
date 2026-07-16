@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 from strands import Agent
 
@@ -23,6 +23,24 @@ from .models import CopyEditorInput, CopyEditorOutput, FeedbackItem
 from .prompts import COPY_EDITOR_PROMPT
 
 logger = logging.getLogger(__name__)
+
+
+def _fallback_editor_data(summary: str) -> Dict[str, Any]:
+    """Editor output for a copy-edit tooling failure (unparseable JSON or unexpected error).
+
+    Preconditions:
+        - ``summary`` explains the failure so a human reviewer sees why the automated
+          pass did not run.
+    Postconditions:
+        - Returns ``{"approved": True, "summary": summary, "feedback_items": []}``.
+          ``approved=True`` is deliberate: the copy editor is an *advisory* style/clarity
+          pass, so a tooling failure must not drive a pointless no-op rewrite — an
+          unapproved draft carrying zero actionable feedback would loop the editor for
+          no reason. The deterministic length gate downstream still sets ``has_blocking``
+          and can withhold approval for an over-length draft, and the hard quality gates
+          (fact-check, compliance, validators) run separately and are unaffected.
+    """
+    return {"approved": True, "summary": summary, "feedback_items": []}
 
 
 class BlogCopyEditorAgent:
@@ -232,10 +250,9 @@ class BlogCopyEditorAgent:
                         "Copy editor JSON parse failed after retry; using fallback output: %s",
                         e,
                     )
-                    data = {
-                        "summary": "Copy editor could not parse the model response. Please review the draft manually.",
-                        "feedback_items": [],
-                    }
+                    data = _fallback_editor_data(
+                        "Copy editor could not parse the model response. Please review the draft manually."
+                    )
                     break
             except (LLMRateLimitError, LLMTemporaryError):
                 # Transient transport error after the client's own retries: re-raise so
@@ -243,23 +260,23 @@ class BlogCopyEditorAgent:
                 raise
             except Exception as e:
                 # Any other unexpected error (a non-transient LLM failure, or a bug like
-                # AttributeError) fails closed with a manual-review fallback — matching the
-                # compliance agent. The traceback is logged at ERROR level so the root
-                # cause stays visible rather than being silently swallowed.
+                # AttributeError) degrades to a manual-review fallback rather than crashing
+                # the draft stage. The traceback is logged at ERROR level so the root cause
+                # stays visible; see _fallback_editor_data for why the fallback approves
+                # (the copy editor is advisory — a tooling failure must not force a no-op
+                # rewrite, and the hard quality gates still run downstream).
                 logger.exception(
                     "Copy editor LLM failed unexpectedly; using fallback output: %s", e
                 )
-                data = {
-                    "summary": "Copy editor could not complete review. Please review the draft manually.",
-                    "feedback_items": [],
-                }
+                data = _fallback_editor_data(
+                    "Copy editor could not complete review. Please review the draft manually."
+                )
                 break
 
         if not data:
-            data = {
-                "summary": "Copy editor could not parse the model response. Please review the draft manually.",
-                "feedback_items": [],
-            }
+            data = _fallback_editor_data(
+                "Copy editor could not parse the model response. Please review the draft manually."
+            )
 
         summary = (data.get("summary") or "").strip() or "No summary generated."
         feedback_data = data.get("feedback_items") or []

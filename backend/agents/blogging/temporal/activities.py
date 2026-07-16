@@ -182,6 +182,7 @@ def _run_stage(
     """
     from temporalio.exceptions import CancelledError
 
+    from blogging.shared.errors import BloggingError
     from blogging.shared.run_pipeline_job import start_pipeline_heartbeat
     from llm_service import LLMRateLimitError, LLMTemporaryError
 
@@ -211,7 +212,15 @@ def _run_stage(
                 e,
             )
             raise
-        _fail_activity(job_id, e, failed_phase=failed_phase)
+        # Terminal transient failure (final attempt / thread mode): record a clear,
+        # user-facing reason so the job store shows a provider-availability problem
+        # rather than a raw 429/transport string that reads like a content failure.
+        # The original error is preserved as the cause for debugging.
+        _fail_activity(
+            job_id,
+            BloggingError(f"LLM provider temporarily unavailable after retries: {e}", cause=e),
+            failed_phase=failed_phase,
+        )
         return fail_dto()
     except Exception as e:
         # The "body must not catch CancelledError" contract is enforced structurally

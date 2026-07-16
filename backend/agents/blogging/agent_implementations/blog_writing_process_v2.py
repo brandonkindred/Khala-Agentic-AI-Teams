@@ -1414,6 +1414,12 @@ def run_draft_stage(
                 # as a terminal DraftError (see temporal.activities._run_stage).
                 raise
             except Exception as e:
+                # A Temporal runtime cancellation can surface as a non-CancelledError
+                # type; let it propagate as cancellation instead of masking it as a
+                # terminal DraftError — matching every other stage's handler (draft
+                # revision, planning, gates, validators).
+                if _is_external_cancellation(e):
+                    raise
                 raise DraftError(
                     f"Initial draft generation failed: {e}", iteration=iteration, cause=e
                 ) from e
@@ -2019,6 +2025,20 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
         # closure is accepted for conciseness; the gates' behavior is covered
         # end-to-end via run_pipeline in test_run_pipeline_gates.py.
         def _fact_check_gate(draft: str):
+            """Run the fact-check gate, capturing (not raising) its outcome.
+
+            Preconditions:
+                - ``draft`` is the current draft text to check.
+            Postconditions:
+                - Returns ``(FactCheckReport, None)`` on success, or ``(None, error)`` on
+                  failure — CAPTURING every failure so ``parallel_map`` runs the sibling
+                  gate to completion instead of fast-failing (see the block comment above).
+                - The captured ``error`` preserves its class: ``BloggingError``,
+                  ``CancelledError``, and transient ``LLMRateLimitError``/``LLMTemporaryError``
+                  pass through unwrapped (for cancellation/Temporal-retry handling); an
+                  external cancellation surfacing as another type is passed through too;
+                  any other exception is wrapped in ``FactCheckError``.
+            """
             # Both gates report progress under BlogPhase.FACT_CHECK — the umbrella phase
             # for this concurrent step — so the two callbacks don't flip the UI phase
             # back and forth between FACT_CHECK and COMPLIANCE while they run together.
@@ -2038,6 +2058,20 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                 return None, FactCheckError(f"Fact check failed: {e}", cause=e)
 
         def _compliance_gate(draft: str, validator_report):
+            """Run the compliance gate, capturing (not raising) its outcome.
+
+            Preconditions:
+                - ``draft`` is the current draft text; ``validator_report`` is the
+                  deterministic validator result (a Pydantic model, or a stand-in that
+                  the ``model_dump`` guard tolerates) that compliance consumes.
+            Postconditions:
+                - Returns ``(ComplianceReport, None)`` on success, or ``(None, error)`` on
+                  failure — capturing every failure (same rationale as ``_fact_check_gate``).
+                - The captured ``error`` preserves its class: ``BloggingError``,
+                  ``CancelledError``, and transient LLM errors pass through unwrapped, an
+                  external cancellation surfacing as another type is passed through, and
+                  any other exception is wrapped in ``ComplianceError``.
+            """
             # Reports progress under BlogPhase.FACT_CHECK too — see _fact_check_gate; the
             # umbrella phase keeps the concurrent gates from flip-flopping the UI phase.
             try:
@@ -2112,6 +2146,16 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
             # *either* gate wins over a transient from the other, which in turn wins over
             # any domain error — a single positional pass could not express that ordering.
             gate_errors = [e for e in (fact_error, compliance_error) if e is not None]
+            # Only one error is raised (by the precedence below), so when BOTH gates
+            # failed, log every error first — otherwise the lower-precedence failure
+            # would be silently discarded and never reach the logs.
+            if len(gate_errors) > 1:
+                logger.error(
+                    "Both gates failed on rewrite iteration %s; raising by precedence, "
+                    "all gate errors: %s",
+                    rewrite_iter + 1,
+                    [f"{type(e).__name__}: {e}" for e in gate_errors],
+                )
             for gate_error in gate_errors:
                 if isinstance(gate_error, CancelledError) or _is_external_cancellation(gate_error):
                     raise gate_error

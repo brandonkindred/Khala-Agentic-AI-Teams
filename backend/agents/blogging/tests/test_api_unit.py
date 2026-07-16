@@ -564,9 +564,19 @@ def test_async_job_pool_is_bounded_and_enqueues(monkeypatch: pytest.MonkeyPatch)
 
     # Don't spin real worker threads; just verify submit enqueues the (target, args) job.
     monkeypatch.setattr(_api_main, "_ensure_async_workers", lambda: None)
-    sentinel = object()
+
+    def sentinel(*_a):
+        return None
+
     _api_main._submit_async_job(sentinel, "job-1", 2)
     assert _api_main._ASYNC_JOB_QUEUE.get_nowait() == (sentinel, ("job-1", 2))
+
+
+def test_submit_async_job_rejects_non_callable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The callable precondition is enforced at submit time, not deferred to a worker."""
+    monkeypatch.setattr(_api_main, "_ensure_async_workers", lambda: None)
+    with pytest.raises(AssertionError):
+        _api_main._submit_async_job(object(), "job-1")
 
 
 def test_async_job_workers_are_daemon(monkeypatch: pytest.MonkeyPatch) -> None:

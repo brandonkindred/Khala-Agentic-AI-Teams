@@ -233,9 +233,9 @@ def test_copy_editor_transient_error_reraises(monkeypatch, kind) -> None:
         agent.run(CopyEditorInput(draft="# d\n\nsome body text here"))
 
 
-def test_copy_editor_unexpected_error_fails_closed(monkeypatch) -> None:
-    """A non-transient, non-JSON LLM/programming error fails closed with a manual-review
-    fallback instead of crashing the draft stage."""
+def test_copy_editor_unexpected_error_degrades_to_fallback(monkeypatch) -> None:
+    """A non-transient, non-JSON LLM/programming error degrades to a manual-review
+    fallback (approved, no feedback) instead of crashing the draft stage."""
     from blog_copy_editor_agent import agent as ce_mod
 
     class _Agent:
@@ -254,6 +254,33 @@ def test_copy_editor_unexpected_error_fails_closed(monkeypatch) -> None:
 
     assert isinstance(result, CopyEditorOutput)
     assert "manually" in result.summary.lower()
-    # No LLM-derived feedback survives the fallback (length injection may still add items,
-    # but none carry an LLM-authored issue about the prose itself).
-    assert isinstance(result.feedback_items, list)
+    # A tooling failure approves so it never drives a pointless no-op rewrite of a
+    # within-length draft — the copy editor is advisory; hard gates run downstream.
+    assert result.approved is True
+    assert result.feedback_items == []
+
+
+def test_copy_editor_json_parse_failure_degrades_to_fallback(monkeypatch) -> None:
+    """When the model never returns parseable JSON, the fallback approves (no no-op rewrite)."""
+    from blog_copy_editor_agent import agent as ce_mod
+
+    from llm_service import LLMJsonParseError
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise LLMJsonParseError("not json")
+
+    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
+    )
+
+    result = agent.run(CopyEditorInput(draft="# d\n\nsome body text here"))
+
+    assert isinstance(result, CopyEditorOutput)
+    assert "manually" in result.summary.lower()
+    assert result.approved is True
+    assert result.feedback_items == []

@@ -363,7 +363,7 @@ def test_run_stage_transient_error_funnels_fail_dto_on_last_attempt(monkeypatch)
     monkeypatch.setattr(
         acts,
         "_fail_activity",
-        lambda job_id, exc, failed_phase: failed.append((job_id, failed_phase)),
+        lambda job_id, exc, failed_phase: failed.append((job_id, exc, failed_phase)),
     )
 
     def body():
@@ -371,7 +371,13 @@ def test_run_stage_transient_error_funnels_fail_dto_on_last_attempt(monkeypatch)
 
     result = acts._run_stage("j1", "gates", lambda: {"status": "FAIL"}, body)
     assert result == {"status": "FAIL"}
-    assert failed == [("j1", "gates")]
+    assert len(failed) == 1
+    job_id, exc, failed_phase = failed[0]
+    assert (job_id, failed_phase) == ("j1", "gates")
+    # The terminal transient failure is recorded with a clear provider-availability
+    # message (not the raw "429"), while the original error is preserved as the cause.
+    assert "temporarily unavailable" in str(exc)
+    assert isinstance(exc.cause, LLMRateLimitError)
 
 
 # ---------------------------------------------------------------------------

@@ -228,13 +228,17 @@ def _ensure_async_workers() -> None:
         _ASYNC_JOB_WORKERS_STARTED = True
 
 
-def _submit_async_job(target: Any, *args: Any) -> None:
+def _submit_async_job(target: Callable[..., Any], *args: Any) -> None:
     """Enqueue a background job for the bounded daemon worker pool (returns immediately).
 
     Preconditions: ``target`` is callable; ``args`` are its positional arguments.
     Postconditions: the job is queued and will run on a worker as soon as one is free
         (submissions beyond ``_ASYNC_JOB_MAX_WORKERS`` in-flight jobs wait in the queue).
     """
+    # Enforce the callable precondition at the boundary rather than letting a
+    # non-callable slip through and only surface as a TypeError when a worker
+    # dequeues it (where the bad item is logged and dropped, obscuring the caller bug).
+    assert callable(target), f"async job target must be callable, got {type(target).__name__}"
     _ensure_async_workers()
     _ASYNC_JOB_QUEUE.put((target, args))
 
