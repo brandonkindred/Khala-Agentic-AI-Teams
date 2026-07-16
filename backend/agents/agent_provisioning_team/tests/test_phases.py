@@ -299,6 +299,74 @@ def test_run_setup_reclaims_reused_orphan_with_no_env_record(tmp_path: Path) -> 
     docker.deprovision.assert_called_once_with("a7")
 
 
+def test_run_setup_clears_own_record_when_register_fails(tmp_path: Path) -> None:
+    """Rollback must clear the record its own failed registration left behind.
+
+    ``register`` can write a complete record and then raise (e.g. on close/flush).
+    Tearing down the container but leaving a ``running`` record would make a
+    retry's early-return short-circuit onto the deleted container, so the record
+    is removed alongside the container.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = MagicMock()
+    env_store.get.return_value = None  # fresh provision, no prior record
+    env_store.register.side_effect = RuntimeError("register boom")
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={"container_id": "c-new", "container_name": "agent-a9"},
+    )
+
+    with pytest.raises(RuntimeError, match="register boom"):
+        run_setup(
+            agent_id="a9",
+            manifest=ToolManifest(),
+            environment_store=env_store,
+            docker_provisioner=docker,
+        )
+
+    docker.deprovision.assert_called_once_with("a9")
+    env_store.remove.assert_called_once_with("a9")
+
+
+def test_run_setup_rollback_survives_ownership_reread_failure(tmp_path: Path) -> None:
+    """A failing ownership re-read must not abort the rollback or mask the error.
+
+    ``EnvironmentStore.get`` can raise (``_read_env_data`` calls ``Path.exists``
+    outside its OSError handler). For a reused container with no pre-check record,
+    a raising re-read must be caught so the rollback still reclaims the container
+    and the original register error still propagates.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = MagicMock()
+    # Pre-check sees no record; the rollback re-read raises (e.g. EACCES).
+    env_store.get.side_effect = [None, OSError("permission denied")]
+    env_store.register.side_effect = RuntimeError("register boom")
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={"container_id": "c-x", "container_name": "agent-a10", "reused": True},
+    )
+
+    with pytest.raises(RuntimeError, match="register boom"):
+        run_setup(
+            agent_id="a10",
+            manifest=ToolManifest(),
+            environment_store=env_store,
+            docker_provisioner=docker,
+        )
+
+    docker.deprovision.assert_called_once_with("a10")
+
+
 def test_run_setup_rollback_swallows_deprovision_error(tmp_path: Path) -> None:
     """The best-effort rollback must not mask the original register failure."""
     from agent_provisioning_team.phases.setup import run_setup
