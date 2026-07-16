@@ -52,20 +52,72 @@ class DocumentationSnapshot(_Snapshot):
 
 
 def restore_setup(raw: Dict[str, Any]) -> SetupSnapshot:
+    """Reconstruct a ``SetupSnapshot`` from a persisted setup-phase result.
+
+    Preconditions:
+        * ``raw`` is a mapping whose fields conform to ``SetupSnapshot`` (the
+          shape produced by the setup phase on a prior run).
+    Postconditions:
+        * Returns a validated ``SetupSnapshot``.
+        * Raises ``pydantic.ValidationError`` when ``raw`` does not conform — no
+          silent coercion.
+    """
     return SetupSnapshot.model_validate(raw)
 
 
 def restore_credentials(raw: Dict[str, Any]) -> CredentialGenerationSnapshot:
+    """Reconstruct a ``CredentialGenerationSnapshot`` from a persisted result.
+
+    Preconditions:
+        * ``raw`` is a mapping whose fields conform to
+          ``CredentialGenerationSnapshot`` (the shape produced by the credential
+          generation phase on a prior run).
+    Postconditions:
+        * Returns a validated ``CredentialGenerationSnapshot``.
+        * Raises ``pydantic.ValidationError`` when ``raw`` does not conform — no
+          silent coercion.
+    """
     return CredentialGenerationSnapshot.model_validate(raw)
 
 
 def restore_account_provisioning(raw: Dict[str, Any]) -> AccountProvisioningSnapshot:
+    """Reconstruct an ``AccountProvisioningSnapshot`` from a persisted result.
+
+    Preconditions:
+        * ``raw`` is a mapping whose fields conform to
+          ``AccountProvisioningSnapshot`` (the shape produced by the account
+          provisioning phase on a prior run).
+    Postconditions:
+        * Returns a validated ``AccountProvisioningSnapshot``.
+        * Raises ``pydantic.ValidationError`` when ``raw`` does not conform — no
+          silent coercion.
+    """
     return AccountProvisioningSnapshot.model_validate(raw)
 
 
 def restore_access_audit(raw: Dict[str, Any]) -> AccessAuditResult:
+    """Reconstruct an ``AccessAuditResult`` from a persisted result.
+
+    Preconditions:
+        * ``raw`` is a mapping whose fields conform to ``AccessAuditResult`` (the
+          shape produced by the access audit phase on a prior run).
+    Postconditions:
+        * Returns a validated ``AccessAuditResult``.
+        * Raises ``pydantic.ValidationError`` when ``raw`` does not conform — no
+          silent coercion.
+    """
     return AccessAuditResult.model_validate(raw)
 
 
 def restore_documentation(raw: Dict[str, Any]) -> DocumentationSnapshot:
+    """Reconstruct a ``DocumentationSnapshot`` from a persisted result.
+
+    Preconditions:
+        * ``raw`` is a mapping whose fields conform to ``DocumentationSnapshot``
+          (the shape produced by the documentation phase on a prior run).
+    Postconditions:
+        * Returns a validated ``DocumentationSnapshot``.
+        * Raises ``pydantic.ValidationError`` when ``raw`` does not conform — no
+          silent coercion.
+    """
     return DocumentationSnapshot.model_validate(raw)
