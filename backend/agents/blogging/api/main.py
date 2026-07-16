@@ -38,6 +38,7 @@ from shared.content_plan import (  # noqa: E402
 )
 from shared.content_profile import (  # noqa: E402
     ContentProfile,
+    LengthPolicy,
     SeriesContext,
     resolve_length_policy,
 )
@@ -464,26 +465,27 @@ class FullPipelineResponse(BaseModel):
     )
 
 
-@app.post(
-    "/full-pipeline",
-    response_model=FullPipelineResponse,
-    summary="Run full blog pipeline with gates",
-    description="Runs planning -> draft -> validators -> compliance -> rewrite loop. Persists all artifacts.",
-)
-def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
-    """Run the full brand-aligned pipeline with artifact persistence and gates."""
-    import sys
-    from pathlib import Path
+def _import_run_pipeline() -> Callable[..., Any]:
+    """Lazily import and return the v2 pipeline orchestrator.
 
-    _blogging_root = Path(__file__).resolve().parent.parent
-    if str(_blogging_root) not in sys.path:
-        sys.path.insert(0, str(_blogging_root))
+    The module-level ``sys.path`` bootstrap (top of this file) already guarantees
+    ``_blogging_root`` is importable before either call site runs, so this only needs
+    to perform the (deliberately lazy, to avoid a heavy import at module load) import.
+    """
     from agent_implementations.blog_writing_process_v2 import run_pipeline
 
-    run_id = str(uuid.uuid4())[:8]
-    work_dir = RUN_ARTIFACTS_BASE / run_id
-    work_dir.mkdir(parents=True, exist_ok=True)
+    return run_pipeline
 
+
+def _prepare_pipeline_input(
+    request: FullPipelineRequest,
+) -> Tuple[ResearchBriefInput, LengthPolicy]:
+    """Build the ``ResearchBriefInput`` and ``LengthPolicy`` shared by both pipeline runners.
+
+    Preconditions: ``request`` is a valid ``FullPipelineRequest``.
+    Postconditions: returns ``(brief_input, length_policy)`` derived purely from
+        ``request`` fields (no filesystem or job-store access).
+    """
     brief_text = request.brief.strip()
     if request.title_concept:
         brief_text = f"{brief_text}. Title concept: {request.title_concept.strip()}"
@@ -495,13 +497,30 @@ def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
         tone_or_purpose=request.tone_or_purpose,
         max_results=request.max_results,
     )
-
     length_policy = resolve_length_policy(
         content_profile=request.content_profile,
         explicit_target_word_count=request.target_word_count,
         length_notes=request.length_notes,
         series_context=request.series_context,
     )
+    return brief_input, length_policy
+
+
+@app.post(
+    "/full-pipeline",
+    response_model=FullPipelineResponse,
+    summary="Run full blog pipeline with gates",
+    description="Runs planning -> draft -> validators -> compliance -> rewrite loop. Persists all artifacts.",
+)
+def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
+    """Run the full brand-aligned pipeline with artifact persistence and gates."""
+    run_pipeline = _import_run_pipeline()
+
+    run_id = str(uuid.uuid4())[:8]
+    work_dir = RUN_ARTIFACTS_BASE / run_id
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    brief_input, length_policy = _prepare_pipeline_input(request)
     try:
         planning_phase_result, draft_result, status = run_pipeline(
             brief_input,
@@ -886,28 +905,12 @@ def _run_pipeline_with_tracking(
         _publish_skip_terminal_event(job_id)
         return
     try:
-        import sys
-        from pathlib import Path
-
-        _blogging_root = Path(__file__).resolve().parent.parent
-        if str(_blogging_root) not in sys.path:
-            sys.path.insert(0, str(_blogging_root))
-        from agent_implementations.blog_writing_process_v2 import run_pipeline
+        run_pipeline = _import_run_pipeline()
 
         work_dir = RUN_ARTIFACTS_BASE / job_id
         work_dir.mkdir(parents=True, exist_ok=True)
 
-        brief_text = request.brief.strip()
-        if request.title_concept:
-            brief_text = f"{brief_text}. Title concept: {request.title_concept.strip()}"
-        audience_str = _format_audience(request.audience)
-
-        brief_input = ResearchBriefInput(
-            brief=brief_text,
-            audience=audience_str or None,
-            tone_or_purpose=request.tone_or_purpose,
-            max_results=request.max_results,
-        )
+        brief_input, length_policy = _prepare_pipeline_input(request)
 
         def job_updater(**kwargs: Any) -> None:
             """Update job status in the job store and broadcast to SSE subscribers."""
@@ -928,12 +931,6 @@ def _run_pipeline_with_tracking(
             start_blog_job(job_id)
         job_updater(work_dir=str(work_dir))
 
-        length_policy = resolve_length_policy(
-            content_profile=request.content_profile,
-            explicit_target_word_count=request.target_word_count,
-            length_notes=request.length_notes,
-            series_context=request.series_context,
-        )
         try:
             planning_phase_result, draft_result, status = run_pipeline(
                 brief_input,
