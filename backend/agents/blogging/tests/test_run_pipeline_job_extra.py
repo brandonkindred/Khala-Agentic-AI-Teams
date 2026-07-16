@@ -9,6 +9,8 @@ import uuid
 from pathlib import Path
 
 import pytest
+from conftest import make_pipeline_doubles as _make_pipeline_doubles
+from conftest import setup_artifacts_root as _setup_artifacts_root
 
 
 @pytest.fixture
@@ -23,41 +25,6 @@ def patched_client(monkeypatch, fake_job_client):
     except ImportError:
         pass
     return fake_job_client
-
-
-def _setup_artifacts_root(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("BLOGGING_RUN_ARTIFACTS_ROOT", str(tmp_path))
-
-
-def _make_pipeline_doubles():
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        PlanningPhaseResult,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
-
-    plan = ContentPlan(
-        overarching_topic="Topic",
-        narrative_flow="Flow",
-        sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
-        title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
-    )
-    ppr = PlanningPhaseResult(
-        content_plan=plan,
-        planning_iterations_used=1,
-        parse_retry_count=0,
-        planning_wall_ms_total=5.0,
-    )
-
-    class _Draft:
-        draft = "# Draft\n\nBody."
-
-    return ppr, _Draft(), "PASS"
 
 
 def test_publish_terminal_swallows_publish_errors(monkeypatch) -> None:

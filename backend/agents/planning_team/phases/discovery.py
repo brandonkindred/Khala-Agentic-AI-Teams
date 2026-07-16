@@ -24,8 +24,12 @@ Given the following client brief and/or spec, extract and structure:
 2. **Opportunity statement**: Why now, what success looks like.
 3. **Target users**: List of user segments or personas (short labels).
 4. **Success criteria**: 3-7 measurable or observable criteria.
+5. **Technology constraints**: Technologies the brief/spec explicitly requires or mandates
+   (languages, frameworks, databases, platforms, cloud/hosting). Include ONLY what is
+   explicitly stated — leave this empty if the input does not name a required technology.
+   Do NOT guess or infer a default stack here.
 
-Keep each section concise. If information is missing, infer reasonable defaults and note them under "Assumptions".
+Keep each section concise. If information is missing, infer reasonable defaults and note them under "Assumptions". (This does not apply to "Technology constraints", which must stay empty unless a technology is explicitly required.)
 
 Input:
 ---
@@ -38,6 +42,7 @@ Respond with JSON only (no markdown fences):
   "opportunity_statement": "...",
   "target_users": ["...", "..."],
   "success_criteria": ["...", "..."],
+  "tech_constraints": ["..."],
   "assumptions": ["..."]
 }}
 """
@@ -64,6 +69,7 @@ def _discovery_map(section: str, llm: Any, idx: int, total: int) -> Optional[Dic
             "opportunity_statement",
             "target_users",
             "success_criteria",
+            "tech_constraints",
             "assumptions",
         ),
     )
@@ -113,8 +119,27 @@ def _discovery_reduce(parts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "opportunity_statement": first_str("opportunity_statement"),
         "target_users": union("target_users"),
         "success_criteria": union("success_criteria"),
+        "tech_constraints": union("tech_constraints"),
         "assumptions": union("assumptions"),
     }
+
+
+def _as_str_list(value: Any) -> list:
+    """Coerce a discovery list field to a clean list of strings.
+
+    Mirrors the multi-section ``_discovery_reduce.union`` filtering so a single-section
+    response that returns ``null``, a non-list, or a list with non-string items cannot
+    propagate a malformed value into ``ClientContext`` (whose list fields are ``List[str]``).
+
+    Preconditions:
+        - ``value`` may be anything (``None``, list, scalar, or a list of mixed types).
+    Postconditions:
+        - Returns a new ``list`` containing only the ``str`` items of ``value`` (empty when
+          ``value`` is not a list); never raises.
+    """
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, str)]
 
 
 def run_discovery(
@@ -122,7 +147,8 @@ def run_discovery(
     llm: Any,
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    Run discovery phase using LLM to extract problem, opportunity, personas, success criteria.
+    Run discovery phase using LLM to extract problem, opportunity, personas, success
+    criteria, and any explicitly-required technology constraints.
 
     The whole brief+spec is digested via section-aware map-reduce (see
     ``planning_team.spec_digest``); no input is truncated.
@@ -141,6 +167,7 @@ def run_discovery(
         "opportunity_statement": "",
         "target_users": [],
         "success_criteria": [],
+        "tech_constraints": [],
         "assumptions": ["LLM extraction failed; using raw input."],
     }
     data = map_reduce(
@@ -157,15 +184,22 @@ def run_discovery(
         if hasattr(client_context, "model_dump")
         else (client_context or {})
     )
+    # Normalize the list-typed fields defensively. The multi-section reduce already
+    # returns clean string lists (via ``union``), but the single-section path returns the
+    # raw LLM dict, where a field may be ``null`` or a non-list (the LLM is asked to leave
+    # ``tech_constraints`` empty when none apply, so ``null`` is a realistic reply). Passing
+    # such a value straight into ``ClientContext`` would raise ``ValidationError`` and fail
+    # the whole planning workflow.
     assumptions = list(prev.get("assumptions") or [])
-    assumptions.extend(data.get("assumptions", []))
+    assumptions.extend(_as_str_list(data.get("assumptions")))
 
     merged = {
         **prev,
         "problem_summary": data.get("problem_summary"),
         "opportunity_statement": data.get("opportunity_statement"),
-        "target_users": data.get("target_users", []),
-        "success_criteria": data.get("success_criteria", []),
+        "target_users": _as_str_list(data.get("target_users")),
+        "success_criteria": _as_str_list(data.get("success_criteria")),
+        "tech_constraints": _as_str_list(data.get("tech_constraints")),
         "assumptions": assumptions,
     }
     updated_client = ClientContext(**merged)
