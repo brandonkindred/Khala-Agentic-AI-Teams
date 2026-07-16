@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,6 +15,44 @@ from strands.types.content import Message as StrandsMessage
 from strands.types.content import SystemContentBlock
 from strands.types.streaming import StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
+
+
+def setup_artifacts_root(monkeypatch, tmp_path: Path) -> None:
+    """Point ``BLOGGING_RUN_ARTIFACTS_ROOT`` at a test-owned temp directory."""
+    monkeypatch.setenv("BLOGGING_RUN_ARTIFACTS_ROOT", str(tmp_path))
+
+
+def make_pipeline_doubles():
+    """Build a ``(PlanningPhaseResult, draft, status)`` triple for a passing pipeline run."""
+    from shared.content_plan import (
+        ContentPlan,
+        ContentPlanSection,
+        PlanningPhaseResult,
+        RequirementsAnalysis,
+        TitleCandidate,
+    )
+
+    plan = ContentPlan(
+        overarching_topic="Topic",
+        narrative_flow="Flow",
+        sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
+        title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
+        requirements_analysis=RequirementsAnalysis(
+            plan_acceptable=True, scope_feasible=True, research_gaps=[]
+        ),
+    )
+    ppr = PlanningPhaseResult(
+        content_plan=plan,
+        planning_iterations_used=1,
+        parse_retry_count=0,
+        planning_wall_ms_total=5.0,
+    )
+
+    class _Draft:
+        draft = "# Draft\n\nBody."
+
+    return ppr, _Draft(), "PASS"
+
 
 # Job-store helpers captured by reference inside ``api/main`` at import time. The
 # ``patched_client`` fixture rebinds each to the fake-backed implementation so
