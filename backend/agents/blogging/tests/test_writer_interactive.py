@@ -13,15 +13,9 @@ import json
 
 
 def _make_agent():
-    from blog_writer_agent.agent import BlogWriterAgent
+    from conftest import make_writer_agent
 
-    from llm_service import DummyLLMClient
-
-    return BlogWriterAgent(
-        llm_client=DummyLLMClient(),
-        writing_style_guide_content="Style",
-        brand_spec_content="Brand",
-    )
+    return make_writer_agent()
 
 
 # ---------------------------------------------------------------------------

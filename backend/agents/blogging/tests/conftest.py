@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterable
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 import pytest
 from strands.models.model import Model
@@ -14,6 +15,64 @@ from strands.types.content import Message as StrandsMessage
 from strands.types.content import SystemContentBlock
 from strands.types.streaming import StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
+
+
+def setup_artifacts_root(monkeypatch, tmp_path: Path) -> None:
+    """Point ``BLOGGING_RUN_ARTIFACTS_ROOT`` at a test-owned temp directory.
+
+    Preconditions:
+        - ``tmp_path`` is a directory the calling test owns for its duration.
+    Postconditions:
+        - ``BLOGGING_RUN_ARTIFACTS_ROOT`` is set to ``str(tmp_path)`` for the test; monkeypatch
+          restores the prior environment on teardown.
+    """
+    monkeypatch.setenv("BLOGGING_RUN_ARTIFACTS_ROOT", str(tmp_path))
+
+
+def patch_job_event_bus_publish(monkeypatch, publish_fn: Callable[..., Any]) -> None:
+    """Patch ``job_event_bus.publish`` on both the ``shared`` and ``blogging.shared`` module
+    paths, so a call through either import layout reaches ``publish_fn``.
+
+    Preconditions:
+        - ``publish_fn`` matches ``job_event_bus.publish``'s call signature
+          (``job_id, payload, event_type="update"``).
+    Postconditions:
+        - ``shared.job_event_bus.publish`` is patched to ``publish_fn``; if
+          ``blogging.shared.job_event_bus`` is also importable (the dual-layout case), it is
+          patched too.
+    """
+    try:
+        from blogging.shared import job_event_bus as bus_b
+
+        monkeypatch.setattr(bus_b, "publish", publish_fn)
+    except ImportError:
+        pass
+    from shared import job_event_bus as bus_s
+
+    monkeypatch.setattr(bus_s, "publish", publish_fn)
+
+
+def make_writer_agent(
+    *, writing_style_guide_content: str = "Style", brand_spec_content: str = "Brand"
+) -> Any:
+    """Build a BlogWriterAgent wired to DummyLLMClient with minimal style/brand guidelines.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns a ``BlogWriterAgent`` constructed with ``DummyLLMClient()`` and the given
+          (or default) style/brand content.
+    """
+    from blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import DummyLLMClient
+
+    return BlogWriterAgent(
+        llm_client=DummyLLMClient(),
+        writing_style_guide_content=writing_style_guide_content,
+        brand_spec_content=brand_spec_content,
+    )
+
 
 # Job-store helpers captured by reference inside ``api/main`` at import time. The
 # ``patched_client`` fixture rebinds each to the fake-backed implementation so

@@ -112,9 +112,8 @@ def make_pipeline_doubles(
     title: str = "My Title",
     probability: float = 0.7,
     planning_wall_ms_total: float = 5.0,
-    include_status: bool = True,
-) -> tuple[PlanningPhaseResult, Any] | tuple[PlanningPhaseResult, Any, str]:
-    """Build (planning_phase_result, draft_double[, status]) doubles for pipeline-job tests.
+) -> tuple[PlanningPhaseResult, Any, str]:
+    """Build a (planning_phase_result, draft_double, status) triple for pipeline-job tests.
 
     Centralizes the "Topic"/"Flow"/single-"Intro"-section plan plus a minimal draft stub
     previously copy-pasted as local ``_make_pipeline_doubles``/``_pipeline_doubles`` helpers
@@ -123,8 +122,8 @@ def make_pipeline_doubles(
     Preconditions:
         - ``probability`` is a valid success probability for a ``TitleCandidate``.
     Postconditions:
-        - Returns a 3-tuple ``(ppr, draft, "PASS")`` when ``include_status`` is true (default);
-          returns a 2-tuple ``(ppr, draft)`` when ``include_status`` is false. ``draft`` always
+        - Always returns a 3-tuple ``(ppr, draft, "PASS")``; callers that don't need the
+          status unpack it as ``ppr, draft, _ = make_pipeline_doubles()``. ``draft`` always
           exposes a ``.draft`` attribute with placeholder markdown body text.
     """
     plan = make_content_plan(
@@ -138,6 +137,4 @@ def make_pipeline_doubles(
     class _Draft:
         draft = "# Draft\n\nBody."
 
-    if include_status:
-        return ppr, _Draft(), "PASS"
-    return ppr, _Draft()
+    return ppr, _Draft(), "PASS"

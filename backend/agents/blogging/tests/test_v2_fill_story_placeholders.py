@@ -8,6 +8,8 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from blog_writer_agent.models import WriterOutput
+from ghost_writer_agent.models import StoryElicitationResult
 
 
 def _plan():
@@ -20,6 +22,42 @@ def _plan():
         sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
     )
+
+
+def _make_stub_ghost(
+    *,
+    narrative: str | None = None,
+    skipped: bool = False,
+    rounds_used: int = 1,
+    raises: bool = False,
+):
+    """Build a GhostWriterElicitationAgent stand-in returning a canned StoryElicitationResult.
+
+    Pass ``raises=True`` for the "must not be called" case (the cancel-check-breaks-first tests).
+    """
+
+    class _StubGhost:
+        def __init__(self, *a, **kw):
+            pass
+
+        def conduct_interview(self, gap, **kw):
+            if raises:
+                raise AssertionError("should not be called")
+            return StoryElicitationResult(
+                gap=gap, narrative=narrative, skipped=skipped, rounds_used=rounds_used
+            )
+
+    return _StubGhost
+
+
+def _make_stub_draft_agent(draft_text: str):
+    """Build a draft_agent stand-in whose .run(...) always returns ``draft_text``."""
+
+    class _StubAgent:
+        def run(self, *a, **kw):
+            return WriterOutput(draft=draft_text)
+
+    return _StubAgent
 
 
 def test_fill_story_placeholders_no_placeholders_returns_input(monkeypatch) -> None:
@@ -47,8 +85,6 @@ def test_fill_story_placeholders_user_skips_all(
 ) -> None:
     """User skips all placeholders → re-draft path with skip instruction."""
     import agent_implementations.blog_writing_process_v2 as v2
-    from blog_writer_agent.models import WriterOutput
-    from ghost_writer_agent.models import StoryElicitationResult
     from shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
@@ -57,19 +93,7 @@ def test_fill_story_placeholders_user_skips_all(
     # Stub GhostWriterElicitationAgent.conduct_interview to return skipped
     import ghost_writer_agent as gw
 
-    class _StubGhost:
-        def __init__(self, *a, **kw):
-            pass
-
-        def conduct_interview(self, gap, **kw):
-            return StoryElicitationResult(gap=gap, narrative=None, skipped=True, rounds_used=1)
-
-    monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _StubGhost)
-
-    # Stub draft_agent.run to return the redraft
-    class _StubAgent:
-        def run(self, draft_input, **kw):
-            return WriterOutput(draft="# Redraft without stories\nBody.")
+    monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _make_stub_ghost(skipped=True))
 
     out_draft, out_stories = v2._fill_story_placeholders(
         draft_text="# Draft\n[Author: add a real story]\nBody.",
@@ -78,7 +102,7 @@ def test_fill_story_placeholders_user_skips_all(
         job_id=job_id,
         job_updater=lambda **kw: None,
         elicited_stories_text=None,
-        draft_agent=_StubAgent(),
+        draft_agent=_make_stub_draft_agent("# Redraft without stories\nBody.")(),
         draft_input_kwargs={"content_plan": _plan()},
         work_dir=tmp_path,
         iteration=1,
@@ -92,8 +116,6 @@ def test_fill_story_placeholders_user_provides_narrative(
 ) -> None:
     """User provides a story → narrative collected and re-drafted."""
     import agent_implementations.blog_writing_process_v2 as v2
-    from blog_writer_agent.models import WriterOutput
-    from ghost_writer_agent.models import StoryElicitationResult
     from shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
@@ -101,23 +123,11 @@ def test_fill_story_placeholders_user_provides_narrative(
 
     import ghost_writer_agent as gw
 
-    class _StubGhost:
-        def __init__(self, *a, **kw):
-            pass
-
-        def conduct_interview(self, gap, **kw):
-            return StoryElicitationResult(
-                gap=gap,
-                narrative="I once debugged a production outage.",
-                skipped=False,
-                rounds_used=2,
-            )
-
-    monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _StubGhost)
-
-    class _StubAgent:
-        def run(self, draft_input, **kw):
-            return WriterOutput(draft="# Redraft with stories\nNarrative incorporated.")
+    monkeypatch.setattr(
+        gw,
+        "GhostWriterElicitationAgent",
+        _make_stub_ghost(narrative="I once debugged a production outage.", rounds_used=2),
+    )
 
     out_draft, out_stories = v2._fill_story_placeholders(
         draft_text="# Draft\n[Author: a debug story]\nBody.",
@@ -126,7 +136,7 @@ def test_fill_story_placeholders_user_provides_narrative(
         job_id=job_id,
         job_updater=lambda **kw: None,
         elicited_stories_text=None,
-        draft_agent=_StubAgent(),
+        draft_agent=_make_stub_draft_agent("# Redraft with stories\nNarrative incorporated.")(),
         draft_input_kwargs={"content_plan": _plan()},
         work_dir=tmp_path,
         iteration=1,
@@ -140,7 +150,6 @@ def test_fill_story_placeholders_redraft_fails_keeps_original(
 ) -> None:
     """When re-draft raises, keep original draft."""
     import agent_implementations.blog_writing_process_v2 as v2
-    from ghost_writer_agent.models import StoryElicitationResult
     from shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
@@ -148,19 +157,7 @@ def test_fill_story_placeholders_redraft_fails_keeps_original(
 
     import ghost_writer_agent as gw
 
-    class _StubGhost:
-        def __init__(self, *a, **kw):
-            pass
-
-        def conduct_interview(self, gap, **kw):
-            return StoryElicitationResult(
-                gap=gap,
-                narrative="A story.",
-                skipped=False,
-                rounds_used=1,
-            )
-
-    monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _StubGhost)
+    monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _make_stub_ghost(narrative="A story."))
 
     class _Boom:
         def run(self, *a, **kw):
@@ -187,7 +184,6 @@ def test_fill_story_placeholders_story_bank_save_cancellation_propagates(
     """A Temporal cancellation raised from the story-bank save must propagate,
     not be swallowed by the non-fatal save guard."""
     import agent_implementations.blog_writing_process_v2 as v2
-    from ghost_writer_agent.models import StoryElicitationResult
     from shared import blog_job_store as bjs
     from shared import story_bank
     from temporalio.exceptions import CancelledError
@@ -197,30 +193,14 @@ def test_fill_story_placeholders_story_bank_save_cancellation_propagates(
 
     import ghost_writer_agent as gw
 
-    class _StubGhost:
-        def __init__(self, *a, **kw):
-            pass
-
-        def conduct_interview(self, gap, **kw):
-            return StoryElicitationResult(
-                gap=gap,
-                narrative="A story worth saving.",
-                skipped=False,
-                rounds_used=1,
-            )
-
-    monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _StubGhost)
+    monkeypatch.setattr(
+        gw, "GhostWriterElicitationAgent", _make_stub_ghost(narrative="A story worth saving.")
+    )
 
     def _cancelling_save(**kw):
         raise CancelledError("cancelled")
 
     monkeypatch.setattr(story_bank, "save_story", _cancelling_save)
-
-    class _StubAgent:
-        def run(self, *a, **kw):
-            from blog_writer_agent.models import WriterOutput
-
-            return WriterOutput(draft="# Should not get here")
 
     with pytest.raises(CancelledError):
         v2._fill_story_placeholders(
@@ -230,7 +210,7 @@ def test_fill_story_placeholders_story_bank_save_cancellation_propagates(
             job_id=job_id,
             job_updater=lambda **kw: None,
             elicited_stories_text=None,
-            draft_agent=_StubAgent(),
+            draft_agent=_make_stub_draft_agent("# Should not get here")(),
             draft_input_kwargs={"content_plan": _plan()},
             work_dir=tmp_path,
             iteration=1,
@@ -254,20 +234,7 @@ def test_fill_story_placeholders_cancelled_break(
     # Even though the ghost writer would be invoked, the cancel check breaks first
     import ghost_writer_agent as gw
 
-    class _StubGhost:
-        def __init__(self, *a, **kw):
-            pass
-
-        def conduct_interview(self, gap, **kw):
-            raise AssertionError("should not be called")
-
-    monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _StubGhost)
-
-    class _StubAgent:
-        def run(self, *a, **kw):
-            from blog_writer_agent.models import WriterOutput
-
-            return WriterOutput(draft="# Should not get here")
+    monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _make_stub_ghost(raises=True))
 
     out_draft, _ = v2._fill_story_placeholders(
         draft_text="# Draft\n[Author: a story]\nBody.",
@@ -276,7 +243,7 @@ def test_fill_story_placeholders_cancelled_break(
         job_id=job_id,
         job_updater=lambda **kw: None,
         elicited_stories_text=None,
-        draft_agent=_StubAgent(),
+        draft_agent=_make_stub_draft_agent("# Should not get here")(),
         draft_input_kwargs={"content_plan": _plan()},
         work_dir=tmp_path,
         iteration=1,

@@ -385,11 +385,11 @@ def test_run_stage_transient_error_funnels_fail_dto_on_last_attempt(monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-def _run_workflow(monkeypatch, statuses, patched=True):
+def _run_workflow(monkeypatch, statuses, is_patched=True):
     """Drive BlogFullPipelineWorkflow.run with a stubbed execute_activity.
 
     ``statuses`` maps activity function name -> DTO returned by that activity;
-    ``patched`` is what the stubbed ``workflow.patched`` reports (False replays the
+    ``is_patched`` is what the stubbed ``workflow.patched`` reports (False replays the
     pre-decomposition history path). Returns the ordered activity names scheduled.
     """
     import asyncio
@@ -404,7 +404,7 @@ def _run_workflow(monkeypatch, statuses, patched=True):
         return statuses.get(name, {})
 
     monkeypatch.setattr(wf.workflow, "execute_activity", fake_execute)
-    monkeypatch.setattr(wf.workflow, "patched", lambda _id: patched)
+    monkeypatch.setattr(wf.workflow, "patched", lambda _id: is_patched)
     asyncio.run(wf.BlogFullPipelineWorkflow().run("j1", {"brief": "x"}))
     return calls
 
@@ -474,7 +474,7 @@ def test_workflow_finalizes_on_needs_human_review(monkeypatch) -> None:
 
 def test_workflow_unpatched_replay_runs_legacy_monolith(monkeypatch) -> None:
     """Pre-decomposition histories replay the single-activity path deterministically."""
-    calls = _run_workflow(monkeypatch, {"run_full_pipeline_activity": None}, patched=False)
+    calls = _run_workflow(monkeypatch, {"run_full_pipeline_activity": None}, is_patched=False)
     assert calls == ["run_full_pipeline_activity"]
 
 

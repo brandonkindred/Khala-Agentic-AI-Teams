@@ -13,9 +13,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-
-def _setup_artifacts_root(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("BLOGGING_RUN_ARTIFACTS_ROOT", str(tmp_path))
+from conftest import setup_artifacts_root as _setup_artifacts_root
 
 
 def _make_pipeline_doubles():

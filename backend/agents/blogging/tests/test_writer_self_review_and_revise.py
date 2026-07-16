@@ -13,14 +13,10 @@ import json
 
 
 def _make_agent_with_guidelines():
-    from blog_writer_agent.agent import BlogWriterAgent
+    from conftest import make_writer_agent
 
-    from llm_service import DummyLLMClient
-
-    return BlogWriterAgent(
-        llm_client=DummyLLMClient(),
-        writing_style_guide_content="Style Guide",
-        brand_spec_content="Brand Spec",
+    return make_writer_agent(
+        writing_style_guide_content="Style Guide", brand_spec_content="Brand Spec"
     )
 
 

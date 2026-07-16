@@ -12,6 +12,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from conftest import patch_job_event_bus_publish
 
 # ---------------------------------------------------------------------------
 # build_brief_input
@@ -92,16 +93,7 @@ def test_make_job_updater_writes_store_and_publishes(
     def fake_publish(jid, payload, event_type="update"):
         published.append((event_type, dict(payload)))
 
-    # Patch both module objects (distinct in this layout), like the other bus tests.
-    try:
-        from blogging.shared import job_event_bus as bus_b
-
-        monkeypatch.setattr(bus_b, "publish", fake_publish)
-    except ImportError:
-        pass
-    from shared import job_event_bus as bus_s
-
-    monkeypatch.setattr(bus_s, "publish", fake_publish)
+    patch_job_event_bus_publish(monkeypatch, fake_publish)
 
     updater = rpj.make_job_updater(job_id)
     updater(status_text="working", progress=0.5)
@@ -195,7 +187,8 @@ def test_mark_job_cancelled_sets_status_and_returns_true(
 def _pipeline_doubles():
     from _content_plan_test_utils import make_pipeline_doubles
 
-    return make_pipeline_doubles(include_status=False)
+    ppr, draft, _ = make_pipeline_doubles()
+    return ppr, draft
 
 
 def test_finalize_blog_job_pass_completes(monkeypatch, patched_blog_job_store_client) -> None:

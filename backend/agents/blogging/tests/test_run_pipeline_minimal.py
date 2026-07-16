@@ -11,6 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from blog_copy_editor_agent.models import CopyEditorOutput
+from blog_writer_agent.models import WriterOutput
 
 
 def _make_plan():
@@ -19,46 +21,47 @@ def _make_plan():
     return make_minimal_planning_phase_result()
 
 
+class _StubWriter:
+    """A BlogWriterAgent stand-in returning canned, always-approvable output."""
+
+    def __init__(self, *a, **kw):
+        pass
+
+    def run(self, *a, **kw):
+        return WriterOutput(draft="# Draft\n\nBody.")
+
+    def revise(self, *a, **kw):
+        return WriterOutput(draft="# Revised\n\nBody.")
+
+    def revise_from_user_feedback(self, *a, **kw):
+        return WriterOutput(draft="# Revised\n\nBody.")
+
+    def identify_uncertainty_questions(self, *a, **kw):
+        return []
+
+    def analyze_user_feedback_for_guideline_updates(self, *a, **kw):
+        return []
+
+    def generate_escalation_summary(self, *a, **kw):
+        return ""
+
+
+class _StubEditor:
+    """A BlogCopyEditorAgent stand-in that always approves on the first pass."""
+
+    def __init__(self, *a, **kw):
+        pass
+
+    def run(self, *a, **kw):
+        return CopyEditorOutput(approved=True, summary="ok", feedback_items=[])
+
+
 def test_run_pipeline_no_gates_no_job(monkeypatch, tmp_path: Path) -> None:
     """Smallest possible orchestration: planning + draft, no gates, no job_id."""
     import agent_implementations.blog_writing_process_v2 as v2
 
     # Stub heavy steps:
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
-
-    from blog_writer_agent.models import WriterOutput
-
-    class _StubWriter:
-        def __init__(self, *a, **kw):
-            pass
-
-        def run(self, *a, **kw):
-            return WriterOutput(draft="# Draft\n\nBody.")
-
-        def revise(self, *a, **kw):
-            return WriterOutput(draft="# Revised\n\nBody.")
-
-        def revise_from_user_feedback(self, *a, **kw):
-            return WriterOutput(draft="# Revised\n\nBody.")
-
-        def identify_uncertainty_questions(self, *a, **kw):
-            return []
-
-        def analyze_user_feedback_for_guideline_updates(self, *a, **kw):
-            return []
-
-        def generate_escalation_summary(self, *a, **kw):
-            return "stuck"
-
-    from blog_copy_editor_agent.models import CopyEditorOutput
-
-    class _StubEditor:
-        def __init__(self, *a, **kw):
-            pass
-
-        def run(self, *a, **kw):
-            return CopyEditorOutput(approved=True, summary="ok", feedback_items=[])
-
     monkeypatch.setattr(v2, "BlogWriterAgent", _StubWriter)
     monkeypatch.setattr(v2, "BlogCopyEditorAgent", _StubEditor)
 
@@ -86,40 +89,6 @@ def test_run_pipeline_no_gates_no_workdir(monkeypatch) -> None:
     import agent_implementations.blog_writing_process_v2 as v2
 
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
-
-    from blog_writer_agent.models import WriterOutput
-
-    class _StubWriter:
-        def __init__(self, *a, **kw):
-            pass
-
-        def run(self, *a, **kw):
-            return WriterOutput(draft="# Draft")
-
-        def revise(self, *a, **kw):
-            return WriterOutput(draft="# Draft")
-
-        def revise_from_user_feedback(self, *a, **kw):
-            return WriterOutput(draft="# Draft")
-
-        def identify_uncertainty_questions(self, *a, **kw):
-            return []
-
-        def analyze_user_feedback_for_guideline_updates(self, *a, **kw):
-            return []
-
-        def generate_escalation_summary(self, *a, **kw):
-            return ""
-
-    from blog_copy_editor_agent.models import CopyEditorOutput
-
-    class _StubEditor:
-        def __init__(self, *a, **kw):
-            pass
-
-        def run(self, *a, **kw):
-            return CopyEditorOutput(approved=True, summary="ok", feedback_items=[])
-
     monkeypatch.setattr(v2, "BlogWriterAgent", _StubWriter)
     monkeypatch.setattr(v2, "BlogCopyEditorAgent", _StubEditor)
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
@@ -163,33 +132,9 @@ def test_run_pipeline_copy_editor_stalls_then_accepts(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
 
-    from blog_writer_agent.models import WriterOutput
+    from blog_copy_editor_agent.models import FeedbackItem
 
-    class _StubWriter:
-        def __init__(self, *a, **kw):
-            pass
-
-        def run(self, *a, **kw):
-            return WriterOutput(draft="# Draft\n\nBody.")
-
-        def revise(self, *a, **kw):
-            return WriterOutput(draft="# Revised\n\nBody.")
-
-        def revise_from_user_feedback(self, *a, **kw):
-            return WriterOutput(draft="# Revised\n\nBody.")
-
-        def identify_uncertainty_questions(self, *a, **kw):
-            return []
-
-        def analyze_user_feedback_for_guideline_updates(self, *a, **kw):
-            return []
-
-        def generate_escalation_summary(self, *a, **kw):
-            return ""
-
-    from blog_copy_editor_agent.models import CopyEditorOutput, FeedbackItem
-
-    class _StubEditor:
+    class _StubEditorNeverApproves:
         def __init__(self, *a, **kw):
             pass
 
@@ -208,7 +153,7 @@ def test_run_pipeline_copy_editor_stalls_then_accepts(monkeypatch, tmp_path: Pat
             )
 
     monkeypatch.setattr(v2, "BlogWriterAgent", _StubWriter)
-    monkeypatch.setattr(v2, "BlogCopyEditorAgent", _StubEditor)
+    monkeypatch.setattr(v2, "BlogCopyEditorAgent", _StubEditorNeverApproves)
 
     from blog_research_agent.models import ResearchBriefInput
 

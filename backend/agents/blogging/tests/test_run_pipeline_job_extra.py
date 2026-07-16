@@ -8,9 +8,8 @@ import threading
 import uuid
 from pathlib import Path
 
-
-def _setup_artifacts_root(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("BLOGGING_RUN_ARTIFACTS_ROOT", str(tmp_path))
+from conftest import patch_job_event_bus_publish
+from conftest import setup_artifacts_root as _setup_artifacts_root
 
 
 def _make_pipeline_doubles():
@@ -77,15 +76,7 @@ def test_publish_publishes_via_job_event_bus(
     def fake_publish(job_id, payload, event_type="update"):
         seen.append((event_type, dict(payload)))
 
-    try:
-        from blogging.shared import job_event_bus as bus_b
-
-        monkeypatch.setattr(bus_b, "publish", fake_publish)
-    except ImportError:
-        pass
-    from shared import job_event_bus as bus_s
-
-    monkeypatch.setattr(bus_s, "publish", fake_publish)
+    patch_job_event_bus_publish(monkeypatch, fake_publish)
 
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(
@@ -115,17 +106,7 @@ def test_job_updater_swallows_publish_exception(
         boomed.append("publish")
         raise RuntimeError("event bus down")
 
-    # Patch BOTH module objects: production resolves blogging.shared.job_event_bus
-    # first (distinct from the sibling shared.job_event_bus in this layout).
-    try:
-        from blogging.shared import job_event_bus as bus_b
-
-        monkeypatch.setattr(bus_b, "publish", boom)
-    except ImportError:
-        pass
-    from shared import job_event_bus as bus_s
-
-    monkeypatch.setattr(bus_s, "publish", boom)
+    patch_job_event_bus_publish(monkeypatch, boom)
 
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(
