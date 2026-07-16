@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .path_safety import candidate_paths, safe_path_component
+
 
 def default_environments_dir() -> Path:
     """Resolve the durable on-disk environment registry directory.
@@ -42,6 +44,7 @@ def legacy_environments_dirs() -> List[Path]:
         Path(".agent_cache") / "provisioning_environments",
         root / "provisioning_environments",
     ]
+
 
 _lock = threading.Lock()
 
@@ -161,18 +164,32 @@ class EnvironmentStore:
     """
 
     def __init__(self, storage_dir: Optional[Path] = None) -> None:
-        self.storage_dir = Path(storage_dir) if storage_dir is not None else default_environments_dir()
+        self.storage_dir = (
+            Path(storage_dir) if storage_dir is not None else default_environments_dir()
+        )
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
     def _env_file(self, agent_id: str) -> Path:
-        """Get the environment file path for an agent in the primary store."""
-        return self.storage_dir / f"{agent_id}.json"
+        """Return the environment file path for ``agent_id`` in the primary store.
+
+        Raises ``ValueError`` (via :func:`safe_path_component`) if ``agent_id`` is
+        not a safe filename component. This is the store's single validation
+        chokepoint: the write path calls it directly (``_write_env_data``) and the
+        read/remove path reaches it through ``_env_file_candidates``, so every
+        code path that turns ``agent_id`` into a path is guarded here exactly
+        once. The returned path is always strictly inside ``storage_dir``.
+        """
+        return self.storage_dir / f"{safe_path_component(agent_id, kind='agent_id')}.json"
 
     def _env_file_candidates(self, agent_id: str) -> List[Path]:
-        """Primary path first, then legacy locations from before the AGENT_CACHE move."""
-        return [self._env_file(agent_id)] + [
-            legacy / f"{agent_id}.json" for legacy in legacy_environments_dirs()
-        ]
+        """Primary path first, then legacy locations from before the AGENT_CACHE move.
+
+        The primary path comes from the guarded :meth:`_env_file`; each legacy
+        candidate reuses that validated filename via :func:`candidate_paths`, so
+        the traversal guard runs once (in :meth:`_env_file`) and every candidate
+        is derived from it.
+        """
+        return candidate_paths(self._env_file(agent_id), legacy_environments_dirs())
 
     def _read_env_data(self, agent_id: str) -> tuple[Optional[Dict[str, Any]], Optional[Path]]:
         """Load environment JSON from the primary or a legacy path.
@@ -197,7 +214,9 @@ class EnvironmentStore:
             return data, path
         return None, None
 
-    def _write_env_data(self, agent_id: str, data: Dict[str, Any], source: Optional[Path] = None) -> None:
+    def _write_env_data(
+        self, agent_id: str, data: Dict[str, Any], source: Optional[Path] = None
+    ) -> None:
         """Persist environment JSON to the primary store, dropping a legacy copy."""
         primary = self._env_file(agent_id)
         primary.parent.mkdir(parents=True, exist_ok=True)
@@ -209,12 +228,15 @@ class EnvironmentStore:
         """Register (or overwrite) an environment record.
 
         Preconditions:
+            * ``env_info`` is not ``None``.
             * ``env_info.agent_id`` is non-empty.
         Postconditions:
             * ``env_info`` is serialized to the primary store, replacing any
               prior record for the same ``agent_id``.
             * Returns ``None``.
         """
+        if env_info is None:
+            raise ValueError("env_info must not be None")
         with _lock:
             self._write_env_data(env_info.agent_id, env_info.to_dict())
 

@@ -74,6 +74,12 @@ def test_environment_store_register_get_remove(tmp_path: Path) -> None:
     assert store.get("a1") is None
 
 
+def test_environment_store_register_rejects_none(tmp_path: Path) -> None:
+    store = EnvironmentStore(storage_dir=tmp_path)
+    with pytest.raises(ValueError, match="env_info must not be None"):
+        store.register(None)
+
+
 def test_environment_store_update_status(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
 
@@ -254,6 +260,106 @@ def test_environment_store_remove_clears_legacy_copy(tmp_path: Path, monkeypatch
     store = EnvironmentStore(storage_dir=tmp_path / "primary")
     assert store.remove("legacy-a2") is True
     assert not (legacy_dir / "legacy-a2.json").exists()
+
+
+# Malicious identifiers that must never be turned into a filesystem path.
+_TRAVERSAL_IDS = ["../../etc/passwd", "a/b", "..\\..\\x", "/etc/passwd", "..", "."]
+
+
+@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
+def test_environment_store_rejects_path_traversal_agent_id(tmp_path: Path, bad_id: str) -> None:
+    """A traversal agent_id raises on every read/write path and writes nothing."""
+    store = EnvironmentStore(storage_dir=tmp_path / "store")
+
+    with pytest.raises(ValueError):
+        store.register(
+            StoreEnvInfo(agent_id=bad_id, container_id="c", container_name="c", workspace_path="/w")
+        )
+    with pytest.raises(ValueError):
+        store.get(bad_id)
+    with pytest.raises(ValueError):
+        store.exists(bad_id)
+    with pytest.raises(ValueError):
+        store.update_status(bad_id, "ready")
+    with pytest.raises(ValueError):
+        store.add_tool(bad_id, "pg")
+    with pytest.raises(ValueError):
+        store.remove(bad_id)
+
+    # The guard fires before any filesystem write, so no env file lands inside
+    # or outside the store directory.
+    assert list(tmp_path.rglob("*.json")) == []
+
+
+def test_environment_store_allows_dotted_agent_id(tmp_path: Path) -> None:
+    """A legitimate id containing a dot (e.g. ``blog.writer``) still round-trips."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(
+            agent_id="blog.writer", container_id="c1", container_name="c1", workspace_path="/w"
+        )
+    )
+    assert store.get("blog.writer").container_id == "c1"
+    assert store.exists("blog.writer") is True
+
+
+# ---------------------------------------------------------------------------
+# credential_store — path-traversal guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
+def test_credential_store_rejects_path_traversal_agent_id(tmp_path: Path, bad_id: str) -> None:
+    """A traversal agent_id can neither read nor overwrite encrypted secrets."""
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    store = CredentialStore(storage_dir=tmp_path / "store")
+
+    with pytest.raises(ValueError):
+        store.store_credentials(bad_id, "pg", {"user": "x"})
+    with pytest.raises(ValueError):
+        store.get_credentials(bad_id)
+    with pytest.raises(ValueError):
+        store.delete_credentials(bad_id)
+
+    # No encrypted credential file escaped the store directory.
+    assert list(tmp_path.rglob("*.enc")) == []
+
+
+def test_credential_store_allows_dotted_agent_id(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    store = CredentialStore(storage_dir=tmp_path)
+    store.store_credentials("blog.writer", "pg", {"user": "x"})
+    assert store.get_credentials("blog.writer") == {"pg": {"user": "x"}}
+
+
+def test_stores_accept_max_length_identifier(tmp_path: Path) -> None:
+    """A max-length identifier round-trips: the generated filename (plus the
+    provisioner tempfile decoration) stays within the filesystem name limit, so
+    no store raises ENAMETOOLONG.
+    """
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+    from agent_provisioning_team.shared.path_safety import _MAX_COMPONENT_LEN
+    from agent_provisioning_team.shared.provisioner_state import ProvisionerStateStore
+
+    long_id = "a" * _MAX_COMPONENT_LEN
+
+    env = EnvironmentStore(storage_dir=tmp_path / "env")
+    env.register(
+        StoreEnvInfo(agent_id=long_id, container_id="c", container_name="c", workspace_path="/w")
+    )
+    assert env.get(long_id).container_id == "c"
+
+    cred = CredentialStore(storage_dir=tmp_path / "cred")
+    cred.store_credentials(long_id, "pg", {"u": "x"})
+    assert cred.get_credentials(long_id) == {"pg": {"u": "x"}}
+
+    # The provisioner writes a ``.{name}.XXXXXXXX.json`` tempfile — the worst case
+    # for name-length overhead — so a successful put proves the reserve is enough.
+    ps = ProvisionerStateStore(long_id, storage_dir=tmp_path / "ps")
+    ps.put("a1", {"k": 1})
+    assert ps.get("a1") == {"k": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -882,6 +988,16 @@ def test_build_default_tool_agents_has_required_keys() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("bad_name", ["../evil", "a/b", "..\\x", "/etc/passwd", "..", "."])
+def test_provisioner_state_rejects_path_traversal_name(tmp_path: Path, bad_name: str) -> None:
+    """A traversal provisioner_name is rejected before the JSON path is bound."""
+    from agent_provisioning_team.shared.provisioner_state import ProvisionerStateStore
+
+    with pytest.raises(ValueError):
+        ProvisionerStateStore(bad_name, storage_dir=tmp_path)
+    assert list(tmp_path.rglob("*.json")) == []
+
+
 def test_provisioner_state_load_corrupt_file(tmp_path: Path) -> None:
     from agent_provisioning_team.shared.provisioner_state import ProvisionerStateStore
 
@@ -935,3 +1051,7 @@ def test_provisioner_state_save_handles_io_error(tmp_path: Path, monkeypatch) ->
     with patch("os.replace", side_effect=OSError("io")):
         with pytest.raises(OSError):
             store.put("a1", {"x": 1})
+
+    # The mkstemp tempfile is unlinked on failure and the target file was never
+    # created (os.replace raised), so the store dir is left clean.
+    assert list(tmp_path.iterdir()) == []
