@@ -5,15 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from conftest import make_content_plan
+from conftest import make_content_plan, make_planning_phase_result
 
 
 def _make_planning_result(iterations: int = 1, critic_report: dict | None = None):
-    from shared.content_plan import (
-        ContentPlanSection,
-        PlanningPhaseResult,
-        TitleCandidate,
-    )
+    from shared.content_plan import ContentPlanSection, TitleCandidate
 
     plan = make_content_plan(
         overarching_topic="Topic",
@@ -25,11 +21,9 @@ def _make_planning_result(iterations: int = 1, critic_report: dict | None = None
         ],
         title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
     )
-    return PlanningPhaseResult(
-        content_plan=plan,
+    return make_planning_phase_result(
+        plan=plan,
         planning_iterations_used=iterations,
-        parse_retry_count=0,
-        planning_wall_ms_total=10.0,
         plan_critic_report=critic_report,
     )
 
