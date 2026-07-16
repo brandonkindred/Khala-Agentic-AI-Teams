@@ -353,8 +353,6 @@ def test_run_stage_transient_error_reraises_when_not_last_attempt(monkeypatch) -
 
 def test_run_stage_transient_error_funnels_fail_dto_on_last_attempt(monkeypatch) -> None:
     """On the final Temporal attempt, a transient LLM error is funneled to a FAIL DTO."""
-    import pytest  # noqa: F401
-
     from blogging.shared import run_pipeline_job as rpj
     from blogging.temporal import activities as acts
     from llm_service import LLMRateLimitError
