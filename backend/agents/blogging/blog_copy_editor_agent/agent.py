@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 
 # After llm_service exhausts HTTP retries, re-run complete_json a few times (timeouts, cloud blips).
 _MAX_COPY_EDITOR_LLM_ROUNDS = 3
+# Per-round JSON parse attempts: the raw prompt first, then one strict-JSON retry.
+_MAX_JSON_PARSE_ATTEMPTS = 2
+# Exponential-backoff bounds (seconds) between LLM transport retries.
+_LLM_RETRY_BASE_DELAY_SECONDS = 15.0
+_LLM_RETRY_MAX_DELAY_SECONDS = 60.0
+# Content plans are truncated to this many characters before being embedded in the prompt.
+_MAX_CONTENT_PLAN_CHARS = 12000
+# For technical deep dives, a draft below this fraction of soft_min_words is flagged as thin.
+_THIN_DRAFT_RATIO = 0.88
 
 
 class BlogCopyEditorAgent:
@@ -71,13 +80,17 @@ class BlogCopyEditorAgent:
         style_guide_text: str,
     ) -> str:
         """
-        Assemble the full editor prompt from length intent, author/context signals,
-        the style guide, the content plan, and the draft itself.
+        Assemble the per-request editor context from length intent, author/context
+        signals, the style guide, the content plan, and the draft itself.
+
+        The base instructions (``COPY_EDITOR_PROMPT``) are delivered once via the
+        Agent's ``system_prompt`` in :meth:`_invoke_editor_llm`, so they are
+        intentionally not repeated here.
 
         Preconditions:
             - draft is the stripped, non-empty draft text to review.
         Postconditions:
-            - Returns COPY_EDITOR_PROMPT followed by the assembled context, as one string.
+            - Returns the assembled context (draft last), as one string.
             - Has no side effects on self or the inputs.
         """
         actual_word_count = len(draft.split())
@@ -158,7 +171,7 @@ class BlogCopyEditorAgent:
                     "---",
                     "CONTENT PLAN (align feedback with this structure and section intent):",
                     "---",
-                    copy_editor_input.content_plan_context.strip()[:12000],
+                    copy_editor_input.content_plan_context.strip()[:_MAX_CONTENT_PLAN_CHARS],
                     "",
                 ]
             )
@@ -172,7 +185,7 @@ class BlogCopyEditorAgent:
             ]
         )
 
-        return COPY_EDITOR_PROMPT + "\n\n" + "\n".join(context_parts)
+        return "\n".join(context_parts)
 
     def _invoke_editor_llm(
         self,
@@ -202,7 +215,7 @@ class BlogCopyEditorAgent:
             "category, severity, location?, issue, suggestion?)."
         )
         for llm_round in range(_MAX_COPY_EDITOR_LLM_ROUNDS):
-            for json_attempt in range(2):
+            for json_attempt in range(_MAX_JSON_PARSE_ATTEMPTS):
                 try:
                     result = agent(
                         working_prompt + "\n\nRespond with valid JSON only, no markdown fences."
@@ -229,7 +242,9 @@ class BlogCopyEditorAgent:
                 except Exception as e:
                     if llm_round >= _MAX_COPY_EDITOR_LLM_ROUNDS - 1:
                         raise
-                    wait = rate_limit_retry_delay(llm_round, 15.0, 60.0)
+                    wait = rate_limit_retry_delay(
+                        llm_round, _LLM_RETRY_BASE_DELAY_SECONDS, _LLM_RETRY_MAX_DELAY_SECONDS
+                    )
                     logger.warning(
                         "Copy editor LLM transport/timeout after service retries (agent round %d/%d, "
                         "json sub-attempt %d): %s — sleeping %.0fs and retrying.",
@@ -375,7 +390,7 @@ class BlogCopyEditorAgent:
         if (
             copy_editor_input.content_profile == "technical_deep_dive"
             and soft_min is not None
-            and actual_word_count < int(soft_min * 0.88)
+            and actual_word_count < int(soft_min * _THIN_DRAFT_RATIO)
         ):
             feedback_items.append(
                 FeedbackItem(

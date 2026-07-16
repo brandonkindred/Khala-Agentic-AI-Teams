@@ -12,6 +12,7 @@ import json
 import pytest
 from blog_copy_editor_agent import BlogCopyEditorAgent
 from blog_copy_editor_agent.models import CopyEditorInput, FeedbackItem
+from blog_copy_editor_agent.prompts import COPY_EDITOR_PROMPT
 
 from llm_service import DummyLLMClient, LLMJsonParseError
 
@@ -66,6 +67,8 @@ def test_build_prompt_includes_band_and_context_signals() -> None:
     # Style-guide branch present, draft appended at the end.
     assert "STYLE GUIDE (evaluate the draft against these rules):" in prompt
     assert prompt.rstrip().endswith("Real draft body.")
+    # Base instructions live only in the Agent system prompt — not duplicated here.
+    assert COPY_EDITOR_PROMPT not in prompt
 
 
 def test_build_prompt_no_band_uses_plain_target_line() -> None:
@@ -219,14 +222,17 @@ def _patch_agent(monkeypatch, side_effect) -> None:
     """Replace the module-level Agent with a stub whose __call__ runs `side_effect`."""
     from blog_copy_editor_agent import agent as ce_mod
 
+    captured: dict = {}
+
     class _Agent:
         def __init__(self, *a, **kw):
-            pass
+            captured.update(kw)
 
         def __call__(self, prompt):
             return side_effect(prompt)
 
     monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    return captured
 
 
 def test_invoke_llm_success_and_calls_progress_hook(monkeypatch) -> None:
@@ -241,6 +247,18 @@ def test_invoke_llm_success_and_calls_progress_hook(monkeypatch) -> None:
 
     assert data["summary"] == "ok"
     assert calls == ["Reviewing draft for style and clarity..."]
+
+
+def test_invoke_llm_delivers_base_instructions_as_system_prompt(monkeypatch) -> None:
+    """The base instructions reach the model once, via the Agent's system prompt."""
+    agent = _make_agent()
+    captured = _patch_agent(
+        monkeypatch, lambda p: json.dumps({"summary": "ok", "feedback_items": []})
+    )
+
+    agent._invoke_editor_llm("just the context")
+
+    assert captured["system_prompt"] == COPY_EDITOR_PROMPT
 
 
 def test_invoke_llm_strict_retry_then_success(monkeypatch) -> None:
