@@ -11,18 +11,12 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
-
 
 def _plan():
-    from shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from _content_plan_test_utils import make_content_plan
+    from shared.content_plan import ContentPlanSection, TitleCandidate
 
-    return ContentPlan(
+    return make_content_plan(
         overarching_topic="My Topic",
         narrative_flow="flow",
         sections=[
@@ -33,24 +27,7 @@ def _plan():
             TitleCandidate(title="First", probability_of_success=0.6),
             TitleCandidate(title="Second", probability_of_success=0.5),
         ],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
-
-
-@pytest.fixture
-def patched_client(monkeypatch, fake_job_client):
-    from shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    try:
-        from blogging.shared import blog_job_store as bjs_alt
-
-        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
-    except ImportError:
-        pass
-    return fake_job_client
 
 
 def test_run_title_selection_returns_none_without_job_id() -> None:
@@ -66,7 +43,9 @@ def test_run_title_selection_returns_none_without_job_id() -> None:
     assert out is None
 
 
-def test_run_title_selection_returns_loved_title(monkeypatch, patched_client) -> None:
+def test_run_title_selection_returns_loved_title(
+    monkeypatch, patched_blog_job_store_client
+) -> None:
     """User submits 'love' rating → selected_title set, function returns it."""
     from agent_implementations.blog_writing_process_v2 import _run_title_selection
     from shared import blog_job_store as bjs
@@ -98,7 +77,9 @@ def test_run_title_selection_returns_loved_title(monkeypatch, patched_client) ->
     assert out == "First"
 
 
-def test_run_title_selection_returns_none_on_cancellation(monkeypatch, patched_client) -> None:
+def test_run_title_selection_returns_none_on_cancellation(
+    monkeypatch, patched_blog_job_store_client
+) -> None:
     """When the job is cancelled mid-wait, return None."""
     from agent_implementations.blog_writing_process_v2 import _run_title_selection
     from shared import blog_job_store as bjs
@@ -117,7 +98,9 @@ def test_run_title_selection_returns_none_on_cancellation(monkeypatch, patched_c
     assert out is None
 
 
-def test_run_title_selection_processes_pending_feedback(monkeypatch, patched_client) -> None:
+def test_run_title_selection_processes_pending_feedback(
+    monkeypatch, patched_blog_job_store_client
+) -> None:
     """User dislikes title → LLM generates replacement → process continues until 'love'."""
     import agent_implementations.blog_writing_process_v2 as v2
     from shared import blog_job_store as bjs
@@ -161,7 +144,9 @@ def test_run_title_selection_processes_pending_feedback(monkeypatch, patched_cli
     assert out == "Replacement Title"
 
 
-def test_run_title_selection_handles_llm_failure(monkeypatch, patched_client) -> None:
+def test_run_title_selection_handles_llm_failure(
+    monkeypatch, patched_blog_job_store_client
+) -> None:
     """If LLM fails to generate replacement, just remove the rated title."""
     import agent_implementations.blog_writing_process_v2 as v2
     from shared import blog_job_store as bjs

@@ -39,6 +39,15 @@ _BLOG_JOB_HELPERS = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _patched_blog_client(monkeypatch, fake_job_client) -> Any:
+    """Back ``shared.blog_job_store`` with the in-memory fake for every test in this package."""
+    from shared import blog_job_store as bjs
+
+    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
+    return fake_job_client
+
+
 @pytest.fixture
 def patched_client(monkeypatch, fake_job_client) -> Any:
     """Back the blogging API with the in-memory fake job store.
@@ -66,6 +75,21 @@ def client(patched_client) -> Any:
     from fastapi.testclient import TestClient
 
     return TestClient(app)
+
+
+@pytest.fixture
+def patched_blog_job_store_client(monkeypatch, fake_job_client) -> Any:
+    """Back ``shared.blog_job_store._client`` (and its ``blogging.shared`` alias, if loaded)."""
+    from shared import blog_job_store as bjs
+
+    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
+    try:
+        from blogging.shared import blog_job_store as bjs_alt
+
+        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
+    except ImportError:
+        pass
+    return fake_job_client
 
 
 class SequencedMockModel(Model):

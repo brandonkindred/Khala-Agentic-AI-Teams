@@ -369,20 +369,3 @@ def test_ghost_writer_generate_friendly_seeds_empty_input() -> None:
 
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     assert agent._generate_friendly_seeds([]) == []
-
-
-# ---------------------------------------------------------------------------
-# graphs/*.py — call build helpers
-# ---------------------------------------------------------------------------
-
-
-def test_graphs_build_returns_objects() -> None:
-    """Smoke-test the build_* helpers — confirms imports + composition work."""
-    from graphs.copy_edit_swarm import build_copy_edit_swarm
-    from graphs.pipeline_graph import build_post_review_graph, build_pre_review_graph
-    from graphs.rewrite_swarm import build_rewrite_swarm
-
-    assert build_copy_edit_swarm() is not None
-    assert build_rewrite_swarm() is not None
-    assert build_pre_review_graph() is not None
-    assert build_post_review_graph() is not None

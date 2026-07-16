@@ -13,22 +13,6 @@ import uuid
 
 import pytest
 
-
-@pytest.fixture
-def patched_client(monkeypatch, fake_job_client):
-    """Make ``shared.blog_job_store._client`` return the in-memory fake (both layouts)."""
-    from shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    try:
-        from blogging.shared import blog_job_store as bjs_alt
-
-        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
-    except ImportError:
-        pass
-    return fake_job_client
-
-
 # ---------------------------------------------------------------------------
 # build_brief_input
 # ---------------------------------------------------------------------------
@@ -67,7 +51,7 @@ def test_build_brief_input_appends_title_concept_and_normalizes_audience() -> No
 # ---------------------------------------------------------------------------
 
 
-def test_start_blog_job_is_idempotent_across_retries(patched_client) -> None:
+def test_start_blog_job_is_idempotent_across_retries(patched_blog_job_store_client) -> None:
     """Calling start_blog_job twice (as a Temporal retry would) never raises and
     preserves the original started_at — it merges status=running onto the existing
     row rather than re-creating it or resetting the start time."""
@@ -93,7 +77,9 @@ def test_start_blog_job_is_idempotent_across_retries(patched_client) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_make_job_updater_writes_store_and_publishes(monkeypatch, patched_client) -> None:
+def test_make_job_updater_writes_store_and_publishes(
+    monkeypatch, patched_blog_job_store_client
+) -> None:
     """The updater writes kwargs to the store and broadcasts an ``update`` SSE event."""
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
@@ -183,7 +169,9 @@ def test_start_pipeline_heartbeat_starts_and_stops(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_mark_job_cancelled_sets_status_and_returns_true(monkeypatch, patched_client) -> None:
+def test_mark_job_cancelled_sets_status_and_returns_true(
+    monkeypatch, patched_blog_job_store_client
+) -> None:
     """The job is marked cancelled, a terminal event is published, and True is returned."""
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
@@ -235,7 +223,7 @@ def _pipeline_doubles():
     return ppr, _Draft()
 
 
-def test_finalize_blog_job_pass_completes(monkeypatch, patched_client) -> None:
+def test_finalize_blog_job_pass_completes(monkeypatch, patched_blog_job_store_client) -> None:
     """status PASS completes the job (COMPLETED) and returns the completed status."""
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
@@ -251,7 +239,9 @@ def test_finalize_blog_job_pass_completes(monkeypatch, patched_client) -> None:
     assert bjs.get_blog_job(job_id)["status"] == bjs.JOB_STATUS_COMPLETED
 
 
-def test_finalize_blog_job_non_pass_needs_review(monkeypatch, patched_client) -> None:
+def test_finalize_blog_job_non_pass_needs_review(
+    monkeypatch, patched_blog_job_store_client
+) -> None:
     """A non-PASS status finalizes as NEEDS_REVIEW rather than COMPLETED."""
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj

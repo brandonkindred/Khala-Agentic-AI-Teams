@@ -1,5 +1,6 @@
 """Tests for ContentPlan helpers."""
 
+from _content_plan_test_utils import make_content_plan
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
@@ -24,26 +25,14 @@ def test_requirements_analysis_json_round_trip() -> None:
 
 
 def _minimal_plan(**kwargs) -> ContentPlan:
-    ra = RequirementsAnalysis(
-        plan_acceptable=True,
-        scope_feasible=True,
-        research_gaps=[],
-    )
     defaults = dict(
         overarching_topic="Topic",
         narrative_flow="Start here, then there, then conclude.",
-        sections=[
-            ContentPlanSection(
-                title="One",
-                coverage_description="A",
-                order=0,
-            ),
-        ],
+        sections=[ContentPlanSection(title="One", coverage_description="A", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.9)],
-        requirements_analysis=ra,
     )
     defaults.update(kwargs)
-    return ContentPlan(**defaults)
+    return make_content_plan(**defaults)
 
 
 def test_content_plan_summary_text_concatenates_and_truncates() -> None:

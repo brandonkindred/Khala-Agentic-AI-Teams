@@ -4,40 +4,17 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
-
 
 def _plan():
-    from shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from _content_plan_test_utils import make_content_plan
+    from shared.content_plan import ContentPlanSection, TitleCandidate
 
-    return ContentPlan(
+    return make_content_plan(
         overarching_topic="Topic",
         narrative_flow="flow",
         sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
-
-
-@pytest.fixture
-def patched_client(monkeypatch, fake_job_client):
-    from shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    try:
-        from blogging.shared import blog_job_store as bjs_alt
-
-        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
-    except ImportError:
-        pass
-    return fake_job_client
 
 
 def test_fill_story_placeholders_no_placeholders_returns_input(monkeypatch) -> None:
@@ -60,7 +37,9 @@ def test_fill_story_placeholders_no_placeholders_returns_input(monkeypatch) -> N
     assert out_stories == "existing stories"
 
 
-def test_fill_story_placeholders_user_skips_all(monkeypatch, patched_client, tmp_path) -> None:
+def test_fill_story_placeholders_user_skips_all(
+    monkeypatch, patched_blog_job_store_client, tmp_path
+) -> None:
     """User skips all placeholders → re-draft path with skip instruction."""
     import agent_implementations.blog_writing_process_v2 as v2
     from blog_writer_agent.models import WriterOutput
@@ -104,7 +83,7 @@ def test_fill_story_placeholders_user_skips_all(monkeypatch, patched_client, tmp
 
 
 def test_fill_story_placeholders_user_provides_narrative(
-    monkeypatch, patched_client, tmp_path
+    monkeypatch, patched_blog_job_store_client, tmp_path
 ) -> None:
     """User provides a story → narrative collected and re-drafted."""
     import agent_implementations.blog_writing_process_v2 as v2
@@ -152,7 +131,7 @@ def test_fill_story_placeholders_user_provides_narrative(
 
 
 def test_fill_story_placeholders_redraft_fails_keeps_original(
-    monkeypatch, patched_client, tmp_path
+    monkeypatch, patched_blog_job_store_client, tmp_path
 ) -> None:
     """When re-draft raises, keep original draft."""
     import agent_implementations.blog_writing_process_v2 as v2
@@ -197,7 +176,9 @@ def test_fill_story_placeholders_redraft_fails_keeps_original(
     assert "[Author:" in out_draft.draft  # original kept
 
 
-def test_fill_story_placeholders_cancelled_break(monkeypatch, patched_client, tmp_path) -> None:
+def test_fill_story_placeholders_cancelled_break(
+    monkeypatch, patched_blog_job_store_client, tmp_path
+) -> None:
     """If job goes to cancelled mid-loop, break out."""
     import agent_implementations.blog_writing_process_v2 as v2
     from shared import blog_job_store as bjs

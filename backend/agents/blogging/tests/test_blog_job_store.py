@@ -5,16 +5,6 @@
 import uuid
 from pathlib import Path
 
-import pytest
-
-
-@pytest.fixture(autouse=True)
-def _patched_blog_client(monkeypatch, fake_job_client):
-    from shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    return fake_job_client
-
 
 def test_brief_label_picks_first_nonblank_line() -> None:
     """_brief_label is robust to empty/whitespace-led briefs (no IndexError)."""
