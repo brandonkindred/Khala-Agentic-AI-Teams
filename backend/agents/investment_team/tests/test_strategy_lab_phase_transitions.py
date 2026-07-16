@@ -590,6 +590,25 @@ def test_build_spec_from_dict_canonicalizes_accepted_aliases() -> None:
     assert orch._build_spec_from_dict(payload, strategy_id="strat-coerce").asset_class == "crypto"
 
 
+def test_build_spec_from_dict_blank_asset_class_defaults_to_stocks() -> None:
+    """A missing or blank ``asset_class`` is the documented default (``stocks``),
+    not an unsupported class. It must canonicalize to ``stocks`` without raising
+    ``SpecImplementabilityError`` so a designer that omits or blanks the field is
+    not forced through a spurious redesign loop."""
+    orch = StrategyLabOrchestrator()
+
+    for blank in ("", "   ", None):
+        payload = _spec_dict()
+        payload["asset_class"] = blank
+        spec = orch._build_spec_from_dict(payload, strategy_id="strat-blank")
+        assert spec.asset_class == "stocks", repr(blank)
+
+    # An absent key falls back to the same ``stocks`` default.
+    payload = _spec_dict()
+    del payload["asset_class"]
+    assert orch._build_spec_from_dict(payload, strategy_id="strat-missing").asset_class == "stocks"
+
+
 def test_build_spec_from_dict_routes_unsupported_class_to_redesign() -> None:
     """A genuinely-unsupported class (e.g. ``bonds``) must NOT be silently
     coerced to ``stocks`` and backtested as a stock strategy. It raises

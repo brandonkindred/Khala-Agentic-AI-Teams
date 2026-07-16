@@ -194,7 +194,9 @@ def build_spec_from_dict(strategy_dict: Dict[str, Any], *, strategy_id: str) -> 
     Accepted ``asset_class`` aliases (equity/equities/stock/etf/etfs, fx,
     commodity/metal/energy, cryptocurrency/cryptocurrencies) are
     canonicalized before construction so a clean mapping never trips the
-    strict ``StrategySpec`` validator.
+    strict ``StrategySpec`` validator. A missing or blank ``asset_class``
+    likewise resolves to the default ``stocks`` rather than being treated as
+    unsupported, so it never triggers a spurious redesign.
 
     A *genuinely unsupported* class the strict normalizer rejects (e.g.
     ``bonds``) is NOT silently coerced to ``stocks`` — doing so would run
@@ -217,11 +219,20 @@ def build_spec_from_dict(strategy_dict: Dict[str, Any], *, strategy_id: str) -> 
     """
     raw_asset_class = strategy_dict.get("asset_class", "stocks")
     asset_class = normalize_asset_class(raw_asset_class)
+    # A missing/blank asset_class is the documented default (``stocks``), which
+    # ``normalize_asset_class`` already produced above — it is not an unsupported
+    # class, so it must not trip the strict validator and force a redesign. Only a
+    # genuinely-named-but-unknown class (e.g. ``bonds``) routes to redesign. The
+    # strict check runs on the RAW value so an unknown class is caught before
+    # ``normalize_asset_class`` flattens it to ``stocks``; checking the coerced
+    # value would let ``bonds`` pass as ``stocks`` and be backtested under the
+    # wrong universe/gates.
     unsupported_class = False
-    try:
-        normalize_asset_class_strict(raw_asset_class)
-    except ValueError:
-        unsupported_class = True
+    if str(raw_asset_class or "").strip():
+        try:
+            normalize_asset_class_strict(raw_asset_class)
+        except ValueError:
+            unsupported_class = True
 
     spec = StrategySpec(
         strategy_id=strategy_id,
