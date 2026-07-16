@@ -1,0 +1,129 @@
+// Base chip look, duplicated from code-review-panel.component.scss's `.cr-chip`:
+// Angular's view encapsulation scopes each component's styles to its own
+// template, so classes defined only in the parent's stylesheet would not style
+// the elements this (extracted) component renders.
+.cr-chip {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: var(--mat-sys-surface-container-high, #ececec);
+  color: var(--mat-sys-on-surface, rgba(0, 0, 0, 0.75));
+
+  &--draft {
+    background: var(--mat-sys-tertiary-container, #efe2d0);
+    color: var(--mat-sys-on-tertiary-container, #4a3a1d);
+  }
+
+  &--event {
+    background: var(--mat-sys-primary-container, #d7e3ff);
+    color: var(--mat-sys-on-primary-container, #001b3f);
+    font-weight: 600;
+  }
+}
+
+// Review run status text in the reviews table. Also duplicated from the parent,
+// which keeps its own copy for the collapsed row's status badge.
+.cr-job-status {
+  text-transform: capitalize;
+
+  &--completed {
+    color: var(--mat-sys-primary, #1a7f37);
+    font-weight: 600;
+  }
+
+  &--failed {
+    color: var(--mat-sys-error, #b3261e);
+    font-weight: 600;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PR detail panel
+// ---------------------------------------------------------------------------
+
+.cr-pr-number {
+  font-variant-numeric: tabular-nums;
+  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+}
+
+.cr-pr-title {
+  font-weight: 500;
+}
+
+.cr-pull-detail {
+  padding: 1rem 1.25rem 1.25rem;
+  border-top: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+  background: var(--mat-sys-surface-container, #f7f7f7);
+
+  &__pr {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1.05rem;
+  }
+
+  &__meta,
+  &__preview,
+  &__hint {
+    margin: 0.5rem 0 0;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.7));
+  }
+
+  &__preview {
+    font-size: 0.9rem;
+    white-space: pre-wrap;
+  }
+
+  &__hint {
+    font-size: 0.85rem;
+  }
+
+  &__actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 1rem;
+  }
+}
+
+.cr-reviews-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+  font-size: 0.85rem;
+
+  th,
+  td {
+    text-align: left;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+    vertical-align: top;
+  }
+
+  th {
+    font-weight: 600;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.65));
+  }
+
+  td {
+    > span,
+    > a {
+      vertical-align: middle;
+    }
+
+    mat-spinner {
+      display: inline-block;
+      vertical-align: middle;
+      margin-left: 0.3rem;
+    }
+
+    a {
+      color: var(--mat-sys-primary, #1a73e8);
+    }
+  }
+}
+
+.cr-findings {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}

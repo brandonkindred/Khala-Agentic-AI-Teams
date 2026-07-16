@@ -591,32 +591,8 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.isLatestRunning(1)).toBe(false);
   });
 
-  it('normalizes the standalone-comment count across the body_findings rename', async () => {
-    await setup();
-    // New rows carry comment_findings.
-    expect(
-      component.commentFindings({ total_issues: 3, inline_comments: 1, comment_findings: 2, event: 'COMMENT' }),
-    ).toBe(2);
-    // Rows persisted before the rename only carry the legacy body_findings.
-    expect(
-      component.commentFindings({
-        total_issues: 3,
-        inline_comments: 1,
-        body_findings: 2,
-        event: 'COMMENT',
-      }),
-    ).toBe(2);
-    // Neither present → 0 rather than a blank count.
-    expect(
-      component.commentFindings({ total_issues: 0, inline_comments: 0, event: 'COMMENT' }),
-    ).toBe(0);
-  });
-
-  it('reports per-record terminality', async () => {
-    await setup();
-    expect(component.isRecordTerminal(record({ status: 'running' }))).toBe(false);
-    expect(component.isRecordTerminal(record({ status: 'completed' }))).toBe(true);
-  });
+  // `commentFindings` and `isRecordTerminal` moved into PrReviewDetailComponent,
+  // which renders the reviews table; they're covered by its spec.
 
   // -------------------------------------------------------------------------
   // Teardown
@@ -736,17 +712,8 @@ describe('CodeReviewPanelComponent', () => {
     });
   }
 
-  it('exposes proposals only for terminal reviews', async () => {
-    await setup();
-    const running = record({ status: 'running', reviewSummary: {
-      total_issues: 0, inline_comments: 0, event: 'COMMENT',
-      pending_issue_proposals: [proposal('p0')],
-    } });
-    expect(component.hasProposals(running)).toBe(false);
-    const done = terminalRecordWith([proposal('p0')]);
-    expect(component.hasProposals(done)).toBe(true);
-    expect(component.hasProposals(terminalRecordWith([]))).toBe(false);
-  });
+  // `hasProposals` (the gate on whether the proposals child renders) moved into
+  // PrReviewDetailComponent and is covered by its spec.
 
   it('files the given proposal ids and merges the updated list back', async () => {
     await setup();
@@ -772,7 +739,8 @@ describe('CodeReviewPanelComponent', () => {
     );
     // The record's proposals now reflect the filed issue.
     expect(rec.reviewSummary?.pending_issue_proposals?.[0].issue_url).toBe('https://x/issues/5');
-    expect(component.isCreatingIssues('j1')).toBe(false);
+    // The in-flight flag (passed down to the child) is cleared on completion.
+    expect(component.creatingIssues.has('j1')).toBe(false);
   });
 
   it('does nothing when creating issues with no ids', async () => {
@@ -789,8 +757,9 @@ describe('CodeReviewPanelComponent', () => {
       throwError(() => ({ error: { detail: 'no scope' } })),
     );
     component.createIssuesFor(rec, ['p0']);
-    expect(component.createIssueErrorFor('j1')).toBe('no scope');
-    expect(component.isCreatingIssues('j1')).toBe(false);
+    // The parent owns the create-issue state it passes down to the child.
+    expect(component.createIssueErrors.get('j1')).toBe('no scope');
+    expect(component.creatingIssues.has('j1')).toBe(false);
   });
 
   it('renders the proposals section and creates issues from the template', async () => {
