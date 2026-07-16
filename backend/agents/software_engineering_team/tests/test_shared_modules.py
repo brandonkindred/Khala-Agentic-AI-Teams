@@ -862,3 +862,39 @@ def test_process_with_decomposition_helper_recovers_fenced_json(monkeypatch) -> 
         strategy=SectionDecompositionStrategy(),
     )
     assert out == payload
+
+
+def test_recursive_processor_default_branch_uses_injected_llm_client(monkeypatch) -> None:
+    """Regression test: the default branch (no ``process_fn``) must resolve the
+    Strands model from the caller's injected ``llm`` client instead of silently
+    discarding it and building a fresh default model via ``get_strands_model()``.
+    """
+    import strands
+
+    from llm_service import OllamaLLMClient
+    from llm_service.strands_adapter import LLMClientModel
+    from software_engineering_team.shared.decomposition import (
+        RecursiveProcessor,
+        SectionDecompositionStrategy,
+    )
+
+    captured_models = []
+
+    class _RecordingAgent:
+        def __init__(self, model=None, **kw):
+            captured_models.append(model)
+
+        def __call__(self, prompt):
+            return '{"ok": true}'
+
+    monkeypatch.setattr(strands, "Agent", _RecordingAgent)
+
+    client = OllamaLLMClient(model="some-model", base_url="http://localhost:11434", timeout=5)
+    p: RecursiveProcessor = RecursiveProcessor(SectionDecompositionStrategy())
+    out = p.process(llm=client, prompt="hi", content="hi", agent_name="A")
+
+    assert out == {"ok": True}
+    assert len(captured_models) == 1
+    resolved_model = captured_models[0]
+    assert isinstance(resolved_model, LLMClientModel)
+    assert resolved_model._client is client
