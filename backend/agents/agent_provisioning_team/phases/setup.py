@@ -48,12 +48,13 @@ def run_setup(
         * On Docker provisioning failure: returns
           ``SetupResult(success=False, error=...)`` — nothing is created.
         * Atomicity: if the container is created but the environment cannot be
-          registered, a *newly created* container is torn down (best effort)
-          before the exception propagates, so a failed setup never leaks orphaned
-          Docker resources. A *reused* container — one a prior job already
-          provisioned for the same ``agent_id`` — is never torn down, because all
-          stores are keyed solely by ``agent_id`` and tearing it down would
-          destroy another job's healthy agent.
+          registered, the container is torn down (best effort) before the
+          exception propagates, so a failed setup never leaks orphaned Docker
+          resources — including across Temporal retries of this activity.
+          Teardown is skipped only when a *running* environment record already
+          exists for the ``agent_id``, which means another job (or a prior
+          successful setup) owns and is using the container; tearing that down
+          would break a live agent.
     """
     env_store = environment_store or EnvironmentStore()
     docker = docker_provisioner or DockerProvisionerTool()
@@ -101,20 +102,6 @@ def run_setup(
             error=result.error or "Docker container creation failed",
         )
 
-    # Whether *this* call created the container, versus reusing one a prior job
-    # already provisioned for this agent_id (docker provisioning is idempotent and
-    # stamps ``reused`` onto the result). Only a newly created container may be
-    # rolled back below — tearing down a reused container would destroy another
-    # job's healthy agent, since every store is keyed solely by agent_id.
-    #
-    # LIMITATION: this signal reflects only *this* provision() result, not
-    # exclusive ownership. Concurrent provisioning of the same agent_id is not
-    # serialized anywhere in the pipeline, so a rollback here (like every other
-    # agent_id-keyed teardown, including the workflow's compensate path) could
-    # race a concurrent job that has adopted the same container. Agent-level
-    # serialization is tracked as separate follow-up work.
-    newly_created = not result.details.get("reused", False)
-
     if progress_callback:
         progress_callback("Registering environment...")
 
@@ -143,11 +130,32 @@ def run_setup(
             )
         )
     except Exception:
-        # Atomic setup: a container we just created must not outlive a failure to
-        # record it. Roll it back (best effort) so the failed job leaves no
-        # orphaned Docker resource, then let the original error propagate. A
-        # reused container belongs to another job and is left untouched.
-        if newly_created:
+        # Atomic setup: a container this setup produced must not outlive a failure
+        # to record it. Reclaim it (best effort) UNLESS a *running* environment
+        # record already exists for this agent_id — such a record means another job
+        # (or a prior successful setup) owns and is using the container, so tearing
+        # it down would break a live agent. Without that record the container is an
+        # unregistered orphan — this attempt's, or a prior failed attempt's that a
+        # Temporal retry is now reusing — so teardown is safe. Gating on the record
+        # rather than the idempotent ``reused`` flag is deliberate: ``reused`` also
+        # matches a container this same setup created on an earlier retry, and
+        # trusting it there would suppress teardown forever and leak that container.
+        #
+        # NOTE: the read-then-teardown is not atomic, so a job that registers
+        # concurrently between the two can still lose its container. Fully closing
+        # that race needs agent-level serialization, tracked as separate follow-up
+        # work.
+        owned_elsewhere = False
+        try:
+            current = env_store.get(agent_id)
+            owned_elsewhere = current is not None and getattr(current, "status", None) == "running"
+        except Exception:
+            logger.exception(
+                "Setup rollback: could not read environment for agent_id=%s; "
+                "proceeding with teardown",
+                agent_id,
+            )
+        if not owned_elsewhere:
             try:
                 teardown = docker.deprovision(agent_id)
                 # deprovision() reports failure (e.g. a `docker stop` timeout) via

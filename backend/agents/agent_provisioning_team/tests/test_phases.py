@@ -173,8 +173,58 @@ def test_run_setup_rolls_back_new_container_when_register_fails(tmp_path: Path) 
     docker.deprovision.assert_called_once_with("a2")
 
 
-def test_run_setup_keeps_reused_container_when_register_fails(tmp_path: Path) -> None:
-    """Atomic setup: a *reused* container is never torn down (it belongs to a prior job)."""
+def test_run_setup_keeps_container_backed_by_running_env(tmp_path: Path) -> None:
+    """Rollback must NOT tear down a container backed by a running env record.
+
+    Such a record means another job (or a prior successful setup) owns and is
+    using the container. Here the early-return check sees nothing, but a
+    concurrent job has registered a running env by the time the rollback re-reads.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import (
+        EnvironmentInfo as StoreEnvInfo,
+    )
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    running_env = StoreEnvInfo(
+        agent_id="a4",
+        container_id="c-existing",
+        container_name="agent-a4",
+        ssh_host="localhost",
+        ssh_port=22004,
+        workspace_path="/workspace/a4",
+        status="running",
+    )
+    env_store = MagicMock()
+    env_store.get.side_effect = [None, running_env]
+    env_store.register.side_effect = RuntimeError("register boom")
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={"container_id": "c-existing", "container_name": "agent-a4"},
+    )
+
+    with pytest.raises(RuntimeError, match="register boom"):
+        run_setup(
+            agent_id="a4",
+            manifest=ToolManifest(),
+            environment_store=env_store,
+            docker_provisioner=docker,
+        )
+
+    docker.deprovision.assert_not_called()
+
+
+def test_run_setup_reclaims_reused_orphan_when_register_fails(tmp_path: Path) -> None:
+    """A reused container with no running env record is an orphan and must be reclaimed.
+
+    This is the Temporal-retry case: a prior attempt created the container and its
+    teardown failed, so this attempt sees ``reused=True`` — but there is still no
+    running env record, so the container must be torn down (not suppressed by the
+    idempotent ``reused`` flag), otherwise it leaks forever.
+    """
     from agent_provisioning_team.phases.setup import run_setup
     from agent_provisioning_team.shared.tool_manifest import ToolManifest
 
@@ -187,21 +237,21 @@ def test_run_setup_keeps_reused_container_when_register_fails(tmp_path: Path) ->
         tool_name="docker",
         success=True,
         details={
-            "container_id": "c-existing",
-            "container_name": "agent-a4",
+            "container_id": "c-orphan",
+            "container_name": "agent-a7",
             "reused": True,
         },
     )
 
     with pytest.raises(RuntimeError, match="register boom"):
         run_setup(
-            agent_id="a4",
+            agent_id="a7",
             manifest=ToolManifest(),
             environment_store=env_store,
             docker_provisioner=docker,
         )
 
-    docker.deprovision.assert_not_called()
+    docker.deprovision.assert_called_once_with("a7")
 
 
 def test_run_setup_rollback_swallows_deprovision_error(tmp_path: Path) -> None:
