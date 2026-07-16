@@ -1,6 +1,10 @@
 """Tests for /api/integrations/* endpoints and route helper functions."""
 
+import hashlib
+import hmac
+import json
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +20,7 @@ if str(_agents) not in sys.path:
 from fastapi.testclient import TestClient
 
 from unified_api.main import app
+from unified_api.routes.integrations import _SLACK_NO_SECRET_STATUS
 
 client = TestClient(app, follow_redirects=False)
 
@@ -646,3 +651,244 @@ def test_medium_clear_session_returns_200():
         resp = client.delete("/api/integrations/medium/session")
     assert resp.status_code == 200
     assert resp.json()["session_configured"] is False
+
+
+# ---------------------------------------------------------------------------
+# POST /slack/events, /slack/commands, /slack/interactive — fail-closed signature
+# verification. When no signing secret is configured, only the url_verification setup
+# probe is served (events); every other request is refused rather than processed unsigned.
+#
+# slack_sdk (the real verify_slack_request's HMAC backend) may be absent in some
+# environments, so these route-branch tests patch verify_slack_request to True/False
+# directly — HMAC correctness itself is covered by test_slack_events_handler.py. The
+# handlers re-import verify_slack_request / dispatch_event / process_slash_command from
+# unified_api.slack_events_handler inside the function body, so patching the attribute on
+# that module takes effect (same mechanism as the /github/events route tests).
+# ---------------------------------------------------------------------------
+
+_SLACK_EVENTS = "/api/integrations/slack/events"
+_SLACK_COMMANDS = "/api/integrations/slack/commands"
+_SLACK_INTERACTIVE = "/api/integrations/slack/interactive"
+_SECRET_CFG = {**_DEFAULT_SLACK_CFG, "signing_secret": "shhh"}
+_HANDLER = "unified_api.slack_events_handler"
+
+
+def _make_signature(secret: str, timestamp: str, body: str) -> str:
+    """Build a valid Slack v0 signature (mirrors the test_slack_events_handler helper)."""
+    sig_basestring = f"v0:{timestamp}:{body}"
+    h = hmac.new(secret.encode(), sig_basestring.encode(), hashlib.sha256)
+    return f"v0={h.hexdigest()}"
+
+
+# --- /slack/events -----------------------------------------------------------
+
+
+def test_slack_events_url_verification_served_without_secret():
+    """The url_verification setup probe is served unsigned (challenge echoed) so an
+    operator can register the Request URL before a signing secret is configured."""
+    body = json.dumps({"type": "url_verification", "challenge": "c123"})
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG)),
+        patch(f"{_HANDLER}.dispatch_event") as disp,
+    ):
+        resp = client.post(_SLACK_EVENTS, content=body)
+    assert resp.status_code == 200
+    assert resp.json() == {"challenge": "c123"}
+    disp.assert_not_called()
+
+
+def test_slack_events_url_verification_requires_valid_signature_when_secret_set():
+    """Once a secret is configured, even url_verification must be validly signed."""
+    body = json.dumps({"type": "url_verification", "challenge": "c123"})
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_SECRET_CFG)),
+        patch(f"{_HANDLER}.verify_slack_request", return_value=False),
+        patch(f"{_HANDLER}.dispatch_event") as disp,
+    ):
+        resp = client.post(_SLACK_EVENTS, content=body)
+    assert resp.status_code == 401
+    assert "signature" in resp.json()["detail"].lower()
+    disp.assert_not_called()
+
+
+def test_slack_events_url_verification_ok_with_valid_signature():
+    body = json.dumps({"type": "url_verification", "challenge": "c999"})
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_SECRET_CFG)),
+        patch(f"{_HANDLER}.verify_slack_request", return_value=True),
+        patch(f"{_HANDLER}.dispatch_event") as disp,
+    ):
+        resp = client.post(_SLACK_EVENTS, content=body)
+    assert resp.status_code == 200
+    assert resp.json() == {"challenge": "c999"}
+    disp.assert_not_called()
+
+
+def test_slack_events_refuses_event_callback_without_secret():
+    """The bug fix: an unsigned event_callback is refused (not dispatched) when no
+    signing secret is configured — an unsigned request must never reach the assistant."""
+    body = json.dumps({"type": "event_callback", "event": {"type": "app_mention"}})
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG)),
+        patch(f"{_HANDLER}.dispatch_event") as disp,
+    ):
+        resp = client.post(_SLACK_EVENTS, content=body)
+    assert resp.status_code == _SLACK_NO_SECRET_STATUS
+    assert "secret" in resp.json()["detail"].lower()
+    disp.assert_not_called()
+
+
+def test_slack_events_rejects_bad_signature():
+    body = json.dumps({"type": "event_callback", "event": {"type": "app_mention"}})
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_SECRET_CFG)),
+        patch(f"{_HANDLER}.verify_slack_request", return_value=False),
+        patch(f"{_HANDLER}.dispatch_event") as disp,
+    ):
+        resp = client.post(_SLACK_EVENTS, content=body)
+    assert resp.status_code == 401
+    disp.assert_not_called()
+
+
+def test_slack_events_dispatches_valid_signed_event_callback():
+    payload = {"type": "event_callback", "event": {"type": "app_mention", "user": "U1"}}
+    body = json.dumps(payload)
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_SECRET_CFG)),
+        patch(f"{_HANDLER}.verify_slack_request", return_value=True),
+        patch(f"{_HANDLER}.dispatch_event") as disp,
+    ):
+        resp = client.post(_SLACK_EVENTS, content=body)
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    disp.assert_called_once()
+    assert disp.call_args[0][0] == payload
+
+
+def test_slack_events_returns_400_on_invalid_json():
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_SECRET_CFG)),
+        patch(f"{_HANDLER}.verify_slack_request", return_value=True),
+        patch(f"{_HANDLER}.dispatch_event") as disp,
+    ):
+        resp = client.post(_SLACK_EVENTS, content=b"not json")
+    assert resp.status_code == 400
+    assert "Invalid JSON" in resp.json()["detail"]
+    disp.assert_not_called()
+
+
+def test_slack_events_returns_400_on_non_object_body():
+    """A valid-JSON-but-non-object body (e.g. []) is rejected with 400 instead of raising
+    AttributeError on payload.get(...) → an unhandled 500."""
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_SECRET_CFG)),
+        patch(f"{_HANDLER}.verify_slack_request", return_value=True),
+        patch(f"{_HANDLER}.dispatch_event") as disp,
+    ):
+        resp = client.post(_SLACK_EVENTS, content=b"[]")
+    assert resp.status_code == 400
+    assert "JSON object" in resp.json()["detail"]
+    disp.assert_not_called()
+
+
+def test_slack_events_unknown_verified_type_returns_ok():
+    body = json.dumps({"type": "reaction_added"})
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_SECRET_CFG)),
+        patch(f"{_HANDLER}.verify_slack_request", return_value=True),
+        patch(f"{_HANDLER}.dispatch_event") as disp,
+    ):
+        resp = client.post(_SLACK_EVENTS, content=body)
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    disp.assert_not_called()
+
+
+def test_slack_events_real_signature_end_to_end():
+    """End-to-end through the real HMAC path (skipped when slack_sdk is unavailable)."""
+    pytest.importorskip("slack_sdk")
+    body = json.dumps({"type": "event_callback", "event": {"type": "app_mention", "user": "U1"}})
+    ts = str(int(time.time()))
+    sig = _make_signature("shhh", ts, body)
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_SECRET_CFG)),
+        patch(f"{_HANDLER}.dispatch_event") as disp,
+    ):
+        resp = client.post(
+            _SLACK_EVENTS,
+            content=body,
+            headers={"X-Slack-Request-Timestamp": ts, "X-Slack-Signature": sig},
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    disp.assert_called_once()
+
+
+# --- /slack/commands ---------------------------------------------------------
+
+
+def test_slack_commands_refuses_without_secret():
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG)),
+        patch(f"{_HANDLER}.process_slash_command") as proc,
+    ):
+        resp = client.post(_SLACK_COMMANDS, content="text=help&user_id=U1")
+    assert resp.status_code == _SLACK_NO_SECRET_STATUS
+    assert "secret" in resp.json()["detail"].lower()
+    proc.assert_not_called()
+
+
+def test_slack_commands_rejects_bad_signature():
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_SECRET_CFG)),
+        patch(f"{_HANDLER}.verify_slack_request", return_value=False),
+        patch(f"{_HANDLER}.process_slash_command") as proc,
+    ):
+        resp = client.post(_SLACK_COMMANDS, content="text=help&user_id=U1")
+    assert resp.status_code == 401
+    proc.assert_not_called()
+
+
+def test_slack_commands_processes_valid_signed_command():
+    ack = {"response_type": "ephemeral", "text": "ok"}
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_SECRET_CFG)),
+        patch(f"{_HANDLER}.verify_slack_request", return_value=True),
+        patch(f"{_HANDLER}.process_slash_command", return_value=ack) as proc,
+    ):
+        resp = client.post(_SLACK_COMMANDS, content="text=help&user_id=U1")
+    assert resp.status_code == 200
+    assert resp.json() == ack
+    proc.assert_called_once()
+    form_data = proc.call_args[0][0]
+    assert form_data.get("text") == "help"
+    assert form_data.get("user_id") == "U1"
+
+
+# --- /slack/interactive ------------------------------------------------------
+
+
+def test_slack_interactive_refuses_without_secret():
+    with patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG)):
+        resp = client.post(_SLACK_INTERACTIVE, content="payload=%7B%7D")
+    assert resp.status_code == _SLACK_NO_SECRET_STATUS
+    assert "secret" in resp.json()["detail"].lower()
+
+
+def test_slack_interactive_rejects_bad_signature():
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_SECRET_CFG)),
+        patch(f"{_HANDLER}.verify_slack_request", return_value=False),
+    ):
+        resp = client.post(_SLACK_INTERACTIVE, content="payload=%7B%7D")
+    assert resp.status_code == 401
+
+
+def test_slack_interactive_ok_with_valid_signature():
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_SECRET_CFG)),
+        patch(f"{_HANDLER}.verify_slack_request", return_value=True),
+    ):
+        resp = client.post(_SLACK_INTERACTIVE, content="payload=%7B%7D")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
