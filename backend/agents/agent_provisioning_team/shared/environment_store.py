@@ -219,8 +219,9 @@ class EnvironmentStore:
             * ``tool_name`` is the tool to record (empty is a no-op via
               ``add_tools``).
         Postconditions:
-            * Delegates to ``add_tools([tool_name])``; when the env exists,
-              ``tool_name`` is present in ``tools_provisioned``.
+            * Delegates to ``add_tools([tool_name])``; when the env exists and
+              ``tool_name`` is non-empty, ``tool_name`` is present in
+              ``tools_provisioned`` (an empty ``tool_name`` is a no-op).
             * Returns ``True`` on success, ``False`` when the env is missing or
               corrupt (per ``add_tools``).
         """
