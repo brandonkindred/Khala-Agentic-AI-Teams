@@ -87,6 +87,10 @@ def _run_async(coro: Coroutine[Any, Any, _T]) -> _T:
           within the shared client-ready timeout (cold-start race).
         * ``concurrent.futures.TimeoutError`` when start acceptance exceeds
           ``AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S``.
+        * Propagates exceptions from ``coro`` itself (for example
+          ``temporalio.exceptions.WorkflowAlreadyStartedError`` or
+          ``temporalio.service.RPCError``) — ``future.result`` re-raises them
+          as the original type, not wrapped in ``TimeoutError``.
     """
     # Wait briefly for the worker thread to populate client/loop — immediate
     # None is a cold-start race, not a terminal Temporal outage.
