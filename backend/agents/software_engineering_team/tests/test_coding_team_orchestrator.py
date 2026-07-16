@@ -29,6 +29,14 @@ from software_engineering_team.coding_team.orchestrator import (
     run_coding_team_orchestrator,
 )
 from software_engineering_team.coding_team.task_graph import TaskGraphService
+from software_engineering_team.coding_team.team_routing import (
+    _BACKEND_V2_STACK_SPEC,
+    _quality_gate_agent_type,
+    _target_matches_agent,
+    _team_key,
+    _v2_team_kind_for_stack,
+)
+from software_engineering_team.coding_team.worker_factory import _v2_text_mode_llm
 
 GIT_UTILS = "shared_git.git_utils"
 
@@ -976,20 +984,20 @@ def test_assignment_normalizes_frontend_owned_target_aliases(tmp_path):
 
 def test_target_match_normalizes_frontend_owned_aliases() -> None:
     """UI/UX target aliases canonicalize to the frontend v2 team for matching."""
-    assert orch_mod._team_key("ui") == "frontend_v2"
-    assert orch_mod._team_key("UX") == "frontend_v2"
-    assert orch_mod._team_key("Web App") == "frontend_v2"
-    assert orch_mod._target_matches_agent("ui", "frontend-v2-worker-2") is True
-    assert orch_mod._target_matches_agent("ux", "backend_v2_worker_1") is False
+    assert _team_key("ui") == "frontend_v2"
+    assert _team_key("UX") == "frontend_v2"
+    assert _team_key("Web App") == "frontend_v2"
+    assert _target_matches_agent("ui", "frontend-v2-worker-2") is True
+    assert _target_matches_agent("ux", "backend_v2_worker_1") is False
     # Exact-token match only: unrelated words containing an alias substring are unaffected.
-    assert orch_mod._team_key("build") == "build"
-    assert orch_mod._team_key("guidelines") == "guidelines"
+    assert _team_key("build") == "build"
+    assert _team_key("guidelines") == "guidelines"
 
 
 def test_team_key_routes_framework_and_language_labels() -> None:
     """Concrete tech labels route to the owning v2 team instead of failing to match."""
     for label in ("React", "Angular", "AngularJS", "scss", "Next.js", "React.js", "Vue.js"):
-        assert orch_mod._team_key(label) == "frontend_v2"
+        assert _team_key(label) == "frontend_v2"
     for label in (
         "Python",
         "Java",
@@ -1002,24 +1010,24 @@ def test_team_key_routes_framework_and_language_labels() -> None:
         ".NET Core",
         "ASP.NET",
     ):
-        assert orch_mod._team_key(label) == "backend_v2"
+        assert _team_key(label) == "backend_v2"
     # Ambiguous languages (used by frontend frameworks AND Node backends) must NOT be
     # forced onto a team — routing them would mis-send backend work to the frontend worker.
     for label in ("TypeScript", "JavaScript"):
-        assert orch_mod._team_key(label) not in ("frontend_v2", "backend_v2")
+        assert _team_key(label) not in ("frontend_v2", "backend_v2")
     # A capable worker now matches these labels rather than the task being dropped.
-    assert orch_mod._target_matches_agent("react", "frontend_v2") is True
-    assert orch_mod._target_matches_agent("python", "backend_v2") is True
+    assert _target_matches_agent("react", "frontend_v2") is True
+    assert _target_matches_agent("python", "backend_v2") is True
     # Generic, non-tech words still pass through unmapped.
-    assert orch_mod._team_key("build") == "build"
+    assert _team_key("build") == "build"
 
 
 def test_team_key_accepts_compact_v2_labels() -> None:
     """Separator-less v2 labels still route, without matching unrelated substrings."""
-    assert orch_mod._team_key("frontendv2") == "frontend_v2"
-    assert orch_mod._team_key("BackendV2") == "backend_v2"
+    assert _team_key("frontendv2") == "frontend_v2"
+    assert _team_key("BackendV2") == "backend_v2"
     # Exact-match only: a word merely containing the alias as a substring is unaffected.
-    assert orch_mod._team_key("myfrontend") == "myfrontend"
+    assert _team_key("myfrontend") == "myfrontend"
 
 
 def test_assign_tasks_survives_assignment_error(tmp_path):
@@ -1095,15 +1103,15 @@ def test_assignment_fails_task_with_unrecognized_target_team(tmp_path, caplog):
 
 def test_target_match_normalizes_raw_v2_agent_ids() -> None:
     """Raw worker IDs with suffixes still compare by their canonical v2 team."""
-    assert orch_mod._target_matches_agent("frontend_v2", "frontend-v2-worker-2") is True
-    assert orch_mod._target_matches_agent("devops", "backend_v2_worker_1") is True
-    assert orch_mod._target_matches_agent("frontend_v2", "backend_v2_worker_1") is False
+    assert _target_matches_agent("frontend_v2", "frontend-v2-worker-2") is True
+    assert _target_matches_agent("devops", "backend_v2_worker_1") is True
+    assert _target_matches_agent("frontend_v2", "backend_v2_worker_1") is False
 
 
 def test_team_key_warns_on_ambiguous_frontend_backend_label(caplog) -> None:
     """Ambiguous raw labels are visible in logs while preserving current precedence."""
     with caplog.at_level(logging.WARNING, logger=orch_mod.logger.name):
-        assert orch_mod._team_key("frontend-backend") == "frontend_v2"
+        assert _team_key("frontend-backend") == "frontend_v2"
 
     assert "contains both frontend and backend" in caplog.text
 
@@ -1119,28 +1127,25 @@ def test_team_key_warns_on_ambiguous_frontend_backend_label(caplog) -> None:
 )
 def test_team_key_normalizes_separated_frontend_backend_labels(label: str, expected: str) -> None:
     """Common separated frontend/backend labels route to canonical v2 teams."""
-    assert orch_mod._team_key(label) == expected
+    assert _team_key(label) == expected
 
 
 def test_quality_gate_type_uses_v2_stack_inference_for_hint_stack_names() -> None:
     """Hint-only stack names still map to canonical quality gate agent types."""
-    assert orch_mod._quality_gate_agent_type("Angular") == "frontend"
-    assert orch_mod._quality_gate_agent_type("Spring Boot") == "backend"
-    assert orch_mod._quality_gate_agent_type("Python") == "backend"
+    assert _quality_gate_agent_type("Angular") == "frontend"
+    assert _quality_gate_agent_type("Spring Boot") == "backend"
+    assert _quality_gate_agent_type("Python") == "backend"
 
 
 def test_v2_team_kind_matches_frontend_hint_tokens_without_substrings() -> None:
     """Frontend hint aliases must match as tokens, not substrings inside unrelated words."""
-    assert orch_mod._v2_team_kind_for_stack(StackSpec(name="UI", tools_services=[])) == "frontend"
-    assert orch_mod._v2_team_kind_for_stack(StackSpec(name="build", tools_services=[])) == "backend"
+    assert _v2_team_kind_for_stack(StackSpec(name="UI", tools_services=[])) == "frontend"
+    assert _v2_team_kind_for_stack(StackSpec(name="build", tools_services=[])) == "backend"
     assert (
-        orch_mod._v2_team_kind_for_stack(StackSpec(name="documentation", tools_services=["guides"]))
-        is None
+        _v2_team_kind_for_stack(StackSpec(name="documentation", tools_services=["guides"])) is None
     )
     assert (
-        orch_mod._v2_team_kind_for_stack(
-            StackSpec(name="release automation", tools_services=["CI build"])
-        )
+        _v2_team_kind_for_stack(StackSpec(name="release automation", tools_services=["CI build"]))
         == "backend"
     )
 
@@ -1148,17 +1153,13 @@ def test_v2_team_kind_matches_frontend_hint_tokens_without_substrings() -> None:
 @pytest.mark.parametrize("stack_name", ["platform", "ci_cd", "services"])
 def test_v2_team_kind_accepts_backend_alias_stack_names(stack_name: str) -> None:
     """Backend-owned alias stack names build backend v2 workers instead of failing."""
-    assert (
-        orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
-    )
+    assert _v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
 
 
 @pytest.mark.parametrize("stack_name", ["default", "Senior Software Engineer"])
 def test_v2_team_kind_accepts_legacy_default_stack_names(stack_name: str) -> None:
     """Legacy generic stack names now route to backend v2 after removing the Senior SWE worker."""
-    assert (
-        orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
-    )
+    assert _v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
 
 
 def test_legacy_default_stack_spec_is_repaired_to_backend_v2() -> None:
@@ -1223,7 +1224,7 @@ def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, mon
     )
 
     assert captured_specs == ["backend_v2"]
-    assert any(update.get("stack_specs") == [orch_mod._BACKEND_V2_STACK_SPEC] for update in updates)
+    assert any(update.get("stack_specs") == [_BACKEND_V2_STACK_SPEC] for update in updates)
 
 
 def test_backend_v2_worker_uses_injected_llm_getter():
@@ -1325,7 +1326,7 @@ def test_v2_text_mode_llm_resolves_underlying_client_on_clone_failure(monkeypatc
             raise RuntimeError("clone boom")
 
     model = _BrokenJsonModel()
-    result = orch_mod._v2_text_mode_llm(model)
+    result = _v2_text_mode_llm(model)
 
     assert result is sentinel
     # Re-resolved from the wrapped client (guaranteed text mode), not the JSON-mode model.
@@ -1354,7 +1355,7 @@ def test_v2_text_mode_llm_clone_failure_without_client_uses_default(monkeypatch)
             raise RuntimeError("clone boom")
 
     broken = _BrokenCloneModel()
-    result = orch_mod._v2_text_mode_llm(broken)
+    result = _v2_text_mode_llm(broken)
 
     # No wrapped client → resolver builds a fresh default text model (arg is None).
     assert result is sentinel
