@@ -244,12 +244,24 @@ def _job_already_terminal(job_id: str) -> bool:
     ``get_blog_job`` returns None only for a genuinely-absent job — transient/HTTP errors
     raise rather than returning None — so a missing job is treated as terminal too.
 
+    Fails OPEN: if the store is unavailable or the preflight read itself raises (a
+    transient job-service outage at dequeue time), this returns False so the job still
+    runs (it starts/heartbeats/fails on its own). Abandoning a valid queued job on a
+    transient read blip would leave it pending until the stale monitor reaps it.
+
     Preconditions: ``job_id`` is non-empty.
-    Postconditions: pure read; returns a bool (False when the job store is unavailable).
+    Postconditions: pure read; returns a bool (False when the job store is unavailable or
+        the read fails). Only a definitive failed/cancelled/missing status returns True.
     """
     if get_blog_job is None:
         return False
-    job = get_blog_job(job_id)
+    try:
+        job = get_blog_job(job_id)
+    except Exception:
+        logger.warning(
+            "Preflight status read failed for job %s; proceeding to run it", job_id, exc_info=True
+        )
+        return False
     return job is None or job.get("status") in (JOB_STATUS_FAILED, JOB_STATUS_CANCELLED)
 
 

@@ -618,6 +618,13 @@ def test_job_already_terminal_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "running"})
     assert _api_main._job_already_terminal("j1") is False
 
+    # Fail open: a transient preflight read failure must NOT abandon a valid queued job.
+    def _raises(_jid):
+        raise RuntimeError("job-service outage")
+
+    monkeypatch.setattr(_api_main, "get_blog_job", _raises)
+    assert _api_main._job_already_terminal("j1") is False
+
 
 def test_medium_stats_sync_when_integration_disabled(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
