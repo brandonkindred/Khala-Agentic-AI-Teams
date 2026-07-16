@@ -237,6 +237,71 @@ def test_plan_project_activity_exception_path(monkeypatch, tmp_path, patched_job
     assert job["status"] == js.JOB_STATUS_FAILED
 
 
+def test_plan_project_activity_wires_lazy_architecture_callback(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """The activity hands Planning a working architecture callback.
+
+    Regression guard: the callback must resolve ``agents["architecture"]`` lazily (only
+    when invoked, not when the activity builds it) and return the agent's overview. This
+    exercises the shared ``_make_planning_architecture_fn`` wiring end-to-end through the
+    Temporal path, which the mocked-``run_workflow`` tests otherwise never invoke.
+    """
+    from unittest.mock import MagicMock
+
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("pp-wire", repo_path=str(tmp_path))
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+
+    # A duck-typed architecture agent whose run() yields a scripted overview.
+    arch_agent = MagicMock()
+    arch_output = MagicMock()
+    arch_output.architecture = MagicMock(overview="Wired overview")
+    arch_agent.run.return_value = arch_output
+
+    resolved = {"n": 0}
+
+    class _Registry:
+        def __getitem__(self, key):
+            assert key == "architecture"
+            resolved["n"] += 1
+            return arch_agent
+
+    monkeypatch.setattr(
+        "software_engineering_team.orchestrator._get_agents", lambda: _Registry()
+    )
+    monkeypatch.setattr("spec_parser.parse_spec_with_llm", lambda *a, **kw: MagicMock())
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_run_workflow(*args, **kwargs):
+        captured["run_architecture_fn"] = kwargs["run_architecture_fn"]
+        # Short-circuit: a failure result makes plan_project_activity return early,
+        # before the adapter runs, so this test stays focused on the callback wiring.
+        return {"success": False, "failure_reason": "stop here"}
+
+    monkeypatch.setattr("planning_team.orchestrator.run_workflow", _fake_run_workflow)
+
+    activities.plan_project_activity(
+        "pp-wire",
+        str(tmp_path),
+        {"spec_content": "spec", "validated_spec": "spec", "plan_dir": str(tmp_path)},
+    )
+
+    # The callback was passed but not yet invoked → the registry must not have been read.
+    assert resolved["n"] == 0, "architecture agent must be resolved lazily, not eagerly"
+
+    run_architecture_fn = captured["run_architecture_fn"]
+    overview = run_architecture_fn(
+        spec_content="# Spec", prd_content=None, repo_path=str(tmp_path), client_context=None
+    )
+
+    assert overview == "Wired overview"
+    assert resolved["n"] == 1
+
+
 def test_coding_update_callback_forwards_without_heartbeat(monkeypatch) -> None:
     """The callback forwards kwargs to update_job and must NOT heartbeat.
 

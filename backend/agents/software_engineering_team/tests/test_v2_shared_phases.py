@@ -632,27 +632,40 @@ def test_write_repo_text_files_rejects_empty_path(tmp_path: Path):
 
 
 def test_write_microtask_output_or_fail_success_and_rejection(tmp_path: Path):
-    """Write microtask output helper: writes on a safe path, review-fails on unsafe."""
+    """Write microtask output helper: writes on a safe path, review-fails on unsafe.
+
+    On rejection the recorded rollback reverts both the in-memory result and the
+    worktree: a key this microtask created is removed/unlinked, and a key it
+    overwrote is restored to its pre-microtask value in both places.
+    """
     mt = SimpleNamespace(id="mt-1", status="in_progress", notes="")
     review_failed_ids: set = set()
-    all_files = {"kept.py": "k", "gen.py": "g"}
+    # ``shared.py`` pre-exists on disk and in all_files (an earlier product);
+    # ``gen.py`` is created by this microtask.
+    (tmp_path / "shared.py").write_text("orig", encoding="utf-8")
+    all_files = {"kept.py": "k", "shared.py": "orig"}
 
-    # Safe path → writes and returns True.
+    # Snapshot the pre-write baselines the way the loop does, then write.
+    rollback = sh_exec._MicrotaskRollback()
+    sh_exec._record_prior_values(rollback, tmp_path, all_files, {"gen.py": "g2", "shared.py": "clob"})
     ok = sh_exec.write_microtask_output_or_fail(
         tmp_path,
-        {"gen.py": "g2"},
+        {"gen.py": "g2", "shared.py": "clob"},
         mt=mt,
         task_id="t1",
         review_failed_ids=review_failed_ids,
         all_files=all_files,
-        microtask_file_keys={"gen.py"},
+        rollback=rollback,
         review_failed_status="REVIEW_FAILED",
     )
     assert ok is True
+    all_files.update({"gen.py": "g2", "shared.py": "clob"})
     assert (tmp_path / "gen.py").read_text(encoding="utf-8") == "g2"
     assert not review_failed_ids
 
-    # Unsafe path → no exception, marks review-failed, rolls back this microtask's keys.
+    # Unsafe path → no exception, marks review-failed, rolls back this microtask's
+    # contributions: ``gen.py`` (created) is removed/unlinked and ``shared.py`` (an
+    # earlier file this one overwrote) is restored — in all_files and on disk.
     rejected = sh_exec.write_microtask_output_or_fail(
         tmp_path,
         {"../evil.py": "x"},
@@ -660,16 +673,52 @@ def test_write_microtask_output_or_fail_success_and_rejection(tmp_path: Path):
         task_id="t1",
         review_failed_ids=review_failed_ids,
         all_files=all_files,
-        microtask_file_keys={"gen.py"},
+        rollback=rollback,
         review_failed_status="REVIEW_FAILED",
     )
     assert rejected is False
     assert mt.status == "REVIEW_FAILED"
     assert "mt-1" in review_failed_ids
-    assert (
-        "gen.py" not in all_files and "kept.py" in all_files
-    )  # only this microtask's keys rolled back
+    assert "gen.py" not in all_files  # created by this microtask → removed
+    assert all_files["kept.py"] == "k"  # untouched key left alone
+    assert all_files["shared.py"] == "orig"  # earlier file restored
     assert not (tmp_path.parent / "evil.py").exists()
+    assert not (tmp_path / "gen.py").exists()  # created file unlinked
+    assert (tmp_path / "shared.py").read_text(encoding="utf-8") == "orig"  # disk restored
+
+
+def test_resolve_physical_path_and_snapshot_states(tmp_path: Path):
+    """``_resolve_physical_path_in_repo`` collapses a symlink chain to the physical file
+    and rejects out-of-repo escapes; ``_snapshot_disk_state`` reports file/dir/absent."""
+    root = tmp_path.resolve()
+    # a symlink chain to an in-repo file resolves to that physical file
+    (tmp_path / "real.py").write_text("X", encoding="utf-8")
+    (tmp_path / "mid").symlink_to("real.py")
+    (tmp_path / "top").symlink_to("mid")
+    assert sh_exec._resolve_physical_path_in_repo(root, root / "top") == root / "real.py"
+    # a symlink pointing out of the repo is rejected
+    (tmp_path / "escape").symlink_to(tmp_path.parent)
+    assert sh_exec._resolve_physical_path_in_repo(root, root / "escape") is None
+
+    assert sh_exec._snapshot_disk_state(root / "real.py").file_bytes == b"X"
+    (tmp_path / "adir").mkdir()
+    directory = sh_exec._snapshot_disk_state(root / "adir")
+    assert directory.file_bytes is None and not directory.absent
+    assert sh_exec._snapshot_disk_state(root / "missing").absent
+
+
+def test_snapshot_disk_state_degrades_on_read_error(tmp_path: Path, monkeypatch):
+    """A read/stat OSError during snapshot degrades to a leave-alone entry, never raised,
+    so rollback bookkeeping cannot abort the run."""
+    f = tmp_path / "f.py"
+    f.write_text("x", encoding="utf-8")
+
+    def _boom(self, *a, **k):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+    entry = sh_exec._snapshot_disk_state(tmp_path.resolve() / "f.py")
+    assert entry.file_bytes is None and not entry.absent  # leave-alone, no exception
 
 
 def _issue(**kw):
