@@ -12,10 +12,17 @@
     @for (p of proposals; track p.id) {
       <li class="cr-proposal">
         @if (p.issue_url) {
-          <span class="cr-proposal__filed">
-            <mat-icon>check_circle</mat-icon>
-            filed
-          </span>
+          @if (p.matched_existing) {
+            <span class="cr-proposal__matched">
+              <mat-icon>link</mat-icon>
+              already tracked
+            </span>
+          } @else {
+            <span class="cr-proposal__filed">
+              <mat-icon>check_circle</mat-icon>
+              filed
+            </span>
+          }
         } @else {
           <label class="cr-proposal__select" [attr.aria-label]="'Select ' + p.description">
             <input
