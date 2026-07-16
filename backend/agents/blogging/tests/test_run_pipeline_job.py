@@ -13,24 +13,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-import pytest
 from conftest import make_content_plan, make_planning_phase_result
-
-
-@pytest.fixture
-def patched_client(monkeypatch, fake_job_client):
-    """Make `shared.blog_job_store._client` return the in-memory fake."""
-    from shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    # Also patch the blogging.shared alias if the alternate module path was loaded
-    try:
-        from blogging.shared import blog_job_store as bjs_alt
-
-        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
-    except ImportError:
-        pass
-    return fake_job_client
 
 
 def _setup_artifacts_root(monkeypatch, tmp_path: Path) -> None:
@@ -54,7 +37,9 @@ def _make_pipeline_doubles():
     return ppr, _Draft(), "PASS"
 
 
-def test_run_blog_full_pipeline_job_completes(monkeypatch, tmp_path: Path, patched_client) -> None:
+def test_run_blog_full_pipeline_job_completes(
+    monkeypatch, tmp_path: Path, patched_blog_job_store
+) -> None:
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
 
@@ -79,7 +64,7 @@ def test_run_blog_full_pipeline_job_completes(monkeypatch, tmp_path: Path, patch
 
 
 def test_run_blog_full_pipeline_job_completes_needs_review(
-    monkeypatch, tmp_path: Path, patched_client
+    monkeypatch, tmp_path: Path, patched_blog_job_store
 ) -> None:
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
@@ -114,7 +99,7 @@ def _import_errors_used_by_run_pipeline_job():
 
 
 def test_run_blog_full_pipeline_job_planning_error(
-    monkeypatch, tmp_path: Path, patched_client
+    monkeypatch, tmp_path: Path, patched_blog_job_store
 ) -> None:
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
@@ -139,7 +124,7 @@ def test_run_blog_full_pipeline_job_planning_error(
 
 
 def test_run_blog_full_pipeline_job_blogging_error(
-    monkeypatch, tmp_path: Path, patched_client
+    monkeypatch, tmp_path: Path, patched_blog_job_store
 ) -> None:
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
@@ -161,7 +146,7 @@ def test_run_blog_full_pipeline_job_blogging_error(
 
 
 def test_run_blog_full_pipeline_job_unknown_error(
-    monkeypatch, tmp_path: Path, patched_client
+    monkeypatch, tmp_path: Path, patched_blog_job_store
 ) -> None:
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
@@ -181,7 +166,7 @@ def test_run_blog_full_pipeline_job_unknown_error(
 
 
 def test_run_blog_full_pipeline_job_job_updater_failure_swallowed(
-    monkeypatch, tmp_path: Path, patched_client
+    monkeypatch, tmp_path: Path, patched_blog_job_store
 ) -> None:
     """A failing update_blog_job inside the job_updater is swallowed; the run still completes.
 

@@ -47,12 +47,26 @@ def patched_blog_job_store(monkeypatch, fake_job_client) -> Any:
     the per-test ``FakeJobServiceClient``. Unlike ``patched_client``, this does not
     import ``api/main`` — store-only test modules should not pay that import cost.
 
+    Both import paths of the store module are covered: ``shared.blog_job_store`` and,
+    when it resolves to a distinct module object, the ``blogging.shared.blog_job_store``
+    alias — so code that reaches the store through either path hits the fake.
+
     Apply per-module with
-    ``pytestmark = pytest.mark.usefixtures("patched_blog_job_store")``.
+    ``pytestmark = pytest.mark.usefixtures("patched_blog_job_store")``, or request it by
+    name from a test that needs the fake store.
     """
     from shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
+    # Also patch the ``blogging.shared`` alias when that alternate module path was loaded
+    # as a separate object (depends on how the code under test imported the store).
+    try:
+        from blogging.shared import blog_job_store as bjs_alt
+    except ImportError:
+        pass
+    else:
+        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
+
     return fake_job_client
 
 

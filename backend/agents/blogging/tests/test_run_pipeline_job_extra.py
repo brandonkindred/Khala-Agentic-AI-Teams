@@ -8,22 +8,7 @@ import threading
 import uuid
 from pathlib import Path
 
-import pytest
 from conftest import make_content_plan, make_planning_phase_result
-
-
-@pytest.fixture
-def patched_client(monkeypatch, fake_job_client):
-    from shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    try:
-        from blogging.shared import blog_job_store as bjs_alt
-
-        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
-    except ImportError:
-        pass
-    return fake_job_client
 
 
 def _setup_artifacts_root(monkeypatch, tmp_path: Path) -> None:
@@ -71,7 +56,7 @@ def test_publish_terminal_swallows_publish_errors(monkeypatch) -> None:
 
 
 def test_fail_job_works_via_shared_blog_job_store(
-    monkeypatch, patched_client, tmp_path: Path
+    monkeypatch, patched_blog_job_store, tmp_path: Path
 ) -> None:
     """_fail_job records the failure (status/error) via the shared job store."""
     from shared import blog_job_store as bjs
@@ -91,7 +76,9 @@ def test_fail_job_works_via_shared_blog_job_store(
     assert job["error"] == "oh no"
 
 
-def test_publish_publishes_via_job_event_bus(monkeypatch, tmp_path: Path, patched_client) -> None:
+def test_publish_publishes_via_job_event_bus(
+    monkeypatch, tmp_path: Path, patched_blog_job_store
+) -> None:
     """A full run publishes at least one ``update`` event through the SSE bus."""
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
@@ -127,7 +114,7 @@ def test_publish_publishes_via_job_event_bus(monkeypatch, tmp_path: Path, patche
 
 
 def test_job_updater_swallows_publish_exception(
-    monkeypatch, tmp_path: Path, patched_client
+    monkeypatch, tmp_path: Path, patched_blog_job_store
 ) -> None:
     """A raising SSE publish is swallowed; the run still completes."""
     from shared import blog_job_store as bjs
@@ -167,7 +154,9 @@ def test_job_updater_swallows_publish_exception(
     assert boomed  # the raising publish was actually reached and swallowed
 
 
-def test_external_cancellation_planning_path(monkeypatch, tmp_path: Path, patched_client) -> None:
+def test_external_cancellation_planning_path(
+    monkeypatch, tmp_path: Path, patched_blog_job_store
+) -> None:
     """A PlanningError wrapping a Temporal cancellation marks the job cancelled."""
     from shared import blog_job_store as bjs
     from shared import run_pipeline_job as rpj
@@ -192,7 +181,7 @@ def test_external_cancellation_planning_path(monkeypatch, tmp_path: Path, patche
 
 
 def test_external_cancellation_blogging_error_path(
-    monkeypatch, tmp_path: Path, patched_client
+    monkeypatch, tmp_path: Path, patched_blog_job_store
 ) -> None:
     """A BloggingError wrapping a Temporal cancellation marks the job cancelled."""
     from shared import blog_job_store as bjs
@@ -218,7 +207,7 @@ def test_external_cancellation_blogging_error_path(
 
 
 def test_external_cancellation_unexpected_error_path(
-    monkeypatch, tmp_path: Path, patched_client
+    monkeypatch, tmp_path: Path, patched_blog_job_store
 ) -> None:
     """A generic error wrapping a Temporal cancellation marks the job cancelled."""
     from shared import blog_job_store as bjs
@@ -243,7 +232,7 @@ def test_external_cancellation_unexpected_error_path(
 
 
 def test_mark_cancelled_swallows_update_exception(
-    monkeypatch, tmp_path: Path, patched_client
+    monkeypatch, tmp_path: Path, patched_blog_job_store
 ) -> None:
     """A failing update inside the cancellation path is swallowed (no crash)."""
     from shared import blog_job_store as bjs
@@ -278,7 +267,7 @@ def test_mark_cancelled_swallows_update_exception(
 
 
 def test_pipeline_heartbeat_loop_runs_body_directly(
-    monkeypatch, tmp_path: Path, patched_client
+    monkeypatch, tmp_path: Path, patched_blog_job_store
 ) -> None:
     """Drive the inner ``_pipeline_heartbeat`` body by patching threading.Event.wait."""
     from shared import blog_job_store as bjs

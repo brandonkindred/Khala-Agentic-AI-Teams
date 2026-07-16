@@ -8,20 +8,6 @@ import pytest
 from conftest import make_content_plan
 
 
-@pytest.fixture
-def patched_client(monkeypatch, fake_job_client):
-    from shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    try:
-        from blogging.shared import blog_job_store as bjs_alt
-
-        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
-    except ImportError:
-        pass
-    return fake_job_client
-
-
 def _plan(target_reader: str | None = None):
     from shared.content_plan import ContentPlanSection, TitleCandidate
 
@@ -42,7 +28,7 @@ def _plan(target_reader: str | None = None):
 
 
 def test_run_title_selection_replaces_disliked_with_llm_replacement(
-    monkeypatch, patched_client
+    monkeypatch, patched_blog_job_store
 ) -> None:
     from agent_implementations.blog_writing_process_v2 import _run_title_selection
     from shared import blog_job_store as bjs
@@ -84,7 +70,9 @@ def test_run_title_selection_replaces_disliked_with_llm_replacement(
     assert state["call"] >= 1
 
 
-def test_run_title_selection_llm_failure_falls_back_to_removal(monkeypatch, patched_client) -> None:
+def test_run_title_selection_llm_failure_falls_back_to_removal(
+    monkeypatch, patched_blog_job_store
+) -> None:
     """If LLM raises while generating a replacement, the disliked title is REMOVED.
     Then the user selects another title (= loves it) and we return it."""
     import agent_implementations.blog_writing_process_v2 as v2
@@ -126,7 +114,9 @@ def test_run_title_selection_llm_failure_falls_back_to_removal(monkeypatch, patc
     assert out == "Fallback Title"
 
 
-def test_run_title_selection_propagates_cancelled_error(monkeypatch, patched_client) -> None:
+def test_run_title_selection_propagates_cancelled_error(
+    monkeypatch, patched_blog_job_store
+) -> None:
     """CancelledError inside the loop propagates out — does not become None."""
     from agent_implementations.blog_writing_process_v2 import _run_title_selection
     from shared import blog_job_store as bjs
@@ -154,7 +144,7 @@ def test_run_title_selection_propagates_cancelled_error(monkeypatch, patched_cli
         )
 
 
-def test_run_title_selection_swallows_generic_error(monkeypatch, patched_client) -> None:
+def test_run_title_selection_swallows_generic_error(monkeypatch, patched_blog_job_store) -> None:
     """Non-Cancelled exceptions inside the function are caught and return None."""
     from agent_implementations.blog_writing_process_v2 import _run_title_selection
     from shared import blog_job_store as bjs
