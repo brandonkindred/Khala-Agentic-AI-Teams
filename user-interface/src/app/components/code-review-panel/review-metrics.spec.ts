@@ -1,7 +1,5 @@
 import { vi } from 'vitest';
 import {
-  commentFindings,
-  findingChips,
   reviewDuration,
   severityEntries,
   terminalTimestamp,
@@ -9,30 +7,6 @@ import {
 } from './review-metrics';
 
 describe('review-metrics', () => {
-  describe('commentFindings', () => {
-    it('prefers comment_findings, falls back to body_findings, then 0', () => {
-      expect(
-        commentFindings({ total_issues: 0, inline_comments: 0, comment_findings: 2, event: 'COMMENT' }),
-      ).toBe(2);
-      expect(
-        commentFindings({ total_issues: 0, inline_comments: 0, body_findings: 4, event: 'COMMENT' }),
-      ).toBe(4);
-      expect(commentFindings({ total_issues: 0, inline_comments: 0, event: 'COMMENT' })).toBe(0);
-    });
-  });
-
-  describe('findingChips', () => {
-    it('builds total / inline / comments labels', () => {
-      expect(
-        findingChips({ total_issues: 3, inline_comments: 2, comment_findings: 1, event: 'COMMENT' }),
-      ).toEqual(['3 finding(s)', '2 inline', '1 comments']);
-      // The legacy body_findings key folds into the comments count.
-      expect(
-        findingChips({ total_issues: 0, inline_comments: 0, body_findings: 4, event: 'COMMENT' }),
-      ).toEqual(['0 finding(s)', '0 inline', '4 comments']);
-    });
-  });
-
   describe('severityEntries', () => {
     it('returns only non-zero levels in critical→info order', () => {
       expect(severityEntries(undefined)).toEqual([]);

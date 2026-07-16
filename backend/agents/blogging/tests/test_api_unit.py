@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from _api_test_utils import NoOpThread
 from _api_test_utils import api_main as _api_main
 from _api_test_utils import create_job as _create_job
 from fastapi.testclient import TestClient
@@ -456,15 +455,14 @@ def test_restart_job_400_when_no_payload(client: TestClient) -> None:
 def test_start_full_pipeline_async_creates_job(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """POST /full-pipeline-async creates a job and starts a background thread, which we no-op."""
+    """POST /full-pipeline-async creates a job and submits it to the bounded async pool, no-oped."""
     started: list[Any] = []
 
-    def _record_thread(*args: Any, **kwargs: Any) -> NoOpThread:
-        started.append((kwargs.get("target"), kwargs.get("args")))
-        return NoOpThread()
+    def _fake_submit(fn, *args, **kwargs):
+        started.append((fn, args))
 
-    # Replace the threading module reference inside the API module.
-    monkeypatch.setattr(_api_main.threading, "Thread", _record_thread)
+    # Intercept the bounded async-job pool so we don't actually run the pipeline.
+    monkeypatch.setattr(_api_main, "_submit_async_job", _fake_submit)
 
     body = {
         "brief": "How to ship faster",
@@ -478,6 +476,144 @@ def test_start_full_pipeline_async_creates_job(
     data = r.json()
     assert "job_id" in data
     assert started
+    # The submitted job is the pipeline runner bound to the returned job_id.
+    ((fn, args),) = started
+    assert fn is _api_main._run_pipeline_with_tracking
+    assert args[0] == data["job_id"]
+
+
+def test_async_job_pool_is_bounded_and_enqueues(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Async jobs are dispatched to a bounded worker pool via a queue, sized from
+    BLOGGING_ASYNC_MAX_WORKERS. Submit enqueues the (target, args) without running it."""
+    import queue
+
+    assert _api_main._ASYNC_JOB_MAX_WORKERS >= 1
+    assert isinstance(_api_main._ASYNC_JOB_QUEUE, queue.Queue)
+
+    # Don't spin real worker threads; just verify submit enqueues the (target, args) job.
+    monkeypatch.setattr(_api_main, "_ensure_async_workers", lambda: None)
+
+    def sentinel(*_a):
+        return None
+
+    _api_main._submit_async_job(sentinel, "job-1", 2)
+    assert _api_main._ASYNC_JOB_QUEUE.get_nowait() == (sentinel, ("job-1", 2))
+
+
+def test_submit_async_job_rejects_non_callable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The callable precondition is enforced at submit time (explicit raise so it survives
+    python -O), not deferred to a worker."""
+    monkeypatch.setattr(_api_main, "_ensure_async_workers", lambda: None)
+    with pytest.raises(TypeError):
+        _api_main._submit_async_job(object(), "job-1")
+
+
+def test_async_job_workers_are_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Workers are daemon threads so an HITL-parked job never blocks process shutdown."""
+    created: list[dict] = []
+
+    class _FakeThread:
+        def __init__(self, *a, **kw):
+            created.append(kw)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(_api_main.threading, "Thread", _FakeThread)
+    monkeypatch.setattr(_api_main, "_ASYNC_JOB_WORKERS_STARTED", False)
+    _api_main._ensure_async_workers()
+    assert len(created) == _api_main._ASYNC_JOB_MAX_WORKERS
+    assert all(kw.get("daemon") is True for kw in created)
+
+
+def test_async_job_worker_runs_jobs_and_survives_crash() -> None:
+    """The worker loop runs queued jobs, keeps going after a job raises, and stops on the
+    None sentinel (so one bad job never kills a worker)."""
+    ran: list[str] = []
+
+    def _ok():
+        ran.append("ok")
+
+    def _boom():
+        raise RuntimeError("job crashed")
+
+    # No real workers run in tests, so the shared queue is safe to drive directly.
+    _api_main._ASYNC_JOB_QUEUE.put((_ok, ()))
+    _api_main._ASYNC_JOB_QUEUE.put((_boom, ()))
+    _api_main._ASYNC_JOB_QUEUE.put(None)  # stop sentinel
+    _api_main._async_job_worker()
+    assert ran == ["ok"]
+
+
+def test_async_job_worker_marks_crashed_job_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A job that crashes before failing its own store entry is marked failed by the worker
+    as a safety net, so it doesn't sit in 'running' until the stale monitor reaps it."""
+    failed: list = []
+    monkeypatch.setattr(
+        _api_main, "fail_blog_job", lambda job_id, error=None: failed.append((job_id, error))
+    )
+
+    def _boom(job_id):
+        raise RuntimeError("crashed before own handler")
+
+    _api_main._ASYNC_JOB_QUEUE.put((_boom, ("job-x",)))
+    _api_main._ASYNC_JOB_QUEUE.put(None)  # stop sentinel
+    _api_main._async_job_worker()
+    assert failed == [("job-x", "crashed before own handler")]
+
+
+def test_job_already_terminal_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A queued job failed/cancelled or deleted before a worker starts it is treated as
+    terminal, so the worker skips it instead of resurrecting it."""
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "failed"})
+    assert _api_main._job_already_terminal("j1") is True
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "cancelled"})
+    assert _api_main._job_already_terminal("j1") is True
+    # A shutdown-marked interrupted job must be skipped, not flipped back to running
+    # (the resume flow sets it running before dispatch, so it's never interrupted here).
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "interrupted"})
+    assert _api_main._job_already_terminal("j1") is True
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: None)
+    assert _api_main._job_already_terminal("j1") is True
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "running"})
+    assert _api_main._job_already_terminal("j1") is False
+
+    # Fail open: a transient preflight read failure must NOT abandon a valid queued job.
+    def _raises(_jid):
+        raise RuntimeError("job-service outage")
+
+    monkeypatch.setattr(_api_main, "get_blog_job", _raises)
+    assert _api_main._job_already_terminal("j1") is False
+
+
+def test_publish_skip_terminal_event_maps_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skipping a terminal queued job emits the matching stream-terminal event so a
+    subscribed SSE client closes promptly; interrupted/missing emit nothing."""
+    events: list[tuple] = []
+    monkeypatch.setattr(
+        _api_main,
+        "_publish_terminal_event",
+        lambda job_id, event_type, **kw: events.append((event_type, kw)),
+    )
+
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "cancelled"})
+    _api_main._publish_skip_terminal_event("j1")
+    assert events[-1][0] == "cancelled"
+
+    monkeypatch.setattr(
+        _api_main, "get_blog_job", lambda jid: {"status": "failed", "error": "reaped"}
+    )
+    _api_main._publish_skip_terminal_event("j1")
+    assert events[-1][0] == "error"
+    assert events[-1][1]["error"] == "reaped"
+
+    # interrupted (shutdown handoff) and a missing job emit no stream-terminal event.
+    before = len(events)
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "interrupted"})
+    _api_main._publish_skip_terminal_event("j1")
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: None)
+    _api_main._publish_skip_terminal_event("j1")
+    assert len(events) == before
 
 
 def test_medium_stats_sync_when_integration_disabled(
@@ -511,7 +647,8 @@ def test_medium_stats_async_starts_job(
 ) -> None:
     monkeypatch.setattr(_api_main, "medium_stats_integration_eligible", lambda: (True, ""))
 
-    monkeypatch.setattr(_api_main.threading, "Thread", NoOpThread)
+    # Intercept the bounded async-job pool so we don't actually run the Medium stats job.
+    monkeypatch.setattr(_api_main, "_submit_async_job", lambda fn, *a, **kw: None)
     monkeypatch.setenv("BLOGGING_MEDIUM_STATS_ROOT", str(tmp_path / "ms"))
 
     r = client.post("/medium-stats-async", json={})

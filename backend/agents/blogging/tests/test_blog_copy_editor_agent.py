@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput, CopyEditorOutput
 
 from llm_service import DummyLLMClient
@@ -204,6 +205,83 @@ def test_blog_copy_editor_agent_empty_draft_writes_file(tmp_path: Path) -> None:
     assert content["feedback_items"] == []
     assert result.summary
     assert len(result.feedback_items) == 0
+
+
+@pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
+def test_copy_editor_transient_error_reraises(monkeypatch, kind) -> None:
+    """A transient LLM-transport error propagates unwrapped (delegated to Temporal), no fallback."""
+    from blog_copy_editor_agent import agent as ce_mod
+
+    from llm_service import LLMRateLimitError, LLMTemporaryError
+
+    err_cls = LLMRateLimitError if kind == "rate_limit" else LLMTemporaryError
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise err_cls("transient outage")
+
+    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
+    )
+    with pytest.raises(err_cls):
+        agent.run(CopyEditorInput(draft="# d\n\nsome body text here"))
+
+
+def test_copy_editor_unexpected_error_degrades_to_fallback(monkeypatch) -> None:
+    """A non-transient, non-JSON LLM/programming error degrades to a manual-review
+    fallback (approved, no feedback) instead of crashing the draft stage."""
+    from blog_copy_editor_agent import agent as ce_mod
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise RuntimeError("unexpected model failure")
+
+    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
+    )
+
+    result = agent.run(CopyEditorInput(draft="# d\n\nsome body text here"))
+
+    assert isinstance(result, CopyEditorOutput)
+    assert "manually" in result.summary.lower()
+    # A tooling failure approves so it never drives a pointless no-op rewrite of a
+    # within-length draft — the copy editor is advisory; hard gates run downstream.
+    assert result.approved is True
+    assert result.feedback_items == []
+
+
+def test_copy_editor_json_parse_failure_degrades_to_fallback(monkeypatch) -> None:
+    """When the model never returns parseable JSON, the fallback approves (no no-op rewrite)."""
+    from blog_copy_editor_agent import agent as ce_mod
+
+    from llm_service import LLMJsonParseError
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise LLMJsonParseError("not json")
+
+    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
+    )
+
+    result = agent.run(CopyEditorInput(draft="# d\n\nsome body text here"))
+
+    assert isinstance(result, CopyEditorOutput)
+    assert "manually" in result.summary.lower()
+    assert result.approved is True
+    assert result.feedback_items == []
 
 
 def test_write_feedback_to_path_returns_true_on_success(tmp_path: Path) -> None:

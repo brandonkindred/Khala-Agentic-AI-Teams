@@ -1,0 +1,154 @@
+@use '../chip';
+
+// Chip look shared via the code-review-panel chip partial: the `--draft` chip in
+// the PR header and the `--event` chip in the reviews-table outcome cell.
+.cr-chip {
+  @include chip.look;
+
+  &--draft {
+    background: var(--mat-sys-tertiary-container, #efe2d0);
+    color: var(--mat-sys-on-tertiary-container, #4a3a1d);
+  }
+
+  &--event {
+    background: var(--mat-sys-primary-container, #d7e3ff);
+    color: var(--mat-sys-on-primary-container, #001b3f);
+    font-weight: 600;
+  }
+
+  // Severity accents for the per-review metric chips: critical/high stand out red,
+  // medium/low take warm/cool container tints, info stays neutral.
+  &--sev-critical {
+    background: var(--mat-sys-error-container, #ffdad6);
+    color: var(--mat-sys-on-error-container, #410002);
+    font-weight: 700;
+  }
+
+  &--sev-high {
+    background: var(--mat-sys-error-container, #ffdad6);
+    color: var(--mat-sys-on-error-container, #410002);
+    font-weight: 600;
+  }
+
+  &--sev-medium {
+    background: var(--mat-sys-tertiary-container, #efe2d0);
+    color: var(--mat-sys-on-tertiary-container, #4a3a1d);
+  }
+
+  &--sev-low {
+    background: var(--mat-sys-secondary-container, #e0e7ef);
+    color: var(--mat-sys-on-secondary-container, #2a3441);
+  }
+
+  &--sev-info {
+    background: var(--mat-sys-surface-container-high, #ececec);
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.7));
+  }
+}
+
+// Review-run status text in the table (shared with the parent's row badge).
+@include chip.status;
+
+// ---------------------------------------------------------------------------
+// PR detail panel
+// ---------------------------------------------------------------------------
+
+.cr-pr-number {
+  font-variant-numeric: tabular-nums;
+  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+}
+
+.cr-pr-title {
+  font-weight: 500;
+}
+
+.cr-pull-detail {
+  padding: 1rem 1.25rem 1.25rem;
+  border-top: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+  background: var(--mat-sys-surface-container, #f7f7f7);
+
+  &__pr {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1.05rem;
+  }
+
+  // The single hoisted PR link, sitting inline in the detail header.
+  &__link {
+    display: inline-flex;
+    align-items: center;
+    color: var(--mat-sys-primary, #1a73e8);
+
+    mat-icon {
+      font-size: 1.1rem;
+      width: 1.1rem;
+      height: 1.1rem;
+    }
+  }
+
+  &__meta,
+  &__preview,
+  &__hint {
+    margin: 0.5rem 0 0;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.7));
+  }
+
+  &__preview {
+    font-size: 0.9rem;
+    white-space: pre-wrap;
+  }
+
+  &__hint {
+    font-size: 0.85rem;
+  }
+
+  &__actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 1rem;
+  }
+}
+
+.cr-reviews-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+  font-size: 0.85rem;
+
+  th,
+  td {
+    text-align: left;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+    vertical-align: top;
+  }
+
+  th {
+    font-weight: 600;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.65));
+  }
+
+  td {
+    > span,
+    > a {
+      vertical-align: middle;
+    }
+
+    mat-spinner {
+      display: inline-block;
+      vertical-align: middle;
+      margin-left: 0.3rem;
+    }
+
+    a {
+      color: var(--mat-sys-primary, #1a73e8);
+    }
+  }
+}
+
+.cr-findings {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}

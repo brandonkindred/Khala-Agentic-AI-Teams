@@ -327,6 +327,59 @@ def test_plan_stage_activity_reraises_cancelled(monkeypatch, tmp_path) -> None:
         acts.plan_stage_activity("j1", {"brief": "x"})
 
 
+def test_run_stage_transient_error_reraises_when_not_last_attempt(monkeypatch) -> None:
+    """A transient LLM error re-raises (deferred to Temporal retry) on a non-final attempt."""
+    import pytest
+
+    from blogging.shared import run_pipeline_job as rpj
+    from blogging.temporal import activities as acts
+    from llm_service import LLMTemporaryError
+
+    monkeypatch.setattr(rpj, "start_pipeline_heartbeat", lambda job_id: None)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: False)
+    failed: list = []
+    monkeypatch.setattr(acts, "_fail_activity", lambda *a, **kw: failed.append(a))
+
+    def body():
+        raise LLMTemporaryError("provider 503")
+
+    with pytest.raises(LLMTemporaryError):
+        acts._run_stage("j1", "gates", lambda: {"status": "FAIL"}, body)
+    # Not funneled to a terminal failure — Temporal will retry the stage.
+    assert failed == []
+
+
+def test_run_stage_transient_error_funnels_fail_dto_on_last_attempt(monkeypatch) -> None:
+    """On the final Temporal attempt, a transient LLM error is funneled to a FAIL DTO."""
+    import pytest  # noqa: F401
+
+    from blogging.shared import run_pipeline_job as rpj
+    from blogging.temporal import activities as acts
+    from llm_service import LLMRateLimitError
+
+    monkeypatch.setattr(rpj, "start_pipeline_heartbeat", lambda job_id: None)
+    monkeypatch.setattr(acts, "_is_last_attempt", lambda: True)
+    failed: list = []
+    monkeypatch.setattr(
+        acts,
+        "_fail_activity",
+        lambda job_id, exc, failed_phase: failed.append((job_id, exc, failed_phase)),
+    )
+
+    def body():
+        raise LLMRateLimitError("429")
+
+    result = acts._run_stage("j1", "gates", lambda: {"status": "FAIL"}, body)
+    assert result == {"status": "FAIL"}
+    assert len(failed) == 1
+    job_id, exc, failed_phase = failed[0]
+    assert (job_id, failed_phase) == ("j1", "gates")
+    # The terminal transient failure is recorded with a clear provider-availability
+    # message (not the raw "429"), while the original error is preserved as the cause.
+    assert "temporarily unavailable" in str(exc)
+    assert isinstance(exc.cause, LLMRateLimitError)
+
+
 # ---------------------------------------------------------------------------
 # workflow orchestration — patch workflow.execute_activity (no Temporal env)
 # ---------------------------------------------------------------------------

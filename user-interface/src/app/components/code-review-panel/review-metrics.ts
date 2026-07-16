@@ -1,11 +1,13 @@
 /**
- * Pure formatting/derivation helpers for the Code Review page's per-review metrics
- * (Findings, Severity, and Duration cells, plus the live-poll completion timestamp).
+ * Pure derivation helpers for the Code Review page's per-review metrics — the Severity
+ * and Duration cells rendered by `PrReviewDetailComponent`, plus the live-poll completion
+ * timestamp stamped by `CodeReviewPanelComponent`.
  *
- * Extracted from `CodeReviewPanelComponent` so the metric logic is unit-testable in
- * isolation and the component keeps a smaller surface. Every function here is pure
- * except `reviewDuration` (may `console.warn` on a clock-skew anomaly) and
- * `terminalTimestamp` (reads the clock only on its fallback path).
+ * Kept as standalone pure functions so the metric logic is unit-testable in isolation and
+ * shared by both the parent panel (`terminalTimestamp`) and the detail child
+ * (`severityEntries`, `reviewDuration`). Every function is pure except `reviewDuration`
+ * (may `console.warn` on a clock-skew anomaly) and `terminalTimestamp` (reads the clock
+ * only on its fallback path).
  */
 import type { CodeReviewSummary, CodingTeamJobStatus } from '../../models/coding-team.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
@@ -22,32 +24,6 @@ export interface ReviewDurationInput {
   status: string;
   startedAt: number;
   completedAt?: number;
-}
-
-/**
- * Findings posted as standalone comments, normalized across the field rename.
- *
- * Preconditions: `summary` is a review summary.
- * Postconditions: returns `comment_findings`, falling back to the legacy
- * `body_findings`, then 0 — never a blank count. Pure.
- */
-export function commentFindings(summary: CodeReviewSummary): number {
-  return summary.comment_findings ?? summary.body_findings ?? 0;
-}
-
-/**
- * Chip labels for a review's Findings cell (total / inline / standalone-comment counts).
- *
- * Preconditions: `summary` is a review summary.
- * Postconditions: returns exactly three labels, in order, derived from `total_issues`,
- * `inline_comments`, and `commentFindings(summary)`. Pure — no side effects.
- */
-export function findingChips(summary: CodeReviewSummary): string[] {
-  return [
-    `${summary.total_issues} finding(s)`,
-    `${summary.inline_comments} inline`,
-    `${commentFindings(summary)} comments`,
-  ];
 }
 
 /**

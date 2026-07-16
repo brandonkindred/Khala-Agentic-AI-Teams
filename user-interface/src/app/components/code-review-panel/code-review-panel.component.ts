@@ -12,42 +12,25 @@ import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { pollJobStatus } from '../../services/job-status-poller';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
-import { PendingIssueProposalsComponent } from './pending-issue-proposals/pending-issue-proposals.component';
+import { PrReviewDetailComponent } from './pr-review-detail/pr-review-detail.component';
 import type {
   CodeReviewRunItem,
   GitHubPullRequestItem,
   GitHubRepoItem,
   RunPrReviewResponse,
 } from '../../models/integrations.model';
-import type { CodeReviewSummary, CodingTeamJobStatus } from '../../models/coding-team.model';
+import type { CodingTeamJobStatus } from '../../models/coding-team.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
-import { findingChips, reviewDuration, severityEntries, terminalTimestamp } from './review-metrics';
+import type { PrReviewRecord } from './pr-review-record.model';
+import { terminalTimestamp } from './review-metrics';
 
-/**
- * One code-review run on a pull request. Held in memory and kept live by a
- * per-job poller; the authoritative copy is persisted backend-side (the
- * `code_review_runs` table) and re-hydrated on load so history survives reloads.
- */
-export interface PrReviewRecord {
-  jobId: string;
-  prNumber: number;
-  /** Repository the review ran against — PR numbers collide across repositories. */
-  owner: string;
-  repo: string;
-  /** Milliseconds since epoch when the review started (for the table timestamp). */
-  startedAt: number;
-  /** Milliseconds since epoch when the review reached a terminal state, if known.
-   * Drives the row's duration; absent while the review is still running. */
-  completedAt?: number;
-  status: string;
-  statusText?: string;
-  reviewSummary?: CodeReviewSummary;
-  prUrl?: string;
-  error?: string;
-}
+// Re-exported so existing importers of `PrReviewRecord` from this module keep working;
+// the interface now lives in ./pr-review-record.model so both this panel and its
+// extracted detail child can depend on it without a component-to-component import cycle.
+export type { PrReviewRecord } from './pr-review-record.model';
 
 /**
  * Code Review panel: lists every repository the configured PAT can access and, per
@@ -69,7 +52,7 @@ export interface PrReviewRecord {
     RouterLink,
     HealthIndicatorComponent,
     InlineBannerComponent,
-    PendingIssueProposalsComponent,
+    PrReviewDetailComponent,
   ],
   templateUrl: './code-review-panel.component.html',
   styleUrl: './code-review-panel.component.scss',
@@ -483,11 +466,9 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
         record.error = status.error;
         if (isCodingTeamTerminalStatus(status.status)) {
           // Stamp the completion time when the run first goes terminal so the row can
-          // show a duration without a reload. Prefer the server's timestamp for the
-          // terminal update over the browser clock: a backgrounded tab, an offline
-          // gap, or a delayed poll can push Date.now() well past when the job actually
-          // finished, overstating the duration until a reload swaps in the persisted
-          // completed_at. `??=` so a value from a prior hydrate is never overwritten.
+          // show a duration without a reload, using the server's terminal timestamp
+          // (see terminalTimestamp) rather than the browser clock. `??=` so a value
+          // from a prior hydrate is never overwritten.
           record.completedAt ??= terminalTimestamp(status);
           this.disposePoller(record.jobId);
         }
@@ -536,18 +517,6 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     return !!latest && !latest.error && !isCodingTeamTerminalStatus(latest.status);
   }
 
-  /** True once a single review run has reached a terminal state. */
-  isRecordTerminal(record: PrReviewRecord): boolean {
-    return isCodingTeamTerminalStatus(record.status);
-  }
-
-  // Per-review metric helpers are pure functions in `review-metrics.ts` (unit-tested
-  // there in isolation). Expose the template-facing ones as fields so the template calls
-  // them unchanged; `terminalTimestamp` is used directly in `startPolling`.
-  readonly findingChips = findingChips;
-  readonly severityEntries = severityEntries;
-  readonly reviewDuration = reviewDuration;
-
   /** Row status badge text derived from the latest review, or null when none. */
   badgeLabel(prNumber: number): string | null {
     const latest = this.latestReview(prNumber);
@@ -569,28 +538,10 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   }
 
   // --- Pre-existing-bug proposals -> GitHub issues -------------------------
-  // Selection/formatting/rendering lives in PendingIssueProposalsComponent;
-  // this component only gates whether it's shown and owns the actual API call.
-
-  /**
-   * True when a *terminal* review has pre-existing-bug proposals to show.
-   * Gated on terminal so proposals never flash mid-review, before the summary
-   * (and its proposal list) is final.
-   */
-  hasProposals(record: PrReviewRecord): boolean {
-    return (
-      this.isRecordTerminal(record) &&
-      (record.reviewSummary?.pending_issue_proposals?.length ?? 0) > 0
-    );
-  }
-
-  isCreatingIssues(jobId: string): boolean {
-    return this.creatingIssues.has(jobId);
-  }
-
-  createIssueErrorFor(jobId: string): string | null {
-    return this.createIssueErrors.get(jobId) ?? null;
-  }
+  // Gating (`hasProposals`) and the in-flight/error reads (`isCreatingIssues`,
+  // `createIssueErrorFor`) live in PrReviewDetailComponent, which renders the
+  // proposals; this component owns the `creatingIssues`/`createIssueErrors` state
+  // it passes down and the actual API call below.
 
   /**
    * File GitHub issues for the given (child-selected) proposal ids of a
