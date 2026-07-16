@@ -303,6 +303,27 @@ def test_run_discovery_absent_tech_constraints_defaults_empty():
     assert ctx_update["client_context"].tech_constraints == []
 
 
+def test_run_discovery_single_section_null_list_fields_do_not_crash():
+    """A single-section reply with null/malformed list fields normalizes, not raises.
+
+    The single-section reduce path returns the raw LLM dict, so a ``null`` (or non-list)
+    value for a list field must be coerced before constructing ClientContext — otherwise
+    Pydantic validation would fail the whole planning workflow.
+    """
+    context = {"client_context": ClientContext(), "spec_content": "Some material"}
+    llm = make_llm(
+        '{"problem_summary": "P", "opportunity_statement": "",'
+        ' "target_users": null, "success_criteria": "notalist",'
+        ' "tech_constraints": [123, "Rust", null], "assumptions": null}'
+    )
+    ctx_update, _ = run_discovery(context, llm=llm)
+    cc = ctx_update["client_context"]
+    assert cc.target_users == []
+    assert cc.success_criteria == []
+    assert cc.tech_constraints == ["Rust"]  # non-string items filtered out
+    assert cc.assumptions == []
+
+
 def test_run_discovery_brief_only_and_spec_only():
     for key in ("initial_brief", "spec_content"):
         context = {"client_context": ClientContext(), key: "Some material"}
