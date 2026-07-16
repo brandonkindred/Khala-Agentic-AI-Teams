@@ -142,7 +142,7 @@ def load_brand_spec_prompt(path: str | Path) -> str:
     Raises:
         FileNotFoundError: If the template file does not exist.
     """
-    from author_profile import load_author_profile, render_template_file
+    from agents.blogging.author_profile import load_author_profile, render_template_file
 
     p = Path(path).resolve()
     if not p.exists():

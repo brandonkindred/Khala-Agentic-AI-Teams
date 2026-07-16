@@ -14,9 +14,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from author_profile import EXAMPLE_PROFILE_PATH, AuthorProfile, load_author_profile
-from shared.brand_spec import load_brand_spec_prompt
-from shared.style_loader import load_style_file
+from agents.blogging.author_profile import EXAMPLE_PROFILE_PATH, AuthorProfile, load_author_profile
+from agents.blogging.shared.brand_spec import load_brand_spec_prompt
+from agents.blogging.shared.style_loader import load_style_file
 
 _BLOGGING_ROOT = Path(__file__).resolve().parent.parent
 _BRAND_SPEC = _BLOGGING_ROOT / "docs" / "brand_spec_prompt.md"
@@ -37,7 +37,7 @@ _BANNED = (
 @pytest.fixture(autouse=True)
 def _force_example_profile(monkeypatch):
     monkeypatch.setenv("AUTHOR_PROFILE_PATH", str(EXAMPLE_PROFILE_PATH))
-    from author_profile import loader as loader_mod
+    from agents.blogging.author_profile import loader as loader_mod
 
     loader_mod.clear_cache()
     yield

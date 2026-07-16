@@ -21,7 +21,7 @@ def _make_agent_with_guidelines():
 
 
 def test_writer_fix_deterministic_violations(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
     monkeypatch.setattr(
@@ -36,7 +36,7 @@ def test_writer_fix_deterministic_violations(monkeypatch) -> None:
 
 
 def test_writer_fix_deterministic_violations_swallow_error(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
 
@@ -50,7 +50,7 @@ def test_writer_fix_deterministic_violations_swallow_error(monkeypatch) -> None:
 
 def test_writer_fix_deterministic_violations_empty_response(monkeypatch) -> None:
     """If LLM returns nothing extractable, keep original."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
     monkeypatch.setattr(BlogWriterAgent, "_call_text", lambda *a, **kw: "no marker text")
@@ -58,7 +58,7 @@ def test_writer_fix_deterministic_violations_empty_response(monkeypatch) -> None
 
 
 def test_writer_llm_self_review_no_issues(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
     monkeypatch.setattr(BlogWriterAgent, "_call_text", lambda self, prompt, system_prompt="": "[]")
@@ -68,7 +68,7 @@ def test_writer_llm_self_review_no_issues(monkeypatch) -> None:
 
 def test_writer_llm_self_review_with_issues(monkeypatch) -> None:
     """When review returns issues, the agent applies fixes via a second call."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
     state = {"i": 0}
@@ -86,7 +86,7 @@ def test_writer_llm_self_review_with_issues(monkeypatch) -> None:
 
 def test_writer_llm_self_review_no_array(monkeypatch) -> None:
     """No JSON array → return draft unchanged."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
     monkeypatch.setattr(
@@ -97,7 +97,7 @@ def test_writer_llm_self_review_no_array(monkeypatch) -> None:
 
 
 def test_writer_llm_self_review_exception(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
 
@@ -111,7 +111,7 @@ def test_writer_llm_self_review_exception(monkeypatch) -> None:
 
 def test_writer_self_review_combines_both(monkeypatch) -> None:
     """_self_review runs deterministic + LLM passes."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
     monkeypatch.setattr(
@@ -127,7 +127,7 @@ def test_writer_self_review_combines_both(monkeypatch) -> None:
 
 
 def test_writer_format_feedback_item_line() -> None:
-    from blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 
     a = _make_agent_with_guidelines()
     item = FeedbackItem(
@@ -153,8 +153,8 @@ def test_writer_format_feedback_item_line() -> None:
 def test_writer_revise_empty_draft() -> None:
     """revise() returns empty draft unchanged."""
     from _content_plan_test_utils import make_requirements_analysis
-    from blog_writer_agent.models import ReviseWriterInput
-    from shared.content_plan import (
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         TitleCandidate,
@@ -183,8 +183,8 @@ def test_writer_revise_empty_draft() -> None:
 
 def test_writer_revise_no_feedback_items() -> None:
     from _content_plan_test_utils import make_requirements_analysis
-    from blog_writer_agent.models import ReviseWriterInput
-    from shared.content_plan import (
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         TitleCandidate,
@@ -210,7 +210,7 @@ def test_writer_revise_no_feedback_items() -> None:
 
 
 def test_writer_call_agent_json_strips_fences(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
     monkeypatch.setattr(

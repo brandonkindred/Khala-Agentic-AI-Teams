@@ -75,7 +75,7 @@ def test_get_job_status_200(client: TestClient) -> None:
 
 
 def test_list_jobs_filters(client: TestClient) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     a = _create_job()
     b = _create_job()
@@ -96,7 +96,7 @@ def test_list_jobs_filters(client: TestClient) -> None:
 
 
 def test_cancel_job_lifecycle(client: TestClient) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     bjs.start_blog_job(job_id)
@@ -139,7 +139,7 @@ def test_approve_404(client: TestClient) -> None:
 
 
 def test_approve_unapprove_happy_path(client: TestClient) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     bjs.complete_blog_job(job_id)
@@ -174,7 +174,7 @@ def test_select_title_not_waiting(client: TestClient) -> None:
 
 
 def test_select_title_empty_title(client: TestClient) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     bjs.update_blog_job(job_id, waiting_for_title_selection=True)
@@ -183,7 +183,7 @@ def test_select_title_empty_title(client: TestClient) -> None:
 
 
 def test_select_title_ok(client: TestClient) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     bjs.update_blog_job(job_id, waiting_for_title_selection=True)
@@ -195,7 +195,7 @@ def test_select_title_ok(client: TestClient) -> None:
 
 
 def test_rate_titles_paths(client: TestClient) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     # 404 when missing
@@ -236,7 +236,7 @@ def test_rate_titles_paths(client: TestClient) -> None:
 
 
 def test_story_response_paths(client: TestClient) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     r = client.post("/job/missing/story-response", json={"message": "hi"})
@@ -253,7 +253,7 @@ def test_story_response_paths(client: TestClient) -> None:
 
 
 def test_skip_story_gap_paths(client: TestClient) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     r = client.post("/job/missing/skip-story-gap")
@@ -267,7 +267,7 @@ def test_skip_story_gap_paths(client: TestClient) -> None:
 
 
 def test_submit_answers_paths(client: TestClient) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     r = client.post("/job/missing/answers", json={"answers": []})
@@ -283,7 +283,7 @@ def test_submit_answers_paths(client: TestClient) -> None:
 
 
 def test_draft_feedback_paths(client: TestClient) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     r = client.post("/job/missing/draft-feedback", json={"feedback": "x", "approved": True})
@@ -315,7 +315,7 @@ def test_artifact_list_404_when_no_work_dir(client: TestClient) -> None:
 
 
 def test_artifact_list_200_and_get_artifact(client: TestClient, tmp_path: Path) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     workdir = tmp_path / "work"
     workdir.mkdir()
@@ -368,7 +368,7 @@ def test_artifact_get_404_no_work_dir(client: TestClient) -> None:
 
 
 def test_artifact_get_404_when_file_missing(client: TestClient, tmp_path: Path) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     workdir = tmp_path / "work"
     workdir.mkdir()
@@ -385,7 +385,7 @@ def test_artifact_get_404_when_file_missing(client: TestClient, tmp_path: Path) 
 
 
 def test_stream_terminal_job_completes_quickly(client: TestClient) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     bjs.complete_blog_job(job_id)
@@ -415,7 +415,7 @@ def test_resume_job_404(client: TestClient) -> None:
 
 def test_resume_job_400_when_not_resumable(client: TestClient) -> None:
     """A completed job can't be resumed."""
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     bjs.complete_blog_job(job_id)
@@ -424,7 +424,7 @@ def test_resume_job_400_when_not_resumable(client: TestClient) -> None:
 
 
 def test_resume_job_400_when_no_payload(client: TestClient) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     bjs.update_blog_job(job_id, status="interrupted")
@@ -439,7 +439,7 @@ def test_restart_job_404(client: TestClient) -> None:
 
 
 def test_restart_job_400_when_no_payload(client: TestClient) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     bjs.complete_blog_job(job_id)
@@ -664,7 +664,7 @@ def test_medium_stats_async_starts_job(
 
 def test_story_bank_endpoints(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """list/get/delete/search delegate to story_bank module functions."""
-    import shared.story_bank as sb
+    import agents.blogging.shared.story_bank as sb
 
     monkeypatch.setattr(sb, "list_stories", lambda limit=50, offset=0: [{"id": "s1"}])
     monkeypatch.setattr(

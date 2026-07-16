@@ -8,7 +8,7 @@ from pathlib import Path
 
 def test_brief_label_picks_first_nonblank_line() -> None:
     """_brief_label is robust to empty/whitespace-led briefs (no IndexError)."""
-    from shared.blog_job_store import _brief_label
+    from agents.blogging.shared.blog_job_store import _brief_label
 
     assert _brief_label("Hello\nworld", "fallback") == "Hello"
     # Leading blank lines: must skip to the first line with visible content.
@@ -23,7 +23,7 @@ def test_brief_label_picks_first_nonblank_line() -> None:
 
 def test_create_blog_job_records_profile_association(tmp_path: Path, monkeypatch) -> None:
     """create_blog_job links the new job to the default user profile (best-effort)."""
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     from user_profile import ArtifactType
 
@@ -38,7 +38,7 @@ def test_create_blog_job_records_profile_association(tmp_path: Path, monkeypatch
 
 def test_mark_all_running_jobs_failed(tmp_path: Path) -> None:
     """mark_all_running_jobs_failed sets all running/pending blog jobs to interrupted with reason."""
-    from shared.blog_job_store import (
+    from agents.blogging.shared.blog_job_store import (
         create_blog_job,
         get_blog_job,
         mark_all_running_jobs_failed,
@@ -60,7 +60,7 @@ def test_mark_all_running_jobs_failed(tmp_path: Path) -> None:
 
 def test_delete_blog_job(tmp_path: Path) -> None:
     """delete_blog_job removes the job and returns True; returns False if not found."""
-    from shared.blog_job_store import create_blog_job, delete_blog_job, get_blog_job
+    from agents.blogging.shared.blog_job_store import create_blog_job, delete_blog_job, get_blog_job
 
     cache_dir = tmp_path
     job_id = str(uuid.uuid4())[:8]

@@ -20,7 +20,7 @@ def _make_plan():
 
 
 def _stub_writer_class():
-    from blog_writer_agent.models import WriterOutput
+    from agents.blogging.blog_writer_agent.models import WriterOutput
 
     class _StubWriter:
         def __init__(self, *a, **kw):
@@ -48,7 +48,7 @@ def _stub_writer_class():
 
 
 def _stub_editor_class():
-    from blog_copy_editor_agent.models import CopyEditorOutput
+    from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput
 
     class _StubEditor:
         def __init__(self, *a, **kw):
@@ -61,7 +61,7 @@ def _stub_editor_class():
 
 
 def _stub_compliance(status: str = "PASS"):
-    from blog_compliance_agent.models import ComplianceReport
+    from agents.blogging.blog_compliance_agent.models import ComplianceReport
 
     class _Stub:
         def __init__(self, *a, **kw):
@@ -74,7 +74,7 @@ def _stub_compliance(status: str = "PASS"):
 
 
 def _stub_factcheck(claims_status: str = "PASS", risk_status: str = "PASS"):
-    from blog_fact_check_agent.models import FactCheckReport
+    from agents.blogging.blog_fact_check_agent.models import FactCheckReport
 
     class _Stub:
         def __init__(self, *a, **kw):
@@ -104,7 +104,7 @@ class _ValidatorStub:
 
 def _common_v2_setup(monkeypatch, validator_status: str = "PASS"):
     """Apply the standard set of monkeypatches to v2 for gate tests."""
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
 
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
@@ -125,7 +125,7 @@ def test_run_pipeline_with_gates_all_pass(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(v2, "BlogComplianceAgent", _stub_compliance("PASS"))
     monkeypatch.setattr(v2, "BlogFactCheckAgent", _stub_factcheck("PASS", "PASS"))
 
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     brief = ResearchBriefInput(brief="hi", max_results=5)
     _, _, status = v2.run_pipeline(
@@ -144,7 +144,7 @@ def test_run_pipeline_with_gates_exhausts_iterations(monkeypatch, tmp_path: Path
     monkeypatch.setattr(v2, "BlogComplianceAgent", _stub_compliance("FAIL"))
     monkeypatch.setattr(v2, "BlogFactCheckAgent", _stub_factcheck("FAIL", "FAIL"))
 
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     brief = ResearchBriefInput(brief="hi", max_results=5)
     _, _, status = v2.run_pipeline(
@@ -159,7 +159,7 @@ def test_run_pipeline_with_gates_exhausts_iterations(monkeypatch, tmp_path: Path
 
 def test_run_pipeline_with_gates_pass_after_one_rewrite(monkeypatch, tmp_path: Path) -> None:
     """Gates fail on iter 1, pass on iter 2."""
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
 
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
@@ -176,8 +176,8 @@ def test_run_pipeline_with_gates_pass_after_one_rewrite(monkeypatch, tmp_path: P
 
     monkeypatch.setattr(v2, "run_validators_from_work_dir", validator_factory)
 
-    from blog_compliance_agent.models import ComplianceReport
-    from blog_fact_check_agent.models import FactCheckReport
+    from agents.blogging.blog_compliance_agent.models import ComplianceReport
+    from agents.blogging.blog_fact_check_agent.models import FactCheckReport
 
     compliance_state = {"i": 0}
 
@@ -214,7 +214,7 @@ def test_run_pipeline_with_gates_pass_after_one_rewrite(monkeypatch, tmp_path: P
     monkeypatch.setattr(v2, "BlogComplianceAgent", _Compliance)
     monkeypatch.setattr(v2, "BlogFactCheckAgent", _FactCheck)
 
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     brief = ResearchBriefInput(brief="hi", max_results=5)
     _, _, status = v2.run_pipeline(
@@ -241,7 +241,7 @@ def _raising_gate(exc: Exception):
 
 
 def _run_gated_pipeline(v2, tmp_path):
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     brief = ResearchBriefInput(brief="hi", max_results=5)
     return v2.run_pipeline(
@@ -270,7 +270,7 @@ def test_gate_factcheck_transient_error_propagates_unwrapped(monkeypatch, tmp_pa
 def test_gate_factcheck_generic_error_maps_to_factcheckerror(monkeypatch, tmp_path: Path) -> None:
     """A non-transient error from the fact-check gate maps to FactCheckError."""
     import pytest
-    from shared.errors import FactCheckError
+    from agents.blogging.shared.errors import FactCheckError
 
     v2 = _common_v2_setup(monkeypatch, validator_status="PASS")
     monkeypatch.setattr(v2, "BlogComplianceAgent", _stub_compliance("PASS"))
@@ -283,7 +283,7 @@ def test_gate_factcheck_generic_error_maps_to_factcheckerror(monkeypatch, tmp_pa
 def test_gate_compliance_generic_error_maps_to_complianceerror(monkeypatch, tmp_path: Path) -> None:
     """A non-transient error from the compliance gate maps to ComplianceError."""
     import pytest
-    from shared.errors import ComplianceError
+    from agents.blogging.shared.errors import ComplianceError
 
     v2 = _common_v2_setup(monkeypatch, validator_status="PASS")
     monkeypatch.setattr(v2, "BlogFactCheckAgent", _stub_factcheck("PASS", "PASS"))
@@ -295,8 +295,8 @@ def test_gate_compliance_generic_error_maps_to_complianceerror(monkeypatch, tmp_
 
 def test_both_gates_invoked_when_parallelized(monkeypatch, tmp_path: Path) -> None:
     """Both gates run (concurrently) and their PASS reports combine to status=PASS."""
-    from blog_compliance_agent.models import ComplianceReport
-    from blog_fact_check_agent.models import FactCheckReport
+    from agents.blogging.blog_compliance_agent.models import ComplianceReport
+    from agents.blogging.blog_fact_check_agent.models import FactCheckReport
 
     calls = {"fact": 0, "compliance": 0}
 
@@ -336,7 +336,7 @@ def test_gate_failure_drains_other_gate(monkeypatch, tmp_path: Path) -> None:
     """When one gate raises, the other still runs to completion before the error
     propagates — no abandoned worker that could overwrite a later attempt's artifact."""
     import pytest
-    from blog_compliance_agent.models import ComplianceReport
+    from agents.blogging.blog_compliance_agent.models import ComplianceReport
 
     from llm_service import LLMTemporaryError
 

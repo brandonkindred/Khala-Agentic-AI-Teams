@@ -24,7 +24,7 @@ if _api_main is None:
 
 def test_publish_terminal_event_swallows_exceptions(monkeypatch) -> None:
     """When ``publish`` raises, ``_publish_terminal_event`` returns silently."""
-    from shared import job_event_bus
+    from agents.blogging.shared import job_event_bus
 
     def boom(*a, **kw):
         raise RuntimeError("down")
@@ -51,7 +51,7 @@ def test_publish_terminal_event_swallows_import_error(monkeypatch) -> None:
 
 
 def test_run_blogging_service_shutdown_runs_with_helpers(monkeypatch) -> None:
-    from shared import blog_job_store
+    from agents.blogging.shared import blog_job_store
 
     called = {"stop": False, "temporal": False, "job_svc": False}
 
@@ -87,7 +87,7 @@ def test_run_blogging_service_shutdown_swallows_inner_errors(monkeypatch) -> Non
     def boom(*a, **kw):
         raise RuntimeError("kaboom")
 
-    from shared import blog_job_store
+    from agents.blogging.shared import blog_job_store
 
     monkeypatch.setattr(blog_job_store, "stop_blog_stale_monitor", boom)
 
@@ -124,7 +124,7 @@ def test_blogging_app_lifespan_runs_in_event_loop(monkeypatch) -> None:
     fake_shared_postgres.close_pool = lambda: None
     monkeypatch.setitem(sys.modules, "shared_postgres", fake_shared_postgres)
 
-    from shared import blog_job_store
+    from agents.blogging.shared import blog_job_store
 
     shutdown_ran = {"value": False}
     monkeypatch.setattr(

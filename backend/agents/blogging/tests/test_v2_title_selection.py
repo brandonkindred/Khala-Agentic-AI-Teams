@@ -16,7 +16,7 @@ import uuid
 
 def _plan():
     from _content_plan_test_utils import make_content_plan
-    from shared.content_plan import ContentPlanSection, TitleCandidate
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     return make_content_plan(
         overarching_topic="My Topic",
@@ -33,7 +33,7 @@ def _plan():
 
 
 def test_run_title_selection_returns_none_without_job_id() -> None:
-    from agent_implementations.blog_writing_process_v2 import _run_title_selection
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
 
     out = _run_title_selection(
         plan=_plan(),
@@ -49,8 +49,8 @@ def test_run_title_selection_returns_loved_title(
     monkeypatch, patched_blog_job_store_client
 ) -> None:
     """User submits 'love' rating → selected_title set, function returns it."""
-    from agent_implementations.blog_writing_process_v2 import _run_title_selection
-    from shared import blog_job_store as bjs
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -83,8 +83,8 @@ def test_run_title_selection_returns_none_on_cancellation(
     monkeypatch, patched_blog_job_store_client
 ) -> None:
     """When the job is cancelled mid-wait, return None."""
-    from agent_implementations.blog_writing_process_v2 import _run_title_selection
-    from shared import blog_job_store as bjs
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -104,8 +104,8 @@ def test_run_title_selection_processes_pending_feedback(
     monkeypatch, patched_blog_job_store_client
 ) -> None:
     """User dislikes title → LLM generates replacement → process continues until 'love'."""
-    import agent_implementations.blog_writing_process_v2 as v2
-    from shared import blog_job_store as bjs
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared import blog_job_store as bjs
 
     # Speed up the sleep
     monkeypatch.setattr(v2.time, "sleep", lambda s: None)
@@ -150,8 +150,8 @@ def test_run_title_selection_handles_llm_failure(
     monkeypatch, patched_blog_job_store_client
 ) -> None:
     """If LLM fails to generate replacement, just remove the rated title."""
-    import agent_implementations.blog_writing_process_v2 as v2
-    from shared import blog_job_store as bjs
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(v2.time, "sleep", lambda s: None)
 

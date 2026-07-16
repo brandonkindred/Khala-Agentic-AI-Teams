@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from shared.content_plan import (
+from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     PlanningPhaseResult,

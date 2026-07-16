@@ -4,7 +4,7 @@ Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
 """
 
 from _content_plan_test_utils import make_content_plan
-from shared.content_plan import (
+from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     RequirementsAnalysis,

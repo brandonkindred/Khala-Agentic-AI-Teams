@@ -21,7 +21,7 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from shared.content_plan import ContentPlan
+from agents.blogging.shared.content_plan import ContentPlan
 from strands import Agent
 
 from llm_service import LLMJsonParseError, extract_json_from_response
@@ -364,12 +364,12 @@ class GhostWriterElicitationAgent:
         The pipeline must have already posted the seed question and set
         ``waiting_for_story_input=True`` before calling this method.
         """
-        from shared.blog_job_store import (
+        from agents.blogging.shared.blog_job_store import (
             add_story_agent_message,
             get_blog_job,
             is_waiting_for_story_input,
         )
-        from shared.job_event_bus import subscribe, unsubscribe
+        from agents.blogging.shared.job_event_bus import subscribe, unsubscribe
 
         conversation: List[Dict[str, str]] = [{"role": "agent", "content": gap.seed_question}]
         detected_context: Optional[str] = None

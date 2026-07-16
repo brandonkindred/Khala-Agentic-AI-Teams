@@ -8,13 +8,13 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from blog_writer_agent.models import WriterOutput
-from ghost_writer_agent.models import StoryElicitationResult
+from agents.blogging.blog_writer_agent.models import WriterOutput
+from agents.blogging.ghost_writer_agent.models import StoryElicitationResult
 
 
 def _plan():
     from _content_plan_test_utils import make_content_plan
-    from shared.content_plan import ContentPlanSection, TitleCandidate
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     return make_content_plan(
         overarching_topic="Topic",
@@ -62,7 +62,9 @@ def _make_stub_draft_agent(draft_text: str):
 
 def test_fill_story_placeholders_no_placeholders_returns_input(monkeypatch) -> None:
     """When no [Author: ...] placeholders exist, return original draft and stories."""
-    from agent_implementations.blog_writing_process_v2 import _fill_story_placeholders
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _fill_story_placeholders,
+    )
 
     out_draft, out_stories = _fill_story_placeholders(
         draft_text="# Draft\nBody with no placeholders.",
@@ -84,14 +86,14 @@ def test_fill_story_placeholders_user_skips_all(
     monkeypatch, patched_blog_job_store_client, tmp_path
 ) -> None:
     """User skips all placeholders → re-draft path with skip instruction."""
-    import agent_implementations.blog_writing_process_v2 as v2
-    from shared import blog_job_store as bjs
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
 
     # Stub GhostWriterElicitationAgent.conduct_interview to return skipped
-    import ghost_writer_agent as gw
+    import agents.blogging.ghost_writer_agent as gw
 
     monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _make_stub_ghost(skipped=True))
 
@@ -115,13 +117,13 @@ def test_fill_story_placeholders_user_provides_narrative(
     monkeypatch, patched_blog_job_store_client, tmp_path
 ) -> None:
     """User provides a story → narrative collected and re-drafted."""
-    import agent_implementations.blog_writing_process_v2 as v2
-    from shared import blog_job_store as bjs
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
 
-    import ghost_writer_agent as gw
+    import agents.blogging.ghost_writer_agent as gw
 
     monkeypatch.setattr(
         gw,
@@ -149,13 +151,13 @@ def test_fill_story_placeholders_redraft_fails_keeps_original(
     monkeypatch, patched_blog_job_store_client, tmp_path
 ) -> None:
     """When re-draft raises, keep original draft."""
-    import agent_implementations.blog_writing_process_v2 as v2
-    from shared import blog_job_store as bjs
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
 
-    import ghost_writer_agent as gw
+    import agents.blogging.ghost_writer_agent as gw
 
     monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _make_stub_ghost(narrative="A story."))
 
@@ -183,15 +185,15 @@ def test_fill_story_placeholders_story_bank_save_cancellation_propagates(
 ) -> None:
     """A Temporal cancellation raised from the story-bank save must propagate,
     not be swallowed by the non-fatal save guard."""
-    import agent_implementations.blog_writing_process_v2 as v2
-    from shared import blog_job_store as bjs
-    from shared import story_bank
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import story_bank
     from temporalio.exceptions import CancelledError
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
 
-    import ghost_writer_agent as gw
+    import agents.blogging.ghost_writer_agent as gw
 
     monkeypatch.setattr(
         gw, "GhostWriterElicitationAgent", _make_stub_ghost(narrative="A story worth saving.")
@@ -221,8 +223,8 @@ def test_fill_story_placeholders_cancelled_break(
     monkeypatch, patched_blog_job_store_client, tmp_path
 ) -> None:
     """If job goes to cancelled mid-loop, break out."""
-    import agent_implementations.blog_writing_process_v2 as v2
-    from shared import blog_job_store as bjs
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(
@@ -232,7 +234,7 @@ def test_fill_story_placeholders_cancelled_break(
     bjs.update_blog_job(job_id, status="cancelled")
 
     # Even though the ghost writer would be invoked, the cancel check breaks first
-    import ghost_writer_agent as gw
+    import agents.blogging.ghost_writer_agent as gw
 
     monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _make_stub_ghost(raises=True))
 

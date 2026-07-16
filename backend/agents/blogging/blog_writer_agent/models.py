@@ -6,9 +6,9 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from blog_copy_editor_agent.models import FeedbackItem
+from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+from agents.blogging.shared.content_plan import ContentPlan, content_plan_to_outline_markdown
 from pydantic import BaseModel, Field, model_validator
-from shared.content_plan import ContentPlan, content_plan_to_outline_markdown
 
 from .feedback_tracker import PersistentFeedbackItem
 
@@ -144,11 +144,16 @@ class WriterOutput(BaseModel):
 class RevisionPlanChange(BaseModel):
     """A single planned change in the revision plan."""
 
-    section: str = Field(..., description="Which section or location in the draft this change targets.")
-    feedback_ids: List[int] = Field(
-        default_factory=list, description="1-based indices of feedback items addressed by this change."
+    section: str = Field(
+        ..., description="Which section or location in the draft this change targets."
     )
-    action: str = Field(..., description="What will be done: rewrite, delete, merge, add, rephrase, etc.")
+    feedback_ids: List[int] = Field(
+        default_factory=list,
+        description="1-based indices of feedback items addressed by this change.",
+    )
+    action: str = Field(
+        ..., description="What will be done: rewrite, delete, merge, add, rephrase, etc."
+    )
     rationale: str = Field(..., description="Why this change is needed and what it fixes.")
 
 

@@ -18,8 +18,8 @@ import pytest
 
 
 def test_research_synthesize_overview_dict_with_outline(monkeypatch) -> None:
-    from blog_research_agent.agent import ResearchAgent
-    from blog_research_agent.models import (
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.models import (
         ResearchBriefInput,
         ResearchReference,
     )
@@ -54,8 +54,8 @@ def test_research_synthesize_overview_dict_with_outline(monkeypatch) -> None:
 
 def test_research_synthesize_overview_string_response(monkeypatch) -> None:
     """LLM may return a string directly."""
-    from blog_research_agent.agent import ResearchAgent
-    from blog_research_agent.models import (
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.models import (
         ResearchBriefInput,
         ResearchReference,
     )
@@ -84,8 +84,8 @@ def test_research_synthesize_overview_string_response(monkeypatch) -> None:
 
 
 def test_research_synthesize_overview_json_error_returns_none(monkeypatch) -> None:
-    from blog_research_agent.agent import ResearchAgent
-    from blog_research_agent.models import (
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.models import (
         ResearchBriefInput,
         ResearchReference,
     )
@@ -118,8 +118,8 @@ def test_research_synthesize_overview_json_error_returns_none(monkeypatch) -> No
 
 
 def test_research_get_similar_topics_no_refs() -> None:
-    from blog_research_agent.agent import ResearchAgent
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     from llm_service import DummyLLMClient
 
@@ -128,8 +128,8 @@ def test_research_get_similar_topics_no_refs() -> None:
 
 
 def test_research_get_similar_topics_filters_by_score(monkeypatch) -> None:
-    from blog_research_agent.agent import ResearchAgent
-    from blog_research_agent.models import (
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.models import (
         ResearchBriefInput,
         ResearchReference,
     )
@@ -170,8 +170,8 @@ def test_research_get_similar_topics_filters_by_score(monkeypatch) -> None:
 
 
 def test_research_get_similar_topics_llm_error(monkeypatch) -> None:
-    from blog_research_agent.agent import ResearchAgent
-    from blog_research_agent.models import (
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.models import (
         ResearchBriefInput,
         ResearchReference,
     )
@@ -203,14 +203,14 @@ def test_research_get_similar_topics_llm_error(monkeypatch) -> None:
 
 
 def test_research_fetch_academic_papers_swallows_error(monkeypatch) -> None:
-    from blog_research_agent.agent import ResearchAgent
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.agent import ResearchAgent
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     from llm_service import DummyLLMClient
 
     a = ResearchAgent(llm_client=DummyLLMClient())
 
-    import blog_research_agent.agent as ra_mod
+    import agents.blogging.blog_research_agent.agent as ra_mod
 
     def boom(*a, **kw):
         raise RuntimeError("arxiv down")
@@ -226,7 +226,7 @@ def test_research_fetch_academic_papers_swallows_error(monkeypatch) -> None:
 
 
 def test_publication_submit_draft_happy(tmp_path) -> None:
-    from blog_publication_agent import BlogPublicationAgent, SubmitDraftInput
+    from agents.blogging.blog_publication_agent import BlogPublicationAgent, SubmitDraftInput
 
     from llm_service import DummyLLMClient
 
@@ -244,7 +244,7 @@ def test_publication_submit_draft_happy(tmp_path) -> None:
 
 
 def test_publication_submit_draft_empty_raises(tmp_path) -> None:
-    from blog_publication_agent import BlogPublicationAgent, SubmitDraftInput
+    from agents.blogging.blog_publication_agent import BlogPublicationAgent, SubmitDraftInput
 
     from llm_service import DummyLLMClient
 
@@ -254,7 +254,7 @@ def test_publication_submit_draft_empty_raises(tmp_path) -> None:
 
 
 def test_publication_approve_happy(tmp_path) -> None:
-    from blog_publication_agent import BlogPublicationAgent, SubmitDraftInput
+    from agents.blogging.blog_publication_agent import BlogPublicationAgent, SubmitDraftInput
 
     from llm_service import DummyLLMClient
 
@@ -268,7 +268,7 @@ def test_publication_approve_happy(tmp_path) -> None:
 
 
 def test_publication_approve_missing_raises(tmp_path) -> None:
-    from blog_publication_agent import BlogPublicationAgent
+    from agents.blogging.blog_publication_agent import BlogPublicationAgent
 
     from llm_service import DummyLLMClient
 
@@ -278,7 +278,7 @@ def test_publication_approve_missing_raises(tmp_path) -> None:
 
 
 def test_publication_reject_with_force_ready(tmp_path) -> None:
-    from blog_publication_agent import BlogPublicationAgent, SubmitDraftInput
+    from agents.blogging.blog_publication_agent import BlogPublicationAgent, SubmitDraftInput
 
     from llm_service import DummyLLMClient
 
@@ -290,8 +290,8 @@ def test_publication_reject_with_force_ready(tmp_path) -> None:
 
 
 def test_publication_reject_with_llm_followup(tmp_path, monkeypatch) -> None:
-    from blog_publication_agent import BlogPublicationAgent, SubmitDraftInput
-    from blog_publication_agent import agent as pa_mod
+    from agents.blogging.blog_publication_agent import BlogPublicationAgent, SubmitDraftInput
+    from agents.blogging.blog_publication_agent import agent as pa_mod
 
     from llm_service import DummyLLMClient
 
@@ -317,7 +317,7 @@ def test_publication_reject_with_llm_followup(tmp_path, monkeypatch) -> None:
 
 
 def test_publication_reject_missing_submission(tmp_path) -> None:
-    from blog_publication_agent import BlogPublicationAgent
+    from agents.blogging.blog_publication_agent import BlogPublicationAgent
 
     from llm_service import DummyLLMClient
 
@@ -333,7 +333,7 @@ def test_publication_reject_missing_submission(tmp_path) -> None:
 
 def test_planning_agent_make_default_init() -> None:
     """make_blog_planning_agent() is a zero-arg factory used by the sandbox shim."""
-    from blog_planning_agent.agent import make_blog_planning_agent
+    from agents.blogging.blog_planning_agent.agent import make_blog_planning_agent
 
     a = make_blog_planning_agent()
     assert a is not None
@@ -342,8 +342,8 @@ def test_planning_agent_make_default_init() -> None:
 def test_planning_agent_runner_delegates(monkeypatch) -> None:
     """The _BlogPlanningAgentRunner.run() delegates to BlogPlanningAgent.run."""
     from _content_plan_test_utils import make_requirements_analysis
-    from blog_planning_agent.agent import make_blog_planning_agent
-    from shared.content_plan import (
+    from agents.blogging.blog_planning_agent.agent import make_blog_planning_agent
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         PlanningPhaseResult,

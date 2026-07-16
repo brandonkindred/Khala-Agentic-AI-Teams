@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 def _content_plan():
     from _content_plan_test_utils import make_requirements_analysis
-    from shared.content_plan import (
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         TitleCandidate,
@@ -36,7 +36,7 @@ def _content_plan():
 
 
 def _gap():
-    from ghost_writer_agent.models import StoryGap
+    from agents.blogging.ghost_writer_agent.models import StoryGap
 
     return StoryGap(
         section_title="Intro",
@@ -51,7 +51,7 @@ def _gap():
 
 
 def test_ghost_plan_to_text_renders_sections() -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     plan = _content_plan()
     text = GhostWriterElicitationAgent._plan_to_text(plan)
@@ -67,7 +67,7 @@ def test_ghost_plan_to_text_renders_sections() -> None:
 
 def _patch_agent(monkeypatch, responses: List[Any]) -> None:
     """Stub the strands Agent class inside ghost_writer_agent.agent."""
-    import ghost_writer_agent.agent as gw_agent
+    import agents.blogging.ghost_writer_agent.agent as gw_agent
 
     state = {"i": 0}
 
@@ -86,7 +86,7 @@ def _patch_agent(monkeypatch, responses: List[Any]) -> None:
 
 
 def test_ghost_evaluate_sufficiency_success(monkeypatch) -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -110,7 +110,7 @@ def test_ghost_evaluate_sufficiency_success(monkeypatch) -> None:
 
 
 def test_ghost_evaluate_sufficiency_parse_retry_succeeds(monkeypatch) -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -129,7 +129,7 @@ def test_ghost_evaluate_sufficiency_parse_retry_succeeds(monkeypatch) -> None:
 
 
 def test_ghost_evaluate_sufficiency_falls_back_default(monkeypatch) -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -145,8 +145,8 @@ def test_ghost_evaluate_sufficiency_falls_back_default(monkeypatch) -> None:
 
 
 def test_ghost_evaluate_sufficiency_exception_then_default(monkeypatch) -> None:
-    import ghost_writer_agent.agent as gw_agent
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    import agents.blogging.ghost_writer_agent.agent as gw_agent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -170,7 +170,7 @@ def test_ghost_evaluate_sufficiency_exception_then_default(monkeypatch) -> None:
 
 
 def test_ghost_generate_follow_up_happy(monkeypatch) -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -185,7 +185,7 @@ def test_ghost_generate_follow_up_happy(monkeypatch) -> None:
 
 
 def test_ghost_generate_follow_up_error_returns_none(monkeypatch) -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -196,7 +196,7 @@ def test_ghost_generate_follow_up_error_returns_none(monkeypatch) -> None:
 
 
 def test_ghost_generate_follow_up_empty_response(monkeypatch) -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -211,7 +211,7 @@ def test_ghost_generate_follow_up_empty_response(monkeypatch) -> None:
 
 
 def test_ghost_compile_narrative_empty_user_content() -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -221,7 +221,7 @@ def test_ghost_compile_narrative_empty_user_content() -> None:
 
 
 def test_ghost_compile_narrative_happy_path_with_context(monkeypatch) -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -239,8 +239,8 @@ def test_ghost_compile_narrative_happy_path_with_context(monkeypatch) -> None:
 
 
 def test_ghost_compile_narrative_handles_errors(monkeypatch) -> None:
-    import ghost_writer_agent.agent as gw_agent
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    import agents.blogging.ghost_writer_agent.agent as gw_agent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -268,7 +268,7 @@ def test_ghost_compile_narrative_handles_errors(monkeypatch) -> None:
 
 
 def test_ghost_find_gaps_via_llm_success(monkeypatch) -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -302,7 +302,7 @@ def test_ghost_find_gaps_via_llm_success(monkeypatch) -> None:
 
 
 def test_ghost_find_gaps_via_llm_no_array_returns_empty(monkeypatch) -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -313,7 +313,7 @@ def test_ghost_find_gaps_via_llm_no_array_returns_empty(monkeypatch) -> None:
 
 
 def test_ghost_find_gaps_via_llm_parse_error_retry_then_fail(monkeypatch) -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -323,8 +323,8 @@ def test_ghost_find_gaps_via_llm_parse_error_retry_then_fail(monkeypatch) -> Non
 
 
 def test_ghost_find_gaps_via_llm_exception_then_recover(monkeypatch) -> None:
-    import ghost_writer_agent.agent as gw_agent
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    import agents.blogging.ghost_writer_agent.agent as gw_agent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -359,8 +359,8 @@ def test_ghost_find_gaps_via_llm_exception_then_recover(monkeypatch) -> None:
 def test_ghost_find_story_gaps_uses_plan_opportunities_when_present(monkeypatch) -> None:
     """find_story_gaps short-circuits to opportunities, avoiding LLM gap-finding."""
     from _content_plan_test_utils import make_requirements_analysis
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
-    from shared.content_plan import (
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         TitleCandidate,
@@ -387,7 +387,7 @@ def test_ghost_find_story_gaps_uses_plan_opportunities_when_present(monkeypatch)
 
 def test_ghost_find_story_gaps_falls_back_to_llm(monkeypatch) -> None:
     """No story_opportunity → goes through _find_gaps_via_llm."""
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -404,7 +404,7 @@ def test_ghost_find_story_gaps_falls_back_to_llm(monkeypatch) -> None:
 
 def test_ghost_generate_friendly_seeds_dict_with_questions(monkeypatch) -> None:
     """LLM returns {"questions": [...]} — should be unwrapped."""
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -416,7 +416,7 @@ def test_ghost_generate_friendly_seeds_dict_with_questions(monkeypatch) -> None:
 
 def test_ghost_generate_friendly_seeds_dict_wrong_len_fallback(monkeypatch) -> None:
     """Mismatched length → falls back to generic seeds."""
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -434,7 +434,7 @@ def test_ghost_generate_friendly_seeds_dict_wrong_len_fallback(monkeypatch) -> N
 
 def test_ghost_conduct_interview_cancels_immediately(monkeypatch) -> None:
     """When the job is already cancelled, conduct_interview returns skipped=True."""
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -445,7 +445,7 @@ def test_ghost_conduct_interview_cancels_immediately(monkeypatch) -> None:
     def fake_get_job(job_id):
         return {"status": "cancelled", "story_chat_history": [], "current_story_gap_index": 0}
 
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "is_waiting_for_story_input", fake_is_waiting)
     monkeypatch.setattr(bjs, "get_blog_job", fake_get_job)
@@ -455,7 +455,7 @@ def test_ghost_conduct_interview_cancels_immediately(monkeypatch) -> None:
     fake_sub.notify.wait = lambda timeout=0: None
     fake_sub.notify.clear = lambda: None
     fake_sub.touch = lambda: None
-    from shared import job_event_bus as bus
+    from agents.blogging.shared import job_event_bus as bus
 
     monkeypatch.setattr(bus, "subscribe", lambda jid: fake_sub)
     monkeypatch.setattr(bus, "unsubscribe", lambda jid, sub: None)
@@ -467,7 +467,7 @@ def test_ghost_conduct_interview_cancels_immediately(monkeypatch) -> None:
 
 def test_ghost_conduct_interview_skipped_via_index_advance(monkeypatch) -> None:
     """When gap index advances past gap_index, return skipped."""
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -484,7 +484,7 @@ def test_ghost_conduct_interview_skipped_via_index_advance(monkeypatch) -> None:
             "current_gap_round": 0,
         }
 
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "is_waiting_for_story_input", fake_is_waiting)
     monkeypatch.setattr(bjs, "get_blog_job", fake_get_job)
@@ -493,7 +493,7 @@ def test_ghost_conduct_interview_skipped_via_index_advance(monkeypatch) -> None:
     fake_sub.notify.wait = lambda timeout=0: None
     fake_sub.notify.clear = lambda: None
     fake_sub.touch = lambda: None
-    from shared import job_event_bus as bus
+    from agents.blogging.shared import job_event_bus as bus
 
     monkeypatch.setattr(bus, "subscribe", lambda jid: fake_sub)
     monkeypatch.setattr(bus, "unsubscribe", lambda jid, sub: None)
@@ -505,7 +505,7 @@ def test_ghost_conduct_interview_skipped_via_index_advance(monkeypatch) -> None:
 
 def test_ghost_conduct_interview_no_experience_quick_exit(monkeypatch) -> None:
     """If the user's last message is a no-experience phrase, return skipped."""
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -522,7 +522,7 @@ def test_ghost_conduct_interview_no_experience_quick_exit(monkeypatch) -> None:
             "current_gap_round": 0,
         }
 
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "is_waiting_for_story_input", fake_is_waiting)
     monkeypatch.setattr(bjs, "get_blog_job", fake_get_job)
@@ -531,7 +531,7 @@ def test_ghost_conduct_interview_no_experience_quick_exit(monkeypatch) -> None:
     fake_sub.notify.wait = lambda timeout=0: None
     fake_sub.notify.clear = lambda: None
     fake_sub.touch = lambda: None
-    from shared import job_event_bus as bus
+    from agents.blogging.shared import job_event_bus as bus
 
     monkeypatch.setattr(bus, "subscribe", lambda jid: fake_sub)
     monkeypatch.setattr(bus, "unsubscribe", lambda jid, sub: None)

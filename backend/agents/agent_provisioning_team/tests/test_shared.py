@@ -131,17 +131,60 @@ def test_environment_store_register_rejects_none(tmp_path: Path) -> None:
         store.register(None)
 
 
-def test_environment_store_register_rejects_empty_agent_id(tmp_path: Path) -> None:
-    store = EnvironmentStore(storage_dir=tmp_path)
-    with pytest.raises(ValueError, match="agent_id must not be empty"):
-        store.register(
-            StoreEnvInfo(
-                agent_id="",
-                container_id="c1",
-                container_name="c1",
-                workspace_path="/w",
-            )
+def test_environment_info_construction_rejects_empty_agent_id() -> None:
+    """Construction-time validation now fires before ``register`` ever runs."""
+    with pytest.raises(ValueError, match="agent_id must be a non-empty string"):
+        StoreEnvInfo(
+            agent_id="",
+            container_id="c1",
+            container_name="c1",
+            workspace_path="/w",
         )
+
+
+def test_environment_store_register_rejects_empty_agent_id(tmp_path: Path) -> None:
+    """``register``'s own guard still fires for an instance mutated after
+    construction (a freshly-constructed instance can never have an empty
+    ``agent_id``)."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    env = StoreEnvInfo(
+        agent_id="a1",
+        container_id="c1",
+        container_name="c1",
+        workspace_path="/w",
+    )
+    env.agent_id = ""
+    with pytest.raises(ValueError, match="agent_id must not be empty"):
+        store.register(env)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"agent_id": ""},
+        {"agent_id": None},
+        {"container_id": ""},
+        {"container_id": None},
+        {"container_name": ""},
+        {"container_name": None},
+        {"ssh_port": 0},
+        {"ssh_port": -1},
+        {"ssh_port": 65536},
+        {"ssh_port": "22"},
+    ],
+)
+def test_environment_info_rejects_invalid_fields(kwargs: dict) -> None:
+    """Preconditions: ``kwargs`` overrides exactly one required field with an
+    invalid value. Postconditions: construction raises ``ValueError``."""
+    base = {
+        "agent_id": "a1",
+        "container_id": "c1",
+        "container_name": "c1",
+        "workspace_path": "/w",
+    }
+    base.update(kwargs)
+    with pytest.raises(ValueError):
+        StoreEnvInfo(**base)
 
 
 def test_environment_store_update_status(tmp_path: Path) -> None:
@@ -184,6 +227,18 @@ def test_environment_store_update_status_handles_corrupt(tmp_path: Path) -> None
     assert store.update_status("broken", "ready") is False
 
 
+def test_environment_store_update_status_handles_invalid_field(tmp_path: Path) -> None:
+    """A well-formed JSON record with an invalid field value (e.g. an empty
+    ``container_id``) fails ``EnvironmentInfo`` construction inside
+    ``from_dict`` — ``update_status`` must return ``False``, not raise."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    (tmp_path / "bad-record.json").write_text(
+        json.dumps({"agent_id": "bad-record", "container_id": "", "container_name": "c1"}),
+        encoding="utf-8",
+    )
+    assert store.update_status("bad-record", "ready") is False
+
+
 def test_environment_store_add_tool(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
     assert store.add_tool("missing", "pg") is False
@@ -221,6 +276,26 @@ def test_environment_store_add_tool_handles_corrupt(tmp_path: Path) -> None:
     bad = tmp_path / "broken.json"
     bad.write_text("not json", encoding="utf-8")
     assert store.add_tool("broken", "pg") is False
+
+
+def test_environment_store_add_tool_handles_invalid_field(tmp_path: Path) -> None:
+    """A well-formed JSON record with an invalid field value (e.g. an
+    out-of-range ``ssh_port``) fails ``EnvironmentInfo`` construction inside
+    ``from_dict`` — ``add_tool``/``add_tools`` must return ``False``, not
+    raise."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    (tmp_path / "bad-record.json").write_text(
+        json.dumps(
+            {
+                "agent_id": "bad-record",
+                "container_id": "c1",
+                "container_name": "c1",
+                "ssh_port": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert store.add_tool("bad-record", "pg") is False
 
 
 def test_environment_store_list_all(tmp_path: Path) -> None:
@@ -294,6 +369,19 @@ def test_environment_store_list_all_skips_corrupt(tmp_path: Path) -> None:
     assert {e.agent_id for e in out} == {"a1"}
 
 
+def test_environment_store_list_all_skips_non_dict_json(tmp_path: Path) -> None:
+    """A file containing a JSON array (not an object) must be skipped, not raise."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(agent_id="a1", container_id="c1", container_name="c1", workspace_path="/w")
+    )
+    (tmp_path / "array.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+
+    out = store.list_all()
+    # Only the valid one shows up.
+    assert {e.agent_id for e in out} == {"a1"}
+
+
 def test_environment_store_list_all_skips_unsafe_agent_id(tmp_path: Path) -> None:
     """A path-traversal-shaped agent_id from a malicious/malformed file must not surface."""
     store = EnvironmentStore(storage_dir=tmp_path)
@@ -314,6 +402,50 @@ def test_environment_store_list_all_skips_unsafe_agent_id(tmp_path: Path) -> Non
 
     out = store.list_all()
     assert {e.agent_id for e in out} == {"a1"}
+
+
+def test_environment_store_list_all_dedups_by_agent_id_not_filename(tmp_path: Path) -> None:
+    store = EnvironmentStore(storage_dir=tmp_path)
+
+    # Two stale/misnamed files, each named after a *different* agent than the
+    # one in its own contents: "agent_p.json" actually describes "agent_q",
+    # and "agent_q.json" actually describes "agent_r". Glob visits them in
+    # filename order (agent_p.json, then agent_q.json).
+    #
+    # Buggy behavior: after processing agent_p.json, "agent_q" lands in
+    # `seen` (from its *contents*). The next file, agent_q.json, is then
+    # checked by its *filename stem* ("agent_q"), which now matches `seen`
+    # purely by coincidence, so it gets skipped without ever being read —
+    # silently dropping the real "agent_r" record.
+    (tmp_path / "agent_p.json").write_text(
+        json.dumps(
+            StoreEnvInfo(
+                agent_id="agent_q",
+                container_id="p-container",
+                container_name="p-name",
+                workspace_path="/w",
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "agent_q.json").write_text(
+        json.dumps(
+            StoreEnvInfo(
+                agent_id="agent_r",
+                container_id="q-container",
+                container_name="q-name",
+                workspace_path="/w",
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+
+    out = store.list_all()
+
+    # Both distinct agent_ids ("agent_q" from agent_p.json, "agent_r" from
+    # agent_q.json) must be present -- neither is a real duplicate of the
+    # other, so neither should be dropped.
+    assert {e.agent_id for e in out} == {"agent_q", "agent_r"}
 
 
 def test_environment_store_get_handles_corrupt(tmp_path: Path) -> None:

@@ -15,11 +15,20 @@ from unittest.mock import patch
 
 import pytest
 from _content_plan_test_utils import make_content_plan
-from blog_plan_critic_agent import BlogPlanCriticAgent, PlanCriticReport
-from blog_plan_critic_agent.agent import build_refine_feedback_from_critic
-from blog_planning_agent import BlogPlanningAgent
-from shared.content_plan import ContentPlan, ContentPlanSection, PlanningInput, TitleCandidate
-from shared.content_profile import ContentProfile, LengthPolicy, resolve_length_policy
+from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent, PlanCriticReport
+from agents.blogging.blog_plan_critic_agent.agent import build_refine_feedback_from_critic
+from agents.blogging.blog_planning_agent import BlogPlanningAgent
+from agents.blogging.shared.content_plan import (
+    ContentPlan,
+    ContentPlanSection,
+    PlanningInput,
+    TitleCandidate,
+)
+from agents.blogging.shared.content_profile import (
+    ContentProfile,
+    LengthPolicy,
+    resolve_length_policy,
+)
 
 from llm_service import DummyLLMClient
 
@@ -107,7 +116,7 @@ def test_critic_returns_pass_on_clean_json() -> None:
         )
     ]
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("blog_plan_critic_agent.agent.Agent", _FakeAgent):
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _FakeAgent):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="Brand spec text.",
@@ -149,7 +158,7 @@ def test_critic_surfaces_violations_and_fails() -> None:
         )
     ]
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("blog_plan_critic_agent.agent.Agent", _FakeAgent):
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _FakeAgent):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="Brand spec text.",
@@ -184,7 +193,7 @@ def test_critic_approved_invariant_enforced() -> None:
         )
     ]
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("blog_plan_critic_agent.agent.Agent", _FakeAgent):
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _FakeAgent):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="b",
@@ -197,7 +206,7 @@ def test_critic_approved_invariant_enforced() -> None:
 def test_critic_parse_failure_falls_back_to_fail() -> None:
     _FakeAgent.responses = ["not json at all", "also not json"]
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("blog_plan_critic_agent.agent.Agent", _FakeAgent):
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _FakeAgent):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="b",
@@ -221,7 +230,7 @@ def test_critic_persists_report_to_work_dir(tmp_path) -> None:
         )
     ]
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("blog_plan_critic_agent.agent.Agent", _FakeAgent):
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _FakeAgent):
         critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="b",

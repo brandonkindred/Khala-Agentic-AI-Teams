@@ -16,7 +16,7 @@ import pytest
 
 def test_create_blogging_worker_with_client(monkeypatch) -> None:
     """create_blogging_worker builds a Worker on the blogging task queue."""
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
     monkeypatch.setenv("TEMPORAL_ADDRESS", "localhost:7233")
@@ -40,7 +40,7 @@ def test_create_blogging_worker_with_client(monkeypatch) -> None:
 
 def test_start_blogging_temporal_worker_thread_when_enabled(monkeypatch) -> None:
     """The worker thread starts once and is idempotent while already alive."""
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
 
@@ -69,7 +69,7 @@ def test_start_blogging_temporal_worker_thread_when_enabled(monkeypatch) -> None
 
 def test_worker_thread_target_handles_runtime_error_loop_stopped(monkeypatch) -> None:
     """RuntimeError mentioning 'event loop stopped' is silently absorbed."""
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
 
@@ -93,7 +93,7 @@ def test_worker_thread_target_handles_runtime_error_loop_stopped(monkeypatch) ->
 
 def test_worker_thread_target_handles_unknown_runtime_error(monkeypatch) -> None:
     """An unrelated RuntimeError in the worker loop is logged, not raised."""
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
 
@@ -114,7 +114,7 @@ def test_worker_thread_target_handles_unknown_runtime_error(monkeypatch) -> None
 
 def test_worker_thread_target_handles_generic_exception(monkeypatch) -> None:
     """A generic exception in the worker loop is logged, not raised."""
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
 
@@ -137,7 +137,7 @@ def test_worker_thread_target_handles_cancelled(monkeypatch) -> None:
     """asyncio.CancelledError is swallowed silently."""
     import asyncio
 
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
 
@@ -157,7 +157,7 @@ def test_worker_thread_target_handles_cancelled(monkeypatch) -> None:
 
 def test_shutdown_blogging_temporal_components_running_loop(monkeypatch) -> None:
     """Exercise the path where worker has a running loop and we run shutdown."""
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     fake_worker = MagicMock()
     fake_worker.shutdown = MagicMock(return_value=None)
@@ -186,7 +186,7 @@ def test_shutdown_blogging_temporal_components_running_loop(monkeypatch) -> None
 
 def test_shutdown_blogging_temporal_components_force_stop(monkeypatch) -> None:
     """When worker.shutdown() future raises, we force-stop the loop."""
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     fake_worker = MagicMock()
     fake_worker.shutdown = MagicMock(return_value=None)
@@ -213,7 +213,7 @@ def test_shutdown_blogging_temporal_components_force_stop(monkeypatch) -> None:
 
 def test_shutdown_blogging_temporal_components_worker_only(monkeypatch) -> None:
     """Path where worker_instance is None but loop is set."""
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     class _FakeLoop:
         def is_running(self):
@@ -232,7 +232,7 @@ def test_shutdown_blogging_temporal_components_worker_only(monkeypatch) -> None:
 
 def test_shutdown_blogging_temporal_components_loop_not_running(monkeypatch) -> None:
     """Path where loop is set but not running — graceful skip."""
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     class _Loop:
         def is_running(self):
@@ -247,7 +247,7 @@ def test_shutdown_blogging_temporal_components_loop_not_running(monkeypatch) -> 
 
 def test_shutdown_blogging_temporal_components_with_executor(monkeypatch) -> None:
     """Shutdown also tears down the activity executor."""
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     executor = MagicMock()
     monkeypatch.setattr(worker, "_worker_instance", None)
@@ -260,7 +260,7 @@ def test_shutdown_blogging_temporal_components_with_executor(monkeypatch) -> Non
 
 def test_shutdown_blogging_temporal_components_executor_exception(monkeypatch) -> None:
     """If executor.shutdown raises, log but don't crash."""
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     executor = MagicMock()
     executor.shutdown = MagicMock(side_effect=RuntimeError("nope"))
@@ -278,7 +278,7 @@ def test_shutdown_blogging_temporal_components_executor_exception(monkeypatch) -
 
 def test_start_full_pipeline_workflow_calls_run_async(monkeypatch) -> None:
     """start_full_pipeline_workflow delegates to _run_async with client.start_workflow result."""
-    from blogging.temporal import start_workflow
+    from agents.blogging.temporal import start_workflow
 
     fake_client = MagicMock()
     fake_client.start_workflow = MagicMock(return_value="coro-handle")
@@ -298,7 +298,7 @@ def test_start_full_pipeline_workflow_calls_run_async(monkeypatch) -> None:
 
 def test_run_async_executes(monkeypatch) -> None:
     """Happy path: get_temporal_loop and get_temporal_client return objects, run completes."""
-    from blogging.temporal import start_workflow
+    from agents.blogging.temporal import start_workflow
 
     fake_loop = MagicMock()
     fake_client = MagicMock()
@@ -354,10 +354,10 @@ def _patch_context(monkeypatch, tmp_path):
     """Patch the shared context builder + job-store/heartbeat side effects to no-ops."""
     import importlib
 
-    from blogging.temporal import activities as acts
+    from agents.blogging.temporal import activities as acts
 
-    bjs = importlib.import_module("blogging.shared.blog_job_store")
-    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    bjs = importlib.import_module("agents.blogging.shared.blog_job_store")
+    rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
     ctx = _fake_ctx(tmp_path)
     monkeypatch.setattr(acts, "_build_pipeline_context", lambda job_id, req: ctx)
     monkeypatch.setattr(bjs, "start_blog_job", lambda job_id: None)
@@ -368,7 +368,7 @@ def _patch_context(monkeypatch, tmp_path):
 def _v2():
     import importlib
 
-    return importlib.import_module("blogging.agent_implementations.blog_writing_process_v2")
+    return importlib.import_module("agents.blogging.agent_implementations.blog_writing_process_v2")
 
 
 def test_plan_stage_activity_returns_planning_dto(monkeypatch, tmp_path) -> None:
@@ -423,9 +423,9 @@ def test_run_stage_propagates_heartbeat_start_failure(monkeypatch) -> None:
     funneling it into a FAIL DTO."""
     import importlib
 
-    from blogging.temporal import activities as acts
+    from agents.blogging.temporal import activities as acts
 
-    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
 
     def boom(job_id):
         raise RuntimeError("heartbeat thread failed to start")
@@ -452,7 +452,7 @@ def test_draft_stage_activity_returns_draft_dto(monkeypatch, tmp_path) -> None:
     import importlib
 
     acts, ctx = _patch_context(monkeypatch, tmp_path)
-    cp = importlib.import_module("blogging.shared.content_plan")
+    cp = importlib.import_module("agents.blogging.shared.content_plan")
     monkeypatch.setattr(
         cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
     )
@@ -476,8 +476,8 @@ def test_gates_stage_activity_returns_gates_dto(monkeypatch, tmp_path) -> None:
     import importlib
 
     acts, ctx = _patch_context(monkeypatch, tmp_path)
-    cp = importlib.import_module("blogging.shared.content_plan")
-    wm = importlib.import_module("blog_writer_agent.models")
+    cp = importlib.import_module("agents.blogging.shared.content_plan")
+    wm = importlib.import_module("agents.blogging.blog_writer_agent.models")
     monkeypatch.setattr(
         cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
     )
@@ -501,11 +501,11 @@ def test_finalize_job_activity_delegates(monkeypatch, tmp_path) -> None:
     """finalize_job_activity reconstructs models and calls finalize_blog_job."""
     import importlib
 
-    from blogging.temporal import activities as acts
+    from agents.blogging.temporal import activities as acts
 
-    cp = importlib.import_module("blogging.shared.content_plan")
-    wm = importlib.import_module("blog_writer_agent.models")
-    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    cp = importlib.import_module("agents.blogging.shared.content_plan")
+    wm = importlib.import_module("agents.blogging.blog_writer_agent.models")
+    rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
     monkeypatch.setattr(
         cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
     )
@@ -537,7 +537,7 @@ def test_plan_stage_activity_swallows_external_cancellation(monkeypatch, tmp_pat
     import importlib
 
     acts, _ = _patch_context(monkeypatch, tmp_path)
-    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
     hb = _FakeHeartbeat()
     monkeypatch.setattr(rpj, "start_pipeline_heartbeat", lambda job_id: hb)
     # Drive the real _fail_activity down its external-cancellation branch.
@@ -560,7 +560,7 @@ def test_draft_stage_activity_abort_returns_fail_with_partial_draft(monkeypatch,
     import importlib
 
     acts, _ = _patch_context(monkeypatch, tmp_path)
-    cp = importlib.import_module("blogging.shared.content_plan")
+    cp = importlib.import_module("agents.blogging.shared.content_plan")
     monkeypatch.setattr(
         cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
     )
@@ -581,7 +581,7 @@ def test_draft_stage_activity_reraises_cancelled(monkeypatch, tmp_path) -> None:
     from temporalio.exceptions import CancelledError
 
     acts, _ = _patch_context(monkeypatch, tmp_path)
-    cp = importlib.import_module("blogging.shared.content_plan")
+    cp = importlib.import_module("agents.blogging.shared.content_plan")
     monkeypatch.setattr(
         cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
     )
@@ -599,8 +599,8 @@ def test_gates_stage_activity_hard_error_returns_fail(monkeypatch, tmp_path) -> 
     import importlib
 
     acts, _ = _patch_context(monkeypatch, tmp_path)
-    cp = importlib.import_module("blogging.shared.content_plan")
-    wm = importlib.import_module("blog_writer_agent.models")
+    cp = importlib.import_module("agents.blogging.shared.content_plan")
+    wm = importlib.import_module("agents.blogging.blog_writer_agent.models")
     monkeypatch.setattr(
         cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
     )
@@ -628,11 +628,11 @@ def _patch_finalize(monkeypatch):
     """
     import importlib
 
-    from blogging.temporal import activities as acts
+    from agents.blogging.temporal import activities as acts
 
-    cp = importlib.import_module("blogging.shared.content_plan")
-    wm = importlib.import_module("blog_writer_agent.models")
-    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    cp = importlib.import_module("agents.blogging.shared.content_plan")
+    wm = importlib.import_module("agents.blogging.blog_writer_agent.models")
+    rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
     monkeypatch.setattr(
         cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
     )
@@ -685,9 +685,9 @@ def test_finalize_job_activity_malformed_dto_raises_loudly(monkeypatch, tmp_path
     bypassing the retry-then-mark funnel — matching the draft/gates contract."""
     import importlib
 
-    from blogging.temporal import activities as acts
+    from agents.blogging.temporal import activities as acts
 
-    cp = importlib.import_module("blogging.shared.content_plan")
+    cp = importlib.import_module("agents.blogging.shared.content_plan")
 
     def boom(cls, d):
         raise ValueError("bad model")
@@ -723,7 +723,7 @@ def test_gates_stage_activity_malformed_dto_raises_loudly(monkeypatch, tmp_path)
     import importlib
 
     acts, _ = _patch_context(monkeypatch, tmp_path)
-    cp = importlib.import_module("blogging.shared.content_plan")
+    cp = importlib.import_module("agents.blogging.shared.content_plan")
     monkeypatch.setattr(
         cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
     )
@@ -747,9 +747,9 @@ def test_legacy_full_pipeline_activity_delegates(monkeypatch) -> None:
     """run_full_pipeline_activity delegates to run_blog_full_pipeline_job."""
     import importlib
 
-    from blogging.temporal import activities as acts
+    from agents.blogging.temporal import activities as acts
 
-    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
     seen: dict = {}
     monkeypatch.setattr(
         rpj, "run_blog_full_pipeline_job", lambda job_id, req: seen.update(job_id=job_id, req=req)
@@ -762,11 +762,10 @@ def test_legacy_full_pipeline_activity_reraises_cancelled(monkeypatch) -> None:
     """The legacy drain-out activity re-raises a Temporal CancelledError."""
     import importlib
 
+    from agents.blogging.temporal import activities as acts
     from temporalio.exceptions import CancelledError
 
-    from blogging.temporal import activities as acts
-
-    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
 
     def boom(job_id, req):
         raise CancelledError("nope")
@@ -780,9 +779,9 @@ def test_legacy_full_pipeline_activity_reraises_other(monkeypatch) -> None:
     """The legacy drain-out activity re-raises non-cancellation errors."""
     import importlib
 
-    from blogging.temporal import activities as acts
+    from agents.blogging.temporal import activities as acts
 
-    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
 
     def boom(job_id, req):
         raise ValueError("oops")
@@ -799,7 +798,7 @@ def test_legacy_full_pipeline_activity_reraises_other(monkeypatch) -> None:
 
 def test_run_copy_editor_agent_main_smoke(monkeypatch, capsys) -> None:
     """run_copy_editor_agent.main should run end-to-end with patched LLM."""
-    import agent_implementations.run_copy_editor_agent as mod
+    import agents.blogging.agent_implementations.run_copy_editor_agent as mod
 
     from llm_service import DummyLLMClient
 
@@ -807,7 +806,7 @@ def test_run_copy_editor_agent_main_smoke(monkeypatch, capsys) -> None:
     monkeypatch.setattr(mod, "load_style_file", lambda *a, **kw: "style")
 
     # Patch the agent's run to return a deterministic result
-    from blog_copy_editor_agent.models import CopyEditorOutput
+    from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput
 
     monkeypatch.setattr(
         mod.BlogCopyEditorAgent,
@@ -821,8 +820,8 @@ def test_run_copy_editor_agent_main_smoke(monkeypatch, capsys) -> None:
 
 
 def test_run_publication_agent_main_smoke(monkeypatch, capsys, tmp_path) -> None:
-    import agent_implementations.run_publication_agent as mod
-    from blog_publication_agent.models import PublicationSubmission
+    import agents.blogging.agent_implementations.run_publication_agent as mod
+    from agents.blogging.blog_publication_agent.models import PublicationSubmission
 
     from llm_service import DummyLLMClient
 
@@ -847,14 +846,14 @@ def test_run_publication_agent_main_smoke(monkeypatch, capsys, tmp_path) -> None
 
 
 def test_run_writer_agent_main_smoke(monkeypatch, capsys) -> None:
-    import agent_implementations.run_writer_agent as mod
+    import agents.blogging.agent_implementations.run_writer_agent as mod
 
     from llm_service import DummyLLMClient
 
     monkeypatch.setattr(mod, "get_strands_model", lambda key: DummyLLMClient())
     monkeypatch.setattr(mod, "load_style_file", lambda *a, **kw: "")
 
-    from blog_writer_agent.models import WriterOutput
+    from agents.blogging.blog_writer_agent.models import WriterOutput
 
     # Stub only the agent's LLM-backed run (no network); the script now builds a
     # real, valid WriterInput/ContentPlan, so WriterInput validation is exercised

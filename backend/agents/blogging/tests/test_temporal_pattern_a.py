@@ -13,9 +13,8 @@ from unittest.mock import MagicMock
 
 def test_pattern_a_exports_workflows_and_activities() -> None:
     """Every ``@activity.defn`` in the package is exported via ACTIVITIES."""
+    from agents.blogging import temporal as t
     from temporalio import activity
-
-    from blogging import temporal as t
 
     assert t.WORKFLOWS == [t.BlogFullPipelineWorkflow]
     assert len(t.ACTIVITIES) == 5
@@ -32,10 +31,9 @@ def test_pattern_a_exports_workflows_and_activities() -> None:
 
 def test_activities_match_constants() -> None:
     """The exported activity names line up with the name constants."""
+    from agents.blogging import temporal as t
+    from agents.blogging.temporal import constants
     from temporalio import activity
-
-    from blogging import temporal as t
-    from blogging.temporal import constants
 
     names = {activity._Definition.must_from_callable(a).name for a in t.ACTIVITIES}
     assert names == {
@@ -49,8 +47,8 @@ def test_activities_match_constants() -> None:
 
 def test_worker_registers_exported_lists(monkeypatch) -> None:
     """create_blogging_worker registers exactly the exported WORKFLOWS/ACTIVITIES."""
-    from blogging import temporal as t
-    from blogging.temporal import worker
+    from agents.blogging import temporal as t
+    from agents.blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
     monkeypatch.setattr(worker, "_activity_executor", None)
@@ -73,7 +71,7 @@ def test_run_pipeline_invokes_three_stages_in_order(monkeypatch, tmp_path) -> No
     """run_pipeline is a thin sequencer over the three extracted stage functions."""
     import importlib
 
-    v2 = importlib.import_module("blogging.agent_implementations.blog_writing_process_v2")
+    v2 = importlib.import_module("agents.blogging.agent_implementations.blog_writing_process_v2")
     calls: list[str] = []
 
     def _planning(ctx):
@@ -97,7 +95,7 @@ def test_run_pipeline_invokes_three_stages_in_order(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(v2, "run_draft_stage", _draft)
     monkeypatch.setattr(v2, "run_gates_stage", _gates)
 
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     ppr, draft, status = v2.run_pipeline(
         ResearchBriefInput(brief="hi", max_results=5),
@@ -114,7 +112,7 @@ def test_load_required_guidelines_raises_when_missing(monkeypatch) -> None:
 
     import pytest
 
-    v2 = importlib.import_module("blogging.agent_implementations.blog_writing_process_v2")
+    v2 = importlib.import_module("agents.blogging.agent_implementations.blog_writing_process_v2")
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "")
     with pytest.raises(v2.DraftError):
         v2._load_required_guidelines("run gate-driven rewrites")
@@ -124,7 +122,7 @@ def test_load_required_guidelines_returns_contents(monkeypatch) -> None:
     """Both guideline files present -> their contents are returned as a pair."""
     import importlib
 
-    v2 = importlib.import_module("blogging.agent_implementations.blog_writing_process_v2")
+    v2 = importlib.import_module("agents.blogging.agent_implementations.blog_writing_process_v2")
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
     assert v2._load_required_guidelines("start drafting") == ("ok", "ok")
 
@@ -136,7 +134,7 @@ def test_load_required_guidelines_phase_override(monkeypatch) -> None:
 
     import pytest
 
-    v2 = importlib.import_module("blogging.agent_implementations.blog_writing_process_v2")
+    v2 = importlib.import_module("agents.blogging.agent_implementations.blog_writing_process_v2")
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "")
     with pytest.raises(v2.DraftError) as exc_info:
         v2._load_required_guidelines("run gate-driven rewrites", phase="gates")
@@ -145,7 +143,7 @@ def test_load_required_guidelines_phase_override(monkeypatch) -> None:
 
 def test_is_last_attempt_outside_activity_context() -> None:
     """No activity context (direct/thread use) -> treated as the last attempt."""
-    from blogging.temporal import activities as acts
+    from agents.blogging.temporal import activities as acts
 
     assert acts._is_last_attempt() is True
 
@@ -155,8 +153,7 @@ def test_is_last_attempt_reads_scheduled_retry_policy(monkeypatch) -> None:
     from types import SimpleNamespace
 
     import temporalio.activity as ta
-
-    from blogging.temporal import activities as acts
+    from agents.blogging.temporal import activities as acts
 
     def _info(attempt, max_attempts):
         return SimpleNamespace(
@@ -175,8 +172,7 @@ def test_is_last_attempt_unlimited_policy_never_last(monkeypatch) -> None:
     from types import SimpleNamespace
 
     import temporalio.activity as ta
-
-    from blogging.temporal import activities as acts
+    from agents.blogging.temporal import activities as acts
 
     monkeypatch.setattr(
         ta,
@@ -191,7 +187,7 @@ def test_is_last_attempt_unlimited_policy_never_last(monkeypatch) -> None:
 def test_finalize_retry_policy_derived_from_default() -> None:
     """FINALIZE_RETRY_POLICY is the default policy with a capped attempt count, so a
     backoff retune of DEFAULT_RETRY_POLICY carries over automatically."""
-    from blogging.temporal import workflows as wf
+    from agents.blogging.temporal import workflows as wf
 
     assert wf.FINALIZE_RETRY_POLICY.maximum_attempts == 3
     assert wf.FINALIZE_RETRY_POLICY.initial_interval == wf.DEFAULT_RETRY_POLICY.initial_interval
@@ -204,7 +200,7 @@ def test_run_pipeline_short_circuits_on_planning_abort(monkeypatch, tmp_path) ->
     """A planning abort tuple short-circuits before draft/gates run."""
     import importlib
 
-    v2 = importlib.import_module("blogging.agent_implementations.blog_writing_process_v2")
+    v2 = importlib.import_module("agents.blogging.agent_implementations.blog_writing_process_v2")
     calls: list[str] = []
 
     monkeypatch.setattr(
@@ -213,7 +209,7 @@ def test_run_pipeline_short_circuits_on_planning_abort(monkeypatch, tmp_path) ->
     monkeypatch.setattr(v2, "run_draft_stage", lambda ctx: calls.append("draft"))
     monkeypatch.setattr(v2, "run_gates_stage", lambda ctx: calls.append("gates"))
 
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     ppr, draft, status = v2.run_pipeline(
         ResearchBriefInput(brief="hi", max_results=5),
@@ -234,7 +230,7 @@ def test_build_pipeline_context_seeds_inputs(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("BLOGGING_RUN_ARTIFACTS_ROOT", str(tmp_path))
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
 
-    from blogging.temporal import activities as acts
+    from agents.blogging.temporal import activities as acts
 
     ctx = acts._build_pipeline_context(
         "job-xyz",
@@ -251,9 +247,9 @@ def test_fail_activity_external_cancellation_marks_cancelled(monkeypatch) -> Non
     """External cancellation -> job marked cancelled (error terminal, never re-raised)."""
     import importlib
 
-    from blogging.temporal import activities as acts
+    from agents.blogging.temporal import activities as acts
 
-    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
     marked: dict = {}
     monkeypatch.setattr(rpj, "_is_external_cancellation", lambda e: True)
     monkeypatch.setattr(rpj, "mark_job_cancelled", lambda jid: marked.setdefault("job", jid))
@@ -266,9 +262,9 @@ def test_fail_activity_hard_error_fails_job(monkeypatch) -> None:
     """A hard error fails the job with the coarse stage name when the exception has no phase."""
     import importlib
 
-    from blogging.temporal import activities as acts
+    from agents.blogging.temporal import activities as acts
 
-    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
     failed: dict = {}
     monkeypatch.setattr(rpj, "_is_external_cancellation", lambda e: False)
     monkeypatch.setattr(
@@ -285,9 +281,9 @@ def test_fail_activity_prefers_exception_phase(monkeypatch) -> None:
     """The exception's own phase attribute wins over the coarse stage name."""
     import importlib
 
-    from blogging.temporal import activities as acts
+    from agents.blogging.temporal import activities as acts
 
-    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
     failed: dict = {}
     monkeypatch.setattr(rpj, "_is_external_cancellation", lambda e: False)
     monkeypatch.setattr(rpj, "_fail_job", lambda jid, msg, **kw: failed.update(kw))
@@ -304,13 +300,12 @@ def test_plan_stage_activity_reraises_cancelled(monkeypatch, tmp_path) -> None:
     import importlib
 
     import pytest
+    from agents.blogging.temporal import activities as acts
     from temporalio.exceptions import CancelledError
 
-    from blogging.temporal import activities as acts
-
-    v2 = importlib.import_module("blogging.agent_implementations.blog_writing_process_v2")
-    bjs = importlib.import_module("blogging.shared.blog_job_store")
-    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    v2 = importlib.import_module("agents.blogging.agent_implementations.blog_writing_process_v2")
+    bjs = importlib.import_module("agents.blogging.shared.blog_job_store")
+    rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
 
     from types import SimpleNamespace
 
@@ -330,9 +325,9 @@ def test_plan_stage_activity_reraises_cancelled(monkeypatch, tmp_path) -> None:
 def test_run_stage_transient_error_reraises_when_not_last_attempt(monkeypatch) -> None:
     """A transient LLM error re-raises (deferred to Temporal retry) on a non-final attempt."""
     import pytest
+    from agents.blogging.shared import run_pipeline_job as rpj
+    from agents.blogging.temporal import activities as acts
 
-    from blogging.shared import run_pipeline_job as rpj
-    from blogging.temporal import activities as acts
     from llm_service import LLMTemporaryError
 
     monkeypatch.setattr(rpj, "start_pipeline_heartbeat", lambda job_id: None)
@@ -352,9 +347,9 @@ def test_run_stage_transient_error_reraises_when_not_last_attempt(monkeypatch) -
 def test_run_stage_transient_error_funnels_fail_dto_on_last_attempt(monkeypatch) -> None:
     """On the final Temporal attempt, a transient LLM error is funneled to a FAIL DTO."""
     import pytest  # noqa: F401
+    from agents.blogging.shared import run_pipeline_job as rpj
+    from agents.blogging.temporal import activities as acts
 
-    from blogging.shared import run_pipeline_job as rpj
-    from blogging.temporal import activities as acts
     from llm_service import LLMRateLimitError
 
     monkeypatch.setattr(rpj, "start_pipeline_heartbeat", lambda job_id: None)
@@ -394,7 +389,7 @@ def _run_workflow(monkeypatch, statuses, is_patched=True):
     """
     import asyncio
 
-    from blogging.temporal import workflows as wf
+    from agents.blogging.temporal import workflows as wf
 
     calls: list[str] = []
 
@@ -485,7 +480,7 @@ def test_workflow_unpatched_replay_runs_legacy_monolith(monkeypatch) -> None:
 
 def _real_planning_phase_result():
     from _content_plan_test_utils import make_requirements_analysis
-    from shared.content_plan import (
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         PlanningPhaseResult,
@@ -509,9 +504,8 @@ def _real_planning_phase_result():
 
 def test_planning_dto_round_trips_real_model() -> None:
     """A real PlanningPhaseResult survives model_dump(mode='json') -> DTO -> model_validate."""
-    from shared.content_plan import PlanningPhaseResult
-
-    from blogging.temporal.phase_models import PlanningStageResult
+    from agents.blogging.shared.content_plan import PlanningPhaseResult
+    from agents.blogging.temporal.phase_models import PlanningStageResult
 
     ppr = _real_planning_phase_result()
     dto = PlanningStageResult(
@@ -530,9 +524,8 @@ def test_planning_dto_round_trips_real_model() -> None:
 
 def test_draft_and_gates_dto_round_trip_real_model() -> None:
     """A real WriterOutput survives the DraftStageResult/GatesStageResult boundary."""
-    from blog_writer_agent.models import WriterOutput
-
-    from blogging.temporal.phase_models import DraftStageResult, GatesStageResult
+    from agents.blogging.blog_writer_agent.models import WriterOutput
+    from agents.blogging.temporal.phase_models import DraftStageResult, GatesStageResult
 
     draft = WriterOutput(draft="# Title\nBody paragraph.")
     draft_dto = DraftStageResult(draft=draft.model_dump(mode="json"), status="PASS").model_dump()

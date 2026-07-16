@@ -51,7 +51,7 @@ def _make_pipeline_doubles():
 
 def test_full_pipeline_sync_success(client: TestClient, monkeypatch) -> None:
     """POST /full-pipeline returns success when run_pipeline returns PASS."""
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
 
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(v2, "run_pipeline", lambda *a, **kw: (ppr, draft, status))
@@ -66,8 +66,8 @@ def test_full_pipeline_sync_success(client: TestClient, monkeypatch) -> None:
 
 
 def test_full_pipeline_sync_planning_error(client: TestClient, monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
-    from shared.errors import PlanningError
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared.errors import PlanningError
 
     def boom(*a, **kw):
         raise PlanningError("could not converge", failure_reason="MAX_ITERATIONS_REACHED")
@@ -82,7 +82,7 @@ def test_full_pipeline_sync_planning_error(client: TestClient, monkeypatch) -> N
 
 
 def test_full_pipeline_sync_unknown_error(client: TestClient, monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
 
     monkeypatch.setattr(v2, "run_pipeline", _raise(RuntimeError("crash")))
 
@@ -98,7 +98,7 @@ def test_full_pipeline_sync_unknown_error(client: TestClient, monkeypatch) -> No
 
 def test_resume_job_happy(client: TestClient, monkeypatch) -> None:
     """Resume an interrupted job that has a stored request_payload."""
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     bjs.update_blog_job(
@@ -119,10 +119,8 @@ def test_resume_job_happy(client: TestClient, monkeypatch) -> None:
 
 
 def test_restart_job_happy(client: TestClient, monkeypatch, patched_blog_job_store_client) -> None:
-    """Restart uses both `shared.blog_job_store` and `blogging.shared.blog_job_store`
-    aliases — `patched_blog_job_store_client` backs both so the in-memory fake client
-    covers everything `reset_blog_job` might import."""
-    from shared import blog_job_store as bjs
+    """Restart uses `agents.blogging.shared.blog_job_store`, backed by the in-memory fake."""
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     bjs.update_blog_job(job_id, status="completed", request_payload={"brief": "x"})
@@ -144,12 +142,12 @@ def test_restart_job_happy(client: TestClient, monkeypatch, patched_blog_job_sto
 
 def test_medium_stats_async_runner_happy(client: TestClient, monkeypatch, tmp_path: Path) -> None:
     """The async background runner writes the artifact + marks job completed."""
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(_api_main, "medium_stats_integration_eligible", lambda: (True, ""))
 
     # Stub Medium agent collect()
-    from blog_medium_stats_agent.models import MediumStatsReport
+    from agents.blogging.blog_medium_stats_agent.models import MediumStatsReport
 
     sentinel = MediumStatsReport(posts=[])
 
@@ -166,7 +164,7 @@ def test_medium_stats_async_runner_happy(client: TestClient, monkeypatch, tmp_pa
     bjs.update_blog_job(job_id, work_dir=str(work_dir))
 
     # Build a payload object
-    from shared.medium_stats_api import MediumStatsRequest
+    from agents.blogging.shared.medium_stats_api import MediumStatsRequest
 
     _api_main._run_medium_stats_async_job(job_id, MediumStatsRequest())
     job = bjs.get_blog_job(job_id)
@@ -177,7 +175,7 @@ def test_medium_stats_async_runner_happy(client: TestClient, monkeypatch, tmp_pa
 def test_medium_stats_async_runner_failure_path(
     client: TestClient, monkeypatch, tmp_path: Path
 ) -> None:
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(_api_main, "medium_stats_integration_eligible", lambda: (False, "no creds"))
 
@@ -186,7 +184,7 @@ def test_medium_stats_async_runner_failure_path(
     work_dir.mkdir()
     bjs.update_blog_job(job_id, work_dir=str(work_dir))
 
-    from shared.medium_stats_api import MediumStatsRequest
+    from agents.blogging.shared.medium_stats_api import MediumStatsRequest
 
     _api_main._run_medium_stats_async_job(job_id, MediumStatsRequest())
     job = bjs.get_blog_job(job_id)
@@ -196,13 +194,13 @@ def test_medium_stats_async_runner_failure_path(
 
 def test_medium_stats_async_runner_missing_work_dir(client: TestClient, monkeypatch) -> None:
     """When the job has no work_dir, runner records failure."""
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(_api_main, "medium_stats_integration_eligible", lambda: (True, ""))
 
     job_id = _create_job()
     # No work_dir set — bjs creates it as None which is treated as missing
-    from shared.medium_stats_api import MediumStatsRequest
+    from agents.blogging.shared.medium_stats_api import MediumStatsRequest
 
     _api_main._run_medium_stats_async_job(job_id, MediumStatsRequest())
     job = bjs.get_blog_job(job_id)
@@ -217,8 +215,8 @@ def test_medium_stats_async_runner_missing_work_dir(client: TestClient, monkeypa
 def test_run_pipeline_with_tracking_completes(
     client: TestClient, monkeypatch, tmp_path: Path
 ) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
-    from shared import blog_job_store as bjs
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared import blog_job_store as bjs
 
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(v2, "run_pipeline", lambda *a, **kw: (ppr, draft, status))
@@ -236,9 +234,9 @@ def test_run_pipeline_with_tracking_completes(
 def test_run_pipeline_with_tracking_planning_error(
     client: TestClient, monkeypatch, tmp_path: Path
 ) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
-    from shared import blog_job_store as bjs
-    from shared.errors import PlanningError
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared.errors import PlanningError
 
     monkeypatch.setattr(_api_main, "RUN_ARTIFACTS_BASE", tmp_path)
     monkeypatch.setattr(v2, "run_pipeline", _raise(PlanningError("nope", failure_reason="x")))
@@ -254,8 +252,8 @@ def test_run_pipeline_with_tracking_planning_error(
 def test_run_pipeline_with_tracking_unknown_error(
     client: TestClient, monkeypatch, tmp_path: Path
 ) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
-    from shared import blog_job_store as bjs
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(_api_main, "RUN_ARTIFACTS_BASE", tmp_path)
     monkeypatch.setattr(v2, "run_pipeline", _raise(RuntimeError("kaboom")))
@@ -273,7 +271,7 @@ def test_run_pipeline_with_tracking_unknown_error(
 
 
 def test_medium_stats_sync_happy(client: TestClient, monkeypatch) -> None:
-    from blog_medium_stats_agent.models import MediumStatsReport
+    from agents.blogging.blog_medium_stats_agent.models import MediumStatsReport
 
     monkeypatch.setattr(_api_main, "medium_stats_integration_eligible", lambda: (True, ""))
 
@@ -322,7 +320,7 @@ def test_publish_terminal_event_swallows() -> None:
 
 def test_publish_terminal_event_swallows_publish_failure(monkeypatch) -> None:
     """Publishes an event but cleanup_job is missing → swallow."""
-    import shared.job_event_bus as bus
+    import agents.blogging.shared.job_event_bus as bus
 
     def boom(*a, **kw):
         raise RuntimeError("nope")

@@ -12,11 +12,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
-from blog_plan_critic_agent import BlogPlanCriticAgent
-from blog_planning_agent.prompts import GENERATE_PLAN_SYSTEM, REFINE_PLAN_SYSTEM
-from shared.content_plan import PlanningInput, PlanningPhaseResult
-from shared.content_planning_loop import complete_plan_json, run_content_planning_loop
-from shared.content_profile import LengthPolicy
+from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent
+from agents.blogging.blog_planning_agent.prompts import GENERATE_PLAN_SYSTEM, REFINE_PLAN_SYSTEM
+from agents.blogging.shared.content_plan import PlanningInput, PlanningPhaseResult
+from agents.blogging.shared.content_planning_loop import (
+    complete_plan_json,
+    run_content_planning_loop,
+)
+from agents.blogging.shared.content_profile import LengthPolicy
 from strands import Agent
 
 from llm_service import (
@@ -952,7 +955,7 @@ class BlogWriterAgent:
         if work_dir is not None:
             plan_name = f"revision_plan_{iteration}.json" if iteration else "revision_plan.json"
             try:
-                from shared.artifacts import write_artifact
+                from agents.blogging.shared.artifacts import write_artifact
 
                 write_artifact(work_dir, plan_name, revision_plan.model_dump(mode="json"))
                 logger.info("Persisted %s", plan_name)

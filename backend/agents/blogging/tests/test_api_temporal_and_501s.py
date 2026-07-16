@@ -25,8 +25,8 @@ from fastapi.testclient import TestClient
 
 def test_full_pipeline_async_with_temporal(client: TestClient, monkeypatch) -> None:
     """When is_temporal_enabled() returns True, route delegates to Temporal."""
-    from blogging.temporal import client as tc_mod
-    from blogging.temporal import start_workflow as sw_mod
+    from agents.blogging.temporal import client as tc_mod
+    from agents.blogging.temporal import start_workflow as sw_mod
 
     monkeypatch.setattr(tc_mod, "is_temporal_enabled", lambda: True)
     called: dict = {}
@@ -44,10 +44,9 @@ def test_full_pipeline_async_with_temporal(client: TestClient, monkeypatch) -> N
 
 
 def test_resume_with_temporal(client: TestClient, monkeypatch) -> None:
-    from shared import blog_job_store as bjs
-
-    from blogging.temporal import client as tc_mod
-    from blogging.temporal import start_workflow as sw_mod
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.temporal import client as tc_mod
+    from agents.blogging.temporal import start_workflow as sw_mod
 
     monkeypatch.setattr(tc_mod, "is_temporal_enabled", lambda: True)
     called: dict = {}
@@ -68,10 +67,9 @@ def test_resume_with_temporal(client: TestClient, monkeypatch) -> None:
 def test_restart_with_temporal(
     client: TestClient, monkeypatch, patched_blog_job_store_client
 ) -> None:
-    from shared import blog_job_store as bjs
-
-    from blogging.temporal import client as tc_mod
-    from blogging.temporal import start_workflow as sw_mod
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.temporal import client as tc_mod
+    from agents.blogging.temporal import start_workflow as sw_mod
 
     monkeypatch.setattr(tc_mod, "is_temporal_enabled", lambda: True)
     monkeypatch.setattr(sw_mod, "start_full_pipeline_workflow", lambda *a, **kw: None)
@@ -224,7 +222,7 @@ def test_stream_terminal_via_subscriber(client: TestClient, monkeypatch) -> None
     """Cover the event_generator main path by delivering events."""
     from collections import deque
 
-    import shared.job_event_bus as bus
+    import agents.blogging.shared.job_event_bus as bus
 
     job_id = _create_job()  # status=pending so terminal short-circuit doesn't fire
 

@@ -9,7 +9,7 @@ import pytest
 
 def _make_planning_result(iterations: int = 1, critic_report: dict | None = None):
     from _content_plan_test_utils import make_requirements_analysis
-    from shared.content_plan import (
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         PlanningPhaseResult,
@@ -37,9 +37,9 @@ def _make_planning_result(iterations: int = 1, critic_report: dict | None = None
 
 
 def test_run_planning_writes_artifacts_and_returns_result(monkeypatch, tmp_path: Path) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
-    from blog_research_agent.models import ResearchBriefInput
-    from shared.content_profile import ContentProfile, resolve_length_policy
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
 
     ppr = _make_planning_result(iterations=2, critic_report={"status": "PASS"})
 
@@ -74,9 +74,9 @@ def test_run_planning_writes_artifacts_and_returns_result(monkeypatch, tmp_path:
 
 
 def test_run_planning_without_work_dir_or_critic_report(monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
-    from blog_research_agent.models import ResearchBriefInput
-    from shared.content_profile import ContentProfile, resolve_length_policy
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
 
     ppr = _make_planning_result(critic_report=None)
 
@@ -104,9 +104,9 @@ def test_run_planning_without_work_dir_or_critic_report(monkeypatch) -> None:
 
 
 def test_run_planning_job_updater_swallows_errors(monkeypatch, tmp_path: Path) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
-    from blog_research_agent.models import ResearchBriefInput
-    from shared.content_profile import ContentProfile, resolve_length_policy
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
 
     ppr = _make_planning_result(critic_report=None)
 
@@ -137,10 +137,10 @@ def test_run_planning_job_updater_swallows_errors(monkeypatch, tmp_path: Path) -
 
 
 def test_run_planning_propagates_blogging_error(monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
-    from blog_research_agent.models import ResearchBriefInput
-    from shared.content_profile import ContentProfile, resolve_length_policy
-    from shared.errors import PlanningError
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+    from agents.blogging.shared.errors import PlanningError
 
     class _FakeAgent:
         def __init__(self, **_kw):
@@ -166,10 +166,10 @@ def test_run_planning_propagates_blogging_error(monkeypatch) -> None:
 
 
 def test_run_planning_wraps_unknown_exception(monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
-    from blog_research_agent.models import ResearchBriefInput
-    from shared.content_profile import ContentProfile, resolve_length_policy
-    from shared.errors import PlanningError
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+    from agents.blogging.shared.errors import PlanningError
 
     class _FakeAgent:
         def __init__(self, **_kw):
@@ -196,9 +196,9 @@ def test_run_planning_wraps_unknown_exception(monkeypatch) -> None:
 
 
 def test_extract_plan_keywords_returns_filtered_unique() -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from _content_plan_test_utils import make_requirements_analysis
-    from shared.content_plan import (
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         TitleCandidate,
@@ -222,7 +222,7 @@ def test_extract_plan_keywords_returns_filtered_unique() -> None:
 
 
 def test_planning_llm_client_overrides_when_model_set(monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
 
     from llm_service.factory import FailoverLLMClient
 
@@ -240,7 +240,7 @@ def test_planning_llm_client_overrides_when_model_set(monkeypatch) -> None:
 
 
 def test_planning_llm_client_no_override_returns_base(monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
 
     monkeypatch.setattr(v2, "planning_model_override", lambda: "")
     sentinel = object()
@@ -248,7 +248,7 @@ def test_planning_llm_client_no_override_returns_base(monkeypatch) -> None:
 
 
 def test_plan_critic_llm_client_overrides_when_model_set(monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
 
     from llm_service.factory import FailoverLLMClient
 
@@ -263,7 +263,7 @@ def test_plan_critic_llm_client_overrides_when_model_set(monkeypatch) -> None:
 
 
 def test_plan_critic_llm_client_no_override_returns_base(monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
 
     monkeypatch.setattr(v2, "plan_critic_model_override", lambda: "")
     sentinel = object()
@@ -273,7 +273,7 @@ def test_plan_critic_llm_client_no_override_returns_base(monkeypatch) -> None:
 def test_planning_llm_client_override_reaches_strands_backing(monkeypatch) -> None:
     """End-to-end: the pipeline passes a Strands LLMClientModel, so the override must
     reach the backing failover client (rebuilding the model) rather than no-op."""
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
 
     from llm_service import LLMClientModel
     from llm_service.factory import FailoverLLMClient
@@ -291,7 +291,7 @@ def test_planning_llm_client_override_reaches_strands_backing(monkeypatch) -> No
 
 
 def test_plan_critic_llm_client_override_reaches_strands_backing(monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
 
     from llm_service import LLMClientModel
     from llm_service.factory import FailoverLLMClient
@@ -306,7 +306,7 @@ def test_plan_critic_llm_client_override_reaches_strands_backing(monkeypatch) ->
 def test_planning_llm_client_strands_dummy_backing_unchanged(monkeypatch) -> None:
     """A Strands model over a Dummy backing has no failover client to pin, so the
     same model instance is returned (no needless rebuild)."""
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
 
     from llm_service import DummyLLMClient, LLMClientModel
 
@@ -316,14 +316,14 @@ def test_planning_llm_client_strands_dummy_backing_unchanged(monkeypatch) -> Non
 
 
 def test_build_plan_critic_agent_disabled_returns_none(monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
 
     monkeypatch.setattr(v2, "plan_critic_enabled", lambda: False)
     assert v2.build_plan_critic_agent(object()) is None
 
 
 def test_build_plan_critic_agent_enabled_returns_instance(monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
 
     monkeypatch.setattr(v2, "plan_critic_enabled", lambda: True)
     monkeypatch.setattr(v2, "plan_critic_llm_client", lambda b: b)

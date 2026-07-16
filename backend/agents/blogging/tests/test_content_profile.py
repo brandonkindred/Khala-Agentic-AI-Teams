@@ -1,7 +1,7 @@
 """Tests for content profile / length policy resolution."""
 
 import pytest
-from shared.content_profile import (
+from agents.blogging.shared.content_profile import (
     ContentProfile,
     LengthPolicy,
     SeriesContext,

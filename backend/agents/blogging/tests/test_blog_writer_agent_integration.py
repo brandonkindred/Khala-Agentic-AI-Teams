@@ -15,8 +15,8 @@ import re
 from pathlib import Path
 
 import pytest
-from blog_writer_agent import BlogWriterAgent, WriterInput, WriterOutput
-from shared.content_plan import (
+from agents.blogging.blog_writer_agent import BlogWriterAgent, WriterInput, WriterOutput
+from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     RequirementsAnalysis,

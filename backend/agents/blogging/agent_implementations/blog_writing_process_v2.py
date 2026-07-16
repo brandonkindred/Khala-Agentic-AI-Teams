@@ -18,26 +18,26 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Tuple, Union
 
 if TYPE_CHECKING:
-    from blog_writer_agent.models import WriterOutput
-    from ghost_writer_agent.models import StoryGap
+    from agents.blogging.blog_writer_agent.models import WriterOutput
+    from agents.blogging.ghost_writer_agent.models import StoryGap
 
-from blog_compliance_agent import BlogComplianceAgent
-from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
-from blog_copy_editor_agent.models import FeedbackItem
-from blog_fact_check_agent import BlogFactCheckAgent
-from blog_plan_critic_agent import BlogPlanCriticAgent
-from blog_publication_agent.models import PublishingPack
-from blog_research_agent.models import ResearchBriefInput
-from blog_writer_agent import BlogWriterAgent, ReviseWriterInput, WriterInput
-from shared.artifacts import write_artifact
-from shared.blog_job_store import (
+from agents.blogging.blog_compliance_agent import BlogComplianceAgent
+from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
+from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+from agents.blogging.blog_fact_check_agent import BlogFactCheckAgent
+from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent
+from agents.blogging.blog_publication_agent.models import PublishingPack
+from agents.blogging.blog_research_agent.models import ResearchBriefInput
+from agents.blogging.blog_writer_agent import BlogWriterAgent, ReviseWriterInput, WriterInput
+from agents.blogging.shared.artifacts import write_artifact
+from agents.blogging.shared.blog_job_store import (
     add_blog_pending_questions,
     get_blog_job,
     is_waiting_for_blog_answers,
     record_guideline_updates,
 )
-from shared.brand_spec import load_brand_spec_prompt
-from shared.content_plan import (
+from agents.blogging.shared.brand_spec import load_brand_spec_prompt
+from agents.blogging.shared.content_plan import (
     ContentPlan,
     PlanningInput,
     PlanningPhaseResult,
@@ -45,7 +45,7 @@ from shared.content_plan import (
     content_plan_to_markdown_doc,
     content_plan_to_outline_markdown,
 )
-from shared.content_profile import (
+from agents.blogging.shared.content_profile import (
     ContentProfile,
     LengthPolicy,
     SeriesContext,
@@ -54,23 +54,23 @@ from shared.content_profile import (
     resolve_length_policy,
     series_context_block,
 )
-from shared.errors import (
+from agents.blogging.shared.errors import (
     BloggingError,
     ComplianceError,
     DraftError,
     FactCheckError,
     PlanningError,
 )
-from shared.models import BlogPhase, get_phase_progress
-from shared.planning_config import (
+from agents.blogging.shared.models import BlogPhase, get_phase_progress
+from agents.blogging.shared.planning_config import (
     plan_critic_enabled,
     plan_critic_max_iterations,
     plan_critic_model_override,
     planning_model_override,
 )
-from shared.style_loader import append_guidelines, load_style_file
+from agents.blogging.shared.style_loader import append_guidelines, load_style_file
+from agents.blogging.validators.runner import run_validators_from_work_dir
 from temporalio.exceptions import CancelledError
-from validators.runner import run_validators_from_work_dir
 
 from llm_service import (
     LLMClientModel,
@@ -487,11 +487,11 @@ def _fill_story_placeholders(
             propagates unchanged — the non-fatal story-bank-save guard below
             never swallows it.
     """
-    from blog_writer_agent.models import WriterInput, WriterOutput
-    from ghost_writer_agent import GhostWriterElicitationAgent
-    from ghost_writer_agent.agent import MAX_ROUNDS_POST_DRAFT
-    from ghost_writer_agent.models import StoryGap
-    from shared.blog_job_store import (
+    from agents.blogging.blog_writer_agent.models import WriterInput, WriterOutput
+    from agents.blogging.ghost_writer_agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import MAX_ROUNDS_POST_DRAFT
+    from agents.blogging.ghost_writer_agent.models import StoryGap
+    from agents.blogging.shared.blog_job_store import (
         add_story_agent_message,
         update_blog_job,
     )
@@ -565,7 +565,7 @@ def _fill_story_placeholders(
             new_narratives.append(f"[Story for section: {gap.section_title}]\n{result.narrative}")
             # Save to story bank for reuse across future posts
             try:
-                from shared.story_bank import save_story
+                from agents.blogging.shared.story_bank import save_story
 
                 save_story(
                     narrative=result.narrative,
@@ -671,7 +671,7 @@ def _run_title_selection(
         return None
 
     try:
-        from shared.blog_job_store import (
+        from agents.blogging.shared.blog_job_store import (
             clear_pending_title_feedback,
             get_blog_job,
             get_pending_title_feedback,
@@ -1075,7 +1075,7 @@ def _save_narratives_to_story_bank(
         CancelledError: a Temporal-native (or otherwise external) cancellation propagates
             unchanged — it is never swallowed by the non-fatal per-pair guard.
     """
-    from shared.story_bank import save_story
+    from agents.blogging.shared.story_bank import save_story
 
     saved = 0
     for story_gap, raw_narrative in collected_story_pairs:
@@ -1154,8 +1154,8 @@ def run_planning_stage(
     elicited_stories_text: Optional[str] = None
     if job_id is not None and job_updater is not None:
         try:
-            from ghost_writer_agent import GhostWriterElicitationAgent, StoryGap
-            from shared.blog_job_store import (
+            from agents.blogging.ghost_writer_agent import GhostWriterElicitationAgent, StoryGap
+            from agents.blogging.shared.blog_job_store import (
                 add_story_agent_message,
                 complete_story_elicitation,
                 get_blog_job,
@@ -1267,7 +1267,7 @@ def run_planning_stage(
     # this post's topic and sections, so the draft agent has real stories even if the ghost
     # writer interview was skipped or produced fewer stories than needed.
     try:
-        from shared.story_bank import find_relevant_stories
+        from agents.blogging.shared.story_bank import find_relevant_stories
 
         bank_keywords = _extract_plan_keywords(plan)
         bank_results = find_relevant_stories(bank_keywords, limit=5)
@@ -1295,7 +1295,7 @@ def run_planning_stage(
     # ------------------------------------------------------------------
     if job_id is not None and job_updater is not None:
         try:
-            from shared.blog_job_store import (
+            from agents.blogging.shared.blog_job_store import (
                 get_blog_job,
                 get_user_draft_feedback,
                 is_waiting_for_draft_feedback,
@@ -1484,7 +1484,7 @@ def run_draft_stage(
     # Deferred imports (here and elsewhere in the stage bodies) keep this module's
     # import-time cheap and avoid pulling the full blog_writer_agent / job-store graph
     # when the Temporal worker imports this file to register activities.
-    from blog_writer_agent.feedback_tracker import FeedbackTracker
+    from agents.blogging.blog_writer_agent.feedback_tracker import FeedbackTracker
 
     draft_result = None
     previous_feedback_items: list[FeedbackItem] = []
@@ -1581,7 +1581,7 @@ def run_draft_stage(
             #   3. Present draft for editor review → block for feedback
             # This loop continues until the user approves a draft.
             if job_id is not None and job_updater is not None:
-                from shared.blog_job_store import (
+                from agents.blogging.shared.blog_job_store import (
                     get_blog_job,
                     get_user_draft_feedback,
                     is_waiting_for_draft_feedback,
@@ -2350,7 +2350,9 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                         details_str = ""
                         if check.details:
                             if "matches" in check.details:
-                                details_str = f" Found: {', '.join(str(m) for m in check.details['matches'])}"
+                                details_str = (
+                                    f" Found: {', '.join(str(m) for m in check.details['matches'])}"
+                                )
                             elif "violations" in check.details:
                                 details_str = f" Violations: {', '.join(str(v) for v in check.details['violations'])}"
                             elif "fk_grade" in check.details:
