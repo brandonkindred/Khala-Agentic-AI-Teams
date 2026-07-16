@@ -7,77 +7,18 @@ suite runs against an in-memory ``FakeJobServiceClient``.
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
+from _api_test_utils import NoOpThread
+from _api_test_utils import api_main as _api_main
+from _api_test_utils import create_job as _create_job
 from fastapi.testclient import TestClient
 
-_blogging_root = Path(__file__).resolve().parent.parent
-if str(_blogging_root) not in sys.path:
-    sys.path.insert(0, str(_blogging_root))
-
-_spec = importlib.util.spec_from_file_location(
-    "blogging_api_main_unit",
-    _blogging_root / "api" / "main.py",
-)
-_api_main = importlib.util.module_from_spec(_spec)
-sys.modules["blogging_api_main_unit"] = _api_main
-_spec.loader.exec_module(_api_main)
-# `_rebuild_api_models()` runs at module import and resolves every model defined
-# in api/main (request DTOs included), so no per-class rebuild is needed here.
-app = _api_main.app
-
-
-@pytest.fixture
-def patched_client(monkeypatch, fake_job_client) -> Any:
-    """Replace the global blog_job_store client and rebind all helpers on api/main."""
-    from shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    # Refresh references inside api/main to the freshly-patched helpers.
-    for name in (
-        "create_blog_job",
-        "delete_blog_job",
-        "get_blog_job",
-        "list_blog_jobs",
-        "update_blog_job",
-        "start_blog_job",
-        "complete_blog_job",
-        "fail_blog_job",
-        "approve_blog_job",
-        "unapprove_blog_job",
-        "submit_title_selection",
-        "submit_title_ratings",
-        "submit_story_user_message",
-        "skip_current_story_gap",
-        "submit_blog_answers",
-        "submit_draft_feedback",
-        "is_waiting_for_draft_feedback",
-    ):
-        helper = getattr(bjs, name, None)
-        if helper is not None:
-            monkeypatch.setattr(_api_main, name, helper)
-    return fake_job_client
-
-
-@pytest.fixture
-def client(patched_client) -> TestClient:
-    return TestClient(app)
-
-
-def _create(client: TestClient, **fields: Any) -> str:
-    """Create a job via the underlying store using a known job_id."""
-    from shared import blog_job_store as bjs
-
-    job_id = str(uuid.uuid4())[:8]
-    bjs.create_blog_job(job_id, fields.pop("brief", "brief"))
-    if fields:
-        bjs.update_blog_job(job_id, **fields)
-    return job_id
+# ``api_main``/``app`` load and the ``patched_client``/``client`` fixtures live in
+# ``_api_test_utils`` and ``conftest.py`` so the three API test modules share one
+# loaded app and one fixture definition.
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +67,7 @@ def test_get_job_status_404(client: TestClient) -> None:
 
 
 def test_get_job_status_200(client: TestClient) -> None:
-    job_id = _create(client, brief="hello world")
+    job_id = _create_job(brief="hello world")
     r = client.get(f"/job/{job_id}")
     assert r.status_code == 200
     body = r.json()
@@ -137,8 +78,8 @@ def test_get_job_status_200(client: TestClient) -> None:
 def test_list_jobs_filters(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    a = _create(client)
-    b = _create(client)
+    a = _create_job()
+    b = _create_job()
     bjs.start_blog_job(a)
     bjs.complete_blog_job(b)
     r = client.get("/jobs")
@@ -158,7 +99,7 @@ def test_list_jobs_filters(client: TestClient) -> None:
 def test_cancel_job_lifecycle(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.start_blog_job(job_id)
     r = client.post(f"/job/{job_id}/cancel")
     assert r.status_code == 200
@@ -174,7 +115,7 @@ def test_cancel_job_404(client: TestClient) -> None:
 
 
 def test_delete_job_lifecycle(client: TestClient) -> None:
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.delete(f"/job/{job_id}")
     assert r.status_code == 200
     # Now it should be gone
@@ -188,7 +129,7 @@ def test_delete_job_lifecycle(client: TestClient) -> None:
 
 
 def test_approve_400_when_not_terminal(client: TestClient) -> None:
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.post(f"/job/{job_id}/approve")
     assert r.status_code == 400
 
@@ -201,7 +142,7 @@ def test_approve_404(client: TestClient) -> None:
 def test_approve_unapprove_happy_path(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.complete_blog_job(job_id)
     r = client.post(f"/job/{job_id}/approve")
     assert r.status_code == 200
@@ -228,7 +169,7 @@ def test_select_title_404(client: TestClient) -> None:
 
 
 def test_select_title_not_waiting(client: TestClient) -> None:
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.post(f"/job/{job_id}/select-title", json={"title": "x"})
     assert r.status_code == 400
 
@@ -236,7 +177,7 @@ def test_select_title_not_waiting(client: TestClient) -> None:
 def test_select_title_empty_title(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.update_blog_job(job_id, waiting_for_title_selection=True)
     r = client.post(f"/job/{job_id}/select-title", json={"title": "  "})
     assert r.status_code == 422
@@ -245,7 +186,7 @@ def test_select_title_empty_title(client: TestClient) -> None:
 def test_select_title_ok(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.update_blog_job(job_id, waiting_for_title_selection=True)
     r = client.post(f"/job/{job_id}/select-title", json={"title": "Chosen"})
     assert r.status_code == 200
@@ -257,7 +198,7 @@ def test_select_title_ok(client: TestClient) -> None:
 def test_rate_titles_paths(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     # 404 when missing
     r = client.post(
         "/job/missing/rate-titles", json={"ratings": [{"title": "x", "rating": "like"}]}
@@ -298,7 +239,7 @@ def test_rate_titles_paths(client: TestClient) -> None:
 def test_story_response_paths(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.post("/job/missing/story-response", json={"message": "hi"})
     assert r.status_code == 404
     r = client.post(f"/job/{job_id}/story-response", json={"message": "hi"})
@@ -315,7 +256,7 @@ def test_story_response_paths(client: TestClient) -> None:
 def test_skip_story_gap_paths(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.post("/job/missing/skip-story-gap")
     assert r.status_code == 404
 
@@ -329,7 +270,7 @@ def test_skip_story_gap_paths(client: TestClient) -> None:
 def test_submit_answers_paths(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.post("/job/missing/answers", json={"answers": []})
     assert r.status_code == 404
     r = client.post(f"/job/{job_id}/answers", json={"answers": []})
@@ -345,7 +286,7 @@ def test_submit_answers_paths(client: TestClient) -> None:
 def test_draft_feedback_paths(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.post("/job/missing/draft-feedback", json={"feedback": "x", "approved": True})
     assert r.status_code == 404
     r = client.post(f"/job/{job_id}/draft-feedback", json={"feedback": "x", "approved": True})
@@ -369,7 +310,7 @@ def test_artifact_list_404_for_missing_job(client: TestClient) -> None:
 
 
 def test_artifact_list_404_when_no_work_dir(client: TestClient) -> None:
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.get(f"/job/{job_id}/artifacts")
     assert r.status_code == 404
 
@@ -381,7 +322,7 @@ def test_artifact_list_200_and_get_artifact(client: TestClient, tmp_path: Path) 
     workdir.mkdir()
     (workdir / "final.md").write_text("# Final\n")
     (workdir / "compliance_report.json").write_text('{"pass": true}')
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.update_blog_job(job_id, work_dir=str(workdir))
 
     r = client.get(f"/job/{job_id}/artifacts")
@@ -422,7 +363,7 @@ def test_artifact_get_404_missing_job(client: TestClient) -> None:
 
 
 def test_artifact_get_404_no_work_dir(client: TestClient) -> None:
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.get(f"/job/{job_id}/artifacts/final.md")
     assert r.status_code == 404
 
@@ -432,7 +373,7 @@ def test_artifact_get_404_when_file_missing(client: TestClient, tmp_path: Path) 
 
     workdir = tmp_path / "work"
     workdir.mkdir()
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.update_blog_job(job_id, work_dir=str(workdir))
     # final.md is a known artifact name but not present on disk → 404
     r = client.get(f"/job/{job_id}/artifacts/final.md")
@@ -447,7 +388,7 @@ def test_artifact_get_404_when_file_missing(client: TestClient, tmp_path: Path) 
 def test_stream_terminal_job_completes_quickly(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.complete_blog_job(job_id)
     # The stream returns immediately for terminal jobs
     with client.stream("GET", f"/job/{job_id}/stream") as r:
@@ -477,7 +418,7 @@ def test_resume_job_400_when_not_resumable(client: TestClient) -> None:
     """A completed job can't be resumed."""
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.complete_blog_job(job_id)
     r = client.post(f"/job/{job_id}/resume")
     assert r.status_code == 400
@@ -486,7 +427,7 @@ def test_resume_job_400_when_not_resumable(client: TestClient) -> None:
 def test_resume_job_400_when_no_payload(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.update_blog_job(job_id, status="interrupted")
     r = client.post(f"/job/{job_id}/resume")
     assert r.status_code == 400
@@ -501,7 +442,7 @@ def test_restart_job_404(client: TestClient) -> None:
 def test_restart_job_400_when_no_payload(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.complete_blog_job(job_id)
     r = client.post(f"/job/{job_id}/restart")
     assert r.status_code == 400
@@ -518,17 +459,12 @@ def test_start_full_pipeline_async_creates_job(
     """POST /full-pipeline-async creates a job and starts a background thread, which we no-op."""
     started: list[Any] = []
 
-    class _NoOpThread:
-        def __init__(self, target=None, args=(), daemon=False, **kw):
-            self._target = target
-            self._args = args
-            started.append((target, args))
-
-        def start(self):
-            pass
+    def _record_thread(*args: Any, **kwargs: Any) -> NoOpThread:
+        started.append((kwargs.get("target"), kwargs.get("args")))
+        return NoOpThread()
 
     # Replace the threading module reference inside the API module.
-    monkeypatch.setattr(_api_main.threading, "Thread", _NoOpThread)
+    monkeypatch.setattr(_api_main.threading, "Thread", _record_thread)
 
     body = {
         "brief": "How to ship faster",
@@ -575,15 +511,7 @@ def test_medium_stats_async_starts_job(
 ) -> None:
     monkeypatch.setattr(_api_main, "medium_stats_integration_eligible", lambda: (True, ""))
 
-    class _NoOpThread:
-        def __init__(self, target=None, args=(), daemon=False, **kw):
-            self._target = target
-            self._args = args
-
-        def start(self):
-            pass
-
-    monkeypatch.setattr(_api_main.threading, "Thread", _NoOpThread)
+    monkeypatch.setattr(_api_main.threading, "Thread", NoOpThread)
     monkeypatch.setenv("BLOGGING_MEDIUM_STATS_ROOT", str(tmp_path / "ms"))
 
     r = client.post("/medium-stats-async", json={})

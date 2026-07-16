@@ -10,76 +10,12 @@ None so the route returns 501.
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import uuid
-from pathlib import Path
-from typing import Any
-
-import pytest
+from _api_test_utils import api_main as _api_main
+from _api_test_utils import create_job as _create_job
 from fastapi.testclient import TestClient
 
-_blogging_root = Path(__file__).resolve().parent.parent
-if str(_blogging_root) not in sys.path:
-    sys.path.insert(0, str(_blogging_root))
-
-_spec = importlib.util.spec_from_file_location(
-    "blogging_api_main_unit",
-    _blogging_root / "api" / "main.py",
-)
-_api_main = sys.modules.get("blogging_api_main_unit")
-if _api_main is None:
-    _api_main = importlib.util.module_from_spec(_spec)
-    sys.modules["blogging_api_main_unit"] = _api_main
-    _spec.loader.exec_module(_api_main)
-    # `_rebuild_api_models()` runs at module import and resolves every model
-    # defined in api/main (request DTOs included), so no per-class rebuild here.
-app = _api_main.app
-
-
-@pytest.fixture
-def patched_client(monkeypatch, fake_job_client) -> Any:
-    from shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    for name in (
-        "create_blog_job",
-        "delete_blog_job",
-        "get_blog_job",
-        "list_blog_jobs",
-        "update_blog_job",
-        "start_blog_job",
-        "complete_blog_job",
-        "fail_blog_job",
-        "approve_blog_job",
-        "unapprove_blog_job",
-        "submit_title_selection",
-        "submit_title_ratings",
-        "submit_story_user_message",
-        "skip_current_story_gap",
-        "submit_blog_answers",
-        "submit_draft_feedback",
-        "is_waiting_for_draft_feedback",
-    ):
-        helper = getattr(bjs, name, None)
-        if helper is not None:
-            monkeypatch.setattr(_api_main, name, helper)
-    return fake_job_client
-
-
-@pytest.fixture
-def client(patched_client) -> TestClient:
-    return TestClient(app)
-
-
-def _create_job(**fields: Any) -> str:
-    from shared import blog_job_store as bjs
-
-    job_id = str(uuid.uuid4())[:8]
-    bjs.create_blog_job(job_id, fields.pop("brief", "brief"))
-    if fields:
-        bjs.update_blog_job(job_id, **fields)
-    return job_id
+# ``api_main``/``app`` load and the ``patched_client``/``client`` fixtures live in
+# ``_api_test_utils`` and ``conftest.py`` — shared across the API test modules.
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +211,7 @@ def test_stream_501(client: TestClient, monkeypatch) -> None:
 def test_resume_404_via_validate_job_for_action(client: TestClient, monkeypatch) -> None:
     """validate_job_for_action raises ValueError 'not found' → 404."""
     job_id = _create_job()
-    # Empty job dict triggers ValueError("Job ... not found") in validate_job_for_action
+    # fake_get returns None, so validate_job_for_action raises ValueError("... not found") → 404.
 
     def fake_get(jid):
         return None  # simulate missing

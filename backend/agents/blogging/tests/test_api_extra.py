@@ -7,76 +7,33 @@ app uses ``FakeJobServiceClient`` and the heavy ``run_pipeline`` is patched.
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import uuid
 from pathlib import Path
 from typing import Any
 
-import pytest
+from _api_test_utils import NoOpThread
+from _api_test_utils import api_main as _api_main
+from _api_test_utils import create_job as _create_job
 from fastapi.testclient import TestClient
 
-_blogging_root = Path(__file__).resolve().parent.parent
-if str(_blogging_root) not in sys.path:
-    sys.path.insert(0, str(_blogging_root))
+# ``api_main``/``app`` load and the ``patched_client``/``client`` fixtures live in
+# ``_api_test_utils`` and ``conftest.py`` — shared across the API test modules.
 
-_spec = importlib.util.spec_from_file_location(
-    "blogging_api_main_unit",  # reuse same name as test_api_unit so the module is shared
-    _blogging_root / "api" / "main.py",
-)
-_api_main = sys.modules.get("blogging_api_main_unit")
-if _api_main is None:
-    _api_main = importlib.util.module_from_spec(_spec)
-    sys.modules["blogging_api_main_unit"] = _api_main
-    _spec.loader.exec_module(_api_main)
-    # `_rebuild_api_models()` runs at module import and resolves every model
-    # defined in api/main (request DTOs included), so no per-class rebuild here.
-app = _api_main.app
+# Title used by ``_make_pipeline_doubles``; referenced by the assertion in
+# ``test_full_pipeline_sync_success`` so the coupling is explicit.
+_EXPECTED_TITLE = "My Title"
 
 
-@pytest.fixture
-def patched_client(monkeypatch, fake_job_client) -> Any:
-    from shared import blog_job_store as bjs
+def _raise(exc: Exception):
+    """Return a function that raises ``exc`` when called (any args).
 
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    for name in (
-        "create_blog_job",
-        "delete_blog_job",
-        "get_blog_job",
-        "list_blog_jobs",
-        "update_blog_job",
-        "start_blog_job",
-        "complete_blog_job",
-        "fail_blog_job",
-        "approve_blog_job",
-        "unapprove_blog_job",
-        "submit_title_selection",
-        "submit_title_ratings",
-        "submit_story_user_message",
-        "skip_current_story_gap",
-        "submit_blog_answers",
-        "submit_draft_feedback",
-        "is_waiting_for_draft_feedback",
-    ):
-        helper = getattr(bjs, name, None)
-        if helper is not None:
-            monkeypatch.setattr(_api_main, name, helper)
-    return fake_job_client
+    Clearer than the ``(_ for _ in ()).throw(exc)`` generator idiom for stubbing
+    a callable that should blow up.
+    """
 
+    def _fn(*args: Any, **kwargs: Any):
+        raise exc
 
-@pytest.fixture
-def client(patched_client) -> TestClient:
-    return TestClient(app)
-
-
-def _create(brief: str = "brief", **fields: Any) -> str:
-    from shared import blog_job_store as bjs
-
-    job_id = str(uuid.uuid4())[:8]
-    bjs.create_blog_job(job_id, brief)
-    if fields:
-        bjs.update_blog_job(job_id, **fields)
-    return job_id
+    return _fn
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +55,7 @@ def _make_pipeline_doubles():
         overarching_topic="Topic",
         narrative_flow="Flow",
         sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
-        title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.8)],
+        title_candidates=[TitleCandidate(title=_EXPECTED_TITLE, probability_of_success=0.8)],
         requirements_analysis=RequirementsAnalysis(
             plan_acceptable=True, scope_feasible=True, research_gaps=[]
         ),
@@ -128,7 +85,7 @@ def test_full_pipeline_sync_success(client: TestClient, monkeypatch) -> None:
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "PASS"
-    assert data["title_choices"][0]["title"] == "My Title"
+    assert data["title_choices"][0]["title"] == _EXPECTED_TITLE
     assert "# Intro" in data["outline"] or "Intro" in data["outline"]
 
 
@@ -151,9 +108,7 @@ def test_full_pipeline_sync_planning_error(client: TestClient, monkeypatch) -> N
 def test_full_pipeline_sync_unknown_error(client: TestClient, monkeypatch) -> None:
     import agent_implementations.blog_writing_process_v2 as v2
 
-    monkeypatch.setattr(
-        v2, "run_pipeline", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("crash"))
-    )
+    monkeypatch.setattr(v2, "run_pipeline", _raise(RuntimeError("crash")))
 
     r = client.post("/full-pipeline", json={"brief": "x"})
     assert r.status_code == 500
@@ -169,7 +124,7 @@ def test_resume_job_happy(client: TestClient, monkeypatch) -> None:
     """Resume an interrupted job that has a stored request_payload."""
     from shared import blog_job_store as bjs
 
-    job_id = _create()
+    job_id = _create_job()
     bjs.update_blog_job(
         job_id,
         status="interrupted",
@@ -177,14 +132,7 @@ def test_resume_job_happy(client: TestClient, monkeypatch) -> None:
     )
 
     # Threading replacement so we don't actually run the pipeline
-    class _NoOpThread:
-        def __init__(self, target=None, args=(), daemon=False, **kw):
-            pass
-
-        def start(self):
-            pass
-
-    monkeypatch.setattr(_api_main.threading, "Thread", _NoOpThread)
+    monkeypatch.setattr(_api_main.threading, "Thread", NoOpThread)
 
     r = client.post(f"/job/{job_id}/resume")
     assert r.status_code == 200
@@ -199,7 +147,7 @@ def test_restart_job_happy(client: TestClient, monkeypatch, fake_job_client) -> 
     aliases — patch both so the in-memory fake client backs everything."""
     from shared import blog_job_store as bjs
 
-    job_id = _create()
+    job_id = _create_job()
     bjs.update_blog_job(job_id, status="completed", request_payload={"brief": "x"})
 
     # Also patch the alternative module path used by api/main.py for reset_blog_job
@@ -210,14 +158,7 @@ def test_restart_job_happy(client: TestClient, monkeypatch, fake_job_client) -> 
     except ImportError:
         pass
 
-    class _NoOpThread:
-        def __init__(self, target=None, args=(), daemon=False, **kw):
-            pass
-
-        def start(self):
-            pass
-
-    monkeypatch.setattr(_api_main.threading, "Thread", _NoOpThread)
+    monkeypatch.setattr(_api_main.threading, "Thread", NoOpThread)
 
     r = client.post(f"/job/{job_id}/restart")
     assert r.status_code == 200
@@ -249,7 +190,7 @@ def test_medium_stats_async_runner_happy(client: TestClient, monkeypatch, tmp_pa
     monkeypatch.setattr(_api_main, "BlogMediumStatsAgent", lambda: _Stub())
 
     # Pre-create job with a work_dir
-    job_id = _create()
+    job_id = _create_job()
     work_dir = tmp_path / "wd"
     work_dir.mkdir()
     bjs.update_blog_job(job_id, work_dir=str(work_dir))
@@ -270,7 +211,7 @@ def test_medium_stats_async_runner_failure_path(
 
     monkeypatch.setattr(_api_main, "medium_stats_integration_eligible", lambda: (False, "no creds"))
 
-    job_id = _create()
+    job_id = _create_job()
     work_dir = tmp_path / "wd"
     work_dir.mkdir()
     bjs.update_blog_job(job_id, work_dir=str(work_dir))
@@ -289,7 +230,7 @@ def test_medium_stats_async_runner_missing_work_dir(client: TestClient, monkeypa
 
     monkeypatch.setattr(_api_main, "medium_stats_integration_eligible", lambda: (True, ""))
 
-    job_id = _create()
+    job_id = _create_job()
     # No work_dir set — bjs creates it as None which is treated as missing
     from shared.medium_stats_api import MediumStatsRequest
 
@@ -313,7 +254,7 @@ def test_run_pipeline_with_tracking_completes(
     monkeypatch.setattr(v2, "run_pipeline", lambda *a, **kw: (ppr, draft, status))
 
     monkeypatch.setattr(_api_main, "RUN_ARTIFACTS_BASE", tmp_path)
-    job_id = _create()
+    job_id = _create_job()
 
     # Build a request
     req = _api_main.FullPipelineRequest(brief="hi")
@@ -330,13 +271,9 @@ def test_run_pipeline_with_tracking_planning_error(
     from shared.errors import PlanningError
 
     monkeypatch.setattr(_api_main, "RUN_ARTIFACTS_BASE", tmp_path)
-    monkeypatch.setattr(
-        v2,
-        "run_pipeline",
-        lambda *a, **kw: (_ for _ in ()).throw(PlanningError("nope", failure_reason="x")),
-    )
+    monkeypatch.setattr(v2, "run_pipeline", _raise(PlanningError("nope", failure_reason="x")))
 
-    job_id = _create()
+    job_id = _create_job()
     req = _api_main.FullPipelineRequest(brief="hi")
     _api_main._run_pipeline_with_tracking(job_id, req)
     job = bjs.get_blog_job(job_id)
@@ -351,11 +288,9 @@ def test_run_pipeline_with_tracking_unknown_error(
     from shared import blog_job_store as bjs
 
     monkeypatch.setattr(_api_main, "RUN_ARTIFACTS_BASE", tmp_path)
-    monkeypatch.setattr(
-        v2, "run_pipeline", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("kaboom"))
-    )
+    monkeypatch.setattr(v2, "run_pipeline", _raise(RuntimeError("kaboom")))
 
-    job_id = _create()
+    job_id = _create_job()
     req = _api_main.FullPipelineRequest(brief="hi")
     _api_main._run_pipeline_with_tracking(job_id, req)
     job = bjs.get_blog_job(job_id)
@@ -453,3 +388,19 @@ def test_all_local_models_rebuilt() -> None:
     assert len(local_models) > 1, "expected multiple locally-defined models"
     unresolved = [m.__name__ for m in local_models if not m.__pydantic_complete__]
     assert not unresolved, f"models with unresolved annotations: {unresolved}"
+
+
+def test_previously_missing_dtos_are_usable() -> None:
+    """Instantiate DTOs that were absent from the old hand-maintained rebuild list.
+
+    ``__pydantic_complete__`` only proves ``model_rebuild`` ran; this constructs
+    the models — including one with a nested forward reference to another local
+    model — to prove their annotations actually resolve and validate at runtime.
+    """
+    select = _api_main.SelectTitleRequest(title="A title")
+    assert select.title == "A title"
+
+    rate = _api_main.RateTitlesRequest(
+        ratings=[_api_main.TitleRatingItem(title="A title", rating="like")]
+    )
+    assert rate.ratings[0].rating == "like"
