@@ -1097,8 +1097,6 @@ async def medium_browser_login_session() -> MediumConfigResponse:
     Run Playwright on the server: open medium.com sign-in, sign in with Google using
     shared encrypted credentials from PUT .../google-browser-login, then persist storage_state to disk.
     """
-    import asyncio
-
     from unified_api.medium_browser_login import perform_medium_google_browser_login
 
     cfg = get_medium_config()
