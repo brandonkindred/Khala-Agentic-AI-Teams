@@ -17,6 +17,7 @@ from temporalio import activity
 from shared_concurrency import BackgroundHeartbeat
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_FAILED,
+    JOB_STATUS_RUNNING,
     update_job,
 )
 
@@ -94,7 +95,7 @@ def _run_frontend_code_v2_impl(
         TaskType,
     )
 
-    update_job(job_id, status="running")
+    update_job(job_id, status=JOB_STATUS_RUNNING)
     tid = task_dict.get("id") or f"fv2-{_uuid.uuid4().hex[:8]}"
     task = Task(
         id=tid,
@@ -188,7 +189,7 @@ def _run_backend_code_v2_impl(
         TaskType,
     )
 
-    update_job(job_id, status="running")
+    update_job(job_id, status=JOB_STATUS_RUNNING)
     tid = task_dict.get("id") or f"bv2-{_uuid.uuid4().hex[:8]}"
     task = Task(
         id=tid,
@@ -278,7 +279,7 @@ def _run_product_analysis_impl(
     )
     from software_engineering_team.spec_parser import gather_context_files
 
-    update_job(job_id, status="running")
+    update_job(job_id, status=JOB_STATUS_RUNNING)
 
     def _job_updater(**kwargs: Any) -> None:
         update_job(job_id, **kwargs)
