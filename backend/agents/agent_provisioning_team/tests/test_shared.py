@@ -48,6 +48,8 @@ def test_environment_info_updated_at_defaults_to_created_at() -> None:
     ``to_dict``/``from_dict`` with ``updated_at == created_at``."""
     info = StoreEnvInfo(agent_id="a1", container_id="c1", container_name="c1")
     d = info.to_dict()
+    assert "updated_at" in d
+    assert d["updated_at"] == info.created_at
     restored = StoreEnvInfo.from_dict(d)
     assert restored.updated_at == restored.created_at
 
@@ -132,6 +134,10 @@ def test_environment_store_update_status(tmp_path: Path) -> None:
     assert updated.status == "ready"
     assert updated.updated_at is not None
     assert updated.updated_at != original_created_at
+
+    # Verify round-trip: a second get preserves the same updated_at
+    refetched = store.get("a1")
+    assert refetched.updated_at == updated.updated_at
 
 
 def test_environment_store_update_status_handles_corrupt(tmp_path: Path) -> None:
