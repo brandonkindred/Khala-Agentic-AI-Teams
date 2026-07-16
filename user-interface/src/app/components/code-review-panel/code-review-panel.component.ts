@@ -476,10 +476,13 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
         record.prUrl = status.github_pr_url ?? record.prUrl;
         record.error = status.error;
         if (isCodingTeamTerminalStatus(status.status)) {
-          // The live status carries no completion timestamp, so stamp one when the
-          // run first goes terminal — this lets the row show a duration without a
-          // reload. `??=` so a value from a prior hydrate is never overwritten.
-          record.completedAt ??= Date.now();
+          // Stamp the completion time when the run first goes terminal so the row can
+          // show a duration without a reload. Prefer the server's timestamp for the
+          // terminal update over the browser clock: a backgrounded tab, an offline
+          // gap, or a delayed poll can push Date.now() well past when the job actually
+          // finished, overstating the duration until a reload swaps in the persisted
+          // completed_at. `??=` so a value from a prior hydrate is never overwritten.
+          record.completedAt ??= this.terminalTimestamp(status);
           this.disposePoller(record.jobId);
         }
         this.cdr.markForCheck();
@@ -491,6 +494,27 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
       },
     );
     this.pollers.set(record.jobId, sub);
+  }
+
+  /**
+   * Best-effort completion time (ms since epoch) for a review whose live poll just
+   * reached a terminal state.
+   *
+   * Preconditions: `status` is the terminal job-status payload for the review.
+   * Postconditions: returns the server's terminal-update timestamp
+   * (`last_activity_at`, else `updated_at`) parsed to ms when one is present and
+   * valid; otherwise falls back to the browser clock (`Date.now()`). Preferring the
+   * server time keeps the duration accurate when the browser observes the terminal
+   * status late (backgrounded tab, offline gap, delayed poll). Reads the clock only
+   * on the fallback path; otherwise pure.
+   */
+  private terminalTimestamp(status: CodingTeamJobStatus): number {
+    const serverTs = status.last_activity_at ?? status.updated_at;
+    if (serverTs) {
+      const parsed = Date.parse(serverTs);
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+    return Date.now();
   }
 
   /** Unsubscribe a poller and drop it from the registry (idempotent). */

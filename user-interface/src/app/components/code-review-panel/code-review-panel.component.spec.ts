@@ -716,12 +716,17 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.reviewDuration(badTime)).toBeNull();
   });
 
-  it('stamps completedAt when a live poll first reaches a terminal status', async () => {
+  it('stamps completedAt from the server timestamp when a live poll goes terminal', async () => {
     await setup();
+    // The terminal status carries the server-side time the job finished; the row's
+    // duration must use that, not the browser clock (which can be minutes/hours late
+    // for a backgrounded tab or delayed poll).
     apiSpy.getJobStatus.mockReturnValue(
       of({
         job_id: 'j1',
         status: 'completed',
+        last_activity_at: '2026-03-01T00:10:00Z',
+        updated_at: '2026-03-01T00:09:00Z', // last_activity_at wins over updated_at
         review_summary: { total_issues: 0, inline_comments: 0, event: 'APPROVE' },
       }),
     );
@@ -729,9 +734,29 @@ describe('CodeReviewPanelComponent', () => {
     const rec = component.reviewsFor(1)[0];
     expect(rec.completedAt).toBeUndefined(); // not terminal yet
     vi.advanceTimersByTime(5000); // one poll tick -> completed
-    expect(rec.completedAt).toBeDefined();
-    // The stamped completion yields a (non-null) duration for the row.
-    expect(component.reviewDuration(rec)).not.toBeNull();
+    expect(rec.completedAt).toBe(Date.parse('2026-03-01T00:10:00Z'));
+  });
+
+  it('falls back to updated_at, then the browser clock, for the terminal timestamp', async () => {
+    await setup();
+    // No last_activity_at -> updated_at is used.
+    apiSpy.getJobStatus.mockReturnValue(
+      of({ job_id: 'j1', status: 'completed', updated_at: '2026-03-02T00:00:00Z' }),
+    );
+    component.startReview(component.pulls[0]);
+    vi.advanceTimersByTime(5000);
+    expect(component.reviewsFor(1)[0].completedAt).toBe(Date.parse('2026-03-02T00:00:00Z'));
+
+    // No server timestamps at all -> fall back to Date.now() (still yields a duration).
+    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'j2', status: 'completed' }));
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(
+      of({ job_id: 'j2', pr_number: 2, pr_url: 'u', status: 'pending', message: '' }),
+    );
+    component.startReview(component.pulls[1]);
+    vi.advanceTimersByTime(5000);
+    const rec2 = component.reviewsFor(2)[0];
+    expect(rec2.completedAt).toBeDefined();
+    expect(component.reviewDuration(rec2)).not.toBeNull();
   });
 
   // -------------------------------------------------------------------------
