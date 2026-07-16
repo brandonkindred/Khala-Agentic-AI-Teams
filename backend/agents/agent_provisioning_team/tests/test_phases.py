@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from agent_provisioning_team.models import (
     AccessAuditResult,
     DeliverResult,
@@ -397,8 +399,29 @@ def test_deprovision_tools_filtered() -> None:
     p2 = MagicMock()
     p2.deprovision.return_value = DeprovisionResult(tool_name="p2", success=True)
 
-    results = deprovision_tools("a1", tool_names=["p1"], provisioners={"p1": p1, "p2": p2})
+    results = deprovision_tools("a1", provisioner_keys=["p1"], provisioners={"p1": p1, "p2": p2})
     assert results == {"p1": True}
+
+
+def test_deprovision_tools_keys_by_provisioner_registry_key() -> None:
+    # The result dict is keyed by the provisioner registry key from the
+    # ``provisioners`` mapping, never by the ``tool_name`` a provisioner returns
+    # (tools are many-to-one onto provisioners, so the two identities differ).
+    from agent_provisioning_team.models import DeprovisionResult
+    from agent_provisioning_team.phases.account_provisioning import deprovision_tools
+
+    prov = MagicMock()
+    prov.deprovision.return_value = DeprovisionResult(tool_name="some_tool", success=True)
+
+    results = deprovision_tools("a1", provisioners={"generic_provisioner": prov})
+    assert results == {"generic_provisioner": True}
+
+
+def test_deprovision_tools_requires_agent_id() -> None:
+    from agent_provisioning_team.phases.account_provisioning import deprovision_tools
+
+    with pytest.raises(AssertionError):
+        deprovision_tools("", provisioners={})
 
 
 def test_build_default_tool_agents_for_account_provisioning() -> None:
