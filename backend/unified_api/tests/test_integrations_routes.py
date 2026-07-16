@@ -1,5 +1,6 @@
 """Tests for /api/integrations/* endpoints and route helper functions."""
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -8,6 +9,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 _backend = Path(__file__).resolve().parent.parent.parent
@@ -20,6 +22,7 @@ if str(_agents) not in sys.path:
 from fastapi.testclient import TestClient
 
 from unified_api.main import app
+from unified_api.routes import integrations
 from unified_api.routes.integrations import _SLACK_NO_SECRET_STATUS
 
 client = TestClient(app, follow_redirects=False)
@@ -651,6 +654,123 @@ def test_medium_clear_session_returns_200():
         resp = client.delete("/api/integrations/medium/session")
     assert resp.status_code == 200
     assert resp.json()["session_configured"] is False
+
+
+# ---------------------------------------------------------------------------
+# Async OAuth HTTP helpers: _exchange_code / _exchange_google_oauth_code /
+# _google_userinfo. These now run outbound requests through httpx.AsyncClient
+# (instead of blocking urllib) so they don't stall the event loop. The route
+# tests above stub the helpers wholesale; these exercise the helper bodies
+# directly, driven with asyncio.run (no pytest-asyncio in unified_api).
+# ---------------------------------------------------------------------------
+
+
+class _FakeResp:
+    """Minimal stand-in for httpx.Response."""
+
+    def __init__(self, json_data=None, *, raise_exc=None):
+        self._json = json_data
+        self._raise_exc = raise_exc
+
+    def raise_for_status(self):
+        if self._raise_exc is not None:
+            raise self._raise_exc
+
+    def json(self):
+        return self._json
+
+
+class _FakeAsyncClient:
+    """Async-context-manager stand-in for httpx.AsyncClient.
+
+    Records each request as ``(method, url, {"data": ..., "headers": ...})`` in
+    ``calls`` and answers with the configured ``_FakeResp``. Accepts (and
+    ignores) the ``timeout`` constructor kwarg the helpers pass.
+    """
+
+    def __init__(self, *, resp=None, timeout=None):
+        self._resp = resp
+        self.calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def post(self, url, data=None, headers=None):
+        self.calls.append(("POST", url, {"data": data, "headers": headers}))
+        return self._resp
+
+    async def get(self, url, headers=None):
+        self.calls.append(("GET", url, {"data": None, "headers": headers}))
+        return self._resp
+
+
+def test_exchange_code_posts_form_to_slack_and_returns_json():
+    """_exchange_code POSTs the OAuth form to Slack and returns the parsed body."""
+    payload = {"ok": True, "access_token": "xoxb-FAKE", "team": {"id": "T1", "name": "Acme"}}
+    fake = _FakeAsyncClient(resp=_FakeResp(payload))
+    with patch(f"{_STORE_MODULE}.httpx.AsyncClient", return_value=fake):
+        result = asyncio.run(integrations._exchange_code("authcode", "https://app/callback", "cid", "csec"))
+    assert result == payload
+    method, url, kwargs = fake.calls[-1]
+    assert method == "POST"
+    assert url == integrations._SLACK_TOKEN_URL
+    assert kwargs["data"] == {
+        "code": "authcode",
+        "client_id": "cid",
+        "client_secret": "csec",
+        "redirect_uri": "https://app/callback",
+    }
+
+
+def test_exchange_code_propagates_http_error():
+    """_exchange_code lets a non-2xx HTTPError propagate to its caller."""
+    fake = _FakeAsyncClient(resp=_FakeResp(raise_exc=httpx.HTTPStatusError("boom", request=None, response=None)))
+    with (
+        patch(f"{_STORE_MODULE}.httpx.AsyncClient", return_value=fake),
+        pytest.raises(httpx.HTTPError),
+    ):
+        asyncio.run(integrations._exchange_code("authcode", "https://app/callback", "cid", "csec"))
+
+
+def test_exchange_google_oauth_code_posts_form_with_grant_type():
+    """_exchange_google_oauth_code POSTs the Google token form incl. grant_type."""
+    payload = {"access_token": "at", "refresh_token": "rt"}
+    fake = _FakeAsyncClient(resp=_FakeResp(payload))
+    with patch(f"{_STORE_MODULE}.httpx.AsyncClient", return_value=fake):
+        result = asyncio.run(integrations._exchange_google_oauth_code("gcode", "https://app/g/callback", "gid", "gsec"))
+    assert result == payload
+    method, url, kwargs = fake.calls[-1]
+    assert method == "POST"
+    assert url == integrations._GOOGLE_TOKEN_URL
+    assert kwargs["data"]["grant_type"] == "authorization_code"
+    assert kwargs["data"]["code"] == "gcode"
+    assert kwargs["data"]["redirect_uri"] == "https://app/g/callback"
+
+
+def test_google_userinfo_gets_with_bearer_header():
+    """_google_userinfo GETs the userinfo URL with an Authorization: Bearer header."""
+    payload = {"email": "user@example.com", "name": "User"}
+    fake = _FakeAsyncClient(resp=_FakeResp(payload))
+    with patch(f"{_STORE_MODULE}.httpx.AsyncClient", return_value=fake):
+        result = asyncio.run(integrations._google_userinfo("access-tok"))
+    assert result == payload
+    method, url, kwargs = fake.calls[-1]
+    assert method == "GET"
+    assert url == integrations._GOOGLE_USERINFO_URL
+    assert kwargs["headers"] == {"Authorization": "Bearer access-tok"}
+
+
+def test_google_userinfo_propagates_http_error():
+    """_google_userinfo lets a non-2xx HTTPError propagate to its caller."""
+    fake = _FakeAsyncClient(resp=_FakeResp(raise_exc=httpx.HTTPStatusError("boom", request=None, response=None)))
+    with (
+        patch(f"{_STORE_MODULE}.httpx.AsyncClient", return_value=fake),
+        pytest.raises(httpx.HTTPError),
+    ):
+        asyncio.run(integrations._google_userinfo("access-tok"))
 
 
 # ---------------------------------------------------------------------------

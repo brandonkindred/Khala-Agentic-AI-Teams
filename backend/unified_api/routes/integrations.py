@@ -24,9 +24,7 @@ import logging
 import os
 import re
 import subprocess
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Literal
@@ -317,24 +315,35 @@ def _get_redirect_uri(request: Request) -> str:
     return f"{base}/api/integrations/slack/oauth/callback"
 
 
-def _exchange_code(code: str, redirect_uri: str, client_id: str, client_secret: str) -> dict:
-    """Exchange an OAuth authorization code for a bot token via Slack's API."""
-    body = urllib.parse.urlencode(
-        {
-            "code": code,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uri": redirect_uri,
-        }
-    ).encode()
-    req = urllib.request.Request(
-        _SLACK_TOKEN_URL,
-        data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode())
+async def _exchange_code(code: str, redirect_uri: str, client_id: str, client_secret: str) -> dict:
+    """Exchange an OAuth authorization code for a bot token via Slack's API.
+
+    Runs on the event loop via ``httpx.AsyncClient`` so the outbound token
+    exchange does not block concurrent request handling.
+
+    Preconditions:
+        - ``code``, ``redirect_uri``, ``client_id`` and ``client_secret`` are the
+          non-empty values supplied by Slack's OAuth v2 redirect and the stored
+          Slack app config.
+    Postconditions:
+        - Returns the parsed JSON body of Slack's ``oauth.v2.access`` response.
+          Slack signals OAuth failure with HTTP 200 and ``{"ok": false, ...}``,
+          so that payload is returned (not raised) for the caller to inspect.
+        - Raises ``httpx.HTTPError`` on transport failure or non-2xx status, or
+          ``ValueError`` if the body is not valid JSON; the caller handles both.
+    """
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            _SLACK_TOKEN_URL,
+            data={
+                "code": code,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
+            },
+        )
+    resp.raise_for_status()
+    return resp.json()
 
 
 def _build_medium_config_response(cfg: dict) -> MediumConfigResponse:
@@ -360,34 +369,57 @@ def _get_medium_google_redirect_uri(request: Request) -> str:
     return f"{base}/api/integrations/medium/oauth/google/callback"
 
 
-def _exchange_google_oauth_code(code: str, redirect_uri: str, client_id: str, client_secret: str) -> dict:
-    body = urllib.parse.urlencode(
-        {
-            "code": code,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uri": redirect_uri,
-            "grant_type": "authorization_code",
-        }
-    ).encode()
-    req = urllib.request.Request(
-        _GOOGLE_TOKEN_URL,
-        data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode())
+async def _exchange_google_oauth_code(code: str, redirect_uri: str, client_id: str, client_secret: str) -> dict:
+    """Exchange a Google OAuth authorization code for tokens (Medium linking).
+
+    Runs on the event loop via ``httpx.AsyncClient`` so the outbound token
+    exchange does not block concurrent request handling.
+
+    Preconditions:
+        - ``code``, ``redirect_uri``, ``client_id`` and ``client_secret`` are the
+          non-empty values from Google's OAuth redirect and the stored Medium
+          Google-client config.
+    Postconditions:
+        - Returns the parsed JSON token payload (typically ``access_token`` and,
+          on first consent, ``refresh_token``).
+        - Raises ``httpx.HTTPError`` on transport failure or non-2xx status, or
+          ``ValueError`` if the body is not valid JSON; the caller handles both.
+    """
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.post(
+            _GOOGLE_TOKEN_URL,
+            data={
+                "code": code,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            },
+        )
+    resp.raise_for_status()
+    return resp.json()
 
 
-def _google_userinfo(access_token: str) -> dict:
-    req = urllib.request.Request(
-        _GOOGLE_USERINFO_URL,
-        headers={"Authorization": f"Bearer {access_token}"},
-        method="GET",
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode())
+async def _google_userinfo(access_token: str) -> dict:
+    """Fetch the Google userinfo profile for an OAuth access token.
+
+    Runs on the event loop via ``httpx.AsyncClient`` so the outbound lookup does
+    not block concurrent request handling.
+
+    Preconditions:
+        - ``access_token`` is a non-empty Google OAuth access token.
+    Postconditions:
+        - Returns the parsed JSON userinfo document (e.g. ``email``, ``name``).
+        - Raises ``httpx.HTTPError`` on transport failure or non-2xx status, or
+          ``ValueError`` if the body is not valid JSON; the caller handles both.
+    """
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            _GOOGLE_USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    resp.raise_for_status()
+    return resp.json()
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +571,7 @@ async def slack_oauth_callback(
     # Exchange code for token
     try:
         redirect_uri = _get_redirect_uri(request)
-        result = _exchange_code(code, redirect_uri, client_id, client_secret)
+        result = await _exchange_code(code, redirect_uri, client_id, client_secret)
     except Exception as exc:
         logger.error("Slack OAuth token exchange failed: %s", exc)
         return RedirectResponse(url=f"{integrations_ui}?slack_error=token_exchange_failed")
@@ -1172,7 +1204,7 @@ async def medium_google_oauth_callback(
 
     redirect_uri = _get_medium_google_redirect_uri(request)
     try:
-        token_payload = _exchange_google_oauth_code(code, redirect_uri, client_id, client_secret)
+        token_payload = await _exchange_google_oauth_code(code, redirect_uri, client_id, client_secret)
     except Exception as exc:
         logger.error("Medium Google token exchange failed: %s", exc)
         return RedirectResponse(url=f"{integrations_ui}?medium_error=token_exchange_failed")
@@ -1182,7 +1214,7 @@ async def medium_google_oauth_callback(
     email, name = "", ""
     if access_token:
         try:
-            info = _google_userinfo(access_token)
+            info = await _google_userinfo(access_token)
             email = str(info.get("email") or "")
             name = str(info.get("name") or "")
         except Exception as exc:
