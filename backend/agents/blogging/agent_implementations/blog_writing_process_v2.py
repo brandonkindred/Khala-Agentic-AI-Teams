@@ -157,15 +157,22 @@ def _wait_for_hitl(
         - ``is_waiting`` (and ``on_poll`` when provided) are callables accepting a
           ``job_id`` string.
     Postconditions:
-        - Returns True iff the job reached a terminal ("failed"/"cancelled") status
-          while waiting — the caller aborts with its own FAIL result.
-        - Returns False once ``is_waiting`` became False without a terminal status
+        - Returns True iff the job reached a terminal state while waiting — either a
+          "failed"/"cancelled" status, or the job disappeared from the store
+          (``get_blog_job`` is None). The caller aborts with its own FAIL result.
+        - Returns False once ``is_waiting`` became False without a terminal state
           (a human responded) — the caller reads the response.
         - Does not mutate job state; ``on_poll`` may.
     """
     while is_waiting(job_id):
         job_data = get_blog_job(job_id)
-        if job_data and job_data.get("status") in ("failed", "cancelled"):
+        if job_data is None:
+            # The job was deleted from the store mid-wait. ``get_blog_job`` only
+            # returns None for a genuinely-absent job (transient/HTTP errors raise),
+            # so treat it as terminal and stop polling a job that no longer exists.
+            logger.warning("Job %s not found during HITL wait — treating as terminal", job_id)
+            return True
+        if job_data.get("status") in ("failed", "cancelled"):
             return True
         if on_poll is not None and on_poll(job_id):
             continue

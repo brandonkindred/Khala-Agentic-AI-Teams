@@ -186,3 +186,35 @@ def test_run_title_selection_swallows_generic_error(monkeypatch, patched_client)
         _update=lambda phase, **kw: None,
     )
     assert out is None
+
+
+def test_wait_for_hitl_treats_missing_job_as_terminal(monkeypatch) -> None:
+    """If the job vanishes mid-wait (get_blog_job -> None), the wait returns terminal
+    immediately without sleeping, instead of polling a job that no longer exists."""
+    import agent_implementations.blog_writing_process_v2 as v2
+
+    monkeypatch.setattr(v2, "get_blog_job", lambda job_id: None)
+
+    slept = {"n": 0}
+    monkeypatch.setattr(v2.time, "sleep", lambda *_a, **_kw: slept.__setitem__("n", slept["n"] + 1))
+
+    # Predicate reports "still waiting", but the job is gone: guard must exit terminal.
+    result = v2._wait_for_hitl("job-x", lambda _job_id: True)
+    assert result is True
+    assert slept["n"] == 0
+
+
+def test_wait_for_hitl_returns_false_when_wait_clears(monkeypatch) -> None:
+    """When is_waiting flips to False (human responded), the helper returns False."""
+    import agent_implementations.blog_writing_process_v2 as v2
+
+    monkeypatch.setattr(v2, "get_blog_job", lambda job_id: {"status": "running"})
+    monkeypatch.setattr(v2.time, "sleep", lambda *_a, **_kw: None)
+
+    calls = {"n": 0}
+
+    def _is_waiting(_job_id: str) -> bool:
+        calls["n"] += 1
+        return calls["n"] < 2  # waiting once, then cleared
+
+    assert v2._wait_for_hitl("job-y", _is_waiting) is False
