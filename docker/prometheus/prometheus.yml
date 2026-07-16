@@ -67,3 +67,5 @@ scrape_configs:
         labels: { service: user-agent-founder-service, team: user_agent_founder }
       - targets: ["deepthought-service:8110"]
         labels: { service: deepthought-service, team: deepthought }
+      - targets: ["job-matching-service:8111"]
+        labels: { service: job-matching-service, team: job_matching }
