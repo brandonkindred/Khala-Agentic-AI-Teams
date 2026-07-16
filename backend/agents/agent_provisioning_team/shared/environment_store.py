@@ -47,7 +47,21 @@ _lock = threading.Lock()
 
 
 class EnvironmentInfo:
-    """Information about a provisioned environment."""
+    """Information about a provisioned environment.
+
+    Attributes:
+        agent_id: Identifier of the agent this environment belongs to.
+        container_id: Docker container ID backing the environment.
+        container_name: Docker container name backing the environment.
+        ssh_host: Host used to reach the environment over SSH.
+        ssh_port: Port used to reach the environment over SSH.
+        workspace_path: Path to the agent's workspace inside the container.
+        status: Current lifecycle status (e.g. ``running``, ``ready``).
+        tools_provisioned: Names of tools provisioned into the environment.
+        created_at: ISO-8601 timestamp of when the record was first created.
+        updated_at: ISO-8601 timestamp of the most recent status/field update;
+            defaults to ``created_at`` when not explicitly supplied.
+    """
 
     def __init__(
         self,
