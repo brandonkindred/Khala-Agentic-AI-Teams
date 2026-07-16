@@ -19,8 +19,8 @@ import pytest
 
 
 def test_fact_check_run_happy(monkeypatch, tmp_path: Path) -> None:
-    from blog_fact_check_agent import BlogFactCheckAgent
-    from blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.blog_fact_check_agent import BlogFactCheckAgent
+    from agents.blogging.blog_fact_check_agent import agent as fc_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -50,8 +50,8 @@ def test_fact_check_run_happy(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_fact_check_run_normalizes_invalid_status(monkeypatch, tmp_path: Path) -> None:
-    from blog_fact_check_agent import BlogFactCheckAgent
-    from blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.blog_fact_check_agent import BlogFactCheckAgent
+    from agents.blogging.blog_fact_check_agent import agent as fc_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -68,8 +68,8 @@ def test_fact_check_run_normalizes_invalid_status(monkeypatch, tmp_path: Path) -
 
 
 def test_fact_check_run_json_retry_then_fallback(monkeypatch, tmp_path: Path) -> None:
-    from blog_fact_check_agent import BlogFactCheckAgent
-    from blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.blog_fact_check_agent import BlogFactCheckAgent
+    from agents.blogging.blog_fact_check_agent import agent as fc_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -86,9 +86,9 @@ def test_fact_check_run_json_retry_then_fallback(monkeypatch, tmp_path: Path) ->
 
 
 def test_fact_check_run_llm_exception_raises(monkeypatch) -> None:
-    from blog_fact_check_agent import BlogFactCheckAgent
-    from blog_fact_check_agent import agent as fc_mod
-    from shared.errors import FactCheckError
+    from agents.blogging.blog_fact_check_agent import BlogFactCheckAgent
+    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.shared.errors import FactCheckError
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -104,8 +104,8 @@ def test_fact_check_run_llm_exception_raises(monkeypatch) -> None:
 
 
 def test_fact_check_run_from_work_dir(monkeypatch, tmp_path: Path) -> None:
-    from blog_fact_check_agent import agent as fc_mod
-    from blog_fact_check_agent.agent import run_fact_check_from_work_dir
+    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.blog_fact_check_agent.agent import run_fact_check_from_work_dir
 
     (tmp_path / "final.md").write_text("# Draft\nbody")
     (tmp_path / "allowed_claims.json").write_text(
@@ -126,8 +126,8 @@ def test_fact_check_run_from_work_dir(monkeypatch, tmp_path: Path) -> None:
 
 def test_fact_check_run_from_work_dir_fallback_draft(monkeypatch, tmp_path: Path) -> None:
     """When final.md doesn't exist, try draft_v2.md then draft_v1.md."""
-    from blog_fact_check_agent import agent as fc_mod
-    from blog_fact_check_agent.agent import run_fact_check_from_work_dir
+    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.blog_fact_check_agent.agent import run_fact_check_from_work_dir
 
     (tmp_path / "draft_v1.md").write_text("# Draft v1\nbody")
 
@@ -149,8 +149,8 @@ def test_fact_check_run_from_work_dir_fallback_draft(monkeypatch, tmp_path: Path
 
 
 def test_run_validators_happy(tmp_path: Path) -> None:
-    from shared.brand_spec import BrandSpec
-    from validators.runner import run_validators
+    from agents.blogging.shared.brand_spec import BrandSpec
+    from agents.blogging.validators.runner import run_validators
 
     spec = BrandSpec()
     out = run_validators(
@@ -163,7 +163,7 @@ def test_run_validators_happy(tmp_path: Path) -> None:
 
 
 def test_check_claims_policy_disabled() -> None:
-    from validators.runner import check_claims_policy
+    from agents.blogging.validators.runner import check_claims_policy
 
     assert check_claims_policy("draft", None, False) is None
     assert check_claims_policy("draft", {"claims": []}, False) is None
@@ -172,7 +172,7 @@ def test_check_claims_policy_disabled() -> None:
 
 
 def test_check_claims_policy_unknown_id() -> None:
-    from validators.runner import check_claims_policy
+    from agents.blogging.validators.runner import check_claims_policy
 
     result = check_claims_policy(
         "Body text [CLAIM:unknown] more.",
@@ -184,7 +184,7 @@ def test_check_claims_policy_unknown_id() -> None:
 
 
 def test_check_claims_policy_all_known() -> None:
-    from validators.runner import check_claims_policy
+    from agents.blogging.validators.runner import check_claims_policy
 
     result = check_claims_policy(
         "Body [CLAIM:c1] more.",
@@ -195,7 +195,7 @@ def test_check_claims_policy_all_known() -> None:
 
 
 def test_run_validators_from_work_dir(tmp_path: Path) -> None:
-    from validators.runner import run_validators_from_work_dir
+    from agents.blogging.validators.runner import run_validators_from_work_dir
 
     (tmp_path / "final.md").write_text("# Draft\nBody.")
     (tmp_path / "brand_spec_prompt.md").write_text("Brand spec")
@@ -207,7 +207,7 @@ def test_run_validators_from_work_dir(tmp_path: Path) -> None:
 
 def test_run_validators_from_work_dir_fallback_draft(tmp_path: Path) -> None:
     """Falls back from final.md to draft_v2/draft_v1."""
-    from validators.runner import run_validators_from_work_dir
+    from agents.blogging.validators.runner import run_validators_from_work_dir
 
     (tmp_path / "draft_v1.md").write_text("# Draft v1\nBody.")
     (tmp_path / "brand_spec_prompt.md").write_text("Brand spec")
@@ -218,7 +218,7 @@ def test_run_validators_from_work_dir_fallback_draft(tmp_path: Path) -> None:
 
 def test_run_validators_from_work_dir_missing_brand_spec(tmp_path: Path, monkeypatch) -> None:
     """When neither work_dir nor default brand_spec_prompt.md exist, raise."""
-    from validators.runner import run_validators_from_work_dir
+    from agents.blogging.validators.runner import run_validators_from_work_dir
 
     (tmp_path / "final.md").write_text("# Draft\nBody.")
 
@@ -238,7 +238,7 @@ def test_run_validators_from_work_dir_missing_brand_spec(tmp_path: Path, monkeyp
 
 
 def test_content_plan_to_content_brief_markdown_all_fields() -> None:
-    from shared.content_plan import (
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -300,7 +300,7 @@ def test_content_plan_to_content_brief_markdown_all_fields() -> None:
 
 
 def test_content_plan_build_research_digest(monkeypatch) -> None:
-    from shared.content_plan import build_research_digest
+    from agents.blogging.shared.content_plan import build_research_digest
 
     # Within budget — returns as-is
     short = "short doc"
@@ -349,7 +349,7 @@ def test_medium_integration_happy_path(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "unified_api", fake_unified_api)
     monkeypatch.setitem(sys.modules, "unified_api.integrations_store", fake_integrations_store)
 
-    from shared.medium_integration_access import resolve_medium_stats_storage_state
+    from agents.blogging.shared.medium_integration_access import resolve_medium_stats_storage_state
 
     state, hint, err = resolve_medium_stats_storage_state()
     assert state == {"cookies": []}
@@ -371,7 +371,7 @@ def test_medium_integration_disabled(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "unified_api", fake_unified_api)
     monkeypatch.setitem(sys.modules, "unified_api.integrations_store", fake_integrations_store)
 
-    from shared.medium_integration_access import resolve_medium_stats_storage_state
+    from agents.blogging.shared.medium_integration_access import resolve_medium_stats_storage_state
 
     state, hint, err = resolve_medium_stats_storage_state()
     assert state is None
@@ -395,7 +395,7 @@ def test_medium_integration_invalid_json(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "unified_api", fake_unified_api)
     monkeypatch.setitem(sys.modules, "unified_api.integrations_store", fake_integrations_store)
 
-    from shared.medium_integration_access import resolve_medium_stats_storage_state
+    from agents.blogging.shared.medium_integration_access import resolve_medium_stats_storage_state
 
     state, hint, err = resolve_medium_stats_storage_state()
     assert state is None
@@ -419,7 +419,7 @@ def test_medium_integration_non_dict_state(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "unified_api", fake_unified_api)
     monkeypatch.setitem(sys.modules, "unified_api.integrations_store", fake_integrations_store)
 
-    from shared.medium_integration_access import resolve_medium_stats_storage_state
+    from agents.blogging.shared.medium_integration_access import resolve_medium_stats_storage_state
 
     state, hint, err = resolve_medium_stats_storage_state()
     assert state is None

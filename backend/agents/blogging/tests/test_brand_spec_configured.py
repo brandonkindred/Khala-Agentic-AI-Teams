@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from shared.brand_spec import brand_spec_prompt_configured
+from agents.blogging.shared.brand_spec import brand_spec_prompt_configured
 
 
 def test_brand_spec_prompt_configured_true_for_repo_docs() -> None:

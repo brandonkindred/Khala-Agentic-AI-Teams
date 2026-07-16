@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import pytest
+from agents.blogging.author_profile import AuthorProfile, Identity, Voice, render_template
 from jinja2.exceptions import UndefinedError
-
-from author_profile import AuthorProfile, Identity, Voice, render_template
 
 
 def _profile() -> AuthorProfile:

@@ -14,7 +14,7 @@ def _start_temporal_worker() -> None:
     if not os.environ.get("TEMPORAL_ADDRESS", "").strip():
         return
     try:
-        from blogging.temporal.worker import start_blogging_temporal_worker_thread
+        from agents.blogging.temporal.worker import start_blogging_temporal_worker_thread
 
         if start_blogging_temporal_worker_thread():
             logger.info("Blogging Temporal worker started")
@@ -27,7 +27,7 @@ if __name__ == "__main__":
 
     # Import the app object so we can instrument it in-process before uvicorn
     # starts. Safe because workers=1 (see note below).
-    from blogging.api.main import app as _blogging_app
+    from agents.blogging.api.main import app as _blogging_app
 
     try:
         from prometheus_fastapi_instrumentator import Instrumentator

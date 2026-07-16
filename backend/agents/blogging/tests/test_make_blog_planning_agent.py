@@ -12,12 +12,16 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from blog_planning_agent.agent import (
+from agents.blogging.blog_planning_agent.agent import (
     BlogPlanningAgent,
     _BlogPlanningAgentRunner,
     make_blog_planning_agent,
 )
-from shared.content_profile import ContentProfile, LengthPolicy, resolve_length_policy
+from agents.blogging.shared.content_profile import (
+    ContentProfile,
+    LengthPolicy,
+    resolve_length_policy,
+)
 
 from llm_service import DummyLLMClient
 
@@ -101,7 +105,7 @@ def test_manifest_entrypoint_resolves_via_shim_dispatcher(monkeypatch: pytest.Mo
     # here so the test stays narrow.
     import importlib
 
-    module = importlib.import_module("blog_planning_agent.agent")
+    module = importlib.import_module("agents.blogging.blog_planning_agent.agent")
     target = getattr(module, "make_blog_planning_agent")
     runner = target()
 

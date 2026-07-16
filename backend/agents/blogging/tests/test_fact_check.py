@@ -1,7 +1,7 @@
 """Tests for the blog fact-check agent."""
 
 import pytest
-from blog_fact_check_agent import BlogFactCheckAgent
+from agents.blogging.blog_fact_check_agent import BlogFactCheckAgent
 
 from llm_service import DummyLLMClient
 
@@ -39,7 +39,7 @@ def test_fact_check_with_work_dir(tmp_path):
 def test_fact_check_transient_error_reraises(monkeypatch, kind) -> None:
     """A transient LLM-transport error propagates unwrapped (delegated to Temporal),
     rather than being masked as a terminal FactCheckError."""
-    from blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.blog_fact_check_agent import agent as fc_mod
 
     from llm_service import LLMRateLimitError, LLMTemporaryError
 

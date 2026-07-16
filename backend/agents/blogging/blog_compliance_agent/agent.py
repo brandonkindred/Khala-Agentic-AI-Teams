@@ -26,14 +26,14 @@ from .models import ComplianceReport, Violation
 from .prompts import COMPLIANCE_PROMPT
 
 try:
-    from shared.artifacts import write_artifact
-    from shared.brand_spec import load_brand_spec_prompt
+    from agents.blogging.shared.artifacts import write_artifact
+    from agents.blogging.shared.brand_spec import load_brand_spec_prompt
 except ImportError:  # pragma: no cover - defensive ImportError fallback for missing shared modules; not exercised because conftest guarantees the import path resolves.
     write_artifact = None
     load_brand_spec_prompt = None
 
 try:
-    from shared.errors import ComplianceError
+    from agents.blogging.shared.errors import ComplianceError
 except ImportError:  # pragma: no cover - defensive ImportError fallback for missing shared.errors; not exercised because conftest guarantees the import path resolves.
 
     class ComplianceError(Exception):
@@ -247,7 +247,7 @@ def run_compliance_from_work_dir(
     Run compliance agent using artifacts from work_dir.
     """
     try:
-        from shared.artifacts import read_artifact
+        from agents.blogging.shared.artifacts import read_artifact
     except ImportError:  # pragma: no cover - defensive ImportError fallback; not exercised because conftest guarantees the import path resolves.
         raise ImportError("shared.artifacts required")
 

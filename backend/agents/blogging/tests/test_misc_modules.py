@@ -32,7 +32,7 @@ import pytest
 
 
 def test_errors_constructors_and_str() -> None:
-    from shared.errors import (
+    from agents.blogging.shared.errors import (
         BloggingError,
         ComplianceError,
         CopyEditError,
@@ -100,7 +100,7 @@ def test_errors_constructors_and_str() -> None:
 
 
 def test_planning_config_env_handling(monkeypatch) -> None:
-    from shared import planning_config as pc
+    from agents.blogging.shared import planning_config as pc
 
     monkeypatch.setenv("BLOG_PLANNING_MAX_ITERATIONS", "8")
     assert pc.planning_max_iterations() == 8
@@ -146,7 +146,7 @@ def test_planning_config_env_handling(monkeypatch) -> None:
 
 
 def test_models_phase_helpers() -> None:
-    from shared.models import (
+    from agents.blogging.shared.models import (
         BlogPhase,
         get_completed_phases,
         get_phase_progress,
@@ -169,7 +169,7 @@ def test_models_phase_helpers() -> None:
 
 
 def test_style_loader_load_save_append(tmp_path: Path) -> None:
-    from shared.style_loader import (
+    from agents.blogging.shared.style_loader import (
         append_guidelines,
         load_style_file,
         save_style_file,
@@ -213,7 +213,7 @@ def test_style_loader_load_save_append(tmp_path: Path) -> None:
 
 
 def test_style_loader_save_fails_on_oserror(monkeypatch, tmp_path: Path) -> None:
-    from shared.style_loader import save_style_file
+    from agents.blogging.shared.style_loader import save_style_file
 
     target = tmp_path / "x.md"
 
@@ -225,7 +225,7 @@ def test_style_loader_save_fails_on_oserror(monkeypatch, tmp_path: Path) -> None
 
 
 def test_style_loader_load_oserror(monkeypatch, tmp_path: Path) -> None:
-    from shared.style_loader import load_style_file
+    from agents.blogging.shared.style_loader import load_style_file
 
     target = tmp_path / "x.md"
     target.write_text("hello")
@@ -255,7 +255,7 @@ def test_medium_integration_modules_unavailable(monkeypatch) -> None:
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    from shared.medium_integration_access import (
+    from agents.blogging.shared.medium_integration_access import (
         medium_stats_integration_eligible,
         resolve_medium_stats_storage_state,
     )
@@ -276,7 +276,7 @@ def test_medium_integration_modules_unavailable(monkeypatch) -> None:
 
 
 def test_run_pipeline_job_helpers(monkeypatch, tmp_path: Path) -> None:
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     # _normalize_audience
     assert rpj._normalize_audience(None) is None
@@ -300,7 +300,7 @@ def test_run_pipeline_job_helpers(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_run_pipeline_job_external_cancellation_detection() -> None:
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import run_pipeline_job as rpj
     from temporalio.exceptions import CancelledError
 
     assert rpj._is_external_cancellation(RuntimeError("nope")) is False
@@ -312,7 +312,7 @@ def test_run_pipeline_job_external_cancellation_detection() -> None:
 
 
 def test_run_pipeline_job_artifacts_base_resolution(monkeypatch, tmp_path: Path) -> None:
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     monkeypatch.setenv("BLOGGING_RUN_ARTIFACTS_ROOT", str(tmp_path / "custom"))
     assert rpj._get_run_artifacts_base() == (tmp_path / "custom").resolve()
@@ -333,7 +333,7 @@ def test_run_pipeline_job_artifacts_base_resolution(monkeypatch, tmp_path: Path)
 
 def test_publish_terminal_swallows_errors(monkeypatch) -> None:
     """_publish_terminal returns silently when the event-bus module is unavailable."""
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     def deny(name):
         raise ImportError("nope")
@@ -344,7 +344,7 @@ def test_publish_terminal_swallows_errors(monkeypatch) -> None:
 
 def test_fail_job_swallows_errors(monkeypatch) -> None:
     """_fail_job tolerates a missing job-store module."""
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     def deny(name):
         raise ImportError("nope")
@@ -359,7 +359,7 @@ def test_fail_job_swallows_errors(monkeypatch) -> None:
 
 
 def test_event_bus_subscribe_publish_cleanup() -> None:
-    from shared import job_event_bus as bus
+    from agents.blogging.shared import job_event_bus as bus
 
     job_id = "job-evbus-1"
     sub = bus.subscribe(job_id)
@@ -383,7 +383,7 @@ def test_event_bus_subscribe_publish_cleanup() -> None:
 
 
 def test_event_bus_reaper_evicts_idle(monkeypatch) -> None:
-    from shared import job_event_bus as bus
+    from agents.blogging.shared import job_event_bus as bus
 
     job_id = "job-evbus-reaper"
     sub = bus.subscribe(job_id)
@@ -395,7 +395,7 @@ def test_event_bus_reaper_evicts_idle(monkeypatch) -> None:
 
 
 def test_event_bus_reaper_global_cap(monkeypatch) -> None:
-    from shared import job_event_bus as bus
+    from agents.blogging.shared import job_event_bus as bus
 
     monkeypatch.setattr(bus, "_MAX_JOBS_TRACKED", 2)
     # Subscribe three jobs
@@ -412,7 +412,7 @@ def test_event_bus_reaper_global_cap(monkeypatch) -> None:
 
 
 def test_event_bus_shutdown_safe(monkeypatch) -> None:
-    from shared import job_event_bus as bus
+    from agents.blogging.shared import job_event_bus as bus
 
     bus.shutdown()  # idempotent
 
@@ -431,7 +431,7 @@ def test_event_bus_concurrent_start_no_double_reaper() -> None:
     """
     import threading
 
-    from shared import job_event_bus as bus
+    from agents.blogging.shared import job_event_bus as bus
 
     bus.shutdown()  # clean slate
 
@@ -484,7 +484,7 @@ def test_extract_allowed_claims_pydantic_models() -> None:
     before the LLM is even called. The model layer is tested here; the broken
     helper is covered indirectly through other tests that import it.
     """
-    from blog_research_agent.allowed_claims import AllowedClaims, ClaimEntry
+    from agents.blogging.blog_research_agent.allowed_claims import AllowedClaims, ClaimEntry
 
     c1 = ClaimEntry(id="1", text="A.", citations=["s1"], risk_level="low")
     c2 = ClaimEntry(id="2", text="B.", citations=[], risk_level="high")
@@ -496,7 +496,7 @@ def test_extract_allowed_claims_pydantic_models() -> None:
 
 
 def test_allowed_claims_default_risk_low() -> None:
-    from blog_research_agent.allowed_claims import ClaimEntry
+    from agents.blogging.blog_research_agent.allowed_claims import ClaimEntry
 
     c = ClaimEntry(id="x", text="hello")
     assert c.risk_level == "low"
@@ -509,7 +509,7 @@ def test_allowed_claims_default_risk_low() -> None:
 
 
 def test_research_llm_reexports_present() -> None:
-    from blog_research_agent.llm import (
+    from agents.blogging.blog_research_agent.llm import (
         DummyLLMClient,
         LLMClient,
         LLMError,
@@ -528,8 +528,8 @@ def test_research_llm_reexports_present() -> None:
 
 
 def test_strands_integration_factory_and_spec() -> None:
-    from blog_research_agent.models import ResearchBriefInput
-    from blog_research_agent.strands_integration import (
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.strands_integration import (
         create_research_agent,
         get_agent_spec,
     )
@@ -558,7 +558,7 @@ def test_strands_integration_factory_and_spec() -> None:
 
 
 def test_ghost_writer_models() -> None:
-    from ghost_writer_agent.models import StoryElicitationResult, StoryGap
+    from agents.blogging.ghost_writer_agent.models import StoryElicitationResult, StoryGap
 
     gap = StoryGap(
         section_title="My Section",
@@ -585,7 +585,7 @@ def test_ghost_writer_models() -> None:
 def test_temporal_client_helpers(monkeypatch) -> None:
     """address/namespace/enabled accessors read env, and the module-level client and
     loop setters/getters round-trip None."""
-    from blogging.temporal import client as tc
+    from agents.blogging.temporal import client as tc
 
     # Default no-address → disabled
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
@@ -610,7 +610,7 @@ def test_temporal_client_helpers(monkeypatch) -> None:
 def test_temporal_constants_loaded() -> None:
     """The task-queue, workflow-id prefix, workflow name, and all five activity-name
     constants are present and non-empty."""
-    from blogging.temporal import constants
+    from agents.blogging.temporal import constants
 
     assert constants.TASK_QUEUE  # non-empty
     assert constants.WORKFLOW_ID_PREFIX_FULL_PIPELINE
@@ -627,7 +627,7 @@ def test_connect_temporal_client_no_address(monkeypatch) -> None:
     TEMPORAL_ADDRESS is unset."""
     import asyncio
 
-    from blogging.temporal import client as tc
+    from agents.blogging.temporal import client as tc
 
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
     out = asyncio.run(tc.connect_temporal_client())
@@ -637,7 +637,7 @@ def test_connect_temporal_client_no_address(monkeypatch) -> None:
 def test_start_full_pipeline_workflow_without_client(monkeypatch) -> None:
     """start_full_pipeline_workflow raises RuntimeError('not available') when no
     Temporal client is configured."""
-    from blogging.temporal import start_workflow
+    from agents.blogging.temporal import start_workflow
 
     monkeypatch.setattr(start_workflow, "get_temporal_client", lambda: None)
     with pytest.raises(RuntimeError, match="not available"):
@@ -647,7 +647,7 @@ def test_start_full_pipeline_workflow_without_client(monkeypatch) -> None:
 def test_start_workflow_run_async_no_loop(monkeypatch) -> None:
     """_run_async raises RuntimeError when there is no running Temporal loop/client to
     submit the coroutine to."""
-    from blogging.temporal import start_workflow
+    from agents.blogging.temporal import start_workflow
 
     monkeypatch.setattr(start_workflow, "get_temporal_loop", lambda: None)
     monkeypatch.setattr(start_workflow, "get_temporal_client", lambda: None)
@@ -663,7 +663,7 @@ def test_start_workflow_run_async_no_loop(monkeypatch) -> None:
 def test_temporal_worker_disabled_paths(monkeypatch) -> None:
     """When Temporal is disabled, create_blogging_worker returns None, the thread
     starter returns False, and the thread target is a no-op."""
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: False)
 
@@ -676,7 +676,7 @@ def test_temporal_worker_disabled_paths(monkeypatch) -> None:
 def test_temporal_worker_shutdown_noop_when_nothing_running() -> None:
     """shutdown_blogging_temporal_components is a safe no-op when no executor, worker,
     loop, or thread is running."""
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     worker._activity_executor = None
     worker._worker_instance = None
@@ -688,7 +688,7 @@ def test_temporal_worker_shutdown_noop_when_nothing_running() -> None:
 def test_force_stop_worker_loop_already_closed(monkeypatch) -> None:
     """_force_stop_worker_loop swallows the 'Event loop is closed' RuntimeError raised
     when stopping an already-closed loop."""
-    from blogging.temporal import worker
+    from agents.blogging.temporal import worker
 
     class _DeadLoop:
         def is_running(self) -> bool:
@@ -706,9 +706,12 @@ def test_force_stop_worker_loop_already_closed(monkeypatch) -> None:
 
 
 def test_medium_stats_agent_delegates(monkeypatch) -> None:
-    from blog_medium_stats_agent import BlogMediumStatsAgent
-    from blog_medium_stats_agent import agent as agent_mod
-    from blog_medium_stats_agent.models import MediumStatsReport, MediumStatsRunConfig
+    from agents.blogging.blog_medium_stats_agent import BlogMediumStatsAgent
+    from agents.blogging.blog_medium_stats_agent import agent as agent_mod
+    from agents.blogging.blog_medium_stats_agent.models import (
+        MediumStatsReport,
+        MediumStatsRunConfig,
+    )
 
     sentinel_report = MediumStatsReport(posts=[])
 
@@ -731,8 +734,8 @@ def test_medium_stats_agent_delegates(monkeypatch) -> None:
 
 
 def test_feedback_tracker_persistence_and_jaccard() -> None:
-    from blog_copy_editor_agent.models import FeedbackItem
-    from blog_writer_agent.feedback_tracker import FeedbackTracker
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.feedback_tracker import FeedbackTracker
 
     t = FeedbackTracker(window_size=3)
 
@@ -773,7 +776,7 @@ def test_feedback_tracker_persistence_and_jaccard() -> None:
 
 
 def test_feedback_tracker_empty_input() -> None:
-    from blog_writer_agent.feedback_tracker import FeedbackTracker
+    from agents.blogging.blog_writer_agent.feedback_tracker import FeedbackTracker
 
     t = FeedbackTracker()
     assert t.get_persistent_issues() == []
@@ -782,8 +785,8 @@ def test_feedback_tracker_empty_input() -> None:
 
 
 def test_feedback_tracker_jaccard_no_overlap() -> None:
-    from blog_copy_editor_agent.models import FeedbackItem
-    from blog_writer_agent.feedback_tracker import FeedbackTracker
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.feedback_tracker import FeedbackTracker
 
     t = FeedbackTracker(window_size=2)
     a = FeedbackItem(category="x", severity="minor", issue="A", location="loc-a")
@@ -799,8 +802,8 @@ def test_feedback_tracker_jaccard_no_overlap() -> None:
 
 
 def test_agent_cache_save_load_clear(tmp_path: Path) -> None:
-    from blog_research_agent.agent_cache import AgentCache
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     cache = AgentCache(tmp_path / "cache")
     brief = ResearchBriefInput(brief="Topic about AI", audience="devs", max_results=10)
@@ -855,8 +858,8 @@ def test_agent_cache_save_load_clear(tmp_path: Path) -> None:
 
 
 def test_agent_cache_load_corrupt_file(tmp_path: Path) -> None:
-    from blog_research_agent.agent_cache import AgentCache
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     cache = AgentCache(tmp_path / "cache")
     brief = ResearchBriefInput(brief="Topic", max_results=10)
@@ -868,8 +871,8 @@ def test_agent_cache_load_corrupt_file(tmp_path: Path) -> None:
 
 def test_agent_cache_save_with_corrupt_existing(tmp_path: Path) -> None:
     """When the existing cache is unreadable, save_checkpoint starts fresh."""
-    from blog_research_agent.agent_cache import AgentCache
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.agent_cache import AgentCache
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     cache = AgentCache(tmp_path / "cache")
     brief = ResearchBriefInput(brief="Topic", max_results=10)
@@ -887,7 +890,7 @@ def test_agent_cache_save_with_corrupt_existing(tmp_path: Path) -> None:
 
 
 def test_arxiv_search_empty_query() -> None:
-    from blog_research_agent.tools.arxiv_search import search_arxiv
+    from agents.blogging.blog_research_agent.tools.arxiv_search import search_arxiv
 
     assert search_arxiv("") == []
     assert search_arxiv("   ") == []
@@ -895,7 +898,7 @@ def test_arxiv_search_empty_query() -> None:
 
 def test_arxiv_search_http_error(monkeypatch) -> None:
     import httpx
-    from blog_research_agent.tools import arxiv_search
+    from agents.blogging.blog_research_agent.tools import arxiv_search
 
     class _FailingClient:
         def __init__(self, *a, **kw):
@@ -916,7 +919,7 @@ def test_arxiv_search_http_error(monkeypatch) -> None:
 
 
 def test_arxiv_search_http_400(monkeypatch) -> None:
-    from blog_research_agent.tools import arxiv_search
+    from agents.blogging.blog_research_agent.tools import arxiv_search
 
     class _Response:
         status_code = 503
@@ -946,7 +949,7 @@ def test_arxiv_search_max_results_minimum(monkeypatch) -> None:
     Mocks httpx so no network call happens, then asserts the coerced value reached
     the request (``max_results=1``) and that an empty feed parses to ``[]``.
     """
-    from blog_research_agent.tools import arxiv_search as mod
+    from agents.blogging.blog_research_agent.tools import arxiv_search as mod
 
     captured: dict = {}
 
@@ -976,7 +979,7 @@ def test_arxiv_search_max_results_minimum(monkeypatch) -> None:
 
 
 def test_web_fetcher_init_validation() -> None:
-    from blog_research_agent.tools.web_fetch import SimpleWebFetcher
+    from agents.blogging.blog_research_agent.tools.web_fetch import SimpleWebFetcher
 
     f = SimpleWebFetcher(timeout=5.0)
     assert f.timeout == 5.0
@@ -991,7 +994,7 @@ def test_web_fetcher_init_validation() -> None:
 
 def test_web_fetcher_http_error(monkeypatch) -> None:
     import httpx
-    from blog_research_agent.tools import web_fetch
+    from agents.blogging.blog_research_agent.tools import web_fetch
     from pydantic import HttpUrl
 
     class _Client:
@@ -1014,7 +1017,7 @@ def test_web_fetcher_http_error(monkeypatch) -> None:
 
 
 def test_web_fetcher_400(monkeypatch) -> None:
-    from blog_research_agent.tools import web_fetch
+    from agents.blogging.blog_research_agent.tools import web_fetch
     from pydantic import HttpUrl
 
     class _Response:
@@ -1042,7 +1045,7 @@ def test_web_fetcher_400(monkeypatch) -> None:
 
 
 def test_web_fetcher_html_parses_title(monkeypatch) -> None:
-    from blog_research_agent.tools import web_fetch
+    from agents.blogging.blog_research_agent.tools import web_fetch
     from pydantic import HttpUrl
 
     class _Response:
@@ -1073,8 +1076,8 @@ def test_web_fetcher_html_parses_title(monkeypatch) -> None:
 
 
 def test_web_search_missing_api_key(monkeypatch) -> None:
-    from blog_research_agent.models import SearchQuery
-    from blog_research_agent.tools import web_search
+    from agents.blogging.blog_research_agent.models import SearchQuery
+    from agents.blogging.blog_research_agent.tools import web_search
 
     monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
     s = web_search.OllamaWebSearch(api_key=None)
@@ -1084,8 +1087,8 @@ def test_web_search_missing_api_key(monkeypatch) -> None:
 
 def test_web_search_http_error(monkeypatch) -> None:
     import httpx
-    from blog_research_agent.models import SearchQuery
-    from blog_research_agent.tools import web_search
+    from agents.blogging.blog_research_agent.models import SearchQuery
+    from agents.blogging.blog_research_agent.tools import web_search
 
     class _Client:
         def __init__(self, *a, **kw):
@@ -1107,8 +1110,8 @@ def test_web_search_http_error(monkeypatch) -> None:
 
 
 def test_web_search_non_200_status(monkeypatch) -> None:
-    from blog_research_agent.models import SearchQuery
-    from blog_research_agent.tools import web_search
+    from agents.blogging.blog_research_agent.models import SearchQuery
+    from agents.blogging.blog_research_agent.tools import web_search
 
     class _Response:
         status_code = 500
@@ -1137,8 +1140,8 @@ def test_web_search_non_200_status(monkeypatch) -> None:
 
 
 def test_web_search_happy_path(monkeypatch) -> None:
-    from blog_research_agent.models import SearchQuery
-    from blog_research_agent.tools import web_search
+    from agents.blogging.blog_research_agent.models import SearchQuery
+    from agents.blogging.blog_research_agent.tools import web_search
 
     class _Response:
         status_code = 200
@@ -1181,8 +1184,8 @@ def test_web_search_happy_path(monkeypatch) -> None:
 
 
 def test_web_search_max_results_assertion() -> None:
-    from blog_research_agent.models import SearchQuery
-    from blog_research_agent.tools import web_search
+    from agents.blogging.blog_research_agent.models import SearchQuery
+    from agents.blogging.blog_research_agent.tools import web_search
 
     s = web_search.OllamaWebSearch(api_key="test-key-placeholder")
     with pytest.raises(AssertionError):

@@ -17,15 +17,9 @@ import pytest
 @pytest.fixture
 def patched_client(monkeypatch, fake_job_client):
     """Make ``shared.blog_job_store._client`` return the in-memory fake (both layouts)."""
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    try:
-        from blogging.shared import blog_job_store as bjs_alt
-
-        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
-    except ImportError:
-        pass
     return fake_job_client
 
 
@@ -36,7 +30,7 @@ def patched_client(monkeypatch, fake_job_client):
 
 def test_build_brief_input_populates_fields_and_defaults() -> None:
     """A minimal request yields a ResearchBriefInput with the default max_results."""
-    from shared.run_pipeline_job import build_brief_input
+    from agents.blogging.shared.run_pipeline_job import build_brief_input
 
     brief = build_brief_input({"brief": "  Write about testing  ", "audience": "devs"})
     assert brief.brief == "Write about testing"
@@ -46,7 +40,7 @@ def test_build_brief_input_populates_fields_and_defaults() -> None:
 
 def test_build_brief_input_appends_title_concept_and_normalizes_audience() -> None:
     """title_concept is folded into the brief text and a dict audience is normalized."""
-    from shared.run_pipeline_job import build_brief_input
+    from agents.blogging.shared.run_pipeline_job import build_brief_input
 
     brief = build_brief_input(
         {
@@ -71,7 +65,7 @@ def test_start_blog_job_is_idempotent_across_retries(patched_client) -> None:
     """Calling start_blog_job twice (as a Temporal retry would) never raises and
     preserves the original started_at — it merges status=running onto the existing
     row rather than re-creating it or resetting the start time."""
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -95,8 +89,8 @@ def test_start_blog_job_is_idempotent_across_retries(patched_client) -> None:
 
 def test_make_job_updater_writes_store_and_publishes(monkeypatch, patched_client) -> None:
     """The updater writes kwargs to the store and broadcasts an ``update`` SSE event."""
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -108,12 +102,12 @@ def test_make_job_updater_writes_store_and_publishes(monkeypatch, patched_client
 
     # Patch both module objects (distinct in this layout), like the other bus tests.
     try:
-        from blogging.shared import job_event_bus as bus_b
+        from agents.blogging.shared import job_event_bus as bus_b
 
         monkeypatch.setattr(bus_b, "publish", fake_publish)
     except ImportError:
         pass
-    from shared import job_event_bus as bus_s
+    from agents.blogging.shared import job_event_bus as bus_s
 
     monkeypatch.setattr(bus_s, "publish", fake_publish)
 
@@ -128,7 +122,7 @@ def test_make_job_updater_writes_store_and_publishes(monkeypatch, patched_client
 
 def test_make_job_updater_reraises_cancelled(monkeypatch) -> None:
     """A CancelledError from the store write propagates (cancellation must not be swallowed)."""
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import run_pipeline_job as rpj
     from temporalio.exceptions import CancelledError
 
     def angry_update(job_id, **kwargs):
@@ -143,7 +137,7 @@ def test_make_job_updater_reraises_cancelled(monkeypatch) -> None:
 
 def test_make_job_updater_swallows_store_error(monkeypatch) -> None:
     """A non-cancel store failure is swallowed so a status update never breaks the run."""
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     def angry_update(job_id, **kwargs):
         raise RuntimeError("db down")
@@ -162,7 +156,7 @@ def test_make_job_updater_swallows_store_error(monkeypatch) -> None:
 
 def test_start_pipeline_heartbeat_returns_none_without_store(monkeypatch) -> None:
     """With no job store available, the heartbeat is a no-op returning None."""
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     monkeypatch.setattr(rpj, "_resolve_update_blog_job", lambda: None)
     assert rpj.start_pipeline_heartbeat("job-x") is None
@@ -170,7 +164,7 @@ def test_start_pipeline_heartbeat_returns_none_without_store(monkeypatch) -> Non
 
 def test_start_pipeline_heartbeat_starts_and_stops(monkeypatch) -> None:
     """With a store available, a started BackgroundHeartbeat is returned and can be stopped."""
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     monkeypatch.setattr(rpj, "_resolve_update_blog_job", lambda: lambda *a, **k: None)
     hb = rpj.start_pipeline_heartbeat("job-abcdefghijkl")
@@ -185,8 +179,8 @@ def test_start_pipeline_heartbeat_starts_and_stops(monkeypatch) -> None:
 
 def test_mark_job_cancelled_sets_status_and_returns_true(monkeypatch, patched_client) -> None:
     """The job is marked cancelled, a terminal event is published, and True is returned."""
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     events: list[str] = []
     monkeypatch.setattr(rpj, "_publish_terminal", lambda jid, ev, **kw: events.append(ev))
@@ -205,7 +199,7 @@ def test_mark_job_cancelled_sets_status_and_returns_true(monkeypatch, patched_cl
 
 
 def _pipeline_doubles():
-    from shared.content_plan import (
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         PlanningPhaseResult,
@@ -237,8 +231,8 @@ def _pipeline_doubles():
 
 def test_finalize_blog_job_pass_completes(monkeypatch, patched_client) -> None:
     """status PASS completes the job (COMPLETED) and returns the completed status."""
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     monkeypatch.setattr(rpj, "_publish_terminal", lambda *a, **kw: None)
     job_id = str(uuid.uuid4())[:8]
@@ -253,8 +247,8 @@ def test_finalize_blog_job_pass_completes(monkeypatch, patched_client) -> None:
 
 def test_finalize_blog_job_non_pass_needs_review(monkeypatch, patched_client) -> None:
     """A non-PASS status finalizes as NEEDS_REVIEW rather than COMPLETED."""
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     monkeypatch.setattr(rpj, "_publish_terminal", lambda *a, **kw: None)
     job_id = str(uuid.uuid4())[:8]

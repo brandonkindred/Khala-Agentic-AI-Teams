@@ -1,6 +1,6 @@
 """Tests for ContentPlan helpers."""
 
-from shared.content_plan import (
+from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     RequirementsAnalysis,

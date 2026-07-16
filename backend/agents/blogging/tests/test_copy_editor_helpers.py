@@ -10,9 +10,9 @@ from __future__ import annotations
 import json
 
 import pytest
-from blog_copy_editor_agent import BlogCopyEditorAgent
-from blog_copy_editor_agent.models import CopyEditorInput, FeedbackItem
-from blog_copy_editor_agent.prompts import COPY_EDITOR_PROMPT
+from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent
+from agents.blogging.blog_copy_editor_agent.models import CopyEditorInput, FeedbackItem
+from agents.blogging.blog_copy_editor_agent.prompts import COPY_EDITOR_PROMPT
 from strands.types.exceptions import EventLoopException
 
 from llm_service import DummyLLMClient, LLMRateLimitError, LLMTemporaryError
@@ -96,7 +96,7 @@ def test_build_prompt_no_style_guide_branch() -> None:
 
 def test_build_prompt_content_plan_is_included_and_truncated() -> None:
     """A content plan appears in the prompt and is truncated to _MAX_CONTENT_PLAN_CHARS."""
-    from blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
 
     agent = _make_agent()
     plan = "P" * (ce_mod._MAX_CONTENT_PLAN_CHARS + 1000)
@@ -227,7 +227,7 @@ def _patch_agent(monkeypatch, side_effect) -> dict:
     Returns a dict that captures the Agent constructor kwargs so tests can assert
     what was passed (e.g. the system prompt).
     """
-    from blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
 
     captured: dict = {}
 

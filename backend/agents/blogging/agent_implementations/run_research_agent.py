@@ -1,8 +1,8 @@
 import logging
 
-from blog_research_agent.agent import ResearchAgent
-from blog_research_agent.agent_cache import AgentCache
-from blog_research_agent.models import ResearchBriefInput
+from agents.blogging.blog_research_agent.agent import ResearchAgent
+from agents.blogging.blog_research_agent.agent_cache import AgentCache
+from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
 from llm_service import get_strands_model
 

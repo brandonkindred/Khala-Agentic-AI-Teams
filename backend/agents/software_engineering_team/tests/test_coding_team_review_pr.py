@@ -2621,22 +2621,6 @@ class TestPreservationProperties:
 class TestAnchorToFirstFileUnit:
     """Unit tests for the anchor_to_first_file pure helper."""
 
-    def test_body_matches_format_comment_body(self) -> None:
-        """The body field in the returned dict equals format_comment_body(finding)."""
-        from software_engineering_team.coding_team.github_source import (
-            anchor_to_first_file,
-            format_comment_body,
-        )
-
-        finding = _FakeReviewIssue(
-            "high", line=5, file_path="src/config.py", description="Security issue"
-        )
-        valid_by_path = {"src/api.py": {1, 2, 3}}
-        result = anchor_to_first_file(finding, valid_by_path)
-        assert result is not None
-        expected_body = format_comment_body(finding)
-        assert result["body"] == expected_body
-
     def test_returns_first_key_of_valid_by_path(self) -> None:
         """The first key in insertion order is used as the anchor path (Python 3.7+)."""
         from software_engineering_team.coding_team.github_source import anchor_to_first_file

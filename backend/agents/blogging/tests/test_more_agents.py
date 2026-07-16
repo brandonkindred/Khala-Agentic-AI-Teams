@@ -16,7 +16,7 @@ import pytest
 
 
 def test_compliance_fallback_report() -> None:
-    from blog_compliance_agent.agent import _fallback_compliance_report
+    from agents.blogging.blog_compliance_agent.agent import _fallback_compliance_report
 
     out = _fallback_compliance_report(RuntimeError("rate limit"))
     assert out.status == "FAIL"
@@ -26,8 +26,8 @@ def test_compliance_fallback_report() -> None:
 
 def test_compliance_run_with_no_validator(monkeypatch, tmp_path) -> None:
     """No validator_report → 'No validator report available.' branch."""
-    from blog_compliance_agent import agent as agent_mod
-    from blog_compliance_agent.agent import BlogComplianceAgent
+    from agents.blogging.blog_compliance_agent import agent as agent_mod
+    from agents.blogging.blog_compliance_agent.agent import BlogComplianceAgent
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -45,8 +45,8 @@ def test_compliance_run_with_no_validator(monkeypatch, tmp_path) -> None:
 
 
 def test_compliance_run_with_validator_summary(monkeypatch, tmp_path) -> None:
-    from blog_compliance_agent import agent as agent_mod
-    from blog_compliance_agent.agent import BlogComplianceAgent
+    from agents.blogging.blog_compliance_agent import agent as agent_mod
+    from agents.blogging.blog_compliance_agent.agent import BlogComplianceAgent
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -78,8 +78,8 @@ def test_compliance_run_with_validator_summary(monkeypatch, tmp_path) -> None:
 
 def test_compliance_run_fallback_on_persistent_parse_failure(monkeypatch, tmp_path) -> None:
     """When JSON parse fails twice in a round, fallback report is returned."""
-    from blog_compliance_agent import agent as agent_mod
-    from blog_compliance_agent.agent import BlogComplianceAgent
+    from agents.blogging.blog_compliance_agent import agent as agent_mod
+    from agents.blogging.blog_compliance_agent.agent import BlogComplianceAgent
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -97,8 +97,8 @@ def test_compliance_run_fallback_on_persistent_parse_failure(monkeypatch, tmp_pa
 
 def test_compliance_run_with_exception_fallback(monkeypatch, tmp_path) -> None:
     """A non-transient, non-JSON exception falls back to a fail-closed report (no retry)."""
-    from blog_compliance_agent import agent as agent_mod
-    from blog_compliance_agent.agent import BlogComplianceAgent
+    from agents.blogging.blog_compliance_agent import agent as agent_mod
+    from agents.blogging.blog_compliance_agent.agent import BlogComplianceAgent
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -116,8 +116,8 @@ def test_compliance_run_with_exception_fallback(monkeypatch, tmp_path) -> None:
 @pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
 def test_compliance_run_transient_error_reraises(monkeypatch, tmp_path, kind) -> None:
     """A transient LLM-transport error re-raises (delegated to Temporal), never fallback."""
-    from blog_compliance_agent import agent as agent_mod
-    from blog_compliance_agent.agent import BlogComplianceAgent
+    from agents.blogging.blog_compliance_agent import agent as agent_mod
+    from agents.blogging.blog_compliance_agent.agent import BlogComplianceAgent
 
     from llm_service import LLMRateLimitError, LLMTemporaryError
 
@@ -140,8 +140,8 @@ def test_compliance_run_transient_error_reraises(monkeypatch, tmp_path, kind) ->
 
 def test_compliance_status_normalization(monkeypatch, tmp_path) -> None:
     """Unknown status string → coerced to FAIL."""
-    from blog_compliance_agent import agent as agent_mod
-    from blog_compliance_agent.agent import BlogComplianceAgent
+    from agents.blogging.blog_compliance_agent import agent as agent_mod
+    from agents.blogging.blog_compliance_agent.agent import BlogComplianceAgent
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -163,8 +163,8 @@ def test_compliance_status_normalization(monkeypatch, tmp_path) -> None:
 
 def test_run_compliance_from_work_dir(monkeypatch, tmp_path) -> None:
     """Pull draft + validator_report from disk and run agent."""
-    from blog_compliance_agent import agent as agent_mod
-    from blog_compliance_agent.agent import run_compliance_from_work_dir
+    from agents.blogging.blog_compliance_agent import agent as agent_mod
+    from agents.blogging.blog_compliance_agent.agent import run_compliance_from_work_dir
 
     (tmp_path / "final.md").write_text("# Draft\nBody.")
     import json as json_mod
@@ -190,8 +190,8 @@ def test_run_compliance_from_work_dir(monkeypatch, tmp_path) -> None:
 
 def test_run_compliance_from_work_dir_falls_back_to_default_brand(monkeypatch, tmp_path) -> None:
     """When brand_spec_path doesn't exist on disk, falls back to docs/brand_spec_prompt.md."""
-    from blog_compliance_agent import agent as agent_mod
-    from blog_compliance_agent.agent import run_compliance_from_work_dir
+    from agents.blogging.blog_compliance_agent import agent as agent_mod
+    from agents.blogging.blog_compliance_agent.agent import run_compliance_from_work_dir
 
     (tmp_path / "final.md").write_text("# Draft\nBody.")
 
@@ -214,7 +214,7 @@ def test_run_compliance_from_work_dir_falls_back_to_default_brand(monkeypatch, t
 
 
 def test_scraper_parse_number_variants() -> None:
-    from blog_medium_stats_agent.scraper import parse_number
+    from agents.blogging.blog_medium_stats_agent.scraper import parse_number
 
     assert parse_number("1,234") == 1234.0
     assert parse_number("1.5K") == 1500.0
@@ -225,7 +225,7 @@ def test_scraper_parse_number_variants() -> None:
 
 
 def test_scraper_parse_metrics_from_text() -> None:
-    from blog_medium_stats_agent.scraper import parse_metrics_from_text
+    from agents.blogging.blog_medium_stats_agent.scraper import parse_metrics_from_text
 
     text = "Story | 1,234 views | 567 reads | 89 fans | 45 claps"
     out = parse_metrics_from_text(text)
@@ -241,7 +241,7 @@ def test_scraper_parse_metrics_from_text() -> None:
 
 
 def test_scraper_extract_posts_from_html() -> None:
-    from blog_medium_stats_agent.scraper import extract_posts_from_html
+    from agents.blogging.blog_medium_stats_agent.scraper import extract_posts_from_html
 
     html = """
     <html>
@@ -268,7 +268,7 @@ def test_scraper_extract_posts_from_html() -> None:
 
 
 def test_scraper_extract_posts_from_html_empty() -> None:
-    from blog_medium_stats_agent.scraper import extract_posts_from_html
+    from agents.blogging.blog_medium_stats_agent.scraper import extract_posts_from_html
 
     assert extract_posts_from_html("") == []
     assert extract_posts_from_html("<html></html>") == []
@@ -276,8 +276,8 @@ def test_scraper_extract_posts_from_html_empty() -> None:
 
 def test_collect_medium_stats_requires_integration(monkeypatch) -> None:
     """When integration helper returns an error, collect_medium_stats raises."""
-    from blog_medium_stats_agent import scraper as sc
-    from blog_medium_stats_agent.models import MediumStatsRunConfig
+    from agents.blogging.blog_medium_stats_agent import scraper as sc
+    from agents.blogging.blog_medium_stats_agent.models import MediumStatsRunConfig
 
     monkeypatch.setattr(sc, "resolve_medium_stats_storage_state", lambda: (None, "", "no creds"))
     with pytest.raises(RuntimeError, match="no creds"):
@@ -285,8 +285,8 @@ def test_collect_medium_stats_requires_integration(monkeypatch) -> None:
 
 
 def test_collect_medium_stats_no_session(monkeypatch) -> None:
-    from blog_medium_stats_agent import scraper as sc
-    from blog_medium_stats_agent.models import MediumStatsRunConfig
+    from agents.blogging.blog_medium_stats_agent import scraper as sc
+    from agents.blogging.blog_medium_stats_agent.models import MediumStatsRunConfig
 
     monkeypatch.setattr(sc, "resolve_medium_stats_storage_state", lambda: (None, "host.com", ""))
     with pytest.raises(RuntimeError, match="empty"):
@@ -298,8 +298,8 @@ def test_collect_medium_stats_storage_override(monkeypatch) -> None:
     # Make playwright unavailable to short-circuit before browser launch
     import builtins
 
-    from blog_medium_stats_agent import scraper as sc
-    from blog_medium_stats_agent.models import MediumStatsRunConfig
+    from agents.blogging.blog_medium_stats_agent import scraper as sc
+    from agents.blogging.blog_medium_stats_agent.models import MediumStatsRunConfig
 
     real_import = builtins.__import__
 

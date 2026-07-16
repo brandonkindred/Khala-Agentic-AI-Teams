@@ -23,8 +23,8 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from blogging.temporal import activities as _activities
-    from blogging.temporal.constants import TASK_QUEUE
+    from agents.blogging.temporal import activities as _activities
+    from agents.blogging.temporal.constants import TASK_QUEUE
 
 # HITL-bearing phases may wait on a human for hours; keep a wide ceiling (>= the
 # former whole-pipeline 12h) so Temporal does not time the activity out mid-wait.

@@ -25,8 +25,8 @@ from fastapi.testclient import TestClient
 
 def test_full_pipeline_async_with_temporal(client: TestClient, monkeypatch) -> None:
     """When is_temporal_enabled() returns True, route delegates to Temporal."""
-    from blogging.temporal import client as tc_mod
-    from blogging.temporal import start_workflow as sw_mod
+    from agents.blogging.temporal import client as tc_mod
+    from agents.blogging.temporal import start_workflow as sw_mod
 
     monkeypatch.setattr(tc_mod, "is_temporal_enabled", lambda: True)
     called: dict = {}
@@ -44,10 +44,9 @@ def test_full_pipeline_async_with_temporal(client: TestClient, monkeypatch) -> N
 
 
 def test_resume_with_temporal(client: TestClient, monkeypatch) -> None:
-    from shared import blog_job_store as bjs
-
-    from blogging.temporal import client as tc_mod
-    from blogging.temporal import start_workflow as sw_mod
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.temporal import client as tc_mod
+    from agents.blogging.temporal import start_workflow as sw_mod
 
     monkeypatch.setattr(tc_mod, "is_temporal_enabled", lambda: True)
     called: dict = {}
@@ -66,21 +65,14 @@ def test_resume_with_temporal(client: TestClient, monkeypatch) -> None:
 
 
 def test_restart_with_temporal(client: TestClient, monkeypatch, fake_job_client) -> None:
-    from shared import blog_job_store as bjs
-
-    from blogging.temporal import client as tc_mod
-    from blogging.temporal import start_workflow as sw_mod
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.temporal import client as tc_mod
+    from agents.blogging.temporal import start_workflow as sw_mod
 
     monkeypatch.setattr(tc_mod, "is_temporal_enabled", lambda: True)
     monkeypatch.setattr(sw_mod, "start_full_pipeline_workflow", lambda *a, **kw: None)
 
     # Patch the alternate bjs module path for reset_blog_job
-    try:
-        from blogging.shared import blog_job_store as bjs_alt
-
-        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
-    except ImportError:
-        pass
 
     job_id = _create_job()
     bjs.update_blog_job(job_id, status="completed", request_payload={"brief": "x"})
@@ -230,8 +222,7 @@ def test_stream_terminal_via_subscriber(client: TestClient, monkeypatch) -> None
     """Cover the event_generator main path by delivering events."""
     from collections import deque
 
-    import shared.job_event_bus as bus
-
+    import agents.blogging.shared.job_event_bus as bus
     job_id = _create_job()  # status=pending so terminal short-circuit doesn't fire
 
     class _FakeSub:

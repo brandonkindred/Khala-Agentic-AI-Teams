@@ -13,6 +13,7 @@ directly with stubs for the agent and ``run_strategy_code``.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -1228,6 +1229,28 @@ def test_ztr_commit_clears_flag_for_conforming_repair_code() -> None:
 
     recovery = _drive_anomaly_recovery(orch)
     assert recovery.ran_on_non_conforming_code is False
+
+
+@pytest.mark.parametrize(
+    "missing_field,expected_message",
+    [
+        ("new_spec", "committed ZTR must carry new_spec"),
+        ("new_metrics", "committed ZTR must carry new_metrics"),
+        ("new_exec_result", "committed ZTR must carry new_exec_result"),
+    ],
+)
+def test_ztr_commit_missing_field_raises_value_error(
+    missing_field: str, expected_message: str
+) -> None:
+    """A committed zero-trade repair outcome that omits a field it must carry
+    raises ``ValueError`` rather than silently propagating ``None`` (the
+    postcondition check must not be a bare ``assert``, which `-O` strips)."""
+    outcome = dataclasses.replace(_committed_repair_outcome(), **{missing_field: None})
+    orch = StrategyLabOrchestrator()
+    orch.zero_trade_repairer = _StubRepairer(outcome)  # type: ignore[assignment]
+
+    with pytest.raises(ValueError, match=expected_message):
+        _drive_anomaly_recovery(orch)
 
 
 def test_generic_refine_leaves_flag_unset() -> None:

@@ -26,12 +26,12 @@ from .models import FactCheckReport
 from .prompts import FACT_CHECK_PROMPT
 
 try:
-    from shared.artifacts import write_artifact
+    from agents.blogging.shared.artifacts import write_artifact
 except ImportError:
     write_artifact = None
 
 try:
-    from shared.errors import FactCheckError, LLMError
+    from agents.blogging.shared.errors import FactCheckError, LLMError
 except ImportError:
 
     class FactCheckError(Exception):
@@ -187,7 +187,7 @@ def run_fact_check_from_work_dir(
 ) -> FactCheckReport:
     """Run fact-check using artifacts from work_dir."""
     try:
-        from shared.artifacts import read_artifact
+        from agents.blogging.shared.artifacts import read_artifact
     except ImportError:
         raise ImportError("shared.artifacts required")
 
