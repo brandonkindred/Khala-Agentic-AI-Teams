@@ -15,6 +15,8 @@ export interface SlackConfigResponse {
   enabled: boolean;
   mode: SlackMode;
   client_id_configured: boolean;
+  /** True when a Slack app signing secret is stored (required to receive events/commands). */
+  signing_secret_configured: boolean;
   webhook_url: string | null;
   webhook_configured: boolean;
   bot_token_configured: boolean;
@@ -36,6 +38,8 @@ export interface SlackConfigUpdate {
   mode: SlackMode;
   client_id: string;
   client_secret: string;
+  /** Slack app signing secret; omitted/empty preserves the existing one. */
+  signing_secret: string;
   webhook_url: string;
   bot_token: string;
   default_channel: string;

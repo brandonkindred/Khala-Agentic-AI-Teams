@@ -1,0 +1,13 @@
+// Shared base look for the `.cr-chip` class, used by both
+// code-review-panel.component.scss and
+// pending-issue-proposals/pending-issue-proposals.component.scss. Angular's
+// view encapsulation scopes each component's styles to its own template, so
+// each still needs its own `.cr-chip { @include chip.look; }` rule -- this
+// mixin just keeps the base properties defined in one place.
+@mixin look {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: var(--mat-sys-surface-container-high, #ececec);
+  color: var(--mat-sys-on-surface, rgba(0, 0, 0, 0.75));
+}

@@ -424,7 +424,11 @@ def test_job_store_mark_all_swallows_exception(monkeypatch, caplog) -> None:
     monkeypatch.setattr(js, "_client", lambda cache_dir=None: fake)
     with caplog.at_level(logging.WARNING):
         js.mark_all_running_jobs_failed("shutdown")
-    # No exception propagated; warning logged.
+    # Exception swallowed (no propagation) AND a warning was logged.
+    assert any(
+        rec.levelno == logging.WARNING and "mark_all_running_jobs_failed" in rec.getMessage()
+        for rec in caplog.records
+    )
 
 
 def test_job_store_update_phase_progress(mock_job_client) -> None:

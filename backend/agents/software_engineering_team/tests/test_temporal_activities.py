@@ -60,7 +60,8 @@ def test_run_orchestrator_activity_failure_captured(
         raise RuntimeError("orchestrator crashed")
 
     monkeypatch.setattr("software_engineering_team.orchestrator.run_orchestrator", boom)
-    activities.run_orchestrator_activity("job-x", str(tmp_path))
+    with pytest.raises(RuntimeError, match="orchestrator crashed"):
+        activities.run_orchestrator_activity("job-x", str(tmp_path))
     job = js.get_job("job-x")
     assert job is not None
     assert job["status"] == js.JOB_STATUS_FAILED
@@ -90,7 +91,8 @@ def test_retry_failed_activity_failure(monkeypatch, tmp_path, patched_job_store)
         raise RuntimeError("retry exploded")
 
     monkeypatch.setattr("software_engineering_team.orchestrator.run_failed_tasks", boom)
-    activities.retry_failed_activity("j-fail")
+    with pytest.raises(RuntimeError, match="retry exploded"):
+        activities.retry_failed_activity("j-fail")
     job = js.get_job("j-fail")
     assert job["status"] == js.JOB_STATUS_FAILED
 
@@ -105,7 +107,8 @@ def test_run_frontend_code_v2_activity_failure(monkeypatch, tmp_path, patched_jo
         raise RuntimeError("v2 frontend failed")
 
     monkeypatch.setattr(activities, "_run_frontend_code_v2_impl", boom)
-    activities.run_frontend_code_v2_activity("fv2-j", str(tmp_path), {"id": "t1"})
+    with pytest.raises(RuntimeError, match="v2 frontend failed"):
+        activities.run_frontend_code_v2_activity("fv2-j", str(tmp_path), {"id": "t1"})
     job = js.get_job("fv2-j")
     assert job["status"] == js.JOB_STATUS_FAILED
 
@@ -120,7 +123,8 @@ def test_run_backend_code_v2_activity_failure(monkeypatch, tmp_path, patched_job
         raise RuntimeError("v2 backend failed")
 
     monkeypatch.setattr(activities, "_run_backend_code_v2_impl", boom)
-    activities.run_backend_code_v2_activity("bv2-j", str(tmp_path), {"id": "t1"})
+    with pytest.raises(RuntimeError, match="v2 backend failed"):
+        activities.run_backend_code_v2_activity("bv2-j", str(tmp_path), {"id": "t1"})
     job = js.get_job("bv2-j")
     assert job["status"] == js.JOB_STATUS_FAILED
 
@@ -135,7 +139,8 @@ def test_run_product_analysis_activity_failure(monkeypatch, tmp_path, patched_jo
         raise RuntimeError("PA failed")
 
     monkeypatch.setattr(activities, "_run_product_analysis_impl", boom)
-    activities.run_product_analysis_activity("pa-j", str(tmp_path), "spec")
+    with pytest.raises(RuntimeError, match="PA failed"):
+        activities.run_product_analysis_activity("pa-j", str(tmp_path), "spec")
     job = js.get_job("pa-j")
     assert job["status"] == js.JOB_STATUS_FAILED
 
