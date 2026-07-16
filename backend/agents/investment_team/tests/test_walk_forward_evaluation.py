@@ -34,13 +34,21 @@ from investment_team.strategy_lab.orchestrator import (
 )
 from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
 
-from ._walk_forward_test_helpers import StubMarketDataService as _StubMarketDataService
+from ._walk_forward_test_helpers import (
+    StubMarketDataService,
+    mk_trade,
+    orchestrator,
+    spec,
+    stub_bars,
+    trades_across_year,
+)
+
+# ``config`` keeps its leading-underscore alias: nearly every test below
+# assigns its result to a local variable named ``config``, and dropping
+# the alias would make ``config = config(...)`` an UnboundLocalError
+# (assigning a name anywhere in a function makes every reference to it
+# local within that function, including the assignment's own right-hand side).
 from ._walk_forward_test_helpers import config as _config
-from ._walk_forward_test_helpers import mk_trade as _mk_trade
-from ._walk_forward_test_helpers import orchestrator as _orchestrator
-from ._walk_forward_test_helpers import spec as _spec
-from ._walk_forward_test_helpers import stub_bars as _stub_bars
-from ._walk_forward_test_helpers import trades_across_year as _trades_across_year
 
 # ---------------------------------------------------------------------------
 # _evaluate_walk_forward
@@ -49,9 +57,9 @@ from ._walk_forward_test_helpers import trades_across_year as _trades_across_yea
 
 def test_evaluate_walk_forward_populates_oos_fields():
     """All new BacktestResult fields are set; fold count matches config."""
-    orch = _orchestrator(_StubMarketDataService())
+    orch = orchestrator(StubMarketDataService())
     config = _config(walk_forward_enabled=True, n_folds=5)
-    trades = _trades_across_year(n_per_month=4)
+    trades = trades_across_year(n_per_month=4)
     base_metrics = BacktestResult(
         total_return_pct=10.0,
         annualized_return_pct=12.0,
@@ -64,9 +72,9 @@ def test_evaluate_walk_forward_populates_oos_fields():
         deflated_sharpe=0.0,
         sortino_ratio=0.0,
     )
-    market_data = {"AAPL": _stub_bars("AAPL")}
+    market_data = {"AAPL": stub_bars("AAPL")}
 
-    result = orch._evaluate_walk_forward(_spec(), market_data, config, trades, base_metrics)
+    result = orch._evaluate_walk_forward(spec(), market_data, config, trades, base_metrics)
 
     assert result.deflated_sharpe is not None
     assert 0.0 <= result.deflated_sharpe <= 1.0
@@ -100,7 +108,7 @@ def test_evaluate_walk_forward_populates_oos_fields():
 def test_evaluate_walk_forward_with_empty_trades_does_not_crash():
     """Empty trade list still yields a populated BacktestResult; OOS fields
     fall back to neutral values rather than raising."""
-    orch = _orchestrator(_StubMarketDataService())
+    orch = orchestrator(StubMarketDataService())
     config = _config(walk_forward_enabled=True, n_folds=5)
     trades = []
     base_metrics = BacktestResult(
@@ -116,7 +124,7 @@ def test_evaluate_walk_forward_with_empty_trades_does_not_crash():
         sortino_ratio=0.0,
     )
 
-    result = orch._evaluate_walk_forward(_spec(), {}, config, trades, base_metrics)
+    result = orch._evaluate_walk_forward(spec(), {}, config, trades, base_metrics)
 
     # At raw Sharpe = 0 and ``n_trials = 0``, DSR collapses to the
     # Probabilistic Sharpe Ratio against a zero benchmark, which is 0.5 —
@@ -133,10 +141,10 @@ def test_evaluate_walk_forward_falls_back_when_60_40_unavailable():
     """When SPY+AGG are unavailable, regime evaluation falls back to the
     single-symbol benchmark path. The overall walk-forward call must still
     return a populated result."""
-    stub = _StubMarketDataService(has_agg=False)
-    orch = _orchestrator(stub)
+    stub = StubMarketDataService(has_agg=False)
+    orch = orchestrator(stub)
     config = _config(walk_forward_enabled=True, n_folds=5, benchmark_composition="60_40")
-    trades = _trades_across_year()
+    trades = trades_across_year()
     base_metrics = BacktestResult(
         total_return_pct=5.0,
         annualized_return_pct=6.0,
@@ -151,7 +159,7 @@ def test_evaluate_walk_forward_falls_back_when_60_40_unavailable():
     )
 
     result = orch._evaluate_walk_forward(
-        _spec(), {"AAPL": _stub_bars("AAPL")}, config, trades, base_metrics
+        spec(), {"AAPL": stub_bars("AAPL")}, config, trades, base_metrics
     )
 
     assert result.deflated_sharpe is not None
@@ -211,7 +219,7 @@ def test_daily_returns_from_trades_emits_log_returns():
     import math as _math
 
     trades = [
-        _mk_trade(
+        mk_trade(
             entry="2023-01-03",
             exit_="2023-01-04",
             net=1_000.0,
@@ -236,7 +244,7 @@ def test_daily_returns_from_trades_invalidates_ruin_series():
     path."""
     # Loss > initial capital drives equity negative on the exit date.
     trades = [
-        _mk_trade(
+        mk_trade(
             entry="2023-01-03",
             exit_="2023-01-04",
             net=-150_000.0,
@@ -281,7 +289,7 @@ def test_is_sharpe_uses_training_segments_not_full_span():
     the gaps dominate; the per-segment computation produces visibly
     different IS Sharpes.
     """
-    orch = _orchestrator(_StubMarketDataService())
+    orch = orchestrator(StubMarketDataService())
     config = _config(walk_forward_enabled=True, n_folds=5)
     base_metrics = BacktestResult(
         total_return_pct=5.0,
@@ -298,9 +306,9 @@ def test_is_sharpe_uses_training_segments_not_full_span():
 
     # Two trades per month, evenly distributed → at least one IS trade per
     # fold's training segments.
-    trades = _trades_across_year(n_per_month=4, base_pnl=80.0)
-    market_data = {"AAPL": _stub_bars("AAPL")}
-    result = orch._evaluate_walk_forward(_spec(), market_data, config, trades, base_metrics)
+    trades = trades_across_year(n_per_month=4, base_pnl=80.0)
+    market_data = {"AAPL": stub_bars("AAPL")}
+    result = orch._evaluate_walk_forward(spec(), market_data, config, trades, base_metrics)
 
     # Per-fold IS Sharpe must come from the segment computation: when
     # ``is_trade_count > 0``, the recorded ``is_sharpe`` should not be

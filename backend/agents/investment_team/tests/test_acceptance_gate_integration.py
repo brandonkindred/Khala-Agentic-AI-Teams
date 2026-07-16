@@ -12,14 +12,24 @@ mechanics themselves are covered in ``test_walk_forward_evaluation.py``.
 
 from __future__ import annotations
 
-from investment_team.models import BacktestResult
+from investment_team.models import BacktestResult, StrategyLabRecord
 from investment_team.strategy_lab.quality_gates.acceptance_gate import AcceptanceGate
 
-from ._walk_forward_test_helpers import StubMarketDataService as _StubMarketDataService
+from ._walk_forward_test_helpers import (
+    StubMarketDataService,
+    minimal_custom_spec_dict,
+    minimal_strategy_code,
+    orchestrator,
+    stub_bars,
+    trades_across_year,
+)
+
+# ``config`` keeps its leading-underscore alias: both tests below assign its
+# result to a local variable named ``config``, and dropping the alias would
+# make ``config = config(...)`` an UnboundLocalError (assigning a name
+# anywhere in a function makes every reference to it local within that
+# function, including the assignment's own right-hand side).
 from ._walk_forward_test_helpers import config as _config
-from ._walk_forward_test_helpers import orchestrator as _orchestrator
-from ._walk_forward_test_helpers import stub_bars as _stub_bars
-from ._walk_forward_test_helpers import trades_across_year as _trades_across_year
 from .conftest import stub_design_loop
 
 
@@ -56,8 +66,11 @@ def test_acceptance_gate_passes_winning_walk_forward_result():
         sortino_ratio=0.0,
     )
     results = AcceptanceGate().check(res, cfg, n_trials=10)
+    # The acceptance gate's own composition of its four sub-criteria into an
+    # all-pass verdict. (The orchestrator's actual is_winning verdict is the
+    # separate deterministic annualized-return-vs-benchmark check — see
+    # test_run_cycle_caveat_resolution.py for that caveats-only behavior.)
     assert all(r.passed for r in results)
-    assert (True and all(r.passed for r in results)) is True  # the orchestrator's rule
 
 
 def test_acceptance_gate_rejects_overfit_pattern():
@@ -107,9 +120,7 @@ def test_walk_forward_fallback_records_overfit_anomaly_as_caveat(monkeypatch):
     overfit-suspect 60% run is still WINNING (60% >= the 8% benchmark) — the
     anomaly is a caveat that rides into the narrative, not a rejection."""
 
-    from investment_team.models import StrategyLabRecord
-
-    orch = _orchestrator(_StubMarketDataService())
+    orch = orchestrator(StubMarketDataService())
 
     # Force walk-forward to raise so we exercise the fallback path.
     def _raise(*args, **kwargs):
@@ -118,28 +129,8 @@ def test_walk_forward_fallback_records_overfit_anomaly_as_caveat(monkeypatch):
     monkeypatch.setattr(orch, "_evaluate_walk_forward", _raise)
 
     # Stub the agents that would otherwise call the LLM.
-    from investment_team.strategy_lab.spec_dsl import EntryRule, Predicate, StopLossRule
-
-    spec_dict = {
-        "asset_class": "stocks",
-        "hypothesis": "h",
-        "signal_definition": "s",
-        "entry_rules": [
-            EntryRule(
-                side="long",
-                when=Predicate(lhs="bar.close", op=">", rhs=0),
-            ).model_dump()
-        ],
-        "exit_rules": [StopLossRule(pct=0.20).model_dump()],
-        "risk_limits": {},
-        "speculative": False,
-    }
-    overfit_code = (
-        "from contract import Strategy\n\nclass S(Strategy):\n"
-        "    def on_bar(self, ctx, bar):\n"
-        "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
-        "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
-    )
+    spec_dict = minimal_custom_spec_dict()
+    overfit_code = minimal_strategy_code()
 
     stub_design_loop(monkeypatch, orch, spec_dict, overfit_code)
     monkeypatch.setattr(
@@ -170,7 +161,7 @@ def test_walk_forward_fallback_records_overfit_anomaly_as_caveat(monkeypatch):
         orch,
         "_fetch_market_data",
         lambda spec, config: _MarketDataFetch(
-            data={"AAPL": _stub_bars("AAPL")},
+            data={"AAPL": stub_bars("AAPL")},
             requested_symbols=["AAPL"],
             fetched_symbols=["AAPL"],
         ),
@@ -192,7 +183,7 @@ def test_walk_forward_fallback_records_overfit_anomaly_as_caveat(monkeypatch):
         deflated_sharpe=0.0,
         sortino_ratio=0.0,
     )
-    overfit_trades = _trades_across_year(n_per_month=4, base_pnl=80.0)
+    overfit_trades = trades_across_year(n_per_month=4, base_pnl=80.0)
 
     class _StubExecResult:
         def __init__(self):

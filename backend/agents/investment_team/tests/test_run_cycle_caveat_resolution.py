@@ -17,11 +17,19 @@ from __future__ import annotations
 from investment_team.models import StrategyLabRecord
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 
-from ._walk_forward_test_helpers import StubMarketDataService as _StubMarketDataService
+from ._walk_forward_test_helpers import (
+    StubMarketDataService,
+    orchestrator,
+    raise_walk_forward,
+    wire_run_cycle_stubs,
+)
+
+# ``config`` keeps its leading-underscore alias: every test below assigns
+# its result to a local variable named ``config``, and dropping the alias
+# would make ``config = config(...)`` an UnboundLocalError (assigning a name
+# anywhere in a function makes every reference to it local within that
+# function, including the assignment's own right-hand side).
 from ._walk_forward_test_helpers import config as _config
-from ._walk_forward_test_helpers import orchestrator as _orchestrator
-from ._walk_forward_test_helpers import raise_walk_forward as _raise_walk_forward
-from ._walk_forward_test_helpers import wire_run_cycle_stubs as _wire_run_cycle_stubs
 
 
 def test_failed_alignment_records_caveat_on_acceptance_path(monkeypatch):
@@ -32,7 +40,7 @@ def test_failed_alignment_records_caveat_on_acceptance_path(monkeypatch):
     resolved verdict is threaded to AnalysisAgent so the narrative surfaces the
     misalignment as a caveat rather than calling the strategy a loss."""
 
-    orch = _orchestrator(_StubMarketDataService())
+    orch = orchestrator(StubMarketDataService())
 
     # Stub the acceptance gate to return all-passing (so alignment is the
     # only veto in play). Also stub walk-forward evaluation to leave the
@@ -61,7 +69,7 @@ def test_failed_alignment_records_caveat_on_acceptance_path(monkeypatch):
         ],
     )
 
-    _wire_run_cycle_stubs(
+    wire_run_cycle_stubs(
         orch,
         monkeypatch,
         alignment_aligned=False,
@@ -131,7 +139,7 @@ def test_failed_alignment_records_caveat_on_walk_forward_fallback(monkeypatch):
     deterministic verdict the 15% (>= 8%) run is still WINNING — alignment is a
     caveat, not a veto."""
 
-    orch = _orchestrator(_StubMarketDataService())
+    orch = orchestrator(StubMarketDataService())
 
     def _raise(*args, **kwargs):
         raise RuntimeError("walk-forward fold construction failed (synthetic)")
@@ -157,7 +165,7 @@ def test_failed_alignment_records_caveat_on_walk_forward_fallback(monkeypatch):
         ],
     )
 
-    _wire_run_cycle_stubs(
+    wire_run_cycle_stubs(
         orch,
         monkeypatch,
         alignment_aligned=False,
@@ -215,7 +223,7 @@ def test_acceptance_failures_and_alignment_failure_both_recorded(monkeypatch):
     deterministic verdict the 15% (>= 8%) run is still WINNING — both robustness
     failures are recorded as caveats, not vetoes."""
 
-    orch = _orchestrator(_StubMarketDataService())
+    orch = orchestrator(StubMarketDataService())
 
     monkeypatch.setattr(
         orch, "_evaluate_walk_forward", lambda spec, md, cfg, trades, metrics: metrics
@@ -243,7 +251,7 @@ def test_acceptance_failures_and_alignment_failure_both_recorded(monkeypatch):
         ],
     )
 
-    _wire_run_cycle_stubs(
+    wire_run_cycle_stubs(
         orch,
         monkeypatch,
         alignment_aligned=False,
@@ -279,9 +287,9 @@ def test_walk_forward_disabled_wins_by_return_records_caveat(monkeypatch):
     and the audit trail records that walk-forward was disabled as a caveat so
     a reviewer knows the win was not out-of-sample validated."""
 
-    orch = _orchestrator(_StubMarketDataService())
+    orch = orchestrator(StubMarketDataService())
 
-    _wire_run_cycle_stubs(
+    wire_run_cycle_stubs(
         orch,
         monkeypatch,
         alignment_aligned=True,
@@ -313,9 +321,9 @@ def test_walk_forward_fallback_rejected_records_acceptance_reason(monkeypatch):
 
     from investment_team.strategy_lab.quality_gates.models import QualityGateResult as _QGR
 
-    orch = _orchestrator(_StubMarketDataService())
+    orch = orchestrator(StubMarketDataService())
 
-    monkeypatch.setattr(orch, "_evaluate_walk_forward", _raise_walk_forward)
+    monkeypatch.setattr(orch, "_evaluate_walk_forward", raise_walk_forward)
 
     # ``anomaly_detector.check`` is called twice in this flow: once
     # inside the refinement loop with ``dsr_aware=True`` (because
@@ -338,7 +346,7 @@ def test_walk_forward_fallback_rejected_records_acceptance_reason(monkeypatch):
 
     monkeypatch.setattr(orch.anomaly_detector, "check", _anomaly_stub)
 
-    _wire_run_cycle_stubs(
+    wire_run_cycle_stubs(
         orch,
         monkeypatch,
         alignment_aligned=True,
@@ -367,9 +375,9 @@ def test_walk_forward_fallback_passed_records_provenance(monkeypatch):
 
     from investment_team.strategy_lab.quality_gates.models import QualityGateResult as _QGR
 
-    orch = _orchestrator(_StubMarketDataService())
+    orch = orchestrator(StubMarketDataService())
 
-    monkeypatch.setattr(orch, "_evaluate_walk_forward", _raise_walk_forward)
+    monkeypatch.setattr(orch, "_evaluate_walk_forward", raise_walk_forward)
     # Anomalies all info-severity — fallback_criticals stays empty.
     monkeypatch.setattr(
         orch.anomaly_detector,
@@ -385,7 +393,7 @@ def test_walk_forward_fallback_passed_records_provenance(monkeypatch):
         ],
     )
 
-    _wire_run_cycle_stubs(
+    wire_run_cycle_stubs(
         orch,
         monkeypatch,
         alignment_aligned=True,
@@ -409,7 +417,7 @@ def test_no_trades_produced_records_acceptance_reason(monkeypatch):
     and alignment both require trades. The persisted ``acceptance_reason``
     must explain this rather than leave an empty field."""
 
-    orch = _orchestrator(_StubMarketDataService())
+    orch = orchestrator(StubMarketDataService())
 
     # Bypass the gates that normally veto zero-trade runs during
     # refinement so we can drive ``execution_succeeded=True`` with
@@ -417,7 +425,7 @@ def test_no_trades_produced_records_acceptance_reason(monkeypatch):
     monkeypatch.setattr(orch.target_symbol_coverage_gate, "check_trades", lambda *a, **k: [])
     monkeypatch.setattr(orch.anomaly_detector, "check", lambda *a, **kw: [])
 
-    _wire_run_cycle_stubs(
+    wire_run_cycle_stubs(
         orch,
         monkeypatch,
         # ``alignment_aligned`` is irrelevant — the alignment loop is

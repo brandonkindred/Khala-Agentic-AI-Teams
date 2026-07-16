@@ -203,6 +203,42 @@ def raise_walk_forward(*_args, **_kwargs):
     raise RuntimeError("walk-forward fold construction failed (synthetic)")
 
 
+def minimal_custom_spec_dict(**overrides: Any) -> Dict[str, Any]:
+    """Build the minimal custom-code spec dict shared by the run_cycle stubs.
+
+    Post: a dict with a single long entry rule / stop-loss exit rule,
+    suitable for ``DesignAgent.run`` stubs; ``overrides`` are merged in
+    (e.g. ``requires_custom_code=True`` where the rule-firing gate must
+    self-skip on a stub with no compiled-entry annotations).
+    """
+    base: Dict[str, Any] = {
+        "asset_class": "stocks",
+        "hypothesis": "h",
+        "signal_definition": "s",
+        "entry_rules": [
+            EntryRule(
+                side="long",
+                when=Predicate(lhs="bar.close", op=">", rhs=0),
+            ).model_dump()
+        ],
+        "exit_rules": [StopLossRule(pct=0.20).model_dump()],
+        "risk_limits": {},
+        "speculative": False,
+    }
+    base.update(overrides)
+    return base
+
+
+def minimal_strategy_code() -> str:
+    """Return the minimal strategy source shared by the run_cycle stubs."""
+    return (
+        "from contract import Strategy\n\nclass S(Strategy):\n"
+        "    def on_bar(self, ctx, bar):\n"
+        "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
+        "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
+    )
+
+
 def wire_run_cycle_stubs(
     orch: StrategyLabOrchestrator,
     monkeypatch: pytest.MonkeyPatch,
@@ -240,31 +276,12 @@ def wire_run_cycle_stubs(
     # alone does not redirect it.
     orch.spec_readiness_gate._market_sample_provider = lambda symbol, asset_class: 100.0
 
-    spec_dict = {
-        "asset_class": "stocks",
-        "hypothesis": "h",
-        "signal_definition": "s",
-        "entry_rules": [
-            EntryRule(
-                side="long",
-                when=Predicate(lhs="bar.close", op=">", rhs=0),
-            ).model_dump()
-        ],
-        "exit_rules": [StopLossRule(pct=0.20).model_dump()],
-        "risk_limits": {},
-        "speculative": False,
-        # The stub bypasses the compiler entirely, so the compiled
-        # ``reason="compiled_entry:entry[N]"`` annotation is absent from
-        # trades. Mark the spec as custom-code so the rule-firing gate
-        # self-skips rather than firing critical on the missing annotations.
-        "requires_custom_code": True,
-    }
-    code = (
-        "from contract import Strategy\n\nclass S(Strategy):\n"
-        "    def on_bar(self, ctx, bar):\n"
-        "        ctx.submit_order(symbol='X', qty=1, side='LONG')\n"
-        "        ctx.submit_order(symbol='X', qty=1, side='FLAT')\n"
-    )
+    # The stub bypasses the compiler entirely, so the compiled
+    # ``reason="compiled_entry:entry[N]"`` annotation is absent from
+    # trades. Mark the spec as custom-code so the rule-firing gate
+    # self-skips rather than firing critical on the missing annotations.
+    spec_dict = minimal_custom_spec_dict(requires_custom_code=True)
+    code = minimal_strategy_code()
 
     stub_design_loop(monkeypatch, orch, spec_dict, code, rationale="rationale")
     monkeypatch.setattr(orch.refinement_agent, "run", lambda **kw: ({"changes_made": "x"}, code))
