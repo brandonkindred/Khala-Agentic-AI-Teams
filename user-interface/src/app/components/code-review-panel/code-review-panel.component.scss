@@ -1,3 +1,5 @@
+@use 'chip';
+
 .page-toolbar {
   margin-bottom: 0.5rem;
 }
@@ -197,11 +199,7 @@
 }
 
 .cr-chip {
-  font-size: 0.72rem;
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  background: var(--mat-sys-surface-container-high, #ececec);
-  color: var(--mat-sys-on-surface, rgba(0, 0, 0, 0.75));
+  @include chip.look;
 
   &--draft {
     background: var(--mat-sys-tertiary-container, #efe2d0);

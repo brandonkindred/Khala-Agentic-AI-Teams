@@ -8,6 +8,7 @@ split; models are imported directly.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import logging
 import os
 import threading
@@ -30,10 +31,12 @@ from software_engineering_team.coding_team.github_source import (
     GitHubAPIError,
     GitHubRepoReader,
     anchor_to_first_file,
+    annotate_duplicate_proposals,
     build_existing_comments,
     build_issue_from_proposal,
     build_review_body,
     choose_event,
+    duplicate_check_max_open_issues,
     group_similar_findings,
     inline_comment_to_timeline_body,
     is_within_diff,
@@ -794,6 +797,73 @@ def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int)
         return []
 
 
+def _detect_duplicate_proposals(
+    proposals: List[Dict[str, Any]], client: Any, owner: str, repo: str, pr_number: int
+) -> List[Dict[str, Any]]:
+    """Annotate pre-existing-finding proposals against the repo's open issues, fail-safe.
+
+    Duplicate-detection is an enhancement to what the human is offered to file, not
+    a correctness requirement of the review itself, so no failure here is allowed
+    to fail the whole PR review.
+
+    Preconditions:
+        - ``client`` is an open ``GitHubClient``. ``proposals`` is fresh from
+          ``proposal_from_findings`` — none carry ``matched_existing`` yet.
+    Postconditions:
+        - Returns ``proposals`` unchanged when empty (no GitHub call made). Otherwise
+          fetches up to ``duplicate_check_max_open_issues()`` of the repo's open
+          issues and returns ``annotate_duplicate_proposals(proposals, open_issues)``.
+        - A failure listing open issues (network, auth, rate-limit) degrades to an
+          empty ``open_issues`` list -- mirroring the GitHubAPIError-tolerant
+          degrade-and-continue pattern ``_fetch_existing_comments`` already uses --
+          so annotation still runs (against no issues, i.e. nothing matches) rather
+          than being skipped.
+        - A failure in ``annotate_duplicate_proposals`` itself instead falls back to
+          marking every proposal ``matched_existing: False`` by hand -- mirroring
+          that function's own "no match" branch -- so downstream consumers
+          (frontend, ``create_review_issues``) still always see the field.
+        - Never raises.
+    """
+    if not proposals:
+        return proposals
+    try:
+        cap = duplicate_check_max_open_issues()
+        open_issues = list(itertools.islice(client.list_open_issues(owner, repo), cap))
+        if len(open_issues) >= cap:
+            logger.info(
+                "PR review #%s: duplicate-detection capped at %d open issues; "
+                "some older open issues were not considered",
+                pr_number,
+                cap,
+            )
+    except GitHubAPIError as e:
+        logger.warning(
+            "PR review #%s: could not list open issues for duplicate-detection: %s",
+            pr_number,
+            e,
+        )
+        open_issues = []
+    except Exception:  # noqa: BLE001 - duplicate-detection must never fail the review
+        logger.warning(
+            "PR review #%s: unexpected error listing open issues for duplicate-detection",
+            pr_number,
+            exc_info=True,
+        )
+        open_issues = []
+    try:
+        return annotate_duplicate_proposals(proposals, open_issues)
+    except Exception:  # noqa: BLE001 - duplicate-detection must never fail the review
+        logger.warning(
+            "PR review #%s: duplicate annotation failed, proceeding without duplicate detection",
+            pr_number,
+            exc_info=True,
+        )
+        # annotate_duplicate_proposals's own "no match" branch does exactly this
+        # ({**p, "matched_existing": False}); mirrored here as a safety net so a
+        # bug inside that function still leaves every proposal carrying the field.
+        return [{**p, "matched_existing": False} for p in proposals]
+
+
 def _run_pr_review_body(
     job_id: str,
     request: ReviewPrRequest,
@@ -928,6 +998,7 @@ def _run_pr_review_body(
             # not one per occurrence.
             finding_groups = group_similar_findings(preexisting_issues)
             proposals = [proposal_from_findings(g, idx) for idx, g in enumerate(finding_groups)]
+            proposals = _detect_duplicate_proposals(proposals, client, owner, repo, pr_number)
 
             # Recognize findings that duplicate a comment already on the PR (from a
             # prior review run, or a human), so an evolving PR does not accumulate
@@ -1053,8 +1124,12 @@ def _run_pr_review_body(
                 "addressed_issues_dropped": len(addressed_issues),
                 # Pre-existing bugs the reviewer flagged in unchanged code, offered
                 # to a human on the Code Review page as GitHub-issue candidates.
-                # Not posted on this PR. Each carries a stable ``id`` and starts
-                # with ``issue_url``/``issue_number`` unset until an issue is filed.
+                # Not posted on this PR. Each carries a stable ``id``. ``issue_url``/
+                # ``issue_number`` start unset, UNLESS annotate_duplicate_proposals
+                # already matched the finding to an existing open issue -- in which
+                # case they're pre-filled with that issue's identity and
+                # ``matched_existing`` is True, so the proposal is never offered as
+                # a fresh "create issue" candidate.
                 "pending_issue_proposals": proposals,
             }
             if comments_failed:
@@ -1433,6 +1508,23 @@ class RepoMismatchError(ValueError):
     """
 
 
+class MultipleIssueCreationErrors(GitHubAPIError):
+    """Raised when concurrently filing issues for multiple proposals fails for more than one.
+
+    A ``GitHubAPIError`` subclass so the existing ``except GitHubAPIError`` branch
+    in the route handler (→ HTTP 502) still catches it without any route change,
+    while carrying every individual failure -- not just the one that happens to be
+    re-raised -- so the caller's error message reflects the true extent of the
+    failures rather than misleadingly naming only one proposal.
+    """
+
+    def __init__(self, failures: Dict[str, BaseException]) -> None:
+        """Preconditions: ``failures`` is non-empty (proposal id -> the exception it raised)."""
+        self.failures = dict(failures)
+        summary = "; ".join(f"{pid}: {err}" for pid, err in failures.items())
+        super().__init__(status=502, body=f"{len(failures)} proposal(s) failed to file: {summary}")
+
+
 # Per-job locks serializing ``create_review_issues`` within this process, so two
 # concurrent requests for the same review (two browser tabs, a double-click)
 # cannot both load a proposal as unfiled and open duplicate GitHub issues. A
@@ -1683,6 +1775,11 @@ def create_review_issues(
           updated proposals to both the job store and the durable review row.
           Idempotent: a proposal already carrying an ``issue_url`` is skipped, so
           a repeated request never opens a duplicate; an unknown id is ignored.
+          ``issue_url`` may already be set before this function ever runs -- when
+          ``annotate_duplicate_proposals`` matched the finding to a pre-existing
+          open issue at review time -- and such a proposal is skipped exactly the
+          same way, so a matched finding can never be filed as a second, duplicate
+          issue.
           Returns ``{"job_id", "created", "proposals"}`` where ``created`` lists
           each newly-opened issue and ``proposals`` is the full, updated
           proposal list.
@@ -1692,7 +1789,11 @@ def create_review_issues(
           treats them). Raises ``GitHubAPIError`` when GitHub rejects an issue
           creation — every proposal's creation is attempted independently, so one
           rejection never stops another's, and any issue opened before the raise
-          is still recorded and persisted.
+          is still recorded and persisted. When exactly one proposal fails, its own
+          exception is re-raised unchanged; when more than one fails, raises
+          :class:`MultipleIssueCreationErrors` (a ``GitHubAPIError`` subclass)
+          carrying every individual failure, so the caller's error is never
+          misleadingly attributed to just one proposal when several actually failed.
     """
     # Serialize the whole load → create → persist section per job. The context is
     # loaded INSIDE the lock so a second same-process request that ran after the
@@ -1803,8 +1904,17 @@ def create_review_issues(
                                     job_id,
                                     errors[pid],
                                 )
-                        first_pid = next(pid for pid in needed if pid in errors)
-                        raise errors[first_pid]
+                        if len(errors) == 1:
+                            # A single failure: re-raise it as-is so its own type
+                            # (e.g. a specific GitHubAPIError subclass) still
+                            # reaches the caller unchanged.
+                            raise next(iter(errors.values()))
+                        # More than one proposal failed: a plain re-raise of
+                        # whichever happened to be first would misleadingly
+                        # report only one failure. Wrap every failure into a
+                        # single composite error instead, so the caller's error
+                        # message reflects the true extent of the failures.
+                        raise MultipleIssueCreationErrors(errors)
         finally:
             # Persist whatever was created — even when some proposals failed — so
             # a partially-successful request never loses the issues it did open.

@@ -21,13 +21,22 @@ from ..tool_agents.redis_provisioner import RedisProvisionerTool
 def build_default_tool_agents() -> Dict[str, ToolProvisionerInterface]:
     """Build the default set of tool provisioner agents.
 
-    Keys MUST match the `provisioner` field used by tool manifests. They are
-    also the canonical identifier stamped onto
-    ``ToolProvisionResult.provisioner_key`` by ``run_account_provisioning``
-    and consumed by ``ProvisioningOrchestrator.compensate()`` to look a
-    provisioner back up for rollback. Do not rename a key here without
-    updating any manifests, persisted results, and call sites that store or
-    match on it (see #293).
+    Preconditions:
+        * None. Takes no arguments and reads no external/mutable state; the
+          concrete provisioner classes are import-time dependencies of this
+          module.
+    Postconditions:
+        * Returns a ``dict`` mapping each provisioner key to a freshly
+          constructed ``ToolProvisionerInterface`` instance. New instances are
+          created on every call (no shared or cached state).
+    Invariants:
+        * Keys match the ``provisioner`` field used by tool manifests. They are
+          also the canonical identifier stamped onto
+          ``ToolProvisionResult.provisioner_key`` by ``run_account_provisioning``
+          and consumed by ``ProvisioningOrchestrator.compensate()`` to look a
+          provisioner back up for rollback. Do not rename a key here without
+          updating any manifests, persisted results, and call sites that store
+          or match on it.
     """
     return {
         "docker_provisioner": DockerProvisionerTool(),

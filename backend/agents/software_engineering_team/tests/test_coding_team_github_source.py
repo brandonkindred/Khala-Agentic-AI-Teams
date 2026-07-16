@@ -31,6 +31,7 @@ from software_engineering_team.coding_team.github_source import (
     scrub_token_from_text,
 )
 from software_engineering_team.coding_team.github_source.client import (
+    MAX_ISSUES_TRAVERSED,
     _is_safe_ref,
     _parse_next_link,
 )
@@ -126,6 +127,25 @@ class TestClientListOpenIssues:
         client = _client_with(handler)
         list(client.list_open_issues("o", "r", label="ready"))
         assert seen == ["ready"]
+
+    def test_pull_requests_count_toward_max_issues_traversed(self) -> None:
+        # Regression (Codex-flagged): a repository dominated by open pull requests
+        # (which the /issues endpoint also returns, filtered out client-side) must
+        # not be able to bypass MAX_ISSUES_TRAVERSED -- if skipped PRs didn't count
+        # toward the cap, a caller reading only the first few yielded issues via
+        # itertools.islice would still pay for paginating through every PR page.
+        payload = [_issue_payload(n, is_pr=True) for n in range(1, MAX_ISSUES_TRAVERSED + 2)] + [
+            _issue_payload(MAX_ISSUES_TRAVERSED + 100)
+        ]
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=payload)
+
+        client = _client_with(handler)
+        numbers = [i.number for i in client.list_open_issues("o", "r")]
+        # The single real issue sits past the cap (buried among MAX_ISSUES_TRAVERSED+1
+        # pull requests examined first), so traversal stops before ever reaching it.
+        assert numbers == []
 
 
 class TestClientSubIssues:
