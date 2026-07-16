@@ -1,9 +1,11 @@
-"""Tests for the sandbox state-layer thread-safety hardening.
+"""Tests for the sandbox state layer.
 
-Once acquire/teardown/reap run on the Temporal worker thread (while status/
-note_activity/list_active/metrics stay on the API loop), ``_state`` and its JSON
-persistence are touched from two threads. These tests cover the ``state.save``
-snapshot + unique-temp-file fix and the ``Lifecycle`` ``threading.RLock``.
+Covers the thread-safety hardening — once acquire/teardown/reap run on the
+Temporal worker thread (while status/note_activity/list_active/metrics stay on
+the API loop), ``_state`` and its JSON persistence are touched from two threads,
+so these tests exercise the ``state.save`` snapshot + unique-temp-file fix and
+the ``Lifecycle`` ``threading.RLock`` — plus the general state helpers: load/save
+round-trips, malformed-entry handling, and env-driven path/timeout resolution.
 """
 
 from __future__ import annotations
@@ -298,3 +300,125 @@ def test_save_survives_concurrent_resize_during_iteration(tmp_path: Path, monkey
 
     loaded = state_mod.load(path)
     assert {"agent-0", "agent-1", "agent-2"} <= set(loaded)
+
+
+# -------------------------------------------------------------------------
+# Additional sandbox state coverage: load/save round-trips, malformed-entry
+# handling, and env-driven path/timeout resolution.
+# -------------------------------------------------------------------------
+
+
+def test_state_load_missing_file_returns_empty(tmp_path: Path) -> None:
+    from agent_provisioning_team.sandbox import state as state_mod
+
+    out = state_mod.load(tmp_path / "ghost.json")
+    assert out == {}
+
+
+def test_state_load_corrupt_returns_empty(tmp_path: Path) -> None:
+    from agent_provisioning_team.sandbox import state as state_mod
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("not json", encoding="utf-8")
+    assert state_mod.load(bad) == {}
+
+
+def test_state_load_drops_malformed_entries(tmp_path: Path) -> None:
+    import json
+
+    from agent_provisioning_team.sandbox import state as state_mod
+
+    f = tmp_path / "s.json"
+    f.write_text(
+        json.dumps({"a1": {"missing": "fields"}}),  # invalid SandboxState shape
+        encoding="utf-8",
+    )
+    out = state_mod.load(f)
+    assert out == {}
+
+
+def test_state_save_roundtrip(tmp_path: Path) -> None:
+    from agent_provisioning_team.sandbox.state import (
+        SandboxStatus,
+        load,
+        new_state,
+        save,
+    )
+
+    state = {
+        "a1": new_state(agent_id="a1", team="t", container_name="khala-sbx-a1"),
+    }
+    state["a1"].status = SandboxStatus.COLD
+    f = tmp_path / "s.json"
+    save(f, state)
+    loaded = load(f)
+    assert "a1" in loaded
+    assert loaded["a1"].status == SandboxStatus.COLD
+
+
+def test_boot_timeout_seconds(monkeypatch) -> None:
+    from agent_provisioning_team.sandbox.state import boot_timeout_seconds
+
+    monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_BOOT_TIMEOUT_S", raising=False)
+    assert boot_timeout_seconds() == 90
+    monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_BOOT_TIMEOUT_S", "30")
+    assert boot_timeout_seconds() == 30
+
+
+def test_sandbox_stack_template_path_override(monkeypatch, tmp_path: Path) -> None:
+    from agent_provisioning_team.sandbox import state as state_mod
+
+    template = tmp_path / "custom.yml"
+    template.write_text("services: {}", encoding="utf-8")
+    monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_STACK_TEMPLATE", str(template))
+    assert state_mod.sandbox_stack_template_path() == template
+    assert state_mod.sandbox_stack_assets_dir() == template.parent
+
+
+def test_sandbox_stack_template_path_default(monkeypatch) -> None:
+    from agent_provisioning_team.sandbox import state as state_mod
+
+    monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_STACK_TEMPLATE", raising=False)
+    p = state_mod.sandbox_stack_template_path()
+    # Should resolve to the in-tree path; existence not required for the
+    # function itself.
+    assert "agent_sandbox_image" in str(p)
+
+
+def test_state_file_path_with_override(monkeypatch) -> None:
+    from agent_provisioning_team.sandbox import state as state_mod
+
+    monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_STATE_FILE", "/tmp/x.json")
+    assert str(state_mod.state_file_path()) == "/tmp/x.json"
+
+
+# -------------------------------------------------------------------------
+# General state-layer helpers: image / idle-threshold / state-file resolution.
+# -------------------------------------------------------------------------
+
+
+def test_sandbox_image_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_provisioning_team.sandbox import state as state_mod
+
+    monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_IMAGE", "my/custom:tag")
+    assert state_mod.sandbox_image() == "my/custom:tag"
+    monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_IMAGE")
+    assert state_mod.sandbox_image() == "khala-agent-sandbox:latest"
+
+
+def test_idle_threshold_reads_per_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_provisioning_team.sandbox import state as state_mod
+
+    monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES", "2")
+    assert state_mod.idle_teardown_seconds() == 120
+    monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES")
+    assert state_mod.idle_teardown_seconds() == 300  # 5-minute default
+
+
+def test_state_file_path_uses_agent_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from agent_provisioning_team.sandbox import state as state_mod
+
+    monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_STATE_FILE", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
+    path = state_mod.state_file_path()
+    assert path == tmp_path / "agent_provisioning" / "sandboxes" / "state.json"

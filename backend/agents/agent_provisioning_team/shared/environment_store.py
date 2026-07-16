@@ -100,7 +100,22 @@ class EnvironmentInfo:
 
 
 class EnvironmentStore:
-    """Store for tracking active agent environments."""
+    """Store for tracking active agent environments.
+
+    Invariants:
+        * Each agent's environment is persisted as a single JSON file named
+          ``{agent_id}.json`` in the primary ``storage_dir``; reads prefer that
+          primary file over any legacy copy (from before the ``AGENT_CACHE`` move).
+        * Every public operation serializes on the module-level ``_lock`` so
+          concurrent callers never interleave a read/modify/write.
+        * Writes always land in the primary ``storage_dir``. A legacy copy is
+          pruned (migrated) only by the read-modify-write updates
+          ``update_status`` and ``add_tool``/``add_tools`` — which pass the source
+          path through to the writer — and by ``remove``. The read-only methods
+          ``get``, ``list_all``, and ``exists`` may return data from a legacy
+          location without migrating it; ``register`` overwrites the primary
+          record but does not prune a pre-existing legacy copy.
+    """
 
     def __init__(self, storage_dir: Optional[Path] = None) -> None:
         self.storage_dir = Path(storage_dir) if storage_dir is not None else default_environments_dir()
@@ -148,12 +163,28 @@ class EnvironmentStore:
             source.unlink()
 
     def register(self, env_info: EnvironmentInfo) -> None:
-        """Register a new environment."""
+        """Register (or overwrite) an environment record.
+
+        Preconditions:
+            * ``env_info.agent_id`` is non-empty.
+        Postconditions:
+            * ``env_info`` is serialized to the primary store, replacing any
+              prior record for the same ``agent_id``.
+            * Returns ``None``.
+        """
         with _lock:
             self._write_env_data(env_info.agent_id, env_info.to_dict())
 
     def get(self, agent_id: str) -> Optional[EnvironmentInfo]:
-        """Get environment info for an agent."""
+        """Get environment info for an agent.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+        Postconditions:
+            * Returns the ``EnvironmentInfo`` reconstructed from the primary or a
+              legacy record when one exists and parses, else ``None``.
+            * Malformed or partial records are treated as absent; never raises.
+        """
         with _lock:
             data, _src = self._read_env_data(agent_id)
             if data is None:
@@ -165,7 +196,16 @@ class EnvironmentStore:
                 return None
 
     def update_status(self, agent_id: str, status: str) -> bool:
-        """Update the status of an environment."""
+        """Update the status of an environment.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+            * ``status`` is the new status string to record.
+        Postconditions:
+            * When the env exists, sets ``status`` and refreshes ``updated_at``,
+              rewrites the record to the primary store, and returns ``True``.
+            * Returns ``False`` when the env is missing or its file is corrupt.
+        """
         with _lock:
             data, src = self._read_env_data(agent_id)
             if data is None:
@@ -176,7 +216,19 @@ class EnvironmentStore:
             return True
 
     def add_tool(self, agent_id: str, tool_name: str) -> bool:
-        """Add a tool to the environment's provisioned tools list."""
+        """Add a single tool to the environment's provisioned tools list.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+            * ``tool_name`` is the tool to record (empty is a no-op via
+              ``add_tools``).
+        Postconditions:
+            * Delegates to ``add_tools([tool_name])``; when the env exists and
+              ``tool_name`` is non-empty, ``tool_name`` is present in
+              ``tools_provisioned`` (an empty ``tool_name`` is a no-op).
+            * Returns ``True`` on success, ``False`` when the env is missing or
+              corrupt (per ``add_tools``).
+        """
         return self.add_tools(agent_id, [tool_name])
 
     def add_tools(self, agent_id: str, tool_names: List[str]) -> bool:
@@ -204,7 +256,15 @@ class EnvironmentStore:
             return True
 
     def remove(self, agent_id: str) -> bool:
-        """Remove an environment from the registry."""
+        """Remove an environment from the registry.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+        Postconditions:
+            * Deletes the primary env file and any legacy copies for ``agent_id``.
+            * Returns ``True`` iff at least one file was removed; idempotent —
+              returns ``False`` when no record existed.
+        """
         with _lock:
             removed = False
             for path in self._env_file_candidates(agent_id):
@@ -214,7 +274,19 @@ class EnvironmentStore:
             return removed
 
     def list_all(self, status: Optional[str] = None) -> List[EnvironmentInfo]:
-        """List all registered environments, optionally filtered by status."""
+        """List all registered environments, optionally filtered by status.
+
+        Preconditions:
+            * ``status`` is ``None`` (no filter) or a status string to match.
+        Postconditions:
+            * Returns the ``EnvironmentInfo`` records found across the primary and
+              legacy directories, deduplicated by filename stem (which is the
+              ``agent_id`` for well-formed records named ``{agent_id}.json``); the
+              primary ``storage_dir`` is scanned first, so its record wins.
+              Results are filtered to ``status`` when given and sorted by
+              ``created_at`` descending.
+            * Unparseable or incomplete files are skipped; never raises.
+        """
         environments: List[EnvironmentInfo] = []
         seen: set[str] = set()
 
@@ -238,7 +310,14 @@ class EnvironmentStore:
         return environments
 
     def exists(self, agent_id: str) -> bool:
-        """Check if a valid environment record exists for an agent."""
+        """Check if a valid environment record exists for an agent.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+        Postconditions:
+            * Returns ``True`` iff a valid record is readable from the primary or
+              a legacy path; never raises.
+        """
         with _lock:
             data, _src = self._read_env_data(agent_id)
             return data is not None

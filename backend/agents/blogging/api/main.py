@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import sys
 import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 _blogging_root = Path(__file__).resolve().parent.parent
 if (
@@ -46,11 +47,13 @@ from shared.medium_stats_api import MediumStatsRequest  # noqa: E402
 
 from blogging.postgres import SCHEMA as BLOGGING_POSTGRES_SCHEMA  # noqa: E402
 from job_service_client import (  # noqa: E402
+    JOB_STATUS_INTERRUPTED,
     RESTARTABLE_STATUSES,
     RESUMABLE_STATUSES,
     validate_job_for_action,
 )
 from shared_app import create_team_app  # noqa: E402
+from shared_env_config import env_int  # noqa: E402
 
 try:
     from shared.artifacts import ARTIFACT_NAMES, ARTIFACT_PRODUCER, read_artifact, write_artifact
@@ -62,7 +65,9 @@ except ImportError:  # pragma: no cover - defensive ImportError fallback only tr
 
 try:
     from shared.blog_job_store import (
+        JOB_STATUS_CANCELLED,
         JOB_STATUS_COMPLETED,
+        JOB_STATUS_FAILED,
         JOB_STATUS_NEEDS_REVIEW,
         approve_blog_job,
         complete_blog_job,
@@ -104,6 +109,8 @@ except ImportError:  # pragma: no cover - defensive ImportError fallback for env
     is_waiting_for_draft_feedback = None
     JOB_STATUS_COMPLETED = "completed"
     JOB_STATUS_NEEDS_REVIEW = "needs_human_review"
+    JOB_STATUS_FAILED = "failed"
+    JOB_STATUS_CANCELLED = "cancelled"
     BloggingError = Exception
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -154,6 +161,144 @@ else:
         RUN_ARTIFACTS_BASE,
     )
 
+# Async blogging jobs (the non-Temporal fallback) run on a BOUNDED pool of daemon worker
+# threads draining a shared queue, instead of an unbounded ``threading.Thread`` per
+# request. A pipeline thread can stay alive for a long time — it blocks on
+# human-in-the-loop polling until the user responds or the ~1h stale-job monitor fires —
+# so without a cap a burst of concurrent HITL jobs would spawn proportionally many
+# idle-but-alive OS threads (the scalability risk this pool exists to bound). When every
+# worker is busy, further submissions queue; the async endpoints still return a job_id
+# immediately. The workers are daemon threads so an HITL-parked job never blocks process
+# shutdown/deploys (preserving the previous per-job ``daemon=True`` behavior) — a
+# ThreadPoolExecutor would instead join its non-daemon workers at interpreter exit and
+# hang until the wait cleared. Temporal remains the durable path for high HITL
+# concurrency. Tunable via BLOGGING_ASYNC_MAX_WORKERS (clamped to >= 1, default 16).
+_ASYNC_JOB_MAX_WORKERS = env_int("BLOGGING_ASYNC_MAX_WORKERS", 16, floor=1)
+# A queue item is a ``(target, args)`` pair, or ``None`` (a stop sentinel dequeued to
+# retire a worker). Spelling the payload out documents the contract for readers/type
+# checkers instead of a bare ``tuple``.
+JobItem = Optional[Tuple[Callable[..., Any], Tuple[Any, ...]]]
+_ASYNC_JOB_QUEUE: "queue.Queue[JobItem]" = queue.Queue()
+_ASYNC_JOB_WORKERS_STARTED = False
+_ASYNC_JOB_WORKERS_LOCK = threading.Lock()
+
+
+def _async_job_worker() -> None:
+    """Daemon worker loop: run queued ``(target, args)`` jobs one at a time.
+
+    Preconditions:
+        - Queue items are ``(callable, args_tuple)`` or ``None`` (stop sentinel).
+    Postconditions:
+        - A job that raises is logged and skipped so one bad job never kills the worker
+          (the job funcs already fail their own job-store entry); the loop runs until the
+          process exits (daemon threads are reclaimed at interpreter shutdown) or a
+          ``None`` sentinel is dequeued.
+
+    Note: no ``task_done()``/``Queue.join()`` coordination — nothing ever joins the queue
+    (workers are daemons reclaimed at shutdown), so a per-item ``task_done()`` would only
+    imply a completion barrier that does not exist.
+    """
+    while True:
+        item = _ASYNC_JOB_QUEUE.get()
+        if item is None:
+            return
+        target, args = item
+        # Both async targets take job_id as their first positional arg; capture it up
+        # front so a crash can be correlated with the specific job in the logs.
+        job_id = args[0] if args else "unknown"
+        try:
+            target(*args)
+        except Exception as e:
+            logger.exception("Async blogging job worker crashed on job %s", job_id)
+            # Safety net: the job funcs mark their own job-store entry failed on error, but
+            # if one crashes BEFORE reaching its own handler (e.g. a TypeError while building
+            # inputs), mark it failed here so it doesn't sit in 'running' until the ~1h stale
+            # monitor reaps it. Best-effort — bookkeeping must never kill the worker loop.
+            if fail_blog_job is not None and job_id != "unknown":
+                try:
+                    fail_blog_job(job_id, error=str(e))
+                except Exception:
+                    logger.warning("Could not mark crashed job %s failed", job_id, exc_info=True)
+
+
+def _ensure_async_workers() -> None:
+    """Lazily start the bounded set of daemon workers on first submit (idempotent, thread-safe)."""
+    global _ASYNC_JOB_WORKERS_STARTED
+    if _ASYNC_JOB_WORKERS_STARTED:
+        return
+    with _ASYNC_JOB_WORKERS_LOCK:
+        if _ASYNC_JOB_WORKERS_STARTED:
+            return
+        for i in range(_ASYNC_JOB_MAX_WORKERS):
+            threading.Thread(
+                target=_async_job_worker,
+                name=f"blogging-async-job-{i}",
+                daemon=True,
+            ).start()
+        _ASYNC_JOB_WORKERS_STARTED = True
+
+
+def _submit_async_job(target: Callable[..., Any], *args: Any) -> None:
+    """Enqueue a background job for the bounded daemon worker pool (returns immediately).
+
+    Preconditions: ``target`` is callable; ``args`` are its positional arguments.
+    Postconditions: the job is queued and will run on a worker as soon as one is free
+        (submissions beyond ``_ASYNC_JOB_MAX_WORKERS`` in-flight jobs wait in the queue).
+    """
+    # Enforce the callable precondition at the boundary rather than letting a
+    # non-callable slip through and only surface as a TypeError when a worker
+    # dequeues it (where the bad item is logged and dropped, obscuring the caller bug).
+    # An explicit raise (not assert) so the guard survives `python -O`/PYTHONOPTIMIZE,
+    # which strips asserts — matching shared_concurrency.parallel_map's boundary checks.
+    if not callable(target):
+        raise TypeError(f"async job target must be callable, got {type(target).__name__}")
+    _ensure_async_workers()
+    _ASYNC_JOB_QUEUE.put((target, args))
+
+
+def _job_already_terminal(job_id: str) -> bool:
+    """True if a worker must not start this queued job because it is no longer runnable.
+
+    The bounded worker pool can leave a job queued (status ``pending``) for a while when
+    all workers are busy. In that window the job may transition out of ``pending`` before
+    a worker dequeues it:
+
+    - the stale-job monitor may mark a long-queued job ``failed``, or a user may
+      ``cancel`` it — starting it anyway would "resurrect" a terminal job (flip it back to
+      ``running``);
+    - the shutdown hook marks active jobs ``interrupted`` for a later resume — a worker
+      dequeuing one before process exit and flipping it to ``running`` would defeat that
+      handoff and leave it un-resumable. (Resume itself first sets the job ``running``, so
+      a legitimately-resumed job is never ``interrupted`` at dequeue time.)
+
+    ``get_blog_job`` returns None only for a genuinely-absent job — transient/HTTP errors
+    raise rather than returning None — so a missing (deleted) job is skipped too.
+
+    Fails OPEN: if the store is unavailable or the preflight read itself raises (a
+    transient job-service outage at dequeue time), this returns False so the job still
+    runs (it starts/heartbeats/fails on its own). Abandoning a valid queued job on a
+    transient read blip would leave it pending until the stale monitor reaps it.
+
+    Preconditions: ``job_id`` is non-empty.
+    Postconditions: pure read; returns a bool (False when the job store is unavailable or
+        the read fails). Only a definitive failed/cancelled/interrupted/missing status
+        returns True.
+    """
+    if get_blog_job is None:
+        return False
+    try:
+        job = get_blog_job(job_id)
+    except Exception:
+        logger.warning(
+            "Preflight status read failed for job %s; proceeding to run it", job_id, exc_info=True
+        )
+        return False
+    return job is None or job.get("status") in (
+        JOB_STATUS_FAILED,
+        JOB_STATUS_CANCELLED,
+        JOB_STATUS_INTERRUPTED,
+    )
+
 
 def _run_blogging_service_shutdown() -> (
     None
@@ -193,6 +338,11 @@ def _run_blogging_service_shutdown() -> (
         _shutdown_event_bus()
     except Exception:
         logger.debug("Event-bus reaper shutdown skipped", exc_info=True)
+
+    # The async-job workers are daemon threads (see _submit_async_job): the interpreter
+    # reclaims them at exit without joining, so no explicit executor teardown is needed —
+    # an in-flight HITL-parked job never blocks process shutdown. Any active jobs were
+    # already marked interrupted above via mark_all_active_jobs_interrupted.
 
 
 # Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.
@@ -631,6 +781,10 @@ def _require_medium_integration() -> None:
 
 def _run_medium_stats_async_job(job_id: str, payload: MediumStatsRequest) -> None:
     """Background worker: scrape Medium stats and write medium_stats_report.json."""
+    if _job_already_terminal(job_id):
+        logger.info("Skipping Medium stats job %s: already terminal/gone before start", job_id)
+        _publish_skip_terminal_event(job_id)
+        return
     cfg = MediumStatsRunConfig(
         headless=payload.headless,
         timeout_ms=payload.timeout_ms,
@@ -690,10 +844,47 @@ def _publish_terminal_event(job_id: str, event_type: str, **kwargs: Any) -> None
         pass
 
 
+def _publish_skip_terminal_event(job_id: str) -> None:
+    """Publish the terminal SSE event for a queued job a worker is skipping.
+
+    When ``_job_already_terminal`` skips a job, a client that subscribed to
+    ``/job/{job_id}/stream`` while the job was still ``pending`` would otherwise keep
+    receiving keepalives until the stream deadline: the stream only closes on a terminal
+    bus event (``complete``/``error``/``cancelled``), and the transition that made the job
+    terminal (stale-monitor fail, user cancel) does not itself publish one. Emit the
+    matching event so the stream closes promptly.
+
+    Best-effort — never raises. An ``interrupted`` job is only ever produced by the
+    shutdown hook (the event bus is being torn down alongside the process, and
+    ``interrupted`` is not a stream-terminal status), and a missing/unreadable job has no
+    meaningful subscriber, so those emit nothing.
+    """
+    if get_blog_job is None:
+        return
+    try:
+        job = get_blog_job(job_id)
+    except Exception:
+        return
+    status = job.get("status") if job else None
+    if status == JOB_STATUS_CANCELLED:
+        _publish_terminal_event(job_id, "cancelled", status=status)
+    elif status == JOB_STATUS_FAILED:
+        _publish_terminal_event(
+            job_id,
+            "error",
+            status=status,
+            error=(job or {}).get("error") or "Job failed before it started.",
+        )
+
+
 def _run_pipeline_with_tracking(
     job_id: str, request: FullPipelineRequest
 ) -> None:  # pragma: no cover - background-thread pipeline driver; depends on the v2 orchestrator (which is itself omitted from coverage as an agent_implementations script) and on live job-store + SSE side effects. Hot paths are exercised end-to-end by integration tests; the request-validation and error-handling branches at the API boundary are covered by the synchronous /full-pipeline tests.
     """Run the full pipeline in a background thread with job tracking."""
+    if _job_already_terminal(job_id):
+        logger.info("Skipping pipeline job %s: already terminal/gone before start", job_id)
+        _publish_skip_terminal_event(job_id)
+        return
     try:
         import sys
         from pathlib import Path
@@ -845,13 +1036,8 @@ def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResp
     except ImportError:
         pass
 
-    # Start pipeline in background thread
-    thread = threading.Thread(
-        target=_run_pipeline_with_tracking,
-        args=(job_id, request),
-        daemon=True,
-    )
-    thread.start()
+    # Submit to the bounded async-job pool (Temporal is preferred when enabled above).
+    _submit_async_job(_run_pipeline_with_tracking, job_id, request)
 
     logger.info("Started async pipeline job %s", job_id)
     return StartPipelineResponse(job_id=job_id, message="Pipeline started")
@@ -909,12 +1095,7 @@ def medium_stats_async(payload: MediumStatsRequest) -> StartPipelineResponse:
         work_dir=work_dir,
         job_type="medium_stats",
     )
-    thread = threading.Thread(
-        target=_run_medium_stats_async_job,
-        args=(job_id, payload),
-        daemon=True,
-    )
-    thread.start()
+    _submit_async_job(_run_medium_stats_async_job, job_id, payload)
     logger.info("Started async Medium stats job %s", job_id)
     return StartPipelineResponse(job_id=job_id, message="Medium statistics job started")
 
@@ -1097,12 +1278,7 @@ def resume_blog_job(job_id: str) -> StartPipelineResponse:
     except ImportError:
         pass
 
-    thread = threading.Thread(
-        target=_run_pipeline_with_tracking,
-        args=(job_id, request),
-        daemon=True,
-    )
-    thread.start()
+    _submit_async_job(_run_pipeline_with_tracking, job_id, request)
     return StartPipelineResponse(job_id=job_id, message="Job resumed")
 
 
@@ -1147,12 +1323,7 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
     except ImportError:
         pass
 
-    thread = threading.Thread(
-        target=_run_pipeline_with_tracking,
-        args=(job_id, request),
-        daemon=True,
-    )
-    thread.start()
+    _submit_async_job(_run_pipeline_with_tracking, job_id, request)
     return StartPipelineResponse(job_id=job_id, message="Job restarted from scratch")
 
 
@@ -1572,24 +1743,32 @@ def list_jobs(running_only: bool = False) -> List[BlogJobListItem]:
 
 
 def _rebuild_api_models() -> None:
-    """Resolve PEP 563 annotations for Pydantic (e.g. dynamic import in tests)."""
+    """Resolve PEP 563 annotations for every Pydantic model defined in this module.
+
+    This module uses ``from __future__ import annotations``, so all annotations
+    are strings at runtime; Pydantic must resolve them against this module's
+    namespace before models with forward references can validate. We scan
+    ``globals()`` for locally-defined ``BaseModel`` subclasses so any model added
+    to this file is rebuilt automatically — there is no hand-maintained list to
+    fall out of sync (a new model that was forgotten would silently keep
+    unresolved annotations).
+
+    Preconditions:
+        - Called after all model classes in this module are defined (the module
+          bottom, or from a test helper once the module has finished executing).
+    Postconditions:
+        - Every ``BaseModel`` subclass defined in this module has its annotations
+          resolved. ``model_rebuild`` is a no-op for already-complete models, so
+          repeat calls are safe (idempotent).
+    Invariants:
+        - ``BaseModel`` subclasses imported from other modules are left untouched
+          (filtered by ``__module__``), matching the resolution scope of the
+          original hand-maintained list.
+    """
     _ns: Dict[str, Any] = {**globals()}
-    for _cls in (
-        AudienceDetails,
-        TitleChoiceResponse,
-        FullPipelineRequest,
-        FullPipelineResponse,
-        BlogJobStatusResponse,
-        BlogJobListItem,
-        ArtifactMeta,
-        ArtifactListResponse,
-        ArtifactContentResponse,
-        StartPipelineResponse,
-        CancelJobResponse,
-        DeleteJobResponse,
-        DraftFeedbackRequest,
-    ):
-        _cls.model_rebuild(_types_namespace=_ns)
+    for _obj in list(_ns.values()):
+        if isinstance(_obj, type) and issubclass(_obj, BaseModel) and _obj.__module__ == __name__:
+            _obj.model_rebuild(_types_namespace=_ns)
 
 
 # ── Story Bank endpoints ─────────────────────────────────────────────────────

@@ -455,9 +455,9 @@ class ProvisioningOrchestrator:
         )
         results["tools"] = tool_results
 
-        for tool, success in tool_results.items():
+        for provisioner_key, success in tool_results.items():
             if not success:
-                errors.append(f"Failed to deprovision {tool}")
+                errors.append(f"Failed to deprovision provisioner '{provisioner_key}'")
 
         docker = self.tool_agents.get("docker_provisioner")
         if docker:
