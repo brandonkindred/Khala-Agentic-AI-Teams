@@ -245,7 +245,7 @@ def build_spec_from_dict(strategy_dict: Dict[str, Any], *, strategy_id: str) -> 
         exit_rules=strategy_dict.get("exit_rules", []),
         sizing=strategy_dict.get("sizing", DEFAULT_SIZING_PAYLOAD),
         target_symbols=strategy_dict.get("target_symbols", []),
-        risk_limits=strategy_dict.get("risk_limits", {}),
+        risk_limits=strategy_dict.get("risk_limits") or {},
         speculative=strategy_dict.get("speculative", False),
         requires_custom_code=_coerce_requires_custom_code(
             strategy_dict.get("requires_custom_code")
@@ -2475,11 +2475,9 @@ class StrategyLabOrchestrator:
              to the generic refinement agent via ``_refine_or_exhaust``.
         """
         if not critical_anomalies:
-            raise OrchestratorContractError(
-                "_handle_critical_anomalies requires at least one critical"
-            )
-        if not (isinstance(market_data, dict) and market_data):
-            raise OrchestratorContractError("market_data must be non-empty")
+            raise ValueError("_handle_critical_anomalies requires at least one critical")
+        if not isinstance(market_data, dict) or not market_data:
+            raise ValueError("market_data must be non-empty")
 
         # ── 1: Build the failure-details prompt block (also used by generic refine) ──
         failure_details = "\n".join(f"- {g.details}" for g in critical_anomalies)

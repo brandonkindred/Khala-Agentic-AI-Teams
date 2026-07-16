@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal
 from typing import Annotated, Any, Callable, Iterator, Literal, Optional, Sequence, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
@@ -826,7 +827,10 @@ def _format_number(x: float) -> str:
     rounded = round(x)
     if math.isclose(x, rounded, rel_tol=1e-12, abs_tol=0) and -1e16 < x < 1e16:
         return str(rounded)
-    return repr(x)
+    # `repr(x)` is the shortest string that round-trips, but for small magnitudes
+    # (e.g. 1e-05) it uses scientific notation the adapter regex can't parse.
+    # Decimal(repr(x)) keeps those exact digits; the "f" format forces plain decimal.
+    return format(Decimal(repr(x)), "f")
 
 
 def _with_source(base: str, source: str) -> str:
