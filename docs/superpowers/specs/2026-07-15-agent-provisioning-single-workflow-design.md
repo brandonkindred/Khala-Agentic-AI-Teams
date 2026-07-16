@@ -1,6 +1,6 @@
 # Agent Provisioning: Single Temporal Workflow (No Legacy)
 
-**Status:** Draft pending user review  
+**Status:** Approved 2026-07-15  
 **Date:** 2026-07-15  
 **Type:** Breaking Temporal cutover for Agent Provisioning
 

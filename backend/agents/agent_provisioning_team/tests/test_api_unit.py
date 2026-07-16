@@ -7,10 +7,10 @@ Marked NON-integration so they run on the default unit lane.
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from agent_provisioning_team.api import main as api_main
@@ -22,6 +22,46 @@ from agent_provisioning_team.models import (
 )
 
 client = TestClient(app)
+
+
+def test_require_provision_starter_is_agent_provisioning_workflow_entry() -> None:
+    """API provision/resume/restart must start AgentProvisioningWorkflow via the Temporal starter."""
+    from agent_provisioning_team.temporal.start_workflow import start_provisioning_workflow
+
+    with patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=True):
+        starter = api_main._require_provision_starter()
+    assert starter is start_provisioning_workflow
+
+
+def test_require_provision_starter_returns_503_when_temporal_check_raises() -> None:
+    with patch(
+        "agent_provisioning_team.temporal.client.is_temporal_enabled",
+        side_effect=RuntimeError("misconfigured"),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            api_main._require_provision_starter()
+    assert exc_info.value.status_code == 503
+
+
+def test_require_provision_starter_returns_503_when_temporal_disabled() -> None:
+    with patch(
+        "agent_provisioning_team.temporal.client.is_temporal_enabled",
+        return_value=False,
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            api_main._require_provision_starter()
+    assert exc_info.value.status_code == 503
+    assert "Temporal" in str(exc_info.value.detail)
+
+
+def test_require_deprovision_runner_returns_503_when_temporal_check_raises() -> None:
+    with patch(
+        "agent_provisioning_team.temporal.client.is_temporal_enabled",
+        side_effect=RuntimeError("misconfigured"),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            api_main._require_deprovision_runner()
+    assert exc_info.value.status_code == 503
 
 
 # ---------------------------------------------------------------------------
@@ -49,68 +89,39 @@ def test_root_endpoint() -> None:
 
 
 def test_provision_routes_to_temporal_when_enabled() -> None:
-    """When a temporal starter is available, /provision delegates to it."""
+    """When Temporal is available, /provision delegates to its starter."""
     fake_starter = MagicMock()
 
     with (
-        patch("agent_provisioning_team.api.main.create_job"),
-        patch.object(api_main, "_temporal_starter", return_value=fake_starter),
+        patch("agent_provisioning_team.api.main.create_job") as mock_create_job,
+        patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
     ):
         r = client.post("/provision", json={"agent_id": "ag-temporal"})
 
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "running"
+    mock_create_job.assert_called_once()
+    assert mock_create_job.call_args.kwargs["agent_id"] == "ag-temporal"
     fake_starter.assert_called_once()
 
 
-def test_provision_uses_thread_path_when_no_temporal() -> None:
+def test_provision_returns_503_when_temporal_disabled() -> None:
+    """Provisioning is Temporal-only: no starter means HTTP 503, not a
+    thread-mode fallback."""
     with (
-        patch("agent_provisioning_team.api.main.create_job"),
-        patch.object(api_main, "_temporal_starter", return_value=None),
-        patch.object(api_main, "_ensure_executor") as mock_ensure,
+        patch("agent_provisioning_team.api.main.create_job") as mock_create_job,
+        patch.object(
+            api_main,
+            "_require_provision_starter",
+            side_effect=HTTPException(status_code=503, detail=api_main._TEMPORAL_REQUIRED_MESSAGE),
+        ),
     ):
-        mock_executor = MagicMock()
-        mock_ensure.return_value = mock_executor
-        r = client.post("/provision", json={"agent_id": "ag-thread"})
+        r = client.post("/provision", json={"agent_id": "ag-no-temporal"})
 
-    assert r.status_code == 200
-    mock_executor.submit.assert_called_once()
-
-
-def test_provision_thread_fallback_env_flag() -> None:
-    """PROVISION_THREAD_FALLBACK=1 forces None starter."""
-    with patch.dict("os.environ", {"PROVISION_THREAD_FALLBACK": "1"}):
-        assert api_main._temporal_starter() is None
-
-
-def test_provision_thread_fallback_with_blank_env() -> None:
-    """A blank value must be treated as not-set (falsy), not as truthy —
-    an empty PROVISION_THREAD_FALLBACK must not force the thread-mode
-    fallback the way "1"/"true"/"yes" do."""
-    with patch.dict("os.environ", {"PROVISION_THREAD_FALLBACK": ""}):
-        assert api_main._provision_thread_fallback() is False
-
-
-def test_provision_thread_fallback_returns_true_for_true() -> None:
-    with patch.dict("os.environ", {"PROVISION_THREAD_FALLBACK": "true"}):
-        assert api_main._provision_thread_fallback() is True
-    with patch.dict("os.environ", {"PROVISION_THREAD_FALLBACK": "yes"}):
-        assert api_main._provision_thread_fallback() is True
-
-
-def test_provision_thread_fallback_delegates_to_shared_predicate() -> None:
-    """_provision_thread_fallback() must consult the single shared escape-hatch
-    check (agent_provisioning_team.temporal.client.provision_thread_fallback_enabled)
-    rather than its own copy of the PROVISION_THREAD_FALLBACK parsing — the same
-    function sandbox_dispatch.sandbox_temporal_enabled() uses, so the two can
-    never independently drift on which spellings disable Temporal."""
-    with patch(
-        "agent_provisioning_team.temporal.client.provision_thread_fallback_enabled",
-        return_value=True,
-    ) as mock_fallback:
-        assert api_main._provision_thread_fallback() is True
-    mock_fallback.assert_called_once()
+    assert r.status_code == 503
+    assert "Temporal" in r.json()["detail"]
+    mock_create_job.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -280,54 +291,111 @@ def test_delete_job_store_returns_false() -> None:
 
 
 def test_resume_job_not_found() -> None:
-    with patch.object(api_main, "get_job", return_value=None):
+    with (
+        patch.object(api_main, "_require_provision_starter", return_value=MagicMock()),
+        patch.object(api_main, "get_job", return_value=None),
+    ):
         r = client.post("/provision/job/missing/resume")
     assert r.status_code == 404
 
 
-def test_resume_job_in_running_state_rejected() -> None:
-    # validate_job_for_action raises ValueError for non-resumable statuses
-    with patch.object(api_main, "get_job", return_value={"status": "running"}):
-        r = client.post("/provision/job/j1/resume")
-    assert r.status_code in (400, 404)
-
-
-def test_resume_job_missing_agent_or_manifest() -> None:
-    with patch.object(
-        api_main,
-        "get_job",
-        return_value={
-            "status": "failed",
-            "agent_id": "",  # missing
-            "manifest_path": "default.yaml",
-        },
+def test_resume_job_in_running_state_rejected_when_workflow_open() -> None:
+    """Active Temporal jobs cannot be resumed (would kill the live run without compensate)."""
+    with (
+        patch.object(api_main, "_require_provision_starter", return_value=MagicMock()),
+        patch.object(
+            api_main,
+            "get_job",
+            return_value={
+                "status": "running",
+                "agent_id": "a1",
+                "manifest_path": "default.yaml",
+            },
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=True,
+        ),
     ):
         r = client.post("/provision/job/j1/resume")
     assert r.status_code == 400
+    assert "cannot be resumed" in r.json()["detail"]
 
 
-def test_resume_job_thread_path() -> None:
+def test_resume_pending_job_when_no_open_workflow() -> None:
+    """Indeterminate start timeouts leave pending jobs recoverable if Temporal never opened."""
+    starter = MagicMock()
     with (
         patch.object(
             api_main,
             "get_job",
             return_value={
-                "status": "failed",
+                "status": "pending",
                 "agent_id": "a1",
                 "manifest_path": "default.yaml",
-                "completed_phases": ["setup"],
-                "phase_results": {"setup": {"success": True, "environment": None}},
+                "completed_phases": [],
+                "phase_results": {},
             },
         ),
-        patch.object(api_main, "update_job"),
-        patch.object(api_main, "_temporal_starter", return_value=None),
-        patch.object(api_main, "_ensure_executor") as mock_ensure,
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
+        ),
+        patch.object(api_main, "_require_provision_starter", return_value=starter),
+        patch.object(api_main, "update_job") as mock_update,
     ):
-        mock_ensure.return_value = MagicMock()
         r = client.post("/provision/job/j1/resume")
+    assert r.status_code == 200
+    starter.assert_called_once()
+    assert starter.call_args.kwargs.get("replace_existing") is True
+    mock_update.assert_called_once_with("j1", status="running", error=None)
+
+
+def test_provision_start_timeout_does_not_mark_job_failed() -> None:
+    """Indeterminate start timeouts leave the job pollable and return job_id."""
+    import concurrent.futures
+
+    with (
+        patch("agent_provisioning_team.api.main.create_job") as mock_create_job,
+        patch.object(
+            api_main,
+            "_require_provision_starter",
+            return_value=MagicMock(side_effect=concurrent.futures.TimeoutError()),
+        ),
+        patch.object(api_main, "mark_job_failed") as mock_fail,
+    ):
+        r = client.post("/provision", json={"agent_id": "ag-timeout"})
 
     assert r.status_code == 200
-    assert r.json()["status"] == "running"
+    body = r.json()
+    assert body["job_id"]
+    assert body["status"] == "pending"
+    assert "timed out" in body["message"].lower()
+    assert body["job_id"] in body["message"]
+    mock_create_job.assert_called_once()
+    assert mock_create_job.call_args.kwargs["agent_id"] == "ag-timeout"
+    mock_fail.assert_not_called()
+
+
+def test_resume_job_missing_agent_or_manifest() -> None:
+    with (
+        patch.object(api_main, "_require_provision_starter", return_value=MagicMock()),
+        patch.object(
+            api_main,
+            "get_job",
+            return_value={
+                "status": "failed",
+                "agent_id": "",  # missing
+                "manifest_path": "default.yaml",
+            },
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
+        ),
+    ):
+        r = client.post("/provision/job/j1/resume")
+    assert r.status_code == 400
 
 
 def test_resume_job_temporal_path() -> None:
@@ -344,13 +412,69 @@ def test_resume_job_temporal_path() -> None:
                 "phase_results": {},
             },
         ),
-        patch.object(api_main, "update_job"),
-        patch.object(api_main, "_temporal_starter", return_value=fake_starter),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
+        ),
+        patch.object(api_main, "update_job") as mock_update,
+        patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
     ):
         r = client.post("/provision/job/j1/resume")
 
     assert r.status_code == 200
     fake_starter.assert_called_once()
+    mock_update.assert_called_once_with("j1", status="running", error=None)
+
+
+def test_resume_job_rejects_when_workflow_still_open() -> None:
+    with (
+        patch.object(api_main, "_require_provision_starter", return_value=MagicMock()),
+        patch.object(
+            api_main,
+            "get_job",
+            return_value={
+                "status": "failed",
+                "agent_id": "a1",
+                "manifest_path": "default.yaml",
+            },
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=True,
+        ),
+    ):
+        r = client.post("/provision/job/j1/resume")
+    assert r.status_code == 400
+    assert "active Temporal workflow" in r.json()["detail"]
+
+
+def test_resume_job_returns_503_when_temporal_disabled() -> None:
+    with (
+        patch.object(
+            api_main,
+            "get_job",
+            return_value={
+                "status": "failed",
+                "agent_id": "a1",
+                "manifest_path": "default.yaml",
+                "completed_phases": [],
+                "phase_results": {},
+            },
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
+        ),
+        patch.object(
+            api_main,
+            "_require_provision_starter",
+            side_effect=HTTPException(status_code=503, detail=api_main._TEMPORAL_REQUIRED_MESSAGE),
+        ),
+    ):
+        r = client.post("/provision/job/j1/resume")
+
+    assert r.status_code == 503
+    assert "Temporal" in r.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -359,40 +483,29 @@ def test_resume_job_temporal_path() -> None:
 
 
 def test_restart_job_not_found() -> None:
-    with patch.object(api_main, "get_job", return_value=None):
+    with (
+        patch.object(api_main, "_require_provision_starter", return_value=MagicMock()),
+        patch.object(api_main, "get_job", return_value=None),
+    ):
         r = client.post("/provision/job/missing/restart")
     assert r.status_code == 404
 
 
 def test_restart_job_missing_agent_or_manifest() -> None:
-    with patch.object(
-        api_main,
-        "get_job",
-        return_value={"status": "completed", "agent_id": "a1", "manifest_path": ""},
-    ):
-        r = client.post("/provision/job/j1/restart")
-    assert r.status_code == 400
-
-
-def test_restart_job_thread_path() -> None:
     with (
+        patch.object(api_main, "_require_provision_starter", return_value=MagicMock()),
         patch.object(
             api_main,
             "get_job",
-            return_value={
-                "status": "completed",
-                "agent_id": "a1",
-                "manifest_path": "default.yaml",
-            },
+            return_value={"status": "completed", "agent_id": "a1", "manifest_path": ""},
         ),
-        patch.object(api_main, "store_reset_job"),
-        patch.object(api_main, "_temporal_starter", return_value=None),
-        patch.object(api_main, "_ensure_executor") as mock_ensure,
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
+        ),
     ):
-        mock_ensure.return_value = MagicMock()
         r = client.post("/provision/job/j1/restart")
-    assert r.status_code == 200
-    assert r.json()["status"] == "running"
+    assert r.status_code == 400
 
 
 def test_restart_job_temporal_path() -> None:
@@ -407,12 +520,43 @@ def test_restart_job_temporal_path() -> None:
                 "manifest_path": "default.yaml",
             },
         ),
-        patch.object(api_main, "store_reset_job"),
-        patch.object(api_main, "_temporal_starter", return_value=fake_starter),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
+        ),
+        patch.object(api_main, "store_reset_job") as mock_reset,
+        patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
     ):
         r = client.post("/provision/job/j1/restart")
     assert r.status_code == 200
+    mock_reset.assert_called_once_with("j1")
     fake_starter.assert_called_once()
+
+
+def test_restart_job_returns_503_when_temporal_disabled() -> None:
+    with (
+        patch.object(
+            api_main,
+            "get_job",
+            return_value={
+                "status": "completed",
+                "agent_id": "a1",
+                "manifest_path": "default.yaml",
+            },
+        ),
+        patch(
+            "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
+            return_value=False,
+        ),
+        patch.object(
+            api_main,
+            "_require_provision_starter",
+            side_effect=HTTPException(status_code=503, detail=api_main._TEMPORAL_REQUIRED_MESSAGE),
+        ),
+    ):
+        r = client.post("/provision/job/j1/restart")
+    assert r.status_code == 503
+    assert "Temporal" in r.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -420,33 +564,41 @@ def test_restart_job_temporal_path() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_deprovision_returns_orchestrator_result() -> None:
+def test_deprovision_returns_runner_result() -> None:
     fake_resp = DeprovisionResponse(agent_id="a1", success=True)
-    with (
-        patch.object(api_main, "_deprovision_starter", return_value=None),
-        patch.object(api_main.orchestrator, "deprovision", return_value=fake_resp),
-    ):
+    fake_runner = MagicMock(return_value=fake_resp.model_dump())
+    with patch.object(api_main, "_require_deprovision_runner", return_value=fake_runner):
         r = client.delete("/environments/a1")
     assert r.status_code == 200
     assert r.json()["agent_id"] == "a1"
     assert r.json()["success"] is True
+    fake_runner.assert_called_once_with("a1", False)
 
 
 def test_deprovision_with_force_flag() -> None:
-    fake_resp = DeprovisionResponse(agent_id="a1", success=True)
     captured = {}
 
-    def fake_dep(agent_id, force=False):
+    def fake_runner(agent_id, force=False):
+        captured["agent_id"] = agent_id
         captured["force"] = force
-        return fake_resp
+        return {"agent_id": agent_id, "success": True, "details": {}, "error": None}
 
-    with (
-        patch.object(api_main, "_deprovision_starter", return_value=None),
-        patch.object(api_main.orchestrator, "deprovision", side_effect=fake_dep),
-    ):
+    with patch.object(api_main, "_require_deprovision_runner", return_value=fake_runner):
         r = client.delete("/environments/a1?force=true")
     assert r.status_code == 200
+    assert captured["agent_id"] == "a1"
     assert captured["force"] is True
+
+
+def test_deprovision_returns_503_when_temporal_disabled() -> None:
+    with patch.object(
+        api_main,
+        "_require_deprovision_runner",
+        side_effect=HTTPException(status_code=503, detail=api_main._TEMPORAL_REQUIRED_MESSAGE),
+    ):
+        r = client.delete("/environments/a1")
+    assert r.status_code == 503
+    assert "Temporal" in r.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -454,16 +606,33 @@ def test_deprovision_with_force_flag() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_deprovision_timeout_returns_success_false() -> None:
+    """Client-side wait timeout must not surface as an unhandled 500."""
+    import concurrent.futures
+
+    with patch.object(
+        api_main,
+        "_require_deprovision_runner",
+        return_value=MagicMock(side_effect=concurrent.futures.TimeoutError()),
+    ):
+        r = client.delete("/environments/a1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is False
+    assert "timed out" in body["error"].lower()
+
+
 def test_get_environment_not_found() -> None:
-    with patch.object(api_main.orchestrator, "get_agent_status", return_value=None):
+    with patch.object(api_main, "_get_agent_status", return_value=None) as mock_status:
         r = client.get("/environments/missing")
     assert r.status_code == 404
+    mock_status.assert_called_once_with("missing")
 
 
 def test_get_environment_returns_status() -> None:
     with patch.object(
-        api_main.orchestrator,
-        "get_agent_status",
+        api_main,
+        "_get_agent_status",
         return_value={
             "agent_id": "a1",
             "status": "ready",
@@ -471,11 +640,12 @@ def test_get_environment_returns_status() -> None:
             "container_name": "agent-a1",
             "tools_provisioned": ["postgresql"],
         },
-    ):
+    ) as mock_status:
         r = client.get("/environments/a1")
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "ready"
+    mock_status.assert_called_once_with("a1")
 
 
 # ---------------------------------------------------------------------------
@@ -484,10 +654,11 @@ def test_get_environment_returns_status() -> None:
 
 
 def test_list_environments_empty() -> None:
-    with patch.object(api_main.orchestrator, "list_agents", return_value=[]):
+    with patch.object(api_main, "_list_agents", return_value=[]) as mock_list:
         r = client.get("/environments")
     assert r.status_code == 200
     assert r.json()["agents"] == []
+    mock_list.assert_called_once_with(status=None)
 
 
 def test_list_environments_with_filter() -> None:
@@ -504,7 +675,7 @@ def test_list_environments_with_filter() -> None:
             }
         ]
 
-    with patch.object(api_main.orchestrator, "list_agents", side_effect=fake_list):
+    with patch.object(api_main, "_list_agents", side_effect=fake_list):
         r = client.get("/environments?status=ready")
     assert r.status_code == 200
     assert captured["status"] == "ready"
@@ -512,250 +683,30 @@ def test_list_environments_with_filter() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Internals: _ensure_executor, _queue_depth, _reject_if_saturated
+# lifespan — Temporal owns in-flight work
 # ---------------------------------------------------------------------------
 
 
-def test_ensure_executor_lazy_construct(monkeypatch) -> None:
-    monkeypatch.setattr(api_main, "_executor", None)
-    ex = api_main._ensure_executor()
-    assert ex is not None
-    # Subsequent call returns same instance
-    assert api_main._ensure_executor() is ex
-    ex.shutdown(wait=True)
-    monkeypatch.setattr(api_main, "_executor", None)
-
-
-def test_queue_depth_zero_when_no_executor(monkeypatch) -> None:
-    monkeypatch.setattr(api_main, "_executor", None)
-    assert api_main._queue_depth() == 0
-
-
-def test_reject_if_saturated_raises_429(monkeypatch) -> None:
-    """When the work queue is full, _reject_if_saturated raises HTTPException 429."""
-    from fastapi import HTTPException
-
-    fake_ex = MagicMock()
-    fake_ex._work_queue.qsize.return_value = 999
-    monkeypatch.setattr(api_main, "_executor", fake_ex)
-    monkeypatch.setattr(api_main, "PROVISION_MAX_QUEUE_DEPTH", 10)
-
-    with pytest.raises(HTTPException) as exc_info:
-        api_main._reject_if_saturated()
-    assert exc_info.value.status_code == 429
-
-
-def test_reject_if_saturated_quiet_when_under_limit(monkeypatch) -> None:
-    fake_ex = MagicMock()
-    fake_ex._work_queue.qsize.return_value = 1
-    monkeypatch.setattr(api_main, "_executor", fake_ex)
-    monkeypatch.setattr(api_main, "PROVISION_MAX_QUEUE_DEPTH", 10)
-    # No exception
-    api_main._reject_if_saturated()
-
-
-# ---------------------------------------------------------------------------
-# _run_provisioning_background
-# ---------------------------------------------------------------------------
-
-
-def test_run_provisioning_background_success_path() -> None:
-    """Successful workflow → mark_job_completed with the redacted result."""
-    from agent_provisioning_team.models import EnvironmentInfo, ProvisioningResult
-
-    env = EnvironmentInfo(container_id="c1", container_name="c1")
-    fake_result = ProvisioningResult(agent_id="a", success=True, environment=env)
+def test_lifespan_shutdown_does_not_compensate_or_fail_jobs() -> None:
+    """API process exit must not tear down Temporal-owned provision jobs."""
+    mark_failed_calls: list[str] = []
 
     with (
-        patch.object(api_main, "mark_job_running") as mock_run,
-        patch.object(api_main, "mark_job_completed") as mock_done,
-        patch.object(api_main, "update_job"),
-        patch.object(api_main.orchestrator, "run_workflow", return_value=fake_result),
-    ):
-        api_main._run_provisioning_background("j1", "a", "default.yaml")
-
-    mock_run.assert_called_once_with("j1")
-    mock_done.assert_called_once()
-
-
-def test_run_provisioning_background_failure_path() -> None:
-    from agent_provisioning_team.models import ProvisioningResult
-
-    fake_result = ProvisioningResult(agent_id="a", success=False, error="boom")
-
-    with (
-        patch.object(api_main, "mark_job_running"),
-        patch.object(api_main, "mark_job_failed") as mock_fail,
-        patch.object(api_main, "update_job"),
-        patch.object(api_main.orchestrator, "run_workflow", return_value=fake_result),
-    ):
-        api_main._run_provisioning_background("j1", "a", "default.yaml")
-
-    mock_fail.assert_called_once()
-    assert "boom" in mock_fail.call_args.kwargs["error"]
-
-
-def test_run_provisioning_background_shutdown_error() -> None:
-    from agent_provisioning_team.orchestrator import ProvisioningShutdownError
-
-    with (
-        patch.object(api_main, "mark_job_running"),
-        patch.object(api_main, "mark_job_failed") as mock_fail,
-        patch.object(
-            api_main.orchestrator,
-            "run_workflow",
-            side_effect=ProvisioningShutdownError(agent_id="a", phase="setup"),
+        patch(
+            "agent_provisioning_team.shared.job_store.mark_all_running_jobs_failed",
+            side_effect=lambda reason: mark_failed_calls.append(reason),
         ),
-    ):
-        api_main._run_provisioning_background("j1", "a", "default.yaml")
-
-    mock_fail.assert_called_once()
-    assert "Shutdown" in mock_fail.call_args.kwargs["error"]
-
-
-def test_run_provisioning_background_generic_exception() -> None:
-    with (
-        patch.object(api_main, "mark_job_running"),
-        patch.object(api_main, "mark_job_failed") as mock_fail,
-        patch.object(api_main.orchestrator, "run_workflow", side_effect=RuntimeError("kaboom")),
-    ):
-        api_main._run_provisioning_background("j1", "a", "default.yaml")
-
-    mock_fail.assert_called_once()
-    assert "kaboom" in mock_fail.call_args.kwargs["error"]
-
-
-def test_run_provisioning_background_job_updater_invokes_update_job() -> None:
-    """The job_updater closure should call update_job with sanitized fields only."""
-    from agent_provisioning_team.models import ProvisioningResult
-
-    captured = []
-
-    def fake_update_job(job_id, **fields):
-        captured.append({"job_id": job_id, **fields})
-
-    fake_result = ProvisioningResult(agent_id="a", success=True)
-
-    def fake_run_workflow(*, agent_id, manifest_path, job_updater, **kw):
-        # Exercise every branch of job_updater
-        job_updater(
-            current_phase="setup",
-            progress=10,
-            current_tool="pg",
-            tools_completed=1,
-            tools_total=3,
-            status_text="hi",
-        )
-        # Empty call should be a no-op
-        job_updater()
-        return fake_result
-
-    with (
-        patch.object(api_main, "mark_job_running"),
-        patch.object(api_main, "mark_job_completed"),
-        patch.object(api_main, "update_job", side_effect=fake_update_job),
-        patch.object(api_main.orchestrator, "run_workflow", side_effect=fake_run_workflow),
-    ):
-        api_main._run_provisioning_background("j1", "a", "default.yaml")
-
-    # The first call should have written every field; the empty call is filtered out.
-    assert len(captured) == 1
-    assert captured[0]["current_phase"] == "setup"
-    assert captured[0]["progress"] == 10
-
-
-# ---------------------------------------------------------------------------
-# _graceful_shutdown + _safe_compensate
-# ---------------------------------------------------------------------------
-
-
-def test_safe_compensate_swallows_exceptions(monkeypatch) -> None:
-    with patch.object(api_main.orchestrator, "_compensate", side_effect=RuntimeError("ugh")):
-        # Must not raise
-        api_main._safe_compensate("a1")
-
-
-def test_graceful_shutdown_drains_executor(monkeypatch) -> None:
-    """The graceful shutdown path waits for the executor + marks running jobs failed."""
-
-    monkeypatch.setattr(api_main, "_executor", None)
-    api_main._ensure_executor()
-    monkeypatch.setattr(api_main, "SHUTDOWN_GRACE_S", 1.0)
-
-    with (
-        patch.object(api_main, "list_jobs", return_value=[]),
-        patch.object(api_main, "mark_all_running_jobs_failed"),
-    ):
-        asyncio.run(api_main._graceful_shutdown())
-
-
-def test_graceful_shutdown_list_jobs_failure(monkeypatch) -> None:
-    """If list_jobs raises, shutdown still completes."""
-    monkeypatch.setattr(api_main, "_executor", None)
-    api_main._ensure_executor()
-
-    with (
-        patch.object(api_main, "list_jobs", side_effect=RuntimeError("db down")),
-        patch.object(api_main, "mark_all_running_jobs_failed"),
-    ):
-        asyncio.run(api_main._graceful_shutdown())
-
-
-def test_graceful_shutdown_mark_all_failure_swallowed(monkeypatch) -> None:
-    monkeypatch.setattr(api_main, "_executor", None)
-    api_main._ensure_executor()
-
-    with (
-        patch.object(api_main, "list_jobs", return_value=[]),
-        patch.object(
-            api_main,
-            "mark_all_running_jobs_failed",
-            side_effect=RuntimeError("io"),
-        ),
-    ):
-        asyncio.run(api_main._graceful_shutdown())
-
-
-def test_graceful_shutdown_compensates_inflight_jobs(monkeypatch) -> None:
-    """Active jobs with agent_id get _compensate'd via the safe wrapper."""
-    monkeypatch.setattr(api_main, "_executor", None)
-    api_main._ensure_executor()
-    monkeypatch.setattr(api_main, "COMPENSATE_TIMEOUT_S", 1.0)
-
-    compensated = []
-
-    def fake_compensate(agent_id, tool_results):
-        compensated.append(agent_id)
-
-    with (
         patch.object(
             api_main,
             "list_jobs",
-            return_value=[
-                {"agent_id": "a1", "status": "running"},
-                {"agent_id": "a2", "status": "running"},
-                {"status": "running"},  # missing agent_id is skipped
-            ],
+            return_value=[{"agent_id": "a1", "status": "running"}],
         ),
-        patch.object(api_main.orchestrator, "_compensate", side_effect=fake_compensate),
-        patch.object(api_main, "mark_all_running_jobs_failed"),
     ):
-        asyncio.run(api_main._graceful_shutdown())
+        with TestClient(api_main.app):
+            pass
 
-    assert set(compensated) == {"a1", "a2"}
-
-
-def test_submit_provisioning_job_tracks_future(monkeypatch) -> None:
-    """Submitted jobs land in _inflight; the done callback removes them."""
-    monkeypatch.setattr(api_main, "_executor", None)
-    api_main._ensure_executor()
-
-    def quick(*a, **k):
-        return None
-
-    with patch.object(api_main, "_run_provisioning_background", side_effect=quick):
-        api_main._submit_provisioning_job("job-zzz", "agent-x", "default.yaml")
-
-    # The submitted job will likely have completed already; the done-callback
-    # cleans up _inflight so it may or may not be present, but executor was used.
-    assert api_main._executor is not None
+    assert mark_failed_calls == []
+    assert not hasattr(api_main, "orchestrator")
+    assert not hasattr(api_main, "_graceful_shutdown")
+    assert not hasattr(api_main, "_safe_compensate")
+    assert not hasattr(api_main, "COMPENSATE_TIMEOUT_S")

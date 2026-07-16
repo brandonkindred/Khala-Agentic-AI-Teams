@@ -4,24 +4,28 @@ FastAPI endpoints for the Agent Provisioning Team.
 Provides REST API for provisioning, status tracking, and deprovisioning.
 """
 
-import asyncio
+import concurrent.futures
 import contextlib
 import logging
-import os
-import threading
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from temporalio.exceptions import TemporalError, WorkflowAlreadyStartedError
 
-from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
+from job_service_client import (
+    JOB_STATUS_FAILED,
+    JOB_STATUS_INTERRUPTED,
+    RESTARTABLE_STATUSES,
+    validate_job_for_action,
+)
 from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 
 from ..models import (
     DeprovisionResponse,
+    Phase,
     ProvisioningResult,
     ProvisionJobResponse,
     ProvisionJobsListResponse,
@@ -29,8 +33,8 @@ from ..models import (
     ProvisionRequest,
     ProvisionStatusResponse,
 )
-from ..orchestrator import ProvisioningOrchestrator, ProvisioningShutdownError
-from ..phases.deliver import redact_credentials_for_response
+from ..shared.environment_queries import get_agent_status_dict, list_agent_status_dicts
+from ..shared.environment_store import EnvironmentStore
 from ..shared.job_store import (
     JOB_STATUS_COMPLETED,
     JOB_STATUS_PENDING,
@@ -38,10 +42,7 @@ from ..shared.job_store import (
     create_job,
     get_job,
     list_jobs,
-    mark_all_running_jobs_failed,
-    mark_job_completed,
     mark_job_failed,
-    mark_job_running,
     update_job,
 )
 from ..shared.job_store import (
@@ -59,183 +60,280 @@ logger = logging.getLogger(__name__)
 init_otel(service_name="agent-provisioning-team", team_key="agent_provisioning")
 
 
-# Bounded-concurrency config. Defaults tuned for a single pod; override via env.
-PROVISION_MAX_WORKERS = int(os.getenv("PROVISION_MAX_WORKERS", "8"))
-PROVISION_MAX_QUEUE_DEPTH = int(os.getenv("PROVISION_MAX_QUEUE_DEPTH", "32"))
-SHUTDOWN_GRACE_S = float(os.getenv("SHUTDOWN_GRACE_S", "30"))
-COMPENSATE_TIMEOUT_S = float(os.getenv("COMPENSATE_TIMEOUT_S", "15"))
+_TEMPORAL_REQUIRED_MESSAGE = "Temporal is required for agent provisioning (set TEMPORAL_ADDRESS)"
+
+# Resume is for interrupted/failed jobs only. ``running``/``pending`` share a stable
+# Temporal workflow id (``agent-provisioning-{job_id}``); a second start fails with
+# WorkflowAlreadyStartedError while the original keeps running — marking failed on
+# that error would corrupt a live job.
+PROVISION_RESUMABLE_STATUSES: frozenset[str] = frozenset(
+    {
+        JOB_STATUS_FAILED,
+        JOB_STATUS_INTERRUPTED,
+        "agent_crash",
+    }
+)
+
+# When start acceptance times out we leave pending/running; those are recoverable
+# only if Temporal has no open execution for the stable workflow id. Replacing an
+# open live run would terminate it without compensation and can leak resources.
+_STRANDED_START_STATUSES: frozenset[str] = frozenset(
+    {JOB_STATUS_PENDING, JOB_STATUS_RUNNING}
+)
 
 
-def _provision_thread_fallback() -> bool:
-    """Escape hatch: force the legacy thread path even when TEMPORAL_ADDRESS is set.
+def _is_indeterminate_workflow_start(exc: BaseException) -> bool:
+    """True when Temporal may still have accepted the start (caller must not fail the job)."""
+    return isinstance(exc, (TimeoutError, concurrent.futures.TimeoutError))
 
-    Delegates to the shared, single-source-of-truth check in
-    ``temporal.client.provision_thread_fallback_enabled`` — also used by
-    ``sandbox_dispatch.sandbox_temporal_enabled`` — so provisioning, deprovision,
-    and the sandbox lifecycle can never independently drift on which env-var
-    spellings disable Temporal.
+
+def _fail_job_after_start_error(job_id: str, exc: BaseException) -> None:
+    """Mark ``job_id`` failed unless ``exc`` leaves start acceptance indeterminate.
+
+    Preconditions:
+        * ``job_id`` is a non-empty string identifying an existing job row
+          (or a row the job service will accept updates for).
+        * ``exc`` is the exception raised while dispatching the Temporal start.
+    Postconditions:
+        * If ``exc`` is an indeterminate workflow-start timeout
+          (``TimeoutError`` / ``concurrent.futures.TimeoutError``): the job
+          store is left unchanged and a warning is logged — Temporal may still
+          accept and run the workflow.
+        * If ``exc`` is ``WorkflowAlreadyStartedError``: the job is left
+          unchanged (a concurrent start already owns the live run).
+        * Otherwise: the job is marked failed via ``mark_job_failed`` with
+          ``error=str(exc)``.
     """
-    from agent_provisioning_team.temporal.client import provision_thread_fallback_enabled
-
-    return provision_thread_fallback_enabled()
-
-
-def _temporal_starter():
-    """Return ``start_provisioning_workflow`` when /provision should dispatch
-    to Temporal (V2), else ``None``. Returns None on import error or when the
-    PROVISION_THREAD_FALLBACK escape hatch is set, so callers can branch on a
-    single value."""
-    if _provision_thread_fallback():
-        return None
-    try:
-        from agent_provisioning_team.temporal.client import is_temporal_enabled
-        from agent_provisioning_team.temporal.start_workflow import start_provisioning_workflow
-    except ImportError:
-        return None
-    return start_provisioning_workflow if is_temporal_enabled() else None
-
-
-def _deprovision_starter():
-    """Return ``run_deprovision_workflow`` when ``DELETE /environments/{id}``
-    should run the deprovision as a durable Temporal workflow, else ``None`` so
-    the caller falls back to the in-process ``orchestrator.deprovision`` call.
-
-    Mirrors :func:`_temporal_starter`: honors the ``PROVISION_THREAD_FALLBACK``
-    escape hatch and returns ``None`` on import error or when Temporal is off."""
-    if _provision_thread_fallback():
-        return None
-    try:
-        from agent_provisioning_team.temporal.client import is_temporal_enabled
-        from agent_provisioning_team.temporal.start_workflow import run_deprovision_workflow
-    except ImportError:
-        return None
-    return run_deprovision_workflow if is_temporal_enabled() else None
-
-
-_executor: Optional[ThreadPoolExecutor] = None
-_shutdown_event: threading.Event = threading.Event()
-_inflight: Dict[str, Future] = {}
-_inflight_lock = threading.Lock()
-
-
-def _ensure_executor() -> ThreadPoolExecutor:
-    """Lazy-init the provisioning executor.
-
-    Normally created by the lifespan hook; this fallback covers tests that
-    use `TestClient(app)` without entering its context manager."""
-    global _executor
-    if _executor is None or _executor._shutdown:  # noqa: SLF001
-        _executor = ThreadPoolExecutor(
-            max_workers=PROVISION_MAX_WORKERS,
-            thread_name_prefix="provision-worker",
+    assert job_id, "job_id must be non-empty"
+    if _is_indeterminate_workflow_start(exc):
+        logger.warning(
+            "Temporal start timed out for job=%s; not marking failed (workflow may still run): %s",
+            job_id,
+            exc,
         )
-    return _executor
+        return
+    if isinstance(exc, WorkflowAlreadyStartedError):
+        logger.warning(
+            "Temporal workflow already started for job=%s; not marking failed: %s",
+            job_id,
+            exc,
+        )
+        return
+    mark_job_failed(job_id, error=str(exc))
 
 
-def _queue_depth() -> int:
-    """Count of tasks waiting for a slot. Uses _work_queue (private but stable
-    across CPython 3.10+; documented in cpython/Lib/concurrent/futures/thread.py)."""
-    ex = _executor
-    if ex is None:
-        return 0
-    return ex._work_queue.qsize()  # noqa: SLF001
+class ProvisionStarter(Protocol):
+    """Callable that starts ``AgentProvisioningWorkflow`` for a job."""
+
+    def __call__(
+        self,
+        job_id: str,
+        agent_id: str,
+        manifest_path: str,
+        *,
+        skip_phases: Optional[List[str]] = None,
+        prior_results: Optional[Dict[str, Any]] = None,
+        replace_existing: bool = False,
+    ) -> None: ...
 
 
-def _reject_if_saturated() -> None:
-    """Raise HTTP 429 when the pending queue exceeds PROVISION_MAX_QUEUE_DEPTH.
-    Call BEFORE `create_job()` so we don't leave orphan PENDING rows."""
-    if _queue_depth() >= PROVISION_MAX_QUEUE_DEPTH:
+def _invoke_provision_starter(
+    starter: ProvisionStarter,
+    *,
+    job_id: str,
+    agent_id: str,
+    manifest_path: str,
+    skip_phases: Optional[List[str]],
+    prior_results: Optional[Dict[str, Any]],
+    success_message: str,
+    failure_verb: str,
+    replace_existing: bool = False,
+    indeterminate_status: str = JOB_STATUS_PENDING,
+) -> ProvisionJobResponse:
+    """Dispatch a provision workflow start and normalize success / error responses.
+
+    Preconditions:
+        * ``starter`` is the callable returned by ``_require_provision_starter``.
+        * ``job_id``, ``agent_id``, and ``manifest_path`` are non-empty.
+        * Job-store mutations that prepare the row (create / update / reset)
+          have already run for ``job_id``.
+    Postconditions:
+        * On accepted start: returns ``ProvisionJobResponse`` with
+          ``status=running`` and ``success_message``.
+        * On indeterminate start timeout: does **not** mark the job failed;
+          returns ``ProvisionJobResponse`` with ``job_id`` and
+          ``indeterminate_status`` so the caller can poll
+          ``GET /provision/status/{job_id}``.
+        * On ``WorkflowAlreadyStartedError``: raises HTTP 409 without failing
+          the job (concurrent resume/restart lost the race).
+        * On other start failures: marks the job failed (via
+          ``_fail_job_after_start_error``) and raises HTTP 503.
+    """
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
+    assert manifest_path, "manifest_path must be non-empty"
+    try:
+        kwargs: Dict[str, Any] = {
+            "skip_phases": skip_phases,
+            "prior_results": prior_results,
+        }
+        if replace_existing:
+            kwargs["replace_existing"] = True
+        starter(job_id, agent_id, manifest_path, **kwargs)
+    except WorkflowAlreadyStartedError as exc:
+        _fail_job_after_start_error(job_id, exc)
         raise HTTPException(
-            status_code=429,
+            status_code=409,
             detail=(
-                f"Provisioning queue saturated "
-                f"({PROVISION_MAX_QUEUE_DEPTH} jobs waiting). Retry later."
+                f"A provisioning workflow is already running for job {job_id}; "
+                f"poll GET /provision/status/{job_id}."
             ),
-        )
-
-
-def _submit_provisioning_job(job_id: str, *args: Any, **kwargs: Any) -> None:
-    """Submit to the bounded executor and track the future for shutdown."""
-    executor = _ensure_executor()
-    kwargs.setdefault("shutdown_event", _shutdown_event)
-    future = executor.submit(_run_provisioning_background, job_id, *args, **kwargs)
-    with _inflight_lock:
-        _inflight[job_id] = future
-
-    def _cleanup(_f: Future) -> None:
-        with _inflight_lock:
-            _inflight.pop(job_id, None)
-
-    future.add_done_callback(_cleanup)
-
-
-def _safe_compensate(agent_id: str) -> None:
-    try:
-        # Passes [] so the orchestrator only runs the tail (docker teardown,
-        # credential delete, env cleanup). Per-tool rollback on SIGTERM isn't
-        # wired up from here — per-job tool_results aren't plumbed through
-        # job_store today. Tracked alongside #258/#293; out of scope for #293.
-        orchestrator._compensate(agent_id, [])  # noqa: SLF001
-    except Exception:
-        logger.exception("Compensate raised for agent=%s", agent_id)
-
-
-async def _graceful_shutdown() -> None:
-    """Signal cooperative cancel, drain the executor within SHUTDOWN_GRACE_S,
-    compensate any still-running job with COMPENSATE_TIMEOUT_S per job, then
-    backstop with mark_all_running_jobs_failed."""
-    _shutdown_event.set()
-
-    executor = _executor
-    if executor is not None:
-        loop = asyncio.get_running_loop()
-        try:
-            await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: executor.shutdown(wait=True, cancel_futures=True),
+        ) from exc
+    except Exception as exc:
+        _fail_job_after_start_error(job_id, exc)
+        if _is_indeterminate_workflow_start(exc):
+            return ProvisionJobResponse(
+                job_id=job_id,
+                status=indeterminate_status,
+                message=(
+                    f"Temporal {failure_verb} acceptance timed out; the workflow may still "
+                    f"run. Poll GET /provision/status/{job_id}."
                 ),
-                timeout=SHUTDOWN_GRACE_S,
             )
-        except asyncio.TimeoutError:
-            logger.warning("Provisioning executor did not drain within %.1fs", SHUTDOWN_GRACE_S)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to {failure_verb} Temporal workflow: {exc}",
+        ) from exc
+    return ProvisionJobResponse(
+        job_id=job_id,
+        status=JOB_STATUS_RUNNING,
+        message=success_message,
+    )
 
+
+def _validate_job_for_reprovision(
+    job_id: str,
+    allowed_statuses: frozenset[str],
+    action_label: str,
+) -> Dict[str, Any]:
+    """Validate resume/restart without replacing a live Temporal execution.
+
+    Preconditions:
+        * ``job_id`` is non-empty.
+        * ``allowed_statuses`` is the normal gate for ``action_label``.
+    Postconditions:
+        * Returns job data when status is allowed (or stranded pending/running)
+          and no open Temporal workflow exists for the stable id.
+        * Raises ``ValueError`` when the job is missing, has an open workflow,
+          or is otherwise not actionable.
+    """
+    data = get_job(job_id)
+    if not data:
+        raise ValueError(f"Job {job_id} not found")
     try:
-        active_jobs = list_jobs(running_only=True)
-    except Exception:
-        logger.exception("list_jobs failed during shutdown; skipping per-job compensate")
-        active_jobs = []
+        validate_job_for_action(data, job_id, allowed_statuses, action_label)
+    except ValueError:
+        status = data.get("status", JOB_STATUS_PENDING)
+        if status not in _STRANDED_START_STATUSES:
+            raise
+        logger.info(
+            "Candidate stranded job=%s status=%s for %s; checking Temporal open state",
+            job_id,
+            status,
+            action_label,
+        )
+    # Deferred import: api.main is loaded at process boot; pulling
+    # temporal.start_workflow at module top can create import cycles with
+    # the Temporal package self-boot path (Pattern A).
+    from agent_provisioning_team.temporal.start_workflow import (
+        provisioning_workflow_is_open,
+    )
 
-    for job in active_jobs:
-        agent_id = job.get("agent_id")
-        if not agent_id:
-            continue
-        t = threading.Thread(target=_safe_compensate, args=(agent_id,), daemon=True)
-        t.start()
-        t.join(timeout=COMPENSATE_TIMEOUT_S)
-        if t.is_alive():
-            logger.warning(
-                "Compensate for agent=%s exceeded %.1fs; moving on",
-                agent_id,
-                COMPENSATE_TIMEOUT_S,
-            )
+    if provisioning_workflow_is_open(job_id):
+        raise ValueError(
+            f"Job {job_id} has an active Temporal workflow; cannot be {action_label}"
+        )
+    return data
 
+
+def _ensure_temporal_enabled() -> None:
+    """Raise HTTP 503 when Temporal is disabled or unavailable.
+
+    Preconditions:
+        * None — reads process env / Temporal client state only.
+    Postconditions:
+        * Returns normally when Temporal is enabled.
+        * Raises ``HTTPException(status_code=503)`` when Temporal is disabled,
+          the temporal client module fails to import, or the availability check
+          raises.
+    """
     try:
-        mark_all_running_jobs_failed("shutdown")
-    except Exception:
-        logger.exception("mark_all_running_jobs_failed failed during shutdown")
+        from agent_provisioning_team.temporal.client import is_temporal_enabled
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
+    try:
+        enabled = is_temporal_enabled()
+    except Exception as exc:
+        logger.exception("Temporal availability check failed")
+        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
+    if not enabled:
+        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE)
+
+
+def _require_provision_starter():
+    """Return the ``start_provisioning_workflow`` callable, or raise HTTP 503.
+
+    Provisioning is Temporal-only: there is no in-process thread fallback, so
+    every write endpoint that starts a workflow (``/provision``, resume,
+    restart) must go through this helper before mutating job-store state.
+
+    Preconditions:
+        * None — reads process env / Temporal client state only.
+    Postconditions:
+        * Returns the ``start_provisioning_workflow`` callable when Temporal
+          is enabled and importable.
+        * Raises ``HTTPException(status_code=503)`` otherwise (Temporal
+          disabled, or the ``temporal`` submodule fails to import).
+    """
+    _ensure_temporal_enabled()
+    try:
+        from agent_provisioning_team.temporal.start_workflow import start_provisioning_workflow
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
+    return start_provisioning_workflow
+
+
+def _require_deprovision_runner():
+    """Return the ``run_deprovision_workflow`` callable, or raise HTTP 503.
+
+    Mirrors :func:`_require_provision_starter` for the deprovision path:
+    deprovisioning is Temporal-only, no in-process orchestrator fallback.
+
+    Preconditions:
+        * None — reads process env / Temporal client state only.
+    Postconditions:
+        * Returns the ``run_deprovision_workflow`` callable when Temporal is
+          enabled and importable.
+        * Raises ``HTTPException(status_code=503)`` otherwise.
+    """
+    _ensure_temporal_enabled()
+    try:
+        from agent_provisioning_team.temporal.start_workflow import run_deprovision_workflow
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
+    return run_deprovision_workflow
 
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    _ensure_executor()
-    _shutdown_event.clear()
-    app.state.executor = _executor
-    app.state.shutdown_event = _shutdown_event
-    try:
-        yield
-    finally:
-        await _graceful_shutdown()
+    """API lifespan.
+
+    Provisioning/deprovisioning are Temporal-owned. On pod restart this process
+    must not mark running jobs failed or compensate agents — that would race
+    durable workflows that continue on the Temporal worker and may later update
+    the same job_store rows.
+    """
+    yield
 
 
 app = FastAPI(
@@ -254,68 +352,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-orchestrator = ProvisioningOrchestrator()
+_environment_store = EnvironmentStore()
 
 
-def _run_provisioning_background(
-    job_id: str,
-    agent_id: str,
-    manifest_path: str,
-    skip_phases: Optional[set] = None,
-    prior_results: Optional[Dict[str, Any]] = None,
-    shutdown_event: Optional[threading.Event] = None,
-) -> None:
-    """Executor-target function for running the provisioning workflow."""
-    try:
-        mark_job_running(job_id)
+def _get_agent_status(agent_id: str) -> Optional[Dict[str, Any]]:
+    """Read-only agent status via shared ``EnvironmentStore`` queries."""
+    return get_agent_status_dict(_environment_store, agent_id)
 
-        def job_updater(
-            current_phase: Optional[str] = None,
-            progress: Optional[int] = None,
-            current_tool: Optional[str] = None,
-            tools_completed: Optional[int] = None,
-            tools_total: Optional[int] = None,
-            status_text: Optional[str] = None,
-        ) -> None:
-            """Callback to update job status during workflow execution."""
-            updates: Dict[str, Any] = {}
 
-            if current_phase is not None:
-                updates["current_phase"] = current_phase
-            if progress is not None:
-                updates["progress"] = progress
-            if current_tool is not None:
-                updates["current_tool"] = current_tool
-            if tools_completed is not None:
-                updates["tools_completed"] = tools_completed
-            if tools_total is not None:
-                updates["tools_total"] = tools_total
-            if status_text is not None:
-                updates["status_text"] = status_text
-
-            if updates:
-                update_job(job_id, **updates)
-
-        result = orchestrator.run_workflow(
-            agent_id=agent_id,
-            manifest_path=manifest_path,
-            job_updater=job_updater,
-            skip_phases=skip_phases,
-            prior_results=prior_results,
-            shutdown_event=shutdown_event,
-        )
-
-        if result.success:
-            redacted = redact_credentials_for_response(result)
-            mark_job_completed(job_id, result=redacted.model_dump())
-        else:
-            mark_job_failed(job_id, error=result.error or "Provisioning failed")
-
-    except ProvisioningShutdownError as e:
-        # Orchestrator has already compensated; just record terminal state.
-        mark_job_failed(job_id, error=f"Shutdown during {e.phase}")
-    except Exception as e:
-        mark_job_failed(job_id, error=str(e))
+def _list_agents(status: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List provisioned agents via shared ``EnvironmentStore`` queries."""
+    return list_agent_status_dicts(_environment_store, status=status)
 
 
 @app.post(
@@ -326,11 +373,20 @@ def _run_provisioning_background(
     "Returns a job_id to poll for status.",
 )
 def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
-    """Start a new provisioning job."""
-    # Apply thread-pool backpressure only on the thread path; Temporal has its own queueing.
-    starter = _temporal_starter()
-    if starter is None:
-        _reject_if_saturated()
+    """Start a new provisioning job.
+
+    Preconditions:
+        * Temporal must be enabled (raises HTTP 503 otherwise, before any
+          job-store row is created).
+    Postconditions:
+        * On accepted Temporal start: a job row exists and the returned
+          ``ProvisionJobResponse`` carries its ``job_id`` with ``running`` status.
+        * On indeterminate start timeout: the job is left non-terminal and the
+          response still includes ``job_id`` so the client can poll status.
+        * On other Temporal dispatch failures: the job is marked failed and
+          HTTP 503 is raised.
+    """
+    starter = _require_provision_starter()
 
     job_id = str(uuid.uuid4())
     create_job(
@@ -339,30 +395,18 @@ def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
         manifest_path=request.manifest_path,
     )
 
-    if starter is not None:
-        starter(
-            job_id,
-            request.agent_id,
-            request.manifest_path,
-            skip_phases=None,
-            prior_results=None,
-        )
-        return ProvisionJobResponse(
-            job_id=job_id,
-            status=JOB_STATUS_RUNNING,
-            message="Provisioning started (Temporal). Poll GET /provision/status/{job_id} for progress.",
-        )
-
-    _submit_provisioning_job(
-        job_id,
-        request.agent_id,
-        request.manifest_path,
-    )
-
-    return ProvisionJobResponse(
+    return _invoke_provision_starter(
+        starter,
         job_id=job_id,
-        status=JOB_STATUS_RUNNING,
-        message="Provisioning started. Poll GET /provision/status/{job_id} for progress.",
+        agent_id=request.agent_id,
+        manifest_path=request.manifest_path,
+        skip_phases=None,
+        prior_results=None,
+        success_message=(
+            "Provisioning started (Temporal). Poll GET /provision/status/{job_id} for progress."
+        ).format(job_id=job_id),
+        failure_verb="start",
+        indeterminate_status=JOB_STATUS_PENDING,
     )
 
 
@@ -480,9 +524,18 @@ def delete_provision_job(job_id: str) -> DeleteProvisionJobResponse:
     description="Re-enter the provisioning pipeline at the last completed phase.",
 )
 def resume_provision_job(job_id: str) -> ProvisionJobResponse:
-    """Resume a provisioning job from its last checkpoint."""
+    """Resume a provisioning job from its last checkpoint.
+
+    Preconditions:
+        * Temporal must be enabled (raises HTTP 503 otherwise, before the
+          job's status is mutated).
+    Postconditions:
+        * On success, the job is set to ``JOB_STATUS_RUNNING`` and the
+          workflow is restarted skipping ``completed_phases``.
+    """
+    starter = _require_provision_starter()
     try:
-        data = validate_job_for_action(get_job(job_id), job_id, RESUMABLE_STATUSES, "resumed")
+        data = _validate_job_for_reprovision(job_id, PROVISION_RESUMABLE_STATUSES, "resumed")
     except ValueError as exc:
         code = 404 if "not found" in str(exc) else 400
         raise HTTPException(status_code=code, detail=str(exc)) from exc
@@ -495,40 +548,22 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
     completed = data.get("completed_phases", [])
     phase_results = data.get("phase_results", {})
 
-    from ..models import Phase
-
     phase_values = {ph.value for ph in Phase}
     completed_values = [p for p in completed if p in phase_values]
 
-    starter = _temporal_starter()
     update_job(job_id, status=JOB_STATUS_RUNNING, error=None)
 
-    if starter is not None:
-        starter(
-            job_id,
-            agent_id,
-            manifest_path,
-            skip_phases=completed_values,
-            prior_results=phase_results,
-        )
-        return ProvisionJobResponse(
-            job_id=job_id,
-            status="running",
-            message="Job resumed (Temporal). Skipping completed phases.",
-        )
-
-    _reject_if_saturated()
-    skip = {Phase(p) for p in completed_values}
-    _submit_provisioning_job(
-        job_id,
-        agent_id,
-        manifest_path,
-        skip_phases=skip,
+    return _invoke_provision_starter(
+        starter,
+        job_id=job_id,
+        agent_id=agent_id,
+        manifest_path=manifest_path,
+        skip_phases=completed_values,
         prior_results=phase_results,
-    )
-
-    return ProvisionJobResponse(
-        job_id=job_id, status="running", message="Job resumed. Skipping completed phases."
+        replace_existing=True,
+        success_message="Job resumed (Temporal). Skipping completed phases.",
+        failure_verb="resume",
+        indeterminate_status=JOB_STATUS_RUNNING,
     )
 
 
@@ -539,9 +574,20 @@ def resume_provision_job(job_id: str) -> ProvisionJobResponse:
     description="Reset the job and re-run the full pipeline with the same inputs.",
 )
 def restart_provision_job(job_id: str) -> ProvisionJobResponse:
-    """Restart a provisioning job from the beginning."""
+    """Restart a provisioning job from the beginning.
+
+    Preconditions:
+        * Temporal must be enabled (raises HTTP 503 otherwise, before the
+          job is reset).
+    Postconditions:
+        * On success, the job is reset and a fresh workflow run is started
+          with no skipped phases.
+        * On indeterminate start timeout: the reset job is left non-terminal
+          and the response still includes ``job_id`` for polling.
+    """
+    starter = _require_provision_starter()
     try:
-        data = validate_job_for_action(get_job(job_id), job_id, RESTARTABLE_STATUSES, "restarted")
+        data = _validate_job_for_reprovision(job_id, RESTARTABLE_STATUSES, "restarted")
     except ValueError as exc:
         code = 404 if "not found" in str(exc) else 400
         raise HTTPException(status_code=code, detail=str(exc)) from exc
@@ -551,32 +597,19 @@ def restart_provision_job(job_id: str) -> ProvisionJobResponse:
     if not agent_id or not manifest_path:
         raise HTTPException(status_code=400, detail="Job is missing agent_id or manifest_path.")
 
-    starter = _temporal_starter()
     store_reset_job(job_id)
 
-    if starter is not None:
-        starter(
-            job_id,
-            agent_id,
-            manifest_path,
-            skip_phases=None,
-            prior_results=None,
-        )
-        return ProvisionJobResponse(
-            job_id=job_id,
-            status="running",
-            message="Job restarted (Temporal) from scratch.",
-        )
-
-    _reject_if_saturated()
-    _submit_provisioning_job(
-        job_id,
-        agent_id,
-        manifest_path,
-    )
-
-    return ProvisionJobResponse(
-        job_id=job_id, status="running", message="Job restarted from scratch."
+    return _invoke_provision_starter(
+        starter,
+        job_id=job_id,
+        agent_id=agent_id,
+        manifest_path=manifest_path,
+        skip_phases=None,
+        prior_results=None,
+        replace_existing=True,
+        success_message="Job restarted (Temporal) from scratch.",
+        failure_verb="restart",
+        indeterminate_status=JOB_STATUS_PENDING,
     )
 
 
@@ -592,33 +625,65 @@ def deprovision_agent(
 ) -> DeprovisionResponse:
     """Deprovision an agent and remove all resources.
 
-    Runs as a durable ``AgentDeprovisioningWorkflow`` when Temporal is enabled
-    (execute-and-wait, so the response shape is unchanged), and falls back to
-    the in-process ``orchestrator.deprovision`` call otherwise. This handler is
-    a sync ``def`` — FastAPI runs it in its threadpool — so the blocking
-    execute-and-wait dispatch does not stall the event loop.
+    Runs as a durable ``AgentDeprovisioningWorkflow`` (execute-and-wait, so
+    the response shape is unchanged). This handler is a sync ``def`` —
+    FastAPI runs it in its threadpool — so the blocking execute-and-wait
+    dispatch does not stall the event loop.
 
+    Preconditions:
+        * Temporal must be enabled and the shared client/loop must be ready
+          (raises HTTP 503 otherwise).
     Postconditions:
-        * Always returns a ``DeprovisionResponse`` — never raises. Matches the
-          pre-Temporal contract of ``orchestrator.deprovision`` (which never
-          raises either): an infrastructure-level failure of the Temporal
-          dispatch itself (client not ready, timeout, workflow failure) is
-          reported as ``success=False`` with the failure in ``error``, not as
-          an unhandled 500.
+        * Pre-start / Temporal-unavailable failures raise ``HTTPException(503)``.
+        * Once execute-and-wait has begun, workflow/application failures and
+          client-wait timeouts (``TimeoutError``) are returned as
+          ``DeprovisionResponse(success=False, ...)`` (not 500).
     """
-    starter = _deprovision_starter()
-    if starter is not None:
-        try:
-            return DeprovisionResponse.model_validate(starter(agent_id, force))
-        except Exception as exc:
-            logger.exception("Durable deprovision failed for agent=%s", agent_id)
-            return DeprovisionResponse(
-                agent_id=agent_id,
-                success=False,
-                details={},
-                error=f"Deprovision workflow failed: {exc}",
-            )
-    return orchestrator.deprovision(agent_id, force=force)
+    runner = _require_deprovision_runner()
+    try:
+        return DeprovisionResponse.model_validate(runner(agent_id, force))
+    except ValidationError:
+        logger.exception("Invalid deprovision workflow response for agent=%s", agent_id)
+        return DeprovisionResponse(
+            agent_id=agent_id,
+            success=False,
+            details={},
+            error="Invalid deprovision workflow response",
+        )
+    except RuntimeError as exc:
+        # execute_workflow_sync raises this when the shared Temporal client/loop
+        # never becomes available — same "Temporal required" contract as provision.
+        if "Temporal client not available" in str(exc):
+            raise HTTPException(
+                status_code=503,
+                detail=f"{_TEMPORAL_REQUIRED_MESSAGE}: {exc}",
+            ) from exc
+        logger.exception("Durable deprovision failed for agent=%s", agent_id)
+        return DeprovisionResponse(
+            agent_id=agent_id,
+            success=False,
+            details={},
+            error=f"Deprovision workflow failed: {exc}",
+        )
+    except TemporalError as exc:
+        # Expected Temporal / workflow execution failures — return as payload, not 500.
+        logger.exception("Durable deprovision failed for agent=%s", agent_id)
+        return DeprovisionResponse(
+            agent_id=agent_id,
+            success=False,
+            details={},
+            error=f"Deprovision workflow failed: {exc}",
+        )
+    except (TimeoutError, concurrent.futures.TimeoutError) as exc:
+        # Client wait exceeded DEPROVISION_CLIENT_TIMEOUT_S; the workflow may
+        # still be running on Temporal — do not 500 the HTTP caller.
+        logger.exception("Durable deprovision timed out for agent=%s", agent_id)
+        return DeprovisionResponse(
+            agent_id=agent_id,
+            success=False,
+            details={},
+            error=f"Deprovision workflow timed out waiting for result: {exc}",
+        )
 
 
 class AgentStatusResponse(BaseModel):
@@ -640,7 +705,7 @@ class AgentStatusResponse(BaseModel):
 )
 def get_agent_status(agent_id: str) -> AgentStatusResponse:
     """Get status of a provisioned agent."""
-    status = orchestrator.get_agent_status(agent_id)
+    status = _get_agent_status(agent_id)
 
     if status is None:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
@@ -664,7 +729,7 @@ def list_agents(
     status: Optional[str] = Query(None, description="Filter by status (running, ready, etc.)"),
 ) -> AgentListResponse:
     """List all provisioned agents."""
-    agents_data = orchestrator.list_agents(status=status)
+    agents_data = _list_agents(status=status)
 
     agents = [
         AgentStatusResponse(

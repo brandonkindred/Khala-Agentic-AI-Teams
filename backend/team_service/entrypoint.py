@@ -9,6 +9,10 @@ Reads configuration from environment variables:
   TEAM_TEMPORAL_WORKER_FUNC      — optional Temporal worker start function name
   TEAM_WORKERS                   — uvicorn worker processes (default 2; set 1 to
                                    shrink the per-team memory footprint)
+  TEAM_SKIP_ACTIVE_JOB_INTERRUPT — when truthy (1/true/yes), skip startup/shutdown
+                                   mark_all_active_jobs_interrupted. Use for teams
+                                   whose in-flight work is Temporal-owned and must
+                                   survive API process restarts.
 """
 
 import atexit
@@ -57,6 +61,11 @@ TEAM_PORT = int(os.environ.get("TEAM_PORT", "8090"))
 TEAM_NAME = os.environ.get("TEAM_NAME", "team")
 TEMPORAL_MODULE = os.environ.get("TEAM_TEMPORAL_WORKER_MODULE", "").strip()
 TEMPORAL_FUNC = os.environ.get("TEAM_TEMPORAL_WORKER_FUNC", "").strip()
+_SKIP_ACTIVE_JOB_INTERRUPT_VALUES = frozenset({"1", "true", "yes"})
+TEAM_SKIP_ACTIVE_JOB_INTERRUPT = (
+    os.environ.get("TEAM_SKIP_ACTIVE_JOB_INTERRUPT", "").strip().lower()
+    in _SKIP_ACTIVE_JOB_INTERRUPT_VALUES
+)
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None = None) -> int:
@@ -113,7 +122,17 @@ def _shutdown_hook() -> None:
     single-line WARNING instead of a full traceback, since there's nothing
     the team service can do about it. Other exceptions still get the full
     stack trace so real bugs aren't hidden.
+
+    Teams with Temporal-owned work (``TEAM_SKIP_ACTIVE_JOB_INTERRUPT``) skip
+    this: durable workflows outlive the API process and must not be marked
+    interrupted on a normal restart.
     """
+    if TEAM_SKIP_ACTIVE_JOB_INTERRUPT:
+        logger.info(
+            "Skipping shutdown active-job interrupt for %s (TEAM_SKIP_ACTIVE_JOB_INTERRUPT)",
+            TEAM_NAME,
+        )
+        return
     try:
         from job_service_client import JobServiceClient
 
@@ -326,7 +345,17 @@ def _startup_recovery() -> None:
 
     On startup, no jobs from a previous process can genuinely be running —
     they are leftovers from a crash or kill where the shutdown hook didn't fire.
+
+    Temporal-owned teams skip this (``TEAM_SKIP_ACTIVE_JOB_INTERRUPT``): their
+    workflows keep running across API restarts and job-store rows must not flip
+    to ``interrupted`` underneath them.
     """
+    if TEAM_SKIP_ACTIVE_JOB_INTERRUPT:
+        logger.info(
+            "Skipping startup active-job interrupt for %s (TEAM_SKIP_ACTIVE_JOB_INTERRUPT)",
+            TEAM_NAME,
+        )
+        return
     try:
         from job_service_client import JobServiceClient
 

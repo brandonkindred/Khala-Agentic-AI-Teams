@@ -202,6 +202,32 @@ def test_get_stored_credentials_roundtrip(tmp_path: Path) -> None:
     assert "postgresql" in fetched
 
 
+def test_get_stored_credentials_restores_enriched_fields(tmp_path: Path) -> None:
+    from agent_provisioning_team.phases.credential_generation import (
+        get_stored_credentials,
+        store_credentials_payload,
+    )
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    cred_store = CredentialStore(storage_dir=tmp_path)
+    store_credentials_payload(
+        "agent-z",
+        "postgresql",
+        {
+            "username": "u",
+            "password": "p",
+            "connection_string": "postgres://u:p@host/db",
+            "ssh_private_key": "PRIV",
+            "extra": {"role": "app"},
+        },
+        credential_store=cred_store,
+    )
+    fetched = get_stored_credentials("agent-z", credential_store=cred_store)
+    assert fetched["postgresql"].connection_string == "postgres://u:p@host/db"
+    assert fetched["postgresql"].ssh_private_key == "PRIV"
+    assert fetched["postgresql"].extra == {"role": "app"}
+
+
 def test_run_credential_generation_with_progress_callback(tmp_path: Path) -> None:
     from agent_provisioning_team.phases.credential_generation import run_credential_generation
     from agent_provisioning_team.shared.credential_store import CredentialStore
@@ -375,10 +401,10 @@ def test_deprovision_tools_filtered() -> None:
     assert results == {"p1": True}
 
 
-def test_build_provisioners_shim() -> None:
-    from agent_provisioning_team.phases.account_provisioning import _build_provisioners
+def test_build_default_tool_agents_for_account_provisioning() -> None:
+    from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
 
-    out = _build_provisioners()
+    out = build_default_tool_agents()
     assert isinstance(out, dict)
     assert "docker_provisioner" in out
 
@@ -492,11 +518,12 @@ def test_generate_audit_report_failed_status() -> None:
     assert "FAILED" in report
 
 
-def test_build_provisioners_audit_shim() -> None:
-    from agent_provisioning_team.phases.access_audit import _build_provisioners
+def test_build_default_tool_agents_for_access_audit() -> None:
+    from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
 
-    out = _build_provisioners()
+    out = build_default_tool_agents()
     assert isinstance(out, dict)
+    assert "docker_provisioner" in out
 
 
 # ---------------------------------------------------------------------------
@@ -676,8 +703,8 @@ def test_generate_readme_includes_sections() -> None:
     assert "POSTGRES_URL" in out
     assert "ALL PRIVILEGES" in out
     assert "agent_anatomy" in out
-    # Password content is hidden
-    assert "***" not in out  # POSTGRES_URL key doesn't contain "password"
+    # POSTGRES_URL key does not contain "password", so no redaction placeholder appears
+    assert "***" not in out
 
 
 def test_generate_readme_redacts_password_envvar() -> None:

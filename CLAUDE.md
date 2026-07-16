@@ -1,21 +1,21 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) working in this repository. **This file is a map, not the territory** — a high-level orientation that links out to the detailed docs. For operational depth (full command reference, every env var, per-team internals), follow the links.
 
 ## Project Overview
 
-**Khala** is a multi-agent orchestration platform that simulates autonomous software development teams and specialized business functions. It currently mounts **24 enabled agent "teams"** (software engineering, blogging, personal assistant, market research, SOC2 compliance, social marketing, branding, agent provisioning, accessibility audit, AI systems, investment, nutrition & meal planning, planning, coding team, sales, road trip planning, agentic team provisioning, startup advisor, user agent founder, deepthought, job matching, user profile, product delivery, agent studio) under a single Unified FastAPI app, with an Angular 19 frontend. The authoritative team list lives in `backend/unified_api/config.py` (`TEAM_CONFIGS`).
+**Khala** is a multi-agent orchestration platform that simulates autonomous software development teams and specialized business functions. It mounts **24 enabled agent "teams"** (software engineering, blogging, personal assistant, market research, SOC2 compliance, social marketing, branding, agent provisioning, accessibility audit, AI systems, investment, nutrition & meal planning, planning, coding team, sales, road trip planning, agentic team provisioning, startup advisor, user agent founder, deepthought, job matching, user profile, product delivery, agent studio) under a single Unified FastAPI app, with an Angular 19 frontend. The authoritative team list is `TEAM_CONFIGS` in `backend/unified_api/config.py`.
 
 ## Repository Structure
 
-One directory per agent team under `backend/agents/` — the authoritative team list is `TEAM_CONFIGS` in `backend/unified_api/config.py`. Load-bearing entries:
+One directory per agent team under `backend/agents/`. Load-bearing entries:
 
 ```
 backend/
   agents/
     software_engineering_team/  # Primary team — full dev pipeline; contains the backend/frontend
-                                # code-v2, devops, coding_team (Tech Lead + Task Graph execution,
-                                # still routed at /api/coding-team), planning, integration, and QA sub-teams
+                                # code-v2, devops, coding_team (routed at /api/coding-team),
+                                # planning, integration, and QA sub-teams
     planning_team/           # Client-facing discovery/PRD team (/api/planning)
     product_delivery/        # Persistent Product Delivery Loop (/api/product-delivery)
     llm_service/             # Centralized LLM client (Ollama, Claude)
@@ -28,150 +28,55 @@ backend/
     artifact_registry/       # Shared artifact persistence
     event_bus/               # Cross-team event publishing
     api/                     # Legacy blog API surface (see blogging/ for current pipeline)
-  unified_api/               # Single-entry-point FastAPI server (port 8080);
-                             # config.py = TEAM_CONFIGS + security gateway + Temporal settings
+  unified_api/               # Single-entry-point FastAPI server; config.py = TEAM_CONFIGS +
+                             # security gateway + Temporal settings
   run_unified_api.py         # CLI launcher
   Makefile                   # Primary build/run targets
-  pyproject.toml             # Ruff config (line-length 120, Python 3.10 target)
 docker/                      # Full-stack compose: Postgres, Temporal, Ollama, Agents, UI
 user-interface/              # Angular 19 frontend (src/app: components/, models/, services/)
 ```
 
-## Common Commands
-
-### Backend
-
-```bash
-cd backend
-
-make install          # Create venv, install deps
-make install-dev      # + pytest, ruff
-make lint             # ruff check + format check
-make lint-fix         # ruff --fix + format
-make test             # pytest (agents + unified_api)
-make run              # Start Unified API (0.0.0.0:8080, reload enabled)
-make deploy           # Production: 4 workers
-
-# Direct run
-python run_unified_api.py
-python run_unified_api.py --port 9000 --reload --workers 4
-```
-
-### Local dev with Postgres
-
-Migrated teams (blogging, branding, startup_advisor, team_assistant, user_agent_founder, agentic_team_provisioning, nutrition_meal_planning, unified_api credentials) require Postgres for local dev and tests — no SQLite fallback. Every team's `JobServiceClient` requires `JOB_SERVICE_URL` (no file-backed fallback), except under `pytest`, where `backend/conftest.py` spins up the job service in-process.
-
-```bash
-cp docker/.env.example docker/.env              # once, if not done
-docker compose -f docker/docker-compose.yml up -d postgres job-service
-
-export POSTGRES_HOST=localhost
-export POSTGRES_PORT=5432
-export POSTGRES_USER=postgres
-export POSTGRES_PASSWORD=postgres
-export POSTGRES_DB=postgres
-export JOB_SERVICE_URL=http://localhost:8085
-```
-
-Pool sizing and slow-query logging knobs (`POSTGRES_POOL_MIN_SIZE`/`POSTGRES_POOL_MAX_SIZE`, `POSTGRES_SLOW_QUERY_MS`): see `docs/ENV_VARS.md`.
-
-### Frontend
-
-```bash
-cd user-interface
-nvm use               # Node 22 (.nvmrc)
-npm ci
-npm start             # Dev server at localhost:4200
-npm run build         # Production build
-npm test              # Vitest (requires Chrome)
-npm run test:coverage # 90% line coverage target
-```
-
-### Docker (Full Stack)
-
-```bash
-cp docker/.env.example docker/.env   # Then set OLLAMA_API_KEY
-docker compose -f docker/docker-compose.yml --env-file docker/.env up --build
-# Ports: UI=4200, Agents=8888, Temporal UI=8080, Ollama=11434
-```
-
-### Docker Volumes
-
-All agent containers share one `agents_data` named volume mounted at `/data/agents` (`AGENT_CACHE`); teams namespace artifacts under `{team_name}/`, so job state, caches, profiles, and workspaces persist across restarts. Blogging paths and SE workspaces (`SE_WORKSPACE_DIR`) also point into this volume.
-
 ## Architecture
 
-### Execution Model
+Concise summary below; full detail with Mermaid diagrams (12 sections) lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-Each agent team has a **team-lead orchestrator** that coordinates role-separated specialist agents via Pydantic request/response models. There are two runtime modes:
+- **Execution model** — each team has a team-lead orchestrator coordinating role-separated specialist agents via Pydantic request/response models. Two runtime modes: **thread mode** (default, local dev; agents run as Python threads) and **Temporal mode** (durable workflows when `TEMPORAL_ADDRESS` is set — state survives server restarts).
+- **Shared infra patterns** — Temporal client + per-team worker registry (`shared_temporal/`, **Pattern A**: teams export `WORKFLOWS`/`ACTIVITIES` from `<team>/temporal/__init__.py`, workers start on import) and a Postgres schema registry ([`shared_postgres/README.md`](backend/agents/shared_postgres/README.md), **Pattern B**: teams export a `SCHEMA` constant, the FastAPI lifespan calls `register_team_schemas`; no-op when `POSTGRES_HOST` is unset).
+- **Software Engineering team** — 4-phase pipeline (Discovery → Design → parallel Execution → Integration) with a per-task backend pipeline (feature branch → plan → codegen → lint/build → code review → security → QA → DbC → Tech Lead review → merge). Sub-team variants (backend/frontend code-v2, devops, coding_team) live inside `software_engineering_team/`; standalone Planning lives in `planning_team/`. Deep dive: [`software_engineering_team/README.md`](backend/agents/software_engineering_team/README.md).
+- **Unified API routing** — all teams mount under `/api/{team-slug}`; configs in `backend/unified_api/config.py`; the security gateway (`SECURITY_GATEWAY_ENABLED=true` by default) fronts all routes.
+- **Agent Console & Registry** — single entry point (UI `/agent-console`) for discovering, inspecting, and running specialist agents. Catalog: [`agent_registry/README.md`](backend/agents/agent_registry/README.md); ephemeral sandbox runner: `agent_provisioning_team/sandbox/README.md`; runs/inputs/diff data layer: [`agent_console/README.md`](backend/agents/agent_console/README.md).
+- **Product Delivery Loop** — `product_delivery/` (`/api/product-delivery`) wraps the SE pipeline in a persistent backlog → groom → sprint plan → run → release → feedback loop. Sequence diagram and contracts: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §11.
+- **LLM resolution (behavior-defining)** — `llm_service/` is a unified client for Ollama and Claude (default model `claude-opus-4-8`). The **Postgres-backed ordered provider list is the SOLE source of LLM resolution** (`/llm-config` UI → `llm_provider_configs` table); each entry carries its own provider/model/base URL and its own Fernet-encrypted API key. `get_client` selects the most-preferred entry that isn't usage-limited; a `FailoverLLMClient` fails over to the next entry on a 429. When the list is empty (or `POSTGRES_HOST` unset) and the provider isn't `dummy`, `get_client` raises `LLMNotConfiguredError` — there is **no legacy single-provider env fallback**. The only override is `LLM_PROVIDER=dummy` (the no-LLM test/dev harness). `LLM_MODEL`/`LLM_BASE_URL` supply blank-entry defaults only. Tuning vars: [`docs/ENV_VARS.md`](docs/ENV_VARS.md).
 
-- **Thread mode** (default, local dev): agents run as Python threads
-- **Temporal mode** (when `TEMPORAL_ADDRESS` is set): durable workflow execution using Temporal 1.24.2 — state survives server restarts
+## Build & Run
 
-### Shared infrastructure modules
+Essential entry points below; full command reference in `backend/Makefile`, [`docker/README.md`](docker/README.md), and [`user-interface/README.md`](user-interface/README.md).
 
-- **`backend/agents/shared_temporal/`** — Temporal client + per-team worker registry. Teams export `WORKFLOWS`/`ACTIVITIES` from `<team>/temporal/__init__.py`; workers start on import (Pattern A).
-- **`backend/agents/shared_postgres/`** — Postgres schema registry. Each team exports a `SCHEMA: TeamSchema` constant from `<team>/postgres/__init__.py` (pure data, no side effects), and the team's FastAPI lifespan calls `register_team_schemas(SCHEMA)` at startup (Pattern B). No-op when `POSTGRES_HOST` is unset. See `backend/agents/shared_postgres/README.md`.
+```bash
+# Backend (from backend/)
+make install-dev      # venv + deps + pytest, ruff
+make lint / lint-fix  # ruff check+format
+make test             # pytest (agents + unified_api)
+make run              # Unified API on 0.0.0.0:8080 (reload)
 
-### Software Engineering Team Pipeline (4 phases)
+# Frontend (from user-interface/; Node 22 via `nvm use`)
+npm ci && npm start   # dev server at localhost:4200
+npm test              # Vitest (requires Chrome)
 
-1. **Discovery**: Spec → LLM parsing → Planning (`planning_adapter.py`, which delegates to the standalone `planning_team`)
-2. **Design**: Tech Lead generates task assignments; Architecture Expert produces architecture docs
-3. **Execution** (parallel queues):
-   - Prefix queue: git/DevOps setup (sequential)
-   - Backend worker: processes backend tasks one at a time
-   - Frontend worker: processes frontend tasks one at a time
-4. **Integration**: Integration agent → DevOps trigger → security pass → doc update → merge
+# Full stack (needs docker/.env with OLLAMA_API_KEY)
+docker compose -f docker/docker-compose.yml --env-file docker/.env up --build
+```
 
-**Per-task backend pipeline**: Feature branch → planning → code generation → write files → lint → build → code review → acceptance verifier → security review → QA → DbC → Tech Lead review → doc update → merge
+**Local dev with Postgres:** migrated teams require Postgres (no SQLite fallback), and every `JobServiceClient` requires `JOB_SERVICE_URL` (except under `pytest`, where `backend/conftest.py` spins the job service up in-process). Bring up `postgres` + `job-service` from the compose file and export the `POSTGRES_*` / `JOB_SERVICE_URL` vars; step-by-step in [`docs/ENV_VARS.md`](docs/ENV_VARS.md) and [`docker/README.md`](docker/README.md).
 
-### Sub-Team Variants
-
-The first four live **inside** `backend/agents/software_engineering_team/`; Planning is a standalone module under `backend/agents/`:
-
-- **Backend-Code-V2** (`software_engineering_team/backend_code_v2_team/`): 3-layer (Backend Tech Lead → Backend Dev Agent + tool agents for linting, build, code review, security, QA, DbC, git ops)
-- **Frontend-Code-V2** (`software_engineering_team/frontend_code_v2_team/`): 3-layer (Frontend Tech Lead → Frontend Dev Agent + tool agents)
-- **DevOps Team** (`software_engineering_team/devops_team/`): 5-phase (Intake → Change Design → Write Artifacts → Validation → Completion)
-- **Coding Team** (`software_engineering_team/coding_team/`): Tech Lead + stack-specialist workers coordinating a Task Graph; invoked in-process by the SE orchestrator after planning. Still reachable at `/api/coding-team` (its `TeamConfig` entry is unchanged — see Unified API Routing below), now served by the SE process instead of a standalone container.
-- **Planning** (`backend/agents/planning_team/`): standalone client-facing discovery/PRD team mounted at `/api/planning`; SE invokes it through `planning_adapter.py`
-
-### Unified API Routing
-
-All teams mount under `/api/{team-slug}`. Team configs are defined in `backend/unified_api/config.py`. The security gateway (`SECURITY_GATEWAY_ENABLED=true` by default) sits in front of all routes.
-
-### Agent Console & Agent Registry
-
-The **Agent Console** (UI at `/agent-console`; the old `/agent-provisioning` route redirects there) is the single entry point for discovering, inspecting, and running every specialist agent. Three parts, each with its own docs:
-
-- **Catalog** — `backend/agents/agent_registry/` serves per-agent YAML manifests at `/api/agents`. Manifest schema and routes: `backend/agents/agent_registry/README.md`.
-- **Runner** — each invocation runs in an ephemeral docker compose sandbox, proxied via `POST /api/agents/{id}/invoke`. Stack contents and lifecycle: `backend/agents/agent_provisioning_team/sandbox/README.md`.
-- **Runs, saved inputs, diff** — `backend/agents/agent_console/` is the Postgres-backed data layer. Tables, routes, and env vars: `backend/agents/agent_console/README.md`.
-
-### Product Delivery Loop
-
-The `product_delivery` team (`backend/agents/product_delivery/`, mounted at `/api/product-delivery`) wraps the SE 4-phase pipeline in a persistent loop: backlog → groom → sprint plan → SE run → release hook → feedback → next groom. Sequence diagram, runtime contracts, and known limitations (including which SE path fires the release hook): `docs/ARCHITECTURE.md` §11 ("Product Delivery Loop").
-
-### LLM Integration
-
-`backend/agents/llm_service/` provides a unified client that supports:
-- **Ollama** (local inference or Cloud API) — including thinking mode
-- **Claude** (via the official `anthropic` Python SDK) — streaming, adaptive thinking + `output_config.effort`; default model `claude-opus-4-8`
-
-**The Postgres-backed ordered provider list is the SOLE source of LLM resolution.** The LLM Provider settings UI (`/llm-config`) manages an **ordered list of provider entries** (`/api/llm-config/providers` → `llm_provider_configs` table via `llm_service.provider_store`), most→least preferred; each entry carries its own provider/model/base URL and its **own API key** (Fernet-encrypted; no environment fallback for keys). `get_client` selects the most-preferred entry that isn't usage-limited; on a 429 a `FailoverLLMClient` marks the entry (with a `reset_at`) and retries the same call on the next available provider, resetting an entry automatically once its limit window passes. Tuning vars: `LLM_FAILOVER_FAST_429`, `LLM_FAILOVER_RATE_WINDOW_S`, `LLM_FAILOVER_WEEKLY_WINDOW_S` (see `docs/ENV_VARS.md`).
-
-When the list is empty (or `POSTGRES_HOST` unset) and the provider is not `dummy`, `get_client` raises `LLMNotConfiguredError` — there is **no legacy single-provider env fallback**. In an agent run this fails the job; the Angular UI shows a "No LLMs configured" dialog whose "Setup LLM" button routes to `/llm-config`. The only override is `LLM_PROVIDER=dummy`, the no-LLM test/dev harness, which pre-empts the list. The `LLM_MODEL`/`LLM_BASE_URL` env vars now only supply *defaults* for an entry's blank model/base URL — they no longer configure a live provider on their own.
-
-Environment variables for LLM: `LLM_PROVIDER` (`ollama`/`claude`/`dummy`; only `dummy` is load-bearing — it selects the no-LLM harness), `LLM_BASE_URL`, `LLM_MODEL` (blank-entry-field defaults only)
+**Docker volumes:** all agent containers share one `agents_data` volume mounted at `/data/agents` (`AGENT_CACHE`); teams namespace artifacts under `{team_name}/`, so job state, caches, and workspaces persist across restarts.
 
 ## Code Style
 
-- **Python**: Ruff, line-length 120, Python 3.10 target. Pre-commit hooks enforce this.
-- Ignored rules: E501, N802/N806, B904, SIM108
-- Known first-party modules: `shared`, `backend_agent`, `frontend_team`, `qa_agent`
-- Per-file ignores exist for tests and `agent_implementations/`
-- **TypeScript**: Angular style; SCSS for styling
+- **Python**: Ruff, line-length 120, Python 3.10 target. Pre-commit hooks enforce this. Ignored rules: E501, N802/N806, B904, SIM108. Per-file ignores exist for tests and `agent_implementations/`.
+- **TypeScript**: Angular style; SCSS for styling.
 
-### Project Rules
+## Project Rules
 
 - **Never reference GitHub issues in code, comments, or docs.** Do not mention issue numbers (e.g. `#NNN`, `Issue #NNN`), issue URLs, or "see issue X" anywhere in source code, comments, docstrings, commit messages, changelogs, or documentation. Describe the change on its own terms — what it does and why — without pointing at an external tracker. This rule applies to *new* writing; existing references in this file and historical docs are grandfathered until the surrounding section is rewritten.
 - **Always use `Closes #N` notation in pull requests.** Every PR must reference the associated GitHub issue in its body using GitHub's auto-close keywords (`Closes #N`, `Fixes #N`, or `Resolves #N`) so merging the PR automatically closes the linked issue. This is the *only* place issue numbers belong — PR bodies — and it is required, not optional. If a change has no associated issue, open one first.
@@ -182,45 +87,33 @@ Environment variables for LLM: `LLM_PROVIDER` (`ollama`/`claude`/`dummy`; only `
   - Document the contract in the docstring under explicit `Preconditions:`, `Postconditions:`, and (where relevant) `Invariants:` sections. Comments that are not part of a contract should still respect the existing "only write a comment when the WHY is non-obvious" rule.
   - Violations are bugs in the *caller* (precondition) or *callee* (postcondition/invariant) — never silently coerce, never `try`/`except` around a contract failure to hide it.
 
+## Testing
+
+- **Coverage requirement: tests must cover at least 90% of code (line coverage) on both backend and frontend.** This is a hard floor for new and modified code; CI enforces it. If a file or branch cannot reach 90%, document the reason explicitly in the PR and add a targeted `# pragma: no cover` (Python) or `/* istanbul ignore next */` (TypeScript) with a one-line justification — do not lower the global threshold.
+- **Backend**: `pytest` with `pytest-cov` (per-team suites). **Frontend**: Vitest + Angular testing utilities, 90% line-coverage target for `src/app`.
+- **CI**: GitHub Actions — ruff lint must pass first, then parallel coverage-gated test jobs, then a docker smoke test.
+
 ## Key Environment Variables
 
-Core vars only. The complete reference — every var, defaults, backoff math, fallback semantics, edge cases — lives in [`docs/ENV_VARS.md`](docs/ENV_VARS.md); team-specific tuning knobs (Strategy Lab, agent cognition, blogging, social marketing, etc.) are also covered in the owning team's README. All numeric vars parse defensively: garbage → documented default, out-of-range → clamped to the documented floor/ceiling unless noted.
+Core, behavior-changing vars only. The complete reference (every var, defaults, backoff math, fallback semantics, edge cases) is [`docs/ENV_VARS.md`](docs/ENV_VARS.md); team-specific tuning knobs live in the owning team's README (agent cognition, SE observability, blogging, social marketing, etc.). All numeric vars parse defensively: garbage → documented default, out-of-range → clamped to the documented floor/ceiling.
 
 | Variable | Purpose |
 |---|---|
 | `LLM_PROVIDER` | `dummy` selects the no-LLM test/dev harness (the only load-bearing value); otherwise the Postgres provider list is the sole source. |
-| `LLM_BASE_URL` / `LLM_MODEL` | Default base URL / model for a provider-list entry whose field is blank (no longer configures a live provider on their own). |
-| `POSTGRES_HOST` (+ `_PORT`/`_USER`/`_PASSWORD`/`_DB`) | Required for migrated teams; enables Postgres-backed stores via `shared_postgres`; no SQLite fallback |
-| `JOB_SERVICE_URL` | Central job service; required by every team's `JobServiceClient` |
-| `TEMPORAL_ADDRESS` (+ `TEMPORAL_NAMESPACE`/`TEMPORAL_TASK_QUEUE`) | Enables Temporal mode when set |
-| `AGENT_CACHE` | Shared cache root for all teams (Docker: `/data/agents`); each team namespaces under `{team_name}/` |
-| `SE_WORKSPACE_DIR` | Root for software-engineering team per-job workspaces |
-| `SE_TRACE_TO_POSTGRES` / `SE_LEARNINGS_TOPN` | SE observability: persist per-LLM-call traces to `se_agent_traces` (default off); top-N past-sprint learnings injected into the Tech Lead Design prompt (default 5). Full set below + in `docs/ENV_VARS.md` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` (+ `_PROTOCOL`/`OTEL_METRICS_EXPORTER`/`OTEL_SDK_DISABLED`) | OpenTelemetry trace/metric exporter config; SE LLM spans carry `cost.usd`, `task.id`, `phase`, token counts |
-| `SECURITY_GATEWAY_ENABLED` | Security gateway toggle (default: true) |
-| `UNIFIED_API_PORT` / `UNIFIED_API_HOST` | Bind address/port for the Unified API (default `0.0.0.0:8080`) |
-| `GITHUB_TOKEN` | Token for the coding team's `run-from-github` flow (Issues/PRs/Contents read-write + Metadata read) |
-
-**Agent Cognition:** operability/tuning env lives in `backend/agents/agent_cognition/README.md` (§"Configuration & operability") — the scheduler tick (`AGENT_COGNITION_SCHEDULER_INTERVAL_S`), event retention (manifest `cognition.memory.retention_days_events`), digest budget (`AGENT_COGNITION_DIGEST_EVENT_TOP_N`), per-key model (`LLM_MODEL_cognition`), writeback cap (`AGENT_COGNITION_WRITEBACK_MAX_BYTES`), and ledger TTL (`AGENT_COGNITION_RUN_TTL_S`). Seed rule packs declared in an agent's `cognition.rule_packs` manifest field install lazily and idempotently on the agent's first cognition-gated invoke.
-
-**SE observability & learning layer:** every `llm_service` call emits an OpenTelemetry span with `cost.usd`/`outcome`/`task.id`/`phase` and token counts; per-job cost is accumulated and reported on the job-store entry (`cost_usd`). `GET /api/se/metrics` (alias of `/api/software-engineering/dora`) returns the four DORA metrics over a `window_days` window, rendered in the Agent Console "Metrics" tab. Post-mortems and quality-gate rejections become rows in the `se_learnings` Postgres table, and the Tech Lead's Design prompt is augmented with the top-N relevant learnings. Tuning vars: `SE_TRACE_TO_POSTGRES`, `SE_TRACE_RETENTION_DAYS`, `SE_LEARNINGS_RETENTION_DAYS`, `SE_LEARNINGS_TOPN`, `SE_COST_FLUSH_INTERVAL_S`, and per-model price overrides `LLM_PRICE_<model>` — see `docs/ENV_VARS.md`.
-
-**Blogging pipeline:** `research → planning (ContentPlan) → writer → gates`. See `backend/agents/blogging/README.md`.
-
-**Google browser login (shared):** `GET/PUT/DELETE /api/integrations/google-browser-login` stores one Fernet-encrypted Google credential (Postgres only — never SQLite) for any Playwright integration that signs in with Google. Reuse `unified_api/google_browser_login_credentials.py` for new "Sign in with Google" integrations. Medium uses this flow; details in `backend/agents/blogging/README.md`.
-
-## Testing
-
-- **Coverage requirement: tests must cover at least 90% of code (line coverage) on both backend and frontend.** This is a hard floor for new and modified code; CI enforces it. If a file or branch cannot reach 90%, document the reason explicitly in the PR and add a targeted `# pragma: no cover` (Python) or `/* istanbul ignore next */` (TypeScript) with a one-line justification — do not lower the global threshold.
-- **Backend**: `pytest` with `pytest-cov` — CI runs per-team test suites (SE, blogging, market research, SOC2, social marketing, investment, planning, sales, deepthought, etc.) and fails the build below 90% line coverage.
-- **Frontend**: Vitest + Angular testing utilities; **90% line coverage target** for `src/app`.
-- **CI**: GitHub Actions — ruff lint must pass first, then parallel test jobs (coverage-gated at 90%), then docker smoke test.
+| `LLM_BASE_URL` / `LLM_MODEL` | Default base URL / model for a provider-list entry whose field is blank (they no longer configure a live provider on their own). |
+| `POSTGRES_HOST` (+ `_PORT`/`_USER`/`_PASSWORD`/`_DB`) | Required for migrated teams; enables Postgres-backed stores via `shared_postgres`; no SQLite fallback. |
+| `JOB_SERVICE_URL` | Central job service; required by every team's `JobServiceClient`. |
+| `TEMPORAL_ADDRESS` (+ `_NAMESPACE`/`_TASK_QUEUE`) | Enables Temporal mode when set. |
+| `AGENT_CACHE` / `SE_WORKSPACE_DIR` | Shared cache root (Docker: `/data/agents`, namespaced per team) / root for SE per-job workspaces. |
+| `SECURITY_GATEWAY_ENABLED` | Security gateway toggle (default: true). |
+| `UNIFIED_API_PORT` / `UNIFIED_API_HOST` | Bind address/port for the Unified API (default `0.0.0.0:8080`). |
+| `GITHUB_TOKEN` | Token for the coding team's `run-from-github` flow (Issues/PRs/Contents read-write + Metadata read). |
 
 ## Reference Docs
 
-- `docs/ENV_VARS.md` — complete environment-variable reference (every var, defaults, backoff math, edge cases)
-- `backend/agents/agent_provisioning_team/AGENT_ANATOMY.md` — Required structure for AI agents (Input/Output, Tools, Memory, Prompts, Security Guardrails, Subagents); diagrams in `design_assets/`
-- `ARCHITECTURE.md` — detailed architecture with Mermaid diagrams (12 sections, including the Product Delivery Loop)
-- `backend/agents/software_engineering_team/README.md` — 31KB SE team deep dive
-- `docker/README.md` — Full-stack setup, ports, env vars, security
-- `user-interface/README.md` — UI setup and API configuration
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — detailed architecture with Mermaid diagrams (12 sections, including the Product Delivery Loop)
+- [`docs/ENV_VARS.md`](docs/ENV_VARS.md) — complete environment-variable reference (defaults, backoff math, edge cases)
+- [`backend/agents/software_engineering_team/README.md`](backend/agents/software_engineering_team/README.md) — SE team deep dive
+- [`backend/agents/agent_provisioning_team/AGENT_ANATOMY.md`](backend/agents/agent_provisioning_team/AGENT_ANATOMY.md) — required structure for AI agents (Input/Output, Tools, Memory, Prompts, Guardrails, Subagents)
+- [`docker/README.md`](docker/README.md) — full-stack setup, ports, env vars, security
+- [`user-interface/README.md`](user-interface/README.md) — UI setup and API configuration

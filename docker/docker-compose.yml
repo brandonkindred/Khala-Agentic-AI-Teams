@@ -271,10 +271,10 @@ services:
     # same caps under plain `docker compose up`, matching the unified-api service.
     deploy:
       resources:
-        limits: { memory: 12G }
-        reservations: { memory: 8G }
-    mem_limit: 12g
-    mem_reservation: 8g
+        limits: { memory: 4G }
+        reservations: { memory: 2G }
+    mem_limit: 4g
+    mem_reservation: 2g
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
       interval: 15s
@@ -449,6 +449,9 @@ services:
       TEAM_PORT: "8097"
       TEAM_TEMPORAL_WORKER_MODULE: agent_provisioning_team.temporal.worker
       TEAM_TEMPORAL_WORKER_FUNC: start_agent_provisioning_temporal_worker_thread
+      # Provisioning jobs are Temporal-owned; do not flip them interrupted on
+      # API process restart (would race durable workflows + break /resume).
+      TEAM_SKIP_ACTIVE_JOB_INTERRUPT: "true"
     volumes: *team-volumes
     extra_hosts: *team-extra-hosts
     ports: ["8097:8097"]
@@ -664,6 +667,7 @@ services:
     container_name: khala-road-trip-service
     depends_on:
       postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base
@@ -874,9 +878,9 @@ services:
       - "8888:8080"
     deploy:
       resources:
-        limits: { cpus: "8", memory: 2G }
+        limits: { cpus: "4", memory: 2G }
         reservations: { memory: 2G }
-    cpus: "8"
+    cpus: "4"
     mem_limit: 2g
     environment:
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}

@@ -184,6 +184,31 @@ def add_completed_phase(
     update_job(job_id, cache_dir=cache_dir, **updates)
 
 
+def clear_completed_phases(
+    job_id: str,
+    cache_dir: Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Drop completed-phase bookkeeping after compensation undoes durable work.
+
+    Preconditions:
+        * ``job_id`` is non-empty.
+    Postconditions:
+        * When the job exists: ``completed_phases`` is ``[]`` and
+          ``phase_results`` is ``{}``.
+        * When the job is missing: no-op (returns without raising).
+    """
+    assert job_id, "job_id must be non-empty"
+    data = get_job(job_id, cache_dir=cache_dir)
+    if not data:
+        return
+    update_job(
+        job_id,
+        cache_dir=cache_dir,
+        completed_phases=[],
+        phase_results={},
+    )
+
+
 def reset_job(
     job_id: str,
     cache_dir: Path = DEFAULT_CACHE_DIR,
