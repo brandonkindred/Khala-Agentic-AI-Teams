@@ -12,6 +12,15 @@ Extracted collaborators (import those modules for the concerns they own):
 - ``pause_cycle``, ``reasoning_capture``, ``team_routing``, ``worker_factory``,
   ``swarm_*`` — HITL pauses, thinking flush, stack routing, worker construction,
   and the assignment / implementation / review mixin bodies
+
+``ActivityBridge`` and ``MAX_TECH_LEAD_QUESTION_ROUNDS`` stay imported here (rather
+than only in the modules that define them) because ``swarm_review.py`` and
+``pause_cycle.py`` late-bind them via a module reference (``_orch.NAME``, resolved
+at call time) instead of a name import, to dodge a circular import and so a
+monkeypatch of this module's attribute is observed. Everything else these
+collaborators export is imported directly from its definition site by whichever
+module actually uses it — this module does not re-export helpers purely for test
+convenience.
 """
 
 from __future__ import annotations
@@ -24,7 +33,7 @@ from typing import Any, Callable, Dict, List, Optional
 from shared_dev_models import ReviewContext, SystemArchitecture
 from software_engineering_team.coding_team import hitl
 from software_engineering_team.coding_team.activity import (
-    ActivityBridge,  # noqa: F401 - re-exported, test-patched
+    ActivityBridge,  # noqa: F401 - late-bound via `_orch.ActivityBridge` in swarm_review.py
 )
 from software_engineering_team.coding_team.agent_status import derive_stack_roster
 from software_engineering_team.coding_team.engine_provider import get_engine_provider
@@ -40,10 +49,9 @@ from software_engineering_team.coding_team.models import (
     Task,
     TaskStatus,
 )
-from software_engineering_team.coding_team.pause_cycle import (  # noqa: F401 - re-exported for test monkeypatching
-    MAX_TECH_LEAD_QUESTION_ROUNDS,
+from software_engineering_team.coding_team.pause_cycle import (
+    MAX_TECH_LEAD_QUESTION_ROUNDS,  # noqa: F401 - late-bound via `_orch.MAX_TECH_LEAD_QUESTION_ROUNDS` in pause_cycle._plan_with_hitl
     PauseCycle,
-    _format_decisions,  # noqa: F401 - re-exported, test-imported
     _hydrate_resolved_from_record,
     _plan_with_hitl,
     _run_pause_cycle,
@@ -54,8 +62,7 @@ from software_engineering_team.coding_team.progress_config import (
     _coding_progress,
     _implementation_concurrency,
 )
-from software_engineering_team.coding_team.reasoning_capture import (  # noqa: F401 - re-exported, test-imported
-    _DEFAULT_THINKING_FLUSH_INTERVAL_S,
+from software_engineering_team.coding_team.reasoning_capture import (
     _flush_thinking,
     _make_reasoning_llm_getter,
     _thinking_flush_interval_s,
@@ -67,19 +74,11 @@ from software_engineering_team.coding_team.swarm_implementation import _Implemen
 from software_engineering_team.coding_team.swarm_review import _ReviewMixin
 from software_engineering_team.coding_team.task_graph import TaskGraphService, create_task_graph
 from software_engineering_team.coding_team.team_routing import (
-    _BACKEND_V2_STACK_SPEC,  # noqa: F401 - re-exported for tests
     _ensure_target_team_stack_specs,
-    _quality_gate_agent_type,  # noqa: F401 - re-exported for tests
-    _target_matches_agent,  # noqa: F401 - re-exported for tests
-    _team_key,  # noqa: F401 - re-exported for tests
-    _v2_team_kind_for_stack,  # noqa: F401 - re-exported for tests
     _worker_team_key,
 )
 from software_engineering_team.coding_team.tech_lead_agent import TechLeadAgent
-from software_engineering_team.coding_team.worker_factory import (
-    _build_implementation_worker,
-    _v2_text_mode_llm,  # noqa: F401 - re-exported, test-imported
-)
+from software_engineering_team.coding_team.worker_factory import _build_implementation_worker
 from software_engineering_team.coding_team.worktree_manager import WorktreeManager
 
 logger = logging.getLogger(__name__)
