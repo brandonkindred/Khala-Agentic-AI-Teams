@@ -209,12 +209,15 @@ class EnvironmentStore:
         """Register (or overwrite) an environment record.
 
         Preconditions:
+            * ``env_info`` is not ``None``.
             * ``env_info.agent_id`` is non-empty.
         Postconditions:
             * ``env_info`` is serialized to the primary store, replacing any
               prior record for the same ``agent_id``.
             * Returns ``None``.
         """
+        if env_info is None:
+            raise ValueError("env_info must not be None")
         with _lock:
             self._write_env_data(env_info.agent_id, env_info.to_dict())
 
