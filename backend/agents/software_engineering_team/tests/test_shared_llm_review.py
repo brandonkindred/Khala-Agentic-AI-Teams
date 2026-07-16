@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from software_engineering_team.shared.llm_review import run_llm_review
+from software_engineering_team.shared.llm_review import run_llm_review, run_team_llm_review
 
 
 def _task(**overrides):
@@ -283,3 +283,65 @@ def test_run_llm_review_grounding_kill_switch_keeps_ungrounded():
     assert len(out.issues) == 1
     assert "Insurance Provider" in out.issues[0].description
     assert out.raw_issue_count == 1  # kill switch still reports the raw count
+
+
+# ---------------------------------------------------------------------------
+# run_team_llm_review: the review_context bounding step both V2 teams share
+# ---------------------------------------------------------------------------
+
+_PROMPT_WITH_CONTEXT = "{architecture_context}|{spec_content}|{requirements}|{code}"
+
+
+def test_run_team_llm_review_forwards_architecture_and_spec_content():
+    """``review_context`` is rendered and bounded into ``architecture_context``/
+    ``spec_content`` before delegating to ``run_llm_review``."""
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
+
+    prompts: list[str] = []
+
+    def invoke(prompt: str) -> str:
+        prompts.append(prompt)
+        return "raw"
+
+    architecture = SystemArchitecture(overview="Layered service architecture.")
+    review_context = ReviewContext(
+        architecture=architecture, spec_content="All endpoints require auth."
+    )
+
+    run_team_llm_review(
+        llm=DummyLLMClient(),
+        task=_task(),
+        files={"x.py": "code"},
+        prompt_template=_PROMPT_WITH_CONTEXT,
+        parse_template=_parse_one_issue,
+        issue_factory=_Issue,
+        invoke_model=invoke,
+        max_chars=60_000,
+        warn_threshold=20,
+        review_context=review_context,
+    )
+    assert "Layered service architecture." in prompts[0]
+    assert "All endpoints require auth." in prompts[0]
+
+
+def test_run_team_llm_review_without_review_context_never_touches_llm():
+    """``review_context=None`` (the default) is the common case -- no code_review_agent
+    context is available yet -- and must never call into ``llm`` at all, so a bare
+    test double without ``get_max_context_tokens`` still works."""
+
+    def invoke(prompt: str) -> str:
+        return "raw"
+
+    out = run_team_llm_review(
+        llm=object(),  # no get_max_context_tokens -- would raise AttributeError if touched
+        task=_task(),
+        files={"x.py": "code"},
+        prompt_template=_PROMPT_WITH_CONTEXT,
+        parse_template=_parse_one_issue,
+        issue_factory=_Issue,
+        invoke_model=invoke,
+        max_chars=60_000,
+        warn_threshold=20,
+    )
+    assert len(out.issues) == 1

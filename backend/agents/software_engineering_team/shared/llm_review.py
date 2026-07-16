@@ -13,10 +13,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Generic, List, TypeVar
+from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar
 
+from llm_service import LLMClient
+from software_engineering_team.shared.context_sizing import (
+    compute_code_review_arch_overview_chars,
+    compute_code_review_spec_excerpt_chars,
+)
 from software_engineering_team.shared.issue_grounding import drop_ungrounded_issues
-from software_engineering_team.shared.models import Task
+from software_engineering_team.shared.models import ReviewContext, Task
 
 logger = logging.getLogger(__name__)
 
@@ -184,3 +189,81 @@ def run_llm_review(
             on_dropped=_on_dropped,
         )
     return LlmReviewOutput(issues=issues, raw_issue_count=raw_issue_count)
+
+
+def run_team_llm_review(
+    *,
+    llm: LLMClient,
+    task: Task,
+    files: Dict[str, str],
+    prompt_template: str,
+    parse_template: Callable[[str], Dict[str, Any]],
+    issue_factory: Callable[..., IssueT],
+    invoke_model: Callable[[str], str],
+    max_chars: int,
+    warn_threshold: int,
+    review_context: Optional[ReviewContext] = None,
+    enable_llm_review_grounding: bool = True,
+) -> LlmReviewOutput[IssueT]:
+    """Team-level entry point for the LLM review fallback.
+
+    Both V2 teams' ``_run_llm_review`` wrappers built the same
+    ``review_context`` -> ``architecture_context``/``spec_content`` bounding step
+    before delegating to :func:`run_llm_review`; this function owns that shared
+    step so each team's wrapper is left with only the
+    ``Agent``/``resolve_text_mode_strands_model`` invocation, which must stay in
+    the team module (tests patch it there directly).
+
+    Preconditions:
+        - See :func:`run_llm_review` for ``files``/``prompt_template``/
+          ``parse_template``/``issue_factory``/``invoke_model``/``max_chars``/
+          ``warn_threshold``/``enable_llm_review_grounding``.
+        - ``review_context`` bundles the caller's system architecture and project
+          specification, when available; ``None`` means "nothing to add" so a
+          caller without this context yet keeps working unchanged.
+
+    Postconditions:
+        - ``architecture_context``/``spec_content`` are rendered from
+          ``review_context`` (when given) and hard-truncated to the same
+          per-chunk caps the coordinator's own architecture/spec excerpts use
+          (this runs once per chunk, so an uncapped document would repeat its
+          full size in every chunk's prompt); both stay ``""`` when
+          ``review_context`` is ``None``, so ``llm`` is never touched when there
+          is nothing to bound (a caller's bare test double without
+          ``get_max_context_tokens`` is never invoked).
+        - Delegates to :func:`run_llm_review` with the bounded context; see that
+          function's contract for the rest of the behavior.
+    """
+    architecture_context = ""
+    spec_content = ""
+    if review_context is not None:
+        if review_context.architecture is not None:
+            # Lazy import: code_review_agent submodules are imported on demand
+            # rather than at module scope elsewhere in the review call chain
+            # (e.g. _code_review_step's CodeReviewInput import), so this module
+            # follows the same convention rather than adding a new eager edge.
+            from code_review_agent.architecture_context import render_architecture_context
+
+            architecture_context = render_architecture_context(review_context.architecture)
+        spec_content = review_context.spec_content or ""
+        # Bounded here (only when there is context to bound): this runs once per
+        # chunk, so an uncapped document would repeat its full size in every
+        # chunk's prompt. Skipped entirely with no review_context so a caller's
+        # bare llm handle (e.g. a test double without get_max_context_tokens)
+        # is never touched when there is nothing to bound.
+        architecture_context = architecture_context[: compute_code_review_arch_overview_chars(llm)]
+        spec_content = spec_content[: compute_code_review_spec_excerpt_chars(llm)]
+
+    return run_llm_review(
+        task=task,
+        files=files,
+        prompt_template=prompt_template,
+        parse_template=parse_template,
+        issue_factory=issue_factory,
+        invoke_model=invoke_model,
+        max_chars=max_chars,
+        warn_threshold=warn_threshold,
+        architecture_context=architecture_context,
+        spec_content=spec_content,
+        enable_llm_review_grounding=enable_llm_review_grounding,
+    )
