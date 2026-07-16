@@ -15,17 +15,46 @@ Execution:
 from __future__ import annotations
 
 import logging
-
-# Path setup when run as module
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+# These two sys.path insertions are still required by this module itself:
+# below (and further down), it does *bare* (non-dotted) imports of its own
+# sibling sub-packages -- `from qa_agent import ...`, `from tech_lead_agent
+# import ...`, `from architecture_expert import ...`, `from spec_parser
+# import ...` -- rather than `from software_engineering_team.qa_agent
+# import ...`. The app launcher putting `backend/agents` on sys.path
+# (run_unified_api.py / unified_api/main.py) only resolves *dotted* imports
+# like `software_engineering_team.shared`; it doesn't reach these bare names,
+# which need `software_engineering_team/` (and, for `architecture_expert`,
+# the hyphenated `architect-agents/` beneath it, which can't itself be a
+# dotted import segment) directly on sys.path.
+#
+# This differs from coding_team's old `_paths.py` bootstrap (deleted when
+# coding_team merged into this package): that one was safe to remove because
+# coding_team's own modules were converted to fully-qualified dotted imports
+# for their siblings, so `backend/agents` alone sufficed. orchestrator.py
+# (and quality_gates/__init__.py, devops_team/test_validation_agent/agent.py,
+# discovery.py, temporal/activities.py -- none of which bootstrap their own
+# sys.path) were not converted, so they still need this.
+#
+# `api/_paths.py` (run via `api/__init__`) and pytest's `pythonpath` ini
+# option cover the FastAPI-app and test-collection entry points respectively,
+# but not every path: Temporal activities import `orchestrator` directly
+# without going through `api/__init__` first, and
+# `test_orchestrator_sprint_path.py` loads this file directly from disk via
+# `importlib`. This module keeps its own bootstrap so its bare imports
+# resolve regardless of which entry point got there first.
 _team_dir = Path(__file__).resolve().parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
+# `_arch_dir` (architect-agents/) has a hyphen and can't itself be a dotted
+# import segment; its `architecture_expert` sub-package is imported bare
+# below (`from architecture_expert import ...`), so this directory must be on
+# sys.path directly rather than reachable via `_team_dir`.
 _arch_dir = _team_dir / "architect-agents"
 if _arch_dir.exists() and str(_arch_dir) not in sys.path:
     sys.path.insert(0, str(_arch_dir))
