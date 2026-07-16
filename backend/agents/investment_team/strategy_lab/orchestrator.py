@@ -80,7 +80,7 @@ from .agents.zero_trade_repair import ZeroTradeRepairAgent
 from .alignment_findings import AlignmentFinding
 from .backtest_cache import BacktestCache
 from .coverage_probe import format_coverage_report
-from .exceptions import SpecImplementabilityError
+from .exceptions import OrchestratorContractError, SpecImplementabilityError
 from .market_regime import RegimeSummary, compute_regime_summary
 from .mechanical_repair import RepairAction, demote_code_path, repair_spec, select_code_path
 from .phases import (
@@ -2180,8 +2180,9 @@ class StrategyLabOrchestrator:
         # Post-condition: success and round-exhaustion are mutually exclusive.
         if execution_succeeded and max_rounds_exhausted:
             raise RuntimeError(
-                "synthesis loop returned both execution_succeeded and max_rounds_exhausted; "
-                "this is a bug in the round-evaluation loop above."
+                "synthesis loop invariant violated: both execution_succeeded and "
+                f"max_rounds_exhausted are True after round {round_num}; this is a bug "
+                "in the round-evaluation loop above."
             )
         return _SynthesisLoopOutcome(
             spec=spec,
@@ -2791,9 +2792,9 @@ class StrategyLabOrchestrator:
           8. Commit proposal as new known-good state; continue.
         """
         if align_round < 0:
-            raise ValueError(f"align_round must be non-negative, got {align_round}")
+            raise OrchestratorContractError(f"align_round must be non-negative, got {align_round}")
         if not isinstance(market_data, dict) or not market_data:
-            raise ValueError("market_data must be non-empty")
+            raise OrchestratorContractError("market_data must be non-empty")
 
         # Step 1 — audit the current ledger and record the alignment gates.
         report = self._audit_and_record_alignment(
@@ -4306,11 +4307,12 @@ class StrategyLabOrchestrator:
         # ``DesignReviewAgent`` marked the spec ready. The short-circuit
         # branch above returns before reaching this point, so reaching
         # this line implies the gate has passed for this design attempt.
-        assert design_outcome.ready, (
-            "DESIGN_REVIEW → CODE_SYNTHESIS boundary invariant violated: "
-            "design_outcome.ready is False but the short-circuit branch "
-            "did not return. This is a bug in _run_design_attempt."
-        )
+        if not design_outcome.ready:
+            raise OrchestratorContractError(
+                "DESIGN_REVIEW → CODE_SYNTHESIS boundary invariant violated: "
+                "design_outcome.ready is False but the short-circuit branch "
+                "did not return. This is a bug in _run_design_attempt."
+            )
         _emit_phase_transition(
             emit,
             from_phase=Phase.DESIGN_REVIEW,
