@@ -294,6 +294,19 @@ def test_environment_store_list_all_skips_corrupt(tmp_path: Path) -> None:
     assert {e.agent_id for e in out} == {"a1"}
 
 
+def test_environment_store_list_all_skips_non_dict_json(tmp_path: Path) -> None:
+    """A file containing a JSON array (not an object) must be skipped, not raise."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(agent_id="a1", container_id="c1", container_name="c1", workspace_path="/w")
+    )
+    (tmp_path / "array.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+
+    out = store.list_all()
+    # Only the valid one shows up.
+    assert {e.agent_id for e in out} == {"a1"}
+
+
 def test_environment_store_list_all_skips_unsafe_agent_id(tmp_path: Path) -> None:
     """A path-traversal-shaped agent_id from a malicious/malformed file must not surface."""
     store = EnvironmentStore(storage_dir=tmp_path)
