@@ -4,6 +4,7 @@ Setup phase: Create Docker container for the agent.
 This is phase 1 of the provisioning workflow.
 """
 
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
 from ..models import (
@@ -107,6 +108,7 @@ def run_setup(
             status="running",
             tools_provisioned=[],
             created_at=existing.created_at if existing else None,
+            updated_at=datetime.now(timezone.utc).isoformat(),
         )
     )
 
