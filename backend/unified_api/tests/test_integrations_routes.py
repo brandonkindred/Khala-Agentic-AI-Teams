@@ -646,3 +646,166 @@ def test_medium_clear_session_returns_200():
         resp = client.delete("/api/integrations/medium/session")
     assert resp.status_code == 200
     assert resp.json()["session_configured"] is False
+
+
+# ---------------------------------------------------------------------------
+# Slack webhook endpoints: signature verification must fail closed
+#
+# The three POST endpoints re-import their handler helpers inside the function
+# body (``from unified_api.slack_events_handler import ...``), so those are patched
+# at the handler module. ``get_slack_config`` is a top-level import in the route
+# module and is patched there. The shared ``_DEFAULT_SLACK_CFG`` omits
+# ``signing_secret``; ``_slack_cfg`` supplies it explicitly.
+# ---------------------------------------------------------------------------
+
+_SLACK_HANDLER = "unified_api.slack_events_handler"
+_SLACK_EVENTS = "/api/integrations/slack/events"
+_SLACK_COMMANDS = "/api/integrations/slack/commands"
+_SLACK_INTERACTIVE = "/api/integrations/slack/interactive"
+
+
+def _slack_cfg(signing_secret: str = "") -> dict:
+    """Slack config stub with an explicit signing_secret (empty = not configured)."""
+    return dict(_DEFAULT_SLACK_CFG, signing_secret=signing_secret)
+
+
+def test_slack_events_url_verification_allowed_without_secret():
+    """No secret configured: the url_verification challenge is still answered (setup)."""
+    body = b'{"type":"url_verification","challenge":"abc123"}'
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("")),
+        patch(f"{_SLACK_HANDLER}.dispatch_event") as disp,
+    ):
+        resp = client.post(_SLACK_EVENTS, content=body)
+    assert resp.status_code == 200
+    assert resp.json() == {"challenge": "abc123"}
+    disp.assert_not_called()
+
+
+def test_slack_events_rejects_event_callback_without_secret():
+    """No secret configured: an event_callback is refused with 401 and never dispatched."""
+    body = b'{"type":"event_callback","event":{"type":"app_mention"}}'
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("")),
+        patch(f"{_SLACK_HANDLER}.dispatch_event") as disp,
+    ):
+        resp = client.post(_SLACK_EVENTS, content=body)
+    assert resp.status_code == 401
+    assert "secret" in resp.json()["detail"].lower()
+    disp.assert_not_called()
+
+
+def test_slack_events_valid_signature_dispatches():
+    """Secret configured + valid signature: the event_callback is dispatched."""
+    body = b'{"type":"event_callback","event":{"type":"app_mention"}}'
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("secret")),
+        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=True),
+        patch(f"{_SLACK_HANDLER}.dispatch_event") as disp,
+    ):
+        resp = client.post(_SLACK_EVENTS, content=body)
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    disp.assert_called_once()
+
+
+def test_slack_events_invalid_signature_rejected():
+    """Secret configured + invalid signature: 401 and never dispatched."""
+    body = b'{"type":"event_callback","event":{"type":"app_mention"}}'
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("secret")),
+        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=False),
+        patch(f"{_SLACK_HANDLER}.dispatch_event") as disp,
+    ):
+        resp = client.post(_SLACK_EVENTS, content=body)
+    assert resp.status_code == 401
+    disp.assert_not_called()
+
+
+def test_slack_events_url_verification_verified_when_secret_set():
+    """Secret configured: even a url_verification challenge must carry a valid signature."""
+    body = b'{"type":"url_verification","challenge":"abc123"}'
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("secret")),
+        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=False),
+    ):
+        resp = client.post(_SLACK_EVENTS, content=body)
+    assert resp.status_code == 401
+
+
+def test_slack_events_invalid_json_returns_400():
+    """A non-JSON body is rejected with 400 before any verification."""
+    with patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("")):
+        resp = client.post(_SLACK_EVENTS, content=b"not json{")
+    assert resp.status_code == 400
+
+
+def test_slack_events_non_object_json_returns_400():
+    """A valid-JSON-but-non-object body (e.g. a list) is rejected with 400, not a 500."""
+    with patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("")):
+        resp = client.post(_SLACK_EVENTS, content=b"[]")
+    assert resp.status_code == 400
+
+
+def test_slack_commands_rejects_without_secret():
+    """No secret configured: the slash command is refused with 401 and never executed."""
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("")),
+        patch(f"{_SLACK_HANDLER}.process_slash_command") as proc,
+    ):
+        resp = client.post(_SLACK_COMMANDS, content=b"command=%2Fkhala&text=help")
+    assert resp.status_code == 401
+    proc.assert_not_called()
+
+
+def test_slack_commands_valid_signature_processes():
+    """Secret configured + valid signature: the command runs and its result is returned."""
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("secret")),
+        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=True),
+        patch(f"{_SLACK_HANDLER}.process_slash_command", return_value={"text": "hi"}) as proc,
+    ):
+        resp = client.post(_SLACK_COMMANDS, content=b"command=%2Fkhala&text=help")
+    assert resp.status_code == 200
+    assert resp.json() == {"text": "hi"}
+    proc.assert_called_once()
+
+
+def test_slack_commands_invalid_signature_rejected():
+    """Secret configured + invalid signature: 401 and the command is not executed."""
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("secret")),
+        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=False),
+        patch(f"{_SLACK_HANDLER}.process_slash_command") as proc,
+    ):
+        resp = client.post(_SLACK_COMMANDS, content=b"command=%2Fkhala&text=help")
+    assert resp.status_code == 401
+    proc.assert_not_called()
+
+
+def test_slack_interactive_rejects_without_secret():
+    """No secret configured: interactive payloads are refused with 401."""
+    with patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("")):
+        resp = client.post(_SLACK_INTERACTIVE, content=b"payload=%7B%7D")
+    assert resp.status_code == 401
+
+
+def test_slack_interactive_valid_signature_ok():
+    """Secret configured + valid signature: returns ok."""
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("secret")),
+        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=True),
+    ):
+        resp = client.post(_SLACK_INTERACTIVE, content=b"payload=%7B%7D")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+
+def test_slack_interactive_invalid_signature_rejected():
+    """Secret configured + invalid signature: 401."""
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("secret")),
+        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=False),
+    ):
+        resp = client.post(_SLACK_INTERACTIVE, content=b"payload=%7B%7D")
+    assert resp.status_code == 401

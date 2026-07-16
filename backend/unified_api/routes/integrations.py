@@ -593,7 +593,23 @@ async def slack_events(request: Request) -> Any:
     - event_callback: app_mention and message.im events → routed to team assistants
 
     Slack requires a 200 response within 3 seconds, so event processing runs async.
-    All requests are verified using the Slack signing secret (HMAC-SHA256).
+
+    Preconditions: ``request`` is the raw Slack Events API delivery; the
+        ``X-Slack-Request-Timestamp`` and ``X-Slack-Signature`` headers carry the
+        replay timestamp and HMAC signature.
+    Postconditions:
+        - A non-JSON body, or a JSON value that is not an object, raises
+          ``HTTPException(400)``.
+        - When a signing secret is configured, EVERY request — including the
+          ``url_verification`` challenge — must carry a valid, fresh signature; a
+          failure raises ``HTTPException(401)`` and nothing is dispatched.
+        - Fails closed when no signing secret is configured: the ``url_verification``
+          challenge is still answered (so an operator can complete Slack app setup),
+          but every other event is refused with ``HTTPException(401)``. An unsigned
+          request must never be able to reach a team assistant.
+        - A verified (or setup-phase ``url_verification``) ``event_callback`` is handed
+          to :func:`dispatch_event` and ``{"ok": True}`` is returned before any
+          assistant work runs; unrecognized event types return ``{"ok": True}``.
     """
     from unified_api.slack_events_handler import (
         dispatch_event,
@@ -605,23 +621,42 @@ async def slack_events(request: Request) -> Any:
     timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
     signature = request.headers.get("X-Slack-Signature", "")
 
-    # Get signing secret
-    cfg = get_slack_config()
-    signing_secret = str(cfg.get("signing_secret") or "").strip()
-
-    # Verify signature (skip only for url_verification if no secret configured yet)
-    if signing_secret:
-        if not verify_slack_request(signing_secret, body, timestamp, signature):
-            raise HTTPException(status_code=401, detail="Invalid Slack signature")
-    else:
-        logger.warning("Slack signing secret not configured — skipping signature verification")
-
+    # Parse up front: the event type decides whether a url_verification challenge may
+    # proceed before a signing secret is configured. Parsing unverified bytes is safe.
     try:
         payload = json.loads(body)
     except (json.JSONDecodeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
 
+    # A real Slack Events payload is always a JSON object; a non-object (list/number/
+    # string/null) is malformed. Reject it here rather than letting ``payload.get(...)``
+    # raise AttributeError → an unhandled 500 on an unauthenticated request.
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Slack payload must be a JSON object.")
+
     event_type = str(payload.get("type", "")).strip()
+
+    # Get signing secret
+    cfg = get_slack_config()
+    signing_secret = str(cfg.get("signing_secret") or "").strip()
+
+    # When a secret is configured, EVERY request (including url_verification) must carry
+    # a valid signature. When no secret is configured, only the url_verification
+    # challenge is served (so an operator can finish Slack app setup); every other event
+    # is refused — an unsigned request must never reach a team assistant.
+    if signing_secret:
+        if not verify_slack_request(signing_secret, body, timestamp, signature):
+            raise HTTPException(status_code=401, detail="Invalid Slack signature")
+    elif event_type != "url_verification":
+        logger.warning(
+            "Slack signing secret not configured — refusing %s event; only url_verification "
+            "is served until a signing secret is set",
+            event_type or "(missing type)",
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="Slack signing secret not configured; cannot verify request",
+        )
 
     # URL verification challenge (Slack sends this when you set the Request URL)
     if event_type == "url_verification":
@@ -745,6 +780,17 @@ async def slack_commands(request: Request) -> Any:
 
     Returns an immediate acknowledgment, then processes the command in a
     background thread and posts the result to response_url.
+
+    Preconditions: ``request`` is the raw Slack slash-command delivery; the
+        ``X-Slack-Request-Timestamp`` and ``X-Slack-Signature`` headers carry the
+        replay timestamp and HMAC signature.
+    Postconditions:
+        - Fails closed when no signing secret is configured: raises
+          ``HTTPException(401)`` without running the command. A slash command runs
+          real work on behalf of the sender, so it must never execute unauthenticated.
+        - With a secret configured, an invalid or stale signature raises
+          ``HTTPException(401)``; only a verified request is passed to
+          :func:`process_slash_command`, whose result is returned.
     """
     from unified_api.slack_events_handler import (
         process_slash_command,
@@ -758,7 +804,12 @@ async def slack_commands(request: Request) -> Any:
     cfg = get_slack_config()
     signing_secret = str(cfg.get("signing_secret") or "").strip()
 
-    if signing_secret and not verify_slack_request(signing_secret, body, timestamp, signature):
+    if not signing_secret:
+        raise HTTPException(
+            status_code=401,
+            detail="Slack signing secret not configured; cannot verify request",
+        )
+    if not verify_slack_request(signing_secret, body, timestamp, signature):
         raise HTTPException(status_code=401, detail="Invalid Slack signature")
 
     # Parse form-encoded body
@@ -777,6 +828,16 @@ async def slack_interactive(request: Request) -> Any:
     Receive Slack interactive component payloads (button clicks, menus, etc.).
 
     Placeholder for future interactive component handling.
+
+    Preconditions: ``request`` is the raw Slack interactive-components delivery; the
+        ``X-Slack-Request-Timestamp`` and ``X-Slack-Signature`` headers carry the
+        replay timestamp and HMAC signature.
+    Postconditions:
+        - Fails closed when no signing secret is configured: raises
+          ``HTTPException(401)``. Interactive payloads are authenticated user actions,
+          so an unsigned request must never be accepted.
+        - With a secret configured, an invalid or stale signature raises
+          ``HTTPException(401)``; a verified request returns ``{"ok": True}``.
     """
     from unified_api.slack_events_handler import verify_slack_request
 
@@ -787,7 +848,12 @@ async def slack_interactive(request: Request) -> Any:
     cfg = get_slack_config()
     signing_secret = str(cfg.get("signing_secret") or "").strip()
 
-    if signing_secret and not verify_slack_request(signing_secret, body, timestamp, signature):
+    if not signing_secret:
+        raise HTTPException(
+            status_code=401,
+            detail="Slack signing secret not configured; cannot verify request",
+        )
+    if not verify_slack_request(signing_secret, body, timestamp, signature):
         raise HTTPException(status_code=401, detail="Invalid Slack signature")
 
     return {"ok": True}
