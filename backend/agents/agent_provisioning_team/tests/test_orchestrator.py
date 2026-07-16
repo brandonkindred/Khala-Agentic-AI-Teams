@@ -25,12 +25,12 @@ from agent_provisioning_team.models import (
 from agent_provisioning_team.orchestrator import (
     ProvisioningOrchestrator,
     ProvisioningShutdownError,
-    _build_tool_agents,
 )
 from agent_provisioning_team.shared.environment_store import (
     EnvironmentInfo as StoreEnvInfo,
 )
 from agent_provisioning_team.shared.environment_store import EnvironmentStore
+from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
 
 
 def _make_manifest(tmp_path: Path) -> str:
@@ -68,8 +68,8 @@ def _patch_run_setup(monkeypatch, *, success: bool = True, error: str | None = N
     monkeypatch.setattr(orch_mod, "run_setup", fake)
 
 
-def test_build_tool_agents_shim() -> None:
-    out = _build_tool_agents()
+def test_build_default_tool_agents_includes_docker() -> None:
+    out = build_default_tool_agents()
     assert isinstance(out, dict)
     assert "docker_provisioner" in out
 
@@ -306,7 +306,7 @@ def test_run_workflow_resume_restores_all_phases(tmp_path: Path, monkeypatch) ->
 
 
 def test_run_workflow_account_provisioning_failure_compensates(tmp_path: Path, monkeypatch) -> None:
-    """A failed account provisioning rolls back via _compensate."""
+    """A failed account provisioning rolls back via compensate."""
     from agent_provisioning_team import orchestrator as orch_mod
 
     _patch_run_setup(monkeypatch)
@@ -367,7 +367,7 @@ def test_compensate_swallows_docker_failure(tmp_path: Path) -> None:
         tool_agents={"docker_provisioner": fake_docker},
     )
     # Should not raise
-    orch._compensate("a1", [])
+    orch.compensate("a1", [])
 
 
 def test_compensate_skips_unsuccessful_tool_results(tmp_path: Path) -> None:
@@ -386,7 +386,7 @@ def test_compensate_skips_unsuccessful_tool_results(tmp_path: Path) -> None:
         provisioner_key="some_provisioner",
     )
 
-    orch._compensate("a1", [failed])
+    orch.compensate("a1", [failed])
     fake_prov.deprovision.assert_not_called()
     fake_prov.list_compensations.assert_not_called()
 
@@ -400,7 +400,7 @@ def test_compensate_skips_when_no_provisioner_key(tmp_path: Path, caplog) -> Non
 
     # No provisioner_key
     success_no_key = ToolProvisionResult(tool_name="t", success=True)
-    orch._compensate("a1", [success_no_key])
+    orch.compensate("a1", [success_no_key])
     fake_prov.deprovision.assert_not_called()
 
 
@@ -412,7 +412,9 @@ def test_compensate_skips_when_provisioner_unregistered(tmp_path: Path) -> None:
     )
 
     success_unknown_key = ToolProvisionResult(tool_name="t", success=True, provisioner_key="ghost")
-    orch._compensate("a1", [success_unknown_key])
+    orch.compensate("a1", [success_unknown_key])
+    # Unknown registry key skips per-tool rollback; docker/env teardown still runs.
+    fake_docker.deprovision.assert_called_once_with("a1")
 
 
 def test_compensate_list_compensations_failure_falls_to_deprovision(tmp_path: Path) -> None:
@@ -426,7 +428,7 @@ def test_compensate_list_compensations_failure_falls_to_deprovision(tmp_path: Pa
     )
 
     success = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
-    orch._compensate("a1", [success])
+    orch.compensate("a1", [success])
     fake_prov.deprovision.assert_called_once()
 
 
@@ -447,7 +449,7 @@ def test_compensate_replay_failure_continues(tmp_path: Path) -> None:
     )
 
     success = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
-    orch._compensate("a1", [success])
+    orch.compensate("a1", [success])
     # Replay attempted for both records (continues despite failure)
     assert fake_prov.replay_compensation.call_count == 2
 
@@ -461,7 +463,7 @@ def test_compensate_credential_cleanup_failure_swallowed(tmp_path: Path) -> None
         environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
         tool_agents={"docker_provisioner": MagicMock()},
     )
-    orch._compensate("a1", [])
+    orch.compensate("a1", [])
 
 
 def test_compensate_environment_cleanup_failure_swallowed(tmp_path: Path, monkeypatch) -> None:
@@ -472,7 +474,7 @@ def test_compensate_environment_cleanup_failure_swallowed(tmp_path: Path, monkey
         environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
         tool_agents={"docker_provisioner": MagicMock()},
     )
-    orch._compensate("a1", [])
+    orch.compensate("a1", [])
 
 
 def test_compensate_post_replay_state_cleanup_failure(tmp_path: Path) -> None:
@@ -488,7 +490,7 @@ def test_compensate_post_replay_state_cleanup_failure(tmp_path: Path) -> None:
         tool_agents={"x": fake_prov, "docker_provisioner": MagicMock()},
     )
     success = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
-    orch._compensate("a1", [success])
+    orch.compensate("a1", [success])
 
 
 # ---------------------------------------------------------------------------
@@ -615,7 +617,7 @@ def test_list_agents_filters_by_status(tmp_path: Path) -> None:
 
 
 def test_run_workflow_shutdown_mid_workflow(tmp_path: Path, monkeypatch) -> None:
-    """If shutdown event flips between phases, _compensate runs + raise fires."""
+    """If shutdown event flips between phases, compensate runs + raise fires."""
     from agent_provisioning_team import orchestrator as orch_mod
 
     _patch_run_setup(monkeypatch)
@@ -724,3 +726,25 @@ def test_run_workflow_uses_default_workspace_when_env_missing(tmp_path: Path, mo
         },
     )
     assert captured_workspace["ws"] == "/workspace"
+
+
+def test_no_legacy_v2_or_thread_fallback_symbols() -> None:
+    """Hard cutover: no V2 workflow type, v2 activities, or thread fallback knob."""
+    import agent_provisioning_team
+
+    root = Path(agent_provisioning_team.__file__).resolve().parent
+    # Plain literals are fine — this file lives under tests/, which is excluded.
+    forbidden = (
+        "AgentProvisioningWorkflowV2",
+        "_activity_v2",
+        "PROVISION_THREAD_FALLBACK",
+    )
+    hits: list[str] = []
+    for path in root.rglob("*.py"):
+        if "__pycache__" in path.parts or "tests" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            if token in text:
+                hits.append(f"{path.relative_to(root)}:{token}")
+    assert hits == [], f"legacy cutover symbols still present: {hits}"

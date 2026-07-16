@@ -165,6 +165,21 @@ def test_build_provisioning_graph_returns_graph() -> None:
 
 # ---------------------------------------------------------------------------
 # credential_store — additional paths
+
+
+def test_credential_store_defaults_under_agent_cache(tmp_path: Path, monkeypatch) -> None:
+    """Encrypted credentials land on the durable AGENT_CACHE volume path."""
+    from agent_provisioning_team.shared.credential_store import (
+        CredentialStore,
+        default_credentials_dir,
+    )
+
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path / "agents"))
+    expected = tmp_path / "agents" / "agent_provisioning" / "credentials"
+    assert default_credentials_dir() == expected
+    store = CredentialStore()
+    assert store.storage_dir == expected
+    assert expected.is_dir()
 # ---------------------------------------------------------------------------
 
 
@@ -254,6 +269,78 @@ def test_credential_store_list_agents(tmp_path: Path) -> None:
     store.store_credentials("a2", "redis", {"password": "p"})
     out = sorted(store.list_agents())
     assert out == ["a1", "a2"]
+
+
+def test_credential_store_reads_legacy_path(tmp_path: Path, monkeypatch) -> None:
+    """Pre-cutover ``.agent_cache/provisioning_credentials`` files remain readable."""
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    monkeypatch.chdir(tmp_path)
+    key = CredentialStore.generate_key()
+    primary = tmp_path / "primary"
+    writer = CredentialStore(storage_dir=primary, encryption_key=key)
+    writer.store_credentials("legacy-a1", "pg", {"password": "secret"})
+
+    legacy_dir = tmp_path / ".agent_cache" / "provisioning_credentials"
+    legacy_dir.mkdir(parents=True)
+    legacy_file = legacy_dir / "legacy-a1.enc"
+    legacy_file.write_bytes((primary / "legacy-a1.enc").read_bytes())
+
+    reader = CredentialStore(storage_dir=tmp_path / "empty-primary", encryption_key=key)
+    assert reader.get_credentials("legacy-a1", "pg") == {"password": "secret"}
+    assert "legacy-a1" in reader.list_agents()
+    assert reader.delete_credentials("legacy-a1") is True
+    assert not legacy_file.exists()
+
+
+def test_credential_store_reads_legacy_with_legacy_generated_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Upgrade: primary mints a new dir but legacy .enc still decrypts via legacy key."""
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PROVISION_CREDENTIAL_KEY", raising=False)
+    monkeypatch.delenv("PA_CREDENTIAL_KEY_FILE", raising=False)
+    monkeypatch.delenv("PROVISION_REQUIRE_KEY", raising=False)
+
+    legacy_dir = tmp_path / ".agent_cache" / "provisioning_credentials"
+    legacy_writer = CredentialStore(storage_dir=legacy_dir)
+    legacy_writer.store_credentials("legacy-a1", "pg", {"password": "secret"})
+    assert (legacy_dir / ".encryption_key").is_file()
+
+    # New primary path with no explicit key — must still open the legacy file.
+    primary = tmp_path / "agents" / "agent_provisioning" / "credentials"
+    reader = CredentialStore(storage_dir=primary)
+    assert reader.get_credentials("legacy-a1", "pg") == {"password": "secret"}
+    assert (primary / ".encryption_key").is_file()
+
+
+def test_credential_store_decrypts_legacy_when_primary_key_diverged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Primary already minted a fresh key; legacy files still decrypt via trailing key."""
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PROVISION_CREDENTIAL_KEY", raising=False)
+    monkeypatch.delenv("PA_CREDENTIAL_KEY_FILE", raising=False)
+    monkeypatch.delenv("PROVISION_REQUIRE_KEY", raising=False)
+
+    primary = tmp_path / "primary"
+    # Mint a primary key before any legacy dir exists (simulates a prior boot
+    # that generated a divergent key under the new path).
+    CredentialStore(storage_dir=primary)
+    primary_key = (primary / ".encryption_key").read_bytes()
+
+    legacy_dir = tmp_path / ".agent_cache" / "provisioning_credentials"
+    CredentialStore(storage_dir=legacy_dir).store_credentials(
+        "legacy-a1", "pg", {"password": "secret"}
+    )
+    assert primary_key != (legacy_dir / ".encryption_key").read_bytes()
+
+    reader = CredentialStore(storage_dir=primary)
+    assert reader.get_credentials("legacy-a1", "pg") == {"password": "secret"}
 
 
 def test_credential_store_store_credentials_handles_corrupt_existing(tmp_path: Path) -> None:

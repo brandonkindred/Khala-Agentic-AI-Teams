@@ -20,6 +20,7 @@ from .phases.deliver import build_final_result, run_deliver
 from .phases.documentation import run_documentation
 from .phases.setup import cleanup_setup, run_setup
 from .shared.credential_store import CredentialStore
+from .shared.environment_queries import get_agent_status_dict, list_agent_status_dicts
 from .shared.environment_store import EnvironmentStore
 from .shared.logging_context import install_filter as _install_log_filter
 from .shared.phase_state import (
@@ -40,7 +41,7 @@ JobUpdater = Callable[..., None]
 class ProvisioningShutdownError(Exception):
     """Raised when the provisioning workflow is cancelled mid-flight
     because the FastAPI app is shutting down. After raising, the orchestrator
-    has already invoked `_compensate()` to roll back partial state."""
+    has already invoked `compensate()` to roll back partial state."""
 
     def __init__(self, agent_id: str, phase: str) -> None:
         self.agent_id = agent_id
@@ -48,22 +49,20 @@ class ProvisioningShutdownError(Exception):
         super().__init__(f"Provisioning for {agent_id} cancelled during {phase}")
 
 
-# Backwards-compat alias for callers/tests that imported the old name.
-def _build_tool_agents() -> Dict[str, Any]:
-    return build_default_tool_agents()
-
-
 class ProvisioningOrchestrator:
-    """
-    Orchestrator for the agent provisioning workflow.
+    """In-process phase engine used by Temporal activities and tests.
 
-    Coordinates 6 phases:
-    1. SETUP - Create Docker container
-    2. CREDENTIAL_GENERATION - Generate passwords/tokens
-    3. ACCOUNT_PROVISIONING - Create accounts in tools
-    4. ACCESS_AUDIT - Verify least-privilege
-    5. DOCUMENTATION - Generate onboarding docs
-    6. DELIVER - Finalize and return results
+    HTTP provision/resume/restart/deprovision go through Temporal only — that
+    path is the production source of truth for phase ordering, compensation,
+    and durable checkpoints.
+
+    Temporal activities call the shared phase functions (and ``compensate`` /
+    ``deprovision``) rather than ``run_workflow``. ``run_workflow`` remains a
+    sequential in-process coordinator for unit tests and any non-HTTP callers
+    that need the same phase *functions* with a ``shutdown_event`` / progress
+    callback. Do not extend ``run_workflow`` with behavior that the Temporal
+    workflow does not also implement; prefer changing shared phase modules so
+    both paths stay aligned.
     """
 
     def __init__(
@@ -117,7 +116,7 @@ class ProvisioningOrchestrator:
             )
 
         # Tracks the latest tool_results the orchestrator has produced, so a
-        # shutdown check mid-workflow can pass them to `_compensate()` to
+        # shutdown check mid-workflow can pass them to `compensate()` to
         # deprovision any tools that succeeded before cancellation.
         tool_results_ref: List[Any] = []
 
@@ -131,7 +130,7 @@ class ProvisioningOrchestrator:
                     agent_id,
                     phase_name,
                 )
-                self._compensate(agent_id, tool_results_ref)
+                self.compensate(agent_id, tool_results_ref)
                 raise ProvisioningShutdownError(agent_id=agent_id, phase=phase_name)
 
         def _update(
@@ -263,7 +262,7 @@ class ProvisioningOrchestrator:
                     agent_id,
                     account_result.error,
                 )
-                self._compensate(agent_id, account_result.tool_results)
+                self.compensate(agent_id, account_result.tool_results)
                 return ProvisioningResult(
                     agent_id=agent_id,
                     current_phase=Phase.ACCOUNT_PROVISIONING,
@@ -290,8 +289,6 @@ class ProvisioningOrchestrator:
             audit_result = run_access_audit(
                 agent_id=agent_id,
                 tool_results=account_result.tool_results,
-                manifest=manifest,
-                provisioners=self.tool_agents,
                 progress_callback=lambda msg: _update(status_text=msg),
             )
 
@@ -353,16 +350,17 @@ class ProvisioningOrchestrator:
         )
         return final_result
 
-    def _compensate(
+    def compensate(
         self,
         agent_id: str,
         tool_results: List[Any],
     ) -> None:
         """Roll back partial provisioning after a phase failure.
 
-        Best-effort: deprovisions any tools that did succeed, tears down the
-        Docker environment, and removes encrypted credentials so a failed
-        run doesn't leak resources or secrets to disk.
+        Public entry point for Temporal ``compensate_activity`` and in-process
+        shutdown compensation. Best-effort: deprovisions any tools that did
+        succeed, tears down the Docker environment, and removes encrypted
+        credentials so a failed run doesn't leak resources or secrets to disk.
         """
         # Look each successfully-provisioned tool back up by its registry key
         # (stamped onto the result in run_account_provisioning). Prior to #293
@@ -484,46 +482,9 @@ class ProvisioningOrchestrator:
         )
 
     def get_agent_status(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get the current status of a provisioned agent.
-
-        Args:
-            agent_id: Agent to check
-
-        Returns:
-            Status dict or None if not found
-        """
-        env = self.environment_store.get(agent_id)
-        if env is None:
-            return None
-
-        return {
-            "agent_id": agent_id,
-            "status": env.status,
-            "container_id": env.container_id,
-            "container_name": env.container_name,
-            "tools_provisioned": env.tools_provisioned,
-            "created_at": env.created_at,
-        }
+        """Get the current status of a provisioned agent."""
+        return get_agent_status_dict(self.environment_store, agent_id)
 
     def list_agents(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
-        """
-        List all provisioned agents.
-
-        Args:
-            status: Optional status filter ('running', 'ready', etc.)
-
-        Returns:
-            List of agent status dicts
-        """
-        environments = self.environment_store.list_all(status=status)
-        return [
-            {
-                "agent_id": env.agent_id,
-                "status": env.status,
-                "container_name": env.container_name,
-                "tools_provisioned": env.tools_provisioned,
-                "created_at": env.created_at,
-            }
-            for env in environments
-        ]
+        """List all provisioned agents, optionally filtered by status."""
+        return list_agent_status_dicts(self.environment_store, status=status)
