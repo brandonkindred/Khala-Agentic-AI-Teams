@@ -3486,6 +3486,87 @@ class TestDuplicateProposalDetection:
         assert proposal["issue_url"] == "https://example/issues/99"
 
 
+class TestDetectDuplicateProposalsUnit:
+    """Direct unit tests for _detect_duplicate_proposals, independent of the full
+    review harness (extracted from _run_pr_review_body for exactly this reason)."""
+
+    def _proposal(self, pid: str, description: str = "d") -> dict:
+        return {
+            "id": pid,
+            "severity": "high",
+            "category": "logic",
+            "file_path": "",
+            "line": None,
+            "description": description,
+            "suggestion": "",
+            "locations": [],
+            "issue_number": None,
+            "issue_url": None,
+        }
+
+    def test_empty_proposals_never_calls_the_client(self) -> None:
+        from software_engineering_team.coding_team.api import pr_review
+
+        class _Client:
+            def list_open_issues(self, _o, _r):
+                raise AssertionError("should not be called for an empty proposals list")
+
+        result = pr_review._detect_duplicate_proposals([], _Client(), "o", "r", 1)
+        assert result == []
+
+    def test_matches_against_a_fetched_open_issue(self) -> None:
+        from software_engineering_team.coding_team.api import pr_review
+
+        class _Client:
+            def list_open_issues(self, _o, _r):
+                yield Issue(
+                    number=42,
+                    title="off-by-one error in loop bound",
+                    body="",
+                    state="open",
+                    html_url="https://example/issues/42",
+                    labels=(),
+                )
+
+        [proposal] = pr_review._detect_duplicate_proposals(
+            [self._proposal("p0", "off-by-one error in loop bound")], _Client(), "o", "r", 1
+        )
+        assert proposal["matched_existing"] is True
+        assert proposal["issue_url"] == "https://example/issues/42"
+
+    def test_list_open_issues_failure_degrades_to_unmatched(self) -> None:
+        from software_engineering_team.coding_team.api import pr_review
+
+        class _Client:
+            def list_open_issues(self, _o, _r):
+                raise GitHubAPIError(500, "boom")
+
+        [proposal] = pr_review._detect_duplicate_proposals(
+            [self._proposal("p0")], _Client(), "o", "r", 1
+        )
+        assert proposal["matched_existing"] is False
+        assert proposal["issue_url"] is None
+
+    def test_annotation_failure_falls_back_to_unmatched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from software_engineering_team.coding_team.api import pr_review
+
+        class _Client:
+            def list_open_issues(self, _o, _r):
+                return iter(())
+
+        def _raise(*_a, **_k):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(pr_review, "annotate_duplicate_proposals", _raise)
+        [proposal] = pr_review._detect_duplicate_proposals(
+            [self._proposal("p0")], _Client(), "o", "r", 1
+        )
+        assert proposal["matched_existing"] is False
+        assert proposal["issue_url"] is None
+
+
 class TestCreateReviewIssuesUnit:
     """Direct unit tests for create_review_issues / its context loader."""
 

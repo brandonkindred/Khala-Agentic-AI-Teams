@@ -797,6 +797,73 @@ def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int)
         return []
 
 
+def _detect_duplicate_proposals(
+    proposals: List[Dict[str, Any]], client: Any, owner: str, repo: str, pr_number: int
+) -> List[Dict[str, Any]]:
+    """Annotate pre-existing-finding proposals against the repo's open issues, fail-safe.
+
+    Duplicate-detection is an enhancement to what the human is offered to file, not
+    a correctness requirement of the review itself, so no failure here is allowed
+    to fail the whole PR review.
+
+    Preconditions:
+        - ``client`` is an open ``GitHubClient``. ``proposals`` is fresh from
+          ``proposal_from_findings`` — none carry ``matched_existing`` yet.
+    Postconditions:
+        - Returns ``proposals`` unchanged when empty (no GitHub call made). Otherwise
+          fetches up to ``duplicate_check_max_open_issues()`` of the repo's open
+          issues and returns ``annotate_duplicate_proposals(proposals, open_issues)``.
+        - A failure listing open issues (network, auth, rate-limit) degrades to an
+          empty ``open_issues`` list -- mirroring the GitHubAPIError-tolerant
+          degrade-and-continue pattern ``_fetch_existing_comments`` already uses --
+          so annotation still runs (against no issues, i.e. nothing matches) rather
+          than being skipped.
+        - A failure in ``annotate_duplicate_proposals`` itself instead falls back to
+          marking every proposal ``matched_existing: False`` by hand -- mirroring
+          that function's own "no match" branch -- so downstream consumers
+          (frontend, ``create_review_issues``) still always see the field.
+        - Never raises.
+    """
+    if not proposals:
+        return proposals
+    try:
+        cap = duplicate_check_max_open_issues()
+        open_issues = list(itertools.islice(client.list_open_issues(owner, repo), cap))
+        if len(open_issues) >= cap:
+            logger.info(
+                "PR review #%s: duplicate-detection capped at %d open issues; "
+                "some older open issues were not considered",
+                pr_number,
+                cap,
+            )
+    except GitHubAPIError as e:
+        logger.warning(
+            "PR review #%s: could not list open issues for duplicate-detection: %s",
+            pr_number,
+            e,
+        )
+        open_issues = []
+    except Exception:  # noqa: BLE001 - duplicate-detection must never fail the review
+        logger.warning(
+            "PR review #%s: unexpected error listing open issues for duplicate-detection",
+            pr_number,
+            exc_info=True,
+        )
+        open_issues = []
+    try:
+        return annotate_duplicate_proposals(proposals, open_issues)
+    except Exception:  # noqa: BLE001 - duplicate-detection must never fail the review
+        logger.warning(
+            "PR review #%s: duplicate annotation failed, proceeding without duplicate detection",
+            pr_number,
+            exc_info=True,
+        )
+        # annotate_duplicate_proposals's own "no match" branch does exactly this
+        # ({**p, "matched_existing": False}); mirrored here as a safety net so a
+        # bug inside that function still leaves every proposal carrying the field.
+        return [{**p, "matched_existing": False} for p in proposals]
+
+
 def _run_pr_review_body(
     job_id: str,
     request: ReviewPrRequest,
@@ -931,56 +998,7 @@ def _run_pr_review_body(
             # not one per occurrence.
             finding_groups = group_similar_findings(preexisting_issues)
             proposals = [proposal_from_findings(g, idx) for idx, g in enumerate(finding_groups)]
-            if proposals:
-                # Duplicate-detection is an enhancement to what the human is offered
-                # to file, not a correctness requirement of the review itself: any
-                # failure listing existing issues (network, auth, rate-limit) must
-                # degrade to "no duplicates found" rather than fail the whole PR
-                # review -- mirroring the GitHubAPIError-tolerant degrade-and-continue
-                # pattern already used above for get_authenticated_login. Only
-                # fetched when there is at least one pre-existing finding, so a clean
-                # PR (or a PR with only in-diff findings) never pays for the extra
-                # GitHub call.
-                try:
-                    cap = duplicate_check_max_open_issues()
-                    open_issues = list(itertools.islice(client.list_open_issues(owner, repo), cap))
-                    if len(open_issues) >= cap:
-                        logger.info(
-                            "PR review #%s: duplicate-detection capped at %d open issues; "
-                            "some older open issues were not considered",
-                            pr_number,
-                            cap,
-                        )
-                except GitHubAPIError as e:
-                    logger.warning(
-                        "PR review #%s: could not list open issues for duplicate-detection: %s",
-                        pr_number,
-                        e,
-                    )
-                    open_issues = []
-                except Exception:  # noqa: BLE001 - duplicate-detection must never fail the review
-                    logger.warning(
-                        "PR review #%s: unexpected error listing open issues for "
-                        "duplicate-detection",
-                        pr_number,
-                        exc_info=True,
-                    )
-                    open_issues = []
-                try:
-                    proposals = annotate_duplicate_proposals(proposals, open_issues)
-                except Exception:  # noqa: BLE001 - duplicate-detection must never fail the review
-                    logger.warning(
-                        "PR review #%s: duplicate annotation failed, proceeding without "
-                        "duplicate detection",
-                        pr_number,
-                        exc_info=True,
-                    )
-                    # annotate_duplicate_proposals is the only place matched_existing
-                    # gets set; fall back to marking every proposal unmatched by hand
-                    # so downstream consumers (frontend, create_review_issues) always
-                    # see the field, exactly as they would on a clean "no duplicates
-                    # found" outcome.
-                    proposals = [{**p, "matched_existing": False} for p in proposals]
+            proposals = _detect_duplicate_proposals(proposals, client, owner, repo, pr_number)
 
             # Recognize findings that duplicate a comment already on the PR (from a
             # prior review run, or a human), so an evolving PR does not accumulate
