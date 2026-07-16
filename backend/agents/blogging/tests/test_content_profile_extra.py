@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from shared.content_profile import (
+from agents.blogging.shared.content_profile import (
     ContentProfile,
     SeriesContext,
     build_planning_length_context,

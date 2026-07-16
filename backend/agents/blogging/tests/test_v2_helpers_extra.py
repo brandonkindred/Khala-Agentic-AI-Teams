@@ -9,20 +9,14 @@ import pytest
 
 @pytest.fixture
 def patched_client(monkeypatch, fake_job_client):
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    try:
-        from blogging.shared import blog_job_store as bjs_alt
-
-        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
-    except ImportError:
-        pass
     return fake_job_client
 
 
 def _plan(target_reader: str | None = None):
-    from shared.content_plan import (
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -51,8 +45,8 @@ def _plan(target_reader: str | None = None):
 def test_run_title_selection_replaces_disliked_with_llm_replacement(
     monkeypatch, patched_client
 ) -> None:
-    from agent_implementations.blog_writing_process_v2 import _run_title_selection
-    from shared import blog_job_store as bjs
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -94,9 +88,9 @@ def test_run_title_selection_replaces_disliked_with_llm_replacement(
 def test_run_title_selection_llm_failure_falls_back_to_removal(monkeypatch, patched_client) -> None:
     """If LLM raises while generating a replacement, the disliked title is REMOVED.
     Then the user selects another title (= loves it) and we return it."""
-    import agent_implementations.blog_writing_process_v2 as v2
-    from agent_implementations.blog_writing_process_v2 import _run_title_selection
-    from shared import blog_job_store as bjs
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -135,8 +129,8 @@ def test_run_title_selection_llm_failure_falls_back_to_removal(monkeypatch, patc
 
 def test_run_title_selection_propagates_cancelled_error(monkeypatch, patched_client) -> None:
     """CancelledError inside the loop propagates out — does not become None."""
-    from agent_implementations.blog_writing_process_v2 import _run_title_selection
-    from shared import blog_job_store as bjs
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
+    from agents.blogging.shared import blog_job_store as bjs
     from temporalio.exceptions import CancelledError
 
     job_id = str(uuid.uuid4())[:8]
@@ -144,8 +138,7 @@ def test_run_title_selection_propagates_cancelled_error(monkeypatch, patched_cli
 
     bjs.update_blog_job(job_id, waiting_for_title_selection=True)
 
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     def angry_sleep(*_a, **_kw):
         raise CancelledError("cancelled")
 
@@ -163,16 +156,15 @@ def test_run_title_selection_propagates_cancelled_error(monkeypatch, patched_cli
 
 def test_run_title_selection_swallows_generic_error(monkeypatch, patched_client) -> None:
     """Non-Cancelled exceptions inside the function are caught and return None."""
-    from agent_implementations.blog_writing_process_v2 import _run_title_selection
-    from shared import blog_job_store as bjs
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
+    from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
 
     bjs.update_blog_job(job_id, waiting_for_title_selection=True)
 
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     def angry_sleep(*_a, **_kw):
         raise RuntimeError("transport failed")
 
@@ -191,8 +183,7 @@ def test_run_title_selection_swallows_generic_error(monkeypatch, patched_client)
 def test_wait_for_hitl_treats_missing_job_as_terminal(monkeypatch) -> None:
     """If the job vanishes mid-wait (get_blog_job -> None), the wait returns terminal
     immediately without sleeping, instead of polling a job that no longer exists."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     monkeypatch.setattr(v2, "get_blog_job", lambda job_id: None)
 
     slept = {"n": 0}
@@ -206,8 +197,7 @@ def test_wait_for_hitl_treats_missing_job_as_terminal(monkeypatch) -> None:
 
 def test_wait_for_hitl_returns_false_when_wait_clears(monkeypatch) -> None:
     """When is_waiting flips to False (human responded), the helper returns False."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     monkeypatch.setattr(v2, "get_blog_job", lambda job_id: {"status": "running"})
     monkeypatch.setattr(v2.time, "sleep", lambda *_a, **_kw: None)
 
@@ -223,8 +213,7 @@ def test_wait_for_hitl_returns_false_when_wait_clears(monkeypatch) -> None:
 def test_wait_for_hitl_rides_out_transient_read_error(monkeypatch) -> None:
     """A transient job-store read failure is retried on the next poll rather than failing
     the whole job."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     monkeypatch.setattr(v2.time, "sleep", lambda *_a, **_kw: None)
 
     reads = {"n": 0}
@@ -244,8 +233,7 @@ def test_wait_for_hitl_rides_out_transient_read_error(monkeypatch) -> None:
 def test_wait_for_hitl_reraises_after_persistent_read_errors(monkeypatch) -> None:
     """Consecutive read failures beyond the bound propagate — a persistent job-store outage
     still fails the job instead of looping forever."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     monkeypatch.setattr(v2.time, "sleep", lambda *_a, **_kw: None)
 
     attempts = {"n": 0}

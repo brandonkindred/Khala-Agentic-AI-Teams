@@ -8,10 +8,16 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
-from shared.content_plan import PlanningInput, PlanningPhaseResult
-from shared.content_planning_loop import complete_plan_json, run_content_planning_loop
-from shared.content_profile import LengthPolicy
-from shared.planning_config import planning_max_iterations, planning_max_parse_retries
+from agents.blogging.shared.content_plan import PlanningInput, PlanningPhaseResult
+from agents.blogging.shared.content_planning_loop import (
+    complete_plan_json,
+    run_content_planning_loop,
+)
+from agents.blogging.shared.content_profile import LengthPolicy
+from agents.blogging.shared.planning_config import (
+    planning_max_iterations,
+    planning_max_parse_retries,
+)
 from strands import Agent
 
 from llm_service import extract_json_from_response
@@ -134,7 +140,7 @@ class _BlogPlanningAgentRunner:
         Raises:
             TypeError: If ``body`` is not a ``dict``.
         """
-        from shared.content_profile import resolve_length_policy_from_request_dict
+        from agents.blogging.shared.content_profile import resolve_length_policy_from_request_dict
 
         if not isinstance(body, dict):
             raise TypeError(f"blogging.planner body must be a dict, got {type(body).__name__}")
@@ -168,7 +174,7 @@ def make_blog_planning_agent() -> _BlogPlanningAgentRunner:
         env-resolved LLM client and a default ``standard_article`` length
         policy.
     """
-    from shared.content_profile import ContentProfile, resolve_length_policy
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
 
     from llm_service import get_client
 

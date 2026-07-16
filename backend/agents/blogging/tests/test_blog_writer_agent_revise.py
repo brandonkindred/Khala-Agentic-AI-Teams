@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from blog_copy_editor_agent.models import FeedbackItem
-from blog_writer_agent import BlogWriterAgent, ReviseWriterInput
-from shared.content_plan import (
+from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+from agents.blogging.blog_writer_agent import BlogWriterAgent, ReviseWriterInput
+from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     RequirementsAnalysis,

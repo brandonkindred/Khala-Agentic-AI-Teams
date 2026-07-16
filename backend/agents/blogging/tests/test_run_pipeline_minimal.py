@@ -12,7 +12,7 @@ import pytest
 
 
 def _make_plan():
-    from shared.content_plan import (
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         PlanningPhaseResult,
@@ -39,12 +39,11 @@ def _make_plan():
 
 def test_run_pipeline_no_gates_no_job(monkeypatch, tmp_path: Path) -> None:
     """Smallest possible orchestration: planning + draft, no gates, no job_id."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     # Stub heavy steps:
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
 
-    from blog_writer_agent.models import WriterOutput
+    from agents.blogging.blog_writer_agent.models import WriterOutput
 
     class _StubWriter:
         def __init__(self, *a, **kw):
@@ -68,7 +67,7 @@ def test_run_pipeline_no_gates_no_job(monkeypatch, tmp_path: Path) -> None:
         def generate_escalation_summary(self, *a, **kw):
             return "stuck"
 
-    from blog_copy_editor_agent.models import CopyEditorOutput
+    from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput
 
     class _StubEditor:
         def __init__(self, *a, **kw):
@@ -83,7 +82,7 @@ def test_run_pipeline_no_gates_no_job(monkeypatch, tmp_path: Path) -> None:
     # Style and brand spec — non-empty strings so the missing-guideline check passes
     monkeypatch.setattr(v2, "load_style_file", lambda path, label="": "guidelines text")
 
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     brief = ResearchBriefInput(brief="Topic about AI", audience="devs", max_results=10)
     work_dir = tmp_path / "wd"
@@ -101,11 +100,10 @@ def test_run_pipeline_no_gates_no_job(monkeypatch, tmp_path: Path) -> None:
 
 def test_run_pipeline_no_gates_no_workdir(monkeypatch) -> None:
     """No work_dir — artifact writes are skipped."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
 
-    from blog_writer_agent.models import WriterOutput
+    from agents.blogging.blog_writer_agent.models import WriterOutput
 
     class _StubWriter:
         def __init__(self, *a, **kw):
@@ -129,7 +127,7 @@ def test_run_pipeline_no_gates_no_workdir(monkeypatch) -> None:
         def generate_escalation_summary(self, *a, **kw):
             return ""
 
-    from blog_copy_editor_agent.models import CopyEditorOutput
+    from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput
 
     class _StubEditor:
         def __init__(self, *a, **kw):
@@ -142,7 +140,7 @@ def test_run_pipeline_no_gates_no_workdir(monkeypatch) -> None:
     monkeypatch.setattr(v2, "BlogCopyEditorAgent", _StubEditor)
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
 
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     brief = ResearchBriefInput(brief="hi", max_results=5)
     _, draft, status = v2.run_pipeline(
@@ -156,13 +154,12 @@ def test_run_pipeline_no_gates_no_workdir(monkeypatch) -> None:
 
 def test_run_pipeline_missing_guidelines_raises(monkeypatch, tmp_path: Path) -> None:
     """When style/brand files load as empty, DraftError is raised before any drafting."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "")
 
-    from blog_research_agent.models import ResearchBriefInput
-    from shared.errors import DraftError
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.errors import DraftError
 
     brief = ResearchBriefInput(brief="hi", max_results=5)
     with pytest.raises(DraftError):
@@ -176,12 +173,11 @@ def test_run_pipeline_missing_guidelines_raises(monkeypatch, tmp_path: Path) -> 
 
 def test_run_pipeline_copy_editor_stalls_then_accepts(monkeypatch, tmp_path: Path) -> None:
     """Copy editor never approves; eventually accept after iterations exhausted."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
 
-    from blog_writer_agent.models import WriterOutput
+    from agents.blogging.blog_writer_agent.models import WriterOutput
 
     class _StubWriter:
         def __init__(self, *a, **kw):
@@ -205,7 +201,7 @@ def test_run_pipeline_copy_editor_stalls_then_accepts(monkeypatch, tmp_path: Pat
         def generate_escalation_summary(self, *a, **kw):
             return ""
 
-    from blog_copy_editor_agent.models import CopyEditorOutput, FeedbackItem
+    from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput, FeedbackItem
 
     class _StubEditor:
         def __init__(self, *a, **kw):
@@ -228,7 +224,7 @@ def test_run_pipeline_copy_editor_stalls_then_accepts(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(v2, "BlogWriterAgent", _StubWriter)
     monkeypatch.setattr(v2, "BlogCopyEditorAgent", _StubEditor)
 
-    from blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     brief = ResearchBriefInput(brief="hi", max_results=5)
     # Use small draft_editor_iterations so the loop completes quickly

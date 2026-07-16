@@ -5,10 +5,10 @@ equivalent ContentPlan output for identical inputs."""
 
 from __future__ import annotations
 
-from blog_planning_agent.agent import BlogPlanningAgent
-from blog_writer_agent.agent import BlogWriterAgent
-from shared.content_plan import PlanningInput
-from shared.content_profile import ContentProfile, resolve_length_policy
+from agents.blogging.blog_planning_agent.agent import BlogPlanningAgent
+from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+from agents.blogging.shared.content_plan import PlanningInput
+from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
 
 from llm_service import DummyLLMClient
 

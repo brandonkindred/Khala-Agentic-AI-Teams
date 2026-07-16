@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 
 import pytest
-from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput, CopyEditorOutput
+from agents.blogging.blog_copy_editor_agent import (
+    BlogCopyEditorAgent,
+    CopyEditorInput,
+    CopyEditorOutput,
+)
 
 from llm_service import DummyLLMClient
 
@@ -176,7 +180,7 @@ def test_blog_copy_editor_agent_feedback_file_roundtrip(tmp_path: Path) -> None:
 
 def test_blog_copy_editor_agent_no_path_no_file(monkeypatch) -> None:
     """When feedback_output_path is not passed, the agent never attempts to write a feedback file."""
-    from blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
 
     llm = DummyLLMClient()
     agent = BlogCopyEditorAgent(
@@ -219,7 +223,7 @@ def test_blog_copy_editor_agent_empty_draft_writes_file(tmp_path: Path) -> None:
 @pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
 def test_copy_editor_transient_error_reraises(monkeypatch, kind) -> None:
     """A transient LLM-transport error propagates unwrapped (delegated to Temporal), no fallback."""
-    from blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
 
     from llm_service import LLMRateLimitError, LLMTemporaryError
 
@@ -243,7 +247,7 @@ def test_copy_editor_transient_error_reraises(monkeypatch, kind) -> None:
 def test_copy_editor_unexpected_error_degrades_to_fallback(monkeypatch) -> None:
     """A non-transient, non-JSON LLM/programming error degrades to a manual-review
     fallback (approved, no feedback) instead of crashing the draft stage."""
-    from blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -269,7 +273,7 @@ def test_copy_editor_unexpected_error_degrades_to_fallback(monkeypatch) -> None:
 
 def test_copy_editor_json_parse_failure_degrades_to_fallback(monkeypatch) -> None:
     """When the model never returns parseable JSON, the fallback approves (no no-op rewrite)."""
-    from blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
 
     from llm_service import LLMJsonParseError
 

@@ -384,7 +384,7 @@ def test_trend_agent_requires_web_search() -> None:
 
 def test_trend_agent_skips_non_dict_topic_items() -> None:
     """Lines 165-166: non-dict items in 'topics' are skipped."""
-    from blog_research_agent.models import CandidateResult
+    from agents.blogging.blog_research_agent.models import CandidateResult
 
     from llm_service import DummyLLMClient
 
@@ -413,7 +413,7 @@ def test_trend_agent_skips_non_dict_topic_items() -> None:
 
 def test_trend_agent_skips_items_with_blank_title_or_summary() -> None:
     """Lines 168-170: items where title or summary is blank are skipped."""
-    from blog_research_agent.models import CandidateResult
+    from agents.blogging.blog_research_agent.models import CandidateResult
 
     from llm_service import DummyLLMClient
 

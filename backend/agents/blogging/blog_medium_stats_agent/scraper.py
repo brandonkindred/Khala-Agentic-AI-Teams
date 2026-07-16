@@ -7,7 +7,7 @@ import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
 
-from shared.medium_integration_access import resolve_medium_stats_storage_state
+from agents.blogging.shared.medium_integration_access import resolve_medium_stats_storage_state
 
 from .models import MediumPostStats, MediumStatsReport, MediumStatsRunConfig
 from .selectors import ME_STATS_URL

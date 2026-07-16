@@ -19,17 +19,17 @@ def reset_cache():
 
 
 def _install_fake_profile(short: str = "", full: str = "") -> None:
-    """Inject a minimal blogging.author_profile stub into sys.modules."""
+    """Inject a minimal agents.blogging.author_profile stub into sys.modules."""
     identity = types.SimpleNamespace(short_name=short, full_name=full)
     profile = types.SimpleNamespace(identity=identity)
 
-    fake_module = types.ModuleType("blogging.author_profile")
+    fake_module = types.ModuleType("agents.blogging.author_profile")
     fake_module.load_author_profile = lambda: profile
-    sys.modules["blogging.author_profile"] = fake_module
+    sys.modules["agents.blogging.author_profile"] = fake_module
 
 
 def _remove_fake_profile() -> None:
-    sys.modules.pop("blogging.author_profile", None)
+    sys.modules.pop("agents.blogging.author_profile", None)
 
 
 def test_short_name_wins_when_present() -> None:
@@ -60,9 +60,9 @@ def test_anonymous_when_loader_raises(monkeypatch) -> None:
     def _boom():
         raise RuntimeError("profile gone")
 
-    fake_module = types.ModuleType("blogging.author_profile")
+    fake_module = types.ModuleType("agents.blogging.author_profile")
     fake_module.load_author_profile = _boom
-    sys.modules["blogging.author_profile"] = fake_module
+    sys.modules["agents.blogging.author_profile"] = fake_module
     try:
         assert resolve_author() == ANONYMOUS
     finally:
@@ -71,15 +71,15 @@ def test_anonymous_when_loader_raises(monkeypatch) -> None:
 
 def test_anonymous_when_loader_raises_attribute_error() -> None:
     _remove_fake_profile()
-    # The real blogging package may be importable in this tree; inject a
+    # The real agents.blogging package may be importable in this tree; inject a
     # stub whose loader raises to simulate a broken profile module.
-    fake_module = types.ModuleType("blogging.author_profile")
+    fake_module = types.ModuleType("agents.blogging.author_profile")
 
     def _missing(*args, **kwargs):  # noqa: ANN401, ARG001
         raise AttributeError("load_author_profile not available")
 
     fake_module.load_author_profile = _missing  # type: ignore[assignment]
-    sys.modules["blogging.author_profile"] = fake_module
+    sys.modules["agents.blogging.author_profile"] = fake_module
     try:
         assert resolve_author() == ANONYMOUS
     finally:

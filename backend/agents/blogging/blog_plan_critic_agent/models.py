@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from agents.blogging.shared.gate_report import GateReport, GateSeverity, GateStatus, GateViolation
 from pydantic import Field
-from shared.gate_report import GateReport, GateSeverity, GateStatus, GateViolation
 
 
 class PlanViolation(GateViolation):

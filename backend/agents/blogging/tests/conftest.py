@@ -24,7 +24,7 @@ def setup_artifacts_root(monkeypatch, tmp_path: Path) -> None:
 
 def make_pipeline_doubles():
     """Build a ``(PlanningPhaseResult, draft, status)`` triple for a passing pipeline run."""
-    from shared.content_plan import (
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         PlanningPhaseResult,
@@ -88,7 +88,7 @@ def patched_client(monkeypatch, fake_job_client) -> Any:
     this fixture do not pay the ``api/main`` import cost.
     """
     from _api_test_utils import api_main
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
     for name in _BLOG_JOB_HELPERS:

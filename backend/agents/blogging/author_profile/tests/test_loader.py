@@ -6,9 +6,8 @@ import os
 from pathlib import Path
 
 import pytest
-
-from author_profile import EXAMPLE_PROFILE_PATH, AuthorProfile, load_author_profile
-from author_profile import loader as loader_mod
+from agents.blogging.author_profile import EXAMPLE_PROFILE_PATH, AuthorProfile, load_author_profile
+from agents.blogging.author_profile import loader as loader_mod
 
 _SAMPLE = """\
 identity:
