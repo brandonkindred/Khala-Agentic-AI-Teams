@@ -346,7 +346,6 @@ ALLOWED_SERVICES = frozenset(
         "market_research_api",
         "soc2_compliance_api",
         "social_marketing_api",
-        "blog_research_api",
         "agent_provisioning_api",
         "postgresql",
         "nginx",
