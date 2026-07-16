@@ -574,6 +574,30 @@ def _open_issue(number: int, title: str, body: str = "") -> Issue:
     )
 
 
+def test_find_matching_open_issue_matches_own_combined_proposal_title_wrapper() -> None:
+    # Regression: an issue Khala itself filed from a combined (multi-location)
+    # proposal carries a "[severity] headline (N occurrences)" title -- without
+    # un-wrapping that title first, the wrapper text dilutes a short headline's
+    # similarity ratio (0.489, computed) just below the with-location threshold
+    # (0.5), so a rerun would fail to recognize its own previously-filed issue.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", severity="high", description="memory leak")], 0
+    )
+    issue = _open_issue(1, "[high] memory leak (2 occurrences)", body="See `src/a.py` for details.")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
+def test_find_matching_open_issue_matches_own_single_location_title_wrapper() -> None:
+    # Same wrapper concern for a single-location Khala-filed issue (no
+    # "(N occurrences)" suffix, just the severity prefix) -- text similarity
+    # alone (no location signal) must still clear the no-location threshold.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", severity="critical", description="off-by-one error")], 0
+    )
+    issue = _open_issue(1, "[critical] off-by-one error", body="")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
 def test_find_matching_open_issue_location_plus_moderate_text_matches() -> None:
     proposal = proposal_from_findings(
         [_Issue(file_path="src/a.py", description="null pointer dereference in parser")], 0

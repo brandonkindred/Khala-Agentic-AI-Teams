@@ -698,6 +698,37 @@ def duplicate_check_max_open_issues() -> int:
     return value if value > 0 else _DUPLICATE_CHECK_MAX_OPEN_ISSUES
 
 
+# Matches exactly the wrapper `_proposal_title` applies around a proposal's bare
+# headline (`"[severity] headline"`, optionally followed by `" (N occurrences)"`
+# for a combined proposal) so a candidate issue's title can be un-wrapped back to
+# its headline before it is compared to a fresh finding's own bare headline.
+_ISSUE_TITLE_WRAPPER_RE = re.compile(
+    r"^\[(?:info|low|medium|high|critical)\] (.*?)(?: \(\d+ occurrences\))?$",
+    re.IGNORECASE,
+)
+
+
+def _normalized_issue_title(title: str) -> str:
+    """Strip Khala's own severity-prefix/occurrences-suffix title wrapper, if present.
+
+    ``_proposal_title`` renders a filed issue's title as ``"[severity] headline"``,
+    or ``"[severity] headline (N occurrences)"`` for a combined proposal. Comparing
+    a fresh finding's bare headline against that wrapped text via ``SequenceMatcher``
+    dilutes the similarity ratio -- the wrapper can be a large fraction of a short
+    headline -- which can push a genuine rerun match (against an issue Khala itself
+    filed on a previous review) below threshold. Stripping a recognized wrapper
+    before computing the ratio undoes exactly what Khala added, so a rerun still
+    recognizes its own previously-filed issues.
+
+    Postconditions:
+        - Returns the captured headline when ``title`` matches the wrapper pattern
+          exactly; otherwise returns ``title`` unchanged (a human-filed issue, or
+          one from another tool, never carries this wrapper). Never raises.
+    """
+    match = _ISSUE_TITLE_WRAPPER_RE.match(title or "")
+    return match.group(1) if match else (title or "")
+
+
 def _location_appears_in(file_path: str, issue: Issue) -> bool:
     """True when a finding's file_path is a substring of an existing issue's title/body.
 
@@ -738,6 +769,12 @@ def find_matching_open_issue(
         location match -- covers a finding with a blank ``file_path``, or an issue
         whose body doesn't happen to repeat the exact path string.
 
+    A candidate issue's title is compared after :func:`_normalized_issue_title`
+    strips Khala's own severity-prefix/occurrences-suffix wrapper (if present), so
+    a rerun still recognizes an issue Khala itself filed on a previous review --
+    without this, the wrapper text dilutes the similarity ratio enough to drop a
+    genuine match (especially a short headline) below threshold.
+
     Pure and side-effect-free: no GitHub/network access. ``open_issues`` must already
     be a materialized (or safely re-iterable) snapshot -- callers fetch it ONCE per
     review (e.g. via ``GitHubClient.list_open_issues``) and pass the same snapshot to
@@ -768,7 +805,8 @@ def find_matching_open_issue(
     best: Optional[Issue] = None
     best_ratio = -1.0
     for issue in open_issues:
-        ratio = SequenceMatcher(None, headline, (issue.title or "").casefold()).ratio()
+        candidate_title = _normalized_issue_title(issue.title or "").casefold()
+        ratio = SequenceMatcher(None, headline, candidate_title).ratio()
         matches = (_location_appears_in(file_path, issue) and ratio >= with_location) or (
             ratio >= no_location
         )
