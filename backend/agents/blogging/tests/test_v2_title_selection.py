@@ -12,17 +12,13 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from conftest import make_content_plan
 
 
 def _plan():
-    from shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from shared.content_plan import ContentPlanSection, TitleCandidate
 
-    return ContentPlan(
+    return make_content_plan(
         overarching_topic="My Topic",
         narrative_flow="flow",
         sections=[
@@ -33,9 +29,6 @@ def _plan():
             TitleCandidate(title="First", probability_of_success=0.6),
             TitleCandidate(title="Second", probability_of_success=0.5),
         ],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
 
 

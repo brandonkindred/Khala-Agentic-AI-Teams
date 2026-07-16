@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 import pytest
+from conftest import make_content_plan
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
@@ -66,14 +67,11 @@ def test_post_validate_plan_flags_out_of_bounds_section_count() -> None:
     sections = [
         ContentPlanSection(title=f"S{i}", coverage_description="x", order=i) for i in range(15)
     ]
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="T",
         narrative_flow="n",
         sections=sections,
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     out = post_validate_plan(plan, _policy_standard())
     assert out.requirements_analysis.plan_acceptable is False
@@ -81,16 +79,13 @@ def test_post_validate_plan_flags_out_of_bounds_section_count() -> None:
 
 
 def test_post_validate_plan_preserves_in_bounds_plan() -> None:
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="T",
         narrative_flow="n",
         sections=[
             ContentPlanSection(title=f"S{i}", coverage_description="x", order=i) for i in range(4)
         ],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     out = post_validate_plan(plan, _policy_standard())
     assert out.requirements_analysis.plan_acceptable is True
@@ -99,16 +94,13 @@ def test_post_validate_plan_preserves_in_bounds_plan() -> None:
 def test_post_validate_plan_uses_bounds_for_the_given_profile() -> None:
     """10 sections is in-bounds for standard_article (4-10) but out-of-bounds for
     short_listicle (3-7) — confirms bounds are looked up per-profile, not hardcoded."""
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="T",
         narrative_flow="n",
         sections=[
             ContentPlanSection(title=f"S{i}", coverage_description="x", order=i) for i in range(10)
         ],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     assert (
         post_validate_plan(plan, _policy_standard()).requirements_analysis.plan_acceptable is True
@@ -120,14 +112,11 @@ def test_post_validate_plan_uses_bounds_for_the_given_profile() -> None:
 
 def test_is_planner_self_eval_satisfied() -> None:
     """True only when both plan_acceptable and scope_feasible are True."""
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="X",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     assert is_planner_self_eval_satisfied(plan) is True
 
@@ -169,7 +158,7 @@ def test_build_generate_plan_prompt_skips_blank_series_block() -> None:
 
 def test_build_refine_plan_prompt_includes_previous_plan_and_feedback() -> None:
     inp = PlanningInput(brief="b", length_policy_context="ctx", research_digest="digest")
-    prev = ContentPlan(
+    prev = make_content_plan(
         overarching_topic="t",
         narrative_flow="n",
         sections=[ContentPlanSection(title="x", coverage_description="x", order=0)],

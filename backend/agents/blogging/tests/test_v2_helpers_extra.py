@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from conftest import make_content_plan
 
 
 @pytest.fixture
@@ -22,12 +23,7 @@ def patched_client(monkeypatch, fake_job_client):
 
 
 def _plan(target_reader: str | None = None):
-    from shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from shared.content_plan import ContentPlanSection, TitleCandidate
 
     plan_kwargs = dict(
         overarching_topic="My Topic",
@@ -39,13 +35,10 @@ def _plan(target_reader: str | None = None):
         title_candidates=[
             TitleCandidate(title="First", probability_of_success=0.6),
         ],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     if target_reader is not None:
         plan_kwargs["target_reader"] = target_reader
-    return ContentPlan(**plan_kwargs)
+    return make_content_plan(**plan_kwargs)
 
 
 def test_run_title_selection_replaces_disliked_with_llm_replacement(

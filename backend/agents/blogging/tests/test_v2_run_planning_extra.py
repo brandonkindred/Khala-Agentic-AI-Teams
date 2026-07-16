@@ -5,18 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from conftest import make_content_plan
 
 
 def _make_planning_result(iterations: int = 1, critic_report: dict | None = None):
     from shared.content_plan import (
-        ContentPlan,
         ContentPlanSection,
         PlanningPhaseResult,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="Topic",
         narrative_flow="flow",
         sections=[
@@ -25,9 +24,6 @@ def _make_planning_result(iterations: int = 1, critic_report: dict | None = None
             ContentPlanSection(title="Conclusion", coverage_description="wrap", order=2),
         ],
         title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     return PlanningPhaseResult(
         content_plan=plan,
@@ -199,14 +195,9 @@ def test_run_planning_wraps_unknown_exception(monkeypatch) -> None:
 
 def test_extract_plan_keywords_returns_filtered_unique() -> None:
     import agent_implementations.blog_writing_process_v2 as v2
-    from shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from shared.content_plan import ContentPlanSection, TitleCandidate
 
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="observability essentials",
         narrative_flow="x",
         sections=[
@@ -214,9 +205,6 @@ def test_extract_plan_keywords_returns_filtered_unique() -> None:
             ContentPlanSection(title="Cost Attribution", coverage_description="x", order=1),
         ],
         title_candidates=[TitleCandidate(title="t", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     kws = v2._extract_plan_keywords(plan)
     assert "and" not in kws

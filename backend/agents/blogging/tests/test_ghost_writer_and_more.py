@@ -14,16 +14,13 @@ import json
 from typing import Any, List
 from unittest.mock import MagicMock
 
+from conftest import make_content_plan
+
 
 def _content_plan():
-    from shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from shared.content_plan import ContentPlanSection, TitleCandidate
 
-    return ContentPlan(
+    return make_content_plan(
         overarching_topic="Building scalable APIs",
         narrative_flow="Intro, body, wrap",
         sections=[
@@ -31,9 +28,6 @@ def _content_plan():
             ContentPlanSection(title="Body", coverage_description="depth", order=1),
         ],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
 
 
@@ -361,26 +355,18 @@ def test_ghost_find_gaps_via_llm_exception_then_recover(monkeypatch) -> None:
 def test_ghost_find_story_gaps_uses_plan_opportunities_when_present(monkeypatch) -> None:
     """find_story_gaps short-circuits to opportunities, avoiding LLM gap-finding."""
     from ghost_writer_agent.agent import GhostWriterElicitationAgent
-    from shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from shared.content_plan import ContentPlanSection, TitleCandidate
 
     from llm_service import DummyLLMClient
 
     sec = ContentPlanSection(
         title="A", coverage_description="cov", order=0, story_opportunity="A bug story"
     )
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="X",
         narrative_flow="flow",
         sections=[sec],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     monkeypatch.setattr(agent, "_generate_friendly_seeds", lambda opps: [f"q-{o}" for o in opps])
