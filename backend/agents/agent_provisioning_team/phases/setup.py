@@ -145,23 +145,18 @@ def run_setup(
         # concurrently between the two can still lose its container. Fully closing
         # that race needs agent-level serialization, tracked as separate follow-up
         # work.
-        owned_elsewhere = False
-        try:
-            current = env_store.get(agent_id)
-            owned_elsewhere = current is not None and getattr(current, "status", None) == "running"
-        except Exception:
-            logger.exception(
-                "Setup rollback: could not read environment for agent_id=%s; "
-                "proceeding with teardown",
-                agent_id,
-            )
+        # env_store.get never raises (its contract swallows malformed/IO errors
+        # and returns None), so call it directly — a raise here would be a real
+        # contract violation and should surface, not be masked into a teardown.
+        current = env_store.get(agent_id)
+        owned_elsewhere = current is not None and getattr(current, "status", None) == "running"
         if not owned_elsewhere:
             try:
                 teardown = docker.deprovision(agent_id)
                 # deprovision() reports failure (e.g. a `docker stop` timeout) via
                 # its result rather than raising, so inspect it — otherwise a
                 # failed rollback would leave the container silently orphaned.
-                if teardown is not None and not getattr(teardown, "success", True):
+                if not getattr(teardown, "success", True):
                     logger.error(
                         "Setup rollback: container teardown for agent_id=%s reported "
                         "failure; container may be orphaned: %s",

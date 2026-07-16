@@ -195,8 +195,12 @@ def test_run_setup_keeps_container_backed_by_running_env(tmp_path: Path) -> None
         workspace_path="/workspace/a4",
         status="running",
     )
+    # First read (the early-return check) sees no env; the rollback re-read — and
+    # any later read — sees a concurrently-registered running env. Using an
+    # iterator with a default avoids coupling to the exact number of get() calls.
+    reads = iter((None,))
     env_store = MagicMock()
-    env_store.get.side_effect = [None, running_env]
+    env_store.get.side_effect = lambda _agent_id: next(reads, running_env)
     env_store.register.side_effect = RuntimeError("register boom")
 
     docker = MagicMock()
@@ -217,13 +221,15 @@ def test_run_setup_keeps_container_backed_by_running_env(tmp_path: Path) -> None
     docker.deprovision.assert_not_called()
 
 
-def test_run_setup_reclaims_reused_orphan_when_register_fails(tmp_path: Path) -> None:
-    """A reused container with no running env record is an orphan and must be reclaimed.
+def test_run_setup_reclaims_orphan_with_no_running_env(tmp_path: Path) -> None:
+    """Reclaim a leftover container that has no running env record.
 
-    This is the Temporal-retry case: a prior attempt created the container and its
-    teardown failed, so this attempt sees ``reused=True`` — but there is still no
-    running env record, so the container must be torn down (not suppressed by the
-    idempotent ``reused`` flag), otherwise it leaks forever.
+    Models the Temporal-retry orphan: a prior attempt created the container and
+    its teardown failed, so the container (and its docker state) still exist, but
+    no *running* environment record was ever written. On this attempt registration
+    fails again; with no running record the container is an orphan and must be
+    reclaimed rather than left to leak. (Teardown is gated on the env record, not
+    on the provisioner's ``reused`` flag, so the flag is irrelevant here.)
     """
     from agent_provisioning_team.phases.setup import run_setup
     from agent_provisioning_team.shared.tool_manifest import ToolManifest
@@ -236,11 +242,7 @@ def test_run_setup_reclaims_reused_orphan_when_register_fails(tmp_path: Path) ->
     docker.provision.return_value = ToolProvisionResult(
         tool_name="docker",
         success=True,
-        details={
-            "container_id": "c-orphan",
-            "container_name": "agent-a7",
-            "reused": True,
-        },
+        details={"container_id": "c-orphan", "container_name": "agent-a7"},
     )
 
     with pytest.raises(RuntimeError, match="register boom"):
