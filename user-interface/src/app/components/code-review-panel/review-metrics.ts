@@ -1,16 +1,17 @@
 /**
  * Pure derivation helpers for the Code Review page's per-review metrics — the Severity
- * and Duration cells rendered by `PrReviewDetailComponent`, plus the live-poll completion
- * timestamp stamped by `CodeReviewPanelComponent`.
+ * and Duration cells rendered by `PrReviewDetailComponent`, the row status badge rendered
+ * by `CodeReviewPanelComponent`, and the live-poll completion timestamp stamped by
+ * `PrReviewRunsService`.
  *
  * Kept as standalone pure functions so the metric logic is unit-testable in isolation and
- * shared by both the parent panel (`terminalTimestamp`) and the detail child
- * (`severityEntries`, `reviewDuration`). Every function is pure except `reviewDuration`
- * (may `console.warn` on a clock-skew anomaly) and `terminalTimestamp` (reads the clock
- * only on its fallback path).
+ * shared across the parent panel, its review-runs service, and the detail child. Every
+ * function is pure except `reviewDuration` (may `console.warn` on a clock-skew anomaly)
+ * and `terminalTimestamp` (reads the clock only on its fallback path).
  */
 import type { CodeReviewSummary, CodingTeamJobStatus } from '../../models/coding-team.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
+import type { PrReviewRecord } from './pr-review-record.model';
 
 /** Fixed critical→info ordering for the per-row severity metric chips. */
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'] as const;
@@ -94,4 +95,47 @@ export function terminalTimestamp(
     if (!Number.isNaN(parsed)) return parsed;
   }
   return Date.now();
+}
+
+/**
+ * Whether a PR's latest review is still running (drives the row spinner).
+ *
+ * Preconditions: `latest` is a PR's most recent review record, or `null` when it has none.
+ * Postconditions: returns true iff `latest` is non-null, carries no `error`, and its status
+ * is not terminal. Pure — no side effects.
+ */
+export function isLatestRunning(latest: PrReviewRecord | null): boolean {
+  return !!latest && !latest.error && !isCodingTeamTerminalStatus(latest.status);
+}
+
+/**
+ * Row status badge text derived from a PR's latest review, or null when it has none.
+ *
+ * Preconditions: `latest` is a PR's most recent review record, or `null` when it has none.
+ * Postconditions: returns null when `latest` is null; `'error'` when it carries an error;
+ * the review-summary event (falling back to the raw status) when terminal; otherwise the
+ * raw status. Pure — no side effects.
+ */
+export function badgeLabel(latest: PrReviewRecord | null): string | null {
+  if (!latest) return null;
+  if (latest.error) return 'error';
+  if (isCodingTeamTerminalStatus(latest.status)) {
+    return latest.reviewSummary?.event ?? latest.status;
+  }
+  return latest.status;
+}
+
+/**
+ * Row status badge CSS class derived from a PR's latest review.
+ *
+ * Preconditions: `latest` is a PR's most recent review record, or `null` when it has none.
+ * Postconditions: returns `''` when `latest` is null; `'cr-job-status--failed'` when it
+ * carries an error or a `'failed'` status; `'cr-job-status--completed'` when terminal
+ * (and not failed); `''` otherwise. Pure — no side effects.
+ */
+export function badgeClass(latest: PrReviewRecord | null): string {
+  if (!latest) return '';
+  if (latest.error || latest.status === 'failed') return 'cr-job-status--failed';
+  if (isCodingTeamTerminalStatus(latest.status)) return 'cr-job-status--completed';
+  return '';
 }

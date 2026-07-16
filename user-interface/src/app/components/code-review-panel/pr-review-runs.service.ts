@@ -1,0 +1,405 @@
+import { ChangeDetectorRef, Injectable, OnDestroy, inject } from '@angular/core';
+import { Subject, Subscription } from 'rxjs';
+import { takeUntil } from 'rxjs/operators';
+import { CodingTeamApiService } from '../../services/coding-team-api.service';
+import { IntegrationsApiService } from '../../services/integrations-api.service';
+import { pollJobStatus } from '../../services/job-status-poller';
+import type {
+  CodeReviewRunItem,
+  GitHubPullRequestItem,
+  GitHubRepoItem,
+  RunPrReviewResponse,
+} from '../../models/integrations.model';
+import type { CodingTeamJobStatus } from '../../models/coding-team.model';
+import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
+import { LatestOnly } from '../../shared/latest-only';
+import type { PrReviewRecord } from './pr-review-record.model';
+import {
+  badgeClass as badgeClassFor,
+  badgeLabel as badgeLabelFor,
+  isLatestRunning as isLatestRunningFor,
+  terminalTimestamp,
+} from './review-metrics';
+
+/**
+ * Owns the Code Review page's review-run domain: hydrating review history from the
+ * backend, starting new reviews, live-polling them to completion, and filing GitHub
+ * issues from a completed review's proposals — everything `CodeReviewPanelComponent`
+ * used to hold directly (issue: the component mixed this with PR-list management).
+ *
+ * Provided in `CodeReviewPanelComponent`'s own `providers` array (not `providedIn: 'root'`)
+ * so each panel instance gets a fresh service instance whose state resets cleanly on
+ * navigation, mirroring `AgentStudioStateService`. Because of that, `inject(ChangeDetectorRef)`
+ * below resolves to the *hosting* `CodeReviewPanelComponent`'s change detector, so this
+ * service can call `markForCheck()` itself wherever the component used to.
+ *
+ * Invariants: `reviews`/`reviewErrors` only ever hold records for `currentRepo` — callers
+ * must call {@link reset} before hydrating a newly-expanded repo so records from a
+ * previous repo can never render under another repo's identically-numbered PR (PR numbers
+ * collide across repositories). `starting`/`creatingIssues`/`createIssueErrors` are keyed by
+ * `owner/repo#number` or `jobId`, which cannot collide across repos, so `reset` does not
+ * touch them.
+ */
+@Injectable()
+export class PrReviewRunsService implements OnDestroy {
+  private readonly api = inject(CodingTeamApiService);
+  private readonly integrationsApi = inject(IntegrationsApiService);
+  private readonly cdr = inject(ChangeDetectorRef);
+
+  // All review runs per PR number, newest-first. Hydrated from the backend on
+  // load and updated live by the per-job pollers below.
+  reviews = new Map<number, PrReviewRecord[]>();
+
+  // Per-PR "Start Review" failures, shown inside that PR's expanded panel so a
+  // start error and a list-load error never clobber each other.
+  reviewErrors = new Map<number, string>();
+
+  // Reviews whose Start Review request is in flight (disables the button). Keyed by
+  // `owner/repo#number`, NOT bare PR number: PR numbers collide across repositories, so a
+  // bare-number key would let an in-flight start in one repo block the same-numbered PR in
+  // another (and is why this set does NOT need clearing on repo switch).
+  starting = new Set<string>();
+
+  // Job ids whose "create issues" request is in flight (disables the button).
+  creatingIssues = new Set<string>();
+  // Per-review "create issues" failure, shown beneath that review's proposals.
+  createIssueErrors = new Map<string, string>();
+
+  // The repo whose reviews/pollers this service currently holds; set by `reset`.
+  private currentRepo: GitHubRepoItem | null = null;
+
+  // "Latest wins" guard so a slow hydrate response from a superseded repo load can't
+  // overwrite a newer one (rapid collapse/re-expand of the same repo, or a fast repo switch).
+  private readonly reviewsLoad = new LatestOnly();
+
+  // Live status pollers keyed by job id, so `reset`/`ngOnDestroy` can tear them all down.
+  private pollers = new Map<string, Subscription>();
+
+  // Completes on destroy; every HTTP subscription is gated on it so a late
+  // response can't update a torn-down component.
+  private readonly destroy$ = new Subject<void>();
+
+  /**
+   * Drop everything keyed by bare PR number and adopt `repo` as the current repo. PR
+   * numbers collide across repositories, so records and errors from one repo must never
+   * render under another's rows.
+   *
+   * Pollers are disposed too, not left running: a poller mutates its record object, but
+   * this clears the `reviews` map those records live in, so a surviving poller would
+   * update an orphan nothing renders while a later hydrate rebuilds a *fresh* record whose
+   * `startPolling` would no-op (the jobId still looked "polled"), freezing the row.
+   * Disposing here means re-expanding the repo re-fetches history and attaches a fresh
+   * poller to the shown record.
+   *
+   * Preconditions: `repo` is the newly-expanded repo, or `null` when all repo rows are
+   * collapsed.
+   * Postconditions: `reviews`/`reviewErrors` are empty; no pollers remain running;
+   * `currentRepo` is `repo`.
+   */
+  reset(repo: GitHubRepoItem | null): void {
+    this.stopAllPollers();
+    this.reviews = new Map();
+    this.reviewErrors.clear();
+    this.currentRepo = repo;
+  }
+
+  /**
+   * Reconcile the in-memory review map with the backend for `repo`. The backend is the
+   * source of truth, but any review that still has a live poller is preserved as the
+   * *same* object its poller mutates — so a review started while this request was on the
+   * wire is never dropped and its poller is never killed (closing a hydrate-vs-startReview
+   * race). Records from a *different* repository are never folded in: PR numbers collide
+   * across repos, so the rebuilt map holds this repo's reviews only.
+   *
+   * Note: this fetches the repository's recent reviews in one call (the backend `limit`,
+   * default 500) rather than per-PR, because the row status badges need the latest review
+   * for *every* listed PR up front; a per-PR-on-expand fetch would leave the list without
+   * badges. Consequence of the cap: in a repo with more than ~500 recent runs, the oldest
+   * runs (and the badges for the least active PRs) may be absent until a future "latest
+   * run per PR" backend query lands. Best-effort: a failure leaves the page usable
+   * without history.
+   *
+   * Preconditions: `repo` is the currently-expanded repo (the caller must have already
+   * called {@link reset} with this same repo).
+   * Postconditions: on success, `reviews` holds this repo's review history plus any
+   * still-live in-flight reviews; non-terminal runs resume polling. A failure leaves
+   * `reviews` unchanged.
+   */
+  hydrate(repo: GitHubRepoItem): void {
+    const token = this.reviewsLoad.next();
+    this.integrationsApi
+      .getGitHubReviewHistory({ owner: repo.owner, repo: repo.name })
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (items) => {
+          // Drop if superseded by a newer repo load, or if the user is no longer on this
+          // repo (a switch that didn't issue a new hydrate) — PR numbers collide across repos.
+          if (!this.reviewsLoad.isCurrent(token) || this.currentRepo?.full_name !== repo.full_name) return;
+          // Records that still have a live poller must survive the rebuild as the
+          // same object their poller writes to, or the UI stops updating.
+          const live = new Map<string, PrReviewRecord>();
+          for (const list of this.reviews.values()) {
+            for (const record of list) {
+              if (this.pollers.has(record.jobId)) live.set(record.jobId, record);
+            }
+          }
+          const map = new Map<number, PrReviewRecord[]>();
+          const seen = new Set<string>();
+          for (const item of items) {
+            // Prefer the live record so its poller keeps updating the shown object.
+            const record = live.get(item.job_id) ?? this.toRecord(item, repo);
+            seen.add(record.jobId);
+            const list = map.get(record.prNumber) ?? [];
+            list.push(record); // backend returns newest-first; preserve that order
+            map.set(record.prNumber, list);
+          }
+          // Carry over any still-polling review the snapshot didn't include yet
+          // (e.g. one started while this request was in flight) — but only when it
+          // belongs to this repository, so a switched-away repo's run can't surface
+          // under another repo's identical PR number.
+          for (const [jobId, record] of live) {
+            if (seen.has(jobId)) continue;
+            if (record.owner !== repo.owner || record.repo !== repo.name) continue;
+            const list = map.get(record.prNumber) ?? [];
+            list.unshift(record); // newest-first
+            map.set(record.prNumber, list);
+          }
+          this.reviews = map;
+          for (const list of map.values()) {
+            for (const record of list) {
+              if (!isCodingTeamTerminalStatus(record.status) && !record.error) {
+                this.startPolling(record); // guarded against double-start
+              }
+            }
+          }
+          this.cdr.markForCheck();
+        },
+        error: () => {
+          // History is a best-effort enhancement; the PR list still works without it.
+        },
+      });
+  }
+
+  private toRecord(item: CodeReviewRunItem, repo: GitHubRepoItem): PrReviewRecord {
+    const parsed = Date.parse(item.created_at);
+    // completed_at is present only on terminal runs; an unparseable/absent value
+    // leaves completedAt undefined so the row shows no duration.
+    const completed = item.completed_at ? Date.parse(item.completed_at) : NaN;
+    return {
+      jobId: item.job_id,
+      prNumber: item.pr_number,
+      owner: repo.owner,
+      repo: repo.name,
+      startedAt: Number.isNaN(parsed) ? Date.now() : parsed,
+      completedAt: Number.isNaN(completed) ? undefined : completed,
+      status: item.status,
+      statusText: item.status_text,
+      reviewSummary: item.review_summary,
+      prUrl: item.pr_url,
+      error: item.error,
+    };
+  }
+
+  /**
+   * Repo-scoped key for the in-flight `starting` set (PR numbers collide across repos).
+   *
+   * Preconditions: `repo` is a repository item; `prNumber` is a PR number.
+   * Postconditions: returns a stable `owner/repo#number` key, lowercased so it is
+   * case-insensitive (GitHub treats owner/repo case-insensitively). Pure — no side effects.
+   */
+  private startKey(repo: GitHubRepoItem, prNumber: number): string {
+    return `${repo.owner.toLowerCase()}/${repo.name.toLowerCase()}#${prNumber}`;
+  }
+
+  /**
+   * Whether a Start Review request for this PR in `repo` is in flight.
+   *
+   * Preconditions: `repo` is the currently-expanded repo, or `null` when none is expanded;
+   * `prNumber` is a PR number from that repo's list.
+   * Postconditions: returns true iff `repo` is non-null and its `owner/repo#prNumber` key
+   * is in `starting`. Pure — no side effects.
+   */
+  isStarting(repo: GitHubRepoItem | null, prNumber: number): boolean {
+    return !!repo && this.starting.has(this.startKey(repo, prNumber));
+  }
+
+  /** The "Start Review" error for a PR, if its last attempt failed. */
+  reviewErrorFor(prNumber: number): string | null {
+    return this.reviewErrors.get(prNumber) ?? null;
+  }
+
+  /** Start a code review on `pull` in `repo`, recording it and polling it live. */
+  startReview(repo: GitHubRepoItem, pull: GitHubPullRequestItem): void {
+    const key = this.startKey(repo, pull.number);
+    if (this.starting.has(key)) return;
+    this.starting.add(key);
+    this.reviewErrors.delete(pull.number);
+    this.integrationsApi
+      .runGitHubReviewPr({ pr_number: pull.number, owner: repo.owner, repo: repo.name })
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (resp: RunPrReviewResponse) => {
+          this.starting.delete(key);
+          // Prefer the server-clock start time so the live duration is computed from
+          // server timestamps at both ends (this start + the server completion stamped
+          // in startPolling), avoiding a browser-vs-server clock-skew mismatch. Fall
+          // back to the browser clock when the server didn't supply one.
+          const parsedStart = resp.created_at ? Date.parse(resp.created_at) : NaN;
+          const record: PrReviewRecord = {
+            jobId: resp.job_id,
+            prNumber: pull.number,
+            owner: repo.owner,
+            repo: repo.name,
+            startedAt: Number.isNaN(parsedStart) ? Date.now() : parsedStart,
+            status: resp.status,
+            prUrl: resp.pr_url,
+          };
+          // Only record AND poll while the user is still on the repo the review targeted.
+          // If they switched away, don't spin an orphan poller for an off-screen record —
+          // the hydrate on return re-fetches this run's history and attaches a fresh poller.
+          if (this.currentRepo?.full_name === repo.full_name) {
+            const list = this.reviews.get(pull.number) ?? [];
+            list.unshift(record); // newest-first
+            this.reviews.set(pull.number, list);
+            this.startPolling(record);
+          }
+          this.cdr.markForCheck();
+        },
+        error: (err: unknown) => {
+          this.starting.delete(key);
+          // Only surface the error while the user is still on the repo the review targeted;
+          // reviewErrors is keyed by bare PR number, so an unguarded set would render this
+          // failure under another repo's identically-numbered PR after a switch.
+          if (this.currentRepo?.full_name === repo.full_name) {
+            this.reviewErrors.set(pull.number, extractErrorDetail(err, 'Failed to start review.'));
+          }
+          this.cdr.markForCheck();
+        },
+      });
+  }
+
+  /**
+   * Begin polling a review job's status. Mutates `record` in place on each
+   * update (and calls `markForCheck()` so the UI refreshes under any change
+   * detection strategy). The subscription is registered in `pollers` for
+   * teardown and is explicitly unsubscribed — and removed from `pollers` — once
+   * the job reaches a terminal state or the connection is lost, so no poller
+   * outlives the job. `reset`/`ngOnDestroy` tear down any still-running pollers.
+   */
+  private startPolling(record: PrReviewRecord): void {
+    if (this.pollers.has(record.jobId)) return;
+    const sub = pollJobStatus(
+      this.api,
+      record.jobId,
+      (status: CodingTeamJobStatus) => {
+        // Mutate the record in place; markForCheck() makes the live badge/table
+        // refresh independent of the change-detection strategy (safe under OnPush).
+        record.status = status.status;
+        record.statusText = status.status_text;
+        record.reviewSummary = status.review_summary ?? record.reviewSummary;
+        record.prUrl = status.github_pr_url ?? record.prUrl;
+        record.error = status.error;
+        if (isCodingTeamTerminalStatus(status.status)) {
+          // Stamp the completion time when the run first goes terminal so the row can
+          // show a duration without a reload, using the server's terminal timestamp
+          // (see terminalTimestamp) rather than the browser clock. `??=` so a value
+          // from a prior hydrate is never overwritten.
+          record.completedAt ??= terminalTimestamp(status);
+          this.disposePoller(record.jobId);
+        }
+        this.cdr.markForCheck();
+      },
+      () => {
+        record.error = 'Lost connection to the coding team — status polling failed.';
+        this.disposePoller(record.jobId);
+        this.cdr.markForCheck();
+      },
+    );
+    this.pollers.set(record.jobId, sub);
+  }
+
+  /** Unsubscribe a poller and drop it from the registry (idempotent). */
+  private disposePoller(jobId: string): void {
+    this.pollers.get(jobId)?.unsubscribe();
+    this.pollers.delete(jobId);
+  }
+
+  private stopAllPollers(): void {
+    for (const sub of this.pollers.values()) {
+      sub.unsubscribe();
+    }
+    this.pollers.clear();
+  }
+
+  /** All review runs for a PR, newest-first. */
+  reviewsFor(prNumber: number): PrReviewRecord[] {
+    return this.reviews.get(prNumber) ?? [];
+  }
+
+  /** The most recent review run for a PR, or null. */
+  latestReview(prNumber: number): PrReviewRecord | null {
+    return this.reviewsFor(prNumber)[0] ?? null;
+  }
+
+  /** True when a PR has at least one recorded review run. */
+  hasReviews(prNumber: number): boolean {
+    return this.reviewsFor(prNumber).length > 0;
+  }
+
+  /** True when a PR's latest review is still running (drives the row spinner). */
+  isLatestRunning(prNumber: number): boolean {
+    return isLatestRunningFor(this.latestReview(prNumber));
+  }
+
+  /** Row status badge text derived from the latest review, or null when none. */
+  badgeLabel(prNumber: number): string | null {
+    return badgeLabelFor(this.latestReview(prNumber));
+  }
+
+  /** Row status badge CSS class derived from the latest review. */
+  badgeClass(prNumber: number): string {
+    return badgeClassFor(this.latestReview(prNumber));
+  }
+
+  /**
+   * File GitHub issues for the given (child-selected) proposal ids of a
+   * review. On success the record's proposal list is replaced with the
+   * server's updated copy (filed proposals now carry `issue_url`) — the child
+   * component reconciles its own selection against that fresh list.
+   */
+  createIssuesFor(record: PrReviewRecord, ids: string[]): void {
+    const jobId = record.jobId;
+    if (ids.length === 0 || this.creatingIssues.has(jobId)) return;
+    this.creatingIssues.add(jobId);
+    this.createIssueErrors.delete(jobId);
+    this.integrationsApi
+      .createGitHubReviewIssues(record.owner, record.repo, jobId, ids)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (resp) => {
+          this.creatingIssues.delete(jobId);
+          if (record.reviewSummary) {
+            record.reviewSummary = {
+              ...record.reviewSummary,
+              pending_issue_proposals: resp.proposals,
+            };
+          }
+          this.cdr.markForCheck();
+        },
+        error: (err: unknown) => {
+          this.creatingIssues.delete(jobId);
+          this.createIssueErrors.set(jobId, extractErrorDetail(err, 'Failed to create issue(s).'));
+          this.cdr.markForCheck();
+        },
+      });
+  }
+
+  /** Tears down all pollers and completes `destroy$`. Called by Angular when the
+   * hosting `CodeReviewPanelComponent` is destroyed (this service is component-provided). */
+  ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
+    this.stopAllPollers();
+  }
+}
