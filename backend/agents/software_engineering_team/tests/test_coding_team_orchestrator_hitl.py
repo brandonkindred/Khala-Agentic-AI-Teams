@@ -9,12 +9,12 @@ from software_engineering_team.coding_team import orchestrator as orch_mod
 from software_engineering_team.coding_team.models import CodingTeamPlanInput, StackSpec, TaskStatus
 from software_engineering_team.coding_team.orchestrator import (
     CodingTeamSwarm,
-    _format_decisions,
     _hydrate_resolved_from_record,
     _plan_with_hitl,
     _run_pause_cycle,
     run_coding_team_orchestrator,
 )
+from software_engineering_team.coding_team.pause_cycle import _format_decisions
 from software_engineering_team.coding_team.task_graph import TaskGraphService
 
 GIT_UTILS = "shared_git.git_utils"
