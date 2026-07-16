@@ -644,6 +644,17 @@ def proposal_from_findings(findings: list[Any], index: int) -> dict[str, Any]:
 _DUPLICATE_TITLE_THRESHOLD_WITH_LOCATION = 0.5
 _DUPLICATE_TITLE_THRESHOLD_NO_LOCATION = 0.8
 
+# Minimum word-set (Jaccard) overlap additionally required for the "no location"
+# text-alone signal above. SequenceMatcher's character-level ratio alone is fooled
+# by two headlines that share a long templated prefix/suffix around one differing
+# keyword -- e.g. "hardcoded secret in config" vs "hardcoded timeout in config"
+# scores 0.83 (clears the default 0.8 char-ratio bar) despite describing unrelated
+# bugs. Requiring the tokenized descriptions (see _tokenize_for_similarity, already
+# used by group_similar_findings for the same reason) to also overlap this much
+# catches that case without a location signal to corroborate it. Overridable via
+# env var, same convention as the two thresholds above.
+_DUPLICATE_TOKEN_OVERLAP_MIN_NO_LOCATION = 0.8
+
 
 def _duplicate_threshold(env_var: str, default: float) -> float:
     """Read a float similarity-threshold override from the environment, defensively.
@@ -764,10 +775,16 @@ def find_matching_open_issue(
         candidate issue's title/body (:func:`_location_appears_in`) AND the
         proposal's description headline is at least somewhat similar to the issue's
         title (>= :data:`_DUPLICATE_TITLE_THRESHOLD_WITH_LOCATION`, default 0.5).
-      - Strong text alone: the headline/title similarity clears
-        :data:`_DUPLICATE_TITLE_THRESHOLD_NO_LOCATION` (default 0.8) even without any
-        location match -- covers a finding with a blank ``file_path``, or an issue
-        whose body doesn't happen to repeat the exact path string.
+      - Strong text alone: the headline/title character-level similarity clears
+        :data:`_DUPLICATE_TITLE_THRESHOLD_NO_LOCATION` (default 0.8) AND their
+        tokenized word-sets (:func:`_tokenize_for_similarity`) overlap at least
+        :data:`_DUPLICATE_TOKEN_OVERLAP_MIN_NO_LOCATION` (default 0.8) -- covers a
+        finding with a blank ``file_path``, or an issue whose body doesn't happen
+        to repeat the exact path string. The extra token-overlap requirement
+        guards against two headlines that share a long templated prefix/suffix
+        around one differing keyword (e.g. "hardcoded secret in config" vs
+        "hardcoded timeout in config") scoring a deceptively high character ratio
+        despite describing unrelated bugs.
 
     A candidate issue's title is compared after :func:`_normalized_issue_title`
     strips Khala's own severity-prefix/occurrences-suffix wrapper (if present), so
@@ -802,13 +819,21 @@ def find_matching_open_issue(
     no_location = _duplicate_threshold(
         "PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION", _DUPLICATE_TITLE_THRESHOLD_NO_LOCATION
     )
+    no_location_token_overlap = _duplicate_threshold(
+        "PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN", _DUPLICATE_TOKEN_OVERLAP_MIN_NO_LOCATION
+    )
+    headline_tokens = _tokenize_for_similarity(headline)
     best: Optional[Issue] = None
     best_ratio = -1.0
     for issue in open_issues:
         candidate_title = _normalized_issue_title(issue.title or "").casefold()
         ratio = SequenceMatcher(None, headline, candidate_title).ratio()
+        text_alone_matches = ratio >= no_location and (
+            _jaccard_similarity(headline_tokens, _tokenize_for_similarity(candidate_title))
+            >= no_location_token_overlap
+        )
         matches = (_location_appears_in(file_path, issue) and ratio >= with_location) or (
-            ratio >= no_location
+            text_alone_matches
         )
         if not matches:
             continue

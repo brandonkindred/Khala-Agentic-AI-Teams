@@ -676,14 +676,49 @@ def test_find_matching_open_issue_ties_break_by_lowest_issue_number() -> None:
 
 
 def test_find_matching_open_issue_threshold_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    proposal = proposal_from_findings([_Issue(file_path="", description="off-by-one error")], 0)
-    issue = _open_issue(1, "unrelated feature request", body="")
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", description="leaked file handle in worker cleanup path")], 0
+    )
+    # Same words, scrambled order: character ratio is low (~0.48, below the
+    # default 0.8 no-location bar) even though every word matches (token overlap
+    # 0.857, above the token-overlap floor) -- so this fails to match by default.
+    issue = _open_issue(1, "worker cleanup path leaked file handle", body="")
     assert find_matching_open_issue(proposal, [issue]) is None
-    # A very low override turns the otherwise-dissimilar pair into a match.
+    # A very low ratio override turns the otherwise low-character-ratio,
+    # high-token-overlap pair into a match.
     monkeypatch.setenv("PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION", "0.0")
     assert find_matching_open_issue(proposal, [issue]) is issue
     # Garbage falls back to the documented default rather than raising.
     monkeypatch.setenv("PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION", "not-a-float")
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_high_char_ratio_but_low_token_overlap_does_not_match() -> None:
+    # Regression (Codex-flagged): two headlines sharing a long templated
+    # prefix/suffix around one differing keyword score a deceptively high
+    # character ratio (~0.83, clears the default 0.8 no-location bar) despite
+    # describing unrelated bugs. Word-set overlap (0.6) is well below the
+    # token-overlap floor (0.8), so this must not match without a location signal.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", description="hardcoded secret in config")], 0
+    )
+    issue = _open_issue(1, "hardcoded timeout in config", body="")
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_token_overlap_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", description="hardcoded secret in config")], 0
+    )
+    issue = _open_issue(1, "hardcoded timeout in config", body="")
+    assert find_matching_open_issue(proposal, [issue]) is None
+    # A low override accepts the pair's 0.6 token overlap as sufficient.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN", "0.5")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+    # Garbage falls back to the documented default rather than raising.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN", "not-a-float")
     assert find_matching_open_issue(proposal, [issue]) is None
 
 

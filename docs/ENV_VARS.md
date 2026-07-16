@@ -615,6 +615,18 @@ parses defensively: a missing, blank, unparsable, or out-of-range value falls
 back to its documented default (clamped to `[0.0, 1.0]` when it does parse)
 rather than raising or disabling the check.
 
+### PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN
+Word-set (Jaccard) overlap override (0.0–1.0, default `0.8`) additionally
+required, alongside `PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION`, for the
+`/review-pr` duplicate-issue check's text-alone signal (no `file_path` match to
+corroborate it). `SequenceMatcher`'s character-level ratio alone is fooled by
+two headlines sharing a long templated prefix/suffix around one differing
+keyword — e.g. "hardcoded secret in config" vs "hardcoded timeout in config"
+scores a character ratio above the default no-location bar despite describing
+unrelated bugs — so the tokenized descriptions must also overlap this much
+before a match is pre-linked. Parses defensively, same convention as the two
+threshold vars above.
+
 ### PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES
 Caps how many of the reviewed repository's open issues the `/review-pr` flow's
 duplicate-issue check reads per review (default `100`). `GitHubClient.list_open_issues`
