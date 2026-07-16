@@ -516,11 +516,6 @@ MAX_CLARIFICATION_REFINEMENTS = 10  # Max times to refine a task based on specia
 MAX_CODE_REVIEW_ITERATIONS = 10  # Max rounds of code review -> fix -> re-review
 
 
-# _read_repo_code and _truncate_for_context are now in shared.repo_utils
-_read_repo_code = read_repo_code
-_truncate_for_context = truncate_for_context
-
-
 def _build_coding_team_plan_input(
     adapter_result: Any,
     repo_path: str,
@@ -905,7 +900,7 @@ def run_orchestrator(
 
         # Execution: delegate to the coding_team orchestrator (it replaces the former
         # Tech Lead + Architecture Expert + backend/frontend code-v2 worker pipeline).
-        existing_code_summary = _truncate_for_context(_read_repo_code(path), 8000)
+        existing_code_summary = truncate_for_context(read_repo_code(path), 8000)
         if existing_code_summary == "# No code files found":
             existing_code_summary = None
         plan_input = _build_coding_team_plan_input(
