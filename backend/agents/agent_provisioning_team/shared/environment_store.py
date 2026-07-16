@@ -52,11 +52,26 @@ _lock = threading.Lock()
 class EnvironmentInfo:
     """Information about a provisioned environment.
 
+    Attributes:
+        agent_id: Identifier of the agent this environment belongs to.
+        container_id: Docker container ID backing the environment.
+        container_name: Docker container name backing the environment.
+        ssh_host: Host used to reach the environment over SSH.
+        ssh_port: Port used to reach the environment over SSH.
+        workspace_path: Path to the agent's workspace inside the container.
+        status: Current lifecycle status (e.g. ``running``, ``ready``).
+        tools_provisioned: Names of tools provisioned into the environment.
+        created_at: ISO-8601 timestamp of when the record was first created.
+        updated_at: ISO-8601 timestamp of the most recent status/field update;
+            defaults to ``created_at`` when not explicitly supplied.
+
     Invariants:
         * ``tools_provisioned`` is always a ``list`` (never ``None``) —
           construction coerces a ``None`` argument to ``[]``.
         * ``created_at`` is always an ISO-8601 timestamp string — construction
           defaults it to the current UTC time when not supplied.
+        * ``updated_at`` is always an ISO-8601 timestamp string — construction
+          defaults it to ``created_at`` when not supplied.
     """
 
     def __init__(
@@ -70,6 +85,7 @@ class EnvironmentInfo:
         status: str = "running",
         tools_provisioned: Optional[List[str]] = None,
         created_at: Optional[str] = None,
+        updated_at: Optional[str] = None,
     ) -> None:
         """Construct an environment record.
 
@@ -83,6 +99,8 @@ class EnvironmentInfo:
               given list.
             * ``created_at`` is the current UTC time in ISO format when not
               supplied, else the given value.
+            * ``updated_at`` is ``created_at`` when not supplied, else the
+              given value.
         """
         self.agent_id = agent_id
         self.container_id = container_id
@@ -92,7 +110,10 @@ class EnvironmentInfo:
         self.workspace_path = workspace_path
         self.status = status
         self.tools_provisioned = tools_provisioned or []
-        self.created_at = created_at or datetime.now(timezone.utc).isoformat()
+        self.created_at = (
+            created_at if created_at is not None else datetime.now(timezone.utc).isoformat()
+        )
+        self.updated_at = updated_at if updated_at is not None else self.created_at
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize this record to a plain dict for JSON persistence.
@@ -103,7 +124,8 @@ class EnvironmentInfo:
             * Returns a ``Dict[str, Any]`` with exactly the keys
               ``agent_id``, ``container_id``, ``container_name``,
               ``ssh_host``, ``ssh_port``, ``workspace_path``, ``status``,
-              ``tools_provisioned``, ``created_at``, mirroring instance state.
+              ``tools_provisioned``, ``created_at``, ``updated_at``,
+              mirroring instance state.
         """
         return {
             "agent_id": self.agent_id,
@@ -115,6 +137,7 @@ class EnvironmentInfo:
             "status": self.status,
             "tools_provisioned": self.tools_provisioned,
             "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }
 
     @classmethod
@@ -129,8 +152,8 @@ class EnvironmentInfo:
             * Returns a new ``EnvironmentInfo`` populated from ``data``,
               applying the same defaults as ``__init__`` for optional fields
               (``ssh_host``, ``ssh_port``, ``workspace_path``, ``status``,
-              ``tools_provisioned``, ``created_at``) when absent from
-              ``data``.
+              ``tools_provisioned``, ``created_at``, ``updated_at``) when
+              absent from ``data``.
         """
         return cls(
             agent_id=data["agent_id"],
@@ -142,6 +165,7 @@ class EnvironmentInfo:
             status=data.get("status", "running"),
             tools_provisioned=data.get("tools_provisioned", []),
             created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
         )
 
 
@@ -277,9 +301,10 @@ class EnvironmentStore:
             data, src = self._read_env_data(agent_id)
             if data is None:
                 return False
-            data["status"] = status
-            data["updated_at"] = datetime.now(timezone.utc).isoformat()
-            self._write_env_data(agent_id, data, source=src)
+            info = EnvironmentInfo.from_dict(data)
+            info.status = status
+            info.updated_at = datetime.now(timezone.utc).isoformat()
+            self._write_env_data(agent_id, info.to_dict(), source=src)
             return True
 
     def add_tool(self, agent_id: str, tool_name: str) -> bool:
@@ -307,19 +332,22 @@ class EnvironmentStore:
         Postconditions:
             * When the env file exists, every non-empty unique name in
               ``tool_names`` is present in ``tools_provisioned`` (order of first
-              appearance preserved for new names).
+              appearance preserved for new names) and ``updated_at`` is
+              refreshed.
             * Returns ``False`` when the env is missing or the file is corrupt.
         """
         with _lock:
             data, src = self._read_env_data(agent_id)
             if data is None:
                 return False
-            tools = list(data.get("tools_provisioned", []))
+            info = EnvironmentInfo.from_dict(data)
+            tools = list(info.tools_provisioned)
             for tool_name in tool_names:
                 if tool_name and tool_name not in tools:
                     tools.append(tool_name)
-            data["tools_provisioned"] = tools
-            self._write_env_data(agent_id, data, source=src)
+            info.tools_provisioned = tools
+            info.updated_at = datetime.now(timezone.utc).isoformat()
+            self._write_env_data(agent_id, info.to_dict(), source=src)
             return True
 
     def remove(self, agent_id: str) -> bool:
