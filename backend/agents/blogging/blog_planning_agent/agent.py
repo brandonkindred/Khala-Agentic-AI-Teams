@@ -81,6 +81,28 @@ class BlogPlanningAgent:
         max_parse_retries: Optional[int] = None,
         work_dir: Optional[Union[str, Path]] = None,
     ) -> PlanningPhaseResult:
+        """Generate and refine a ContentPlan until acceptance criteria or max iterations.
+
+        Preconditions:
+            ``planning_input`` is a valid :class:`PlanningInput`; ``length_policy``
+            is a valid :class:`LengthPolicy`. ``max_iterations`` and
+            ``max_parse_retries``, when omitted, default to
+            :func:`planning_max_iterations` and :func:`planning_max_parse_retries`
+            respectively.
+
+        Postconditions:
+            Returns a :class:`PlanningPhaseResult` wrapping a ``ContentPlan``
+            whose ``requirements_analysis`` satisfies the planner's own
+            self-evaluation (``plan_acceptable`` and ``scope_feasible``) and,
+            when this agent was constructed with a ``plan_critic``, that
+            critic's approval as well.
+
+        Raises:
+            PlanningError: If the plan JSON fails schema validation, if JSON
+                parsing fails after exhausting ``max_parse_retries`` attempts
+                in a given iteration, or if the loop fails to converge within
+                ``max_iterations`` iterations.
+        """
         max_iter = max_iterations if max_iterations is not None else planning_max_iterations()
         max_parse = (
             max_parse_retries if max_parse_retries is not None else planning_max_parse_retries()
