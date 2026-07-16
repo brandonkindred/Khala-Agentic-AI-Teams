@@ -244,6 +244,50 @@ def test_environment_store_list_all_skips_unsafe_agent_id(tmp_path: Path) -> Non
     assert {e.agent_id for e in out} == {"a1"}
 
 
+def test_environment_store_list_all_dedups_by_agent_id_not_filename(tmp_path: Path) -> None:
+    store = EnvironmentStore(storage_dir=tmp_path)
+
+    # Two stale/misnamed files, each named after a *different* agent than the
+    # one in its own contents: "agent_p.json" actually describes "agent_q",
+    # and "agent_q.json" actually describes "agent_r". Glob visits them in
+    # filename order (agent_p.json, then agent_q.json).
+    #
+    # Buggy behavior: after processing agent_p.json, "agent_q" lands in
+    # `seen` (from its *contents*). The next file, agent_q.json, is then
+    # checked by its *filename stem* ("agent_q"), which now matches `seen`
+    # purely by coincidence, so it gets skipped without ever being read —
+    # silently dropping the real "agent_r" record.
+    (tmp_path / "agent_p.json").write_text(
+        json.dumps(
+            StoreEnvInfo(
+                agent_id="agent_q",
+                container_id="p-container",
+                container_name="p-name",
+                workspace_path="/w",
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "agent_q.json").write_text(
+        json.dumps(
+            StoreEnvInfo(
+                agent_id="agent_r",
+                container_id="q-container",
+                container_name="q-name",
+                workspace_path="/w",
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+
+    out = store.list_all()
+
+    # Both distinct agent_ids ("agent_q" from agent_p.json, "agent_r" from
+    # agent_q.json) must be present -- neither is a real duplicate of the
+    # other, so neither should be dropped.
+    assert {e.agent_id for e in out} == {"agent_q", "agent_r"}
+
+
 def test_environment_store_get_handles_corrupt(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
     (tmp_path / "x.json").write_text("not json", encoding="utf-8")
