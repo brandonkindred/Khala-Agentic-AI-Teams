@@ -125,29 +125,54 @@ def run_account_provisioning(
 
 def deprovision_tools(
     agent_id: str,
-    tool_names: Optional[List[str]] = None,
+    provisioner_keys: Optional[List[str]] = None,
     provisioners: Optional[Dict[str, ToolProvisionerInterface]] = None,
 ) -> Dict[str, bool]:
     """
-    Deprovision tools for an agent.
+    Deprovision an agent's tools by running each provisioner's teardown.
+
+    This function operates at *provisioner* granularity, not tool granularity:
+    a manifest can map many tools onto a single provisioner (many-to-one), and
+    this function receives no manifest, so it has no way to attribute results to
+    individual tool names. Both the filter and the returned keys are therefore
+    provisioner registry keys (e.g. ``"docker_provisioner"``), never tool names.
 
     Args:
-        agent_id: Agent identifier
-        tool_names: Specific tools to deprovision (None = all)
-        provisioners: Provisioner instances
+        agent_id: Agent identifier.
+        provisioner_keys: Restrict teardown to these provisioner registry keys
+            (the keys returned by ``build_default_tool_agents``). ``None`` means
+            every provisioner in ``provisioners``.
+        provisioners: Provisioner instances keyed by registry key. Defaults to
+            ``build_default_tool_agents()``.
 
-    Returns:
-        Dict of tool_name -> success status
+    Preconditions:
+        * ``agent_id`` is non-empty.
+        * ``provisioner_keys``, when given, holds provisioner registry keys (not
+          tool names). Keys not present in ``provisioners`` are silently ignored.
+        * ``provisioners`` maps each registry key to a ``ToolProvisionerInterface``.
+
+    Postconditions:
+        * Returns a ``dict`` keyed by **provisioner registry key** (NOT tool
+          name), with a ``bool`` value per key equal to that provisioner's
+          ``deprovision`` success; a provisioner that raises maps to ``False``.
+        * Contains exactly one entry for every provisioner in ``provisioners``
+          that passes the ``provisioner_keys`` filter, and no other keys.
+
+    Invariants:
+        * Best-effort teardown: never raises on a single provisioner failure, so
+          one failing provisioner cannot block the rest.
     """
+    assert agent_id, "agent_id must be non-empty"
+
     provs = provisioners or build_default_tool_agents()
     results: Dict[str, bool] = {}
 
-    for name, provisioner in provs.items():
-        if tool_names is None or name in tool_names:
+    for key, provisioner in provs.items():
+        if provisioner_keys is None or key in provisioner_keys:
             try:
                 result = provisioner.deprovision(agent_id)
-                results[name] = result.success
+                results[key] = result.success
             except Exception:
-                results[name] = False
+                results[key] = False
 
     return results

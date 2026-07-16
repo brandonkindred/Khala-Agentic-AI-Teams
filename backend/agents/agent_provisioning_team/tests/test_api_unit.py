@@ -12,13 +12,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from agent_provisioning_team.api import main as api_main
 from agent_provisioning_team.api.main import app
 from agent_provisioning_team.models import (
+    DeprovisionRequest,
     DeprovisionResponse,
     EnvironmentInfo,
     ProvisioningResult,
+    ProvisionRequest,
 )
 
 client = TestClient(app)
@@ -62,6 +65,69 @@ def test_require_deprovision_runner_returns_503_when_temporal_check_raises() -> 
         with pytest.raises(HTTPException) as exc_info:
             api_main._require_deprovision_runner()
     assert exc_info.value.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# agent_id path-traversal guard (HTTP edge)
+# ---------------------------------------------------------------------------
+
+
+_TRAVERSAL_IDS = ["../../etc/passwd", "a/b", "..\\..\\x", "/etc/passwd", "..", "."]
+
+
+# End-to-end via the real FastAPI stack: the request-model validator rejects a
+# traversal agent_id in the POST body before any handler/Temporal code runs.
+@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
+def test_provision_endpoint_returns_422_for_traversal_agent_id(bad_id: str) -> None:
+    r = client.post("/provision", json={"agent_id": bad_id})
+    assert r.status_code == 422
+
+
+def test_get_environment_endpoint_returns_422_for_encoded_traversal() -> None:
+    # ``%2e%2e`` reaches the handler as ``..`` (Starlette does not collapse it),
+    # so the path-param guard surfaces a real 422 through the HTTP stack.
+    r = client.get("/environments/%2e%2e")
+    assert r.status_code == 422
+
+
+def test_provision_endpoint_accepts_dotted_agent_id() -> None:
+    """A legitimate dotted id passes validation and reaches the handler (503 without Temporal)."""
+    r = client.post("/provision", json={"agent_id": "blog.writer"})
+    assert r.status_code != 422
+
+
+# Path params bypass the request-model validator, so the {agent_id} routes call
+# ``_require_safe_agent_id`` themselves. These handlers are sync ``def``s, so
+# calling them directly exercises that guard exactly as FastAPI's threadpool
+# would (and reliably covers traversal shapes that URL-encoding would mangle).
+@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
+def test_get_agent_status_rejects_traversal_agent_id(bad_id: str) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        api_main.get_agent_status(bad_id)
+    assert exc_info.value.status_code == 422
+
+
+@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
+def test_deprovision_agent_rejects_traversal_agent_id(bad_id: str) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        api_main.deprovision_agent(bad_id)
+    assert exc_info.value.status_code == 422
+
+
+@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
+def test_provision_request_rejects_traversal_agent_id(bad_id: str) -> None:
+    """The request-model validator turns a traversal id into a 422 (ValidationError)."""
+    with pytest.raises(ValidationError):
+        ProvisionRequest(agent_id=bad_id)
+    with pytest.raises(ValidationError):
+        DeprovisionRequest(agent_id=bad_id)
+
+
+@pytest.mark.parametrize("good_id", ["blog.writer", "agent-001", "a..b"])
+def test_provision_request_allows_valid_agent_id(good_id: str) -> None:
+    # Dotted ids — including a harmless embedded double-dot — are accepted.
+    assert ProvisionRequest(agent_id=good_id).agent_id == good_id
+    assert DeprovisionRequest(agent_id=good_id).agent_id == good_id
 
 
 # ---------------------------------------------------------------------------
@@ -710,3 +776,15 @@ def test_lifespan_shutdown_does_not_compensate_or_fail_jobs() -> None:
     assert not hasattr(api_main, "_graceful_shutdown")
     assert not hasattr(api_main, "_safe_compensate")
     assert not hasattr(api_main, "COMPENSATE_TIMEOUT_S")
+
+
+# -------------------------------------------------------------------------
+# FastAPI lifespan enter/exit smoke.
+# -------------------------------------------------------------------------
+
+
+def test_lifespan_runs_cleanly(monkeypatch) -> None:
+    """Entering + exiting the TestClient context runs the lifespan hook end-to-end."""
+    with TestClient(api_main.app) as c:
+        r = c.get("/health")
+        assert r.status_code == 200

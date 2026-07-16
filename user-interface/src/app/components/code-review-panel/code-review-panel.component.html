@@ -149,126 +149,16 @@
               </button>
 
               @if (expandedPrNumber === pull.number) {
-                <div class="cr-pull-detail">
-                  <!-- PR details -->
-                  <div class="cr-pull-detail__pr">
-                    <span class="cr-pr-number">#{{ pull.number }}</span>
-                    <span class="cr-pr-title">{{ pull.title }}</span>
-                    @if (pull.draft) {
-                      <span class="cr-chip cr-chip--draft">draft</span>
-                    }
-                  </div>
-                  <p class="cr-pull-detail__meta">
-                    <code>{{ pull.head }}</code> → <code>{{ pull.base }}</code>
-                    @if (pull.author) { · by {{ pull.author }} }
-                  </p>
-                  @if (pull.body_preview) {
-                    <p class="cr-pull-detail__preview">{{ pull.body_preview }}</p>
-                  }
-                  <p class="cr-pull-detail__hint">
-                    The reviewer will read the diff and post one GitHub review with inline comments on the
-                    problematic lines.
-                  </p>
-
-                  <div class="cr-pull-detail__actions">
-                    <button
-                      mat-flat-button
-                      color="primary"
-                      (click)="startReview(pull)"
-                      [disabled]="isStarting(pull)"
-                    >
-                      @if (isStarting(pull)) {
-                        <mat-spinner diameter="18"></mat-spinner>
-                        Starting…
-                      } @else {
-                        <ng-container>
-                          <mat-icon>play_arrow</mat-icon>
-                          Start Review
-                        </ng-container>
-                      }
-                    </button>
-                  </div>
-
-                  @if (reviewErrorFor(pull.number); as reviewError) {
-                    <app-inline-banner variant="error" [message]="reviewError" />
-                  }
-
-                  <!-- All review runs for this PR. Computed once via `as revs` and
-                       reused by the proposals block below, instead of each calling
-                       reviewsFor(pull.number) with its own @for pass. -->
-                  @if (reviewsFor(pull.number); as revs) {
-                  @if (revs.length > 0) {
-                    <table class="cr-reviews-table">
-                      <thead>
-                        <tr>
-                          <th scope="col">Status</th>
-                          <th scope="col">Outcome</th>
-                          <th scope="col">Findings</th>
-                          <th scope="col">Started</th>
-                          <th scope="col">Link</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        @for (rec of revs; track rec.jobId) {
-                          <tr>
-                            <td>
-                              <span class="cr-job-status cr-job-status--{{ rec.status }}">
-                                {{ rec.status }}
-                              </span>
-                              @if (!isRecordTerminal(rec) && !rec.error) {
-                                <mat-spinner diameter="14"></mat-spinner>
-                              }
-                            </td>
-                            <td>
-                              @if (rec.error) {
-                                <span class="cr-job-status--failed">{{ rec.error }}</span>
-                              } @else if (rec.reviewSummary) {
-                                <span class="cr-chip cr-chip--event">{{ rec.reviewSummary.event }}</span>
-                              } @else {
-                                —
-                              }
-                            </td>
-                            <td>
-                              @if (rec.reviewSummary; as s) {
-                                <span class="cr-findings">
-                                  <span class="cr-chip">{{ s.total_issues }} finding(s)</span>
-                                  <span class="cr-chip">{{ s.inline_comments }} inline</span>
-                                  <span class="cr-chip">{{ commentFindings(s) }} comments</span>
-                                </span>
-                              } @else {
-                                —
-                              }
-                            </td>
-                            <td>{{ rec.startedAt | date: 'short' }}</td>
-                            <td>
-                              @if (rec.prUrl) {
-                                <a [href]="rec.prUrl" target="_blank" rel="noopener" aria-label="Open PR">
-                                  <mat-icon>open_in_new</mat-icon>
-                                </a>
-                              } @else {
-                                —
-                              }
-                            </td>
-                          </tr>
-                        }
-                      </tbody>
-                    </table>
-                  }
-
-                  <!-- Pre-existing bugs the reviewer found in unchanged code:
-                       offered as GitHub-issue candidates, one block per run. -->
-                  @for (rec of revs; track rec.jobId) {
-                    @if (hasProposals(rec)) {
-                      <app-pending-issue-proposals
-                        [proposals]="rec.reviewSummary!.pending_issue_proposals!"
-                        [creatingIssues]="isCreatingIssues(rec.jobId)"
-                        [createIssueError]="createIssueErrorFor(rec.jobId)"
-                        (createIssuesRequested)="createIssuesFor(rec, $event)"
-                      />
-                    }
-                  }
-                  }
-                </div>
+                <app-pr-review-detail
+                  [pull]="pull"
+                  [reviews]="reviewsFor(pull.number)"
+                  [starting]="isStarting(pull)"
+                  [reviewError]="reviewErrorFor(pull.number)"
+                  [creatingIssues]="creatingIssues"
+                  [createIssueErrors]="createIssueErrors"
+                  (startReviewRequested)="startReview($event)"
+                  (createIssuesRequested)="createIssuesFor($event.record, $event.ids)"
+                />
               }
             </div>
           }

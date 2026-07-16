@@ -7,22 +7,48 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 from strands import Agent
+from strands.types.exceptions import EventLoopException
 
-from llm_service import LLMJsonParseError, extract_json_from_response
-from llm_service.backoff import rate_limit_retry_delay
+from llm_service import (
+    LLMJsonParseError,
+    LLMRateLimitError,
+    LLMTemporaryError,
+    extract_json_from_response,
+)
 
 from .models import CopyEditorInput, CopyEditorOutput, FeedbackItem
 from .prompts import COPY_EDITOR_PROMPT
 
 logger = logging.getLogger(__name__)
 
-# After llm_service exhausts HTTP retries, re-run complete_json a few times (timeouts, cloud blips).
-_MAX_COPY_EDITOR_LLM_ROUNDS = 3
+# Per-round JSON parse attempts: the raw prompt first, then one strict-JSON re-prompt.
+_MAX_JSON_PARSE_ATTEMPTS = 2
+# Content plans are truncated to this many characters before being embedded in the prompt.
+_MAX_CONTENT_PLAN_CHARS = 12000
+# For technical deep dives, a draft below this fraction of soft_min_words is flagged as thin.
+_THIN_DRAFT_RATIO = 0.88
+
+
+def _fallback_editor_data(summary: str) -> Dict[str, Any]:
+    """Editor output for a copy-edit tooling failure (unparseable JSON or unexpected error).
+
+    Preconditions:
+        - ``summary`` explains the failure so a human reviewer sees why the automated
+          pass did not run.
+    Postconditions:
+        - Returns ``{"approved": True, "summary": summary, "feedback_items": []}``.
+          ``approved=True`` is deliberate: the copy editor is an *advisory* style/clarity
+          pass, so a tooling failure must not drive a pointless no-op rewrite — an
+          unapproved draft carrying zero actionable feedback would loop the editor for
+          no reason. The deterministic length gate downstream still sets ``has_blocking``
+          and can withhold approval for an over-length draft, and the hard quality gates
+          (fact-check, compliance, validators) run separately and are unaffected.
+    """
+    return {"approved": True, "summary": summary, "feedback_items": []}
 
 
 class BlogCopyEditorAgent:
@@ -83,53 +109,32 @@ class BlogCopyEditorAgent:
             logger.warning("Failed to write editor feedback to %s: %s", path, e)
             return False
 
-    def run(
+    def _build_editor_prompt(
         self,
         copy_editor_input: CopyEditorInput,
-        *,
-        on_llm_request: Optional[Callable[[str], None]] = None,
-        feedback_output_path: Optional[Union[str, Path]] = None,
-    ) -> CopyEditorOutput:
+        draft: str,
+        style_guide_text: str,
+    ) -> str:
         """
-        Provide copy editing feedback on the draft based on the style guide.
+        Assemble the per-request editor context from length intent, author/context
+        signals, the style guide, the content plan, and the draft itself.
+
+        The base instructions (``COPY_EDITOR_PROMPT``) are delivered once via the
+        Agent's ``system_prompt`` in :meth:`_invoke_editor_llm`, so they are
+        intentionally not repeated here.
 
         Preconditions:
-            - copy_editor_input is a valid CopyEditorInput (draft non-empty).
+            - draft is the stripped, non-empty draft text to review.
         Postconditions:
-            - Returns CopyEditorOutput with summary and feedback_items.
-            - If feedback_output_path is set, best-effort writes the same output to
-              that path before returning. This write may silently fail (e.g. permission
-              denied or disk-full); such failures are logged at WARNING and never raised,
-              so the returned output is authoritative and callers must not assume the
-              file exists. `_write_feedback_to_path` returns whether the write succeeded.
+            - Returns the assembled context (draft last), as one string.
+            - Has no side effects on self or the inputs.
         """
-        draft = copy_editor_input.draft.strip()
-        if not draft:
-            logger.warning("Empty draft; returning minimal feedback.")
-            output = CopyEditorOutput(
-                summary="No draft provided. Please supply a blog post draft to review.",
-                feedback_items=[],
-            )
-            if feedback_output_path:
-                self._write_feedback_to_path(output, feedback_output_path)
-            return output
-
-        style_guide_text = self._style_prompt
-
-        logger.info(
-            "Copy editing: draft len=%s, style_guide len=%s",
-            len(draft),
-            len(style_guide_text),
-        )
-
         actual_word_count = len(draft.split())
         target_word_count = copy_editor_input.target_word_count
         soft_min = copy_editor_input.soft_min_words
         soft_max = copy_editor_input.soft_max_words
-        must_ratio = copy_editor_input.editor_must_fix_over_ratio
-        should_ratio = copy_editor_input.editor_should_fix_over_ratio
 
-        context_parts = []
+        context_parts: list[str] = []
         band = f"{soft_min}–{soft_max}" if soft_min is not None and soft_max is not None else None
         if band:
             context_parts.append(
@@ -202,7 +207,7 @@ class BlogCopyEditorAgent:
                     "---",
                     "CONTENT PLAN (align feedback with this structure and section intent):",
                     "---",
-                    copy_editor_input.content_plan_context.strip()[:12000],
+                    copy_editor_input.content_plan_context.strip()[:_MAX_CONTENT_PLAN_CHARS],
                     "",
                 ]
             )
@@ -216,8 +221,33 @@ class BlogCopyEditorAgent:
             ]
         )
 
-        prompt = COPY_EDITOR_PROMPT + "\n\n" + "\n".join(context_parts)
+        return "\n".join(context_parts)
 
+    def _invoke_editor_llm(
+        self,
+        prompt: str,
+        *,
+        on_llm_request: Optional[Callable[[str], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run the LLM once (with a single strict-JSON re-prompt) and return the parsed dict.
+
+        The LLM client already exhausts its own 429 / transient-transport retry budgets
+        before raising, so the copy editor adds no second blocking retry: a transient LLM
+        error (LLMRateLimitError/LLMTemporaryError — including when strands wraps it in an
+        EventLoopException) re-raises so the Temporal activity funnel retries the whole
+        stage (thread mode fails the job). A JSON-parse failure gets one cheap strict
+        re-prompt then a manual-review fallback; any other unexpected error also fails
+        closed with that fallback so a single bad copy-edit never crashes the draft stage.
+
+        Preconditions:
+            - prompt is the fully assembled per-request editor context.
+        Postconditions:
+            - Returns a dict with at least "summary" and "feedback_items"; on JSON-parse
+              exhaustion or an unexpected error it returns a ``_fallback_editor_data`` dict.
+            - Re-raises only genuinely transient LLM errors (unwrapped from
+              ``EventLoopException``); never returns None.
+        """
         if on_llm_request:
             on_llm_request("Reviewing draft for style and clarity...")
         agent = Agent(model=self._model, system_prompt=COPY_EDITOR_PROMPT)
@@ -229,59 +259,77 @@ class BlogCopyEditorAgent:
             "Keys: approved (boolean), summary (string), feedback_items (array of objects with "
             "category, severity, location?, issue, suggestion?)."
         )
-        for llm_round in range(_MAX_COPY_EDITOR_LLM_ROUNDS):
-            for json_attempt in range(2):
-                try:
-                    result = agent(
-                        working_prompt + "\n\nRespond with valid JSON only, no markdown fences."
-                    )
-                    data = extract_json_from_response(str(result).strip())
-                    break
-                except LLMJsonParseError as e:
-                    if json_attempt == 0:
-                        logger.warning(
-                            "Copy editor JSON parse failed (attempt 1), retrying with strict instruction: %s",
-                            e,
-                        )
-                        working_prompt = base_prompt + strict_json_suffix
-                    else:
-                        logger.warning(
-                            "Copy editor JSON parse failed after retry; using fallback output: %s",
-                            e,
-                        )
-                        data = {
-                            "summary": "Copy editor could not parse the model response. Please review the draft manually.",
-                            "feedback_items": [],
-                        }
-                        break
-                except Exception as e:
-                    if llm_round >= _MAX_COPY_EDITOR_LLM_ROUNDS - 1:
-                        raise
-                    wait = rate_limit_retry_delay(llm_round, 15.0, 60.0)
+        for json_attempt in range(_MAX_JSON_PARSE_ATTEMPTS):
+            try:
+                result = agent(
+                    working_prompt + "\n\nRespond with valid JSON only, no markdown fences."
+                )
+                data = extract_json_from_response(str(result).strip())
+                break
+            except LLMJsonParseError as e:
+                if json_attempt == 0:
                     logger.warning(
-                        "Copy editor LLM transport/timeout after service retries (agent round %d/%d, "
-                        "json sub-attempt %d): %s — sleeping %.0fs and retrying.",
-                        llm_round + 1,
-                        _MAX_COPY_EDITOR_LLM_ROUNDS,
-                        json_attempt + 1,
+                        "Copy editor JSON parse failed (attempt 1), retrying with strict instruction: %s",
                         e,
-                        wait,
                     )
-                    time.sleep(wait)
-                    working_prompt = base_prompt
+                    working_prompt = base_prompt + strict_json_suffix
+                else:
+                    logger.warning(
+                        "Copy editor JSON parse failed after retry; using fallback output: %s",
+                        e,
+                    )
+                    data = _fallback_editor_data(
+                        "Copy editor could not parse the model response. Please review the draft manually."
+                    )
                     break
-            if data is not None:
+            except Exception as e:
+                # strands wraps model failures in EventLoopException; unwrap to classify.
+                cause = e.original_exception if isinstance(e, EventLoopException) else e
+                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                    # Transient transport error after the client's own retries: re-raise the
+                    # UNWRAPPED cause so Temporal (or the caller) owns the retry rather than a
+                    # blocking sleep here. It must be the cause, not `e`: the Temporal stage
+                    # funnel (_run_stage) catches only LLMRateLimitError/LLMTemporaryError to
+                    # trigger a retry — re-raising the EventLoopException wrapper would slip
+                    # past it into the terminal-failure handler. `raise cause` inside this
+                    # except block still chains the wrapper via __context__ for debugging.
+                    # Log at the agent boundary so it is visible in thread mode too (outside
+                    # Temporal, which would otherwise be the only logger).
+                    logger.warning(
+                        "Copy editor hit a transient LLM error, re-raising for retry: %s", cause
+                    )
+                    raise cause
+                # Any other unexpected error (a non-transient LLM failure, or a bug like
+                # AttributeError) degrades to a manual-review fallback rather than crashing
+                # the draft stage. The traceback is logged at ERROR level so the root cause
+                # stays visible; see _fallback_editor_data for why the fallback approves
+                # (the copy editor is advisory — a tooling failure must not force a no-op
+                # rewrite, and the hard quality gates still run downstream).
+                logger.exception(
+                    "Copy editor LLM failed unexpectedly; using fallback output: %s", e
+                )
+                data = _fallback_editor_data(
+                    "Copy editor could not complete review. Please review the draft manually."
+                )
                 break
 
         if not data:
-            data = {
-                "summary": "Copy editor could not parse the model response. Please review the draft manually.",
-                "feedback_items": [],
-            }
+            data = _fallback_editor_data(
+                "Copy editor could not parse the model response. Please review the draft manually."
+            )
+        return data
 
-        summary = (data.get("summary") or "").strip() or "No summary generated."
-        feedback_data = data.get("feedback_items") or []
+    def _parse_feedback_items(self, feedback_data: Any) -> list[FeedbackItem]:
+        """
+        Convert raw model feedback entries into validated FeedbackItem objects.
 
+        Preconditions:
+            - feedback_data is iterable; non-dict entries and entries with an empty
+              issue are skipped.
+        Postconditions:
+            - Returns a list with one FeedbackItem per entry that has a non-empty issue,
+              in input order.
+        """
         feedback_items: list[FeedbackItem] = []
         for item in feedback_data:
             if not isinstance(item, dict):
@@ -301,11 +349,39 @@ class BlogCopyEditorAgent:
                         suggestion=suggestion,
                     )
                 )
+        return feedback_items
 
-        # Inject pre-computed length feedback when the draft is outside the intended band.
-        # When soft_max is set, anything at or below that ceiling is acceptable — do not flag for being
-        # merely above the nominal target (e.g. 1134 words vs ~1000 target is fine when soft_max is 1300).
-        # Above soft_max, use profile-tunable ratios vs target for must_fix / should_fix.
+    def _inject_length_feedback(
+        self,
+        feedback_items: list[FeedbackItem],
+        copy_editor_input: CopyEditorInput,
+        actual_word_count: int,
+    ) -> list[FeedbackItem]:
+        """
+        Add programmatic length feedback based on the draft's word-count bands.
+
+        When soft_max is set, anything at or below that ceiling is acceptable — do not
+        flag for being merely above the nominal target (e.g. 1134 words vs ~1000 target
+        is fine when soft_max is 1300). Above soft_max, use profile-tunable ratios vs
+        target for must_fix / should_fix. Thin technical deep dives get a 'consider' hint.
+
+        Preconditions:
+            - actual_word_count == len(draft.split()) for the reviewed draft.
+        Postconditions:
+            - Returns the same list object passed in, mutated with 0..2 length items:
+              an over-length item (must_fix inserted at the front, else should_fix
+              appended) when the draft is past the soft ceiling, and/or a 'consider'
+              under-length hint appended for thin technical deep dives.
+        Invariants:
+            - Item ordering matches the pre-refactor behavior: must_fix is prepended;
+              should_fix and the deep-dive hint are appended.
+        """
+        target_word_count = copy_editor_input.target_word_count
+        soft_min = copy_editor_input.soft_min_words
+        soft_max = copy_editor_input.soft_max_words
+        must_ratio = copy_editor_input.editor_must_fix_over_ratio
+        should_ratio = copy_editor_input.editor_should_fix_over_ratio
+
         over_ratio = actual_word_count / target_word_count if target_word_count > 0 else 1.0
         cap_label = soft_max if soft_max is not None else target_word_count
         past_soft_ceiling = soft_max is None or actual_word_count > soft_max
@@ -366,7 +442,7 @@ class BlogCopyEditorAgent:
         if (
             copy_editor_input.content_profile == "technical_deep_dive"
             and soft_min is not None
-            and actual_word_count < int(soft_min * 0.88)
+            and actual_word_count < int(soft_min * _THIN_DRAFT_RATIO)
         ):
             feedback_items.append(
                 FeedbackItem(
@@ -383,6 +459,61 @@ class BlogCopyEditorAgent:
                     ),
                 )
             )
+
+        return feedback_items
+
+    def run(
+        self,
+        copy_editor_input: CopyEditorInput,
+        *,
+        on_llm_request: Optional[Callable[[str], None]] = None,
+        feedback_output_path: Optional[Union[str, Path]] = None,
+    ) -> CopyEditorOutput:
+        """
+        Provide copy editing feedback on the draft based on the style guide.
+
+        Orchestrates the pass: build the prompt, invoke the LLM, parse the response,
+        inject programmatic length feedback, derive approval, and return the output.
+
+        Preconditions:
+            - copy_editor_input is a valid CopyEditorInput (draft non-empty).
+        Postconditions:
+            - Returns CopyEditorOutput with summary and feedback_items.
+            - If feedback_output_path is set, best-effort writes the same output to
+              that path before returning. This write may silently fail (e.g. permission
+              denied or disk-full); such failures are logged at WARNING and never raised,
+              so the returned output is authoritative and callers must not assume the
+              file exists. `_write_feedback_to_path` returns whether the write succeeded.
+        """
+        draft = copy_editor_input.draft.strip()
+        if not draft:
+            logger.warning("Empty draft; returning minimal feedback.")
+            output = CopyEditorOutput(
+                summary="No draft provided. Please supply a blog post draft to review.",
+                feedback_items=[],
+            )
+            if feedback_output_path:
+                self._write_feedback_to_path(output, feedback_output_path)
+            return output
+
+        style_guide_text = self._style_prompt
+
+        logger.info(
+            "Copy editing: draft len=%s, style_guide len=%s",
+            len(draft),
+            len(style_guide_text),
+        )
+
+        actual_word_count = len(draft.split())
+
+        prompt = self._build_editor_prompt(copy_editor_input, draft, style_guide_text)
+        data = self._invoke_editor_llm(prompt, on_llm_request=on_llm_request)
+
+        summary = (data.get("summary") or "").strip() or "No summary generated."
+        feedback_items = self._parse_feedback_items(data.get("feedback_items") or [])
+        feedback_items = self._inject_length_feedback(
+            feedback_items, copy_editor_input, actual_word_count
+        )
 
         # Derive approved: true when the LLM says so and there are no blocking items.
         # Fall back to checking severity counts when the model omits the field.

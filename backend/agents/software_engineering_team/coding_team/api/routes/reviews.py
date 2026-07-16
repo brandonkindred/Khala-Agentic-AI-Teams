@@ -78,11 +78,15 @@ def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
         )
 
     # Persist a row so the Code Review page can show this review's history (best-effort).
-    _main.record_review_start(
+    # The returned server-clock start time is surfaced on the response so the UI computes
+    # a live duration on one clock (this start + the completion from job status).
+    created_at = _main.record_review_start(
         job_id, request.owner, request.repo, request.pr_number, pr.html_url, _main._review_author()
     )
     _main._start_pr_review_thread(job_id, request, token)
-    return ReviewPrResponse(job_id=job_id, pr_number=request.pr_number, pr_url=pr.html_url)
+    return ReviewPrResponse(
+        job_id=job_id, pr_number=request.pr_number, pr_url=pr.html_url, created_at=created_at
+    )
 
 
 @router.get("/reviews", response_model=List[ReviewRunItem])

@@ -1291,3 +1291,53 @@ def test_no_legacy_v2_or_thread_fallback_symbols() -> None:
     assert hits == [], f"legacy cutover symbols still present: {hits}"
 
 
+# -------------------------------------------------------------------------
+# start_workflow._run_async success path and activities._load_ctx loading.
+# -------------------------------------------------------------------------
+
+
+def test_run_async_runs_via_loop() -> None:
+    """Drive ``_run_async`` without a background event-loop thread (CI-safe)."""
+    from concurrent.futures import Future
+
+    from agent_provisioning_team.temporal import start_workflow as sw
+
+    fake_client = MagicMock()
+    fake_loop = MagicMock()
+    fut: Future = Future()
+    fut.set_result("OK")
+    # Use a closed coroutine placeholder — run_coroutine_threadsafe is mocked.
+    coro = asyncio.sleep(0)
+
+    with (
+        patch.object(sw, "_await_client", return_value=(fake_client, fake_loop)),
+        patch.object(sw.asyncio, "run_coroutine_threadsafe", return_value=fut) as mock_rcts,
+    ):
+        result = sw._run_async(coro)
+    assert result == "OK"
+    mock_rcts.assert_called_once()
+    assert mock_rcts.call_args.args[0] is coro
+    assert mock_rcts.call_args.args[1] is fake_loop
+    coro.close()
+
+
+def test_load_ctx_returns_orchestrator_and_manifest(tmp_path: Path) -> None:
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    # Build a minimal manifest YAML on disk so load_manifest finds something.
+    f = tmp_path / "m.yaml"
+    f.write_text(
+        """
+version: "1.0"
+tools:
+  - name: pg
+    provisioner: postgres_provisioner
+    config: {database_prefix: "x_"}
+""",
+        encoding="utf-8",
+    )
+
+    orch, manifest = t_acts._load_ctx(str(f))
+    assert orch is not None
+    assert manifest is not None
+    assert manifest.tool_names == ["pg"]
