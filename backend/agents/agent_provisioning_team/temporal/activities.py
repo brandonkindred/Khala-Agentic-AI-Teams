@@ -1,25 +1,27 @@
 """Temporal activities for the Agent Provisioning team.
 
-Two activity surfaces are exposed:
+Per-phase activities used by ``AgentProvisioningWorkflow``. The per-tool
+provision step is its own activity (``provision_tool_activity``) so a workflow
+can fan out across tools in parallel with independent retry/heartbeat policies.
+Most activities take ``job_id`` as their first argument and write phase/progress
+updates back to ``job_store`` so ``GET /provision/status/{job_id}`` shows live
+progress without signal plumbing. Exceptions: ``list_manifest_tools_activity``
+takes ``manifest_path`` only, and ``deprovision_activity`` takes ``agent_id``
+first (no provision job row).
 
-* ``run_provisioning_activity`` — v1, single activity per workflow. Kept for
-  backwards compatibility with ``AgentProvisioningWorkflow`` so in-flight
-  runs can drain during a deploy.
-
-* The ``*_activity_v2`` family — fine-grained, per-phase activities used by
-  ``AgentProvisioningWorkflowV2``. The per-tool provision step is its own
-  activity (``provision_tool_activity``) so a workflow can fan out across
-  tools in parallel with independent retry/heartbeat policies. Each v2
-  activity takes ``job_id`` as its first argument and writes phase/progress
-  updates back to ``job_store`` directly so ``GET /provision/status/{job_id}``
-  shows live progress without any signal plumbing.
+Invariants:
+    * Activities heartbeat periodically for long-running work.
+    * Progress / non-terminal job-store writes are best-effort and must not
+      fail the activity (except durable terminal/checkpoint writes that must
+      raise so Temporal retries).
+    * Each activity validates required arguments with assertions on entry.
 """
 
 from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from temporalio import activity
 
@@ -29,29 +31,33 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# v1 — single-shot activity (back-compat)
-# ---------------------------------------------------------------------------
-
-
-@activity.defn(name="run_agent_provisioning")
-def run_provisioning_activity(
-    job_id: str,
-    agent_id: str,
-    manifest_path: str,
-) -> None:
-    """Run the provisioning workflow."""
-    from agent_provisioning_team.api.main import _run_provisioning_background
-
-    _run_provisioning_background(job_id, agent_id, manifest_path)
-
-
-# ---------------------------------------------------------------------------
-# v2 — per-phase, fan-out friendly activities
+# Per-phase, fan-out friendly activities
 # ---------------------------------------------------------------------------
 
 
 def _load_ctx(manifest_path: str):
-    """Lazy import to keep the worker's import graph minimal."""
+    """Build a fresh orchestrator and load the agent tool manifest.
+
+    Preconditions:
+        * ``manifest_path`` is a readable YAML path (or registry key accepted by
+          ``load_manifest``).
+    Postconditions:
+        * Returns ``(ProvisioningOrchestrator, ToolManifest)``.
+    Raises:
+        * Propagates import/IO/validation errors from ``load_manifest``.
+        * Propagates ``OSError`` / ``PermissionError`` from
+          ``ProvisioningOrchestrator.__init__`` when ``CredentialStore`` /
+          ``EnvironmentStore`` cannot create their storage directories or key
+          files — Temporal retries the activity.
+
+    ``ProvisioningOrchestrator()`` is intentionally constructed per call. Its
+    ``__init__`` only wires local ``CredentialStore`` / ``EnvironmentStore``
+    (mkdir + optional Fernet key file) and builds in-process provisioner
+    objects via ``build_default_tool_agents()`` — plain class construction, no
+    network, DB pool, or config-file I/O — so a process-global cache is
+    unnecessary for activity use. Do not introduce a module-level singleton
+    unless profiling shows construction dominating activity latency.
+    """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
     from agent_provisioning_team.shared.tool_manifest import load_manifest
 
@@ -60,19 +66,60 @@ def _load_ctx(manifest_path: str):
     return orch, manifest
 
 
-def _safe(fn_name: str, *args: Any, **kwargs: Any) -> None:
-    """Best-effort job_store call. A job_store hiccup must never fail the activity."""
+def _safe_job_store_log_args(*args: Any, **kwargs: Any) -> tuple[list[str], list[str]]:
+    """Summarize job-store call args without logging credential payloads.
+
+    Preconditions:
+        * None — accepts arbitrary ``*args`` / ``**kwargs`` from a store call.
+    Postconditions:
+        * Returns ``(arg_summaries, kw_summaries)`` with identifiers / types only —
+          never stringifies nested payloads that may contain secrets.
+    """
+
+    def _summarize(value: Any) -> str:
+        if isinstance(value, bool) or value is None:
+            return repr(value)
+        if isinstance(value, (int, float)):
+            return repr(value)
+        if isinstance(value, str):
+            return repr(value) if len(value) <= 64 else f"str(len={len(value)})"
+        return f"{type(value).__name__}"
+
+    return [_summarize(a) for a in args], [f"{k}={_summarize(v)}" for k, v in kwargs.items()]
+
+
+def _best_effort_job_store(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    """Best-effort job_store call. Store hiccups must never fail the activity.
+
+    Preconditions:
+        * ``fn`` should be a callable (programming errors are logged and skipped).
+    Postconditions:
+        * On success: ``fn(*args, **kwargs)`` has run.
+        * On failure / non-callable ``fn``: logs and returns without raising.
+    """
+    # Pass the real callable (not a name string) so renames stay searchable.
+    # Incorrect args for a valid callable are still caught — progress writes
+    # must not abort the activity and leave Temporal retries opaque.
+    if not callable(fn):
+        logger.error("job_store callable is not callable: %r", fn)
+        return
     try:
-        getattr(_js, fn_name)(*args, **kwargs)
+        fn(*args, **kwargs)
     except Exception:
-        logger.exception("job_store.%s failed: args=%s kwargs=%s", fn_name, args, list(kwargs))
+        arg_summaries, kw_summaries = _safe_job_store_log_args(*args, **kwargs)
+        logger.exception(
+            "job_store.%s failed: args=%s kwargs=%s",
+            getattr(fn, "__name__", repr(fn)),
+            arg_summaries,
+            kw_summaries,
+        )
 
 
-def _restored(job_id: str, phase: str, progress: int) -> None:
-    """Common 'phase skipped, restored from prior_results' progress write."""
+def _record_phase_restored(job_id: str, phase: str, progress: int) -> None:
+    """Record a skipped/restored phase progress update on the job store."""
     logger.info("Skipping %s for job=%s (restored from prior_results)", phase, job_id)
-    _safe(
-        "update_job",
+    _best_effort_job_store(
+        _js.update_job,
         job_id,
         current_phase=phase,
         progress=progress,
@@ -80,28 +127,68 @@ def _restored(job_id: str, phase: str, progress: int) -> None:
     )
 
 
+@activity.defn(name="agent_provisioning_list_manifest_tools")
+def list_manifest_tools_activity(manifest_path: str) -> List[Dict[str, Any]]:
+    """Return a frozen tool snapshot from the agent manifest (workflow-safe I/O).
+
+    Temporal workflows must not read files directly. This activity loads the
+    manifest once so later per-tool activities can use the same
+    name/provisioner/config without re-reading a mutable file mid-run.
+
+    Preconditions:
+        * ``manifest_path`` is non-empty and readable by ``load_manifest``.
+    Postconditions:
+        * Returns ``[{"name", "provisioner", "config"}, ...]`` in manifest order.
+    """
+    assert manifest_path, "manifest_path must be non-empty"
+    from agent_provisioning_team.shared.tool_manifest import load_manifest
+
+    manifest = load_manifest(manifest_path)
+    return [
+        {
+            "name": t.name,
+            "provisioner": t.provisioner,
+            "config": dict(t.config or {}),
+        }
+        for t in manifest.tools
+    ]
+
+
 @activity.defn(name="agent_provisioning_setup")
-def setup_activity_v2(
+def setup_activity(
     job_id: str,
     agent_id: str,
     manifest_path: str,
     prior_setup: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Run (or restore) the Docker/environment setup phase.
+
+    Preconditions:
+        * ``job_id`` / ``agent_id`` / ``manifest_path`` are non-empty.
+        * When ``prior_setup`` is set, it is a serialized setup phase snapshot
+          acceptable to ``restore_setup``.
+    Postconditions:
+        * Returns ``{"success": True, "environment": <dump|None>}``.
+        * Writes setup progress (or restore status) into ``job_store``.
+        * Raises ``RuntimeError`` when a fresh setup fails.
+    """
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
+    assert manifest_path, "manifest_path must be non-empty"
     from agent_provisioning_team.phases.setup import run_setup
     from agent_provisioning_team.shared.phase_state import restore_setup
 
-    _safe("mark_job_running", job_id)
+    _best_effort_job_store(_js.mark_job_running, job_id)
 
     if prior_setup is not None:
         snap = restore_setup(prior_setup)
-        _restored(job_id, "setup", 15)
+        _record_phase_restored(job_id, "setup", 15)
         return {
             "success": snap.success,
             "environment": snap.environment.model_dump() if snap.environment else None,
         }
 
-    _safe(
-        "update_job",
+    _best_effort_job_store(_js.update_job,
         job_id,
         current_phase="setup",
         progress=5,
@@ -122,56 +209,122 @@ def setup_activity_v2(
         "success": True,
         "environment": result.environment.model_dump() if result.environment else None,
     }
-    _safe("add_completed_phase", job_id, "setup", payload)
-    _safe("update_job", job_id, progress=15, status_text="Setup complete")
+    # Durable checkpoint — must raise so Temporal retries before later phases.
+    _js.add_completed_phase(job_id, "setup", payload)
+    _best_effort_job_store(_js.update_job, job_id, progress=15, status_text="Setup complete")
     return payload
 
 
 @activity.defn(name="agent_provisioning_credentials")
-def credentials_activity_v2(
+def credentials_activity(
     job_id: str,
     agent_id: str,
     manifest_path: str,
     prior_credentials: Optional[Dict[str, Any]] = None,
+    tool_specs: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
-    from agent_provisioning_team.phases.credential_generation import run_credential_generation
+    """Generate (or restore) per-tool credentials for the agent.
+
+    Preconditions:
+        * ``job_id`` / ``agent_id`` / ``manifest_path`` are non-empty.
+        * When ``prior_credentials`` is set, it is a credential-phase snapshot
+          acceptable to ``restore_credentials``.
+        * When ``tool_specs`` is set (fresh generate path), each entry has a
+          non-empty ``name`` — the same frozen snapshot used for tool fan-out.
+    Postconditions:
+        * Returns ``{"success": True, "credentials": {tool_name: dump, ...}}``.
+        * Job-store checkpoint never stores plaintext secrets.
+        * Raises ``RuntimeError`` when credential generation fails.
+    """
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
+    assert manifest_path, "manifest_path must be non-empty"
+    from agent_provisioning_team.phases.credential_generation import (
+        get_stored_credentials,
+        run_credential_generation,
+    )
     from agent_provisioning_team.shared.phase_state import restore_credentials
-    from agent_provisioning_team.shared.tool_manifest import load_manifest
 
     if prior_credentials is not None:
         snap = restore_credentials(prior_credentials)
-        _restored(job_id, "credential_generation", 30)
+        _record_phase_restored(job_id, "credential_generation", 30)
+        # Resume reloads secrets from the Fernet CredentialStore — never from
+        # job-store phase_results (which must stay redacted / reference-only).
+        stored = get_stored_credentials(agent_id)
+        if not stored and snap.credentials:
+            # Legacy checkpoints that still carry plaintext: migrate into the
+            # CredentialStore once, then overwrite the job-store checkpoint so
+            # subsequent resumes cannot re-read plaintext.
+            # ``store_credentials`` overwrites per tool and is safe under Temporal
+            # activity retry — do not swallow store failures (retry until durable).
+            # Remove this branch once job-store credential_generation checkpoints
+            # no longer embed plaintext ``credentials`` maps (grep phase_results
+            # for non-empty credentials dumps under credential_generation).
+            from agent_provisioning_team.phases.credential_generation import (
+                store_credentials_payload,
+            )
+
+            for name, cred in snap.credentials.items():
+                store_credentials_payload(agent_id, name, cred.model_dump())
+            tool_names = sorted(snap.credentials.keys()) or list(snap.tool_names)
+            _js.add_completed_phase(
+                job_id,
+                "credential_generation",
+                {"success": True, "tool_names": tool_names, "credentials": {}},
+            )
+            return {
+                "success": snap.success,
+                "credentials": {k: v.model_dump() for k, v in snap.credentials.items()},
+            }
+        if not stored:
+            if not snap.credentials:
+                raise RuntimeError(
+                    f"cannot restore credential_generation for agent={agent_id}: "
+                    "prior checkpoint has no credentials and CredentialStore is empty"
+                )
+            raise RuntimeError(
+                f"cannot restore credential_generation for agent={agent_id}: "
+                "CredentialStore has no credentials"
+            )
         return {
-            "success": snap.success,
-            "credentials": {k: v.model_dump() for k, v in snap.credentials.items()},
+            "success": True,
+            "credentials": {k: v.model_dump() for k, v in stored.items()},
         }
 
-    _safe(
-        "update_job",
+    _best_effort_job_store(_js.update_job,
         job_id,
         current_phase="credential_generation",
         progress=20,
         status_text="Generating credentials...",
     )
-    orch = ProvisioningOrchestrator()
-    manifest = load_manifest(manifest_path)
+    orch, manifest = _load_ctx(manifest_path)
+    frozen_names: Optional[List[str]] = None
+    if tool_specs is not None:
+        frozen_names = [str(s.get("name") or "") for s in tool_specs]
+        assert all(frozen_names), "tool_specs entries must include non-empty name"
     activity.heartbeat("credentials")
     result = run_credential_generation(
         agent_id=agent_id,
         manifest=manifest,
         credential_store=orch.credential_store,
+        tool_names=frozen_names,
     )
     if not result.success:
         raise RuntimeError(f"credential generation failed: {result.error}")
 
-    payload = {
+    # Workflow activities still receive full credentials in-memory for this run.
+    # Job-store checkpoint stores only tool-name references — no plaintext secrets.
+    checkpoint = {
+        "success": True,
+        "tool_names": sorted(result.credentials.keys()),
+        "credentials": {},
+    }
+    _js.add_completed_phase(job_id, "credential_generation", checkpoint)
+    _best_effort_job_store(_js.update_job, job_id, progress=30, status_text="Credentials generated")
+    return {
         "success": True,
         "credentials": {k: v.model_dump() for k, v in result.credentials.items()},
     }
-    _safe("add_completed_phase", job_id, "credential_generation", payload)
-    _safe("update_job", job_id, progress=30, status_text="Credentials generated")
-    return payload
 
 
 @activity.defn(name="agent_provisioning_provision_tool")
@@ -179,18 +332,39 @@ def provision_tool_activity(
     job_id: str,
     agent_id: str,
     tool_name: str,
-    manifest_path: str,
     credentials_dump: Dict[str, Any],
-    tools_completed_so_far: int = 0,
-    tools_total: int = 0,
+    tools_total: int,
+    provisioner: str,
+    tool_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Provision a single tool — one activity per tool so fan-out is natural."""
+    """Provision a single tool — one activity per tool so fan-out is natural.
+
+    Preconditions:
+        * ``tool_name`` / ``provisioner`` are non-empty (from the workflow
+          manifest snapshot — not re-read from disk).
+        * ``credentials_dump`` is a serializable ``GeneratedCredentials`` dump
+          for this tool.
+        * ``tools_total`` must be ``> 0``.
+    Postconditions:
+        * Returns ``ToolProvisionResult.model_dump()`` from the provisioner
+          with ``provisioner_key`` set to the registry key (needed by
+          ``compensate()`` — built-in provisioners leave it ``None``).
+        * Does **not** write ``EnvironmentStore`` — parallel fan-out can run in
+          different worker processes, so tool lists are recorded once after the
+          gather in ``record_account_provisioning_activity``.
+        * Raises ``RuntimeError`` when the provisioner is unknown.
+        * Updates ``job_store`` with the current tool / phase progress.
+          Does not write ``tools_completed`` — parallel fan-out indexes are not
+          completion counts and would race/regress under ``asyncio.gather``.
+    """
     from agent_provisioning_team.models import GeneratedCredentials
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
-    from agent_provisioning_team.shared.tool_manifest import load_manifest
 
-    _safe(
-        "update_job",
+    assert tool_name, "tool_name must be non-empty"
+    assert provisioner, "provisioner must be non-empty"
+    assert tools_total > 0, "tools_total must be > 0"
+    _best_effort_job_store(
+        _js.update_job,
         job_id,
         current_phase="account_provisioning",
         current_tool=tool_name,
@@ -198,70 +372,79 @@ def provision_tool_activity(
         status_text=f"Provisioning {tool_name}...",
     )
 
-    manifest = load_manifest(manifest_path)
-    tool = manifest.get_tool(tool_name)
-    if tool is None:
-        raise RuntimeError(f"tool {tool_name} not in manifest")
-
     provisioners = build_default_tool_agents()
-    provisioner = provisioners.get(tool.provisioner)
-    if provisioner is None:
-        raise RuntimeError(f"unknown provisioner {tool.provisioner}")
+    agent = provisioners.get(provisioner)
+    if agent is None:
+        raise RuntimeError(f"unknown provisioner {provisioner}")
 
     creds = GeneratedCredentials.model_validate(credentials_dump)
 
     activity.heartbeat(f"provisioning {tool_name}")
-    result = provisioner.provision(
+    result = agent.provision(
         agent_id=agent_id,
-        config=tool.config,
+        config=dict(tool_config or {}),
         credentials=creds,
     )
+    # Mirror run_account_provisioning: stamp the registry key so compensate()
+    # can look the provisioner back up (built-ins leave provisioner_key=None).
+    # Also force tool_name to the snapshot name — provisioners may return
+    # their own stem (e.g. generic_provisioner → "generic") which would break
+    # resume tool-set matching and EnvironmentStore recording.
+    result.provisioner_key = provisioner
+    result.tool_name = tool_name
     return result.model_dump()
 
 
 @activity.defn(name="agent_provisioning_audit")
-def audit_activity_v2(
+def audit_activity(
     job_id: str,
     agent_id: str,
     manifest_path: str,
     tool_results_dump: List[Dict[str, Any]],
     prior_audit: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Run (or restore) the access-audit phase after tools are provisioned.
+
+    Preconditions:
+        * ``tool_results_dump`` entries are serializable ``ToolProvisionResult``
+          dumps when ``prior_audit`` is absent.
+        * When ``prior_audit`` is set, it is acceptable to ``restore_access_audit``.
+    Postconditions:
+        * Returns the ``AccessAuditResult`` dump.
+        * Records the phase in ``job_store`` on a fresh audit run.
+    """
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
+    assert manifest_path, "manifest_path must be non-empty"
     from agent_provisioning_team.models import ToolProvisionResult
     from agent_provisioning_team.phases.access_audit import run_access_audit
     from agent_provisioning_team.shared.phase_state import restore_access_audit
-    from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
-    from agent_provisioning_team.shared.tool_manifest import load_manifest
 
     if prior_audit is not None:
         result = restore_access_audit(prior_audit)
-        _restored(job_id, "access_audit", 75)
+        _record_phase_restored(job_id, "access_audit", 75)
         return result.model_dump()
 
-    _safe(
-        "update_job",
+    _best_effort_job_store(_js.update_job,
         job_id,
         current_phase="access_audit",
         progress=70,
         status_text="Auditing access permissions...",
     )
-    manifest = load_manifest(manifest_path)
     tool_results = [ToolProvisionResult.model_validate(t) for t in tool_results_dump]
     activity.heartbeat("access_audit")
     result = run_access_audit(
         agent_id=agent_id,
         tool_results=tool_results,
-        manifest=manifest,
-        provisioners=build_default_tool_agents(),
     )
     payload = result.model_dump()
-    _safe("add_completed_phase", job_id, "access_audit", payload)
-    _safe("update_job", job_id, progress=80, status_text="Access audit complete")
+    _js.add_completed_phase(job_id, "access_audit", payload)
+    _best_effort_job_store(_js.update_job, job_id, progress=80, status_text="Access audit complete")
     return payload
 
 
 @activity.defn(name="agent_provisioning_documentation")
-def documentation_activity_v2(
+def documentation_activity(
     job_id: str,
     agent_id: str,
     manifest_path: str,
@@ -270,6 +453,20 @@ def documentation_activity_v2(
     workspace_path: str,
     prior_documentation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Generate (or restore) onboarding documentation for the agent.
+
+    Preconditions:
+        * ``credentials_dump`` / ``tool_results_dump`` match the models used by
+          ``run_documentation`` when ``prior_documentation`` is absent.
+        * ``workspace_path`` is a non-empty path string.
+    Postconditions:
+        * Returns ``{"success": <bool>, "onboarding": <dump|None>}``.
+        * Records the documentation phase in ``job_store`` on a fresh run.
+    """
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
+    assert manifest_path, "manifest_path must be non-empty"
+    assert workspace_path, "workspace_path must be non-empty"
     from agent_provisioning_team.models import GeneratedCredentials, ToolProvisionResult
     from agent_provisioning_team.phases.documentation import run_documentation
     from agent_provisioning_team.shared.phase_state import restore_documentation
@@ -277,14 +474,13 @@ def documentation_activity_v2(
 
     if prior_documentation is not None:
         snap = restore_documentation(prior_documentation)
-        _restored(job_id, "documentation", 90)
+        _record_phase_restored(job_id, "documentation", 90)
         return {
             "success": snap.success,
             "onboarding": snap.onboarding.model_dump() if snap.onboarding else None,
         }
 
-    _safe(
-        "update_job",
+    _best_effort_job_store(_js.update_job,
         job_id,
         current_phase="documentation",
         progress=85,
@@ -305,13 +501,13 @@ def documentation_activity_v2(
         "success": result.success,
         "onboarding": result.onboarding.model_dump() if result.onboarding else None,
     }
-    _safe("add_completed_phase", job_id, "documentation", payload)
-    _safe("update_job", job_id, progress=92, status_text="Documentation complete")
+    _js.add_completed_phase(job_id, "documentation", payload)
+    _best_effort_job_store(_js.update_job, job_id, progress=92, status_text="Documentation complete")
     return payload
 
 
 @activity.defn(name="agent_provisioning_deliver")
-def deliver_activity_v2(
+def deliver_activity(
     job_id: str,
     agent_id: str,
     environment_dump: Optional[Dict[str, Any]],
@@ -320,6 +516,19 @@ def deliver_activity_v2(
     audit_dump: Optional[Dict[str, Any]],
     onboarding_dump: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    """Finalize provisioning and mark the job completed or failed.
+
+    Preconditions:
+        * Upstream phase dumps (environment / credentials / tools / audit /
+          onboarding) are None or valid model dumps for the deliver phase.
+    Postconditions:
+        * Returns ``{"success": <bool>, "error": <str|None>}``.
+        * Marks the job completed (redacted result) or failed in ``job_store``.
+        * Raises when the terminal job-store write fails so Temporal retries
+          (status must not stay running after a successful deliver).
+    """
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
     from agent_provisioning_team.models import (
         AccessAuditResult,
         EnvironmentInfo,
@@ -327,15 +536,14 @@ def deliver_activity_v2(
         OnboardingPacket,
         ToolProvisionResult,
     )
-    from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
     from agent_provisioning_team.phases.deliver import (
         build_final_result,
         redact_credentials_for_response,
         run_deliver,
     )
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
 
-    _safe(
-        "update_job",
+    _best_effort_job_store(_js.update_job,
         job_id,
         current_phase="deliver",
         progress=95,
@@ -348,7 +556,6 @@ def deliver_activity_v2(
     audit = AccessAuditResult.model_validate(audit_dump) if audit_dump else None
     onboarding = OnboardingPacket.model_validate(onboarding_dump) if onboarding_dump else None
 
-    orch = ProvisioningOrchestrator()
     activity.heartbeat("deliver")
     deliver_result = run_deliver(
         agent_id=agent_id,
@@ -357,7 +564,7 @@ def deliver_activity_v2(
         tool_results=tool_results,
         access_audit=audit,
         onboarding=onboarding,
-        environment_store=orch.environment_store,
+        environment_store=EnvironmentStore(),
     )
 
     final = build_final_result(
@@ -372,24 +579,106 @@ def deliver_activity_v2(
 
     if final.success:
         redacted = redact_credentials_for_response(final)
-        _safe("mark_job_completed", job_id, result=redacted.model_dump())
+        _js.mark_job_completed(job_id, result=redacted.model_dump())
     else:
-        _safe("mark_job_failed", job_id, error=final.error or "Provisioning failed")
+        _js.mark_job_failed(job_id, error=final.error or "Provisioning failed")
 
     return {"success": final.success, "error": final.error}
 
 
+@activity.defn(name="agent_provisioning_record_account_provisioning")
+def record_account_provisioning_activity(
+    job_id: str,
+    tool_results_dump: List[Dict[str, Any]],
+    agent_id: str = "",
+) -> Dict[str, Any]:
+    """Persist a successful account-provisioning checkpoint for ``/resume``.
+
+    Preconditions:
+        * ``job_id`` is non-empty.
+        * ``tool_results_dump`` is the serializable per-tool result list.
+        * ``agent_id`` is non-empty when environment tool recording is required.
+    Postconditions:
+        * ``completed_phases`` includes ``account_provisioning`` and
+          ``phase_results`` carries sanitized tool results (no plaintext
+          ``credentials``; sensitive ``details`` redacted).
+        * When ``agent_id`` is set, successful tool results that carry a
+          ``credentials`` dump are written to ``CredentialStore`` (including
+          enriched fields) so resume can rebuild documentation/deliver material
+          after the checkpoint strips plaintext.
+        * Job progress reports ``tools_completed`` / ``tools_total`` from the
+          finished result list so status polls no longer show ``0/N``.
+        * When ``agent_id`` is set, successful tool names are written once via
+          ``EnvironmentStore.add_tools`` (safe after parallel fan-out).
+        * Raises when job-store / credential-store writes fail so Temporal
+          retries the checkpoint before later phases run.
+    """
+    assert job_id, "job_id must be non-empty"
+    from agent_provisioning_team.phases.deliver import sanitize_tool_results_for_checkpoint
+
+    results = list(tool_results_dump)
+    tools_total = len(results)
+    tools_completed = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
+    # Persist provisioner-enriched credentials (connection_string, SSH keys, …)
+    # into CredentialStore before the job-store checkpoint strips them. Resume
+    # after this phase reloads enrichment from the store — sanitized
+    # ``tool_results`` intentionally keep ``credentials=None``.
+    if agent_id:
+        from agent_provisioning_team.phases.credential_generation import store_credentials_payload
+        from agent_provisioning_team.shared.environment_store import EnvironmentStore
+
+        for raw in results:
+            if not isinstance(raw, dict) or not raw.get("success"):
+                continue
+            tool_name = raw.get("tool_name")
+            creds = raw.get("credentials")
+            if isinstance(tool_name, str) and tool_name and isinstance(creds, dict):
+                store_credentials_payload(agent_id, tool_name, creds)
+
+        names = [
+            r.get("tool_name")
+            for r in results
+            if isinstance(r, dict) and r.get("success") and r.get("tool_name")
+        ]
+        EnvironmentStore().add_tools(agent_id, [n for n in names if isinstance(n, str)])
+
+    # Job-store checkpoint must not retain plaintext credentials / connection strings.
+    sanitized = sanitize_tool_results_for_checkpoint(results)
+    payload = {"success": True, "tool_results": sanitized}
+    _js.add_completed_phase(job_id, "account_provisioning", payload)
+    _js.update_job(
+        job_id,
+        progress=60,
+        status_text="Account provisioning complete",
+        current_tool=None,
+        tools_completed=tools_completed,
+        tools_total=tools_total,
+    )
+    return payload
+
+
 @activity.defn(name="agent_provisioning_compensate")
-def compensate_activity_v2(
+def compensate_activity(
     agent_id: str,
     succeeded_tools: List[Dict[str, Any]],
+    job_id: Optional[str] = None,
 ) -> None:
     """Roll back a partially-provisioned agent (best effort).
 
-    ``succeeded_tools`` entries are dicts with ``tool_name`` and
-    ``provisioner_key`` (registry key, e.g. ``"postgres_provisioner"``).
-    Post-#293 the orchestrator looks provisioners back up by the registry
-    key, not by a class attribute derived from ``tool_name``.
+    Preconditions:
+        * ``agent_id`` identifies the agent whose tools should be rolled back.
+        * ``succeeded_tools`` entries are dicts with ``tool_name`` and
+          ``provisioner_key`` (registry key, e.g. ``"postgres_provisioner"``).
+          The orchestrator looks provisioners up by that registry key.
+        * When ``job_id`` is set, it identifies the job whose completed-phase
+          checkpoints must be cleared after teardown.
+    Postconditions:
+        * Invokes ``ProvisioningOrchestrator.compensate`` once. Failures inside
+          compensation are absorbed by the orchestrator (best effort).
+        * When ``job_id`` is set: clears ``completed_phases`` / ``phase_results``
+          so a later ``/resume`` cannot skip credential_generation (or setup)
+          after CredentialStore / Docker were torn down. Missing jobs are a
+          no-op; job-store write failures raise for Temporal retry.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 
@@ -402,7 +691,32 @@ def compensate_activity_v2(
         )
         for t in succeeded_tools
     ]
-    orch._compensate(agent_id, shims)
+    orch.compensate(agent_id, shims)
+    if job_id:
+        # Compensate tears down Docker, env, and CredentialStore — no prior
+        # phase remains safe to skip on resume.
+        _js.clear_completed_phases(job_id)
+
+
+@activity.defn(name="agent_provisioning_mark_job_failed")
+def mark_job_failed_activity(job_id: str, error: str) -> None:
+    """Record a terminal failure for a provisioning job in ``job_store``.
+
+    Used when the workflow aborts before ``deliver_activity`` (e.g. after tool
+    compensation) so ``GET /provision/status/{job_id}`` does not stay ``running``.
+
+    Preconditions:
+        * ``job_id`` is non-empty.
+        * ``error`` is a non-empty human-readable failure reason.
+    Postconditions:
+        * ``mark_job_failed`` is written to ``job_store`` so status polls leave
+          ``running``/``pending``.
+        * Raises when the job-store write fails so Temporal retries the
+          terminal status update before the workflow abort completes.
+    """
+    assert job_id, "job_id must be non-empty"
+    assert error, "error must be non-empty"
+    _js.mark_job_failed(job_id, error=error)
 
 
 # ---------------------------------------------------------------------------
@@ -417,9 +731,9 @@ def deprovision_activity(agent_id: str, force: bool = False) -> Dict[str, Any]:
     Thin durable wrapper over ``ProvisioningOrchestrator.deprovision`` — which
     already deprovisions each tool, tears down the Docker environment, and
     removes encrypted credentials + the environment record, aggregating
-    best-effort errors. Kept as a single activity (v1-style) rather than a
-    per-tool fan-out because deprovision is fast and the existing method already
-    reports per-tool success in its ``details``.
+    best-effort errors. Kept as a single activity rather than a per-tool fan-out
+    because deprovision is fast and the existing method already reports per-tool
+    success in its ``details``.
 
     Preconditions:
         * ``agent_id`` is a non-empty string identifying a (possibly already

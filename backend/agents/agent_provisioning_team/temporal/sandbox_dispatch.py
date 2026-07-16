@@ -19,6 +19,18 @@ import uuid
 
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from agent_provisioning_team.sandbox import (
+    DockerUnavailableError,
+    SandboxAcquireFailedError,
+    UnknownAgentError,
+)
+from agent_provisioning_team.sandbox import (
+    acquire as _acquire_sandbox_inprocess,
+)
+from agent_provisioning_team.sandbox import (
+    teardown as _teardown_sandbox_inprocess,
+)
+from agent_provisioning_team.sandbox.provisioner import DockerError
 from agent_provisioning_team.sandbox.state import SandboxHandle
 from agent_provisioning_team.temporal.constants import (
     SANDBOX_ACQUIRE_CLIENT_TIMEOUT_S,
@@ -33,6 +45,7 @@ from agent_provisioning_team.temporal.sandbox_workflows import (
     SandboxReaperWorkflow,
     SandboxTeardownWorkflow,
 )
+from shared_temporal import translate_workflow_failure
 from shared_temporal.runner import execute_workflow_async, start_workflow_sync
 
 logger = logging.getLogger(__name__)
@@ -41,24 +54,11 @@ logger = logging.getLogger(__name__)
 def sandbox_temporal_enabled() -> bool:
     """True when sandbox lifecycle ops should dispatch to Temporal.
 
-    Gated on ``TEMPORAL_ADDRESS`` being set and the ``PROVISION_THREAD_FALLBACK``
-    escape hatch being off, so one switch forces the whole Agent Provisioning
-    team (provisioning + sandbox) back to in-process execution. The escape-hatch
-    check itself lives in :func:`agent_provisioning_team.temporal.client.provision_thread_fallback_enabled`
-    — the single source of truth shared with ``api/main.py``'s provisioning and
-    deprovision dispatch, so this can never independently drift.
-
     Postconditions:
-        * Returns ``False`` (never raises) when Temporal is unavailable, so the
-          caller falls back to the direct in-process path.
+        * Returns ``is_temporal_enabled()`` — never raises.
     """
-    from agent_provisioning_team.temporal.client import (
-        is_temporal_enabled,
-        provision_thread_fallback_enabled,
-    )
+    from agent_provisioning_team.temporal.client import is_temporal_enabled
 
-    if provision_thread_fallback_enabled():
-        return False
     return is_temporal_enabled()
 
 
@@ -78,9 +78,7 @@ async def acquire_sandbox(agent_id: str) -> SandboxHandle:
     assert agent_id, "agent_id must be non-empty"
     if sandbox_temporal_enabled():
         return await acquire_sandbox_via_temporal(agent_id)
-    from agent_provisioning_team.sandbox import acquire as _acquire
-
-    return await _acquire(agent_id)
+    return await _acquire_sandbox_inprocess(agent_id)
 
 
 async def teardown_sandbox(agent_id: str) -> None:
@@ -95,9 +93,7 @@ async def teardown_sandbox(agent_id: str) -> None:
     if sandbox_temporal_enabled():
         await teardown_sandbox_via_temporal(agent_id)
         return
-    from agent_provisioning_team.sandbox import teardown as _teardown
-
-    await _teardown(agent_id)
+    await _teardown_sandbox_inprocess(agent_id)
 
 
 async def acquire_sandbox_via_temporal(agent_id: str) -> SandboxHandle:
@@ -143,14 +139,6 @@ def _reraise_sandbox_error(exc: Exception) -> None:
     A client-side ``asyncio.TimeoutError`` (which carries no ``.type``) has no
     match and is left for the caller to re-raise unchanged.
     """
-    from agent_provisioning_team.sandbox import (
-        DockerUnavailableError,
-        SandboxAcquireFailedError,
-        UnknownAgentError,
-    )
-    from agent_provisioning_team.sandbox.provisioner import DockerError
-    from shared_temporal import translate_workflow_failure
-
     translate_workflow_failure(
         exc,
         {

@@ -4,7 +4,7 @@ Credential generation phase: Generate passwords and tokens for tools.
 This is phase 2 of the provisioning workflow.
 """
 
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..models import (
     CredentialGenerationResult,
@@ -19,30 +19,46 @@ def run_credential_generation(
     manifest: ToolManifest,
     credential_store: Optional[CredentialStore] = None,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    tool_names: Optional[List[str]] = None,
 ) -> CredentialGenerationResult:
     """
     Execute the credential generation phase.
 
-    Generates secure passwords/tokens for each tool in the manifest.
+    Generates secure passwords/tokens for each tool in the manifest
+    (or for an explicit frozen ``tool_names`` snapshot).
 
     Args:
         agent_id: Unique identifier for the agent
-        manifest: Loaded tool manifest
+        manifest: Loaded tool manifest (used when ``tool_names`` is omitted)
         credential_store: Store for persisting credentials
         progress_callback: Callback(tool_name, done, total) for progress updates
+        tool_names: Optional frozen name list; when set, overrides ``manifest.tools``
 
     Returns:
         CredentialGenerationResult with generated credentials per tool
+
+    Preconditions:
+        * ``agent_id`` is non-empty.
+        * When ``tool_names`` is set, every entry is a non-empty string.
+    Postconditions:
+        * Each generated credential is stored in ``credential_store``.
+        * Returned map is keyed by the same tool names that were processed.
     """
+    assert agent_id, "agent_id must be non-empty"
+    if tool_names is not None:
+        assert all(isinstance(n, str) and n for n in tool_names), (
+            "tool_names must be non-empty strings"
+        )
+        names = list(tool_names)
+    else:
+        names = [t.name for t in manifest.tools]
+
     cred_store = credential_store or CredentialStore()
 
     credentials: Dict[str, GeneratedCredentials] = {}
-    tools = manifest.tools
-    total = len(tools)
+    total = len(names)
 
-    for idx, tool in enumerate(tools):
-        tool_name = tool.name
-
+    for idx, tool_name in enumerate(names):
         if progress_callback:
             progress_callback(tool_name, idx, total)
 
@@ -144,11 +160,50 @@ def get_stored_credentials(
 
     credentials: Dict[str, GeneratedCredentials] = {}
     for tool_name, cred_data in stored.items():
+        if not isinstance(cred_data, dict):
+            continue
         credentials[tool_name] = GeneratedCredentials(
             tool_name=tool_name,
             username=cred_data.get("username"),
             password=cred_data.get("password"),
             token=cred_data.get("token"),
+            ssh_private_key=cred_data.get("ssh_private_key"),
+            ssh_public_key=cred_data.get("ssh_public_key"),
+            connection_string=cred_data.get("connection_string"),
+            extra=dict(cred_data.get("extra") or {}),
         )
 
     return credentials
+
+
+def store_credentials_payload(
+    agent_id: str,
+    tool_name: str,
+    credentials: Dict[str, Any],
+    *,
+    credential_store: Optional[CredentialStore] = None,
+) -> None:
+    """Persist a full credentials dump (including enriched fields) to the store.
+
+    Preconditions:
+        * ``agent_id`` / ``tool_name`` are non-empty.
+        * ``credentials`` is a mapping (may include connection_string / SSH / extra).
+    Postconditions:
+        * ``CredentialStore`` holds the durable fields for ``tool_name`` under ``agent_id``.
+    """
+    assert agent_id, "agent_id must be non-empty"
+    assert tool_name, "tool_name must be non-empty"
+    cred_store = credential_store or CredentialStore()
+    cred_store.store_credentials(
+        agent_id=agent_id,
+        tool_name=tool_name,
+        credentials={
+            "username": credentials.get("username"),
+            "password": credentials.get("password"),
+            "token": credentials.get("token"),
+            "ssh_private_key": credentials.get("ssh_private_key"),
+            "ssh_public_key": credentials.get("ssh_public_key"),
+            "connection_string": credentials.get("connection_string"),
+            "extra": dict(credentials.get("extra") or {}),
+        },
+    )

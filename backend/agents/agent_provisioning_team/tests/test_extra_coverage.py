@@ -265,6 +265,9 @@ def test_canonical_anatomy_prompt_preamble_via_instance(tmp_path: Path) -> None:
     prov._state = ProvisionerStateStore("generic_x_provisioner", storage_dir=tmp_path)
     text = prov.canonical_anatomy_prompt_preamble()
     assert isinstance(text, str)
+    assert text.strip()
+    assert "anatomy" in text.lower() or "Khala" in text
+    assert "Input" in text or "Output" in text or "Tools" in text
 
 
 # ---------------------------------------------------------------------------
@@ -306,39 +309,28 @@ def test_credential_store_rotate_skips_corrupt_files(tmp_path: Path) -> None:
 
 
 def test_run_async_runs_via_loop() -> None:
+    """Drive ``_run_async`` without a background event-loop thread (CI-safe)."""
+    from concurrent.futures import Future
+
     from agent_provisioning_team.temporal import start_workflow as sw
 
-    # Create an actual event loop and runs the coroutine in it.
-    loop = asyncio.new_event_loop()
     fake_client = MagicMock()
-    sentinel = {}
+    fake_loop = MagicMock()
+    fut: Future = Future()
+    fut.set_result("OK")
+    # Use a closed coroutine placeholder — run_coroutine_threadsafe is mocked.
+    coro = asyncio.sleep(0)
 
-    async def go():
-        sentinel["done"] = True
-        return "OK"
-
-    # Start the loop in a background thread so run_coroutine_threadsafe works.
-    import threading
-
-    def run_forever():
-        asyncio.set_event_loop(loop)
-        loop.run_forever()
-
-    t = threading.Thread(target=run_forever, daemon=True)
-    t.start()
-
-    try:
-        with (
-            patch.object(sw, "get_temporal_client", return_value=fake_client),
-            patch.object(sw, "get_temporal_loop", return_value=loop),
-        ):
-            result = sw._run_async(go())
-        assert result == "OK"
-        assert sentinel.get("done") is True
-    finally:
-        loop.call_soon_threadsafe(loop.stop)
-        t.join(timeout=5)
-        loop.close()
+    with (
+        patch.object(sw, "_await_client", return_value=(fake_client, fake_loop)),
+        patch.object(sw.asyncio, "run_coroutine_threadsafe", return_value=fut) as mock_rcts,
+    ):
+        result = sw._run_async(coro)
+    assert result == "OK"
+    mock_rcts.assert_called_once()
+    assert mock_rcts.call_args.args[0] is coro
+    assert mock_rcts.call_args.args[1] is fake_loop
+    coro.close()
 
 
 # ---------------------------------------------------------------------------
@@ -363,20 +355,14 @@ def test_provisioner_state_save_handles_io_error(tmp_path: Path, monkeypatch) ->
 
 
 def test_lifespan_runs_cleanly(monkeypatch) -> None:
-    """Entering + exiting the TestClient context runs the lifespan hook
-    end-to-end with the executor + shutdown event."""
+    """Entering + exiting the TestClient context runs the lifespan hook end-to-end."""
     from fastapi.testclient import TestClient
 
     from agent_provisioning_team.api import main as api_main
 
-    monkeypatch.setattr(api_main, "_executor", None)
-    with (
-        patch.object(api_main, "list_jobs", return_value=[]),
-        patch.object(api_main, "mark_all_running_jobs_failed"),
-    ):
-        with TestClient(api_main.app) as c:
-            r = c.get("/health")
-            assert r.status_code == 200
+    with TestClient(api_main.app) as c:
+        r = c.get("/health")
+        assert r.status_code == 200
 
 
 # ---------------------------------------------------------------------------

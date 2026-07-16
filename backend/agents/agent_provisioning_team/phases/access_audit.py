@@ -10,7 +10,7 @@ showed up during account provisioning), but it no longer fails on
 "over-permissioned" results — over-permissioning is the design intent now.
 """
 
-from typing import Callable, Dict, List, Optional
+from typing import Callable, List, Optional
 
 from ..models import (
     AccessAuditResult,
@@ -18,41 +18,31 @@ from ..models import (
     ToolProvisionResult,
 )
 from ..shared.tool_agent_registry import build_default_tool_agents
-from ..shared.tool_manifest import ToolManifest
 from ..tool_agents.base import ToolProvisionerInterface
-
-
-# Backwards-compat shim for older imports/tests.
-def _build_provisioners() -> Dict[str, ToolProvisionerInterface]:
-    return build_default_tool_agents()
 
 
 def run_access_audit(
     agent_id: str,
     tool_results: List[ToolProvisionResult],
-    manifest: Optional[ToolManifest] = None,
-    provisioners: Optional[Dict[str, ToolProvisionerInterface]] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> AccessAuditResult:
     """Audit provisioned access for each tool.
 
+    Preconditions:
+        * ``agent_id`` is non-empty.
+        * ``tool_results`` entries are ``ToolProvisionResult`` instances.
+    Postconditions:
+        * Returns an ``AccessAuditResult`` whose ``passed`` is True iff every
+          tool succeeded during account provisioning.
+        * Failures during provisioning surface as per-tool errors;
+          permission grants are recorded as-is (not validated against a tier).
+
     Args:
         agent_id: Unique identifier for the agent
         tool_results: Results from account provisioning phase
-        manifest: Tool manifest (optional, kept for parity with future per-tool checks)
-        provisioners: Provisioner instances (held for future re-verification)
         progress_callback: Callback for progress updates
-
-    Returns:
-        AccessAuditResult — passes whenever every tool succeeded in
-        account provisioning. Failures during provisioning surface as
-        per-tool errors and overall ``passed=False``; permission grants
-        are recorded as-is, not validated against a tier.
     """
-    # `provs` is held for future per-tool re-verification hooks; keeping the
-    # parameter avoids churning the orchestrator call site if/when tier-free
-    # auditing grows back.
-    _ = provisioners if provisioners is not None else build_default_tool_agents()
+    assert agent_id, "agent_id must be non-empty"
 
     verifications: List[AccessVerification] = []
     all_warnings: List[str] = []
