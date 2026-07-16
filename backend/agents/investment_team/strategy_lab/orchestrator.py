@@ -1172,7 +1172,7 @@ class StrategyLabOrchestrator:
         this to ``status="failed: budget_exhausted"``.
         """
         max_rounds = _design_review_rounds()
-        if not (max_rounds >= 1):
+        if max_rounds < 1:
             raise OrchestratorContractError("design-review round cap must be ≥ 1")
 
         emit("designing", {"sub_phase": "started"})
@@ -2180,7 +2180,8 @@ class StrategyLabOrchestrator:
         # Post-condition: success and round-exhaustion are mutually exclusive.
         if execution_succeeded and max_rounds_exhausted:
             raise OrchestratorContractError(
-                "synthesis loop returned both execution_succeeded and max_rounds_exhausted"
+                "synthesis loop invariant violated: both execution_succeeded and "
+                f"max_rounds_exhausted are True after round {round_num}"
             )
         return _SynthesisLoopOutcome(
             spec=spec,
