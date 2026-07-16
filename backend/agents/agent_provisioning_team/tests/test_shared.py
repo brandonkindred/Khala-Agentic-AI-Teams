@@ -41,6 +41,13 @@ def test_environment_info_from_dict_roundtrip() -> None:
     assert restored.updated_at == "2024-01-02T00:00:00+00:00"
 
 
+def test_environment_info_updated_at_defaults_to_created_at() -> None:
+    info = StoreEnvInfo(agent_id="a1", container_id="c1", container_name="c1")
+    d = info.to_dict()
+    restored = StoreEnvInfo.from_dict(d)
+    assert restored.updated_at == restored.created_at
+
+
 def test_environment_store_defaults_under_agent_cache(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path / "agents"))
     from agent_provisioning_team.shared.environment_store import (
@@ -76,6 +83,20 @@ def test_environment_store_register_get_remove(tmp_path: Path) -> None:
     assert store.get("a1") is None
 
 
+def test_environment_store_preserves_updated_at_on_get(tmp_path: Path) -> None:
+    store = EnvironmentStore(storage_dir=tmp_path)
+    env = StoreEnvInfo(
+        agent_id="a1",
+        container_id="c1",
+        container_name="c1",
+        workspace_path="/w",
+        updated_at="2024-06-01T12:00:00+00:00",
+    )
+    store.register(env)
+    fetched = store.get("a1")
+    assert fetched.updated_at == "2024-06-01T12:00:00+00:00"
+
+
 def test_environment_store_update_status(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
 
@@ -90,10 +111,12 @@ def test_environment_store_update_status(tmp_path: Path) -> None:
             workspace_path="/w",
         )
     )
+    original_created_at = store.get("a1").created_at
     assert store.update_status("a1", "ready") is True
     updated = store.get("a1")
     assert updated.status == "ready"
     assert updated.updated_at is not None
+    assert updated.updated_at != original_created_at
 
 
 def test_environment_store_update_status_handles_corrupt(tmp_path: Path) -> None:
