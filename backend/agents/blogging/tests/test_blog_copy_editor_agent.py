@@ -3,7 +3,6 @@
 import json
 from pathlib import Path
 
-import pytest
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput, CopyEditorOutput
 
 from llm_service import DummyLLMClient
@@ -155,7 +154,7 @@ def test_blog_copy_editor_agent_writes_feedback_file(tmp_path: Path) -> None:
     assert len(content["feedback_items"]) == len(result.feedback_items)
 
 
-def test_blog_copy_editor_agent_feedback_file_roundtrip(tmp_path: pytest.TempPathFactory) -> None:
+def test_blog_copy_editor_agent_feedback_file_roundtrip(tmp_path: Path) -> None:
     """Written JSON matches the returned CopyEditorOutput."""
     llm = DummyLLMClient()
     agent = BlogCopyEditorAgent(
