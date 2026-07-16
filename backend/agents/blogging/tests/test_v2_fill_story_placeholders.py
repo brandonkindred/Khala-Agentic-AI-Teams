@@ -64,7 +64,7 @@ def test_fill_story_placeholders_no_placeholders_returns_input(monkeypatch) -> N
 
 def test_fill_story_placeholders_user_skips_all(monkeypatch, patched_client, tmp_path) -> None:
     """User skips all placeholders → re-draft path with skip instruction."""
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.blog_writer_agent.models import WriterOutput
     from agents.blogging.ghost_writer_agent.models import StoryElicitationResult
     from agents.blogging.shared import blog_job_store as bjs
@@ -73,8 +73,7 @@ def test_fill_story_placeholders_user_skips_all(monkeypatch, patched_client, tmp
     bjs.create_blog_job(job_id, "brief")
 
     # Stub GhostWriterElicitationAgent.conduct_interview to return skipped
-    import ghost_writer_agent as gw
-
+    import agents.blogging.ghost_writer_agent as gw
     class _StubGhost:
         def __init__(self, *a, **kw):
             pass
@@ -109,7 +108,7 @@ def test_fill_story_placeholders_user_provides_narrative(
     monkeypatch, patched_client, tmp_path
 ) -> None:
     """User provides a story → narrative collected and re-drafted."""
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.blog_writer_agent.models import WriterOutput
     from agents.blogging.ghost_writer_agent.models import StoryElicitationResult
     from agents.blogging.shared import blog_job_store as bjs
@@ -117,8 +116,7 @@ def test_fill_story_placeholders_user_provides_narrative(
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
 
-    import ghost_writer_agent as gw
-
+    import agents.blogging.ghost_writer_agent as gw
     class _StubGhost:
         def __init__(self, *a, **kw):
             pass
@@ -157,15 +155,14 @@ def test_fill_story_placeholders_redraft_fails_keeps_original(
     monkeypatch, patched_client, tmp_path
 ) -> None:
     """When re-draft raises, keep original draft."""
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.ghost_writer_agent.models import StoryElicitationResult
     from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
 
-    import ghost_writer_agent as gw
-
+    import agents.blogging.ghost_writer_agent as gw
     class _StubGhost:
         def __init__(self, *a, **kw):
             pass
@@ -201,7 +198,7 @@ def test_fill_story_placeholders_redraft_fails_keeps_original(
 
 def test_fill_story_placeholders_cancelled_break(monkeypatch, patched_client, tmp_path) -> None:
     """If job goes to cancelled mid-loop, break out."""
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import blog_job_store as bjs
 
     job_id = str(uuid.uuid4())[:8]
@@ -212,8 +209,7 @@ def test_fill_story_placeholders_cancelled_break(monkeypatch, patched_client, tm
     bjs.update_blog_job(job_id, status="cancelled")
 
     # Even though the ghost writer would be invoked, the cancel check breaks first
-    import ghost_writer_agent as gw
-
+    import agents.blogging.ghost_writer_agent as gw
     class _StubGhost:
         def __init__(self, *a, **kw):
             pass

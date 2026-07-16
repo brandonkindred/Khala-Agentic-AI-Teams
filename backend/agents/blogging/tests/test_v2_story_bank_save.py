@@ -19,7 +19,7 @@ def _gap(title: str, context: str = "ctx"):
 
 def test_save_narratives_pairs_each_narrative_with_its_own_gap(monkeypatch) -> None:
     """Overlapping section titles ('Intro' ⊂ 'Introduction') must not cross-match."""
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import story_bank
 
     calls: list[dict] = []
@@ -53,7 +53,7 @@ def test_save_narratives_pairs_each_narrative_with_its_own_gap(monkeypatch) -> N
 
 
 def test_save_narratives_empty_pairs_is_noop(monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import story_bank
 
     calls: list[dict] = []
@@ -67,7 +67,7 @@ def test_save_narratives_empty_pairs_is_noop(monkeypatch) -> None:
 
 def test_save_narratives_one_failure_does_not_abort_the_rest(monkeypatch) -> None:
     """A single save_story failure is non-fatal; remaining pairs still persist."""
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import story_bank
 
     calls: list[dict] = []
@@ -98,7 +98,7 @@ def test_save_narratives_one_failure_does_not_abort_the_rest(monkeypatch) -> Non
 
 def test_save_narratives_reraises_cancellation(monkeypatch) -> None:
     """A Temporal cancellation must propagate, not be swallowed by the non-fatal guard."""
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import story_bank
     from temporalio.exceptions import CancelledError
 

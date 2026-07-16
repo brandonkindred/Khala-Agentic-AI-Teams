@@ -357,8 +357,7 @@ def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> 
         raise RuntimeError("transient")
 
     # Patch time.sleep to skip waits
-    import blog_writer_agent.agent as wa_mod
-
+    import agents.blogging.blog_writer_agent.agent as wa_mod
     monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
     monkeypatch.setattr(BlogWriterAgent, "_call_text", fail)
 

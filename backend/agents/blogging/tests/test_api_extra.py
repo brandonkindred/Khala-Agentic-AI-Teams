@@ -74,8 +74,7 @@ def _make_pipeline_doubles():
 
 def test_full_pipeline_sync_success(client: TestClient, monkeypatch) -> None:
     """POST /full-pipeline returns success when run_pipeline returns PASS."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(v2, "run_pipeline", lambda *a, **kw: (ppr, draft, status))
 
@@ -89,7 +88,7 @@ def test_full_pipeline_sync_success(client: TestClient, monkeypatch) -> None:
 
 
 def test_full_pipeline_sync_planning_error(client: TestClient, monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared.errors import PlanningError
 
     def boom(*a, **kw):
@@ -105,8 +104,7 @@ def test_full_pipeline_sync_planning_error(client: TestClient, monkeypatch) -> N
 
 
 def test_full_pipeline_sync_unknown_error(client: TestClient, monkeypatch) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     monkeypatch.setattr(v2, "run_pipeline", _raise(RuntimeError("crash")))
 
     r = client.post("/full-pipeline", json={"brief": "x"})
@@ -247,7 +245,7 @@ def test_medium_stats_async_runner_missing_work_dir(client: TestClient, monkeypa
 def test_run_pipeline_with_tracking_completes(
     client: TestClient, monkeypatch, tmp_path: Path
 ) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import blog_job_store as bjs
 
     ppr, draft, status = _make_pipeline_doubles()
@@ -266,7 +264,7 @@ def test_run_pipeline_with_tracking_completes(
 def test_run_pipeline_with_tracking_planning_error(
     client: TestClient, monkeypatch, tmp_path: Path
 ) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared.errors import PlanningError
 
@@ -284,7 +282,7 @@ def test_run_pipeline_with_tracking_planning_error(
 def test_run_pipeline_with_tracking_unknown_error(
     client: TestClient, monkeypatch, tmp_path: Path
 ) -> None:
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(_api_main, "RUN_ARTIFACTS_BASE", tmp_path)
@@ -352,8 +350,7 @@ def test_publish_terminal_event_swallows() -> None:
 
 def test_publish_terminal_event_swallows_publish_failure(monkeypatch) -> None:
     """Publishes an event but cleanup_job is missing → swallow."""
-    import shared.job_event_bus as bus
-
+    import agents.blogging.shared.job_event_bus as bus
     def boom(*a, **kw):
         raise RuntimeError("nope")
 

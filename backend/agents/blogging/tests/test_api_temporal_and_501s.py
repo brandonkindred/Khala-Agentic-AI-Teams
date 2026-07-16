@@ -228,8 +228,7 @@ def test_stream_terminal_via_subscriber(client: TestClient, monkeypatch) -> None
     """Cover the event_generator main path by delivering events."""
     from collections import deque
 
-    import shared.job_event_bus as bus
-
+    import agents.blogging.shared.job_event_bus as bus
     job_id = _create_job()  # status=pending so terminal short-circuit doesn't fire
 
     class _FakeSub:

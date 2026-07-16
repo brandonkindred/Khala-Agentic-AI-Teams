@@ -347,8 +347,7 @@ def test_ghost_writer_generate_friendly_seeds_fallback(monkeypatch) -> None:
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
 
     # Patch the Agent class globally inside ghost_writer_agent.agent
-    import ghost_writer_agent.agent as gw_agent
-
+    import agents.blogging.ghost_writer_agent.agent as gw_agent
     class _BoomAgent:
         def __init__(self, *a, **kw):
             pass

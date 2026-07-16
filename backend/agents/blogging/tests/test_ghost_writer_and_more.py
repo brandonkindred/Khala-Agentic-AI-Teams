@@ -69,8 +69,7 @@ def test_ghost_plan_to_text_renders_sections() -> None:
 
 def _patch_agent(monkeypatch, responses: List[Any]) -> None:
     """Stub the strands Agent class inside ghost_writer_agent.agent."""
-    import ghost_writer_agent.agent as gw_agent
-
+    import agents.blogging.ghost_writer_agent.agent as gw_agent
     state = {"i": 0}
 
     class _StubAgent:
@@ -147,7 +146,7 @@ def test_ghost_evaluate_sufficiency_falls_back_default(monkeypatch) -> None:
 
 
 def test_ghost_evaluate_sufficiency_exception_then_default(monkeypatch) -> None:
-    import ghost_writer_agent.agent as gw_agent
+    import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -241,7 +240,7 @@ def test_ghost_compile_narrative_happy_path_with_context(monkeypatch) -> None:
 
 
 def test_ghost_compile_narrative_handles_errors(monkeypatch) -> None:
-    import ghost_writer_agent.agent as gw_agent
+    import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -325,7 +324,7 @@ def test_ghost_find_gaps_via_llm_parse_error_retry_then_fail(monkeypatch) -> Non
 
 
 def test_ghost_find_gaps_via_llm_exception_then_recover(monkeypatch) -> None:
-    import ghost_writer_agent.agent as gw_agent
+    import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient

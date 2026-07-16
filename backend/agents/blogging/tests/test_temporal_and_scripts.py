@@ -798,7 +798,7 @@ def test_legacy_full_pipeline_activity_reraises_other(monkeypatch) -> None:
 
 def test_run_copy_editor_agent_main_smoke(monkeypatch, capsys) -> None:
     """run_copy_editor_agent.main should run end-to-end with patched LLM."""
-    import agent_implementations.run_copy_editor_agent as mod
+    import agents.blogging.agent_implementations.run_copy_editor_agent as mod
 
     from llm_service import DummyLLMClient
 
@@ -820,7 +820,7 @@ def test_run_copy_editor_agent_main_smoke(monkeypatch, capsys) -> None:
 
 
 def test_run_publication_agent_main_smoke(monkeypatch, capsys, tmp_path) -> None:
-    import agent_implementations.run_publication_agent as mod
+    import agents.blogging.agent_implementations.run_publication_agent as mod
     from agents.blogging.blog_publication_agent.models import PublicationSubmission
 
     from llm_service import DummyLLMClient
@@ -846,7 +846,7 @@ def test_run_publication_agent_main_smoke(monkeypatch, capsys, tmp_path) -> None
 
 
 def test_run_writer_agent_main_smoke(monkeypatch, capsys) -> None:
-    import agent_implementations.run_writer_agent as mod
+    import agents.blogging.agent_implementations.run_writer_agent as mod
 
     from llm_service import DummyLLMClient
 

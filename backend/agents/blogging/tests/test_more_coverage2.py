@@ -210,8 +210,7 @@ def test_research_fetch_academic_papers_swallows_error(monkeypatch) -> None:
 
     a = ResearchAgent(llm_client=DummyLLMClient())
 
-    import blog_research_agent.agent as ra_mod
-
+    import agents.blogging.blog_research_agent.agent as ra_mod
     def boom(*a, **kw):
         raise RuntimeError("arxiv down")
 

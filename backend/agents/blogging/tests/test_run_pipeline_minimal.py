@@ -39,8 +39,7 @@ def _make_plan():
 
 def test_run_pipeline_no_gates_no_job(monkeypatch, tmp_path: Path) -> None:
     """Smallest possible orchestration: planning + draft, no gates, no job_id."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     # Stub heavy steps:
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
 
@@ -101,8 +100,7 @@ def test_run_pipeline_no_gates_no_job(monkeypatch, tmp_path: Path) -> None:
 
 def test_run_pipeline_no_gates_no_workdir(monkeypatch) -> None:
     """No work_dir — artifact writes are skipped."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
 
     from agents.blogging.blog_writer_agent.models import WriterOutput
@@ -156,8 +154,7 @@ def test_run_pipeline_no_gates_no_workdir(monkeypatch) -> None:
 
 def test_run_pipeline_missing_guidelines_raises(monkeypatch, tmp_path: Path) -> None:
     """When style/brand files load as empty, DraftError is raised before any drafting."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "")
 
@@ -176,8 +173,7 @@ def test_run_pipeline_missing_guidelines_raises(monkeypatch, tmp_path: Path) -> 
 
 def test_run_pipeline_copy_editor_stalls_then_accepts(monkeypatch, tmp_path: Path) -> None:
     """Copy editor never approves; eventually accept after iterations exhausted."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
 

@@ -119,7 +119,7 @@ def test_run_title_selection_returns_none_on_cancellation(monkeypatch, patched_c
 
 def test_run_title_selection_processes_pending_feedback(monkeypatch, patched_client) -> None:
     """User dislikes title → LLM generates replacement → process continues until 'love'."""
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import blog_job_store as bjs
 
     # Speed up the sleep
@@ -163,7 +163,7 @@ def test_run_title_selection_processes_pending_feedback(monkeypatch, patched_cli
 
 def test_run_title_selection_handles_llm_failure(monkeypatch, patched_client) -> None:
     """If LLM fails to generate replacement, just remove the rated title."""
-    import agent_implementations.blog_writing_process_v2 as v2
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(v2.time, "sleep", lambda s: None)

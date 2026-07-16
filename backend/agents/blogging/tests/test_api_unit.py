@@ -664,8 +664,7 @@ def test_medium_stats_async_starts_job(
 
 def test_story_bank_endpoints(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """list/get/delete/search delegate to story_bank module functions."""
-    import shared.story_bank as sb
-
+    import agents.blogging.shared.story_bank as sb
     monkeypatch.setattr(sb, "list_stories", lambda limit=50, offset=0: [{"id": "s1"}])
     monkeypatch.setattr(
         sb, "get_story", lambda sid: {"id": sid, "narrative": "x"} if sid == "s1" else None

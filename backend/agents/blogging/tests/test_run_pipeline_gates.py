@@ -122,8 +122,7 @@ class _ValidatorStub:
 
 def _common_v2_setup(monkeypatch, validator_status: str = "PASS"):
     """Apply the standard set of monkeypatches to v2 for gate tests."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda *a, **kw: "brand")
@@ -177,8 +176,7 @@ def test_run_pipeline_with_gates_exhausts_iterations(monkeypatch, tmp_path: Path
 
 def test_run_pipeline_with_gates_pass_after_one_rewrite(monkeypatch, tmp_path: Path) -> None:
     """Gates fail on iter 1, pass on iter 2."""
-    import agent_implementations.blog_writing_process_v2 as v2
-
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda *a, **kw: "brand")

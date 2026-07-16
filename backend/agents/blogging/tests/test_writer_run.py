@@ -218,8 +218,7 @@ def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
     )
 
     a = _agent()
-    import blog_writer_agent.agent as wa_mod
-
+    import agents.blogging.blog_writer_agent.agent as wa_mod
     monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
 
     def boom(self, p, system_prompt=""):
@@ -268,8 +267,7 @@ def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -
     )
 
     a = _agent()
-    import blog_writer_agent.agent as wa_mod
-
+    import agents.blogging.blog_writer_agent.agent as wa_mod
     monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
 
     def boom(self, p, system_prompt=""):

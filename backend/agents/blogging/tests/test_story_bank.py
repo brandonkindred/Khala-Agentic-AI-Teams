@@ -128,7 +128,7 @@ def fake_pg(monkeypatch: pytest.MonkeyPatch):
     def _fake_get_conn(database=None):
         yield _FakeConn(db)
 
-    import blogging.shared.story_bank as sb
+    import agents.blogging.shared.story_bank as sb
 
     monkeypatch.setattr(sb, "get_conn", _fake_get_conn)
     yield db
