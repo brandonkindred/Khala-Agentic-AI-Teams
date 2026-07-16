@@ -591,38 +591,6 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.isLatestRunning(1)).toBe(false);
   });
 
-  it('normalizes the standalone-comment count across the body_findings rename', async () => {
-    await setup();
-    // New rows carry comment_findings.
-    expect(
-      component.commentFindings({ total_issues: 3, inline_comments: 1, comment_findings: 2, event: 'COMMENT' }),
-    ).toBe(2);
-    // Rows persisted before the rename only carry the legacy body_findings.
-    expect(
-      component.commentFindings({
-        total_issues: 3,
-        inline_comments: 1,
-        body_findings: 2,
-        event: 'COMMENT',
-      }),
-    ).toBe(2);
-    // Neither present → 0 rather than a blank count.
-    expect(
-      component.commentFindings({ total_issues: 0, inline_comments: 0, event: 'COMMENT' }),
-    ).toBe(0);
-  });
-
-  it('builds the findings-column chip labels from the review summary', async () => {
-    await setup();
-    expect(
-      component.findingChips({ total_issues: 3, inline_comments: 2, comment_findings: 1, event: 'COMMENT' }),
-    ).toEqual(['3 finding(s)', '2 inline', '1 comments']);
-    // The standalone-comment count folds in the legacy body_findings key.
-    expect(
-      component.findingChips({ total_issues: 0, inline_comments: 0, body_findings: 4, event: 'COMMENT' }),
-    ).toEqual(['0 finding(s)', '0 inline', '4 comments']);
-  });
-
   it('reports per-record terminality', async () => {
     await setup();
     expect(component.isRecordTerminal(record({ status: 'running' }))).toBe(false);
@@ -632,64 +600,6 @@ describe('CodeReviewPanelComponent', () => {
   // -------------------------------------------------------------------------
   // Review metrics: duration + severity breakdown
   // -------------------------------------------------------------------------
-
-  it('formats review duration only for terminal runs that carry a completion time', async () => {
-    await setup();
-    const start = Date.parse('2026-01-01T00:00:00Z');
-    // Still running: no duration yet.
-    expect(component.reviewDuration(record({ status: 'running', startedAt: start }))).toBeNull();
-    // Terminal but no completedAt (e.g. a legacy row): still no duration.
-    expect(component.reviewDuration(record({ status: 'completed', startedAt: start }))).toBeNull();
-    // Seconds only / minutes+seconds / hours+minutes.
-    expect(
-      component.reviewDuration(record({ status: 'completed', startedAt: start, completedAt: start + 45_000 })),
-    ).toBe('45s');
-    expect(
-      component.reviewDuration(record({ status: 'completed', startedAt: start, completedAt: start + 83_000 })),
-    ).toBe('1m 23s');
-    expect(
-      component.reviewDuration(
-        record({ status: 'completed', startedAt: start, completedAt: start + (2 * 3600 + 5 * 60) * 1000 }),
-      ),
-    ).toBe('2h 5m');
-    // Completed-before-started (clock skew) is treated as unknown, not a negative time,
-    // and the anomaly is surfaced via a console warning rather than silently swallowed.
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    expect(
-      component.reviewDuration(record({ status: 'completed', startedAt: start, completedAt: start - 1000 })),
-    ).toBeNull();
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Negative review duration'));
-    warnSpy.mockRestore();
-  });
-
-  it('returns only the non-zero severity counts in critical→info order', async () => {
-    await setup();
-    // No summary / no counts -> empty.
-    expect(component.severityEntries(undefined)).toEqual([]);
-    expect(component.severityEntries({ total_issues: 0, inline_comments: 0, event: 'COMMENT' })).toEqual([]);
-    // Mixed counts: zeros dropped, fixed critical→info order preserved.
-    expect(
-      component.severityEntries({
-        total_issues: 6,
-        inline_comments: 0,
-        event: 'REQUEST_CHANGES',
-        severity_counts: { critical: 1, high: 0, medium: 2, low: 0, info: 3 },
-      }),
-    ).toEqual([
-      { level: 'critical', count: 1 },
-      { level: 'medium', count: 2 },
-      { level: 'info', count: 3 },
-    ]);
-    // Every level zero -> empty.
-    expect(
-      component.severityEntries({
-        total_issues: 0,
-        inline_comments: 0,
-        event: 'APPROVE',
-        severity_counts: { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
-      }),
-    ).toEqual([]);
-  });
 
   it('maps created_at/completed_at into the record and derives a duration', async () => {
     integrationsSpy.getGitHubReviewHistory.mockReturnValue(

@@ -24,6 +24,7 @@ import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
+import { findingChips, reviewDuration, severityEntries, terminalTimestamp } from './review-metrics';
 
 /**
  * One code-review run on a pull request. Held in memory and kept live by a
@@ -487,7 +488,7 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
           // gap, or a delayed poll can push Date.now() well past when the job actually
           // finished, overstating the duration until a reload swaps in the persisted
           // completed_at. `??=` so a value from a prior hydrate is never overwritten.
-          record.completedAt ??= this.terminalTimestamp(status);
+          record.completedAt ??= terminalTimestamp(status);
           this.disposePoller(record.jobId);
         }
         this.cdr.markForCheck();
@@ -499,31 +500,6 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
       },
     );
     this.pollers.set(record.jobId, sub);
-  }
-
-  /**
-   * Best-effort completion time (ms since epoch) for a review whose live poll just
-   * reached a terminal state.
-   *
-   * Preconditions: `status` is the terminal job-status payload for the review.
-   * Postconditions: returns the server's terminal-update timestamp (`updated_at`,
-   * else `last_activity_at`) parsed to ms when one is present and valid; otherwise
-   * falls back to the browser clock (`Date.now()`). `updated_at` is preferred because
-   * it is stamped on the terminal transition itself — including when the stale-job
-   * monitor fails a dead worker, a path that bumps `updated_at` but leaves
-   * `last_activity_at` frozen at the last progress event (which would understate the
-   * duration of a timed-out review). Preferring a server timestamp also keeps the
-   * duration accurate when the browser observes the terminal status late (backgrounded
-   * tab, offline gap, delayed poll). Reads the clock only on the fallback path;
-   * otherwise pure.
-   */
-  private terminalTimestamp(status: CodingTeamJobStatus): number {
-    const serverTs = status.updated_at ?? status.last_activity_at;
-    if (serverTs) {
-      const parsed = Date.parse(serverTs);
-      if (!Number.isNaN(parsed)) return parsed;
-    }
-    return Date.now();
   }
 
   /** Unsubscribe a poller and drop it from the registry (idempotent). */
@@ -565,81 +541,12 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     return isCodingTeamTerminalStatus(record.status);
   }
 
-  /**
-   * Findings posted as standalone comments, normalized across the field rename.
-   * Rows persisted before `body_findings` became `comment_findings` only carry the
-   * legacy key, so fall back to it (then 0) rather than rendering a blank count.
-   */
-  commentFindings(summary: CodeReviewSummary): number {
-    return summary.comment_findings ?? summary.body_findings ?? 0;
-  }
-
-  /**
-   * Chip labels for a review's Findings cell (total / inline / standalone-comment counts).
-   *
-   * Preconditions: `summary` is a review summary.
-   * Postconditions: returns exactly three labels, in order, derived from
-   * `total_issues`, `inline_comments`, and `commentFindings(summary)` (which folds
-   * in the legacy `body_findings` key). Pure — no side effects.
-   */
-  findingChips(summary: CodeReviewSummary): string[] {
-    return [
-      `${summary.total_issues} finding(s)`,
-      `${summary.inline_comments} inline`,
-      `${this.commentFindings(summary)} comments`,
-    ];
-  }
-
-  /** Fixed critical→info ordering for the per-row severity metric chips. */
-  private static readonly SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'] as const;
-
-  /**
-   * Human-readable elapsed time of a review run (e.g. "45s", "1m 23s", "2h 5m").
-   *
-   * Preconditions: `record` is a review record held by this component.
-   * Postconditions: returns a formatted duration string when the run is terminal
-   * and carries a `completedAt` no earlier than `startedAt`; otherwise null (the
-   * template renders "—" for a running review or a record without timestamps).
-   * Pure — no side effects.
-   */
-  reviewDuration(record: PrReviewRecord): string | null {
-    if (!this.isRecordTerminal(record) || record.completedAt === undefined) return null;
-    const ms = record.completedAt - record.startedAt;
-    if (ms < 0) {
-      // A terminal review that completed before it started signals clock skew between
-      // the start and completion timestamps. Surface it rather than silently showing
-      // "—", so the data anomaly is visible in the console.
-      console.warn(`Negative review duration for job ${record.jobId} (${ms}ms); showing no duration.`);
-      return null;
-    }
-    const totalSec = Math.floor(ms / 1000);
-    const h = Math.floor(totalSec / 3600);
-    const m = Math.floor((totalSec % 3600) / 60);
-    const s = totalSec % 60;
-    if (h > 0) return `${h}h ${m}m`;
-    if (m > 0) return `${m}m ${s}s`;
-    return `${s}s`;
-  }
-
-  /**
-   * Non-zero severity counts of a review, in fixed critical→info order, for the
-   * per-row severity chips.
-   *
-   * Preconditions: `summary` may be undefined (review still running / no summary).
-   * Postconditions: returns one `{ level, count }` entry per severity whose count
-   * is greater than zero; returns [] when there is no summary, no `severity_counts`,
-   * or every level is zero. Pure — no side effects.
-   */
-  severityEntries(summary: CodeReviewSummary | undefined): { level: string; count: number }[] {
-    const counts = summary?.severity_counts;
-    if (!counts) return [];
-    const entries: { level: string; count: number }[] = [];
-    for (const level of CodeReviewPanelComponent.SEVERITY_ORDER) {
-      const count = counts[level] ?? 0;
-      if (count > 0) entries.push({ level, count });
-    }
-    return entries;
-  }
+  // Per-review metric helpers are pure functions in `review-metrics.ts` (unit-tested
+  // there in isolation). Expose the template-facing ones as fields so the template calls
+  // them unchanged; `terminalTimestamp` is used directly in `startPolling`.
+  readonly findingChips = findingChips;
+  readonly severityEntries = severityEntries;
+  readonly reviewDuration = reviewDuration;
 
   /** Row status badge text derived from the latest review, or null when none. */
   badgeLabel(prNumber: number): string | null {

@@ -72,3 +72,35 @@ def test_get_review_degrades_on_db_error(monkeypatch) -> None:
     monkeypatch.setattr(store, "get_conn", _boom)
     # A DB failure is logged, never raised; the read degrades to None.
     assert store.get_review("j") is None
+
+
+def test_get_review_returns_row_on_success(monkeypatch) -> None:
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
+    row = {"job_id": "j1", "owner": "o", "repo": "r", "pr_number": 7, "status": "completed"}
+
+    class _FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def execute(self, *_a, **_kw):
+            pass
+
+        def fetchone(self):
+            return row
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def cursor(self, *_a, **_kw):
+            return _FakeCursor()
+
+    monkeypatch.setattr(store, "get_conn", lambda: _FakeConn())
+    # The success path returns exactly the row the cursor yields.
+    assert store.get_review("j1") == row

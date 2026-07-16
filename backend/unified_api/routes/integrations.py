@@ -1340,6 +1340,10 @@ class RunPrReviewRequest(BaseModel):
 
 
 class RunPrReviewResponse(BaseModel):
+    """Response for ``POST /github/review-pr``: identifies the started review job
+    (id, PR number/url, initial status) and carries the server-clock start time so
+    the UI can compute a live duration on server timestamps at both ends."""
+
     job_id: str
     pr_number: int
     pr_url: str

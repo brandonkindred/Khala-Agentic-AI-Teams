@@ -1639,6 +1639,8 @@ class TestReviewEndpoint:
         assert job["status"] == "completed"
         assert len(gh.submitted_reviews) == 1  # the summary-only review
         assert gh.review_comments == []
+        # A clean review carries an empty severity map (only non-zero levels are emitted).
+        assert job["review_summary"]["severity_counts"] == {}
         # A clean review gets a celebratory +1 reaction directly on the PR.
         assert gh.reactions == [(7, "+1")]
 

@@ -179,6 +179,10 @@ class ReviewPrRequest(BaseModel):
 
 
 class ReviewPrResponse(BaseModel):
+    """Response for ``POST /review-pr``: the started review job's id, PR number/url,
+    and initial status, plus the server-clock start time (``created_at``) used to
+    compute a live review duration on one clock."""
+
     job_id: str
     pr_number: int
     pr_url: str
