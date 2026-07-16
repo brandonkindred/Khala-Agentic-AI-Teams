@@ -49,8 +49,8 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 | **Design (post-planning)** | top-level | Architecture Expert, Tech Lead, planning consolidation |
 | **Setup** | top-level | Git Setup |
 | **Implementation** | **coding_team** (sub-team; `software_engineering_team/coding_team/`) | Tech Lead, frontend_v2/backend_v2 workers, Task Graph — **default SE execution path** after Planning + adapter |
-| **Implementation** | backend | Backend Expert (legacy path when not using coding_team) |
-| **Implementation** | frontend_team | UX Designer, UI Designer, Design System, Frontend Architect, Feature Agent, UX Engineer, Performance Engineer, Build/Release |
+| **Implementation** | backend_code_v2_team | Backend v2 worker (Java/Python/Node, DBs, APIs, infra-adjacent); phase pipeline: planning → setup → execution → review → problem-solving → documentation → deliver. Driven by coding_team's Tech Lead |
+| **Implementation** | frontend_code_v2_team | Frontend v2 worker (Angular/React/TypeScript, CSS/SCSS, UI/UX, accessibility, state); same phase pipeline with frontend tool agents. Driven by coding_team's Tech Lead |
 | **Implementation** | ai_agent_development_team | Intake/Planning/Execution/Review/Problem-solving/Delivery phases for spec-to-agent-system workflows with dedicated tool agents |
 | **Quality** | quality gates (cross-cutting) | Code Review, QA Expert, Cybersecurity Expert, Accessibility Expert, Acceptance Verifier, DbC Comments |
 | **Integration / release** | top-level | Integration Agent, DevOps Team (sub-orchestrator), Documentation Agent |
@@ -59,7 +59,7 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 
 **Planning:** The main pipeline uses the standalone `planning_team` (`backend/agents/planning_team/`) for discovery and planning; its handoff is adapted by `planning_adapter` into ProductRequirements and project_overview for Tech Lead and Architecture Expert. The SE orchestrator invokes it via `planning_team.orchestrator.run_workflow` (thread and Temporal paths).
 
-**Accessibility:** Lives under `frontend_team/` but is conceptually part of the **Quality** phase—it reviews frontend code for WCAG 2.2 compliance and is invoked per frontend task.
+**Accessibility:** The top-level `accessibility_agent/` package is conceptually part of the **Quality** phase—it reviews frontend code for WCAG 2.2 compliance and is invoked per frontend task.
 
 ### SDLC Flow Diagram
 
@@ -339,95 +339,99 @@ Spec → Project Planning → Architecture + Tech Lead (alignment loop)
 
 ```
 software_engineering_team/
-├── api/
-│   └── main.py       # FastAPI app with /run-team endpoint
-├── spec_parser.py    # Parses initial_spec.md into ProductRequirements
-├── orchestrator.py   # Main pipeline orchestration
-├── shared/           # LLM client, models, coding_standards, git_utils
-├── git_setup_agent/
+├── orchestrator.py        # Main pipeline orchestration (run_orchestrator)
+├── discovery.py           # Discovery phase: resolve spec source + Product Requirements Analysis
+├── spec_parser.py         # Parses initial_spec.md into ProductRequirements
+├── planning_adapter.py    # Maps planning_team handoff → ProductRequirements + project_overview
+├── quality_gate_tools.py  # Tool functions for the quality gates (build, review, lint, ...)
+├── build_fix.py           # Build verification + one-at-a-time LLM repair loop
+├── coding_engine_provider.py  # SE-backed CodeEngineProvider injected into coding_team
+├── api/                   # FastAPI app (routes/, lifecycle, background, state)
+│   └── main.py            # /run-team endpoint; re-mounts coding_team routers
+├── agent_implementations/
+│   └── run_api_server.py  # HTTP API entry point (uvicorn)
+├── shared/                # LLM client, models, coding_standards, git_utils, plan_dir,
+│                          # phases/, deliver_utils, logging_config, ...
+│
+│  # --- Design / setup ---
+├── product_requirements_analysis_agent/  # Spec review, constraint analysis, Q&A, PRD writing
 ├── architect-agents/      # ArchitectureExpertAgent + Enterprise Orchestrator
-├── tech_lead_agent/
-├── devops_team/           # DevOps Engineering Team (MVP: 9 core agents, 5 tool agents)
+├── tech_lead_agent/       # Tech Lead: build plan, task distribution, progress tracking
+├── git_setup_agent/       # Repo setup (clones/branches; ensures development branch)
+│
+│  # --- Implementation sub-teams ---
+├── coding_team/           # Coding Team sub-team (Tech Lead + Task Graph execution; see § Coding Team below)
+│   ├── orchestrator.py    # run_coding_team_orchestrator + swarm assign/implement/review
+│   ├── models.py          # CodingTeamPlanInput, Task, TaskStatus, JobStatus
+│   ├── task_graph.py      # TaskGraphService
+│   ├── tech_lead_agent/   # Tech Lead: plan → Task Graph + stacks; grooming; assignments; review/merge
+│   ├── github_source/     # GitHub issue/PR integration (run-from-github, review-pr)
+│   ├── temporal/          # Durable-mode workflows/activities
+│   └── api/               # FastAPI hub; its routers are re-mounted on the SE app's api/main.py
+├── backend_code_v2_team/  # Backend v2 implementation team (phases/ + tool_agents/)
+│   ├── orchestrator.py
+│   ├── phases/            # planning → setup → execution → review → problem_solving → documentation → deliver
+│   └── tool_agents/
+├── frontend_code_v2_team/ # Frontend v2 implementation team (phases/ + tool_agents/)
+│   ├── orchestrator.py
+│   ├── phases/
+│   └── tool_agents/       # accessibility, api_openapi, architecture, auth, branding_theme, build_specialist, ...
+├── ai_agent_development_team/  # Spec-to-agent-system sub-team (phase-based, backend_v2-style)
+│   ├── orchestrator.py
+│   ├── prompts.py
+│   ├── phases/
+│   └── tool_agents/
+├── devops_team/           # DevOps Engineering Team (see § DevOps Engineering Team below)
 │   ├── orchestrator.py    # DevOpsTeamLeadAgent
 │   ├── models.py          # Shared contracts (DevOpsTaskSpec, DevOpsCompletionPackage, etc.)
 │   ├── task_clarifier/    # Validates task spec completeness
 │   ├── iac_agent/         # Infrastructure as Code
-│   ├── cicd_pipeline_agent/  # CI/CD workflows
+│   ├── cicd_pipeline_agent/        # CI/CD workflows
 │   ├── deployment_strategy_agent/  # Rollout and rollback
 │   ├── devsecops_review_agent/     # Security review
 │   ├── test_validation_agent/      # Gate aggregation
 │   ├── change_review_agent/        # Senior DevOps review
 │   ├── doc_runbook_agent/          # Runbooks and handoff
+│   ├── infra_debug_agent/          # Diagnoses infrastructure/deploy failures
+│   ├── infra_patch_agent/          # Applies infrastructure fixes
+│   ├── graphs/                     # LangGraph flow definitions
 │   └── tool_agents/       # Stateless subprocess wrappers (repo nav, IaC validate, policy, CI/CD lint, dry-run)
-├── coding_team/           # Coding Team sub-team (Tech Lead + Task Graph execution; see § Coding Team below)
-│   ├── orchestrator.py    # run_coding_team_orchestrator, CodingTeamSwarm
-│   ├── models.py          # CodingTeamPlanInput, Task, TaskStatus, JobStatus
-│   ├── task_graph.py      # TaskGraphService
-│   ├── tech_lead_agent/   # Tech Lead: plan → Task Graph + stacks; grooming; assignments; review/merge
-│   ├── github_source/     # GitHub issue/PR integration (run-from-github, review-pr)
-│   └── api/               # FastAPI hub; its routers are re-mounted on the SE app's api/main.py
-├── security_agent/
-├── backend_agent/
-├── quality_gates/        # Cross-cutting review agents (Code Review, QA, Security, Acceptance Verifier, DbC)
-├── integration_team/      # Post-execution agents (Integration, DevOps, Documentation); includes Integration agent
-├── frontend_team/         # All frontend engineering agents
-│   ├── feature_agent/    # FrontendExpertAgent (implementation)
-│   ├── accessibility_agent/
-│   ├── ux_designer/
-│   ├── ui_designer/
-│   ├── design_system/
-│   ├── frontend_architect/
-│   ├── ux_engineer/
-│   ├── performance_engineer/
-│   ├── build_release/
-│   └── orchestrator.py   # FrontendOrchestratorAgent
-├── ai_agent_development_team/  # Spec-to-agent-system sub-team (phase-based, backend_v2-style)
-│   ├── orchestrator.py
-│   ├── models.py
-│   ├── prompts.py
-│   ├── phases/
-│   └── tool_agents/
-├── qa_agent/
-├── acceptance_verifier_agent/
+│
+│  # --- Quality gates (cross-cutting; invoked inside per-task workflows) ---
+├── quality_gates/         # Protocols + re-exports for the cross-cutting review agents
 ├── code_review_agent/     # Chunk Reviewer + Coordinator for large code; single-call for small
-├── dbc_comments_agent/
-├── documentation_agent/
-├── planning_team/           # All planning agents and infrastructure
-│   ├── plan_dir.py          # ensure_plan_dir, get_plan_dir
-│   ├── planning_graph.py   # PlanningGraph, compile to TaskAssignment
-│   ├── planning_review.py  # alignment, spec conformance
-│   ├── planning_consolidation.py
-│   ├── validation.py
-│   ├── spec_intake_agent/
-│   ├── project_planning_agent/
-│   ├── api_contract_planning_agent/
-│   ├── data_architecture_agent/
-│   ├── ui_ux_design_agent/
-│   ├── frontend_architecture_agent/
-│   ├── backend_planning_agent/
-│   ├── frontend_planning_agent/
-│   ├── data_planning_agent/
-│   ├── infrastructure_planning_agent/
-│   ├── devops_planning_agent/
-│   ├── qa_test_strategy_agent/
-│   ├── test_planning_agent/
-│   ├── security_planning_agent/
-│   ├── observability_planning_agent/
-│   ├── performance_planning_agent/
-│   ├── performance_planning_doc_agent/
-│   ├── documentation_planning_agent/
-│   ├── quality_gate_planning_agent/
-│   ├── spec_chunk_analyzer/      # Tech Lead: analyzes spec chunks
-│   ├── spec_analysis_merger/     # Tech Lead: merges chunk analyses
-│   └── task_generator_agent/     # Tech Lead: fallback task plan from merged analysis
-├── agent_implementations/
-│   └── run_api_server.py   # HTTP API entry point (uvicorn)
-├── shared/
-│   └── logging_config.py  # setup_logging() for consistent agent logs
-├── tests/            # pytest suite (spec, agents, pipeline, API)
+├── qa_agent/
+├── security_agent/
+├── accessibility_agent/   # WCAG 2.2 review of frontend code
+├── acceptance_verifier_agent/
+├── linting_tool_agent/    # Detects/runs project linters, produces fixes
+├── build_fix_specialist/  # Resolves build failures
+├── problem_solver_agent/  # Generic error-resolution agent used by worker workflows
+│
+│  # --- Integration / release ---
+├── integration_team/      # Integration Agent (backend/frontend API-contract alignment)
+├── technical_writers/     # Documentation, DbC comments, and release-notes agents
+│   ├── documentation_agent/
+│   ├── dbc_comments_agent/
+│   └── release_notes_agent/
+│
+│  # --- Infrastructure / cross-cutting ---
+├── temporal/              # Team-level Temporal workflows/activities/worker (durable mode)
+├── postgres/              # Postgres schema (SE observability & learning; Pattern B, no-op without POSTGRES_HOST)
+├── metrics/               # DORA metrics + cost, derived from se_events / se_agent_traces
+├── agent_console/         # Agent Console manifests + samples for SE agents
+├── ci_templates/          # CI workflow templates + renderer
+├── system_design/         # SE architecture/design reference docs (Markdown)
+├── docs/                  # Team SOPs and design notes
+├── tests/                 # pytest suite (spec, agents, pipeline, API)
+├── conftest.py
 ├── pyproject.toml
 └── requirements.txt
 ```
+
+> **Planning lives in a separate package.** The main pipeline's discovery/planning
+> is the standalone `planning_team` at `backend/agents/planning_team/` (not a
+> sub-directory here); its handoff is mapped in by `planning_adapter.py`.
 
 The Tech Lead invokes planning agents (backend, frontend, data, test, performance, documentation, quality gates) internally when creating task details and aligning with Architecture.
 
@@ -438,7 +442,7 @@ Each agent has:
 
 ## DevOps Engineering Team (`devops_team/`)
 
-The `devops_team/` package is the contract-first, multi-agent DevOps engineering team modeled after `frontend_team/`, and is the sole DevOps path (superseding an earlier monolithic DevOps agent). It implements the **MVP fleet** (9 core agents + 5 tool agents) with hard gates, environment-aware safety, and structured completion packages.
+The `devops_team/` package is the contract-first, multi-agent DevOps engineering team modeled after the code-v2 teams (`frontend_code_v2_team/`), and is the sole DevOps path (superseding an earlier monolithic DevOps agent). It implements the **MVP fleet** (9 core agents + 5 tool agents) with hard gates, environment-aware safety, and structured completion packages.
 
 ### Design Principles
 

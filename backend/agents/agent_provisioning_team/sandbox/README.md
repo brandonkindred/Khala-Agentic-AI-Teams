@@ -100,7 +100,9 @@ singleton:
 Durability is bounded: `_state` is in-memory per process, so a sandbox activity
 retried on a different worker replica sees empty state. Single-process
 deployments are unaffected; the concentrated win is the durable, single-instance
-reaper. `PROVISION_THREAD_FALLBACK=1` forces the in-process path.
+reaper. Sandbox Temporal dispatch is gated only on `TEMPORAL_ADDRESS` /
+`is_temporal_enabled()` — when Temporal is off, mutators run directly on the API
+loop.
 
 ## SandboxSpec (manifest side)
 

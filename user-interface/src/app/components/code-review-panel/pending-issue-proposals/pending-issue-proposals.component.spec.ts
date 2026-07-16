@@ -171,6 +171,36 @@ describe('PendingIssueProposalsComponent', () => {
     expect(host.querySelector('.cr-proposal__select input')).toBeFalsy();
   });
 
+  it('treats a matched-existing proposal as not open/selectable, same as a filed one', async () => {
+    await setup([
+      proposal('p0', {
+        issue_number: 42,
+        issue_url: 'https://x/issues/42',
+        matched_existing: true,
+      }),
+    ]);
+    expect(component.openProposals.length).toBe(0);
+  });
+
+  it('renders "already tracked" for a matched proposal and "filed" for a Khala-filed one', async () => {
+    await setup([
+      proposal('p0', {
+        description: 'already tracked bug',
+        issue_number: 42,
+        issue_url: 'https://x/issues/42',
+        matched_existing: true,
+      }),
+      proposal('p1', {
+        description: 'freshly filed bug',
+        issue_number: 7,
+        issue_url: 'https://x/issues/7',
+      }),
+    ]);
+    const host = fixture.nativeElement as HTMLElement;
+    expect(host.querySelector('.cr-proposal__matched')?.textContent).toContain('already tracked');
+    expect(host.querySelector('.cr-proposal__filed')?.textContent).toContain('filed');
+  });
+
   it('renders a combined proposal\'s per-location breakdown', async () => {
     await setup([
       proposal('p0', {
