@@ -104,13 +104,17 @@ class EnvironmentStore:
 
     Invariants:
         * Each agent's environment is persisted as a single JSON file named
-          ``{agent_id}.json`` — at most one primary record per ``agent_id``.
+          ``{agent_id}.json`` in the primary ``storage_dir``; reads prefer that
+          primary file over any legacy copy (from before the ``AGENT_CACHE`` move).
         * Every public operation serializes on the module-level ``_lock`` so
           concurrent callers never interleave a read/modify/write.
-        * Writes always land in the primary ``storage_dir``; when a record is
-          served from a legacy location it is migrated to the primary store and
-          the legacy copy pruned, keeping the primary path the single source of
-          truth for each agent.
+        * Writes always land in the primary ``storage_dir``. A legacy copy is
+          pruned (migrated) only by the read-modify-write updates
+          ``update_status`` and ``add_tool``/``add_tools`` — which pass the source
+          path through to the writer — and by ``remove``. The read-only methods
+          ``get``, ``list_all``, and ``exists`` may return data from a legacy
+          location without migrating it; ``register`` overwrites the primary
+          record but does not prune a pre-existing legacy copy.
     """
 
     def __init__(self, storage_dir: Optional[Path] = None) -> None:
