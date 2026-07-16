@@ -894,7 +894,7 @@ def _format_obv(ref: IndicatorRef) -> str:
 # dict-keyed convention already used for this indicator list elsewhere
 # (``INDICATOR_HELPER_NAME`` / ``INDICATOR_PARAM_SPECS`` in
 # ``indicators.registry_metadata``).
-_INDICATOR_FORMATTERS: dict[str, Callable[[IndicatorRef], str]] = {
+_INDICATOR_FORMATTERS: dict[IndicatorName, Callable[[IndicatorRef], str]] = {
     "sma": _format_period_indicator,
     "ema": _format_period_indicator,
     "rsi": _format_period_indicator,
