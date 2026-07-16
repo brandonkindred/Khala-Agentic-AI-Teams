@@ -18,6 +18,7 @@ from software_engineering_team.coding_team.github_source import (
     MAX_REVIEW_COMMENTS_TRAVERSED,
     GitHubAPIError,
     GitHubClient,
+    Issue,
     PullRequestDetail,
     PullRequestFile,
     ReviewComment,
@@ -631,6 +632,9 @@ class _FakeReviewClient:
         self.reaction_fail = False  # create_issue_reaction raises a 403 when True
         self.created_issues: list[dict[str, Any]] = []  # each create_issue call's kwargs
         self.create_issue_fail = False  # create_issue raises a 403 when True
+        self.open_issues: list[Any] = []  # Issue-like objects returned by list_open_issues
+        self.list_open_issues_exc: Optional[Exception] = None
+        self.list_open_issues_calls = 0
         self.existing_review_comments: list[Any] = []  # ReviewComment-shaped stand-ins
         self.existing_issue_comments: list[Any] = []  # IssueComment-shaped stand-ins
         self.existing_resolved_ids: set[int] = set()
@@ -731,6 +735,17 @@ class _FakeReviewClient:
             (),
             {"number": number, "html_url": f"https://example/issues/{number}"},
         )()
+
+    def list_open_issues(self, _o: str, _r: str, label: Optional[str] = None) -> Any:
+        """Duplicate-detection's read of existing open issues.
+
+        ``list_open_issues_exc``, when set, is raised instead — exercising the
+        review flow's fail-open degrade-and-continue path.
+        """
+        self.list_open_issues_calls += 1
+        if self.list_open_issues_exc is not None:
+            raise self.list_open_issues_exc
+        return iter(self.open_issues)
 
 
 @pytest.fixture
@@ -3217,6 +3232,341 @@ class TestPreExistingFindings:
         assert gh.created_issues == []
 
 
+class TestDuplicateProposalDetection:
+    """A pre-existing finding matched to an already-open GitHub issue is offered
+    pre-linked to that issue, not as a fresh "create issue" candidate."""
+
+    def test_matching_open_issue_marks_proposal_matched_and_prelinked(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        gh.open_issues = [
+            Issue(
+                number=42,
+                title="off-by-one error in loop bound",
+                body="",
+                state="open",
+                html_url="https://example/issues/42",
+                labels=(),
+            )
+        ]
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=2,
+                    file_path="legacy.py",
+                    description="off-by-one error in loop bound",
+                    pre_existing=True,
+                )
+            ],
+        )
+        proposals = job["review_summary"]["pending_issue_proposals"]
+        assert len(proposals) == 1
+        assert proposals[0]["matched_existing"] is True
+        assert proposals[0]["issue_number"] == 42
+        assert proposals[0]["issue_url"] == "https://example/issues/42"
+
+    def test_unrelated_open_issue_does_not_mark_proposal_matched(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        gh.open_issues = [
+            Issue(
+                number=42,
+                title="unrelated feature request",
+                body="nothing to do with this",
+                state="open",
+                html_url="https://example/issues/42",
+                labels=(),
+            )
+        ]
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=2,
+                    file_path="legacy.py",
+                    description="off-by-one error in loop bound",
+                    pre_existing=True,
+                )
+            ],
+        )
+        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        assert proposal["matched_existing"] is False
+        assert proposal["issue_url"] is None
+
+    def test_duplicate_check_fetches_open_issues_once_per_review_not_per_finding(
+        self, review_app
+    ) -> None:
+        gh = review_app["github"]["client"]
+        _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high", line=2, file_path="legacy.py", description="latent A", pre_existing=True
+                ),
+                _FakeReviewIssue(
+                    "low", line=3, file_path="legacy.py", description="latent B", pre_existing=True
+                ),
+            ],
+        )
+        assert gh.list_open_issues_calls == 1
+
+    def test_duplicate_check_skipped_when_no_preexisting_findings(self, review_app) -> None:
+        gh = review_app["github"]["client"]
+        _run_review_with(review_app, [_FakeReviewIssue("high", line=2)])
+        assert gh.list_open_issues_calls == 0
+
+    def test_duplicate_check_fails_open_on_github_api_error(self, review_app) -> None:
+        """A GitHub failure listing open issues degrades to "no duplicates found"
+        rather than failing the review — the proposal still surfaces, unmatched."""
+        gh = review_app["github"]["client"]
+        gh.list_open_issues_exc = GitHubAPIError(500, "boom")
+        job = _run_review_with(
+            review_app,
+            [_FakeReviewIssue("high", line=2, file_path="legacy.py", pre_existing=True)],
+        )
+        assert job["status"] == "completed"
+        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        assert proposal["matched_existing"] is False
+        assert proposal["issue_url"] is None
+
+    def test_duplicate_check_fails_open_on_unexpected_exception(self, review_app) -> None:
+        """Same fail-open guarantee for a non-API exception (the broad except branch)."""
+        gh = review_app["github"]["client"]
+        gh.list_open_issues_exc = RuntimeError("boom")
+        job = _run_review_with(
+            review_app,
+            [_FakeReviewIssue("high", line=2, file_path="legacy.py", pre_existing=True)],
+        )
+        assert job["status"] == "completed"
+        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        assert proposal["matched_existing"] is False
+        assert proposal["issue_url"] is None
+
+    def test_duplicate_check_fails_open_when_annotation_itself_raises(
+        self, review_app, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: listing open issues can succeed while annotate_duplicate_proposals
+        itself raises (e.g. a bug in the matching logic) -- this must degrade to "no
+        duplicates found" exactly like a listing failure, not fail the whole review."""
+        from software_engineering_team.coding_team.api import pr_review
+
+        def _raise(*_a, **_k):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(pr_review, "annotate_duplicate_proposals", _raise)
+        job = _run_review_with(
+            review_app,
+            [_FakeReviewIssue("high", line=2, file_path="legacy.py", pre_existing=True)],
+        )
+        assert job["status"] == "completed"
+        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        assert proposal["matched_existing"] is False
+        assert proposal["issue_url"] is None
+
+    def test_create_review_issues_never_refiles_a_matched_proposal(self, review_app) -> None:
+        """A proposal pre-linked to an existing issue can never be filed as a new,
+        duplicate GitHub issue via the create-issues endpoint."""
+        gh = review_app["github"]["client"]
+        gh.open_issues = [
+            Issue(
+                number=42,
+                title="off-by-one error in loop bound",
+                body="",
+                state="open",
+                html_url="https://example/issues/42",
+                labels=(),
+            )
+        ]
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=2,
+                    file_path="legacy.py",
+                    description="off-by-one error in loop bound",
+                    pre_existing=True,
+                )
+            ],
+        )
+        resp = review_app["client"].post(
+            f"/reviews/{job['job_id']}/issues", json={"proposal_ids": ["p0"]}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["created"] == []
+        assert gh.created_issues == []
+        assert data["proposals"][0]["issue_url"] == "https://example/issues/42"
+
+    def test_duplicate_check_only_considers_open_issues_up_to_the_cap(
+        self, review_app, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A matching issue placed past the configured cap is never considered —
+        the fetch is bounded rather than traversing every open issue."""
+        monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "2")
+        gh = review_app["github"]["client"]
+        gh.open_issues = [
+            Issue(
+                number=n,
+                title="unrelated issue",
+                body="",
+                state="open",
+                html_url=f"https://example/issues/{n}",
+                labels=(),
+            )
+            for n in range(1, 3)
+        ] + [
+            Issue(
+                number=99,
+                title="off-by-one error in loop bound",
+                body="",
+                state="open",
+                html_url="https://example/issues/99",
+                labels=(),
+            )
+        ]
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=2,
+                    file_path="legacy.py",
+                    description="off-by-one error in loop bound",
+                    pre_existing=True,
+                )
+            ],
+        )
+        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        # The matching issue (#99) sits past the cap of 2, so it was never fetched.
+        assert proposal["matched_existing"] is False
+        assert proposal["issue_url"] is None
+
+    def test_duplicate_check_env_override_widens_the_cap(
+        self, review_app, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Raising the cap via env var lets a later-listed matching issue be found."""
+        monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "3")
+        gh = review_app["github"]["client"]
+        gh.open_issues = [
+            Issue(
+                number=n,
+                title="unrelated issue",
+                body="",
+                state="open",
+                html_url=f"https://example/issues/{n}",
+                labels=(),
+            )
+            for n in range(1, 3)
+        ] + [
+            Issue(
+                number=99,
+                title="off-by-one error in loop bound",
+                body="",
+                state="open",
+                html_url="https://example/issues/99",
+                labels=(),
+            )
+        ]
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "high",
+                    line=2,
+                    file_path="legacy.py",
+                    description="off-by-one error in loop bound",
+                    pre_existing=True,
+                )
+            ],
+        )
+        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        assert proposal["matched_existing"] is True
+        assert proposal["issue_url"] == "https://example/issues/99"
+
+
+class TestDetectDuplicateProposalsUnit:
+    """Direct unit tests for _detect_duplicate_proposals, independent of the full
+    review harness (extracted from _run_pr_review_body for exactly this reason)."""
+
+    def _proposal(self, pid: str, description: str = "d") -> dict:
+        return {
+            "id": pid,
+            "severity": "high",
+            "category": "logic",
+            "file_path": "",
+            "line": None,
+            "description": description,
+            "suggestion": "",
+            "locations": [],
+            "issue_number": None,
+            "issue_url": None,
+        }
+
+    def test_empty_proposals_never_calls_the_client(self) -> None:
+        from software_engineering_team.coding_team.api import pr_review
+
+        class _Client:
+            def list_open_issues(self, _o, _r):
+                raise AssertionError("should not be called for an empty proposals list")
+
+        result = pr_review._detect_duplicate_proposals([], _Client(), "o", "r", 1)
+        assert result == []
+
+    def test_matches_against_a_fetched_open_issue(self) -> None:
+        from software_engineering_team.coding_team.api import pr_review
+
+        class _Client:
+            def list_open_issues(self, _o, _r):
+                yield Issue(
+                    number=42,
+                    title="off-by-one error in loop bound",
+                    body="",
+                    state="open",
+                    html_url="https://example/issues/42",
+                    labels=(),
+                )
+
+        [proposal] = pr_review._detect_duplicate_proposals(
+            [self._proposal("p0", "off-by-one error in loop bound")], _Client(), "o", "r", 1
+        )
+        assert proposal["matched_existing"] is True
+        assert proposal["issue_url"] == "https://example/issues/42"
+
+    def test_list_open_issues_failure_degrades_to_unmatched(self) -> None:
+        from software_engineering_team.coding_team.api import pr_review
+
+        class _Client:
+            def list_open_issues(self, _o, _r):
+                raise GitHubAPIError(500, "boom")
+
+        [proposal] = pr_review._detect_duplicate_proposals(
+            [self._proposal("p0")], _Client(), "o", "r", 1
+        )
+        assert proposal["matched_existing"] is False
+        assert proposal["issue_url"] is None
+
+    def test_annotation_failure_falls_back_to_unmatched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from software_engineering_team.coding_team.api import pr_review
+
+        class _Client:
+            def list_open_issues(self, _o, _r):
+                return iter(())
+
+        def _raise(*_a, **_k):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(pr_review, "annotate_duplicate_proposals", _raise)
+        [proposal] = pr_review._detect_duplicate_proposals(
+            [self._proposal("p0")], _Client(), "o", "r", 1
+        )
+        assert proposal["matched_existing"] is False
+        assert proposal["issue_url"] is None
+
+
 class TestCreateReviewIssuesUnit:
     """Direct unit tests for create_review_issues / its context loader."""
 
@@ -3335,6 +3685,62 @@ class TestCreateReviewIssuesUnit:
         }
         assert saved == {"p0": True, "p1": False}
 
+    def test_multiple_failures_wrapped_in_composite_error(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Regression: when more than one proposal fails, the caller must see every
+        failure, not just whichever happened to be first -- a plain re-raise of one
+        error would misleadingly suggest only that one proposal had a problem. Every
+        failure must also still be logged, regardless of which one ends up in the
+        composite exception."""
+        from software_engineering_team.coding_team.api import main as api_main
+        from software_engineering_team.coding_team.api import pr_review
+
+        job = {
+            "github_context": {
+                "owner": "o",
+                "repo": "r",
+                "pr_number": 9,
+                "pr_url": "https://example/pull/9",
+            },
+            "status": "completed",
+            "review_summary": {
+                "pending_issue_proposals": [
+                    {"id": "p0", "description": "a", "issue_url": None},
+                    {"id": "p1", "description": "b", "issue_url": None},
+                ]
+            },
+        }
+        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return None
+
+            def create_issue(self, _o, _r, *, title, body, labels=None):
+                # Both proposals fail, each with a distinguishable error.
+                if "### Description\na" in body:
+                    raise GitHubAPIError(403, "boom-a")
+                raise GitHubAPIError(500, "boom-b")
+
+        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
+        monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
+
+        with caplog.at_level("WARNING"):
+            with pytest.raises(pr_review.MultipleIssueCreationErrors) as exc_info:
+                pr_review.create_review_issues("job1", ["p0", "p1"], token="t")
+        logged = caplog.text
+        assert "p0" in logged and "boom-a" in logged
+        assert "p1" in logged and "boom-b" in logged
+        assert set(exc_info.value.failures) == {"p0", "p1"}
+        message = str(exc_info.value)
+        assert "p0" in message and "p1" in message
+        assert "boom-a" in message and "boom-b" in message
+
     def test_malformed_proposals_field_yields_no_candidates(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3432,50 +3838,6 @@ class TestCreateReviewIssuesUnit:
         out = pr_review.create_review_issues("job1", ["p0", "p0", "p0"], token="t")
         assert len(calls) == 1
         assert [c["proposal_id"] for c in out["created"]] == ["p0"]
-
-    def test_multiple_failures_are_all_logged(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Only the first failure (by request order) is re-raised to the caller, but
-        every failure must be logged — an operator debugging why proposal p1 wasn't
-        filed must not find zero information about it just because p0's error is the
-        one that propagated to the HTTP response."""
-        from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review
-
-        job = {
-            "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
-            "status": "completed",
-            "review_summary": {
-                "pending_issue_proposals": [
-                    {"id": "p0", "description": "a", "issue_url": None},
-                    {"id": "p1", "description": "b", "issue_url": None},
-                ]
-            },
-        }
-        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
-        monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
-        monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
-
-        class _Client:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_a):
-                return None
-
-            def create_issue(self, _o, _r, *, title, body, labels=None):
-                if "### Description\na" in body:
-                    raise GitHubAPIError(403, "boom-a")
-                raise GitHubAPIError(500, "boom-b")
-
-        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
-        with caplog.at_level("WARNING"):
-            with pytest.raises(GitHubAPIError):
-                pr_review.create_review_issues("job1", ["p0", "p1"], token="t")
-        logged = caplog.text
-        assert "p0" in logged and "boom-a" in logged
-        assert "p1" in logged and "boom-b" in logged
 
     def test_persist_swallows_store_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A failure persisting the updated proposals never fails the request — the

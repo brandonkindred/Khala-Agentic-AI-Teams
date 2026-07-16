@@ -1,9 +1,24 @@
-@use '../review-chips' as chips;
+@use '../chip';
 
-// Chip look (outcome/draft chips) and review-run status text for the reviews
-// table, shared with the parent panel via the code-review-panel partial.
-@include chips.chip;
-@include chips.job-status;
+// Chip look shared via the code-review-panel chip partial: the `--draft` chip in
+// the PR header and the `--event` chip in the reviews-table outcome cell.
+.cr-chip {
+  @include chip.look;
+
+  &--draft {
+    background: var(--mat-sys-tertiary-container, #efe2d0);
+    color: var(--mat-sys-on-tertiary-container, #4a3a1d);
+  }
+
+  &--event {
+    background: var(--mat-sys-primary-container, #d7e3ff);
+    color: var(--mat-sys-on-primary-container, #001b3f);
+    font-weight: 600;
+  }
+}
+
+// Review-run status text in the table (shared with the parent's row badge).
+@include chip.status;
 
 // ---------------------------------------------------------------------------
 // PR detail panel

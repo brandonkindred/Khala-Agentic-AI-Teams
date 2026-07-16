@@ -1,0 +1,35 @@
+// Shared looks for the Code Review components' `.cr-chip` and `.cr-job-status`
+// classes, used by code-review-panel.component.scss and its pr-review-detail /
+// pending-issue-proposals children. Angular's view encapsulation scopes each
+// component's styles to its own template, so each still needs its own rule
+// (e.g. `.cr-chip { @include chip.look; }`) -- these mixins just keep the
+// shared properties defined in one place.
+
+// Base pill look for `.cr-chip`. Callers add their own `--*` modifiers.
+@mixin look {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: var(--mat-sys-surface-container-high, #ececec);
+  color: var(--mat-sys-on-surface, rgba(0, 0, 0, 0.75));
+}
+
+// The full review-run status block. Its `--completed`/`--failed` accents are
+// identical everywhere it's used (the panel's row badge and the detail table),
+// so the whole selector lives here; callers `@include chip.status;` at the top
+// level.
+@mixin status {
+  .cr-job-status {
+    text-transform: capitalize;
+
+    &--completed {
+      color: var(--mat-sys-primary, #1a7f37);
+      font-weight: 600;
+    }
+
+    &--failed {
+      color: var(--mat-sys-error, #b3261e);
+      font-weight: 600;
+    }
+  }
+}

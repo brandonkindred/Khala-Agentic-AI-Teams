@@ -7,10 +7,14 @@ from typing import Optional
 
 import pytest
 
+from software_engineering_team.coding_team.github_source.client import Issue
 from software_engineering_team.coding_team.github_source.pr_review_mapping import (
+    annotate_duplicate_proposals,
     build_issue_from_proposal,
     build_review_body,
     choose_event,
+    duplicate_check_max_open_issues,
+    find_matching_open_issue,
     format_comment_body,
     format_issue_comment,
     group_similar_findings,
@@ -552,6 +556,453 @@ def test_build_issue_from_proposal_blank_description_and_title_truncation() -> N
     long_title, _ = build_issue_from_proposal(p_long, pr_number=1, pr_url="u")
     assert len(long_title) <= 120
     assert long_title.endswith("…")
+
+
+# ---------------------------------------------------------------------------
+# find_matching_open_issue / annotate_duplicate_proposals
+# ---------------------------------------------------------------------------
+
+
+def _open_issue(number: int, title: str, body: str = "") -> Issue:
+    return Issue(
+        number=number,
+        title=title,
+        body=body,
+        state="open",
+        html_url=f"https://x/issues/{number}",
+        labels=(),
+    )
+
+
+def test_find_matching_open_issue_matches_own_combined_proposal_title_wrapper() -> None:
+    # Regression: an issue Khala itself filed from a combined (multi-location)
+    # proposal carries a "[severity] headline (N occurrences)" title -- without
+    # un-wrapping that title first, the wrapper text dilutes a short headline's
+    # similarity ratio (0.489, computed) just below the with-location threshold
+    # (0.5), so a rerun would fail to recognize its own previously-filed issue.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", severity="high", description="memory leak")], 0
+    )
+    issue = _open_issue(1, "[high] memory leak (2 occurrences)", body="See `src/a.py` for details.")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
+def test_find_matching_open_issue_matches_own_single_location_title_wrapper() -> None:
+    # Same wrapper concern for a single-location Khala-filed issue (no
+    # "(N occurrences)" suffix, just the severity prefix) -- text similarity
+    # alone (no location signal) must still clear the no-location threshold.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", severity="critical", description="off-by-one error")], 0
+    )
+    issue = _open_issue(1, "[critical] off-by-one error", body="")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
+def test_find_matching_open_issue_location_plus_moderate_text_matches() -> None:
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", description="race condition in worker pool")], 0
+    )
+    # Same words, reordered: character ratio (~0.509) barely clears the "with
+    # location" bar (0.5) but is well below the "no location" bar (0.8) -- and
+    # since every word carries over, word-set overlap (0.8) comfortably clears
+    # the with-location token-overlap floor (0.7) too. The issue body repeats
+    # the exact file_path, so the location signal makes the looser ratio bar
+    # sufficient.
+    issue = _open_issue(1, "worker pool race condition", body="See `src/a.py:12` for details.")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
+def test_find_matching_open_issue_moderate_text_without_location_does_not_match() -> None:
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", description="null pointer dereference in parser")], 0
+    )
+    # Moderate-similarity title (ratio ~0.585, below the "no location" bar of
+    # 0.8), but nothing in the issue mentions the file_path -- moderate
+    # similarity alone is not enough.
+    issue = _open_issue(
+        1, "possible null pointer issue in the parser module", body="unrelated notes"
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_strong_text_alone_matches_without_location() -> None:
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", description="off-by-one error in loop bound")], 0
+    )
+    issue = _open_issue(1, "off-by-one error in loop bound", body="")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
+def test_find_matching_open_issue_dissimilar_and_no_location_returns_none() -> None:
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", description="off-by-one error")], 0
+    )
+    issue = _open_issue(1, "unrelated feature request", body="nothing to do with this")
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_empty_open_issues_returns_none() -> None:
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", description="off-by-one error")], 0
+    )
+    assert find_matching_open_issue(proposal, []) is None
+
+
+def test_find_matching_open_issue_blank_file_path_never_triggers_location_signal() -> None:
+    # Regression: an empty file_path must never "match" via the location signal,
+    # since "" is a substring of every string in Python.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", description="a mildly related headline")], 0
+    )
+    issue = _open_issue(1, "a totally different headline", body="")
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_picks_highest_ratio_among_multiple_matches() -> None:
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", description="off-by-one error in loop bound")], 0
+    )
+    close = _open_issue(1, "off-by-one error in the loop bound", body="")
+    exact = _open_issue(2, "off-by-one error in loop bound", body="")
+    assert find_matching_open_issue(proposal, [close, exact]) is exact
+
+
+def test_find_matching_open_issue_ties_break_by_lowest_issue_number() -> None:
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", description="off-by-one error in loop bound")], 0
+    )
+    first = _open_issue(5, "off-by-one error in loop bound", body="")
+    second = _open_issue(2, "off-by-one error in loop bound", body="")
+    assert find_matching_open_issue(proposal, [first, second]) is second
+
+
+def test_find_matching_open_issue_threshold_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", description="leaked file handle in worker cleanup path")], 0
+    )
+    # Same words, scrambled order: character ratio is low (~0.48, below the
+    # default 0.8 no-location bar) even though every word matches (token overlap
+    # 0.857, above the token-overlap floor) -- so this fails to match by default.
+    issue = _open_issue(1, "worker cleanup path leaked file handle", body="")
+    assert find_matching_open_issue(proposal, [issue]) is None
+    # A very low ratio override turns the otherwise low-character-ratio,
+    # high-token-overlap pair into a match.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION", "0.0")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+    # Garbage falls back to the documented default rather than raising.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION", "not-a-float")
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_high_char_ratio_but_low_token_overlap_does_not_match() -> None:
+    # Regression (Codex-flagged): two headlines sharing a long templated
+    # prefix/suffix around one differing keyword score a deceptively high
+    # character ratio (~0.83, clears the default 0.8 no-location bar) despite
+    # describing unrelated bugs. Word-set overlap (0.6) is well below the
+    # token-overlap floor (0.8), so this must not match without a location signal.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", description="hardcoded secret in config")], 0
+    )
+    issue = _open_issue(1, "hardcoded timeout in config", body="")
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_token_overlap_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", description="hardcoded secret in config")], 0
+    )
+    issue = _open_issue(1, "hardcoded timeout in config", body="")
+    assert find_matching_open_issue(proposal, [issue]) is None
+    # A low override accepts the pair's 0.6 token overlap as sufficient.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN", "0.5")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+    # Garbage falls back to the documented default rather than raising.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN", "not-a-float")
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_location_signal_alone_insufficient_for_low_token_overlap() -> (
+    None
+):
+    # Regression (Codex-flagged): the location signal alone is weaker
+    # corroboration than it looks -- many genuinely distinct bugs share the
+    # same file. "hardcoded secret in config" vs "hardcoded timeout in
+    # config" both mentioning config.py clears the with-location ratio bar
+    # (0.83 >= 0.5) via the location signal, but word-set overlap (0.6) is
+    # below the with-location token-overlap floor (0.7), so this must not
+    # match even with the file_path present in the issue body.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="config.py", description="hardcoded secret in config")], 0
+    )
+    issue = _open_issue(
+        1, "hardcoded timeout in config", body="See `config.py` for where it's set."
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_with_location_token_overlap_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal = proposal_from_findings(
+        [_Issue(file_path="config.py", description="hardcoded secret in config")], 0
+    )
+    issue = _open_issue(
+        1, "hardcoded timeout in config", body="See `config.py` for where it's set."
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+    # A low override accepts the pair's 0.6 token overlap as sufficient.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN_WITH_LOCATION", "0.5")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+    # Garbage falls back to the documented default rather than raising.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN_WITH_LOCATION", "not-a-float")
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_threshold_with_location_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", description="race condition in worker pool")], 0
+    )
+    # The file_path appears in the issue body (location signal present), but the
+    # headline/title ratio (~0.16) is far below both the default with-location
+    # (0.5) and no-location (0.8) thresholds, so there is no match by default.
+    issue = _open_issue(
+        1, "totally unrelated feature request", body="See `src/a.py:5` for context."
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+    # A very low with-location override alone is still not enough -- the headline
+    # and title share zero tokens, so the (still-default) token-overlap floor
+    # blocks it.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION", "0.0")
+    assert find_matching_open_issue(proposal, [issue]) is None
+    # Also lowering the with-location token-overlap floor turns the
+    # location-corroborated, otherwise too-dissimilar pair into a match.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN_WITH_LOCATION", "0.0")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+    # Garbage falls back to the documented default rather than raising.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION", "not-a-float")
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_location_in_title_matches() -> None:
+    # The location signal must check the issue TITLE, not only its body: the
+    # file_path here appears only in the title, and the body is blank.
+    proposal = proposal_from_findings(
+        [
+            _Issue(
+                file_path="a.py",
+                description="race condition detected inside the shared background worker pool",
+            )
+        ],
+        0,
+    )
+    # Reordered words plus the trailing file_path: ratio (~0.512) clears the
+    # with-location bar (0.5) but not the no-location bar (0.8); word-set
+    # overlap (~0.727) clears the with-location token-overlap floor (0.7) since
+    # the base headline is long enough that the two extra path tokens barely
+    # dilute it. This match happens only because the location signal (title
+    # contains the file_path) is honored.
+    issue = _open_issue(
+        1,
+        "shared background worker pool race condition detected inside a.py",
+        body="",
+    )
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
+def test_find_matching_open_issue_rejects_substring_within_unrelated_filename() -> None:
+    # Regression (Codex-flagged): a short/top-level file_path like "app.py" is a
+    # literal substring of an unrelated file's name like "myapp.py" -- a plain
+    # substring check would wrongly treat that as the location signal firing.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="app.py", description="null pointer dereference in parser")], 0
+    )
+    # Same moderate-similarity title as test_find_matching_open_issue_location_plus_moderate_text_matches
+    # (ratio ~0.585, between the with-location bar of 0.5 and the no-location bar
+    # of 0.8), so a match here could only happen via the (bogus) location signal.
+    issue = _open_issue(
+        1, "possible null pointer issue in the parser module", body="See `myapp.py` for details."
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_location_signal_still_matches_at_path_boundary() -> None:
+    # The stricter boundary check must not reject a genuine match: file_path
+    # bounded by a path separator and punctuation (not embedded in a longer
+    # identifier) still counts as the location signal. Same reordered-words
+    # pair as test_find_matching_open_issue_location_plus_moderate_text_matches
+    # (ratio ~0.509, token overlap ~0.8) so the with-location token-overlap
+    # floor (0.7) is also cleared.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="app.py", description="race condition in worker pool")], 0
+    )
+    issue = _open_issue(
+        1,
+        "worker pool race condition",
+        body="See `src/app.py:12` for details.",
+    )
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
+def test_find_matching_open_issue_uses_description_body_for_truncated_title() -> None:
+    # Regression (Codex-flagged): a headline long enough that _proposal_title
+    # truncates the filed issue's TITLE to fit _ISSUE_TITLE_MAX scores a low
+    # ratio against that truncated title, even though the issue BODY's
+    # "### Description" section (rendered by build_issue_from_proposal) always
+    # carries the full, untruncated text -- so a rerun must still recognize its
+    # own previously-filed issue via the body excerpt.
+    long_headline = " ".join(["distinct", "unusual", "descriptive", "word"] * 30)
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", severity="high", description=long_headline)], 0
+    )
+    truncated_title = long_headline[:105].rstrip() + "…"
+    issue = _open_issue(
+        1,
+        f"[high] {truncated_title}",
+        body=f"- **Location:** `src/a.py`\n\n### Description\n{long_headline}\n\n### Suggested fix\nfix it",
+    )
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
+def test_find_matching_open_issue_reduces_multiline_description_excerpt_to_headline() -> None:
+    # Regression (Codex-flagged): when the originally-filed finding's description
+    # spanned multiple lines, the title is truncated to just the first line's
+    # headline (per _proposal_title), but the issue body's "### Description"
+    # section renders the FULL multi-line text verbatim. Comparing the fresh
+    # proposal's single-line headline against that whole excerpt -- extra lines
+    # included -- tanks the word-set overlap (0.16, computed) even though the
+    # first line is an exact match, so the excerpt must be reduced to its own
+    # first-line headline before comparing.
+    long_headline = " ".join(["distinct", "unusual", "descriptive", "word"] * 30)
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", severity="high", description=long_headline)], 0
+    )
+    truncated_title = long_headline[:105].rstrip() + "…"
+    extra_detail = (
+        "This happens under concurrent load when two workers acquire the same "
+        "slot at once, corrupting shared state and causing intermittent crashes."
+    )
+    issue = _open_issue(
+        1,
+        f"[high] {truncated_title}",
+        body=(
+            f"- **Location:** `src/a.py`\n\n### Description\n{long_headline}\n"
+            f"{extra_detail}\n\n### Suggested fix\nfix it"
+        ),
+    )
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
+def test_find_matching_open_issue_ignores_description_section_when_absent() -> None:
+    # A human-filed issue (or one without Khala's "### Description" structure)
+    # must fall back to title-only matching -- no false match conjured from an
+    # absent section.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", description="off-by-one error")], 0
+    )
+    issue = _open_issue(
+        1, "unrelated feature request", body="src/a.py mentioned here but nothing else"
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_generic_headline_does_not_override_conflicting_location() -> None:
+    # Regression (Codex-flagged): a generic/short headline can be identical
+    # between two genuinely distinct findings. When the proposal names its own
+    # file_path and the candidate issue explicitly declares a DIFFERENT
+    # location, that's counter-evidence the text-alone signal must not
+    # override -- without this, "missing null check" in b.py would wrongly
+    # pre-link to an existing issue about the same headline in a.py.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="b.py", severity="high", description="missing null check")], 0
+    )
+    issue = _open_issue(
+        1,
+        "[high] missing null check",
+        body="- **Location:** `a.py`\n\n### Description\nmissing null check",
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_generic_headline_matches_when_issue_is_silent_on_location() -> (
+    None
+):
+    # Control for the regression above: an issue that names NO location at
+    # all (silent, not conflicting) must still match via the text-alone
+    # signal as before -- the fix only suppresses an explicit mismatch.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="b.py", description="off-by-one error in loop bound")], 0
+    )
+    issue = _open_issue(1, "off-by-one error in loop bound", body="")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
+def test_annotate_duplicate_proposals_marks_matched_and_preserves_order_and_length() -> None:
+    proposals = [
+        proposal_from_findings(
+            [_Issue(file_path="", description="off-by-one error in loop bound")], 0
+        ),
+        proposal_from_findings([_Issue(file_path="", description="unrelated latent bug")], 1),
+        proposal_from_findings([_Issue(file_path="", description="another unrelated bug")], 2),
+    ]
+    match = _open_issue(9, "off-by-one error in loop bound", body="")
+    out = annotate_duplicate_proposals(proposals, [match])
+    assert len(out) == 3
+    assert [p["id"] for p in out] == ["p0", "p1", "p2"]
+    assert out[0]["matched_existing"] is True
+    assert out[0]["issue_number"] == 9
+    assert out[0]["issue_url"] == "https://x/issues/9"
+    assert out[1]["matched_existing"] is False
+    assert out[1]["issue_url"] is None
+    assert out[2]["matched_existing"] is False
+    assert out[2]["issue_url"] is None
+
+
+def test_annotate_duplicate_proposals_does_not_mutate_input() -> None:
+    proposals = [
+        proposal_from_findings(
+            [_Issue(file_path="", description="off-by-one error in loop bound")], 0
+        )
+    ]
+    match = _open_issue(9, "off-by-one error in loop bound", body="")
+    annotate_duplicate_proposals(proposals, [match])
+    assert proposals[0]["issue_url"] is None
+    assert "matched_existing" not in proposals[0]
+
+
+def test_annotate_duplicate_proposals_empty_open_issues_all_unmatched() -> None:
+    proposals = [proposal_from_findings([_Issue(file_path="", description="off-by-one error")], 0)]
+    out = annotate_duplicate_proposals(proposals, [])
+    assert out[0]["matched_existing"] is False
+    assert out[0]["issue_url"] is None
+
+
+# ---------------------------------------------------------------------------
+# duplicate_check_max_open_issues
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_check_max_open_issues_default() -> None:
+    assert duplicate_check_max_open_issues() == 100
+
+
+def test_duplicate_check_max_open_issues_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "5")
+    assert duplicate_check_max_open_issues() == 5
+
+
+def test_duplicate_check_max_open_issues_garbage_or_non_positive_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "not-an-int")
+    assert duplicate_check_max_open_issues() == 100
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "0")
+    assert duplicate_check_max_open_issues() == 100
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "-5")
+    assert duplicate_check_max_open_issues() == 100
 
 
 def test_build_issue_from_proposal_multi_location_body_and_title() -> None:

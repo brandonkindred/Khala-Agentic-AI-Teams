@@ -1,10 +1,10 @@
-@use '../review-chips' as chips;
+@use '../chip';
 
-// Base chip look, shared with the parent panel via the code-review-panel partial.
-@include chips.chip;
+.cr-chip {
+  @include chip.look;
+}
 
-// Severity accents on the proposal chips (critical/high stand out) — specific to
-// this component, so they stay local rather than in the shared partial.
+// Severity accents on the proposal chips (critical/high stand out).
 .cr-chip--sev-critical,
 .cr-chip--sev-high {
   background: var(--mat-sys-error-container, #ffdad6);
@@ -65,6 +65,20 @@
     gap: 0.2rem;
     font-size: 0.72rem;
     color: var(--mat-sys-primary, #0b57d0);
+
+    mat-icon {
+      font-size: 1rem;
+      width: 1rem;
+      height: 1rem;
+    }
+  }
+
+  &__matched {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    font-size: 0.72rem;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
 
     mat-icon {
       font-size: 1rem;

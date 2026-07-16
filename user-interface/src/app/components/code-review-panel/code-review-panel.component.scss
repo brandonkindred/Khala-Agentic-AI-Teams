@@ -1,4 +1,4 @@
-@use 'review-chips' as chips;
+@use 'chip';
 
 .page-toolbar {
   margin-bottom: 0.5rem;
@@ -198,8 +198,16 @@
   color: var(--mat-sys-on-secondary-container, #2a3441);
 }
 
-// Chip look shared with the pr-review-detail / pending-issue-proposals children.
-@include chips.chip;
+// Base chip look shared via the code-review-panel chip partial. The `--event`
+// variant moved to the pr-review-detail child with the reviews table.
+.cr-chip {
+  @include chip.look;
+
+  &--draft {
+    background: var(--mat-sys-tertiary-container, #efe2d0);
+    color: var(--mat-sys-on-tertiary-container, #4a3a1d);
+  }
+}
 
 .cr-pulls-paginator {
   margin-top: 0.5rem;
@@ -252,9 +260,9 @@
   }
 }
 
-// Status text shared with the pr-review-detail child (here it styles the
+// Status block shared with the pr-review-detail child (here it styles the
 // collapsed row's status badge; there it styles the reviews-table cells).
-@include chips.job-status;
+@include chip.status;
 
 .cr-review-summary {
   display: flex;

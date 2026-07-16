@@ -94,6 +94,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
       this.clientSecret.trim() ||
       this.botToken.trim() ||
       this.webhookUrl.trim() ||
+      this.signingSecret.trim() ||
       this.googleAccountPassword.length > 0 ||
       this.githubPat.trim() ||
       this.githubWebhookSecret.trim() ||
@@ -170,6 +171,11 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
   botToken = '';
   webhookConfigured = false;
   botTokenConfigured = false;
+  // Signing secret for inbound Slack events / slash commands (HMAC verification). The
+  // value is write-only (never returned by the API); `signingSecretConfigured` reflects
+  // whether one is stored so the input can show "Saved" without exposing the secret.
+  signingSecret = '';
+  signingSecretConfigured = false;
 
   ngOnInit(): void {
     this.loadGoogleBrowserLoginStatus();
@@ -429,6 +435,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     this.slackEnabled = res.enabled;
     this.mode = res.mode || 'webhook';
     this.clientIdConfigured = res.client_id_configured ?? false;
+    this.signingSecretConfigured = res.signing_secret_configured ?? false;
     this.webhookConfigured = res.webhook_configured;
     this.botTokenConfigured = res.bot_token_configured;
     this.defaultChannel = res.default_channel || '';
@@ -440,6 +447,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     this.botToken = '';
     this.clientId = '';
     this.clientSecret = '';
+    this.signingSecret = '';
   }
 
   // ---------------------------------------------------------------------------
@@ -472,6 +480,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         mode: this.mode,
         client_id: clientId,
         client_secret: clientSecret,
+        signing_secret: '',
         webhook_url: '',
         bot_token: '',
         default_channel: this.defaultChannel.trim(),
@@ -525,6 +534,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
       mode: this.mode,
       client_id: '',
       client_secret: '',
+      signing_secret: this.signingSecret.trim(),
       webhook_url: '',
       bot_token: '',
       default_channel: defaultChannel,
@@ -601,6 +611,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
       mode: this.mode,
       client_id: this.clientId.trim(),
       client_secret: this.clientSecret.trim(),
+      signing_secret: this.signingSecret.trim(),
       webhook_url: webhookUrl,
       bot_token: botToken,
       default_channel: defaultChannel,
