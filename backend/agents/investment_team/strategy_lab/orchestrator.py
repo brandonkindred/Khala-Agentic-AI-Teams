@@ -806,10 +806,10 @@ class StrategyLabOrchestrator:
         the operator can act on, rather than a "looks fine, then runs to
         zero trades" silent error downstream.
         """
-        if not (isinstance(symbol, str) and symbol):
-            raise OrchestratorContractError("symbol must be a non-empty str")
-        if not (isinstance(asset_class, str) and asset_class):
-            raise OrchestratorContractError("asset_class must be a non-empty str")
+        if not isinstance(symbol, str) or not symbol:
+            raise ValueError("symbol must be a non-empty str")
+        if not isinstance(asset_class, str) or not asset_class:
+            raise ValueError("asset_class must be a non-empty str")
         try:
             bars = self.market_data_service.fetch_ohlcv(symbol, asset_class, days=5)
             if bars:
@@ -873,10 +873,10 @@ class StrategyLabOrchestrator:
         ``all_gate_results`` is provided it is extended in place. ``results``
         is returned to allow chaining.
         """
-        if not (
-            isinstance(results, list) and all(isinstance(g, QualityGateResult) for g in results)
+        if not isinstance(results, list) or not all(
+            isinstance(g, QualityGateResult) for g in results
         ):
-            raise OrchestratorContractError("results must be a list of QualityGateResult")
+            raise ValueError("results must be a list of QualityGateResult")
         for g in results:
             if refinement_round is not None:
                 g.refinement_round = refinement_round
@@ -945,9 +945,9 @@ class StrategyLabOrchestrator:
         derived from ``severity`` (info → True, warning/critical → False).
         """
         if not name:
-            raise OrchestratorContractError("gate name must be non-empty")
+            raise ValueError("gate name must be non-empty")
         if not details:
-            raise OrchestratorContractError("details must be non-empty")
+            raise ValueError("details must be non-empty")
         return QualityGateResult(
             gate_name=name,
             phase=phase,
@@ -1173,7 +1173,7 @@ class StrategyLabOrchestrator:
         """
         max_rounds = _design_review_rounds()
         if max_rounds < 1:
-            raise OrchestratorContractError("design-review round cap must be ≥ 1")
+            raise ValueError("design-review round cap must be ≥ 1")
 
         emit("designing", {"sub_phase": "started"})
 
@@ -1915,17 +1915,17 @@ class StrategyLabOrchestrator:
         state.
         """
         if not isinstance(spec, StrategySpec):
-            raise OrchestratorContractError("spec must be a StrategySpec")
+            raise ValueError("spec must be a StrategySpec")
         if not isinstance(code, str):
-            raise OrchestratorContractError("code must be a string")
+            raise ValueError("code must be a string")
         if not isinstance(config, BacktestConfig):
-            raise OrchestratorContractError("config must be a BacktestConfig")
+            raise ValueError("config must be a BacktestConfig")
         if not isinstance(all_gate_results, list):
-            raise OrchestratorContractError("all_gate_results must be a list")
+            raise ValueError("all_gate_results must be a list")
         if not isinstance(refinement_attempts, list):
-            raise OrchestratorContractError("refinement_attempts must be a list")
+            raise ValueError("refinement_attempts must be a list")
         if not isinstance(zero_trade_attempts, list):
-            raise OrchestratorContractError("zero_trade_attempts must be a list")
+            raise ValueError("zero_trade_attempts must be a list")
 
         trades: List[TradeRecord] = []
         open_position_entry_reasons: List[str] = []
@@ -2179,9 +2179,10 @@ class StrategyLabOrchestrator:
 
         # Post-condition: success and round-exhaustion are mutually exclusive.
         if execution_succeeded and max_rounds_exhausted:
-            raise OrchestratorContractError(
+            raise RuntimeError(
                 "synthesis loop invariant violated: both execution_succeeded and "
-                f"max_rounds_exhausted are True after round {round_num}"
+                f"max_rounds_exhausted are True after round {round_num}; this is a bug "
+                "in the round-evaluation loop above."
             )
         return _SynthesisLoopOutcome(
             spec=spec,
