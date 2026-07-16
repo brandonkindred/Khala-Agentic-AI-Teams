@@ -848,11 +848,17 @@ def find_matching_open_issue(
     without this, the wrapper text dilutes the similarity ratio enough to drop a
     genuine match (especially a short headline) below threshold. The headline is
     also compared against :func:`_issue_description_excerpt` (the issue body's
-    ``### Description`` section, when present) and whichever of the two scores
-    higher is used -- a Khala-filed issue's TITLE may be truncated to fit
-    ``_ISSUE_TITLE_MAX``, but its body always carries the full, untruncated
-    description, so a long headline's rerun still recognizes its own previously
-    filed issue even though the title alone would score too low.
+    ``### Description`` section, when present) -- reduced to its own first-line
+    headline via :func:`_description_headline`, matching how the proposal's own
+    ``headline`` was derived -- and whichever of the two scores higher is used.
+    A Khala-filed issue's TITLE may be truncated to fit ``_ISSUE_TITLE_MAX``, but
+    its body always carries the full, untruncated description (which itself may
+    span multiple lines when the original finding's description did), so a long
+    headline's rerun still recognizes its own previously filed issue even though
+    the title alone would score too low. Reducing the body excerpt to its
+    headline (rather than comparing the bare single-line proposal headline
+    against the whole multi-line excerpt) avoids the excerpt's extra lines
+    diluting the ratio/token-overlap comparison below threshold.
 
     Pure and side-effect-free: no GitHub/network access. ``open_issues`` must already
     be a materialized (or safely re-iterable) snapshot -- callers fetch it ONCE per
@@ -893,10 +899,13 @@ def find_matching_open_issue(
     best_ratio = -1.0
     for issue in open_issues:
         candidate_title = _normalized_issue_title(issue.title or "").casefold()
-        description_excerpt = _issue_description_excerpt(issue).casefold()
+        raw_description_excerpt = _issue_description_excerpt(issue)
         candidate_texts = [candidate_title]
-        if description_excerpt:
-            candidate_texts.append(description_excerpt)
+        if raw_description_excerpt:
+            # Reduce to its own first-line headline (like the proposal's own
+            # `headline` above) so a multi-line description's extra lines don't
+            # dilute the comparison against a single-line proposal headline.
+            candidate_texts.append(_description_headline(raw_description_excerpt).casefold())
         ratio = -1.0
         best_text = candidate_title
         for text in candidate_texts:

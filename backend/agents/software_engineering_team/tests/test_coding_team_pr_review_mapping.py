@@ -867,6 +867,35 @@ def test_find_matching_open_issue_uses_description_body_for_truncated_title() ->
     assert find_matching_open_issue(proposal, [issue]) is issue
 
 
+def test_find_matching_open_issue_reduces_multiline_description_excerpt_to_headline() -> None:
+    # Regression (Codex-flagged): when the originally-filed finding's description
+    # spanned multiple lines, the title is truncated to just the first line's
+    # headline (per _proposal_title), but the issue body's "### Description"
+    # section renders the FULL multi-line text verbatim. Comparing the fresh
+    # proposal's single-line headline against that whole excerpt -- extra lines
+    # included -- tanks the word-set overlap (0.16, computed) even though the
+    # first line is an exact match, so the excerpt must be reduced to its own
+    # first-line headline before comparing.
+    long_headline = " ".join(["distinct", "unusual", "descriptive", "word"] * 30)
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", severity="high", description=long_headline)], 0
+    )
+    truncated_title = long_headline[:105].rstrip() + "…"
+    extra_detail = (
+        "This happens under concurrent load when two workers acquire the same "
+        "slot at once, corrupting shared state and causing intermittent crashes."
+    )
+    issue = _open_issue(
+        1,
+        f"[high] {truncated_title}",
+        body=(
+            f"- **Location:** `src/a.py`\n\n### Description\n{long_headline}\n"
+            f"{extra_detail}\n\n### Suggested fix\nfix it"
+        ),
+    )
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
 def test_find_matching_open_issue_ignores_description_section_when_absent() -> None:
     # A human-filed issue (or one without Khala's "### Description" structure)
     # must fall back to title-only matching -- no false match conjured from an
