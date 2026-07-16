@@ -64,49 +64,28 @@ class BlogCopyEditorAgent:
         except Exception as e:
             logger.warning("Failed to write editor feedback to %s: %s", path, e)
 
-    def run(
+    def _build_editor_prompt(
         self,
         copy_editor_input: CopyEditorInput,
-        *,
-        on_llm_request: Optional[Callable[[str], None]] = None,
-        feedback_output_path: Optional[Union[str, Path]] = None,
-    ) -> CopyEditorOutput:
+        draft: str,
+        style_guide_text: str,
+    ) -> str:
         """
-        Provide copy editing feedback on the draft based on the style guide.
+        Assemble the full editor prompt from length intent, author/context signals,
+        the style guide, the content plan, and the draft itself.
 
         Preconditions:
-            - copy_editor_input is a valid CopyEditorInput (draft non-empty).
+            - draft is the stripped, non-empty draft text to review.
         Postconditions:
-            - Returns CopyEditorOutput with summary and feedback_items.
-            - If feedback_output_path is set, writes the same output to that path before returning.
+            - Returns COPY_EDITOR_PROMPT followed by the assembled context, as one string.
+            - Has no side effects on self or the inputs.
         """
-        draft = copy_editor_input.draft.strip()
-        if not draft:
-            logger.warning("Empty draft; returning minimal feedback.")
-            output = CopyEditorOutput(
-                summary="No draft provided. Please supply a blog post draft to review.",
-                feedback_items=[],
-            )
-            if feedback_output_path:
-                self._write_feedback_to_path(output, feedback_output_path)
-            return output
-
-        style_guide_text = self._style_prompt
-
-        logger.info(
-            "Copy editing: draft len=%s, style_guide len=%s",
-            len(draft),
-            len(style_guide_text),
-        )
-
         actual_word_count = len(draft.split())
         target_word_count = copy_editor_input.target_word_count
         soft_min = copy_editor_input.soft_min_words
         soft_max = copy_editor_input.soft_max_words
-        must_ratio = copy_editor_input.editor_must_fix_over_ratio
-        should_ratio = copy_editor_input.editor_should_fix_over_ratio
 
-        context_parts = []
+        context_parts: list[str] = []
         band = f"{soft_min}–{soft_max}" if soft_min is not None and soft_max is not None else None
         if band:
             context_parts.append(
@@ -193,8 +172,24 @@ class BlogCopyEditorAgent:
             ]
         )
 
-        prompt = COPY_EDITOR_PROMPT + "\n\n" + "\n".join(context_parts)
+        return COPY_EDITOR_PROMPT + "\n\n" + "\n".join(context_parts)
 
+    def _invoke_editor_llm(
+        self,
+        prompt: str,
+        *,
+        on_llm_request: Optional[Callable[[str], None]] = None,
+    ) -> dict[str, Any]:
+        """
+        Run the LLM with JSON-parse retries and transport backoff.
+
+        Preconditions:
+            - prompt is the fully assembled editor prompt.
+        Postconditions:
+            - Returns a dict; on an unrecoverable JSON parse it returns a fallback dict
+              carrying a "summary" and empty "feedback_items" rather than raising.
+            - Raises only when a transport/timeout error persists past the retry budget.
+        """
         if on_llm_request:
             on_llm_request("Reviewing draft for style and clarity...")
         agent = Agent(model=self._model, system_prompt=COPY_EDITOR_PROMPT)
@@ -255,10 +250,19 @@ class BlogCopyEditorAgent:
                 "summary": "Copy editor could not parse the model response. Please review the draft manually.",
                 "feedback_items": [],
             }
+        return data
 
-        summary = (data.get("summary") or "").strip() or "No summary generated."
-        feedback_data = data.get("feedback_items") or []
+    def _parse_feedback_items(self, feedback_data: Any) -> list[FeedbackItem]:
+        """
+        Convert raw model feedback entries into validated FeedbackItem objects.
 
+        Preconditions:
+            - feedback_data is iterable; non-dict entries and entries with an empty
+              issue are skipped.
+        Postconditions:
+            - Returns a list with one FeedbackItem per entry that has a non-empty issue,
+              in input order.
+        """
         feedback_items: list[FeedbackItem] = []
         for item in feedback_data:
             if not isinstance(item, dict):
@@ -278,11 +282,39 @@ class BlogCopyEditorAgent:
                         suggestion=suggestion,
                     )
                 )
+        return feedback_items
 
-        # Inject pre-computed length feedback when the draft is outside the intended band.
-        # When soft_max is set, anything at or below that ceiling is acceptable — do not flag for being
-        # merely above the nominal target (e.g. 1134 words vs ~1000 target is fine when soft_max is 1300).
-        # Above soft_max, use profile-tunable ratios vs target for must_fix / should_fix.
+    def _inject_length_feedback(
+        self,
+        feedback_items: list[FeedbackItem],
+        copy_editor_input: CopyEditorInput,
+        actual_word_count: int,
+    ) -> list[FeedbackItem]:
+        """
+        Add programmatic length feedback based on the draft's word-count bands.
+
+        When soft_max is set, anything at or below that ceiling is acceptable — do not
+        flag for being merely above the nominal target (e.g. 1134 words vs ~1000 target
+        is fine when soft_max is 1300). Above soft_max, use profile-tunable ratios vs
+        target for must_fix / should_fix. Thin technical deep dives get a 'consider' hint.
+
+        Preconditions:
+            - actual_word_count == len(draft.split()) for the reviewed draft.
+        Postconditions:
+            - Returns the same list object passed in, mutated with 0..2 length items:
+              an over-length item (must_fix inserted at the front, else should_fix
+              appended) when the draft is past the soft ceiling, and/or a 'consider'
+              under-length hint appended for thin technical deep dives.
+        Invariants:
+            - Item ordering matches the pre-refactor behavior: must_fix is prepended;
+              should_fix and the deep-dive hint are appended.
+        """
+        target_word_count = copy_editor_input.target_word_count
+        soft_min = copy_editor_input.soft_min_words
+        soft_max = copy_editor_input.soft_max_words
+        must_ratio = copy_editor_input.editor_must_fix_over_ratio
+        should_ratio = copy_editor_input.editor_should_fix_over_ratio
+
         over_ratio = actual_word_count / target_word_count if target_word_count > 0 else 1.0
         cap_label = soft_max if soft_max is not None else target_word_count
         past_soft_ceiling = soft_max is None or actual_word_count > soft_max
@@ -360,6 +392,57 @@ class BlogCopyEditorAgent:
                     ),
                 )
             )
+
+        return feedback_items
+
+    def run(
+        self,
+        copy_editor_input: CopyEditorInput,
+        *,
+        on_llm_request: Optional[Callable[[str], None]] = None,
+        feedback_output_path: Optional[Union[str, Path]] = None,
+    ) -> CopyEditorOutput:
+        """
+        Provide copy editing feedback on the draft based on the style guide.
+
+        Orchestrates the pass: build the prompt, invoke the LLM, parse the response,
+        inject programmatic length feedback, derive approval, and return the output.
+
+        Preconditions:
+            - copy_editor_input is a valid CopyEditorInput (draft non-empty).
+        Postconditions:
+            - Returns CopyEditorOutput with summary and feedback_items.
+            - If feedback_output_path is set, writes the same output to that path before returning.
+        """
+        draft = copy_editor_input.draft.strip()
+        if not draft:
+            logger.warning("Empty draft; returning minimal feedback.")
+            output = CopyEditorOutput(
+                summary="No draft provided. Please supply a blog post draft to review.",
+                feedback_items=[],
+            )
+            if feedback_output_path:
+                self._write_feedback_to_path(output, feedback_output_path)
+            return output
+
+        style_guide_text = self._style_prompt
+
+        logger.info(
+            "Copy editing: draft len=%s, style_guide len=%s",
+            len(draft),
+            len(style_guide_text),
+        )
+
+        actual_word_count = len(draft.split())
+
+        prompt = self._build_editor_prompt(copy_editor_input, draft, style_guide_text)
+        data = self._invoke_editor_llm(prompt, on_llm_request=on_llm_request)
+
+        summary = (data.get("summary") or "").strip() or "No summary generated."
+        feedback_items = self._parse_feedback_items(data.get("feedback_items") or [])
+        feedback_items = self._inject_length_feedback(
+            feedback_items, copy_editor_input, actual_word_count
+        )
 
         # Derive approved: true when the LLM says so and there are no blocking items.
         # Fall back to checking severity counts when the model omits the field.
