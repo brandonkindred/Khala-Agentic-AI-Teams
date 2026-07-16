@@ -29,17 +29,8 @@ if _api_main is None:
     _api_main = importlib.util.module_from_spec(_spec)
     sys.modules["blogging_api_main_unit"] = _api_main
     _spec.loader.exec_module(_api_main)
-    for _cls_name in (
-        "SelectTitleRequest",
-        "TitleRatingItem",
-        "RateTitlesRequest",
-        "StoryResponseRequest",
-        "BlogAnswersRequest",
-        "DraftFeedbackRequest",
-    ):
-        _cls = getattr(_api_main, _cls_name, None)
-        if _cls is not None:
-            _cls.model_rebuild(_types_namespace={**_api_main.__dict__})
+    # `_rebuild_api_models()` runs at module import and resolves every model
+    # defined in api/main (request DTOs included), so no per-class rebuild here.
 app = _api_main.app
 
 
@@ -443,3 +434,22 @@ def test_publish_terminal_event_swallows_publish_failure(monkeypatch) -> None:
 def test_rebuild_api_models_idempotent() -> None:
     _api_main._rebuild_api_models()
     _api_main._rebuild_api_models()  # idempotent
+
+
+def test_all_local_models_rebuilt() -> None:
+    """Every BaseModel defined in api/main has resolved annotations after import.
+
+    Guards against the auto-scan regressing to a hand-maintained list: if a new
+    model were added to api/main and left unresolved, it would show up here.
+    """
+    from pydantic import BaseModel as _BM
+
+    local_models = [
+        obj
+        for obj in vars(_api_main).values()
+        if isinstance(obj, type) and issubclass(obj, _BM) and obj.__module__ == _api_main.__name__
+    ]
+    # Sanity: the module defines multiple request/response DTOs.
+    assert len(local_models) > 1, "expected multiple locally-defined models"
+    unresolved = [m.__name__ for m in local_models if not m.__pydantic_complete__]
+    assert not unresolved, f"models with unresolved annotations: {unresolved}"

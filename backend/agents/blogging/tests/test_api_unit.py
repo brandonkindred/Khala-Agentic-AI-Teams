@@ -27,20 +27,8 @@ _spec = importlib.util.spec_from_file_location(
 _api_main = importlib.util.module_from_spec(_spec)
 sys.modules["blogging_api_main_unit"] = _api_main
 _spec.loader.exec_module(_api_main)
-# api/main only rebuilds the response classes by default; the request DTOs
-# defined in the second half of the file need an explicit rebuild after we
-# import the module under a synthetic name.
-for _cls_name in (
-    "SelectTitleRequest",
-    "TitleRatingItem",
-    "RateTitlesRequest",
-    "StoryResponseRequest",
-    "BlogAnswersRequest",
-    "DraftFeedbackRequest",
-):
-    _cls = getattr(_api_main, _cls_name, None)
-    if _cls is not None:
-        _cls.model_rebuild(_types_namespace={**_api_main.__dict__})
+# `_rebuild_api_models()` runs at module import and resolves every model defined
+# in api/main (request DTOs included), so no per-class rebuild is needed here.
 app = _api_main.app
 
 
