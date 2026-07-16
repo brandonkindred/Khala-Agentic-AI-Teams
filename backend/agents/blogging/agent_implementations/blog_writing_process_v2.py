@@ -13,6 +13,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Tuple, Union
 
@@ -76,7 +77,8 @@ from llm_service import (
     get_strands_model,
     with_model_override,
 )
-from llm_service.interface import LLMClient
+from llm_service.interface import LLMClient, LLMRateLimitError, LLMTemporaryError
+from shared_concurrency import parallel_map
 
 from . import _path_setup  # noqa: F401
 
@@ -86,11 +88,11 @@ _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
 STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
 BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 # Hard upper bound on the draft/copy-edit loop iterations (the `for iteration in
-# range(1, draft_editor_iterations + 1)` cap in run_draft_stage). It is deliberately
-# high because the loop normally exits *early* when the copy editor approves the
-# draft, or escalates to the author at COPY_EDIT_ESCALATION_THRESHOLD — 500 is a
-# runaway-safety ceiling, not an expected iteration count.
-DRAFT_EDITOR_ITERATIONS = 500
+# range(1, draft_editor_iterations + 1)` cap in run_draft_stage). The loop normally
+# exits *early* when the copy editor approves the draft, or escalates to the author
+# every COPY_EDIT_ESCALATION_THRESHOLD iterations — 30 is a runaway-safety ceiling
+# (3x the escalation threshold), not an expected iteration count.
+DRAFT_EDITOR_ITERATIONS = 30
 MAX_REWRITE_ITERATIONS = 100
 # After this many copy-edit revisions without editor approval, escalate to the user
 COPY_EDIT_ESCALATION_THRESHOLD = 10
@@ -101,6 +103,12 @@ COPY_EDIT_ESCALATION_THRESHOLD = 10
 # ``start_pipeline_heartbeat`` runs a background thread that heartbeats on its own
 # schedule, so these blocking sleeps never risk a heartbeat timeout.
 HITL_POLL_INTERVAL_S = int(os.getenv("BLOGGING_HITL_POLL_INTERVAL_S", "10"))
+
+# A human-in-the-loop wait can poll the job store for up to ~1h; a single transient
+# job-store read blip should not fail the whole job. Tolerate this many CONSECUTIVE
+# read failures (sleeping a poll interval between each) before giving up and letting the
+# error propagate — a persistent outage still surfaces, a momentary one is ridden out.
+HITL_MAX_CONSECUTIVE_READ_ERRORS = 5
 
 # Default model - use environment variable or this default
 DEFAULT_MODEL = "deepseek-v4-pro:cloud"
@@ -128,6 +136,84 @@ def _is_external_cancellation(exc: BaseException) -> bool:
             return True
         cur = cur.__cause__ or cur.__context__
     return False
+
+
+def _wait_for_hitl(
+    job_id: str,
+    is_waiting: Callable[[str], bool],
+    *,
+    on_poll: Optional[Callable[[str], bool]] = None,
+) -> bool:
+    """Block until a human-in-the-loop wait clears or the job goes terminal.
+
+    Single home for the pipeline's HITL poll loops (title selection, outline/draft
+    feedback, uncertainty answers): the poll cadence (``HITL_POLL_INTERVAL_S``), the
+    terminal-status check, and the blocking sleep live here instead of being copied
+    at every wait site.
+
+    Args:
+        job_id: The job being waited on.
+        is_waiting: Predicate ``(job_id) -> bool`` — True while a human response is
+            still outstanding.
+        on_poll: Optional ``(job_id) -> bool`` invoked once per iteration before
+            sleeping. Return True to re-poll immediately without sleeping (e.g. after
+            handling incremental feedback); a falsy return sleeps.
+
+    Preconditions:
+        - ``is_waiting`` (and ``on_poll`` when provided) are callables accepting a
+          ``job_id`` string.
+    Postconditions:
+        - Returns True iff the job reached a terminal state while waiting — either a
+          "failed"/"cancelled" status, or the job disappeared from the store
+          (``get_blog_job`` is None). The caller aborts with its own FAIL result.
+        - Returns False once ``is_waiting`` became False without a terminal state
+          (a human responded) — the caller reads the response.
+        - A transient job-store read failure (``is_waiting``/``get_blog_job`` raising)
+          is ridden out: it is logged and retried on the next poll, up to
+          ``HITL_MAX_CONSECUTIVE_READ_ERRORS`` CONSECUTIVE failures, after which the
+          error propagates (a persistent outage still fails the job). ``on_poll`` errors
+          are not caught — they propagate immediately.
+        - Does not mutate job state; ``on_poll`` may.
+    """
+    consecutive_read_errors = 0
+    while True:
+        # Wrap only the job-store reads: a transient blip during a long HITL wait should
+        # retry next poll, not fail the whole job. on_poll (below) stays outside so its
+        # errors surface immediately.
+        try:
+            if not is_waiting(job_id):
+                return False
+            job_data = get_blog_job(job_id)
+        except Exception as e:
+            consecutive_read_errors += 1
+            if consecutive_read_errors > HITL_MAX_CONSECUTIVE_READ_ERRORS:
+                logger.warning(
+                    "HITL wait for job %s: %d consecutive job-store read failures; giving up",
+                    job_id,
+                    consecutive_read_errors,
+                )
+                raise
+            logger.warning(
+                "HITL wait for job %s: transient job-store read failure (%d/%d), retrying: %s",
+                job_id,
+                consecutive_read_errors,
+                HITL_MAX_CONSECUTIVE_READ_ERRORS,
+                e,
+            )
+            time.sleep(HITL_POLL_INTERVAL_S)
+            continue
+        consecutive_read_errors = 0
+        if job_data is None:
+            # The job was deleted from the store mid-wait. ``get_blog_job`` only
+            # returns None for a genuinely-absent job (transient/HTTP errors raise),
+            # so treat it as terminal and stop polling a job that no longer exists.
+            logger.warning("Job %s not found during HITL wait — treating as terminal", job_id)
+            return True
+        if job_data.get("status") in ("failed", "cancelled"):
+            return True
+        if on_poll is not None and on_poll(job_id):
+            continue
+        time.sleep(HITL_POLL_INTERVAL_S)
 
 
 def _apply_stage_model_override(base: LLMClient, model: Optional[str]) -> LLMClient:
@@ -590,6 +676,99 @@ def _run_title_selection(
         all_ratings: list[dict] = []
         title_round = 0
 
+        def _process_title_feedback(poll_job_id: str) -> bool:
+            """Consume a pending like/dislike rating during a title-selection wait.
+
+            Regenerates (or drops) the rated candidate via the LLM and re-presents
+            the list. Returns True when a rating was handled so the poll loop
+            re-checks immediately without sleeping; False when nothing was pending.
+            """
+            nonlocal title_choices, title_round
+            pending = get_pending_title_feedback(poll_job_id)
+            if not pending:
+                return False
+            clear_pending_title_feedback(poll_job_id)
+            for fb in pending:
+                all_ratings.append(fb)
+
+            rated_title = pending[0].get("title", "")
+            rating_type = pending[0].get("rating", "like")
+            all_liked = [r["title"] for r in all_ratings if r.get("rating") == "like"]
+            all_disliked = [r["title"] for r in all_ratings if r.get("rating") == "dislike"]
+            all_previous = [r["title"] for r in all_ratings]
+
+            logger.info(
+                "Title feedback (round %s): %r rated %r — generating replacement",
+                title_round,
+                rated_title,
+                rating_type,
+            )
+
+            feedback_prompt = (
+                "Generate exactly 1 new blog post title candidate to replace one that was rated.\n\n"
+                f"TOPIC (the article's core argument — the title MUST align with this): {plan.overarching_topic}\n\n"
+            )
+            if plan.target_reader:
+                feedback_prompt += f"TARGET READER: {plan.target_reader}\n\n"
+            section_titles = [sec.title for sec in sorted(plan.sections, key=lambda s: s.order)]
+            if section_titles:
+                feedback_prompt += "ARTICLE SECTIONS:\n"
+                feedback_prompt += "\n".join(f"- {t}" for t in section_titles) + "\n\n"
+            feedback_prompt += (
+                "REQUIREMENTS:\n"
+                "- The title MUST accurately reflect the topic above.\n"
+                "- The title should promise the reader something concrete and valuable.\n"
+                "- Be specific about what the reader will gain.\n\n"
+            )
+            if all_liked:
+                feedback_prompt += (
+                    "Titles the user LIKED (generate a title with a similar style/angle):\n"
+                )
+                feedback_prompt += "\n".join(f"- {t}" for t in all_liked) + "\n\n"
+            if all_disliked:
+                feedback_prompt += "Titles the user DISLIKED (avoid this style/angle):\n"
+                feedback_prompt += "\n".join(f"- {t}" for t in all_disliked) + "\n\n"
+            if all_previous:
+                feedback_prompt += "DO NOT repeat any of these previous titles:\n"
+                feedback_prompt += "\n".join(f"- {t}" for t in all_previous) + "\n\n"
+            feedback_prompt += (
+                "Return a JSON object with exactly one key: "
+                '"titles": [{"title": "...", "probability_of_success": 0.0-1.0}]'
+            )
+
+            replacement = None
+            try:
+                data = llm_client.complete_json(
+                    feedback_prompt, temperature=0.7, objective="regenerate blog titles"
+                )
+                new_titles = data.get("titles", []) if data else []
+                if new_titles and isinstance(new_titles, list):
+                    t = new_titles[0]
+                    if isinstance(t, dict) and t.get("title"):
+                        replacement = {
+                            "title": t["title"],
+                            "probability_of_success": float(t.get("probability_of_success", 0.5)),
+                        }
+            except Exception as e:
+                logger.warning("Failed to generate replacement title: %s", e)
+
+            if replacement:
+                title_choices = [
+                    replacement if tc.get("title") == rated_title else tc for tc in title_choices
+                ]
+            else:
+                title_choices = [tc for tc in title_choices if tc.get("title") != rated_title]
+
+            title_round += 1
+            job_updater(
+                phase="title_selection",
+                progress=get_phase_progress(BlogPhase.TITLE_SELECTION, 0.0),
+                status_text=f"Rate titles (round {title_round}, {len(title_choices)} candidates)...",
+                waiting_for_title_selection=True,
+                title_choices=title_choices,
+            )
+            return True
+
         while True:
             title_round += 1
             _update(
@@ -600,104 +779,12 @@ def _run_title_selection(
                 title_choices=title_choices,
             )
 
-            while is_waiting_for_title_selection(job_id):
-                job_data = get_blog_job(job_id)
-                if job_data and job_data.get("status") in ("failed", "cancelled"):
-                    return None
-
-                # Check for pending like/dislike feedback
-                pending = get_pending_title_feedback(job_id)
-                if pending:
-                    clear_pending_title_feedback(job_id)
-                    for fb in pending:
-                        all_ratings.append(fb)
-
-                    rated_title = pending[0].get("title", "")
-                    rating_type = pending[0].get("rating", "like")
-                    all_liked = [r["title"] for r in all_ratings if r.get("rating") == "like"]
-                    all_disliked = [r["title"] for r in all_ratings if r.get("rating") == "dislike"]
-                    all_previous = [r["title"] for r in all_ratings]
-
-                    logger.info(
-                        "Title feedback (round %s): %r rated %r — generating replacement",
-                        title_round,
-                        rated_title,
-                        rating_type,
-                    )
-
-                    feedback_prompt = (
-                        "Generate exactly 1 new blog post title candidate to replace one that was rated.\n\n"
-                        f"TOPIC (the article's core argument — the title MUST align with this): {plan.overarching_topic}\n\n"
-                    )
-                    if plan.target_reader:
-                        feedback_prompt += f"TARGET READER: {plan.target_reader}\n\n"
-                    section_titles = [
-                        sec.title for sec in sorted(plan.sections, key=lambda s: s.order)
-                    ]
-                    if section_titles:
-                        feedback_prompt += "ARTICLE SECTIONS:\n"
-                        feedback_prompt += "\n".join(f"- {t}" for t in section_titles) + "\n\n"
-                    feedback_prompt += (
-                        "REQUIREMENTS:\n"
-                        "- The title MUST accurately reflect the topic above.\n"
-                        "- The title should promise the reader something concrete and valuable.\n"
-                        "- Be specific about what the reader will gain.\n\n"
-                    )
-                    if all_liked:
-                        feedback_prompt += (
-                            "Titles the user LIKED (generate a title with a similar style/angle):\n"
-                        )
-                        feedback_prompt += "\n".join(f"- {t}" for t in all_liked) + "\n\n"
-                    if all_disliked:
-                        feedback_prompt += "Titles the user DISLIKED (avoid this style/angle):\n"
-                        feedback_prompt += "\n".join(f"- {t}" for t in all_disliked) + "\n\n"
-                    if all_previous:
-                        feedback_prompt += "DO NOT repeat any of these previous titles:\n"
-                        feedback_prompt += "\n".join(f"- {t}" for t in all_previous) + "\n\n"
-                    feedback_prompt += (
-                        "Return a JSON object with exactly one key: "
-                        '"titles": [{"title": "...", "probability_of_success": 0.0-1.0}]'
-                    )
-
-                    replacement = None
-                    try:
-                        data = llm_client.complete_json(
-                            feedback_prompt, temperature=0.7, objective="regenerate blog titles"
-                        )
-                        new_titles = data.get("titles", []) if data else []
-                        if new_titles and isinstance(new_titles, list):
-                            t = new_titles[0]
-                            if isinstance(t, dict) and t.get("title"):
-                                replacement = {
-                                    "title": t["title"],
-                                    "probability_of_success": float(
-                                        t.get("probability_of_success", 0.5)
-                                    ),
-                                }
-                    except Exception as e:
-                        logger.warning("Failed to generate replacement title: %s", e)
-
-                    if replacement:
-                        title_choices = [
-                            replacement if tc.get("title") == rated_title else tc
-                            for tc in title_choices
-                        ]
-                    else:
-                        title_choices = [
-                            tc for tc in title_choices if tc.get("title") != rated_title
-                        ]
-
-                    title_round += 1
-                    job_updater(
-                        phase="title_selection",
-                        progress=get_phase_progress(BlogPhase.TITLE_SELECTION, 0.0),
-                        status_text=f"Rate titles (round {title_round}, {len(title_choices)} candidates)...",
-                        waiting_for_title_selection=True,
-                        title_choices=title_choices,
-                    )
-                    continue
-
-                time.sleep(HITL_POLL_INTERVAL_S)
+            if _wait_for_hitl(
+                job_id,
+                is_waiting_for_title_selection,
+                on_poll=_process_title_feedback,
+            ):
+                return None
 
             job_data = get_blog_job(job_id) or {}
             selected_title = job_data.get("selected_title")
@@ -1160,11 +1247,8 @@ def run_planning_stage(
 
             while True:
                 # Poll until user submits feedback
-                while is_waiting_for_draft_feedback(job_id):
-                    job_data = get_blog_job(job_id)
-                    if job_data and job_data.get("status") in ("failed", "cancelled"):
-                        return planning_phase_result, None, "FAIL"
-                    time.sleep(HITL_POLL_INTERVAL_S)
+                if _wait_for_hitl(job_id, is_waiting_for_draft_feedback):
+                    return planning_phase_result, None, "FAIL"
 
                 feedback_data = get_user_draft_feedback(job_id)
                 if not feedback_data:
@@ -1360,11 +1444,18 @@ def run_draft_stage(
                     on_llm_request=lambda msg: _update(BlogPhase.DRAFT_INITIAL, status_text=msg),
                     draft_output_path=draft_output_path,
                 )
-            except BloggingError:
-                raise
-            except CancelledError:
+            except (BloggingError, CancelledError, LLMRateLimitError, LLMTemporaryError):
+                # Transient LLM-transport errors propagate unwrapped so the Temporal
+                # activity funnel can retry the whole stage rather than masking them
+                # as a terminal DraftError (see temporal.activities._run_stage).
                 raise
             except Exception as e:
+                # A Temporal runtime cancellation can surface as a non-CancelledError
+                # type; let it propagate as cancellation instead of masking it as a
+                # terminal DraftError — matching every other stage's handler (draft
+                # revision, planning, gates, validators).
+                if _is_external_cancellation(e):
+                    raise
                 raise DraftError(
                     f"Initial draft generation failed: {e}", iteration=iteration, cause=e
                 ) from e
@@ -1455,11 +1546,8 @@ def run_draft_stage(
                     add_blog_pending_questions(job_id, q_dicts)
 
                     # Block until user answers
-                    while is_waiting_for_blog_answers(job_id):
-                        job_data = get_blog_job(job_id)
-                        if job_data and job_data.get("status") in ("failed", "cancelled"):
-                            return planning_phase_result, draft_result, "FAIL"
-                        time.sleep(HITL_POLL_INTERVAL_S)
+                    if _wait_for_hitl(job_id, is_waiting_for_blog_answers):
+                        return planning_phase_result, draft_result, "FAIL"
 
                     # ── Step 2: Revise draft with the user's answers ──────
                     job_data = get_blog_job(job_id)
@@ -1517,11 +1605,8 @@ def run_draft_stage(
                 )
 
                 # Poll until user submits feedback
-                while is_waiting_for_draft_feedback(job_id):
-                    job_data = get_blog_job(job_id)
-                    if job_data and job_data.get("status") in ("failed", "cancelled"):
-                        return planning_phase_result, draft_result, "FAIL"
-                    time.sleep(HITL_POLL_INTERVAL_S)
+                if _wait_for_hitl(job_id, is_waiting_for_draft_feedback):
+                    return planning_phase_result, draft_result, "FAIL"
 
                 # Process user feedback in a loop until approved
                 while True:
@@ -1619,11 +1704,8 @@ def run_draft_stage(
                     )
 
                     # Poll until user submits feedback
-                    while is_waiting_for_draft_feedback(job_id):
-                        job_data = get_blog_job(job_id)
-                        if job_data and job_data.get("status") in ("failed", "cancelled"):
-                            return planning_phase_result, draft_result, "FAIL"
-                        time.sleep(HITL_POLL_INTERVAL_S)
+                    if _wait_for_hitl(job_id, is_waiting_for_draft_feedback):
+                        return planning_phase_result, draft_result, "FAIL"
 
         else:
             # Copy edit loop
@@ -1740,11 +1822,8 @@ def run_draft_stage(
                     )
 
                     # Poll until user submits feedback
-                    while is_waiting_for_draft_feedback(job_id):
-                        job_data = get_blog_job(job_id)
-                        if job_data and job_data.get("status") in ("failed", "cancelled"):
-                            return planning_phase_result, draft_result, "FAIL"
-                        time.sleep(HITL_POLL_INTERVAL_S)
+                    if _wait_for_hitl(job_id, is_waiting_for_draft_feedback):
+                        return planning_phase_result, draft_result, "FAIL"
 
                     esc_feedback = get_user_draft_feedback(job_id)
                     if esc_feedback and esc_feedback.get("approved"):
@@ -1846,9 +1925,8 @@ def run_draft_stage(
                     work_dir=work_dir,
                     iteration=iteration,
                 )
-            except BloggingError:
-                raise
-            except CancelledError:
+            except (BloggingError, CancelledError, LLMRateLimitError, LLMTemporaryError):
+                # Transient LLM-transport errors propagate unwrapped for Temporal retry.
                 raise
             except Exception as e:
                 if _is_external_cancellation(e):
@@ -1901,6 +1979,15 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
             above) propagates unchanged.
         CancelledError: a Temporal-native cancellation propagates for the worker
             to observe (never swallowed here).
+        LLMRateLimitError / LLMTemporaryError: a transient LLM-transport failure
+            propagates unwrapped so the Temporal activity funnel can retry the
+            stage instead of masking it as a domain gate failure.
+
+    Note:
+        The fact-check and compliance gates are independent given the draft and the
+        deterministic validator report, so they run concurrently via ``parallel_map``
+        (which copies the caller's LLM attribution/request-id contextvars into each
+        worker). Validators run first because the compliance gate consumes their report.
     """
     assert ctx.draft_result is not None, (
         "run_gates_stage requires ctx.draft_result (set by the draft stage)"
@@ -1952,23 +2039,110 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
             brand_spec_content=brand_spec_content,
         )
 
-        for rewrite_iter in range(max_rewrite_iterations):
-            # Fact check phase
-            _update(
-                BlogPhase.FACT_CHECK,
-                sub_progress=rewrite_iter / max_rewrite_iterations,
-                status_text=f"Running fact check (iteration {rewrite_iter + 1})...",
-                rewrite_iterations=rewrite_iter,
-            )
+        # The fact-check and compliance gates are independent given the draft (and,
+        # for compliance, the deterministic validator report), so they run
+        # concurrently below. Each returns ``(report, error)`` — CAPTURING (not
+        # raising) any failure it would otherwise raise — so that parallel_map runs
+        # BOTH gates to completion before the stage propagates a failure. That drain
+        # matters because both gates persist artifacts (fact_check_report.json /
+        # compliance_report.json) into the same work_dir: if one raised while the
+        # other was still running, parallel_map's fast-fail would abandon the running
+        # worker, which could later overwrite the report from a subsequent
+        # retry/rewrite. The captured error is Temporal cancellation, BloggingError,
+        # or a transient LLM-transport error (propagated unwrapped so the Temporal
+        # activity funnel can retry the stage — see temporal.activities._run_stage),
+        # or any other failure mapped to the gate's domain error type.
+        #
+        # These are nested (not module-level) deliberately: they take only the
+        # per-iteration draft/validator report as parameters — so they never close
+        # over the `rewrite_iter` loop variable — and intentionally close over the
+        # loop-INVARIANT collaborators built once above (the agents,
+        # require_disclaimer_for, work_dir, brand_spec_prompt_text, _update). That
+        # closure is accepted for conciseness; the gates' behavior is covered
+        # end-to-end via run_pipeline in test_run_pipeline_gates.py.
+        def _fact_check_gate(draft: str):
+            """Run the fact-check gate, capturing (not raising) its outcome.
 
+            Preconditions:
+                - ``draft`` is the current draft text to check.
+            Postconditions:
+                - Returns ``(FactCheckReport, None)`` on success, or ``(None, error)`` on
+                  failure — CAPTURING every failure so ``parallel_map`` runs the sibling
+                  gate to completion instead of fast-failing (see the block comment above).
+                - The captured ``error`` preserves its class: ``BloggingError``,
+                  ``CancelledError``, and transient ``LLMRateLimitError``/``LLMTemporaryError``
+                  pass through unwrapped (for cancellation/Temporal-retry handling); an
+                  external cancellation surfacing as another type is passed through too;
+                  any other exception is wrapped in ``FactCheckError``.
+            """
+            # Both gates report progress under BlogPhase.FACT_CHECK — the umbrella phase
+            # for this concurrent step — so the two callbacks don't flip the UI phase
+            # back and forth between FACT_CHECK and COMPLIANCE while they run together.
             try:
-                validator_report = run_validators_from_work_dir(work_dir)
-                fact_report = fact_check_agent.run(
-                    draft_result.draft,
+                report = fact_check_agent.run(
+                    draft,
                     require_disclaimer_for=require_disclaimer_for,
                     work_dir=work_dir,
                     on_llm_request=lambda msg: _update(BlogPhase.FACT_CHECK, status_text=msg),
                 )
+                return report, None
+            except (BloggingError, CancelledError, LLMRateLimitError, LLMTemporaryError) as e:
+                return None, e
+            except Exception as e:
+                if _is_external_cancellation(e):
+                    return None, e
+                return None, FactCheckError(f"Fact check failed: {e}", cause=e)
+
+        def _compliance_gate(draft: str, validator_report):
+            """Run the compliance gate, capturing (not raising) its outcome.
+
+            Preconditions:
+                - ``draft`` is the current draft text; ``validator_report`` is the
+                  deterministic validator result (a Pydantic model, or a stand-in that
+                  the ``model_dump`` guard tolerates) that compliance consumes.
+            Postconditions:
+                - Returns ``(ComplianceReport, None)`` on success, or ``(None, error)`` on
+                  failure — capturing every failure (same rationale as ``_fact_check_gate``).
+                - The captured ``error`` preserves its class: ``BloggingError``,
+                  ``CancelledError``, and transient LLM errors pass through unwrapped, an
+                  external cancellation surfacing as another type is passed through, and
+                  any other exception is wrapped in ``ComplianceError``.
+            """
+            # Reports progress under BlogPhase.FACT_CHECK too — see _fact_check_gate; the
+            # umbrella phase keeps the concurrent gates from flip-flopping the UI phase.
+            try:
+                report = compliance_agent.run(
+                    draft,
+                    brand_spec_prompt=brand_spec_prompt_text,
+                    # validator_report is normally a Pydantic model, but the
+                    # hasattr guard tolerates plain-object stand-ins from test
+                    # doubles / legacy validator paths (passes None if absent).
+                    validator_report=validator_report.model_dump()
+                    if hasattr(validator_report, "model_dump")
+                    else None,
+                    work_dir=work_dir,
+                    on_llm_request=lambda msg: _update(BlogPhase.FACT_CHECK, status_text=msg),
+                )
+                return report, None
+            except (BloggingError, CancelledError, LLMRateLimitError, LLMTemporaryError) as e:
+                return None, e
+            except Exception as e:
+                if _is_external_cancellation(e):
+                    return None, e
+                return None, ComplianceError(f"Compliance check failed: {e}", cause=e)
+
+        for rewrite_iter in range(max_rewrite_iterations):
+            _update(
+                BlogPhase.FACT_CHECK,
+                sub_progress=rewrite_iter / max_rewrite_iterations,
+                status_text=f"Running fact-check + compliance (iteration {rewrite_iter + 1})...",
+                rewrite_iterations=rewrite_iter,
+            )
+
+            # Deterministic validators run first (non-LLM, and the compliance gate
+            # consumes their report). Their failures map to FactCheckError as before.
+            try:
+                validator_report = run_validators_from_work_dir(work_dir)
             except BloggingError:
                 raise
             except CancelledError:
@@ -1978,35 +2152,54 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                     raise
                 raise FactCheckError(f"Fact check failed: {e}", cause=e) from e
 
-            # Compliance phase
-            _update(
-                BlogPhase.COMPLIANCE,
-                sub_progress=rewrite_iter / max_rewrite_iterations,
-                status_text=f"Running compliance check (iteration {rewrite_iter + 1})...",
-                rewrite_iterations=rewrite_iter,
+            # Fan the two independent LLM gates out concurrently. parallel_map copies
+            # this thread's context into each worker so the LLM attribution /
+            # request-id contextvars propagate (a raw ThreadPoolExecutor would not;
+            # see llm_service.attribution). partial() binds the current draft /
+            # validator report eagerly; preserve_order keeps [fact, compliance]
+            # positional; skip_none=False because each gate always returns a
+            # (report, error) tuple. Because the gates capture rather than raise,
+            # parallel_map never fast-fails — both run to completion before we
+            # propagate any failure (no abandoned worker; see the gate comment above).
+            (fact_report, fact_error), (compliance_report, compliance_error) = parallel_map(
+                [
+                    partial(_fact_check_gate, draft_result.draft),
+                    partial(_compliance_gate, draft_result.draft, validator_report),
+                ],
+                lambda gate: gate(),
+                max_workers=2,
+                preserve_order=True,
+                skip_none=False,
             )
 
-            try:
-                compliance_report = compliance_agent.run(
-                    draft_result.draft,
-                    brand_spec_prompt=brand_spec_prompt_text,
-                    # validator_report is normally a Pydantic model, but the
-                    # hasattr guard tolerates plain-object stand-ins from test
-                    # doubles / legacy validator paths (passes None if absent).
-                    validator_report=validator_report.model_dump()
-                    if hasattr(validator_report, "model_dump")
-                    else None,
-                    work_dir=work_dir,
-                    on_llm_request=lambda msg: _update(BlogPhase.COMPLIANCE, status_text=msg),
+            # Both gates have finished; propagate a failure (if any) with a fixed
+            # precedence: cancellation first, then a transient LLM-transport error
+            # (prefer a Temporal stage retry over a terminal domain failure), then the
+            # fact-check domain error, then the compliance one (input order).
+            #
+            # The three passes are deliberate: each pass scans BOTH gates for a
+            # higher-priority error class before falling through, so cancellation from
+            # *either* gate wins over a transient from the other, which in turn wins over
+            # any domain error — a single positional pass could not express that ordering.
+            gate_errors = [e for e in (fact_error, compliance_error) if e is not None]
+            # Only one error is raised (by the precedence below), so when BOTH gates
+            # failed, log every error first — otherwise the lower-precedence failure
+            # would be silently discarded and never reach the logs.
+            if len(gate_errors) > 1:
+                logger.error(
+                    "Both gates failed on rewrite iteration %s; raising by precedence, "
+                    "all gate errors: %s",
+                    rewrite_iter + 1,
+                    [f"{type(e).__name__}: {e}" for e in gate_errors],
                 )
-            except BloggingError:
-                raise
-            except CancelledError:
-                raise
-            except Exception as e:
-                if _is_external_cancellation(e):
-                    raise
-                raise ComplianceError(f"Compliance check failed: {e}", cause=e) from e
+            for gate_error in gate_errors:
+                if isinstance(gate_error, CancelledError) or _is_external_cancellation(gate_error):
+                    raise gate_error
+            for gate_error in gate_errors:
+                if isinstance(gate_error, (LLMRateLimitError, LLMTemporaryError)):
+                    raise gate_error
+            if gate_errors:
+                raise gate_errors[0]
 
             all_pass = (
                 validator_report.status == "PASS"
@@ -2181,9 +2374,8 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                     work_dir=work_dir,
                     iteration=rewrite_iter + 1,
                 )
-            except BloggingError:
-                raise
-            except CancelledError:
+            except (BloggingError, CancelledError, LLMRateLimitError, LLMTemporaryError):
+                # Transient LLM-transport errors propagate unwrapped for Temporal retry.
                 raise
             except Exception as e:
                 if _is_external_cancellation(e):

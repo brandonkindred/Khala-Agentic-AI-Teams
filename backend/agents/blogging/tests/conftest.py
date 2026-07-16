@@ -8,11 +8,64 @@ import json
 from collections.abc import AsyncIterable
 from typing import Any
 
+import pytest
 from strands.models.model import Model
 from strands.types.content import Message as StrandsMessage
 from strands.types.content import SystemContentBlock
 from strands.types.streaming import StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
+
+# Job-store helpers captured by reference inside ``api/main`` at import time. The
+# ``patched_client`` fixture rebinds each to the fake-backed implementation so
+# every endpoint hits the in-memory store.
+_BLOG_JOB_HELPERS = (
+    "create_blog_job",
+    "delete_blog_job",
+    "get_blog_job",
+    "list_blog_jobs",
+    "update_blog_job",
+    "start_blog_job",
+    "complete_blog_job",
+    "fail_blog_job",
+    "approve_blog_job",
+    "unapprove_blog_job",
+    "submit_title_selection",
+    "submit_title_ratings",
+    "submit_story_user_message",
+    "skip_current_story_gap",
+    "submit_blog_answers",
+    "submit_draft_feedback",
+    "is_waiting_for_draft_feedback",
+)
+
+
+@pytest.fixture
+def patched_client(monkeypatch, fake_job_client) -> Any:
+    """Back the blogging API with the in-memory fake job store.
+
+    Replaces the ``blog_job_store`` module client and rebinds the job-store helper
+    references captured inside ``api/main`` at import time, so every endpoint hits
+    the fake. Imports the shared app module lazily so test modules that never use
+    this fixture do not pay the ``api/main`` import cost.
+    """
+    from _api_test_utils import api_main
+    from shared import blog_job_store as bjs
+
+    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
+    for name in _BLOG_JOB_HELPERS:
+        helper = getattr(bjs, name, None)
+        if helper is not None:
+            monkeypatch.setattr(api_main, name, helper)
+    return fake_job_client
+
+
+@pytest.fixture
+def client(patched_client) -> Any:
+    """A ``TestClient`` for the blogging app, backed by the fake job store."""
+    from _api_test_utils import app
+    from fastapi.testclient import TestClient
+
+    return TestClient(app)
 
 
 class SequencedMockModel(Model):

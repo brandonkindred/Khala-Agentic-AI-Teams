@@ -39,7 +39,7 @@ Research → Planning → Writer → (optional) Writer ↔ Copy Editor revision 
 - **Research** fetches and ranks sources from the web and arXiv.
 - **Planning** produces a persisted content plan (`content_plan.json` / `content_plan.md`): titles, narrative flow, section coverage, and analysis; refine loop until the plan is acceptable for the profile.
 - **Writer** writes the initial draft from research + **content plan**. Style and brand content are loaded by the caller before agent creation and passed in as full file contents (see Style guide below).
-- **Copy Editor** reviews the draft and returns feedback; the **Writer** agent revises based on feedback. In the v2 pipeline this loop runs up to `DRAFT_EDITOR_ITERATIONS` times (default 500; stops early when the editor approves).
+- **Copy Editor** reviews the draft and returns feedback; the **Writer** agent revises based on feedback. In the v2 pipeline this loop runs up to `DRAFT_EDITOR_ITERATIONS` times (default 30; stops early when the editor approves).
 - **Publication** receives the final draft: submit → human approve/reject. On approve: write to `blog_posts/`, generate platform-specific versions. On reject: optional revision loop with Writer + Copy Editor.
 
 **Example scripts:**
@@ -69,7 +69,18 @@ When `work_dir` is provided, the pipeline persists all outputs as versioned arti
 - Fact-Checker / Risk → claims and risk PASS
 - Brand and Style Enforcer → `compliance_report.json` (veto on FAIL)
 
+The deterministic validators run first (the compliance gate consumes their report); the
+Fact-Checker/Risk and Brand/Style gates then run **concurrently** (they are independent given
+the draft), roughly halving gate latency per rewrite iteration.
+
 **Closed-loop rewrite**: On any FAIL, the pipeline passes `required_fixes` to the Writer agent and re-runs gates until PASS or max iterations (default 3). Then status is `NEEDS_HUMAN_REVIEW`.
+
+**Transient LLM errors:** the LLM clients already retry their own 429/transport failures, so the
+compliance and copy-editor agents no longer add a second blocking in-process retry. A transient
+error (`LLMRateLimitError`/`LLMTemporaryError`) surfaced after that propagates unwrapped: in
+Temporal mode the activity funnel retries the whole stage (falling back to a terminal FAIL on the
+last attempt); in thread mode it fails the job loudly rather than fabricating a fail-closed
+compliance verdict from a provider outage.
 
 **API**: `POST /full-pipeline` runs the full pipeline with gates. `POST /research-and-review` runs **research + planning** (same planning step as the full pipeline) and accepts optional `work_dir` or `run_id` to persist artifacts.
 

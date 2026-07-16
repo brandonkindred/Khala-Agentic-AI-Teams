@@ -7,89 +7,17 @@ suite runs against an in-memory ``FakeJobServiceClient``.
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
+from _api_test_utils import api_main as _api_main
+from _api_test_utils import create_job as _create_job
 from fastapi.testclient import TestClient
 
-_blogging_root = Path(__file__).resolve().parent.parent
-if str(_blogging_root) not in sys.path:
-    sys.path.insert(0, str(_blogging_root))
-
-_spec = importlib.util.spec_from_file_location(
-    "blogging_api_main_unit",
-    _blogging_root / "api" / "main.py",
-)
-_api_main = importlib.util.module_from_spec(_spec)
-sys.modules["blogging_api_main_unit"] = _api_main
-_spec.loader.exec_module(_api_main)
-# api/main only rebuilds the response classes by default; the request DTOs
-# defined in the second half of the file need an explicit rebuild after we
-# import the module under a synthetic name.
-for _cls_name in (
-    "SelectTitleRequest",
-    "TitleRatingItem",
-    "RateTitlesRequest",
-    "StoryResponseRequest",
-    "BlogAnswersRequest",
-    "DraftFeedbackRequest",
-):
-    _cls = getattr(_api_main, _cls_name, None)
-    if _cls is not None:
-        _cls.model_rebuild(_types_namespace={**_api_main.__dict__})
-app = _api_main.app
-
-
-@pytest.fixture
-def patched_client(monkeypatch, fake_job_client) -> Any:
-    """Replace the global blog_job_store client and rebind all helpers on api/main."""
-    from shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    # Refresh references inside api/main to the freshly-patched helpers.
-    for name in (
-        "create_blog_job",
-        "delete_blog_job",
-        "get_blog_job",
-        "list_blog_jobs",
-        "update_blog_job",
-        "start_blog_job",
-        "complete_blog_job",
-        "fail_blog_job",
-        "approve_blog_job",
-        "unapprove_blog_job",
-        "submit_title_selection",
-        "submit_title_ratings",
-        "submit_story_user_message",
-        "skip_current_story_gap",
-        "submit_blog_answers",
-        "submit_draft_feedback",
-        "is_waiting_for_draft_feedback",
-    ):
-        helper = getattr(bjs, name, None)
-        if helper is not None:
-            monkeypatch.setattr(_api_main, name, helper)
-    return fake_job_client
-
-
-@pytest.fixture
-def client(patched_client) -> TestClient:
-    return TestClient(app)
-
-
-def _create(client: TestClient, **fields: Any) -> str:
-    """Create a job via the underlying store using a known job_id."""
-    from shared import blog_job_store as bjs
-
-    job_id = str(uuid.uuid4())[:8]
-    bjs.create_blog_job(job_id, fields.pop("brief", "brief"))
-    if fields:
-        bjs.update_blog_job(job_id, **fields)
-    return job_id
+# ``api_main``/``app`` load and the ``patched_client``/``client`` fixtures live in
+# ``_api_test_utils`` and ``conftest.py`` so the three API test modules share one
+# loaded app and one fixture definition.
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +66,7 @@ def test_get_job_status_404(client: TestClient) -> None:
 
 
 def test_get_job_status_200(client: TestClient) -> None:
-    job_id = _create(client, brief="hello world")
+    job_id = _create_job(brief="hello world")
     r = client.get(f"/job/{job_id}")
     assert r.status_code == 200
     body = r.json()
@@ -149,8 +77,8 @@ def test_get_job_status_200(client: TestClient) -> None:
 def test_list_jobs_filters(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    a = _create(client)
-    b = _create(client)
+    a = _create_job()
+    b = _create_job()
     bjs.start_blog_job(a)
     bjs.complete_blog_job(b)
     r = client.get("/jobs")
@@ -170,7 +98,7 @@ def test_list_jobs_filters(client: TestClient) -> None:
 def test_cancel_job_lifecycle(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.start_blog_job(job_id)
     r = client.post(f"/job/{job_id}/cancel")
     assert r.status_code == 200
@@ -186,7 +114,7 @@ def test_cancel_job_404(client: TestClient) -> None:
 
 
 def test_delete_job_lifecycle(client: TestClient) -> None:
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.delete(f"/job/{job_id}")
     assert r.status_code == 200
     # Now it should be gone
@@ -200,7 +128,7 @@ def test_delete_job_lifecycle(client: TestClient) -> None:
 
 
 def test_approve_400_when_not_terminal(client: TestClient) -> None:
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.post(f"/job/{job_id}/approve")
     assert r.status_code == 400
 
@@ -213,7 +141,7 @@ def test_approve_404(client: TestClient) -> None:
 def test_approve_unapprove_happy_path(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.complete_blog_job(job_id)
     r = client.post(f"/job/{job_id}/approve")
     assert r.status_code == 200
@@ -240,7 +168,7 @@ def test_select_title_404(client: TestClient) -> None:
 
 
 def test_select_title_not_waiting(client: TestClient) -> None:
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.post(f"/job/{job_id}/select-title", json={"title": "x"})
     assert r.status_code == 400
 
@@ -248,7 +176,7 @@ def test_select_title_not_waiting(client: TestClient) -> None:
 def test_select_title_empty_title(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.update_blog_job(job_id, waiting_for_title_selection=True)
     r = client.post(f"/job/{job_id}/select-title", json={"title": "  "})
     assert r.status_code == 422
@@ -257,7 +185,7 @@ def test_select_title_empty_title(client: TestClient) -> None:
 def test_select_title_ok(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.update_blog_job(job_id, waiting_for_title_selection=True)
     r = client.post(f"/job/{job_id}/select-title", json={"title": "Chosen"})
     assert r.status_code == 200
@@ -269,7 +197,7 @@ def test_select_title_ok(client: TestClient) -> None:
 def test_rate_titles_paths(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     # 404 when missing
     r = client.post(
         "/job/missing/rate-titles", json={"ratings": [{"title": "x", "rating": "like"}]}
@@ -310,7 +238,7 @@ def test_rate_titles_paths(client: TestClient) -> None:
 def test_story_response_paths(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.post("/job/missing/story-response", json={"message": "hi"})
     assert r.status_code == 404
     r = client.post(f"/job/{job_id}/story-response", json={"message": "hi"})
@@ -327,7 +255,7 @@ def test_story_response_paths(client: TestClient) -> None:
 def test_skip_story_gap_paths(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.post("/job/missing/skip-story-gap")
     assert r.status_code == 404
 
@@ -341,7 +269,7 @@ def test_skip_story_gap_paths(client: TestClient) -> None:
 def test_submit_answers_paths(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.post("/job/missing/answers", json={"answers": []})
     assert r.status_code == 404
     r = client.post(f"/job/{job_id}/answers", json={"answers": []})
@@ -357,7 +285,7 @@ def test_submit_answers_paths(client: TestClient) -> None:
 def test_draft_feedback_paths(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.post("/job/missing/draft-feedback", json={"feedback": "x", "approved": True})
     assert r.status_code == 404
     r = client.post(f"/job/{job_id}/draft-feedback", json={"feedback": "x", "approved": True})
@@ -381,7 +309,7 @@ def test_artifact_list_404_for_missing_job(client: TestClient) -> None:
 
 
 def test_artifact_list_404_when_no_work_dir(client: TestClient) -> None:
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.get(f"/job/{job_id}/artifacts")
     assert r.status_code == 404
 
@@ -393,7 +321,7 @@ def test_artifact_list_200_and_get_artifact(client: TestClient, tmp_path: Path) 
     workdir.mkdir()
     (workdir / "final.md").write_text("# Final\n")
     (workdir / "compliance_report.json").write_text('{"pass": true}')
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.update_blog_job(job_id, work_dir=str(workdir))
 
     r = client.get(f"/job/{job_id}/artifacts")
@@ -434,7 +362,7 @@ def test_artifact_get_404_missing_job(client: TestClient) -> None:
 
 
 def test_artifact_get_404_no_work_dir(client: TestClient) -> None:
-    job_id = _create(client)
+    job_id = _create_job()
     r = client.get(f"/job/{job_id}/artifacts/final.md")
     assert r.status_code == 404
 
@@ -444,7 +372,7 @@ def test_artifact_get_404_when_file_missing(client: TestClient, tmp_path: Path) 
 
     workdir = tmp_path / "work"
     workdir.mkdir()
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.update_blog_job(job_id, work_dir=str(workdir))
     # final.md is a known artifact name but not present on disk → 404
     r = client.get(f"/job/{job_id}/artifacts/final.md")
@@ -459,7 +387,7 @@ def test_artifact_get_404_when_file_missing(client: TestClient, tmp_path: Path) 
 def test_stream_terminal_job_completes_quickly(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.complete_blog_job(job_id)
     # The stream returns immediately for terminal jobs
     with client.stream("GET", f"/job/{job_id}/stream") as r:
@@ -489,7 +417,7 @@ def test_resume_job_400_when_not_resumable(client: TestClient) -> None:
     """A completed job can't be resumed."""
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.complete_blog_job(job_id)
     r = client.post(f"/job/{job_id}/resume")
     assert r.status_code == 400
@@ -498,7 +426,7 @@ def test_resume_job_400_when_not_resumable(client: TestClient) -> None:
 def test_resume_job_400_when_no_payload(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.update_blog_job(job_id, status="interrupted")
     r = client.post(f"/job/{job_id}/resume")
     assert r.status_code == 400
@@ -513,7 +441,7 @@ def test_restart_job_404(client: TestClient) -> None:
 def test_restart_job_400_when_no_payload(client: TestClient) -> None:
     from shared import blog_job_store as bjs
 
-    job_id = _create(client)
+    job_id = _create_job()
     bjs.complete_blog_job(job_id)
     r = client.post(f"/job/{job_id}/restart")
     assert r.status_code == 400
@@ -527,20 +455,14 @@ def test_restart_job_400_when_no_payload(client: TestClient) -> None:
 def test_start_full_pipeline_async_creates_job(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """POST /full-pipeline-async creates a job and starts a background thread, which we no-op."""
+    """POST /full-pipeline-async creates a job and submits it to the bounded async pool, no-oped."""
     started: list[Any] = []
 
-    class _NoOpThread:
-        def __init__(self, target=None, args=(), daemon=False, **kw):
-            self._target = target
-            self._args = args
-            started.append((target, args))
+    def _fake_submit(fn, *args, **kwargs):
+        started.append((fn, args))
 
-        def start(self):
-            pass
-
-    # Replace the threading module reference inside the API module.
-    monkeypatch.setattr(_api_main.threading, "Thread", _NoOpThread)
+    # Intercept the bounded async-job pool so we don't actually run the pipeline.
+    monkeypatch.setattr(_api_main, "_submit_async_job", _fake_submit)
 
     body = {
         "brief": "How to ship faster",
@@ -554,6 +476,144 @@ def test_start_full_pipeline_async_creates_job(
     data = r.json()
     assert "job_id" in data
     assert started
+    # The submitted job is the pipeline runner bound to the returned job_id.
+    ((fn, args),) = started
+    assert fn is _api_main._run_pipeline_with_tracking
+    assert args[0] == data["job_id"]
+
+
+def test_async_job_pool_is_bounded_and_enqueues(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Async jobs are dispatched to a bounded worker pool via a queue, sized from
+    BLOGGING_ASYNC_MAX_WORKERS. Submit enqueues the (target, args) without running it."""
+    import queue
+
+    assert _api_main._ASYNC_JOB_MAX_WORKERS >= 1
+    assert isinstance(_api_main._ASYNC_JOB_QUEUE, queue.Queue)
+
+    # Don't spin real worker threads; just verify submit enqueues the (target, args) job.
+    monkeypatch.setattr(_api_main, "_ensure_async_workers", lambda: None)
+
+    def sentinel(*_a):
+        return None
+
+    _api_main._submit_async_job(sentinel, "job-1", 2)
+    assert _api_main._ASYNC_JOB_QUEUE.get_nowait() == (sentinel, ("job-1", 2))
+
+
+def test_submit_async_job_rejects_non_callable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The callable precondition is enforced at submit time (explicit raise so it survives
+    python -O), not deferred to a worker."""
+    monkeypatch.setattr(_api_main, "_ensure_async_workers", lambda: None)
+    with pytest.raises(TypeError):
+        _api_main._submit_async_job(object(), "job-1")
+
+
+def test_async_job_workers_are_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Workers are daemon threads so an HITL-parked job never blocks process shutdown."""
+    created: list[dict] = []
+
+    class _FakeThread:
+        def __init__(self, *a, **kw):
+            created.append(kw)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(_api_main.threading, "Thread", _FakeThread)
+    monkeypatch.setattr(_api_main, "_ASYNC_JOB_WORKERS_STARTED", False)
+    _api_main._ensure_async_workers()
+    assert len(created) == _api_main._ASYNC_JOB_MAX_WORKERS
+    assert all(kw.get("daemon") is True for kw in created)
+
+
+def test_async_job_worker_runs_jobs_and_survives_crash() -> None:
+    """The worker loop runs queued jobs, keeps going after a job raises, and stops on the
+    None sentinel (so one bad job never kills a worker)."""
+    ran: list[str] = []
+
+    def _ok():
+        ran.append("ok")
+
+    def _boom():
+        raise RuntimeError("job crashed")
+
+    # No real workers run in tests, so the shared queue is safe to drive directly.
+    _api_main._ASYNC_JOB_QUEUE.put((_ok, ()))
+    _api_main._ASYNC_JOB_QUEUE.put((_boom, ()))
+    _api_main._ASYNC_JOB_QUEUE.put(None)  # stop sentinel
+    _api_main._async_job_worker()
+    assert ran == ["ok"]
+
+
+def test_async_job_worker_marks_crashed_job_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A job that crashes before failing its own store entry is marked failed by the worker
+    as a safety net, so it doesn't sit in 'running' until the stale monitor reaps it."""
+    failed: list = []
+    monkeypatch.setattr(
+        _api_main, "fail_blog_job", lambda job_id, error=None: failed.append((job_id, error))
+    )
+
+    def _boom(job_id):
+        raise RuntimeError("crashed before own handler")
+
+    _api_main._ASYNC_JOB_QUEUE.put((_boom, ("job-x",)))
+    _api_main._ASYNC_JOB_QUEUE.put(None)  # stop sentinel
+    _api_main._async_job_worker()
+    assert failed == [("job-x", "crashed before own handler")]
+
+
+def test_job_already_terminal_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A queued job failed/cancelled or deleted before a worker starts it is treated as
+    terminal, so the worker skips it instead of resurrecting it."""
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "failed"})
+    assert _api_main._job_already_terminal("j1") is True
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "cancelled"})
+    assert _api_main._job_already_terminal("j1") is True
+    # A shutdown-marked interrupted job must be skipped, not flipped back to running
+    # (the resume flow sets it running before dispatch, so it's never interrupted here).
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "interrupted"})
+    assert _api_main._job_already_terminal("j1") is True
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: None)
+    assert _api_main._job_already_terminal("j1") is True
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "running"})
+    assert _api_main._job_already_terminal("j1") is False
+
+    # Fail open: a transient preflight read failure must NOT abandon a valid queued job.
+    def _raises(_jid):
+        raise RuntimeError("job-service outage")
+
+    monkeypatch.setattr(_api_main, "get_blog_job", _raises)
+    assert _api_main._job_already_terminal("j1") is False
+
+
+def test_publish_skip_terminal_event_maps_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skipping a terminal queued job emits the matching stream-terminal event so a
+    subscribed SSE client closes promptly; interrupted/missing emit nothing."""
+    events: list[tuple] = []
+    monkeypatch.setattr(
+        _api_main,
+        "_publish_terminal_event",
+        lambda job_id, event_type, **kw: events.append((event_type, kw)),
+    )
+
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "cancelled"})
+    _api_main._publish_skip_terminal_event("j1")
+    assert events[-1][0] == "cancelled"
+
+    monkeypatch.setattr(
+        _api_main, "get_blog_job", lambda jid: {"status": "failed", "error": "reaped"}
+    )
+    _api_main._publish_skip_terminal_event("j1")
+    assert events[-1][0] == "error"
+    assert events[-1][1]["error"] == "reaped"
+
+    # interrupted (shutdown handoff) and a missing job emit no stream-terminal event.
+    before = len(events)
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "interrupted"})
+    _api_main._publish_skip_terminal_event("j1")
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: None)
+    _api_main._publish_skip_terminal_event("j1")
+    assert len(events) == before
 
 
 def test_medium_stats_sync_when_integration_disabled(
@@ -587,15 +647,8 @@ def test_medium_stats_async_starts_job(
 ) -> None:
     monkeypatch.setattr(_api_main, "medium_stats_integration_eligible", lambda: (True, ""))
 
-    class _NoOpThread:
-        def __init__(self, target=None, args=(), daemon=False, **kw):
-            self._target = target
-            self._args = args
-
-        def start(self):
-            pass
-
-    monkeypatch.setattr(_api_main.threading, "Thread", _NoOpThread)
+    # Intercept the bounded async-job pool so we don't actually run the Medium stats job.
+    monkeypatch.setattr(_api_main, "_submit_async_job", lambda fn, *a, **kw: None)
     monkeypatch.setenv("BLOGGING_MEDIUM_STATS_ROOT", str(tmp_path / "ms"))
 
     r = client.post("/medium-stats-async", json={})

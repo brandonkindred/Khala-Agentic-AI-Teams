@@ -523,3 +523,139 @@ def test_pra_and_planning_updaters_rescale_progress(monkeypatch):
     updater(progress="garbage", status_text="odd")
     assert "progress" not in written[-1]
     assert written[-1]["status_text"] == "odd"
+
+
+# ---------------------------------------------------------------------------
+# _make_planning_architecture_fn — the extracted Planning architecture callback
+# ---------------------------------------------------------------------------
+
+
+def _mock_arch_agent(*, overview="Arch overview", architecture_present=True, raises=None):
+    """Build a duck-typed architecture agent whose ``run`` returns a scripted output."""
+    agent = MagicMock()
+    if raises is not None:
+        agent.run.side_effect = raises
+        return agent
+    output = MagicMock()
+    output.architecture = MagicMock(overview=overview) if architecture_present else None
+    agent.run.return_value = output
+    return agent
+
+
+def test_planning_architecture_fn_spec_only_returns_overview():
+    """Spec-only input returns the agent overview with the default acceptance criteria."""
+    agent = _mock_arch_agent(overview="Arch overview")
+    fn = orchestrator._make_planning_architecture_fn(agent)
+
+    result = fn(spec_content="# Spec", prd_content=None, repo_path="/x", client_context=None)
+
+    assert result == "Arch overview"
+    arch_input = agent.run.call_args.args[0]
+    assert arch_input.requirements.description == "# Spec"
+    assert arch_input.requirements.acceptance_criteria == [
+        "Deliver according to spec and planning artifacts."
+    ]
+    assert arch_input.features_and_functionality_doc is None
+
+
+def test_planning_architecture_fn_prd_merges_into_description_and_features():
+    """prd_content is appended to the requirements description and the features doc."""
+    agent = _mock_arch_agent()
+    fn = orchestrator._make_planning_architecture_fn(agent)
+
+    fn(spec_content="Spec", prd_content="PRD body", repo_path="/x", client_context=None)
+
+    arch_input = agent.run.call_args.args[0]
+    assert arch_input.requirements.description == "Spec\n\nPRD body"
+    assert arch_input.features_and_functionality_doc == "PRD body"
+
+
+def test_planning_architecture_fn_success_criteria_override_acceptance():
+    """client_context success_criteria replace the default acceptance criteria."""
+    agent = _mock_arch_agent()
+    fn = orchestrator._make_planning_architecture_fn(agent)
+
+    fn(
+        spec_content="Spec",
+        prd_content=None,
+        repo_path="/x",
+        client_context={"success_criteria": ["c1", "c2"]},
+    )
+
+    arch_input = agent.run.call_args.args[0]
+    assert arch_input.requirements.acceptance_criteria == ["c1", "c2"]
+
+
+def test_planning_architecture_fn_problem_and_opportunity_build_features_and_goals():
+    """problem_summary and opportunity_statement feed both the features doc and goals."""
+    agent = _mock_arch_agent()
+    fn = orchestrator._make_planning_architecture_fn(agent)
+
+    fn(
+        spec_content="Spec",
+        prd_content=None,
+        repo_path="/x",
+        client_context={"problem_summary": "prob", "opportunity_statement": "opp"},
+    )
+
+    overview = agent.run.call_args.args[0].project_overview
+    assert "## Problem summary\nprob" in overview["features_and_functionality_doc"]
+    assert "## Opportunity\nopp" in overview["features_and_functionality_doc"]
+    assert overview["goals"] == "prob\nopp"
+
+
+def test_planning_architecture_fn_empty_spec_uses_fallback_description():
+    """Empty spec and no prd fall back to the handoff-artifacts description."""
+    agent = _mock_arch_agent()
+    fn = orchestrator._make_planning_architecture_fn(agent)
+
+    fn(spec_content="", prd_content=None, repo_path="/x", client_context=None)
+
+    arch_input = agent.run.call_args.args[0]
+    assert arch_input.requirements.description == "See Planning handoff artifacts."
+
+
+def test_planning_architecture_fn_none_architecture_returns_none():
+    """A response without an architecture yields None."""
+    agent = _mock_arch_agent(architecture_present=False)
+    fn = orchestrator._make_planning_architecture_fn(agent)
+
+    assert fn(spec_content="Spec", prd_content=None, repo_path="/x", client_context=None) is None
+
+
+def test_planning_architecture_fn_empty_overview_returns_empty_string():
+    """An empty overview returns '' (distinct from the no-architecture None case)."""
+    agent = _mock_arch_agent(overview="")
+    fn = orchestrator._make_planning_architecture_fn(agent)
+
+    assert fn(spec_content="Spec", prd_content=None, repo_path="/x", client_context=None) == ""
+
+
+def test_planning_architecture_fn_agent_raises_returns_none():
+    """The callback never propagates: an agent exception is swallowed to None."""
+    agent = _mock_arch_agent(raises=RuntimeError("boom"))
+    fn = orchestrator._make_planning_architecture_fn(agent)
+
+    assert fn(spec_content="Spec", prd_content=None, repo_path="/x", client_context=None) is None
+
+
+def test_run_architecture_for_planning_module_level_success():
+    """The module-level function itself (not just the factory closure) returns the overview."""
+    agent = _mock_arch_agent(overview="Direct overview")
+
+    result = orchestrator._run_architecture_for_planning(
+        agent, spec_content="# Spec", prd_content=None, repo_path="/x", client_context=None
+    )
+
+    assert result == "Direct overview"
+
+
+def test_run_architecture_for_planning_module_level_agent_raises_returns_none():
+    """Calling the module-level function directly still swallows agent exceptions to None."""
+    agent = _mock_arch_agent(raises=RuntimeError("boom"))
+
+    result = orchestrator._run_architecture_for_planning(
+        agent, spec_content="Spec", prd_content=None, repo_path="/x", client_context=None
+    )
+
+    assert result is None
