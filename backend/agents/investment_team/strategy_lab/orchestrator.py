@@ -806,8 +806,10 @@ class StrategyLabOrchestrator:
         the operator can act on, rather than a "looks fine, then runs to
         zero trades" silent error downstream.
         """
-        assert isinstance(symbol, str) and symbol, "symbol must be a non-empty str"
-        assert isinstance(asset_class, str) and asset_class, "asset_class must be a non-empty str"
+        if not isinstance(symbol, str) or not symbol:
+            raise ValueError("symbol must be a non-empty str")
+        if not isinstance(asset_class, str) or not asset_class:
+            raise ValueError("asset_class must be a non-empty str")
         try:
             bars = self.market_data_service.fetch_ohlcv(symbol, asset_class, days=5)
             if bars:
@@ -871,9 +873,10 @@ class StrategyLabOrchestrator:
         ``all_gate_results`` is provided it is extended in place. ``results``
         is returned to allow chaining.
         """
-        assert isinstance(results, list) and all(
+        if not isinstance(results, list) or not all(
             isinstance(g, QualityGateResult) for g in results
-        ), "results must be a list of QualityGateResult"
+        ):
+            raise ValueError("results must be a list of QualityGateResult")
         for g in results:
             if refinement_round is not None:
                 g.refinement_round = refinement_round
@@ -941,8 +944,10 @@ class StrategyLabOrchestrator:
         Post: returns a ``QualityGateResult`` whose ``passed`` flag is
         derived from ``severity`` (info → True, warning/critical → False).
         """
-        assert name, "gate name must be non-empty"
-        assert details, "details must be non-empty"
+        if not name:
+            raise ValueError("gate name must be non-empty")
+        if not details:
+            raise ValueError("details must be non-empty")
         return QualityGateResult(
             gate_name=name,
             phase=phase,
@@ -1167,7 +1172,8 @@ class StrategyLabOrchestrator:
         this to ``status="failed: budget_exhausted"``.
         """
         max_rounds = _design_review_rounds()
-        assert max_rounds >= 1, "design-review round cap must be ≥ 1"
+        if max_rounds < 1:
+            raise ValueError("design-review round cap must be ≥ 1")
 
         emit("designing", {"sub_phase": "started"})
 
@@ -1908,12 +1914,18 @@ class StrategyLabOrchestrator:
         carries only values the caller cannot read off shared mutable
         state.
         """
-        assert isinstance(spec, StrategySpec), "spec must be a StrategySpec"
-        assert isinstance(code, str), "code must be a string"
-        assert isinstance(config, BacktestConfig), "config must be a BacktestConfig"
-        assert isinstance(all_gate_results, list), "all_gate_results must be a list"
-        assert isinstance(refinement_attempts, list), "refinement_attempts must be a list"
-        assert isinstance(zero_trade_attempts, list), "zero_trade_attempts must be a list"
+        if not isinstance(spec, StrategySpec):
+            raise ValueError("spec must be a StrategySpec")
+        if not isinstance(code, str):
+            raise ValueError("code must be a string")
+        if not isinstance(config, BacktestConfig):
+            raise ValueError("config must be a BacktestConfig")
+        if not isinstance(all_gate_results, list):
+            raise ValueError("all_gate_results must be a list")
+        if not isinstance(refinement_attempts, list):
+            raise ValueError("refinement_attempts must be a list")
+        if not isinstance(zero_trade_attempts, list):
+            raise ValueError("zero_trade_attempts must be a list")
 
         trades: List[TradeRecord] = []
         open_position_entry_reasons: List[str] = []
@@ -2166,9 +2178,11 @@ class StrategyLabOrchestrator:
             break
 
         # Post-condition: success and round-exhaustion are mutually exclusive.
-        assert not (execution_succeeded and max_rounds_exhausted), (
-            "synthesis loop returned both execution_succeeded and max_rounds_exhausted"
-        )
+        if execution_succeeded and max_rounds_exhausted:
+            raise RuntimeError(
+                "synthesis loop returned both execution_succeeded and max_rounds_exhausted; "
+                "this is a bug in the round-evaluation loop above."
+            )
         return _SynthesisLoopOutcome(
             spec=spec,
             code=code,
