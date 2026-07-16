@@ -5,6 +5,7 @@ This is phase 1 of the provisioning workflow.
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
 from ..models import (
@@ -12,6 +13,7 @@ from ..models import (
     GeneratedCredentials,
     SetupResult,
 )
+from ..shared.environment_store import EnvironmentInfo as StoreEnvironmentInfo
 from ..shared.environment_store import EnvironmentStore
 from ..shared.tool_manifest import ToolManifest
 from ..tool_agents.docker_provisioner import DockerProvisionerTool
@@ -108,8 +110,6 @@ def run_setup(
     if progress_callback:
         progress_callback("Registering environment...")
 
-    from ..shared.environment_store import EnvironmentInfo as EnvInfoClass
-
     try:
         env_info = EnvironmentInfo(
             container_id=result.details.get("container_id", ""),
@@ -121,7 +121,7 @@ def run_setup(
         )
 
         env_store.register(
-            EnvInfoClass(
+            StoreEnvironmentInfo(
                 agent_id=agent_id,
                 container_id=env_info.container_id,
                 container_name=env_info.container_name,
@@ -129,7 +129,12 @@ def run_setup(
                 ssh_port=env_info.ssh_port,
                 workspace_path=env_info.workspace_path,
                 status="running",
-                tools_provisioned=[],
+                tools_provisioned=existing.tools_provisioned if existing else [],
+                created_at=existing.created_at if existing else None,
+                # Only stamp a fresh updated_at when replacing an existing record;
+                # for a brand-new registration, leave it unset so it defaults to
+                # the same created_at value rather than a few microseconds before it.
+                updated_at=(datetime.now(timezone.utc).isoformat() if existing else None),
             )
         )
     except Exception:

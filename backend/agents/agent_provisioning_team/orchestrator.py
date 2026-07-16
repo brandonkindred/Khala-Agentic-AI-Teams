@@ -24,6 +24,7 @@ from .shared.environment_queries import get_agent_status_dict, list_agent_status
 from .shared.environment_store import EnvironmentStore
 from .shared.logging_context import install_filter as _install_log_filter
 from .shared.phase_state import (
+    restore_access_audit,
     restore_account_provisioning,
     restore_credentials,
     restore_documentation,
@@ -278,7 +279,7 @@ class ProvisioningOrchestrator:
         _set_phase(Phase.ACCESS_AUDIT.value)
         _check_shutdown(Phase.ACCESS_AUDIT.value)
         if Phase.ACCESS_AUDIT in skip_phases and prior_results.get("access_audit"):
-            audit_result = prior_results["access_audit"]
+            audit_result = restore_access_audit(prior_results["access_audit"])
             logger.info("Skipping ACCESS_AUDIT (already completed)")
         else:
             _update(

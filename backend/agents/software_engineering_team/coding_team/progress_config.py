@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from shared_env import parse_int
+
 # Cap on CONSECUTIVE no-change revision rounds — rounds where the engineer revisited a task it
 # already flagged done and produced no change to the branch diff. This is deliberately distinct from
 # MAX_TASK_REVISIONS: a revision that actually changes the code resets this counter and keeps the
@@ -28,12 +30,6 @@ def _no_change_revisit_cap() -> int:
     Postconditions:
         - Returns an int >= 1.
     """
-    # Use the canonical dependency-free shared parser directly (garbage/empty →
-    # default, value clamped to the floor) rather than the SE team's thin wrapper —
-    # this keeps the coding team off a cross-team import. The floor of 1 keeps the
-    # guard from ever being disabled into an unbounded no-progress loop.
-    from shared_env import parse_int
-
     return parse_int("CODING_TEAM_NO_CHANGE_REVISIT_CAP", NO_CHANGE_REVISIT_CAP, minimum=1)
 
 
@@ -54,8 +50,6 @@ def _review_concurrency() -> int:
     Postconditions:
         - Returns an int >= 1.
     """
-    from shared_env import parse_int
-
     return parse_int("CODING_TEAM_REVIEW_CONCURRENCY", REVIEW_CONCURRENCY, minimum=1)
 
 
@@ -78,8 +72,6 @@ def _implementation_concurrency() -> int:
     Postconditions:
         - Returns an int >= 1.
     """
-    from shared_env import parse_int
-
     return parse_int(
         "CODING_TEAM_IMPLEMENTATION_CONCURRENCY", IMPLEMENTATION_CONCURRENCY, minimum=1
     )
