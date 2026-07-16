@@ -47,6 +47,7 @@ from shared.medium_stats_api import MediumStatsRequest  # noqa: E402
 
 from blogging.postgres import SCHEMA as BLOGGING_POSTGRES_SCHEMA  # noqa: E402
 from job_service_client import (  # noqa: E402
+    JOB_STATUS_INTERRUPTED,
     RESTARTABLE_STATUSES,
     RESUMABLE_STATUSES,
     validate_job_for_action,
@@ -244,14 +245,22 @@ def _submit_async_job(target: Callable[..., Any], *args: Any) -> None:
 
 
 def _job_already_terminal(job_id: str) -> bool:
-    """True if the job was failed/cancelled or deleted before a worker started it.
+    """True if a worker must not start this queued job because it is no longer runnable.
 
     The bounded worker pool can leave a job queued (status ``pending``) for a while when
-    all workers are busy. In that window the stale-job monitor may mark a long-queued job
-    failed, or a user may cancel it, before a worker dequeues it. Starting it anyway would
-    "resurrect" a terminal job (flip it back to ``running``), so the worker skips it.
+    all workers are busy. In that window the job may transition out of ``pending`` before
+    a worker dequeues it:
+
+    - the stale-job monitor may mark a long-queued job ``failed``, or a user may
+      ``cancel`` it — starting it anyway would "resurrect" a terminal job (flip it back to
+      ``running``);
+    - the shutdown hook marks active jobs ``interrupted`` for a later resume — a worker
+      dequeuing one before process exit and flipping it to ``running`` would defeat that
+      handoff and leave it un-resumable. (Resume itself first sets the job ``running``, so
+      a legitimately-resumed job is never ``interrupted`` at dequeue time.)
+
     ``get_blog_job`` returns None only for a genuinely-absent job — transient/HTTP errors
-    raise rather than returning None — so a missing job is treated as terminal too.
+    raise rather than returning None — so a missing (deleted) job is skipped too.
 
     Fails OPEN: if the store is unavailable or the preflight read itself raises (a
     transient job-service outage at dequeue time), this returns False so the job still
@@ -260,7 +269,8 @@ def _job_already_terminal(job_id: str) -> bool:
 
     Preconditions: ``job_id`` is non-empty.
     Postconditions: pure read; returns a bool (False when the job store is unavailable or
-        the read fails). Only a definitive failed/cancelled/missing status returns True.
+        the read fails). Only a definitive failed/cancelled/interrupted/missing status
+        returns True.
     """
     if get_blog_job is None:
         return False
@@ -271,7 +281,11 @@ def _job_already_terminal(job_id: str) -> bool:
             "Preflight status read failed for job %s; proceeding to run it", job_id, exc_info=True
         )
         return False
-    return job is None or job.get("status") in (JOB_STATUS_FAILED, JOB_STATUS_CANCELLED)
+    return job is None or job.get("status") in (
+        JOB_STATUS_FAILED,
+        JOB_STATUS_CANCELLED,
+        JOB_STATUS_INTERRUPTED,
+    )
 
 
 def _run_blogging_service_shutdown() -> (
@@ -757,6 +771,7 @@ def _run_medium_stats_async_job(job_id: str, payload: MediumStatsRequest) -> Non
     """Background worker: scrape Medium stats and write medium_stats_report.json."""
     if _job_already_terminal(job_id):
         logger.info("Skipping Medium stats job %s: already terminal/gone before start", job_id)
+        _publish_skip_terminal_event(job_id)
         return
     cfg = MediumStatsRunConfig(
         headless=payload.headless,
@@ -817,12 +832,46 @@ def _publish_terminal_event(job_id: str, event_type: str, **kwargs: Any) -> None
         pass
 
 
+def _publish_skip_terminal_event(job_id: str) -> None:
+    """Publish the terminal SSE event for a queued job a worker is skipping.
+
+    When ``_job_already_terminal`` skips a job, a client that subscribed to
+    ``/job/{job_id}/stream`` while the job was still ``pending`` would otherwise keep
+    receiving keepalives until the stream deadline: the stream only closes on a terminal
+    bus event (``complete``/``error``/``cancelled``), and the transition that made the job
+    terminal (stale-monitor fail, user cancel) does not itself publish one. Emit the
+    matching event so the stream closes promptly.
+
+    Best-effort — never raises. An ``interrupted`` job is only ever produced by the
+    shutdown hook (the event bus is being torn down alongside the process, and
+    ``interrupted`` is not a stream-terminal status), and a missing/unreadable job has no
+    meaningful subscriber, so those emit nothing.
+    """
+    if get_blog_job is None:
+        return
+    try:
+        job = get_blog_job(job_id)
+    except Exception:
+        return
+    status = job.get("status") if job else None
+    if status == JOB_STATUS_CANCELLED:
+        _publish_terminal_event(job_id, "cancelled", status=status)
+    elif status == JOB_STATUS_FAILED:
+        _publish_terminal_event(
+            job_id,
+            "error",
+            status=status,
+            error=(job or {}).get("error") or "Job failed before it started.",
+        )
+
+
 def _run_pipeline_with_tracking(
     job_id: str, request: FullPipelineRequest
 ) -> None:  # pragma: no cover - background-thread pipeline driver; depends on the v2 orchestrator (which is itself omitted from coverage as an agent_implementations script) and on live job-store + SSE side effects. Hot paths are exercised end-to-end by integration tests; the request-validation and error-handling branches at the API boundary are covered by the synchronous /full-pipeline tests.
     """Run the full pipeline in a background thread with job tracking."""
     if _job_already_terminal(job_id):
         logger.info("Skipping pipeline job %s: already terminal/gone before start", job_id)
+        _publish_skip_terminal_event(job_id)
         return
     try:
         import sys

@@ -623,6 +623,10 @@ def test_job_already_terminal_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _api_main._job_already_terminal("j1") is True
     monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "cancelled"})
     assert _api_main._job_already_terminal("j1") is True
+    # A shutdown-marked interrupted job must be skipped, not flipped back to running
+    # (the resume flow sets it running before dispatch, so it's never interrupted here).
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "interrupted"})
+    assert _api_main._job_already_terminal("j1") is True
     monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: None)
     assert _api_main._job_already_terminal("j1") is True
     monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "running"})
@@ -634,6 +638,36 @@ def test_job_already_terminal_guard(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(_api_main, "get_blog_job", _raises)
     assert _api_main._job_already_terminal("j1") is False
+
+
+def test_publish_skip_terminal_event_maps_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skipping a terminal queued job emits the matching stream-terminal event so a
+    subscribed SSE client closes promptly; interrupted/missing emit nothing."""
+    events: list[tuple] = []
+    monkeypatch.setattr(
+        _api_main,
+        "_publish_terminal_event",
+        lambda job_id, event_type, **kw: events.append((event_type, kw)),
+    )
+
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "cancelled"})
+    _api_main._publish_skip_terminal_event("j1")
+    assert events[-1][0] == "cancelled"
+
+    monkeypatch.setattr(
+        _api_main, "get_blog_job", lambda jid: {"status": "failed", "error": "reaped"}
+    )
+    _api_main._publish_skip_terminal_event("j1")
+    assert events[-1][0] == "error"
+    assert events[-1][1]["error"] == "reaped"
+
+    # interrupted (shutdown handoff) and a missing job emit no stream-terminal event.
+    before = len(events)
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "interrupted"})
+    _api_main._publish_skip_terminal_event("j1")
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: None)
+    _api_main._publish_skip_terminal_event("j1")
+    assert len(events) == before
 
 
 def test_medium_stats_sync_when_integration_disabled(
