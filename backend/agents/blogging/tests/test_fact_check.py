@@ -1,5 +1,6 @@
 """Tests for the blog fact-check agent."""
 
+import pytest
 from blog_fact_check_agent import BlogFactCheckAgent
 
 from llm_service import DummyLLMClient
@@ -32,3 +33,26 @@ def test_fact_check_with_work_dir(tmp_path):
     report = agent.run("Test draft.", work_dir=tmp_path)
     assert report.claims_status in ("PASS", "FAIL")
     assert (tmp_path / "fact_check_report.json").exists()
+
+
+@pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
+def test_fact_check_transient_error_reraises(monkeypatch, kind) -> None:
+    """A transient LLM-transport error propagates unwrapped (delegated to Temporal),
+    rather than being masked as a terminal FactCheckError."""
+    from blog_fact_check_agent import agent as fc_mod
+
+    from llm_service import LLMRateLimitError, LLMTemporaryError
+
+    err_cls = LLMRateLimitError if kind == "rate_limit" else LLMTemporaryError
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise err_cls("transient outage")
+
+    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    agent = BlogFactCheckAgent(llm_client=object())
+    with pytest.raises(err_cls):
+        agent.run("Some draft text.")
