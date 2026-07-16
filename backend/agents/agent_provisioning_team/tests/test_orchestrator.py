@@ -256,16 +256,6 @@ def test_run_workflow_resume_restores_all_phases(tmp_path: Path, monkeypatch) ->
     )
     manifest = _make_manifest(tmp_path)
 
-    # NB: access_audit isn't in skip_phases because the orchestrator stores
-    # the raw dict from prior_results without re-typing, which breaks
-    # build_final_result downstream. That's a pre-existing production quirk
-    # (out of scope for this test suite — coverage only). So we re-run the
-    # audit but skip everything else.
-    monkeypatch.setattr(
-        orch_mod,
-        "run_access_audit",
-        lambda **kw: AccessAuditResult(passed=True, verifications=[]),
-    )
     result = orch.run_workflow(
         agent_id="a1",
         manifest_path=manifest,
@@ -273,6 +263,7 @@ def test_run_workflow_resume_restores_all_phases(tmp_path: Path, monkeypatch) ->
             Phase.SETUP,
             Phase.CREDENTIAL_GENERATION,
             Phase.ACCOUNT_PROVISIONING,
+            Phase.ACCESS_AUDIT,
             Phase.DOCUMENTATION,
         },
         prior_results={
@@ -292,6 +283,7 @@ def test_run_workflow_resume_restores_all_phases(tmp_path: Path, monkeypatch) ->
                 "tools_completed": 0,
                 "tools_total": 0,
             },
+            "access_audit": {"passed": True, "verifications": []},
             "documentation": {
                 "success": True,
                 "onboarding": {
@@ -303,6 +295,12 @@ def test_run_workflow_resume_restores_all_phases(tmp_path: Path, monkeypatch) ->
         },
     )
     assert result.success is True
+    # Regression: the resumed access_audit must be re-typed into
+    # AccessAuditResult, not left as the raw prior_results dict — otherwise
+    # build_final_result's `access_audit.passed` attribute access would have
+    # raised AttributeError before result.success was reached.
+    assert isinstance(result.access_audit, AccessAuditResult)
+    assert result.access_audit.passed is True
 
 
 def test_run_workflow_account_provisioning_failure_compensates(tmp_path: Path, monkeypatch) -> None:
