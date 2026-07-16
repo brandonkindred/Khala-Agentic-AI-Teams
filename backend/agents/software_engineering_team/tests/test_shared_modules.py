@@ -862,3 +862,54 @@ def test_process_with_decomposition_helper_recovers_fenced_json(monkeypatch) -> 
         strategy=SectionDecompositionStrategy(),
     )
     assert out == payload
+
+
+def test_recursive_processor_default_branch_uses_injected_llm_client(monkeypatch) -> None:
+    """Regression test: the default branch (no ``process_fn``) must resolve the
+    Strands model through the caller's injected ``llm`` client instead of
+    silently discarding it and building a default model with no client
+    threaded through (the pre-fix bug).
+
+    Asserts against the ``get_strands_model`` call contract rather than a
+    concrete client/model class, so it stays pinned to the ``LLMClient``
+    protocol: the pre-fix code called ``get_strands_model()`` with no
+    ``client`` kwarg at all, so this would fail against the old behavior.
+    """
+    import strands
+
+    import software_engineering_team.shared.strands_model as strands_model_module
+    from llm_service import LLMClient
+    from software_engineering_team.shared.decomposition import (
+        RecursiveProcessor,
+        SectionDecompositionStrategy,
+    )
+
+    captured_models = []
+    captured_get_strands_model_calls = []
+
+    class _RecordingAgent:
+        def __init__(self, model=None, **kw):
+            captured_models.append(model)
+
+        def __call__(self, prompt):
+            return '{"ok": true}'
+
+    sentinel_model = object()
+
+    def _fake_get_strands_model(*args, **kwargs):
+        captured_get_strands_model_calls.append((args, kwargs))
+        return sentinel_model
+
+    monkeypatch.setattr(strands, "Agent", _RecordingAgent)
+    monkeypatch.setattr(strands_model_module, "get_strands_model", _fake_get_strands_model)
+
+    client = MagicMock(spec=LLMClient)
+    p: RecursiveProcessor = RecursiveProcessor(SectionDecompositionStrategy())
+    out = p.process(llm=client, prompt="hi", content="hi", agent_name="A")
+
+    assert out == {"ok": True}
+    assert len(captured_get_strands_model_calls) == 1
+    _, kwargs = captured_get_strands_model_calls[0]
+    assert kwargs.get("client") is client
+    assert kwargs.get("response_format") == "json"
+    assert captured_models == [sentinel_model]
