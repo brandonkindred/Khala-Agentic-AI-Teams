@@ -192,6 +192,15 @@ def _batch_fix_alias_rewrite(**kwargs: Any) -> SimpleNamespace:
     return SimpleNamespace(files={"/src/a.py": "fixed-but-rejected\n"})
 
 
+def _coder_writes(path: str):
+    """Build a coder that emits a single file at ``path``."""
+
+    def _coder_at(**kwargs: Any) -> Dict[str, str]:
+        return {path: "generated-then-rejected\n"}
+
+    return _coder_at
+
+
 def _doc_review(*, documentation=None, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
     if detail_callback is not None:
         detail_callback("doc")
@@ -610,6 +619,57 @@ def test_rollback_canonicalizes_alias_keys(tmp_path):
     assert not (tmp_path / "src" / "a.py").exists()  # created path removed, no failed bytes
     assert "src/a.py" not in result.files
     assert "/src/a.py" not in result.files
+
+
+def test_rollback_restores_preexisting_binary_file(tmp_path):
+    """A pre-existing non-UTF-8 file at an output path is snapshotted/restored as bytes.
+
+    The prior-state read must not decode as UTF-8 (which would raise and spuriously
+    fail the microtask before review); on rollback the exact bytes are restored.
+    """
+    original = b"\xff\xfe\x00\x01not-utf8"
+    (tmp_path / "data.bin").write_bytes(original)
+    mt = _microtask()
+    cfg = _make_gate_config(coder=_coder_writes("data.bin"), code_review_gate=_fail_gate())
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    # Reached review (REVIEW_FAILED), not a bare FAILED from a decode error at snapshot.
+    assert mt.status == MS.REVIEW_FAILED
+    assert (tmp_path / "data.bin").read_bytes() == original  # restored byte-for-byte
+    assert "data.bin" not in result.files
+
+
+def test_rollback_preserves_dangling_symlink(tmp_path):
+    """Writing through a pre-existing dangling symlink is undone without orphaning bytes.
+
+    The text write follows the symlink and creates its target; on rollback the created
+    target is removed and the symlink itself is left intact — nothing the failed
+    microtask produced remains in the worktree.
+    """
+    (tmp_path / "link.py").symlink_to("real_target.py")  # dangling: target does not exist
+    mt = _microtask()
+    cfg = _make_gate_config(coder=_coder_writes("link.py"), code_review_gate=_fail_gate())
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert (tmp_path / "link.py").is_symlink()  # symlink itself preserved
+    assert not (tmp_path / "real_target.py").exists()  # created target removed
+    assert "link.py" not in result.files
+
+
+def test_rollback_restores_target_through_nondangling_symlink(tmp_path):
+    """Writing through a symlink to an existing in-repo file clobbers the target; on
+    rollback the target's prior bytes are restored and the symlink is left intact."""
+    (tmp_path / "real.py").write_text("REAL\n", encoding="utf-8")
+    (tmp_path / "alias.py").symlink_to("real.py")
+    mt = _microtask()
+    cfg = _make_gate_config(coder=_coder_writes("alias.py"), code_review_gate=_fail_gate())
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert (tmp_path / "alias.py").is_symlink()  # symlink intact
+    assert (tmp_path / "real.py").read_text(encoding="utf-8") == "REAL\n"  # target restored
+    assert "alias.py" not in result.files
 
 
 # ---------------------------------------------------------------------------

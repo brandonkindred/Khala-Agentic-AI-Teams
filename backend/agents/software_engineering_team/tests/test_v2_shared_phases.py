@@ -687,6 +687,19 @@ def test_write_microtask_output_or_fail_success_and_rejection(tmp_path: Path):
     assert (tmp_path / "shared.py").read_text(encoding="utf-8") == "orig"  # disk restored
 
 
+def test_snapshot_disk_state_symlink_escape_and_directory(tmp_path: Path):
+    """_snapshot_disk_state: a symlink out of the repo yields ``target=None`` (left
+    untouched), and a directory yields an inert entry (nothing to restore/remove)."""
+    root = tmp_path.resolve()
+    (tmp_path / "escape").symlink_to(tmp_path.parent)  # points above the repo root
+    escaped = sh_exec._snapshot_disk_state(root, root / "escape")
+    assert escaped.is_symlink and escaped.target is None
+
+    (tmp_path / "adir").mkdir()
+    directory = sh_exec._snapshot_disk_state(root, root / "adir")
+    assert not directory.is_symlink and directory.file_bytes is None and not directory.absent
+
+
 def _issue(**kw):
     base = dict(
         source="review",
