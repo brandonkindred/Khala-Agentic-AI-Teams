@@ -89,86 +89,59 @@ _write_microtask_files = write_repo_text_files
 
 @dataclass(frozen=True)
 class _DiskEntry:
-    """Pre-write filesystem state of one resolved path, enough to restore it exactly.
+    """Pre-write state of a *physical* worktree path (its ``realpath``), keyed so all
+    aliases of one file share a single entry.
 
     Byte-oriented (never decodes), so a pre-existing binary or non-UTF-8 file is
-    snapshotted and restored losslessly instead of raising on read. Exactly one shape
-    is populated:
+    snapshotted and restored losslessly instead of raising on read:
 
-    - ``absent``: nothing existed at the path → rollback removes what the write left.
     - ``file_bytes`` set: a regular file with those bytes → rollback rewrites them.
-    - ``is_symlink``: the path was a symlink, which a text write follows rather than
-      replaces (so the link itself stays intact); ``target`` is the in-repo path the
-      link resolved to and ``target_bytes`` the bytes it held before the write
-      (``None`` when the link was dangling). Rollback restores or removes that target.
-      ``target`` is ``None`` when the link escaped the repo — left untouched.
-    - all fields default (a directory or special file was there): rollback leaves it.
+    - ``absent``: nothing existed → rollback removes the file the write created.
+    - both default: a directory or special file was there → rollback leaves it.
     """
 
-    absent: bool = False
     file_bytes: Optional[bytes] = None
-    is_symlink: bool = False
-    target: Optional[Path] = None
-    target_bytes: Optional[bytes] = None
+    absent: bool = False
 
 
-def _resolve_symlink_target_in_repo(root: Path, link_path: Path) -> Optional[Path]:
-    """Return the symlink's ultimate target resolved under ``root``, or ``None``.
+def _resolve_physical_path_in_repo(root: Path, full_path: Path) -> Optional[Path]:
+    """Resolve ``full_path`` to the real file a write touches, or ``None`` if it escapes.
 
-    Follows the *entire* symlink chain via ``os.path.realpath`` (not a single
-    ``readlink`` level), so ``link -> middle -> real`` resolves to ``real`` — the
-    actual path a text write creates — even when an intermediate or final target is
-    missing. Only that ultimate target is restored/removed on rollback; the symlink
-    chain itself is never touched.
+    A text write follows symlinks, so the physical file it creates/clobbers is at
+    ``os.path.realpath`` — which collapses every alias of one file (a direct path, a
+    symlink, or a whole symlink chain, even a dangling one) to a single identity.
+    Keying the rollback manifest by this realpath is what makes an alias share the
+    one earliest snapshot instead of re-snapshotting already-failed bytes.
 
     Postconditions:
-        Returns the fully-resolved target path when it is strictly inside ``root``;
-        ``None`` when the chain resolves to ``root`` itself or escapes it (a write
-        through such a link is a pre-existing ``write_repo_text_files`` concern this
-        rollback does not reach outside the repo to undo).
+        Returns the fully-resolved path when it is strictly inside ``root``; ``None``
+        when it resolves to ``root`` itself or escapes it (a write through a link that
+        points outside the repo is a pre-existing ``write_repo_text_files`` concern
+        this rollback does not reach outside the repo to undo).
     """
-    resolved = Path(os.path.realpath(link_path))
-    if resolved == root or root not in resolved.parents:
+    real = Path(os.path.realpath(full_path))
+    if real == root or root not in real.parents:
         return None
-    return resolved
+    return real
 
 
-def _snapshot_disk_state(root: Path, full_path: Path) -> _DiskEntry:
-    """Capture ``full_path``'s pre-write state as a :class:`_DiskEntry` (byte-level)."""
-    if full_path.is_symlink():
-        target = _resolve_symlink_target_in_repo(root, full_path)
-        if target is None:
-            return _DiskEntry(is_symlink=True)
-        return _DiskEntry(
-            is_symlink=True,
-            target=target,
-            target_bytes=target.read_bytes() if target.is_file() else None,
-        )
-    if full_path.is_file():
-        return _DiskEntry(file_bytes=full_path.read_bytes())
-    if full_path.exists():
+def _snapshot_disk_state(real_path: Path) -> _DiskEntry:
+    """Capture the pre-write state of physical ``real_path`` as a :class:`_DiskEntry`."""
+    if real_path.is_file():
+        return _DiskEntry(file_bytes=real_path.read_bytes())
+    if real_path.exists():
         # A directory or special file — not something the text writer creates.
         return _DiskEntry()
     return _DiskEntry(absent=True)
 
 
-def _restore_disk_state(full_path: Path, entry: _DiskEntry) -> None:
-    """Revert ``full_path`` to the state captured in ``entry`` (inverse of the write)."""
-    if entry.is_symlink:
-        # The link was followed, not replaced, so it is still in place; restore or
-        # remove the target the write created/clobbered.
-        if entry.target is not None:
-            if entry.target_bytes is None:
-                entry.target.unlink(missing_ok=True)
-            else:
-                entry.target.write_bytes(entry.target_bytes)
-        return
+def _restore_disk_state(real_path: Path, entry: _DiskEntry) -> None:
+    """Revert physical ``real_path`` to the state captured in ``entry``."""
     if entry.file_bytes is not None:
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-        full_path.write_bytes(entry.file_bytes)
-        return
-    if entry.absent:
-        full_path.unlink(missing_ok=True)
+        real_path.parent.mkdir(parents=True, exist_ok=True)
+        real_path.write_bytes(entry.file_bytes)
+    elif entry.absent:
+        real_path.unlink(missing_ok=True)
     # else: a pre-existing directory/special file — leave it as-is.
 
 
@@ -186,16 +159,18 @@ class _MicrotaskRollback:
       pre-existing repo file — which was never an execution output — out of the
       result, and removes every raw key the microtask added, including two spellings
       of one path.
-    - ``disk_prior`` is keyed by the *resolved* worktree path, so equivalent spellings
-      of one file (``a.py`` / ``/a.py`` / ``./a.py``) collapse to a single canonical
-      entry; it holds the pre-write filesystem state (:class:`_DiskEntry`) so a
-      rollback restores a pre-existing file's exact bytes (binary-safe) or a symlink's
-      target, and removes only what the microtask actually created.
+    - ``disk_prior`` is keyed by the *physical* worktree path (``realpath``), so every
+      alias of one file — a lexical spelling (``a.py`` / ``/a.py`` / ``./a.py``), a
+      symlink, or a symlink chain — collapses to a single entry. It holds the
+      pre-write filesystem state (:class:`_DiskEntry`) so a rollback restores a
+      pre-existing file's exact bytes (binary-safe) and removes only what the
+      microtask actually created.
 
     Invariants:
-        Each raw key is recorded in ``all_files_prior`` at most once, and each
-        resolved path in ``disk_prior`` at most once — the earliest snapshot, so a
-        later fix cycle never overwrites the pre-microtask baseline.
+        Each raw key is recorded in ``all_files_prior`` at most once, and each physical
+        path in ``disk_prior`` at most once — the earliest snapshot, so a later fix
+        cycle (even one writing the file through a different alias) never overwrites
+        the pre-microtask baseline.
     """
 
     all_files_prior: Dict[str, Optional[str]] = field(default_factory=dict)
@@ -211,10 +186,10 @@ def _record_prior_values(
     """Snapshot, for each key this microtask is about to write, the state to restore.
 
     Records two baselines per key (see :class:`_MicrotaskRollback`): the prior
-    ``all_files`` value under the raw key, and the prior on-disk content under the
-    resolved path. Each is recorded at most once (the earliest snapshot wins), so a
-    later fix cycle that rewrites the same file — even through an equivalent spelling
-    that resolves to the same path — never overwrites the pre-microtask baseline.
+    ``all_files`` value under the raw key, and the prior on-disk state under the
+    physical (``realpath``) path. Each is recorded at most once (the earliest snapshot
+    wins), so a later fix cycle that rewrites the same file — even through a different
+    alias that resolves to the same physical path — never overwrites the baseline.
 
     Preconditions:
         Called *before* writing ``files`` to the worktree (and before
@@ -223,9 +198,9 @@ def _record_prior_values(
     Postconditions:
         For each key of ``files``: ``rollback.all_files_prior`` gains ``key →
         all_files.get(key)`` if the key is not already recorded; ``rollback.disk_prior``
-        gains ``resolved_path → _DiskEntry`` (the pre-write filesystem state) if that
-        path is not already recorded. An unsafe key (traversal/empty) never reaches
-        disk and is skipped for ``disk_prior``.
+        gains ``realpath → _DiskEntry`` (the pre-write filesystem state) if that
+        physical path is not already recorded. An unsafe key (traversal/empty) or a
+        path that resolves outside the repo is skipped for ``disk_prior``.
     """
     root = Path(repo_path).resolve()
     for rel_path in files:
@@ -235,8 +210,9 @@ def _record_prior_values(
             full_path = resolve_safe_repo_path(root, rel_path)
         except UnsafeRepoPathError:
             continue
-        if full_path not in rollback.disk_prior:
-            rollback.disk_prior[full_path] = _snapshot_disk_state(root, full_path)
+        real_path = _resolve_physical_path_in_repo(root, full_path)
+        if real_path is not None and real_path not in rollback.disk_prior:
+            rollback.disk_prior[real_path] = _snapshot_disk_state(real_path)
 
 
 def _rollback_microtask_files(rollback: _MicrotaskRollback, all_files: Dict[str, str]) -> None:
@@ -254,9 +230,9 @@ def _rollback_microtask_files(rollback: _MicrotaskRollback, all_files: Dict[str,
     Postconditions:
         ``all_files``: each recorded raw key is restored to its prior value, or removed
         when that prior value is ``None`` (the key was absent before). Worktree: each
-        recorded resolved path is reverted to its pre-write state (:class:`_DiskEntry`)
-        — prior bytes restored, a created file/target removed, a pre-existing symlink
-        left intact. Keys/paths the microtask never touched are left unchanged.
+        recorded physical path is reverted to its pre-write state (:class:`_DiskEntry`)
+        — prior bytes restored or a created file removed; a symlink the write followed
+        is never touched (only its physical target is). Untouched paths are unchanged.
     """
     for key, prior in rollback.all_files_prior.items():
         if prior is None:

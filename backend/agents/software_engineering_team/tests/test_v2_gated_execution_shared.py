@@ -201,6 +201,15 @@ def _coder_writes(path: str):
     return _coder_at
 
 
+def _batch_fix_writes(path: str):
+    """Build a batch fix that emits a single file at ``path`` (ignoring current files)."""
+
+    def _fix_at(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={path: "fixed-but-rejected\n"})
+
+    return _fix_at
+
+
 def _doc_review(*, documentation=None, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
     if detail_callback is not None:
         detail_callback("doc")
@@ -690,6 +699,31 @@ def test_rollback_restores_target_through_nondangling_symlink(tmp_path):
     assert (tmp_path / "alias.py").is_symlink()  # symlink intact
     assert (tmp_path / "real.py").read_text(encoding="utf-8") == "REAL\n"  # target restored
     assert "alias.py" not in result.files
+
+
+def test_rollback_canonicalizes_symlink_and_direct_path_aliases(tmp_path):
+    """One physical file written via a symlink then via its direct path collapses to a
+    single rollback entry, so the failed content is not restored over the original.
+
+    The coder writes through ``link.py`` (a symlink to ``real.py``); the failing fix
+    writes ``real.py`` directly. Both are the same physical file, so only the earliest
+    snapshot (``real.py``'s original bytes) is kept and restored.
+    """
+    (tmp_path / "real.py").write_text("ORIG\n", encoding="utf-8")
+    (tmp_path / "link.py").symlink_to("real.py")
+    mt = _microtask()
+    cfg = _make_gate_config(
+        coder=_coder_writes("link.py"),
+        code_review_gate=_fail_gate(),
+        batch_fix=_batch_fix_writes("real.py"),
+    )
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert (tmp_path / "real.py").read_text(encoding="utf-8") == "ORIG\n"  # not failed bytes
+    assert (tmp_path / "link.py").is_symlink()
+    assert "link.py" not in result.files
+    assert "real.py" not in result.files
 
 
 # ---------------------------------------------------------------------------

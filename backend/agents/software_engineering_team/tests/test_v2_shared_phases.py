@@ -687,17 +687,24 @@ def test_write_microtask_output_or_fail_success_and_rejection(tmp_path: Path):
     assert (tmp_path / "shared.py").read_text(encoding="utf-8") == "orig"  # disk restored
 
 
-def test_snapshot_disk_state_symlink_escape_and_directory(tmp_path: Path):
-    """_snapshot_disk_state: a symlink out of the repo yields ``target=None`` (left
-    untouched), and a directory yields an inert entry (nothing to restore/remove)."""
+def test_resolve_physical_path_and_snapshot_states(tmp_path: Path):
+    """``_resolve_physical_path_in_repo`` collapses a symlink chain to the physical file
+    and rejects out-of-repo escapes; ``_snapshot_disk_state`` reports file/dir/absent."""
     root = tmp_path.resolve()
-    (tmp_path / "escape").symlink_to(tmp_path.parent)  # points above the repo root
-    escaped = sh_exec._snapshot_disk_state(root, root / "escape")
-    assert escaped.is_symlink and escaped.target is None
+    # a symlink chain to an in-repo file resolves to that physical file
+    (tmp_path / "real.py").write_text("X", encoding="utf-8")
+    (tmp_path / "mid").symlink_to("real.py")
+    (tmp_path / "top").symlink_to("mid")
+    assert sh_exec._resolve_physical_path_in_repo(root, root / "top") == root / "real.py"
+    # a symlink pointing out of the repo is rejected
+    (tmp_path / "escape").symlink_to(tmp_path.parent)
+    assert sh_exec._resolve_physical_path_in_repo(root, root / "escape") is None
 
+    assert sh_exec._snapshot_disk_state(root / "real.py").file_bytes == b"X"
     (tmp_path / "adir").mkdir()
-    directory = sh_exec._snapshot_disk_state(root, root / "adir")
-    assert not directory.is_symlink and directory.file_bytes is None and not directory.absent
+    directory = sh_exec._snapshot_disk_state(root / "adir")
+    assert directory.file_bytes is None and not directory.absent
+    assert sh_exec._snapshot_disk_state(root / "missing").absent
 
 
 def _issue(**kw):
