@@ -1285,6 +1285,55 @@ def test_run_alignment_round_rejects_anomalous_rerun(
         assert "execution_diagnostics" not in last_anomaly_payload
 
 
+def test_run_alignment_round_rejects_negative_align_round() -> None:
+    """``align_round < 0`` violates the precondition and must raise
+    ``ValueError`` rather than being silently skipped (as a bare
+    ``assert`` would be under ``python -O``)."""
+    orch, _align_stub, _checker_stub = _make_orchestrator(
+        check_results=[_aligned_check_result()],
+    )
+
+    with pytest.raises(ValueError, match="align_round must be non-negative"):
+        orch._run_alignment_round(
+            spec=_spec(),
+            code="code-v0",
+            trades=_trade_records(),
+            metrics=_metrics(),
+            market_data=_market_data(),
+            config=_config(),
+            align_round=-1,
+            all_gate_results=[],
+            alignment_attempts=[],
+            alignment_reports=[],
+            emit=_collect_emit()[1],
+        )
+
+
+@pytest.mark.parametrize("bad_market_data", [{}, None, "not-a-dict"])
+def test_run_alignment_round_rejects_invalid_market_data(bad_market_data) -> None:
+    """Empty/non-dict ``market_data`` violates the precondition and must
+    raise ``ValueError`` rather than being silently skipped (as a bare
+    ``assert`` would be under ``python -O``)."""
+    orch, _align_stub, _checker_stub = _make_orchestrator(
+        check_results=[_aligned_check_result()],
+    )
+
+    with pytest.raises(ValueError, match="market_data must be non-empty"):
+        orch._run_alignment_round(
+            spec=_spec(),
+            code="code-v0",
+            trades=_trade_records(),
+            metrics=_metrics(),
+            market_data=bad_market_data,
+            config=_config(),
+            align_round=0,
+            all_gate_results=[],
+            alignment_attempts=[],
+            alignment_reports=[],
+            emit=_collect_emit()[1],
+        )
+
+
 # ---------------------------------------------------------------------------
 # Full-loop end-to-end test via the orchestrator's `_run_trade_alignment_loop`
 # ---------------------------------------------------------------------------

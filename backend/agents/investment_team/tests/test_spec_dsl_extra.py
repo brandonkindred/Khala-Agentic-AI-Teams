@@ -151,11 +151,8 @@ def test_format_indicator_ref_with_alt_source_appends_modifier() -> None:
     assert "source=high" in out
 
 
-def test_format_indicator_ref_vwap_with_alt_source_branch() -> None:
-    """vwap() has no other args, so source must wedge inside the empty parens."""
-    # vwap doesn't allow source per the registry, but the helper handles the
-    # ``inner.endswith("(")`` branch when the base is arg-less. Use sma with
-    # arg-less base via a temporary override of param.
+def test_format_indicator_ref_rsi_with_alt_source_branch() -> None:
+    """Same comma-append branch of ``_with_source`` as the sma case above, for rsi."""
     ref = IndicatorRef(name="rsi", source="high")
     out = _format_indicator_ref(ref)
     assert "source=high" in out

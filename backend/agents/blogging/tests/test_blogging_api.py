@@ -4,30 +4,11 @@ Backed by an in-memory FakeJobServiceClient — no Postgres or live job service
 required.
 """
 
-import importlib.util
-import sys
 import uuid
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-
-_blogging_root = Path(__file__).resolve().parent.parent
-if str(_blogging_root) not in sys.path:
-    sys.path.insert(0, str(_blogging_root))
-
-_spec = importlib.util.spec_from_file_location(
-    "blogging_api_main",
-    _blogging_root / "api" / "main.py",
-)
-_api_main = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_api_main)
-app = _api_main.app
-
-
-@pytest.fixture
-def client() -> TestClient:
-    return TestClient(app)
 
 
 @pytest.fixture
