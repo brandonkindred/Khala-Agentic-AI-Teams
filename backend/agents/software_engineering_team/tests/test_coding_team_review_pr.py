@@ -830,14 +830,9 @@ class TestReviewEndpoint:
         assert job["review_summary"]["file_comments"] == 1
         assert job["review_summary"]["comment_findings"] == 0
         # The two PR findings (one high inline, one low file-level) are broken down
-        # by severity for the Code Review page's per-review metrics.
-        assert job["review_summary"]["severity_counts"] == {
-            "critical": 0,
-            "high": 1,
-            "medium": 0,
-            "low": 1,
-            "info": 0,
-        }
+        # by severity for the Code Review page's per-review metrics. Only non-zero
+        # levels are emitted, so the zero levels are absent from the map.
+        assert job["review_summary"]["severity_counts"] == {"high": 1, "low": 1}
         # Invariant: with all findings at recognized severities, the per-severity
         # counts sum to total_issues.
         assert (
@@ -846,17 +841,17 @@ class TestReviewEndpoint:
         )
 
     def test_review_summary_counts_findings_by_severity(self, review_app) -> None:
-        # Findings across several severities, plus an unknown level and a
-        # pre-existing bug: only the five known levels of PR findings are counted,
-        # severity matching is case-insensitive, and the pre-existing bug (excluded
-        # from the PR review) does not inflate the counts.
+        # Findings across several recognized severities, plus a pre-existing bug:
+        # severity matching is case-insensitive ("HIGH" folds into "high"), the
+        # pre-existing bug (excluded from the PR review) does not inflate the counts,
+        # and only non-zero levels are emitted. With every PR finding at a recognized
+        # severity the invariant holds: the counts sum to total_issues.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue("critical", line=2, description="crit one"),
                 _FakeReviewIssue("high", line=2, description="high one"),
                 _FakeReviewIssue("HIGH", line=2, description="high two, cased"),
                 _FakeReviewIssue("info", line=2, description="info one"),
-                _FakeReviewIssue("bogus", line=2, description="unknown severity ignored"),
                 _FakeReviewIssue(
                     "high",
                     line=4,
@@ -869,22 +864,39 @@ class TestReviewEndpoint:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
-        # Five PR findings counted (the pre-existing bug is excluded); the "bogus"
-        # level is ignored rather than bucketed, "HIGH" folds into "high".
-        assert job["review_summary"]["total_issues"] == 5
-        assert job["review_summary"]["severity_counts"] == {
-            "critical": 1,
-            "high": 2,
-            "medium": 0,
-            "low": 0,
-            "info": 1,
-        }
-        # The per-severity counts sum to total_issues for recognized severities. Here
-        # exactly one finding has an unrecognized ("bogus") severity — counted in
-        # total_issues but excluded from the breakdown — so the sum is one short.
+        # Four PR findings counted (the pre-existing bug is excluded); zero levels
+        # (medium, low) are absent from the compact map.
+        assert job["review_summary"]["total_issues"] == 4
+        assert job["review_summary"]["severity_counts"] == {"critical": 1, "high": 2, "info": 1}
+        # Invariant: all findings are at recognized severities, so the counts sum to
+        # total_issues.
         assert (
             sum(job["review_summary"]["severity_counts"].values())
-            == job["review_summary"]["total_issues"] - 1
+            == job["review_summary"]["total_issues"]
+        )
+
+    def test_review_summary_excludes_unknown_and_blank_severities(self, review_app) -> None:
+        # A finding whose severity is unrecognized ("bogus") or blank ("") is counted
+        # in total_issues but excluded from the severity breakdown (there is no chip
+        # for it). This is the one documented exception to the sum==total_issues
+        # invariant: the sum falls short by the number of such findings.
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue("high", line=2, description="recognized"),
+                _FakeReviewIssue("bogus", line=2, description="unknown severity"),
+                _FakeReviewIssue("", line=2, description="blank severity"),
+            ],
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        # All three are PR findings, but only the recognized one is bucketed.
+        assert job["review_summary"]["total_issues"] == 3
+        assert job["review_summary"]["severity_counts"] == {"high": 1}
+        # Sum is short by the two unrecognized/blank findings.
+        assert (
+            sum(job["review_summary"]["severity_counts"].values())
+            == job["review_summary"]["total_issues"] - 2
         )
 
     def test_review_body_and_inline_comments_are_token_scrubbed(self, review_app) -> None:

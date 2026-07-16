@@ -596,7 +596,13 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   reviewDuration(record: PrReviewRecord): string | null {
     if (!this.isRecordTerminal(record) || record.completedAt === undefined) return null;
     const ms = record.completedAt - record.startedAt;
-    if (ms < 0) return null;
+    if (ms < 0) {
+      // A terminal review that completed before it started signals clock skew between
+      // the start and completion timestamps. Surface it rather than silently showing
+      // "—", so the data anomaly is visible in the console.
+      console.warn(`Negative review duration for job ${record.jobId} (${ms}ms); showing no duration.`);
+      return null;
+    }
     const totalSec = Math.floor(ms / 1000);
     const h = Math.floor(totalSec / 3600);
     const m = Math.floor((totalSec % 3600) / 60);

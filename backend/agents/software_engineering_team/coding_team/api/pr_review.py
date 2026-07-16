@@ -1024,17 +1024,20 @@ def _run_pr_review_body(
             )
 
             comment_findings = len(standalone)
-            # Break the posted PR findings down by severity so the Code Review page
-            # can show per-review severity metrics. Aggregated over ``pr_issues``
-            # (the findings actually posted on this PR), so the counts sum to
-            # ``total_issues``; pre-existing-bug proposals are excluded. Unknown or
-            # blank severities are ignored rather than bucketed, keeping the map to
-            # the five documented levels.
-            severity_counts = {lvl: 0 for lvl in ("critical", "high", "medium", "low", "info")}
+            # Break the posted PR findings down by severity so the Code Review page can
+            # show per-review severity metrics. Aggregated over ``pr_issues`` (the
+            # findings actually posted on this PR); pre-existing-bug proposals are
+            # excluded. Only the five documented levels are counted and only non-zero
+            # levels are emitted, so the map stays compact. Its values sum to
+            # ``total_issues`` for findings whose severity is recognized; a finding
+            # with an unknown or blank severity is counted in ``total_issues`` but not
+            # bucketed here.
+            recognized_severities = ("critical", "high", "medium", "low", "info")
+            severity_counts: dict[str, int] = {}
             for issue in pr_issues:
-                lvl = str(getattr(issue, "severity", "") or "").lower()
-                if lvl in severity_counts:
-                    severity_counts[lvl] += 1
+                lvl = str(getattr(issue, "severity", "")).lower()
+                if lvl in recognized_severities:
+                    severity_counts[lvl] = severity_counts.get(lvl, 0) + 1
             review_summary = {
                 "total_issues": len(pr_issues),
                 "inline_comments": inline_count,

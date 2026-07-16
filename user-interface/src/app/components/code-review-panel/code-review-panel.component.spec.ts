@@ -652,10 +652,14 @@ describe('CodeReviewPanelComponent', () => {
         record({ status: 'completed', startedAt: start, completedAt: start + (2 * 3600 + 5 * 60) * 1000 }),
       ),
     ).toBe('2h 5m');
-    // Completed-before-started (clock skew) is treated as unknown, not a negative time.
+    // Completed-before-started (clock skew) is treated as unknown, not a negative time,
+    // and the anomaly is surfaced via a console warning rather than silently swallowed.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     expect(
       component.reviewDuration(record({ status: 'completed', startedAt: start, completedAt: start - 1000 })),
     ).toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Negative review duration'));
+    warnSpy.mockRestore();
   });
 
   it('returns only the non-zero severity counts in critical→info order', async () => {
