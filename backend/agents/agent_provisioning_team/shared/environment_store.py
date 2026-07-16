@@ -237,6 +237,8 @@ class EnvironmentStore:
         """
         if env_info is None:
             raise ValueError("env_info must not be None")
+        if not env_info.agent_id:
+            raise ValueError("agent_id must not be empty")
         with _lock:
             self._write_env_data(env_info.agent_id, env_info.to_dict())
 
