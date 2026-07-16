@@ -245,7 +245,7 @@ def build_spec_from_dict(strategy_dict: Dict[str, Any], *, strategy_id: str) -> 
         exit_rules=strategy_dict.get("exit_rules", []),
         sizing=strategy_dict.get("sizing", DEFAULT_SIZING_PAYLOAD),
         target_symbols=strategy_dict.get("target_symbols", []),
-        risk_limits=strategy_dict.get("risk_limits", {}),
+        risk_limits=strategy_dict.get("risk_limits") or {},
         speculative=strategy_dict.get("speculative", False),
         requires_custom_code=_coerce_requires_custom_code(
             strategy_dict.get("requires_custom_code")
