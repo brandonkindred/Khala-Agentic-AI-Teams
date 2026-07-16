@@ -112,6 +112,7 @@ from software_engineering_team.coding_team.api.pr_review import (  # noqa: F401
     _REVIEW_ADMISSION_LOCK,
     _REVIEW_GUARD_HEARTBEAT_STALE_S,
     _REVIEW_HEARTBEAT_INTERVAL_S,
+    MultipleIssueCreationErrors,
     RepoMismatchError,
     ReviewCode,
     ReviewNotFoundError,
