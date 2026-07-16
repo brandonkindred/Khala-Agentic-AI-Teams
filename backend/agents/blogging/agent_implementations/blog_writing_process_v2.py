@@ -88,11 +88,11 @@ _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
 STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
 BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 # Hard upper bound on the draft/copy-edit loop iterations (the `for iteration in
-# range(1, draft_editor_iterations + 1)` cap in run_draft_stage). It is deliberately
-# high because the loop normally exits *early* when the copy editor approves the
-# draft, or escalates to the author at COPY_EDIT_ESCALATION_THRESHOLD — 500 is a
-# runaway-safety ceiling, not an expected iteration count.
-DRAFT_EDITOR_ITERATIONS = 500
+# range(1, draft_editor_iterations + 1)` cap in run_draft_stage). The loop normally
+# exits *early* when the copy editor approves the draft, or escalates to the author
+# every COPY_EDIT_ESCALATION_THRESHOLD iterations — 30 is a runaway-safety ceiling
+# (3x the escalation threshold), not an expected iteration count.
+DRAFT_EDITOR_ITERATIONS = 30
 MAX_REWRITE_ITERATIONS = 100
 # After this many copy-edit revisions without editor approval, escalate to the user
 COPY_EDIT_ESCALATION_THRESHOLD = 10
