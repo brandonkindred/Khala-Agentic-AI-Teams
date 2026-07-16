@@ -265,6 +265,9 @@ def test_canonical_anatomy_prompt_preamble_via_instance(tmp_path: Path) -> None:
     prov._state = ProvisionerStateStore("generic_x_provisioner", storage_dir=tmp_path)
     text = prov.canonical_anatomy_prompt_preamble()
     assert isinstance(text, str)
+    assert text.strip()
+    assert "anatomy" in text.lower() or "Khala" in text
+    assert "Input" in text or "Output" in text or "Tools" in text
 
 
 # ---------------------------------------------------------------------------

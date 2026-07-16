@@ -87,6 +87,15 @@ class CredentialStore:
                     "found. Set PROVISION_CREDENTIAL_KEY or PA_CREDENTIAL_KEY_FILE."
                 )
             keys = [self._load_or_generate_key()]
+        elif (
+            encryption_key is None
+            and not os.environ.get("PROVISION_CREDENTIAL_KEY", "").strip()
+            and not os.environ.get("PA_CREDENTIAL_KEY_FILE")
+            and self._read_valid_key(self.storage_dir / ".encryption_key") is None
+        ):
+            # Upgrade: we decrypted via a legacy ``.encryption_key`` — persist it
+            # as the primary store key so later boots do not mint a divergent key.
+            self._publish_key_file(self.storage_dir / ".encryption_key", keys[0])
 
         try:
             self._fernets = [Fernet(k) for k in keys]
@@ -113,6 +122,21 @@ class CredentialStore:
         if file_key:
             keys.append(file_key)
 
+        # Primary store generated key — include whenever present so a store that
+        # already minted ``.encryption_key`` remains the encrypt preference, with
+        # legacy keys appended below as trailing decrypt-only keys.
+        if not override:
+            primary_key = self._read_valid_key(self.storage_dir / ".encryption_key")
+            if primary_key is not None:
+                keys.append(primary_key)
+
+        # Legacy cutover: include generated fallback keys from the old
+        # ``provisioning_credentials`` directories as trailing decrypt keys so
+        # MultiFernet can still open pre-move ``.enc`` files when the primary
+        # store minted a fresh ``.encryption_key``.
+        for legacy_key in self._legacy_fallback_keys():
+            keys.append(legacy_key)
+
         # Dedup while preserving order — first key wins for encryption.
         seen = set()
         out: List[bytes] = []
@@ -121,6 +145,16 @@ class CredentialStore:
                 seen.add(k)
                 out.append(k)
         return out
+
+    @staticmethod
+    def _legacy_fallback_keys() -> List[bytes]:
+        """Load valid ``.encryption_key`` files from pre-cutover credential dirs."""
+        keys: List[bytes] = []
+        for legacy_dir in legacy_credentials_dirs():
+            key = CredentialStore._read_valid_key(legacy_dir / ".encryption_key")
+            if key is not None:
+                keys.append(key)
+        return keys
 
     @staticmethod
     def _parse_key_list(raw: str) -> List[bytes]:
@@ -177,6 +211,13 @@ class CredentialStore:
         if existing is not None:
             return existing
 
+        # Upgrade path: migrate a legacy generated key into the primary store
+        # before minting a new one (otherwise legacy ``.enc`` files become
+        # undecryptable under a fresh primary key).
+        for legacy_key in self._legacy_fallback_keys():
+            self._publish_key_file(key_file, legacy_key)
+            return legacy_key
+
         # First-time creation (or repair of an invalid/partial file). Serialize
         # across processes sharing storage_dir so peers cannot each generate a
         # different key and clobber the other's.
@@ -189,14 +230,19 @@ class CredentialStore:
                 return existing
 
             key = Fernet.generate_key()
-            tmp = self.storage_dir / f".encryption_key.{os.getpid()}.{secrets.token_hex(8)}.tmp"
-            try:
-                tmp.write_bytes(key)
-                tmp.chmod(0o600)
-                os.replace(tmp, key_file)  # atomic within the same filesystem
-            finally:
-                tmp.unlink(missing_ok=True)  # no-op after a successful replace
+            self._publish_key_file(key_file, key)
             return key
+
+    def _publish_key_file(self, key_file: Path, key: bytes) -> None:
+        """Atomically write ``key`` to ``key_file`` (same-filesystem replace)."""
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = key_file.parent / f".encryption_key.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        try:
+            tmp.write_bytes(key)
+            tmp.chmod(0o600)
+            os.replace(tmp, key_file)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     @staticmethod
     def _lock_exclusive(handle) -> None:

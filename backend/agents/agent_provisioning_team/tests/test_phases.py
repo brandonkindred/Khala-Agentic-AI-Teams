@@ -703,8 +703,8 @@ def test_generate_readme_includes_sections() -> None:
     assert "POSTGRES_URL" in out
     assert "ALL PRIVILEGES" in out
     assert "agent_anatomy" in out
-    # Password content is hidden
-    assert "***" not in out  # POSTGRES_URL key doesn't contain "password"
+    # POSTGRES_URL key does not contain "password", so no redaction placeholder appears
+    assert "***" not in out
 
 
 def test_generate_readme_redacts_password_envvar() -> None:

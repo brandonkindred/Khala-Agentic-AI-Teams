@@ -3,6 +3,12 @@
 ``AgentProvisioningWorkflow`` decomposes provisioning into per-phase activities
 and fans out tool provisioning in parallel via ``asyncio.gather``.
 ``AgentDeprovisioningWorkflow`` tears down one agent as a single activity.
+
+Phase *functions* live under ``phases/`` and are shared with
+``ProvisioningOrchestrator.run_workflow`` (in-process tests / non-HTTP callers).
+This Temporal workflow is the production sequencing source of truth for HTTP
+provision/resume/restart; keep activity order and compensation aligned with
+``orchestrator.run_workflow`` when changing either path.
 """
 
 from __future__ import annotations
@@ -255,8 +261,8 @@ class AgentProvisioningWorkflow:
         manifest_path: str,
         skip: set[str],
         prior: dict[str, Any],
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        """Run or restore setup; return ``(setup_result, environment_dump)``."""
+    ) -> dict[str, Any] | None:
+        """Run or restore setup; return the environment dump (or ``None``)."""
         setup_prior = prior.get("setup") if "setup" in skip else None
         setup_result = await workflow.execute_activity(
             _activities.setup_activity,
@@ -265,8 +271,7 @@ class AgentProvisioningWorkflow:
             schedule_to_close_timeout=PHASE_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
         )
-        environment_dump = setup_result.get("environment") if setup_result else None
-        return setup_result, environment_dump
+        return setup_result.get("environment") if setup_result else None
 
     async def _execute_credentials_phase(
         self,
@@ -411,7 +416,7 @@ class AgentProvisioningWorkflow:
         succeeded_tools: list[dict] = []
 
         try:
-            _, environment_dump = await self._execute_setup_phase(
+            environment_dump = await self._execute_setup_phase(
                 job_id, agent_id, manifest_path, skip, prior
             )
             setup_completed = True

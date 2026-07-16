@@ -45,6 +45,10 @@ def _load_ctx(manifest_path: str):
         * Returns ``(ProvisioningOrchestrator, ToolManifest)``.
     Raises:
         * Propagates import/IO/validation errors from ``load_manifest``.
+        * Propagates ``OSError`` / ``PermissionError`` from
+          ``ProvisioningOrchestrator.__init__`` when ``CredentialStore`` /
+          ``EnvironmentStore`` cannot create their storage directories or key
+          files — Temporal retries the activity.
 
     ``ProvisioningOrchestrator()`` is intentionally constructed per call. Its
     ``__init__`` only wires local ``CredentialStore`` / ``EnvironmentStore``
