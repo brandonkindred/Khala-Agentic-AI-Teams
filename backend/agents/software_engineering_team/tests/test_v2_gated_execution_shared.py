@@ -657,6 +657,26 @@ def test_rollback_preserves_dangling_symlink(tmp_path):
     assert "link.py" not in result.files
 
 
+def test_rollback_preserves_dangling_symlink_chain(tmp_path):
+    """A chain of symlinks ending at a missing target is undone at the ultimate target.
+
+    ``link.py -> middle.py -> real.py`` (real.py missing): the write follows the whole
+    chain and creates ``real.py``; rollback removes only that created ultimate target
+    and leaves every symlink in the chain intact.
+    """
+    (tmp_path / "middle.py").symlink_to("real.py")  # middle -> real (missing)
+    (tmp_path / "link.py").symlink_to("middle.py")  # link -> middle -> real
+    mt = _microtask()
+    cfg = _make_gate_config(coder=_coder_writes("link.py"), code_review_gate=_fail_gate())
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert (tmp_path / "link.py").is_symlink()  # chain intact
+    assert (tmp_path / "middle.py").is_symlink()
+    assert not (tmp_path / "real.py").exists()  # created ultimate target removed
+    assert "link.py" not in result.files
+
+
 def test_rollback_restores_target_through_nondangling_symlink(tmp_path):
     """Writing through a symlink to an existing in-repo file clobbers the target; on
     rollback the target's prior bytes are restored and the symlink is left intact."""

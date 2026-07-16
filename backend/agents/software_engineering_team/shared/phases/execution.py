@@ -113,19 +113,21 @@ class _DiskEntry:
 
 
 def _resolve_symlink_target_in_repo(root: Path, link_path: Path) -> Optional[Path]:
-    """Return the symlink's target resolved under ``root``, or ``None`` if it escapes.
+    """Return the symlink's ultimate target resolved under ``root``, or ``None``.
+
+    Follows the *entire* symlink chain via ``os.path.realpath`` (not a single
+    ``readlink`` level), so ``link -> middle -> real`` resolves to ``real`` — the
+    actual path a text write creates — even when an intermediate or final target is
+    missing. Only that ultimate target is restored/removed on rollback; the symlink
+    chain itself is never touched.
 
     Postconditions:
-        Returns the lexically-normalized target path when it is strictly inside
-        ``root``; ``None`` when the link is unreadable or points at/outside ``root``
-        (a write through such a link is a pre-existing ``write_repo_text_files``
-        concern this rollback does not try to reach outside the repo to undo).
+        Returns the fully-resolved target path when it is strictly inside ``root``;
+        ``None`` when the chain resolves to ``root`` itself or escapes it (a write
+        through such a link is a pre-existing ``write_repo_text_files`` concern this
+        rollback does not reach outside the repo to undo).
     """
-    try:
-        target = link_path.readlink()
-    except OSError:  # pragma: no cover - defensive: readlink race after is_symlink() check
-        return None
-    resolved = Path(os.path.normpath(link_path.parent / target))
+    resolved = Path(os.path.realpath(link_path))
     if resolved == root or root not in resolved.parents:
         return None
     return resolved
