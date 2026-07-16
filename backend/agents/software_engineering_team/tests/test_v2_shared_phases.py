@@ -707,6 +707,20 @@ def test_resolve_physical_path_and_snapshot_states(tmp_path: Path):
     assert sh_exec._snapshot_disk_state(root / "missing").absent
 
 
+def test_snapshot_disk_state_degrades_on_read_error(tmp_path: Path, monkeypatch):
+    """A read/stat OSError during snapshot degrades to a leave-alone entry, never raised,
+    so rollback bookkeeping cannot abort the run."""
+    f = tmp_path / "f.py"
+    f.write_text("x", encoding="utf-8")
+
+    def _boom(self, *a, **k):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+    entry = sh_exec._snapshot_disk_state(tmp_path.resolve() / "f.py")
+    assert entry.file_bytes is None and not entry.absent  # leave-alone, no exception
+
+
 def _issue(**kw):
     base = dict(
         source="review",

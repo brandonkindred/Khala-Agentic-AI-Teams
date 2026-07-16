@@ -133,17 +133,45 @@ def _resolve_physical_path_in_repo(root: Path, full_path: Path) -> Optional[Path
 
 
 def _snapshot_disk_state(real_path: Path) -> _DiskEntry:
-    """Capture the pre-write state of physical ``real_path`` as a :class:`_DiskEntry`."""
-    if real_path.is_file():
-        return _DiskEntry(file_bytes=real_path.read_bytes())
-    if real_path.exists():
-        # A directory or special file — not something the text writer creates.
+    """Capture the pre-write state of physical ``real_path`` as a :class:`_DiskEntry`.
+
+    Preconditions:
+        ``real_path`` is a physical (``realpath``-resolved) path inside the worktree.
+    Postconditions:
+        Returns ``file_bytes`` for a regular file, ``absent`` when nothing exists,
+        or an empty (leave-alone) entry for a directory/special file. A read/stat
+        ``OSError`` (e.g. an unreadable file) is logged and degraded to a leave-alone
+        entry rather than raised, so rollback bookkeeping never aborts the run.
+    Note:
+        A regular file's bytes are read whole into memory and held on the microtask's
+        rollback manifest until it completes or rolls back. The cost is bounded per
+        microtask and by file size; avoiding the in-memory copy would require staging
+        a temp-file backup, deliberately not done here to keep the mechanism simple
+        (a code-gen microtask overwrites small text files, not large binaries).
+    """
+    try:
+        if real_path.is_file():
+            return _DiskEntry(file_bytes=real_path.read_bytes())
+        if real_path.exists():
+            # A directory or special file — not something the text writer creates.
+            return _DiskEntry()
+        return _DiskEntry(absent=True)
+    except OSError as exc:
+        logger.warning("Rollback snapshot skipped for %s: %s", real_path, exc)
         return _DiskEntry()
-    return _DiskEntry(absent=True)
 
 
 def _restore_disk_state(real_path: Path, entry: _DiskEntry) -> None:
-    """Revert physical ``real_path`` to the state captured in ``entry``."""
+    """Revert physical ``real_path`` to the state captured in ``entry``.
+
+    Preconditions:
+        ``entry`` was produced by :func:`_snapshot_disk_state` for ``real_path``.
+    Postconditions:
+        Restores the file's prior bytes when ``entry.file_bytes`` is set (recreating
+        parent directories as needed), removes the path when ``entry.absent`` (the
+        microtask created it), or leaves it untouched for a directory/special or
+        degraded leave-alone entry.
+    """
     if entry.file_bytes is not None:
         real_path.parent.mkdir(parents=True, exist_ok=True)
         real_path.write_bytes(entry.file_bytes)
@@ -203,16 +231,20 @@ def _record_prior_values(
         ``all_files.update(files)``), so both reads reflect the pre-write state.
         ``repo_path`` is the worktree root.
     Postconditions:
-        For each key of ``files``: ``rollback.all_files_prior`` gains ``key →
-        all_files.get(key)`` if the key is not already recorded; ``rollback.disk_prior``
-        gains ``realpath → _DiskEntry`` (the pre-write filesystem state) if that
-        physical path is not already recorded. An unsafe key (traversal/empty) or a
-        path that resolves outside the repo is skipped for ``disk_prior``.
+        For each key of ``files`` not already recorded: ``rollback.all_files_prior``
+        gains ``key → all_files.get(key)`` and ``rollback.disk_prior`` gains
+        ``realpath → _DiskEntry`` (the pre-write filesystem state) unless that physical
+        path is already recorded. An unsafe key (traversal/empty) or a path that
+        resolves outside the repo is skipped for ``disk_prior``. A key already recorded
+        on an earlier write is skipped entirely (its baseline must not be overwritten).
     """
     root = Path(repo_path).resolve()
     for rel_path in files:
-        if rel_path not in rollback.all_files_prior:
-            rollback.all_files_prior[rel_path] = all_files.get(rel_path)
+        if rel_path in rollback.all_files_prior:
+            # Already snapshotted on an earlier write; skip re-resolving. A fixed key's
+            # physical path does not change mid-microtask, so this would be wasted work.
+            continue
+        rollback.all_files_prior[rel_path] = all_files.get(rel_path)
         try:
             full_path = resolve_safe_repo_path(root, rel_path)
         except UnsafeRepoPathError:
@@ -222,8 +254,10 @@ def _record_prior_values(
             rollback.disk_prior[real_path] = _snapshot_disk_state(real_path)
 
 
-def _rollback_microtask_files(rollback: _MicrotaskRollback, all_files: Dict[str, str]) -> None:
-    """Undo a microtask's contributions to ``all_files`` AND the worktree.
+def _rollback_microtask_files(
+    rollback: _MicrotaskRollback, all_files: Dict[str, str], mt: Any
+) -> None:
+    """Undo a microtask's contributions to ``all_files``, the worktree, AND its record.
 
     The commit that follows execution stages the worktree with ``git add -A``, so an
     in-memory-only rollback is not enough: files this microtask left on disk
@@ -233,13 +267,14 @@ def _rollback_microtask_files(rollback: _MicrotaskRollback, all_files: Dict[str,
 
     Preconditions:
         ``rollback`` was populated by :func:`_record_prior_values` before each of this
-        microtask's writes.
+        microtask's writes; ``mt`` is the microtask being rolled back.
     Postconditions:
         ``all_files``: each recorded raw key is restored to its prior value, or removed
         when that prior value is ``None`` (the key was absent before). Worktree: each
         recorded physical path is reverted to its pre-write state (:class:`_DiskEntry`)
         — prior bytes restored or a created file removed; a symlink the write followed
-        is never touched (only its physical target is). Untouched paths are unchanged.
+        is never touched (only its physical target is). ``mt.output_files`` is cleared,
+        so a rolled-back microtask reports no surviving output. Untouched paths unchanged.
     """
     for key, prior in rollback.all_files_prior.items():
         if prior is None:
@@ -248,6 +283,9 @@ def _rollback_microtask_files(rollback: _MicrotaskRollback, all_files: Dict[str,
             all_files[key] = prior
     for full_path, entry in rollback.disk_prior.items():
         _restore_disk_state(full_path, entry)
+    # A rolled-back microtask produced nothing that survives; clear its record so a
+    # consumer of ``mt.output_files`` cannot resurrect the reverted files.
+    mt.output_files = {}
 
 
 def write_microtask_output_or_fail(
@@ -288,7 +326,7 @@ def write_microtask_output_or_fail(
         mt.status = review_failed_status
         mt.notes = f"Rejected unsafe output path: {exc}"
         review_failed_ids.add(mt.id)
-        _rollback_microtask_files(rollback, all_files)
+        _rollback_microtask_files(rollback, all_files, mt)
         return False
 
 
@@ -646,7 +684,7 @@ def _apply_code_review_retry_exhausted(
         code_review_retry_cap,
         cr_outcome.summary,
     )
-    _rollback_microtask_files(rollback, all_files)
+    _rollback_microtask_files(rollback, all_files, mt)
     return True
 
 
@@ -709,7 +747,7 @@ def _apply_grounding_circuit_breaker_trip(
         mt.id,
         grounding_failure_streak,
     )
-    _rollback_microtask_files(rollback, all_files)
+    _rollback_microtask_files(rollback, all_files, mt)
     return True
 
 
@@ -1396,7 +1434,7 @@ def run_gated_execution_impl(
                 )
                 # Rollback: undo this microtask's contributions to all_files and the
                 # worktree, restoring any file an earlier microtask or the repo had.
-                _rollback_microtask_files(microtask_rollback, all_files)
+                _rollback_microtask_files(microtask_rollback, all_files, mt)
                 # Security failures always stop regardless of on_failure setting
                 _force_stop = config.on_failure == "stop" or (
                     getattr(config, "security_failure_always_stops", True)
