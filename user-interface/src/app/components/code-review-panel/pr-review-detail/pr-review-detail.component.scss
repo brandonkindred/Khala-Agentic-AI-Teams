@@ -15,6 +15,35 @@
     color: var(--mat-sys-on-primary-container, #001b3f);
     font-weight: 600;
   }
+
+  // Severity accents for the per-review metric chips: critical/high stand out red,
+  // medium/low take warm/cool container tints, info stays neutral.
+  &--sev-critical {
+    background: var(--mat-sys-error-container, #ffdad6);
+    color: var(--mat-sys-on-error-container, #410002);
+    font-weight: 700;
+  }
+
+  &--sev-high {
+    background: var(--mat-sys-error-container, #ffdad6);
+    color: var(--mat-sys-on-error-container, #410002);
+    font-weight: 600;
+  }
+
+  &--sev-medium {
+    background: var(--mat-sys-tertiary-container, #efe2d0);
+    color: var(--mat-sys-on-tertiary-container, #4a3a1d);
+  }
+
+  &--sev-low {
+    background: var(--mat-sys-secondary-container, #e0e7ef);
+    color: var(--mat-sys-on-secondary-container, #2a3441);
+  }
+
+  &--sev-info {
+    background: var(--mat-sys-surface-container-high, #ececec);
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.7));
+  }
 }
 
 // Review-run status text in the table (shared with the parent's row badge).
@@ -43,6 +72,19 @@
     align-items: center;
     gap: 0.5rem;
     font-size: 1.05rem;
+  }
+
+  // The single hoisted PR link, sitting inline in the detail header.
+  &__link {
+    display: inline-flex;
+    align-items: center;
+    color: var(--mat-sys-primary, #1a73e8);
+
+    mat-icon {
+      font-size: 1.1rem;
+      width: 1.1rem;
+      height: 1.1rem;
+    }
   }
 
   &__meta,
