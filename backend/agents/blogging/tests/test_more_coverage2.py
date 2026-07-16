@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from conftest import make_content_plan, make_planning_phase_result
 
 # ---------------------------------------------------------------------------
 # blog_research_agent — extra branches
@@ -343,30 +344,19 @@ def test_planning_agent_runner_delegates(monkeypatch) -> None:
     """The _BlogPlanningAgentRunner.run() delegates to BlogPlanningAgent.run."""
     from blog_planning_agent.agent import make_blog_planning_agent
     from shared.content_plan import (
-        ContentPlan,
         ContentPlanSection,
-        PlanningPhaseResult,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
     runner = make_blog_planning_agent()
 
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="x",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
-    ppr = PlanningPhaseResult(
-        content_plan=plan,
-        planning_iterations_used=1,
-        parse_retry_count=0,
-        planning_wall_ms_total=1.0,
-    )
+    ppr = make_planning_phase_result(plan=plan, planning_wall_ms_total=1.0)
 
     # Patch the wrapped agent's run method
     monkeypatch.setattr(runner._agent.__class__, "run", lambda self, *a, **kw: ppr)

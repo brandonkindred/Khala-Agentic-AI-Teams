@@ -15,11 +15,11 @@ import pytest
 from blog_plan_critic_agent import BlogPlanCriticAgent, PlanCriticReport
 from blog_plan_critic_agent.agent import build_refine_feedback_from_critic
 from blog_planning_agent import BlogPlanningAgent
+from conftest import make_content_plan
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     PlanningInput,
-    RequirementsAnalysis,
     TitleCandidate,
 )
 from shared.content_profile import ContentProfile, LengthPolicy, resolve_length_policy
@@ -32,7 +32,7 @@ def _policy_standard() -> LengthPolicy:
 
 
 def _minimal_plan(topic: str = "A stance about X that readers should adopt") -> ContentPlan:
-    return ContentPlan(
+    return make_content_plan(
         overarching_topic=topic,
         narrative_flow="Reader journey from skepticism to conviction.",
         sections=[
@@ -53,11 +53,6 @@ def _minimal_plan(topic: str = "A stance about X that readers should adopt") -> 
             TitleCandidate(title=f"Title candidate {i}", probability_of_success=0.7)
             for i in range(5)
         ],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True,
-            scope_feasible=True,
-            research_gaps=[],
-        ),
     )
 
 

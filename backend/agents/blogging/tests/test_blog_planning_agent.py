@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from blog_planning_agent import BlogPlanningAgent
+from conftest import make_content_plan
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
@@ -21,7 +22,7 @@ def _policy_standard() -> LengthPolicy:
 
 
 def test_content_plan_json_roundtrip() -> None:
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="Topic",
         narrative_flow="A then B.",
         sections=[

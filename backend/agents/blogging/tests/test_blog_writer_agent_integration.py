@@ -16,10 +16,9 @@ from pathlib import Path
 
 import pytest
 from blog_writer_agent import BlogWriterAgent, WriterInput, WriterOutput
+from conftest import make_content_plan
 from shared.content_plan import (
-    ContentPlan,
     ContentPlanSection,
-    RequirementsAnalysis,
     TitleCandidate,
 )
 
@@ -120,7 +119,7 @@ def test_writer_agent_with_ollama_produces_real_content() -> None:
         ),
         brand_spec_content="Brand voice: practical, direct, and transparent.",
     )
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="Observability for production systems",
         narrative_flow="Why it matters, key practices, OpenTelemetry path, wrap-up.",
         sections=[
@@ -148,11 +147,6 @@ def test_writer_agent_with_ollama_produces_real_content() -> None:
         title_candidates=[
             TitleCandidate(title="Observability essentials", probability_of_success=0.7)
         ],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True,
-            scope_feasible=True,
-            research_gaps=[],
-        ),
     )
     draft_input = WriterInput(
         research_document=(

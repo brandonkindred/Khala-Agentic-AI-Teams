@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 
+from conftest import make_content_plan
+
 
 def _make_agent():
     from blog_writer_agent.agent import BlogWriterAgent
@@ -289,9 +291,7 @@ def test_revise_with_feedback_batches(monkeypatch, tmp_path) -> None:
     from blog_writer_agent.agent import BlogWriterAgent
     from blog_writer_agent.models import ReviseWriterInput, RevisionPlan
     from shared.content_plan import (
-        ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -309,14 +309,11 @@ def test_revise_with_feedback_batches(monkeypatch, tmp_path) -> None:
         lambda self, p, system_prompt="": '{"draft": 0}\n---DRAFT---\n# Revised\nBody.',
     )
 
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="x",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
 
     out = a.revise(
@@ -339,9 +336,7 @@ def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> 
     from blog_writer_agent.agent import BlogWriterAgent
     from blog_writer_agent.models import ReviseWriterInput, RevisionPlan
     from shared.content_plan import (
-        ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -367,14 +362,11 @@ def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> 
 
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", fail_json)
 
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="x",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     out = a.revise(
         ReviseWriterInput(
@@ -394,21 +386,16 @@ def test_revise_generate_revision_plan_happy(monkeypatch) -> None:
     from blog_writer_agent.agent import BlogWriterAgent
     from blog_writer_agent.models import ReviseWriterInput
     from shared.content_plan import (
-        ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
     a = _make_agent()
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="x",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     monkeypatch.setattr(
         BlogWriterAgent,
@@ -446,21 +433,16 @@ def test_revise_generate_revision_plan_empty_response(monkeypatch) -> None:
     from blog_writer_agent.agent import BlogWriterAgent
     from blog_writer_agent.models import ReviseWriterInput
     from shared.content_plan import (
-        ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
     a = _make_agent()
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="x",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", lambda self, p, **kw: {})
     out = a._generate_revision_plan(
@@ -482,21 +464,16 @@ def test_revise_generate_revision_plan_error_falls_back(monkeypatch) -> None:
     from blog_writer_agent.agent import BlogWriterAgent
     from blog_writer_agent.models import ReviseWriterInput
     from shared.content_plan import (
-        ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
     a = _make_agent()
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="x",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
 
     def boom_json(self, p, **kw):

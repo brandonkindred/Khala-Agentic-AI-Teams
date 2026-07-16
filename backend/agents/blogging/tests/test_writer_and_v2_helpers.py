@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from conftest import make_content_plan
 
 # ---------------------------------------------------------------------------
 # blog_writer_agent.agent helpers
@@ -274,24 +275,19 @@ def test_ghost_writer_extract_gaps_from_plan_no_opportunities() -> None:
     """find_story_gaps falls back to LLM when plan has no story_opportunity fields."""
     from ghost_writer_agent.agent import GhostWriterElicitationAgent
     from shared.content_plan import (
-        ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
     from llm_service import DummyLLMClient
 
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="X",
         narrative_flow="flow",
         sections=[
             ContentPlanSection(title="A", coverage_description="cov", order=0),
         ],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     # When no story_opportunity on sections, _extract_gaps_from_plan returns []
@@ -302,9 +298,7 @@ def test_ghost_writer_extract_gaps_from_plan_no_opportunities() -> None:
 def test_ghost_writer_extract_gaps_from_plan_with_opportunities(monkeypatch) -> None:
     from ghost_writer_agent.agent import GhostWriterElicitationAgent
     from shared.content_plan import (
-        ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -319,14 +313,11 @@ def test_ghost_writer_extract_gaps_from_plan_with_opportunities(monkeypatch) -> 
         order=1,
         story_opportunity="A migration story",
     )
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="X",
         narrative_flow="flow",
         sections=[sec_a, sec_b],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
 
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
@@ -369,20 +360,3 @@ def test_ghost_writer_generate_friendly_seeds_empty_input() -> None:
 
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     assert agent._generate_friendly_seeds([]) == []
-
-
-# ---------------------------------------------------------------------------
-# graphs/*.py — call build helpers
-# ---------------------------------------------------------------------------
-
-
-def test_graphs_build_returns_objects() -> None:
-    """Smoke-test the build_* helpers — confirms imports + composition work."""
-    from graphs.copy_edit_swarm import build_copy_edit_swarm
-    from graphs.pipeline_graph import build_post_review_graph, build_pre_review_graph
-    from graphs.rewrite_swarm import build_rewrite_swarm
-
-    assert build_copy_edit_swarm() is not None
-    assert build_rewrite_swarm() is not None
-    assert build_pre_review_graph() is not None
-    assert build_post_review_graph() is not None

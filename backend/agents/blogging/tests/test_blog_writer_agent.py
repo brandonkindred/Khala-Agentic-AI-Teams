@@ -5,10 +5,10 @@ import re
 import pytest
 from blog_research_agent.models import ResearchReference
 from blog_writer_agent import BlogWriterAgent, WriterInput, WriterOutput
+from conftest import make_content_plan
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
-    RequirementsAnalysis,
     TitleCandidate,
 )
 
@@ -16,7 +16,7 @@ from llm_service import DummyLLMClient
 
 
 def _minimal_plan() -> ContentPlan:
-    return ContentPlan(
+    return make_content_plan(
         overarching_topic="Test topic",
         narrative_flow="Intro, main, wrap.",
         sections=[
@@ -24,11 +24,6 @@ def _minimal_plan() -> ContentPlan:
             ContentPlanSection(title="Main", coverage_description="Body", order=1),
         ],
         title_candidates=[TitleCandidate(title="T1", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True,
-            scope_feasible=True,
-            research_gaps=[],
-        ),
     )
 
 

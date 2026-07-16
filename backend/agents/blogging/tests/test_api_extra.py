@@ -12,6 +12,7 @@ from typing import Any
 
 from _api_test_utils import api_main as _api_main
 from _api_test_utils import create_job as _create_job
+from conftest import make_content_plan, make_planning_phase_result
 from fastapi.testclient import TestClient
 
 # ``api_main``/``app`` load and the ``patched_client``/``client`` fixtures live in
@@ -43,28 +44,17 @@ def _raise(exc: Exception):
 def _make_pipeline_doubles():
     """Build minimal planning_phase_result + draft_result + status fake."""
     from shared.content_plan import (
-        ContentPlan,
         ContentPlanSection,
-        PlanningPhaseResult,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="Topic",
         narrative_flow="Flow",
         sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
         title_candidates=[TitleCandidate(title=_EXPECTED_TITLE, probability_of_success=0.8)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
-    ppr = PlanningPhaseResult(
-        content_plan=plan,
-        planning_iterations_used=1,
-        parse_retry_count=0,
-        planning_wall_ms_total=10.0,
-    )
+    ppr = make_planning_phase_result(plan=plan)
 
     class _Draft:
         draft = "# Draft\n\nBody."
