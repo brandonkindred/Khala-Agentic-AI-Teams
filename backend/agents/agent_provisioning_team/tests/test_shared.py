@@ -74,6 +74,12 @@ def test_environment_store_register_get_remove(tmp_path: Path) -> None:
     assert store.get("a1") is None
 
 
+def test_environment_store_register_rejects_none(tmp_path: Path) -> None:
+    store = EnvironmentStore(storage_dir=tmp_path)
+    with pytest.raises(ValueError, match="env_info must not be None"):
+        store.register(None)
+
+
 def test_environment_store_update_status(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
 
