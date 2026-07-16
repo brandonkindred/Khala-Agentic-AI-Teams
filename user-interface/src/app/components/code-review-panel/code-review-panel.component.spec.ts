@@ -612,6 +612,17 @@ describe('CodeReviewPanelComponent', () => {
     ).toBe(0);
   });
 
+  it('builds the findings-column chip labels from the review summary', async () => {
+    await setup();
+    expect(
+      component.findingChips({ total_issues: 3, inline_comments: 2, comment_findings: 1, event: 'COMMENT' }),
+    ).toEqual(['3 finding(s)', '2 inline', '1 comments']);
+    // The standalone-comment count folds in the legacy body_findings key.
+    expect(
+      component.findingChips({ total_issues: 0, inline_comments: 0, body_findings: 4, event: 'COMMENT' }),
+    ).toEqual(['0 finding(s)', '0 inline', '4 comments']);
+  });
+
   it('reports per-record terminality', async () => {
     await setup();
     expect(component.isRecordTerminal(record({ status: 'running' }))).toBe(false);

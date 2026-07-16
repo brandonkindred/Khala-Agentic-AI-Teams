@@ -838,6 +838,12 @@ class TestReviewEndpoint:
             "low": 1,
             "info": 0,
         }
+        # Invariant: with all findings at recognized severities, the per-severity
+        # counts sum to total_issues.
+        assert (
+            sum(job["review_summary"]["severity_counts"].values())
+            == job["review_summary"]["total_issues"]
+        )
 
     def test_review_summary_counts_findings_by_severity(self, review_app) -> None:
         # Findings across several severities, plus an unknown level and a
@@ -873,6 +879,13 @@ class TestReviewEndpoint:
             "low": 0,
             "info": 1,
         }
+        # The per-severity counts sum to total_issues for recognized severities. Here
+        # exactly one finding has an unrecognized ("bogus") severity — counted in
+        # total_issues but excluded from the breakdown — so the sum is one short.
+        assert (
+            sum(job["review_summary"]["severity_counts"].values())
+            == job["review_summary"]["total_issues"] - 1
+        )
 
     def test_review_body_and_inline_comments_are_token_scrubbed(self, review_app) -> None:
         # LLM output (summary + inline finding text) can echo a credential from the

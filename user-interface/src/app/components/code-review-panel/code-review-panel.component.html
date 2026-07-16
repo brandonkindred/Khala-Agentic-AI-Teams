@@ -244,9 +244,9 @@
                             <td>
                               @if (rec.reviewSummary; as s) {
                                 <span class="cr-findings">
-                                  <span class="cr-chip">{{ s.total_issues }} finding(s)</span>
-                                  <span class="cr-chip">{{ s.inline_comments }} inline</span>
-                                  <span class="cr-chip">{{ commentFindings(s) }} comments</span>
+                                  @for (chip of findingChips(s); track chip) {
+                                    <span class="cr-chip">{{ chip }}</span>
+                                  }
                                 </span>
                               } @else {
                                 —

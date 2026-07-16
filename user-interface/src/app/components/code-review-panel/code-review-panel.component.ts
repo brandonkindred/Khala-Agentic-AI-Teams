@@ -541,6 +541,22 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     return summary.comment_findings ?? summary.body_findings ?? 0;
   }
 
+  /**
+   * Chip labels for a review's Findings cell (total / inline / standalone-comment counts).
+   *
+   * Preconditions: `summary` is a review summary.
+   * Postconditions: returns exactly three labels, in order, derived from
+   * `total_issues`, `inline_comments`, and `commentFindings(summary)` (which folds
+   * in the legacy `body_findings` key). Pure — no side effects.
+   */
+  findingChips(summary: CodeReviewSummary): string[] {
+    return [
+      `${summary.total_issues} finding(s)`,
+      `${summary.inline_comments} inline`,
+      `${this.commentFindings(summary)} comments`,
+    ];
+  }
+
   /** Fixed critical→info ordering for the per-row severity metric chips. */
   private static readonly SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'] as const;
 
