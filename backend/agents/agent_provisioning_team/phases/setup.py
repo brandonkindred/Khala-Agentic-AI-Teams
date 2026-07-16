@@ -107,10 +107,13 @@ def run_setup(
             error=result.error or "Docker container creation failed",
         )
 
-    if progress_callback:
-        progress_callback("Registering environment...")
-
+    # The progress callback is inside the rollback boundary: the container already
+    # exists here, so a callback (e.g. a job_updater) that raises must trigger the
+    # same atomic-setup cleanup as a register failure, not leak the container.
     try:
+        if progress_callback:
+            progress_callback("Registering environment...")
+
         env_info = EnvironmentInfo(
             container_id=result.details.get("container_id", ""),
             container_name=result.details.get("container_name", f"agent-{agent_id}"),
@@ -217,6 +220,19 @@ def run_setup(
                         "Setup rollback: failed to tear down container for agent_id=%s",
                         agent_id,
                     )
+        elif existing is not None:
+            # We're preserving a container a prior successful setup owns, but this
+            # attempt's register may have overwritten/corrupted that record before
+            # raising (register's write is not atomic). Restore the pre-write
+            # snapshot so the live agent isn't left missing from queries or wrongly
+            # flipped to "running". Best effort; must not mask the original error.
+            try:
+                env_store.register(existing)
+            except Exception:
+                logger.exception(
+                    "Setup rollback: could not restore prior env record for agent_id=%s",
+                    agent_id,
+                )
         raise
 
     return SetupResult(

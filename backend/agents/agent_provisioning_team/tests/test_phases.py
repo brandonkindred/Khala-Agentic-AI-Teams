@@ -458,6 +458,90 @@ def test_run_setup_rollback_survives_ownership_reread_failure(tmp_path: Path) ->
     docker.deprovision.assert_called_once_with("a10")
 
 
+def test_run_setup_rolls_back_when_progress_callback_raises(tmp_path: Path) -> None:
+    """A progress callback that raises after provisioning must trigger rollback.
+
+    The container already exists by the time the "Registering environment..."
+    callback runs, so a callback (e.g. a job_updater) that raises must reclaim the
+    container, not leak it — the callback is inside the rollback boundary.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = MagicMock()
+    env_store.get.return_value = None
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={"container_id": "c-new", "container_name": "agent-a12"},
+    )
+
+    def cb(msg):
+        if "Registering" in msg:
+            raise RuntimeError("callback boom")
+
+    with pytest.raises(RuntimeError, match="callback boom"):
+        run_setup(
+            agent_id="a12",
+            manifest=ToolManifest(),
+            environment_store=env_store,
+            docker_provisioner=docker,
+            progress_callback=cb,
+        )
+
+    docker.deprovision.assert_called_once_with("a12")
+
+
+def test_run_setup_restores_prior_record_when_reused_register_fails(tmp_path: Path) -> None:
+    """Preserving a reused container must restore a prior record register corrupted.
+
+    register's write is not atomic, so overwriting a preexisting ``ready`` record
+    can corrupt it and then raise. The healthy container is preserved (not torn
+    down), and the pre-write snapshot is re-registered so the live agent isn't left
+    missing from queries or wrongly flipped to ``running``.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import (
+        EnvironmentInfo as StoreEnvInfo,
+    )
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    ready_env = StoreEnvInfo(
+        agent_id="a13",
+        container_id="c-existing",
+        container_name="agent-a13",
+        ssh_host="localhost",
+        ssh_port=22013,
+        workspace_path="/workspace/a13",
+        status="ready",
+    )
+    env_store = MagicMock()
+    env_store.get.return_value = ready_env
+    # First register (this attempt's) fails; the restore re-register succeeds.
+    env_store.register.side_effect = [RuntimeError("register boom"), None]
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={"container_id": "c-existing", "container_name": "agent-a13", "reused": True},
+    )
+
+    with pytest.raises(RuntimeError, match="register boom"):
+        run_setup(
+            agent_id="a13",
+            manifest=ToolManifest(),
+            environment_store=env_store,
+            docker_provisioner=docker,
+        )
+
+    # The live container is preserved and the prior snapshot is restored.
+    docker.deprovision.assert_not_called()
+    env_store.register.assert_any_call(ready_env)
+
+
 def test_run_setup_rollback_swallows_deprovision_error(tmp_path: Path) -> None:
     """The best-effort rollback must not mask the original register failure."""
     from agent_provisioning_team.phases.setup import run_setup
