@@ -7,9 +7,8 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 from strands import Agent
 from strands.types.exceptions import EventLoopException
@@ -20,29 +19,36 @@ from llm_service import (
     LLMTemporaryError,
     extract_json_from_response,
 )
-from llm_service.backoff import rate_limit_retry_delay
 
 from .models import CopyEditorInput, CopyEditorOutput, FeedbackItem
 from .prompts import COPY_EDITOR_PROMPT
 
 logger = logging.getLogger(__name__)
 
-# After llm_service exhausts HTTP retries, re-run complete_json a few times (timeouts, cloud blips).
-_MAX_COPY_EDITOR_LLM_ROUNDS = 3
-# Per-round JSON parse attempts: the raw prompt first, then one strict-JSON retry.
+# Per-round JSON parse attempts: the raw prompt first, then one strict-JSON re-prompt.
 _MAX_JSON_PARSE_ATTEMPTS = 2
-# Exponential-backoff bounds (seconds) between LLM transport retries.
-_LLM_RETRY_BASE_DELAY_SECONDS = 15.0
-_LLM_RETRY_MAX_DELAY_SECONDS = 60.0
 # Content plans are truncated to this many characters before being embedded in the prompt.
 _MAX_CONTENT_PLAN_CHARS = 12000
 # For technical deep dives, a draft below this fraction of soft_min_words is flagged as thin.
 _THIN_DRAFT_RATIO = 0.88
-# Only these errors are treated as transient and retried. LLMTemporaryError/LLMRateLimitError
-# are what llm_service raises once its own HTTP retries are exhausted; OSError covers builtin
-# transport faults (TimeoutError and ConnectionError both subclass it). Everything else —
-# programming bugs and permanent LLM errors — must surface immediately, not be masked by retries.
-_TRANSIENT_LLM_ERRORS = (LLMTemporaryError, LLMRateLimitError, OSError)
+
+
+def _fallback_editor_data(summary: str) -> Dict[str, Any]:
+    """Editor output for a copy-edit tooling failure (unparseable JSON or unexpected error).
+
+    Preconditions:
+        - ``summary`` explains the failure so a human reviewer sees why the automated
+          pass did not run.
+    Postconditions:
+        - Returns ``{"approved": True, "summary": summary, "feedback_items": []}``.
+          ``approved=True`` is deliberate: the copy editor is an *advisory* style/clarity
+          pass, so a tooling failure must not drive a pointless no-op rewrite — an
+          unapproved draft carrying zero actionable feedback would loop the editor for
+          no reason. The deterministic length gate downstream still sets ``has_blocking``
+          and can withhold approval for an over-length draft, and the hard quality gates
+          (fact-check, compliance, validators) run separately and are unaffected.
+    """
+    return {"approved": True, "summary": summary, "feedback_items": []}
 
 
 class BlogCopyEditorAgent:
@@ -74,15 +80,34 @@ class BlogCopyEditorAgent:
             parts.append("--- WRITING STYLE GUIDE ---\n" + writing)
         self._style_prompt = "\n\n".join(parts)
 
-    def _write_feedback_to_path(self, output: CopyEditorOutput, path: Union[str, Path]) -> None:
-        """Serialize CopyEditorOutput to JSON and write to path. On failure log warning and do not raise."""
+    def _write_feedback_to_path(self, output: CopyEditorOutput, path: Union[str, Path]) -> bool:
+        """
+        Serialize CopyEditorOutput to JSON and write it to ``path``.
+
+        This is a best-effort side write: the returned CopyEditorOutput is always
+        authoritative, and a failed diagnostic write must never abort the copy-edit
+        run. Filesystem/serialization errors (permission denied, disk-full, invalid
+        path) are therefore caught, logged at WARNING, and reported via the return
+        value rather than raised.
+
+        Preconditions:
+            - output is a CopyEditorOutput.
+            - path is a non-empty filesystem path.
+        Postconditions:
+            - Returns True iff the JSON was successfully written to the resolved
+              form of ``path`` (``Path(path).resolve()``).
+            - Returns False on any filesystem/serialization error; in that case a
+              WARNING is logged and no exception propagates.
+        """
         try:
             p = Path(path).resolve()
             p.parent.mkdir(parents=True, exist_ok=True)
             data = output.to_dict()
             p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            return True
         except Exception as e:
             logger.warning("Failed to write editor feedback to %s: %s", path, e)
+            return False
 
     def _build_editor_prompt(
         self,
@@ -203,19 +228,25 @@ class BlogCopyEditorAgent:
         prompt: str,
         *,
         on_llm_request: Optional[Callable[[str], None]] = None,
-    ) -> dict[str, Any]:
+    ) -> Dict[str, Any]:
         """
-        Run the LLM with JSON-parse retries and transport backoff.
+        Run the LLM once (with a single strict-JSON re-prompt) and return the parsed dict.
+
+        The LLM client already exhausts its own 429 / transient-transport retry budgets
+        before raising, so the copy editor adds no second blocking retry: a transient LLM
+        error (LLMRateLimitError/LLMTemporaryError — including when strands wraps it in an
+        EventLoopException) re-raises so the Temporal activity funnel retries the whole
+        stage (thread mode fails the job). A JSON-parse failure gets one cheap strict
+        re-prompt then a manual-review fallback; any other unexpected error also fails
+        closed with that fallback so a single bad copy-edit never crashes the draft stage.
 
         Preconditions:
-            - prompt is the fully assembled editor prompt.
+            - prompt is the fully assembled per-request editor context.
         Postconditions:
-            - Returns a dict; on an unrecoverable JSON parse it returns a fallback dict
-              carrying a "summary" and empty "feedback_items" rather than raising.
-            - Retries only transient errors (``_TRANSIENT_LLM_ERRORS``, unwrapped from
-              strands' ``EventLoopException``). Non-transient errors — programming bugs
-              and permanent LLM errors — propagate immediately, and any transient error
-              still failing after the round budget is re-raised.
+            - Returns a dict with at least "summary" and "feedback_items"; on JSON-parse
+              exhaustion or an unexpected error it returns a ``_fallback_editor_data`` dict.
+            - Re-raises only genuinely transient LLM errors (unwrapped from
+              ``EventLoopException``); never returns None.
         """
         if on_llm_request:
             on_llm_request("Reviewing draft for style and clarity...")
@@ -228,65 +259,57 @@ class BlogCopyEditorAgent:
             "Keys: approved (boolean), summary (string), feedback_items (array of objects with "
             "category, severity, location?, issue, suggestion?)."
         )
-        for llm_round in range(_MAX_COPY_EDITOR_LLM_ROUNDS):
-            for json_attempt in range(_MAX_JSON_PARSE_ATTEMPTS):
-                try:
-                    result = agent(
-                        working_prompt + "\n\nRespond with valid JSON only, no markdown fences."
-                    )
-                    data = extract_json_from_response(str(result).strip())
-                    break
-                except LLMJsonParseError as e:
-                    if json_attempt == 0:
-                        logger.warning(
-                            "Copy editor JSON parse failed (attempt 1), retrying with strict instruction: %s",
-                            e,
-                        )
-                        working_prompt = base_prompt + strict_json_suffix
-                    else:
-                        logger.warning(
-                            "Copy editor JSON parse failed after retry; using fallback output: %s",
-                            e,
-                        )
-                        data = {
-                            "summary": "Copy editor could not parse the model response. Please review the draft manually.",
-                            "feedback_items": [],
-                        }
-                        break
-                except Exception as e:
-                    # strands wraps model failures in EventLoopException; unwrap to classify.
-                    cause = e.original_exception if isinstance(e, EventLoopException) else e
-                    # Non-transient errors (programming bugs, permanent LLM errors) will never
-                    # succeed on retry — re-raise immediately instead of masking them. Transient
-                    # transport/timeout/rate-limit errors are retried until the round budget runs out.
-                    if (
-                        not isinstance(cause, _TRANSIENT_LLM_ERRORS)
-                        or llm_round >= _MAX_COPY_EDITOR_LLM_ROUNDS - 1
-                    ):
-                        raise
-                    wait = rate_limit_retry_delay(
-                        llm_round, _LLM_RETRY_BASE_DELAY_SECONDS, _LLM_RETRY_MAX_DELAY_SECONDS
-                    )
+        for json_attempt in range(_MAX_JSON_PARSE_ATTEMPTS):
+            try:
+                result = agent(
+                    working_prompt + "\n\nRespond with valid JSON only, no markdown fences."
+                )
+                data = extract_json_from_response(str(result).strip())
+                break
+            except LLMJsonParseError as e:
+                if json_attempt == 0:
                     logger.warning(
-                        "Copy editor LLM transport/timeout after service retries (agent round %d/%d, "
-                        "json sub-attempt %d): %s — sleeping %.0fs and retrying.",
-                        llm_round + 1,
-                        _MAX_COPY_EDITOR_LLM_ROUNDS,
-                        json_attempt + 1,
+                        "Copy editor JSON parse failed (attempt 1), retrying with strict instruction: %s",
                         e,
-                        wait,
                     )
-                    time.sleep(wait)
-                    working_prompt = base_prompt
+                    working_prompt = base_prompt + strict_json_suffix
+                else:
+                    logger.warning(
+                        "Copy editor JSON parse failed after retry; using fallback output: %s",
+                        e,
+                    )
+                    data = _fallback_editor_data(
+                        "Copy editor could not parse the model response. Please review the draft manually."
+                    )
                     break
-            if data is not None:
+            except Exception as e:
+                # strands wraps model failures in EventLoopException; unwrap to classify.
+                cause = e.original_exception if isinstance(e, EventLoopException) else e
+                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                    # Transient transport error after the client's own retries: re-raise so
+                    # Temporal (or the caller) owns the retry rather than a blocking sleep here.
+                    # Log at the agent boundary so it is visible in thread mode too (outside
+                    # Temporal, which would otherwise be the only logger).
+                    logger.warning("Copy editor hit a transient LLM error, re-raising: %s", e)
+                    raise
+                # Any other unexpected error (a non-transient LLM failure, or a bug like
+                # AttributeError) degrades to a manual-review fallback rather than crashing
+                # the draft stage. The traceback is logged at ERROR level so the root cause
+                # stays visible; see _fallback_editor_data for why the fallback approves
+                # (the copy editor is advisory — a tooling failure must not force a no-op
+                # rewrite, and the hard quality gates still run downstream).
+                logger.exception(
+                    "Copy editor LLM failed unexpectedly; using fallback output: %s", e
+                )
+                data = _fallback_editor_data(
+                    "Copy editor could not complete review. Please review the draft manually."
+                )
                 break
 
         if not data:
-            data = {
-                "summary": "Copy editor could not parse the model response. Please review the draft manually.",
-                "feedback_items": [],
-            }
+            data = _fallback_editor_data(
+                "Copy editor could not parse the model response. Please review the draft manually."
+            )
         return data
 
     def _parse_feedback_items(self, feedback_data: Any) -> list[FeedbackItem]:
@@ -449,7 +472,11 @@ class BlogCopyEditorAgent:
             - copy_editor_input is a valid CopyEditorInput (draft non-empty).
         Postconditions:
             - Returns CopyEditorOutput with summary and feedback_items.
-            - If feedback_output_path is set, writes the same output to that path before returning.
+            - If feedback_output_path is set, best-effort writes the same output to
+              that path before returning. This write may silently fail (e.g. permission
+              denied or disk-full); such failures are logged at WARNING and never raised,
+              so the returned output is authoritative and callers must not assume the
+              file exists. `_write_feedback_to_path` returns whether the write succeeded.
         """
         draft = copy_editor_input.draft.strip()
         if not draft:

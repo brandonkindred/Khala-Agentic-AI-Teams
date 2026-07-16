@@ -15,7 +15,7 @@ from blog_copy_editor_agent.models import CopyEditorInput, FeedbackItem
 from blog_copy_editor_agent.prompts import COPY_EDITOR_PROMPT
 from strands.types.exceptions import EventLoopException
 
-from llm_service import DummyLLMClient, LLMJsonParseError, LLMTemporaryError
+from llm_service import DummyLLMClient, LLMRateLimitError, LLMTemporaryError
 
 
 def _make_agent(style: str = "Style", brand: str = "Brand") -> BlogCopyEditorAgent:
@@ -95,16 +95,18 @@ def test_build_prompt_no_style_guide_branch() -> None:
 
 
 def test_build_prompt_content_plan_is_included_and_truncated() -> None:
-    """A content plan appears in the prompt and is truncated to 12000 chars."""
+    """A content plan appears in the prompt and is truncated to _MAX_CONTENT_PLAN_CHARS."""
+    from blog_copy_editor_agent import agent as ce_mod
+
     agent = _make_agent()
-    plan = "P" * 13000
+    plan = "P" * (ce_mod._MAX_CONTENT_PLAN_CHARS + 1000)
     inp = CopyEditorInput(draft="ignored", content_plan_context=plan)
 
     prompt = agent._build_editor_prompt(inp, draft="Body.", style_guide_text="Style")
 
     assert "CONTENT PLAN (align feedback with this structure and section intent):" in prompt
-    assert "P" * 12000 in prompt
-    assert "P" * 12001 not in prompt
+    assert "P" * ce_mod._MAX_CONTENT_PLAN_CHARS in prompt
+    assert "P" * (ce_mod._MAX_CONTENT_PLAN_CHARS + 1) not in prompt
 
 
 # --------------------------------------------------------------------------- #
@@ -219,8 +221,12 @@ def test_inject_length_technical_deep_dive_thin_draft() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _patch_agent(monkeypatch, side_effect) -> None:
-    """Replace the module-level Agent with a stub whose __call__ runs `side_effect`."""
+def _patch_agent(monkeypatch, side_effect) -> dict:
+    """Replace the module-level Agent with a stub whose __call__ runs `side_effect`.
+
+    Returns a dict that captures the Agent constructor kwargs so tests can assert
+    what was passed (e.g. the system prompt).
+    """
     from blog_copy_editor_agent import agent as ce_mod
 
     captured: dict = {}
@@ -283,82 +289,49 @@ def test_invoke_llm_strict_retry_then_success(monkeypatch) -> None:
 
 
 def test_invoke_llm_json_parse_exhausted_returns_fallback(monkeypatch) -> None:
-    """Both JSON attempts fail → deterministic fallback dict."""
+    """Both JSON attempts fail → advisory fallback dict (approved, manual review)."""
     agent = _make_agent()
     _patch_agent(monkeypatch, lambda p: "still not json")
 
     data = agent._invoke_editor_llm("base")
 
     assert "could not parse" in data["summary"].lower()
+    assert data["approved"] is True
     assert data["feedback_items"] == []
 
 
-def test_invoke_llm_transient_error_then_success(monkeypatch) -> None:
-    """A transient LLM error backs off (sleep patched) and the next round succeeds."""
-    from blog_copy_editor_agent import agent as ce_mod
-
-    monkeypatch.setattr(ce_mod.time, "sleep", lambda s: None)
+def test_invoke_llm_raw_transient_error_reraises(monkeypatch) -> None:
+    """A transient LLM error propagates (delegated to Temporal), not degraded to fallback."""
     agent = _make_agent()
     calls = {"n": 0}
 
     def side_effect(prompt: str) -> str:
         calls["n"] += 1
-        if calls["n"] == 1:
-            raise LLMTemporaryError("connection reset")
-        return json.dumps({"summary": "after retry", "feedback_items": []})
+        raise LLMTemporaryError("transient outage")
 
     _patch_agent(monkeypatch, side_effect)
 
-    data = agent._invoke_editor_llm("base")
-
-    assert data["summary"] == "after retry"
-    assert calls["n"] == 2
-
-
-def test_invoke_llm_wrapped_transient_error_retries(monkeypatch) -> None:
-    """A transient error wrapped in strands' EventLoopException is unwrapped and retried."""
-    from blog_copy_editor_agent import agent as ce_mod
-
-    monkeypatch.setattr(ce_mod.time, "sleep", lambda s: None)
-    agent = _make_agent()
-    calls = {"n": 0}
-
-    def side_effect(prompt: str) -> str:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise EventLoopException(LLMTemporaryError("5xx from provider"))
-        return json.dumps({"summary": "recovered after wrap", "feedback_items": []})
-
-    _patch_agent(monkeypatch, side_effect)
-
-    data = agent._invoke_editor_llm("base")
-
-    assert data["summary"] == "recovered after wrap"
-    assert calls["n"] == 2
+    with pytest.raises(LLMTemporaryError, match="transient outage"):
+        agent._invoke_editor_llm("base")
+    assert calls["n"] == 1  # no blocking retry here
 
 
-def test_invoke_llm_transient_error_exhausts_and_raises(monkeypatch) -> None:
-    """Persistent transient errors propagate once the retry budget is spent."""
-    from blog_copy_editor_agent import agent as ce_mod
-
-    monkeypatch.setattr(ce_mod.time, "sleep", lambda s: None)
+def test_invoke_llm_wrapped_transient_error_reraises(monkeypatch) -> None:
+    """A transient error wrapped in strands' EventLoopException is unwrapped and re-raised."""
     agent = _make_agent()
 
     def side_effect(prompt: str) -> str:
-        raise LLMTemporaryError("still down")
+        raise EventLoopException(LLMRateLimitError("429 after client retries"))
 
     _patch_agent(monkeypatch, side_effect)
 
-    with pytest.raises(LLMTemporaryError, match="still down"):
+    # Without the unwrap this would slip past the transient check into the fallback.
+    with pytest.raises(EventLoopException):
         agent._invoke_editor_llm("base")
 
 
-def test_invoke_llm_non_transient_error_raises_immediately(monkeypatch) -> None:
-    """A programming bug is not retried — it surfaces on the first attempt."""
-    from blog_copy_editor_agent import agent as ce_mod
-
-    slept = {"n": 0}
-    monkeypatch.setattr(ce_mod.time, "sleep", lambda s: slept.__setitem__("n", slept["n"] + 1))
+def test_invoke_llm_non_transient_error_degrades_to_fallback(monkeypatch) -> None:
+    """A programming bug is not transient — it fails closed to the manual-review fallback."""
     agent = _make_agent()
     calls = {"n": 0}
 
@@ -368,29 +341,27 @@ def test_invoke_llm_non_transient_error_raises_immediately(monkeypatch) -> None:
 
     _patch_agent(monkeypatch, side_effect)
 
-    with pytest.raises(AttributeError, match="NoneType"):
-        agent._invoke_editor_llm("base")
+    data = agent._invoke_editor_llm("base")
+
+    assert "manually" in data["summary"].lower()
+    assert data["approved"] is True
+    assert data["feedback_items"] == []
     assert calls["n"] == 1  # no retry
-    assert slept["n"] == 0  # no backoff
 
 
-def test_invoke_llm_wrapped_non_transient_error_raises_immediately(monkeypatch) -> None:
-    """A bug wrapped in EventLoopException is unwrapped, judged non-transient, and re-raised."""
-    from blog_copy_editor_agent import agent as ce_mod
-
-    monkeypatch.setattr(ce_mod.time, "sleep", lambda s: None)
+def test_invoke_llm_wrapped_non_transient_error_degrades_to_fallback(monkeypatch) -> None:
+    """A bug wrapped in EventLoopException is unwrapped, judged non-transient, and degraded."""
     agent = _make_agent()
-    calls = {"n": 0}
 
     def side_effect(prompt: str) -> str:
-        calls["n"] += 1
         raise EventLoopException(TypeError("bug: unsupported operand"))
 
     _patch_agent(monkeypatch, side_effect)
 
-    with pytest.raises(EventLoopException):
-        agent._invoke_editor_llm("base")
-    assert calls["n"] == 1  # no retry
+    data = agent._invoke_editor_llm("base")
+
+    assert "manually" in data["summary"].lower()
+    assert data["approved"] is True
 
 
 def test_invoke_llm_empty_json_object_uses_final_fallback(monkeypatch) -> None:
@@ -401,16 +372,12 @@ def test_invoke_llm_empty_json_object_uses_final_fallback(monkeypatch) -> None:
     data = agent._invoke_editor_llm("base")
 
     assert "could not parse" in data["summary"].lower()
+    assert data["approved"] is True
     assert data["feedback_items"] == []
 
 
-def test_invoke_llm_first_attempt_json_error_is_importable() -> None:
-    """Guard: LLMJsonParseError is the exception type the retry loop catches."""
-    assert issubclass(LLMJsonParseError, Exception)
-
-
 # --------------------------------------------------------------------------- #
-# _write_feedback_to_path (failure path)
+# _write_feedback_to_path (failure path via run)
 # --------------------------------------------------------------------------- #
 
 

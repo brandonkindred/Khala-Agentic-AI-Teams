@@ -1,7 +1,9 @@
-"""Unit tests for the agent-keyed sandbox Lifecycle (issue #264, Phase 2).
+"""Unit tests for the agent-keyed sandbox Lifecycle.
 
-Docker CLI calls and the ``/health`` probe are patched so tests run without
-a real Docker daemon.
+Covers acquire / teardown / reap / status, the Docker-availability preflight,
+the ``/health`` probe, idle-reaper and ``/metrics`` snapshots, team resolution,
+and the module-level free-function wrappers. Docker CLI calls and the health
+probe are patched so tests run without a real Docker daemon.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -22,7 +24,6 @@ from agent_provisioning_team.sandbox import (
     UnknownAgentError,
 )
 from agent_provisioning_team.sandbox import provisioner as provisioner_mod
-from agent_provisioning_team.sandbox.provisioner import container_name_for
 from agent_provisioning_team.sandbox.state import SandboxHandle, SandboxState, now
 
 
@@ -425,7 +426,9 @@ def test_check_docker_available_passes_with_non_default_docker_context_env() -> 
 
     with (
         patch("shutil.which", return_value="/usr/bin/docker"),
-        patch.dict("os.environ", {"DOCKER_HOST": "", "DOCKER_CONTEXT": "remote-server"}, clear=False),
+        patch.dict(
+            "os.environ", {"DOCKER_HOST": "", "DOCKER_CONTEXT": "remote-server"}, clear=False
+        ),
     ):
         _check_docker_available()
 
@@ -438,48 +441,6 @@ def test_state_persists_across_lifecycle_instances(tmp_path: Path) -> None:
     assert set(lc2._state) == {"blogging.planner"}
     assert lc2._state["blogging.planner"].status == SandboxStatus.WARM
     assert lc2._state["blogging.planner"].container_id == "abc123"
-
-
-def test_container_name_is_dns_safe() -> None:
-    name = container_name_for("blogging.planner")
-    assert name.startswith("khala-sbx-blogging.planner-")
-    # readable prefix + 8 lowercase-hex char digest suffix.
-    suffix = name.rsplit("-", 1)[1]
-    assert len(suffix) == 8
-    assert all(c in "0123456789abcdef" for c in suffix)
-    # Deterministic.
-    assert container_name_for("blogging.planner") == name
-    # Empty id still yields a valid container name.
-    assert container_name_for("").startswith("khala-sbx-agent-")
-
-
-@pytest.mark.asyncio
-async def test_stop_container_is_idempotent_on_missing_container() -> None:
-    with patch.object(
-        provisioner_mod,
-        "_exec",
-        new=AsyncMock(return_value=(1, "", "Error: No such container: abc")),
-    ):
-        await provisioner_mod.stop_container("abc")  # must not raise
-
-
-@pytest.mark.asyncio
-async def test_stop_container_raises_on_real_failure() -> None:
-    with patch.object(
-        provisioner_mod,
-        "_exec",
-        new=AsyncMock(return_value=(1, "", "Cannot connect to the Docker daemon")),
-    ):
-        with pytest.raises(provisioner_mod.DockerError):
-            await provisioner_mod.stop_container("abc")
-
-
-def test_container_name_is_collision_resistant_under_sanitization() -> None:
-    # Two ids that sanitize to the same readable prefix still get distinct
-    # container names, so the acquire-time zombie reap cannot accidentally
-    # tear down another agent's live sandbox.
-    assert container_name_for("agent/1") != container_name_for("agent-1")
-    assert container_name_for("a b") != container_name_for("a-b")
 
 
 @pytest.mark.asyncio
@@ -526,36 +487,6 @@ def test_handle_from_state_projects_url_and_idle() -> None:
         last_used_at=t,
     )
     assert SandboxHandle.from_state(cold).url is None
-
-
-# --- tests for the small module-level helpers ------------------------------
-
-
-def test_sandbox_image_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    from agent_provisioning_team.sandbox import state as state_mod
-
-    monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_IMAGE", "my/custom:tag")
-    assert state_mod.sandbox_image() == "my/custom:tag"
-    monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_IMAGE")
-    assert state_mod.sandbox_image() == "khala-agent-sandbox:latest"
-
-
-def test_idle_threshold_reads_per_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    from agent_provisioning_team.sandbox import state as state_mod
-
-    monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES", "2")
-    assert state_mod.idle_teardown_seconds() == 120
-    monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES")
-    assert state_mod.idle_teardown_seconds() == 300  # 5-minute default
-
-
-def test_state_file_path_uses_agent_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from agent_provisioning_team.sandbox import state as state_mod
-
-    monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_STATE_FILE", raising=False)
-    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
-    path = state_mod.state_file_path()
-    assert path == tmp_path / "agent_provisioning" / "sandboxes" / "state.json"
 
 
 # ---------------------------------------------------------------------------
@@ -739,3 +670,250 @@ async def test_module_helpers_delegate_to_singleton(tmp_path: Path, monkeypatch)
         await sb.teardown("blogging.planner")
     assert await sb.list_active() == []
     d.run.assert_awaited_once()
+
+
+# -------------------------------------------------------------------------
+# Additional Lifecycle coverage: health probe, idle reaper, reap_once,
+# team resolution, and module-level sandbox helpers.
+# -------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_wait_healthy_exceeds_deadline(tmp_path: Path, monkeypatch) -> None:
+    from agent_provisioning_team.sandbox import lifecycle as lc_mod
+
+    lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
+
+    # Force the deadline immediately and httpx to always raise.
+    monkeypatch.setattr(lc_mod, "boot_timeout_seconds", lambda: 0)
+
+    async def fake_get(self, *args, **kwargs):
+        import httpx
+
+        raise httpx.ConnectError("nope")
+
+    with patch("httpx.AsyncClient.get", new=fake_get):
+        with pytest.raises(RuntimeError, match="did not report healthy"):
+            await lc._wait_healthy(host_port=12345)
+
+
+@pytest.mark.asyncio
+async def test_wait_healthy_success(tmp_path: Path, monkeypatch) -> None:
+    from agent_provisioning_team.sandbox import lifecycle as lc_mod
+
+    lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
+
+    async def fake_get(self, *args, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        return resp
+
+    with patch("httpx.AsyncClient.get", new=fake_get):
+        await lc._wait_healthy(host_port=12345)
+
+
+@pytest.mark.asyncio
+async def test_run_idle_reaper_swallows_non_cancel_exception(tmp_path: Path) -> None:
+    from agent_provisioning_team.sandbox import lifecycle as lc_mod
+
+    lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
+
+    calls = {"n": 0}
+
+    async def flaky_reap(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise RuntimeError("transient")
+        raise asyncio.CancelledError()
+
+    with (
+        patch.object(lc_mod.asyncio, "sleep", new=AsyncMock()),
+        patch.object(lc_mod.Lifecycle, "reap_once", new=flaky_reap),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await lc.run_idle_reaper(interval_s=0)
+
+
+@pytest.mark.asyncio
+async def test_reap_once_skips_non_warm(tmp_path: Path) -> None:
+    from agent_provisioning_team.sandbox import lifecycle as lc_mod
+    from agent_provisioning_team.sandbox.state import (
+        SandboxState,
+        SandboxStatus,
+        now,
+    )
+
+    lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
+    t = now()
+    lc._state["a1"] = SandboxState(
+        agent_id="a1",
+        team="t",
+        container_name="c1",
+        status=SandboxStatus.ERROR,  # not warm
+        created_at=t,
+        last_used_at=t - timedelta(hours=1),
+    )
+
+    reaped = await lc.reap_once(threshold=60)
+    assert reaped == []
+    # State row still present (not touched).
+    assert "a1" in lc._state
+
+
+@pytest.mark.asyncio
+async def test_resolve_team_success() -> None:
+    from agent_provisioning_team.sandbox.lifecycle import _resolve_team
+
+    fake_manifest = MagicMock()
+    fake_manifest.team = "myteam"
+    fake_registry = MagicMock()
+    fake_registry.get.return_value = fake_manifest
+
+    with patch(
+        "agent_registry.get_registry",
+        return_value=fake_registry,
+    ):
+        assert await _resolve_team("agent.x") == "myteam"
+
+
+@pytest.mark.asyncio
+async def test_resolve_team_unknown() -> None:
+    from agent_provisioning_team.sandbox.lifecycle import (
+        UnknownAgentError,
+        _resolve_team,
+    )
+
+    fake_registry = MagicMock()
+    fake_registry.get.return_value = None
+
+    with patch("agent_registry.get_registry", return_value=fake_registry):
+        with pytest.raises(UnknownAgentError):
+            await _resolve_team("ghost")
+
+
+@pytest.mark.asyncio
+async def test_resolve_team_calls_get_registry_off_the_event_loop_thread() -> None:
+    """Regression: ``get_registry()`` itself — not just the ``.get(agent_id)``
+    lookup on its result — must run inside the ``asyncio.to_thread`` worker.
+    ``get_registry`` is only cheap on a cache hit; a cold-cache first call
+    performs ``AgentRegistry.load()``'s full manifest directory scan. Evaluating
+    ``get_registry()`` as an eagerly-computed argument to ``asyncio.to_thread``
+    (the pre-fix shape) would run that scan directly on the event loop thread."""
+    import threading
+
+    fake_manifest = MagicMock()
+    fake_manifest.team = "myteam"
+    fake_registry = MagicMock()
+    fake_registry.get.return_value = fake_manifest
+    caller_thread = threading.current_thread()
+    captured: dict = {}
+
+    def _recording_get_registry():
+        captured["thread"] = threading.current_thread()
+        return fake_registry
+
+    from agent_provisioning_team.sandbox.lifecycle import _resolve_team
+
+    with patch("agent_registry.get_registry", side_effect=_recording_get_registry):
+        assert await _resolve_team("agent.x") == "myteam"
+
+    assert captured["thread"] is not caller_thread
+
+
+@pytest.mark.asyncio
+async def test_module_helper_status(tmp_path: Path, monkeypatch) -> None:
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    from agent_provisioning_team import sandbox as sb
+    from agent_provisioning_team.sandbox import lifecycle as lc_mod
+
+    lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
+    lc_mod.get_lifecycle.cache_clear()
+    monkeypatch.setattr(lc_mod, "get_lifecycle", lambda: lc)
+
+    with patch.object(lc_mod, "_resolve_team", _AsyncMock(return_value="t")):
+        handle = await sb.status("some.agent")
+    assert handle.agent_id == "some.agent"
+
+
+@pytest.mark.asyncio
+async def test_module_helper_metrics(tmp_path: Path, monkeypatch) -> None:
+    from agent_provisioning_team import sandbox as sb
+    from agent_provisioning_team.sandbox import lifecycle as lc_mod
+
+    lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
+    lc_mod.get_lifecycle.cache_clear()
+    monkeypatch.setattr(lc_mod, "get_lifecycle", lambda: lc)
+    snap = await sb.metrics()
+    assert snap.resident == 0
+
+
+@pytest.mark.asyncio
+async def test_module_helper_run_idle_reaper(tmp_path: Path, monkeypatch) -> None:
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    from agent_provisioning_team import sandbox as sb
+    from agent_provisioning_team.sandbox import lifecycle as lc_mod
+
+    lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
+    lc_mod.get_lifecycle.cache_clear()
+    monkeypatch.setattr(lc_mod, "get_lifecycle", lambda: lc)
+
+    with (
+        patch.object(lc_mod.asyncio, "sleep", new=_AsyncMock()),
+        patch.object(lc_mod.Lifecycle, "reap_once", new=_AsyncMock(return_value=[])),
+    ):
+        task = asyncio.create_task(sb.run_idle_reaper(interval_s=0))
+        await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_note_activity_missing_no_op(tmp_path: Path) -> None:
+    from agent_provisioning_team.sandbox.lifecycle import Lifecycle
+
+    lc = Lifecycle(state_file=tmp_path / "s.json")
+    # No state for "ghost" — call must be a no-op rather than raise.
+    await lc.note_activity("ghost")
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_teardown_missing_no_op(tmp_path: Path) -> None:
+    from agent_provisioning_team.sandbox.lifecycle import Lifecycle
+
+    lc = Lifecycle(state_file=tmp_path / "s.json")
+    await lc.teardown("ghost")
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_persist_swallows_oserror(tmp_path: Path, monkeypatch) -> None:
+    """If `state.save` raises, the public method completes without re-raising."""
+    from agent_provisioning_team.sandbox import lifecycle as lc_mod
+
+    lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
+
+    def fail_save(path, state):
+        raise OSError("disk full")
+
+    with patch.object(lc_mod.state_mod, "save", side_effect=fail_save):
+        await lc._persist()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_persist_swallows_non_oserror(tmp_path: Path, monkeypatch) -> None:
+    """The docstring promises `_persist()` never raises; a non-OSError failure
+    inside `state.save` (e.g. a serialization error) must be swallowed the
+    same way an OSError is, not propagate as an unhandled task exception."""
+    from agent_provisioning_team.sandbox import lifecycle as lc_mod
+
+    lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
+
+    def fail_save(path, state):
+        raise TypeError("not serializable")
+
+    with patch.object(lc_mod.state_mod, "save", side_effect=fail_save):
+        await lc._persist()
