@@ -29,6 +29,21 @@ _MODULE_NAME = "blogging_api_main_unit"
 def _load_api_main() -> Any:
     """Load ``api/main.py`` once under a synthetic name and cache it in ``sys.modules``.
 
+    This deliberately avoids ``from api.main import app`` / a plain
+    ``importlib.import_module("api.main")``. Every team under ``backend/agents/``
+    (``blogging``, ``planning_team``, ``software_engineering_team``, the legacy
+    ``backend/agents/api``, and about a dozen others) ships its own top-level
+    ``api`` package, and each team's ``conftest.py`` puts that team's own root on
+    ``sys.path`` rather than importing via a shared package prefix. If this
+    module imported ``api.main`` by its natural name, whichever team's ``api``
+    package a test session touched *first* would win the ``sys.modules["api"]``
+    slot for the rest of the run — a different team's routes/models could get
+    bound silently depending on collection order. Loading ``api/main.py`` by
+    explicit file path under the synthetic name ``_MODULE_NAME`` sidesteps that
+    collision entirely, at the cost of module-caching/relative-import quirks
+    normal imports don't have (hence this one central loader instead of
+    per-file imports).
+
     Preconditions:
         - ``api/main.py`` exists under the blogging package root.
     Postconditions:
@@ -39,6 +54,9 @@ def _load_api_main() -> Any:
     if existing is not None:
         return existing
     spec = importlib.util.spec_from_file_location(_MODULE_NAME, _blogging_root / "api" / "main.py")
+    assert spec is not None and spec.loader is not None, (
+        "failed to build an import spec for api/main.py"
+    )
     module = importlib.util.module_from_spec(spec)
     sys.modules[_MODULE_NAME] = module
     spec.loader.exec_module(module)
