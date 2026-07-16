@@ -128,7 +128,7 @@ def test_publish_publishes_via_job_event_bus(monkeypatch, tmp_path: Path, patche
 
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(
-        "agent_implementations.blog_writing_process_v2.run_pipeline",
+        "agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline",
         lambda *a, **kw: (ppr, draft, status),
     )
 
@@ -168,7 +168,7 @@ def test_job_updater_swallows_publish_exception(
 
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(
-        "agent_implementations.blog_writing_process_v2.run_pipeline",
+        "agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline",
         lambda *a, **kw: (ppr, draft, status),
     )
 
@@ -195,7 +195,7 @@ def test_external_cancellation_planning_path(monkeypatch, tmp_path: Path, patche
         err.__cause__ = cancel
         raise err
 
-    monkeypatch.setattr("agent_implementations.blog_writing_process_v2.run_pipeline", boom)
+    monkeypatch.setattr("agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", boom)
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -221,7 +221,7 @@ def test_external_cancellation_blogging_error_path(
         err.__cause__ = cancel
         raise err
 
-    monkeypatch.setattr("agent_implementations.blog_writing_process_v2.run_pipeline", boom)
+    monkeypatch.setattr("agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", boom)
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -246,7 +246,7 @@ def test_external_cancellation_unexpected_error_path(
         err.__cause__ = cancel
         raise err
 
-    monkeypatch.setattr("agent_implementations.blog_writing_process_v2.run_pipeline", boom)
+    monkeypatch.setattr("agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", boom)
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -283,7 +283,7 @@ def test_mark_cancelled_swallows_update_exception(
         err.__cause__ = cancel
         raise err
 
-    monkeypatch.setattr("agent_implementations.blog_writing_process_v2.run_pipeline", boom)
+    monkeypatch.setattr("agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", boom)
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -313,7 +313,7 @@ def test_pipeline_heartbeat_loop_runs_body_directly(
 
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(
-        "agent_implementations.blog_writing_process_v2.run_pipeline",
+        "agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline",
         lambda *a, **kw: (ppr, draft, status),
     )
 

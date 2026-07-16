@@ -75,7 +75,7 @@ def test_run_blog_full_pipeline_job_completes(monkeypatch, tmp_path: Path, patch
 
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(
-        "agent_implementations.blog_writing_process_v2.run_pipeline",
+        "agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline",
         lambda *a, **kw: (ppr, draft, status),
     )
 
@@ -102,7 +102,7 @@ def test_run_blog_full_pipeline_job_completes_needs_review(
     ppr, draft, _ = _make_pipeline_doubles()
     # Override to FAIL status
     monkeypatch.setattr(
-        "agent_implementations.blog_writing_process_v2.run_pipeline",
+        "agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline",
         lambda *a, **kw: (ppr, draft, "FAIL"),
     )
 
@@ -138,7 +138,7 @@ def test_run_blog_full_pipeline_job_planning_error(
     def boom(*a, **kw):
         raise PlanningError("nope", failure_reason="MAX_ITER")
 
-    monkeypatch.setattr("agent_implementations.blog_writing_process_v2.run_pipeline", boom)
+    monkeypatch.setattr("agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", boom)
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -163,7 +163,7 @@ def test_run_blog_full_pipeline_job_blogging_error(
     def boom(*a, **kw):
         raise DraftError("draft failed", iteration=1)
 
-    monkeypatch.setattr("agent_implementations.blog_writing_process_v2.run_pipeline", boom)
+    monkeypatch.setattr("agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", boom)
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -182,7 +182,7 @@ def test_run_blog_full_pipeline_job_unknown_error(
     _setup_artifacts_root(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
-        "agent_implementations.blog_writing_process_v2.run_pipeline",
+        "agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline",
         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("crash")),
     )
 
@@ -225,7 +225,7 @@ def test_run_blog_full_pipeline_job_job_updater_failure_swallowed(
         kw["job_updater"](status_text="boom")
         return (ppr, draft, "PASS")
 
-    monkeypatch.setattr("agent_implementations.blog_writing_process_v2.run_pipeline", fake_run)
+    monkeypatch.setattr("agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", fake_run)
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -281,7 +281,7 @@ def test_run_blog_full_pipeline_job_degrades_without_job_store(monkeypatch, tmp_
 
     ppr, draft, _ = _make_pipeline_doubles()
     monkeypatch.setattr(
-        "agent_implementations.blog_writing_process_v2.run_pipeline",
+        "agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline",
         lambda *a, **kw: (ppr, draft, "PASS"),
     )
 
