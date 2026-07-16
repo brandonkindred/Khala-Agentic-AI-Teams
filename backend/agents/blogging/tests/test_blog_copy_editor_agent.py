@@ -174,8 +174,10 @@ def test_blog_copy_editor_agent_feedback_file_roundtrip(tmp_path: Path) -> None:
     assert len(written["feedback_items"]) == len(data["feedback_items"])
 
 
-def test_blog_copy_editor_agent_no_path_no_file(tmp_path: Path) -> None:
-    """When feedback_output_path is not passed, no file is created in the given dir."""
+def test_blog_copy_editor_agent_no_path_no_file(monkeypatch) -> None:
+    """When feedback_output_path is not passed, the agent never attempts to write a feedback file."""
+    from blog_copy_editor_agent import agent as ce_mod
+
     llm = DummyLLMClient()
     agent = BlogCopyEditorAgent(
         llm_client=llm,
@@ -183,10 +185,17 @@ def test_blog_copy_editor_agent_no_path_no_file(tmp_path: Path) -> None:
         brand_spec_content="",
     )
 
+    write_calls = []
+    monkeypatch.setattr(
+        ce_mod.BlogCopyEditorAgent,
+        "_write_feedback_to_path",
+        lambda self, *a, **k: write_calls.append((a, k)),
+    )
+
     result = agent.run(CopyEditorInput(draft="# Test\n\nDraft."))
 
     assert result.summary is not None
-    assert (tmp_path / "editor_feedback.json").exists() is False
+    assert write_calls == []
 
 
 def test_blog_copy_editor_agent_empty_draft_writes_file(tmp_path: Path) -> None:
