@@ -1,7 +1,9 @@
-"""Unit tests for the agent-keyed sandbox Lifecycle (issue #264, Phase 2).
+"""Unit tests for the agent-keyed sandbox Lifecycle.
 
-Docker CLI calls and the ``/health`` probe are patched so tests run without
-a real Docker daemon.
+Covers acquire / teardown / reap / status, the Docker-availability preflight,
+the ``/health`` probe, idle-reaper and ``/metrics`` snapshots, team resolution,
+and the module-level free-function wrappers. Docker CLI calls and the health
+probe are patched so tests run without a real Docker daemon.
 """
 
 from __future__ import annotations
@@ -22,7 +24,6 @@ from agent_provisioning_team.sandbox import (
     UnknownAgentError,
 )
 from agent_provisioning_team.sandbox import provisioner as provisioner_mod
-from agent_provisioning_team.sandbox.provisioner import container_name_for
 from agent_provisioning_team.sandbox.state import SandboxHandle, SandboxState, now
 
 
@@ -425,7 +426,9 @@ def test_check_docker_available_passes_with_non_default_docker_context_env() -> 
 
     with (
         patch("shutil.which", return_value="/usr/bin/docker"),
-        patch.dict("os.environ", {"DOCKER_HOST": "", "DOCKER_CONTEXT": "remote-server"}, clear=False),
+        patch.dict(
+            "os.environ", {"DOCKER_HOST": "", "DOCKER_CONTEXT": "remote-server"}, clear=False
+        ),
     ):
         _check_docker_available()
 
@@ -438,48 +441,6 @@ def test_state_persists_across_lifecycle_instances(tmp_path: Path) -> None:
     assert set(lc2._state) == {"blogging.planner"}
     assert lc2._state["blogging.planner"].status == SandboxStatus.WARM
     assert lc2._state["blogging.planner"].container_id == "abc123"
-
-
-def test_container_name_is_dns_safe() -> None:
-    name = container_name_for("blogging.planner")
-    assert name.startswith("khala-sbx-blogging.planner-")
-    # readable prefix + 8 lowercase-hex char digest suffix.
-    suffix = name.rsplit("-", 1)[1]
-    assert len(suffix) == 8
-    assert all(c in "0123456789abcdef" for c in suffix)
-    # Deterministic.
-    assert container_name_for("blogging.planner") == name
-    # Empty id still yields a valid container name.
-    assert container_name_for("").startswith("khala-sbx-agent-")
-
-
-@pytest.mark.asyncio
-async def test_stop_container_is_idempotent_on_missing_container() -> None:
-    with patch.object(
-        provisioner_mod,
-        "_exec",
-        new=AsyncMock(return_value=(1, "", "Error: No such container: abc")),
-    ):
-        await provisioner_mod.stop_container("abc")  # must not raise
-
-
-@pytest.mark.asyncio
-async def test_stop_container_raises_on_real_failure() -> None:
-    with patch.object(
-        provisioner_mod,
-        "_exec",
-        new=AsyncMock(return_value=(1, "", "Cannot connect to the Docker daemon")),
-    ):
-        with pytest.raises(provisioner_mod.DockerError):
-            await provisioner_mod.stop_container("abc")
-
-
-def test_container_name_is_collision_resistant_under_sanitization() -> None:
-    # Two ids that sanitize to the same readable prefix still get distinct
-    # container names, so the acquire-time zombie reap cannot accidentally
-    # tear down another agent's live sandbox.
-    assert container_name_for("agent/1") != container_name_for("agent-1")
-    assert container_name_for("a b") != container_name_for("a-b")
 
 
 @pytest.mark.asyncio
@@ -526,36 +487,6 @@ def test_handle_from_state_projects_url_and_idle() -> None:
         last_used_at=t,
     )
     assert SandboxHandle.from_state(cold).url is None
-
-
-# --- tests for the small module-level helpers ------------------------------
-
-
-def test_sandbox_image_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    from agent_provisioning_team.sandbox import state as state_mod
-
-    monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_IMAGE", "my/custom:tag")
-    assert state_mod.sandbox_image() == "my/custom:tag"
-    monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_IMAGE")
-    assert state_mod.sandbox_image() == "khala-agent-sandbox:latest"
-
-
-def test_idle_threshold_reads_per_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    from agent_provisioning_team.sandbox import state as state_mod
-
-    monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES", "2")
-    assert state_mod.idle_teardown_seconds() == 120
-    monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES")
-    assert state_mod.idle_teardown_seconds() == 300  # 5-minute default
-
-
-def test_state_file_path_uses_agent_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from agent_provisioning_team.sandbox import state as state_mod
-
-    monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_STATE_FILE", raising=False)
-    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
-    path = state_mod.state_file_path()
-    assert path == tmp_path / "agent_provisioning" / "sandboxes" / "state.json"
 
 
 # ---------------------------------------------------------------------------

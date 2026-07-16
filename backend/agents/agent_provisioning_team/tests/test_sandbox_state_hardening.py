@@ -1,9 +1,11 @@
-"""Tests for the sandbox state-layer thread-safety hardening.
+"""Tests for the sandbox state layer.
 
-Once acquire/teardown/reap run on the Temporal worker thread (while status/
-note_activity/list_active/metrics stay on the API loop), ``_state`` and its JSON
-persistence are touched from two threads. These tests cover the ``state.save``
-snapshot + unique-temp-file fix and the ``Lifecycle`` ``threading.RLock``.
+Covers the thread-safety hardening — once acquire/teardown/reap run on the
+Temporal worker thread (while status/note_activity/list_active/metrics stay on
+the API loop), ``_state`` and its JSON persistence are touched from two threads,
+so these tests exercise the ``state.save`` snapshot + unique-temp-file fix and
+the ``Lifecycle`` ``threading.RLock`` — plus the general state helpers: load/save
+round-trips, malformed-entry handling, and env-driven path/timeout resolution.
 """
 
 from __future__ import annotations
@@ -388,3 +390,35 @@ def test_state_file_path_with_override(monkeypatch) -> None:
 
     monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_STATE_FILE", "/tmp/x.json")
     assert str(state_mod.state_file_path()) == "/tmp/x.json"
+
+
+# -------------------------------------------------------------------------
+# General state-layer helpers: image / idle-threshold / state-file resolution.
+# -------------------------------------------------------------------------
+
+
+def test_sandbox_image_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_provisioning_team.sandbox import state as state_mod
+
+    monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_IMAGE", "my/custom:tag")
+    assert state_mod.sandbox_image() == "my/custom:tag"
+    monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_IMAGE")
+    assert state_mod.sandbox_image() == "khala-agent-sandbox:latest"
+
+
+def test_idle_threshold_reads_per_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_provisioning_team.sandbox import state as state_mod
+
+    monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES", "2")
+    assert state_mod.idle_teardown_seconds() == 120
+    monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES")
+    assert state_mod.idle_teardown_seconds() == 300  # 5-minute default
+
+
+def test_state_file_path_uses_agent_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from agent_provisioning_team.sandbox import state as state_mod
+
+    monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_STATE_FILE", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
+    path = state_mod.state_file_path()
+    assert path == tmp_path / "agent_provisioning" / "sandboxes" / "state.json"

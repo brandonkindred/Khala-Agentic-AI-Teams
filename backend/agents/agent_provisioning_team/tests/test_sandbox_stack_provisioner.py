@@ -1,21 +1,23 @@
-"""Tests for the per-sandbox compose-stack provisioner (#456).
+"""Tests for the per-sandbox compose-stack provisioner and its Docker helpers.
 
 The provisioner shells out to ``docker compose`` to bring up a self-
 contained stack (postgres + temporal + prometheus + grafana + agent) per
-sandbox. Tests stub ``_exec`` so no real Docker daemon is required and
-assert on the rendered compose file + the argv shape used to bring the
-stack up and tear it down.
+sandbox. Tests stub ``_exec`` so no real Docker daemon is required and cover
+compose up/down and the rendered compose file, ``_exec`` timeouts,
+``is_running`` / ``inspect_host_port``, container naming, and the
+secrets/cleanup helpers.
 """
 
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from agent_provisioning_team.sandbox import provisioner as provisioner_mod
+from agent_provisioning_team.sandbox.provisioner import container_name_for
 
 
 @pytest.fixture
@@ -518,3 +520,50 @@ def test_cleanup_secrets_file_swallows_oserror(tmp_path: Path, monkeypatch) -> N
 
     with patch.object(pm.shutil, "rmtree", side_effect=OSError("io")):
         pm.cleanup_secrets_file("khala-sbx-x")
+
+
+# -------------------------------------------------------------------------
+# Container naming and stop_container (module-level provisioner helpers).
+# -------------------------------------------------------------------------
+
+
+def test_container_name_is_dns_safe() -> None:
+    name = container_name_for("blogging.planner")
+    assert name.startswith("khala-sbx-blogging.planner-")
+    # readable prefix + 8 lowercase-hex char digest suffix.
+    suffix = name.rsplit("-", 1)[1]
+    assert len(suffix) == 8
+    assert all(c in "0123456789abcdef" for c in suffix)
+    # Deterministic.
+    assert container_name_for("blogging.planner") == name
+    # Empty id still yields a valid container name.
+    assert container_name_for("").startswith("khala-sbx-agent-")
+
+
+def test_container_name_is_collision_resistant_under_sanitization() -> None:
+    # Two ids that sanitize to the same readable prefix still get distinct
+    # container names, so the acquire-time zombie reap cannot accidentally
+    # tear down another agent's live sandbox.
+    assert container_name_for("agent/1") != container_name_for("agent-1")
+    assert container_name_for("a b") != container_name_for("a-b")
+
+
+@pytest.mark.asyncio
+async def test_stop_container_is_idempotent_on_missing_container() -> None:
+    with patch.object(
+        provisioner_mod,
+        "_exec",
+        new=AsyncMock(return_value=(1, "", "Error: No such container: abc")),
+    ):
+        await provisioner_mod.stop_container("abc")  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_stop_container_raises_on_real_failure() -> None:
+    with patch.object(
+        provisioner_mod,
+        "_exec",
+        new=AsyncMock(return_value=(1, "", "Cannot connect to the Docker daemon")),
+    ):
+        with pytest.raises(provisioner_mod.DockerError):
+            await provisioner_mod.stop_container("abc")
