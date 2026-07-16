@@ -173,12 +173,14 @@ def test_run_setup_rolls_back_new_container_when_register_fails(tmp_path: Path) 
     docker.deprovision.assert_called_once_with("a2")
 
 
-def test_run_setup_keeps_container_backed_by_running_env(tmp_path: Path) -> None:
-    """Rollback must NOT tear down a container backed by a running env record.
+def test_run_setup_preserves_ready_agent_on_reused_container(tmp_path: Path) -> None:
+    """Rollback must NOT tear down a reused container that already has an env record.
 
-    Such a record means another job (or a prior successful setup) owns and is
-    using the container. Here the early-return check sees nothing, but a
-    concurrent job has registered a running env by the time the rollback re-reads.
+    Re-provisioning an agent that previously completed leaves a ``ready`` (not
+    ``running``) env record, so the running-only fast path is bypassed and docker
+    reuses the healthy existing container. If register then fails transiently, the
+    rollback must preserve that container — the record's existence (regardless of
+    its status) marks it as owned by a prior successful setup / concurrent job.
     """
     from agent_provisioning_team.phases.setup import run_setup
     from agent_provisioning_team.shared.environment_store import (
@@ -186,28 +188,24 @@ def test_run_setup_keeps_container_backed_by_running_env(tmp_path: Path) -> None
     )
     from agent_provisioning_team.shared.tool_manifest import ToolManifest
 
-    running_env = StoreEnvInfo(
+    ready_env = StoreEnvInfo(
         agent_id="a4",
         container_id="c-existing",
         container_name="agent-a4",
         ssh_host="localhost",
         ssh_port=22004,
         workspace_path="/workspace/a4",
-        status="running",
+        status="ready",
     )
-    # First read (the early-return check) sees no env; the rollback re-read — and
-    # any later read — sees a concurrently-registered running env. Using an
-    # iterator with a default avoids coupling to the exact number of get() calls.
-    reads = iter((None,))
     env_store = MagicMock()
-    env_store.get.side_effect = lambda _agent_id: next(reads, running_env)
+    env_store.get.return_value = ready_env
     env_store.register.side_effect = RuntimeError("register boom")
 
     docker = MagicMock()
     docker.provision.return_value = ToolProvisionResult(
         tool_name="docker",
         success=True,
-        details={"container_id": "c-existing", "container_name": "agent-a4"},
+        details={"container_id": "c-existing", "container_name": "agent-a4", "reused": True},
     )
 
     with pytest.raises(RuntimeError, match="register boom"):
@@ -221,15 +219,13 @@ def test_run_setup_keeps_container_backed_by_running_env(tmp_path: Path) -> None
     docker.deprovision.assert_not_called()
 
 
-def test_run_setup_reclaims_orphan_with_no_running_env(tmp_path: Path) -> None:
-    """Reclaim a leftover container that has no running env record.
+def test_run_setup_reclaims_reused_orphan_with_no_env_record(tmp_path: Path) -> None:
+    """Reclaim a *reused* container that has no env record (a retry orphan).
 
     Models the Temporal-retry orphan: a prior attempt created the container and
-    its teardown failed, so the container (and its docker state) still exist, but
-    no *running* environment record was ever written. On this attempt registration
-    fails again; with no running record the container is an orphan and must be
-    reclaimed rather than left to leak. (Teardown is gated on the env record, not
-    on the provisioner's ``reused`` flag, so the flag is irrelevant here.)
+    its teardown failed, so this attempt reuses it (``reused=True``) — but no
+    environment record was ever written. With no record the reused container is an
+    orphan and must be torn down (not preserved), otherwise it leaks forever.
     """
     from agent_provisioning_team.phases.setup import run_setup
     from agent_provisioning_team.shared.tool_manifest import ToolManifest
@@ -242,7 +238,7 @@ def test_run_setup_reclaims_orphan_with_no_running_env(tmp_path: Path) -> None:
     docker.provision.return_value = ToolProvisionResult(
         tool_name="docker",
         success=True,
-        details={"container_id": "c-orphan", "container_name": "agent-a7"},
+        details={"container_id": "c-orphan", "container_name": "agent-a7", "reused": True},
     )
 
     with pytest.raises(RuntimeError, match="register boom"):

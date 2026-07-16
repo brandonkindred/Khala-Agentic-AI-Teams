@@ -51,10 +51,10 @@ def run_setup(
           registered, the container is torn down (best effort) before the
           exception propagates, so a failed setup never leaks orphaned Docker
           resources — including across Temporal retries of this activity.
-          Teardown is skipped only when a *running* environment record already
-          exists for the ``agent_id``, which means another job (or a prior
-          successful setup) owns and is using the container; tearing that down
-          would break a live agent.
+          Teardown is skipped only when a *reused* container already has an
+          environment record (of any status — ``running``, ``ready``, ...), which
+          means a prior successful setup or a concurrent job owns and is using it;
+          tearing that down would break a live agent.
     """
     env_store = environment_store or EnvironmentStore()
     docker = docker_provisioner or DockerProvisionerTool()
@@ -131,26 +131,30 @@ def run_setup(
         )
     except Exception:
         # Atomic setup: a container this setup produced must not outlive a failure
-        # to record it. Reclaim it (best effort) UNLESS a *running* environment
-        # record already exists for this agent_id — such a record means another job
-        # (or a prior successful setup) owns and is using the container, so tearing
-        # it down would break a live agent. Without that record the container is an
-        # unregistered orphan — this attempt's, or a prior failed attempt's that a
-        # Temporal retry is now reusing — so teardown is safe. Gating on the record
-        # rather than the idempotent ``reused`` flag is deliberate: ``reused`` also
-        # matches a container this same setup created on an earlier retry, and
-        # trusting it there would suppress teardown forever and leak that container.
+        # to record it. Only reclaim a container THIS attempt is responsible for:
+        #   * one we created (provision did not report it as ``reused``) — it is
+        #     ours, tear it down; or
+        #   * a reused container that has NO environment record — an orphan left by
+        #     a prior failed attempt/retry, safe (and, across retries, necessary)
+        #     to reclaim.
+        # A reused container that already HAS an environment record is owned by a
+        # prior successful setup or a concurrent job — its status may be "running",
+        # "ready" (a completed agent, per deliver), or anything else — so deleting
+        # it would break a live agent. Existence of the record, NOT its status, is
+        # the ownership signal, so re-provisioning a completed "ready" agent whose
+        # register transiently fails does not destroy it.
         #
-        # NOTE: the read-then-teardown is not atomic, so a job that registers
-        # concurrently between the two can still lose its container. Fully closing
-        # that race needs agent-level serialization, tracked as separate follow-up
-        # work.
         # env_store.get never raises (its contract swallows malformed/IO errors
         # and returns None), so call it directly — a raise here would be a real
         # contract violation and should surface, not be masked into a teardown.
-        current = env_store.get(agent_id)
-        owned_elsewhere = current is not None and getattr(current, "status", None) == "running"
-        if not owned_elsewhere:
+        #
+        # NOTE: not atomic — a container we created can be adopted by a concurrent
+        # job before this rollback runs, so this still races concurrent
+        # provisioning of the same agent_id. Fully closing that race needs
+        # agent-level serialization, tracked as separate follow-up work.
+        reused = bool(result.details.get("reused", False))
+        owned_by_other = reused and env_store.get(agent_id) is not None
+        if not owned_by_other:
             try:
                 teardown = docker.deprovision(agent_id)
                 # deprovision() reports failure (e.g. a `docker stop` timeout) via
