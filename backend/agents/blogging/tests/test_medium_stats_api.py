@@ -7,8 +7,24 @@ required.  The async tests still poll a real background thread for completion.
 import time
 
 import pytest
-from _api_test_utils import api_main as _api_main
+from _api_test_utils import load_api_module
 from fastapi.testclient import TestClient
+
+# A private module instance (not the shared `_api_test_utils.api_main`): these
+# tests submit real jobs through the un-mocked async route, spinning up
+# api/main.py's real daemon worker pool. Sharing the module with test_api_unit
+# (which pokes the same queue directly, assuming no worker is draining it)
+# would race the two and hang — see _api_test_utils.py's module docstring.
+_api_main = load_api_module("blogging_api_main_medium")
+app = _api_main.app
+
+
+@pytest.fixture(autouse=True)
+def _patched_blog_client(monkeypatch, fake_job_client):
+    from shared import blog_job_store as bjs
+
+    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
+    return fake_job_client
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +36,11 @@ def _medium_stats_tmp_dir(monkeypatch, tmp_path):
         "medium_stats_run_dir",
         lambda jid, **kw: bjs.medium_stats_run_dir(jid, cache_dir=tmp_path),
     )
+
+
+@pytest.fixture
+def client() -> TestClient:
+    return TestClient(app)
 
 
 def test_medium_stats_sync_returns_503_without_integration(client: TestClient) -> None:
