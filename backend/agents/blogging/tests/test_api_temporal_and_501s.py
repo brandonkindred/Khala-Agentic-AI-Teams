@@ -73,12 +73,6 @@ def test_restart_with_temporal(client: TestClient, monkeypatch, fake_job_client)
     monkeypatch.setattr(sw_mod, "start_full_pipeline_workflow", lambda *a, **kw: None)
 
     # Patch the alternate bjs module path for reset_blog_job
-    try:
-        from agents.blogging.shared import blog_job_store as bjs_alt
-
-        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
-    except ImportError:
-        pass
 
     job_id = _create_job()
     bjs.update_blog_job(job_id, status="completed", request_payload={"brief": "x"})

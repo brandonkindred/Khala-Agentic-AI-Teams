@@ -24,13 +24,6 @@ def patched_client(monkeypatch, fake_job_client):
     from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    # Also patch the blogging.shared alias if the alternate module path was loaded
-    try:
-        from agents.blogging.shared import blog_job_store as bjs_alt
-
-        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
-    except ImportError:
-        pass
     return fake_job_client
 
 

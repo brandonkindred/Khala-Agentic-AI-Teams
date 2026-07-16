@@ -148,12 +148,6 @@ def test_restart_job_happy(client: TestClient, monkeypatch, fake_job_client) -> 
     bjs.update_blog_job(job_id, status="completed", request_payload={"brief": "x"})
 
     # Also patch the alternative module path used by api/main.py for reset_blog_job
-    try:
-        from agents.blogging.shared import blog_job_store as bjs_alt
-
-        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
-    except ImportError:
-        pass
 
     # Intercept the bounded async-job pool so we don't actually run the pipeline.
     monkeypatch.setattr(_api_main, "_submit_async_job", lambda fn, *a, **kw: None)

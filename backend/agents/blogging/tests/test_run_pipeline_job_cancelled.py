@@ -11,7 +11,6 @@ def test_run_blog_full_pipeline_job_marks_cancelled_on_temporal_cancel(monkeypat
 
     from temporalio.exceptions import CancelledError
 
-    from agents.blogging.shared import blog_job_store as blogging_job_store
     from agents.blogging.shared import blog_job_store
     from agents.blogging.shared.run_pipeline_job import run_blog_full_pipeline_job
 
@@ -30,18 +29,17 @@ def test_run_blog_full_pipeline_job_marks_cancelled_on_temporal_cancel(monkeypat
     fail_calls: list[dict[str, Any]] = []
 
     monkeypatch.setattr(blog_writing_process_v2, "run_pipeline", _raise_cancel)
-    for store in (blog_job_store, blogging_job_store):
-        monkeypatch.setattr(store, "start_blog_job", lambda *a, **k: None)
-        monkeypatch.setattr(
-            store,
-            "update_blog_job",
-            lambda job_id, **kwargs: updates.append({"job_id": job_id, **kwargs}),
-        )
-        monkeypatch.setattr(
-            store,
-            "fail_blog_job",
-            lambda job_id, **kwargs: fail_calls.append({"job_id": job_id, **kwargs}),
-        )
+    monkeypatch.setattr(blog_job_store, "start_blog_job", lambda *a, **k: None)
+    monkeypatch.setattr(
+        blog_job_store,
+        "update_blog_job",
+        lambda job_id, **kwargs: updates.append({"job_id": job_id, **kwargs}),
+    )
+    monkeypatch.setattr(
+        blog_job_store,
+        "fail_blog_job",
+        lambda job_id, **kwargs: fail_calls.append({"job_id": job_id, **kwargs}),
+    )
 
     run_blog_full_pipeline_job(
         "job-cancel-test",
