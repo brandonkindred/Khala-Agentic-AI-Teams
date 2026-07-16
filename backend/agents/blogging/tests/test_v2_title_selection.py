@@ -60,7 +60,7 @@ def test_run_title_selection_returns_none_without_job_id() -> None:
     assert out is None
 
 
-def test_run_title_selection_returns_loved_title(monkeypatch, patched_client) -> None:
+def test_run_title_selection_returns_loved_title(patched_client) -> None:
     """User submits 'love' rating → selected_title set, function returns it."""
     from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
     from agents.blogging.shared import blog_job_store as bjs
@@ -92,7 +92,7 @@ def test_run_title_selection_returns_loved_title(monkeypatch, patched_client) ->
     assert out == "First"
 
 
-def test_run_title_selection_returns_none_on_cancellation(monkeypatch, patched_client) -> None:
+def test_run_title_selection_returns_none_on_cancellation(patched_client) -> None:
     """When the job is cancelled mid-wait, return None."""
     from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
     from agents.blogging.shared import blog_job_store as bjs
