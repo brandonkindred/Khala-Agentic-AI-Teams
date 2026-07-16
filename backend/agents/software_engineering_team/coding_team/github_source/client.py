@@ -483,7 +483,16 @@ class GitHubClient:
               requests (payloads carrying a ``pull_request`` key) are silently skipped,
               since GitHub's issues endpoint returns both. Bounded by
               :data:`MAX_ISSUES_TRAVERSED`: traversal stops (with a warning logged)
-              once that many issues have been seen, rather than paginating unbounded.
+              once that many items -- issues AND pull requests -- have been examined,
+              rather than paginating unbounded. Counting pull requests toward this cap
+              too (not just yielded issues) matters because GitHub's ``/issues``
+              endpoint interleaves both: a repository with many open pull requests and
+              few open issues would otherwise page through all of them unbounded
+              before this generator ever stops, even though almost nothing gets
+              yielded -- defeating the cap's purpose of bounding a caller's traversal
+              cost (e.g. the `/review-pr` duplicate-issue check, which reads only the
+              first N yielded issues via ``itertools.islice`` but would still pay for
+              every page fetched to get there).
         """
         path = f"/repos/{owner}/{repo}/issues"
         params: dict[str, Any] = {"state": "open", "per_page": 100}
@@ -495,8 +504,6 @@ class GitHubClient:
             response = self._check(self._request("GET", url, params=params))
             params = None  # only on first page
             for item in response.json() or []:
-                if "pull_request" in item:
-                    continue
                 seen += 1
                 if seen > MAX_ISSUES_TRAVERSED:
                     logger.warning(
@@ -504,6 +511,8 @@ class GitHubClient:
                         MAX_ISSUES_TRAVERSED,
                     )
                     return
+                if "pull_request" in item:
+                    continue
                 yield _issue_from_payload(item)
             url = _parse_next_link(response.headers.get("Link"))
 

@@ -767,7 +767,7 @@ def _issue_description_excerpt(issue: Issue) -> str:
 
 
 def _location_appears_in(file_path: str, issue: Issue) -> bool:
-    """True when a finding's file_path is a substring of an existing issue's title/body.
+    """True when a finding's file_path appears, at a path boundary, in an existing issue's title/body.
 
     ``build_issue_from_proposal`` renders exactly `` `file_path:line` `` or
     `` `file_path` `` into a Khala-filed issue's "**Location:**" line, so this is a
@@ -781,14 +781,25 @@ def _location_appears_in(file_path: str, issue: Issue) -> bool:
     Postconditions:
         - Returns False when ``file_path`` is empty (an empty string is a substring of
           every string in Python, which would otherwise make every issue "match" a
-          location-less finding). Otherwise returns True iff ``file_path.casefold()``
-          is a substring of ``issue.title`` or ``issue.body`` (casefolded). Never
-          raises.
+          location-less finding). Otherwise returns True iff ``file_path`` (casefolded)
+          appears in ``issue.title`` or ``issue.body`` (casefolded) with no word
+          character (letter/digit/underscore) immediately before or after the match --
+          a plain substring check would also match a short/top-level name like
+          ``a.py`` inside an unrelated ``data.py``, or ``app.py`` inside ``myapp.py``,
+          since both are literal substrings of the other. Requiring a path/word
+          boundary on both sides rejects those false positives while still matching
+          the exact `` `file_path` ``/`` `file_path:line` `` rendering (bounded by
+          backticks, whitespace, or punctuation) and a longer path merely carrying
+          ``file_path`` as a `` / ``-separated suffix. Never raises.
     """
     if not file_path:
         return False
-    needle = file_path.casefold()
-    return needle in (issue.title or "").casefold() or needle in (issue.body or "").casefold()
+    needle = re.escape(file_path.casefold())
+    pattern = re.compile(rf"(?<!\w){needle}(?!\w)")
+    return bool(
+        pattern.search((issue.title or "").casefold())
+        or pattern.search((issue.body or "").casefold())
+    )
 
 
 def find_matching_open_issue(
