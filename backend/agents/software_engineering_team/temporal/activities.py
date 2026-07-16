@@ -7,7 +7,6 @@ they run in the worker process and update the job store. No threads are started.
 
 from __future__ import annotations
 
-import functools
 import logging
 import os
 from pathlib import Path
@@ -447,17 +446,19 @@ def plan_project_activity(
         agents = _get_agents()
 
         from software_engineering_team.orchestrator import (
+            _make_planning_architecture_fn,
             _make_planning_job_updater,
-            _run_architecture_for_planning,
         )
 
         # Shared with the thread path: rescales Planning's own 0-100 progress onto
         # the planning band so the Temporal bar stays monotone into the coding phase.
         _planning_updater = _make_planning_job_updater(job_id)
 
-        # Reuses the thread path's implementation so architecture-input construction
-        # (including technology_preferences derivation) is defined in exactly one place.
-        _run_architecture = functools.partial(_run_architecture_for_planning, agents["architecture"])
+        # Identical wiring to the thread path: the shared factory owns architecture-input
+        # construction (including technology_preferences derivation) and resolves the agent
+        # lazily/defensively, so a construction failure degrades to no overview rather than
+        # aborting planning.
+        _run_architecture = _make_planning_architecture_fn(lambda: agents["architecture"])
 
         planning_result = run_planning_workflow(
             repo_path=str(path),

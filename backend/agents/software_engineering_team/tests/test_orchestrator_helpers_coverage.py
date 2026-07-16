@@ -545,7 +545,7 @@ def _mock_arch_agent(*, overview="Arch overview", architecture_present=True, rai
 def test_planning_architecture_fn_spec_only_returns_overview():
     """Spec-only input returns the agent overview with the default acceptance criteria."""
     agent = _mock_arch_agent(overview="Arch overview")
-    fn = orchestrator._make_planning_architecture_fn(agent)
+    fn = orchestrator._make_planning_architecture_fn(lambda: agent)
 
     result = fn(spec_content="# Spec", prd_content=None, repo_path="/x", client_context=None)
 
@@ -561,7 +561,7 @@ def test_planning_architecture_fn_spec_only_returns_overview():
 def test_planning_architecture_fn_prd_merges_into_description_and_features():
     """prd_content is appended to the requirements description and the features doc."""
     agent = _mock_arch_agent()
-    fn = orchestrator._make_planning_architecture_fn(agent)
+    fn = orchestrator._make_planning_architecture_fn(lambda: agent)
 
     fn(spec_content="Spec", prd_content="PRD body", repo_path="/x", client_context=None)
 
@@ -573,7 +573,7 @@ def test_planning_architecture_fn_prd_merges_into_description_and_features():
 def test_planning_architecture_fn_success_criteria_override_acceptance():
     """client_context success_criteria replace the default acceptance criteria."""
     agent = _mock_arch_agent()
-    fn = orchestrator._make_planning_architecture_fn(agent)
+    fn = orchestrator._make_planning_architecture_fn(lambda: agent)
 
     fn(
         spec_content="Spec",
@@ -589,7 +589,7 @@ def test_planning_architecture_fn_success_criteria_override_acceptance():
 def test_planning_architecture_fn_no_tech_constraints_uses_default_preferences():
     """Without client_context tech_constraints, the module default preferences are used."""
     agent = _mock_arch_agent()
-    fn = orchestrator._make_planning_architecture_fn(agent)
+    fn = orchestrator._make_planning_architecture_fn(lambda: agent)
 
     fn(spec_content="Spec", prd_content=None, repo_path="/x", client_context=None)
 
@@ -600,7 +600,7 @@ def test_planning_architecture_fn_no_tech_constraints_uses_default_preferences()
 def test_planning_architecture_fn_tech_constraints_override_default_preferences():
     """client_context tech_constraints replace the default technology_preferences."""
     agent = _mock_arch_agent()
-    fn = orchestrator._make_planning_architecture_fn(agent)
+    fn = orchestrator._make_planning_architecture_fn(lambda: agent)
 
     fn(
         spec_content="Spec",
@@ -616,7 +616,7 @@ def test_planning_architecture_fn_tech_constraints_override_default_preferences(
 def test_planning_architecture_fn_problem_and_opportunity_build_features_and_goals():
     """problem_summary and opportunity_statement feed both the features doc and goals."""
     agent = _mock_arch_agent()
-    fn = orchestrator._make_planning_architecture_fn(agent)
+    fn = orchestrator._make_planning_architecture_fn(lambda: agent)
 
     fn(
         spec_content="Spec",
@@ -634,7 +634,7 @@ def test_planning_architecture_fn_problem_and_opportunity_build_features_and_goa
 def test_planning_architecture_fn_empty_spec_uses_fallback_description():
     """Empty spec and no prd fall back to the handoff-artifacts description."""
     agent = _mock_arch_agent()
-    fn = orchestrator._make_planning_architecture_fn(agent)
+    fn = orchestrator._make_planning_architecture_fn(lambda: agent)
 
     fn(spec_content="", prd_content=None, repo_path="/x", client_context=None)
 
@@ -645,7 +645,7 @@ def test_planning_architecture_fn_empty_spec_uses_fallback_description():
 def test_planning_architecture_fn_none_architecture_returns_none():
     """A response without an architecture yields None."""
     agent = _mock_arch_agent(architecture_present=False)
-    fn = orchestrator._make_planning_architecture_fn(agent)
+    fn = orchestrator._make_planning_architecture_fn(lambda: agent)
 
     assert fn(spec_content="Spec", prd_content=None, repo_path="/x", client_context=None) is None
 
@@ -653,7 +653,7 @@ def test_planning_architecture_fn_none_architecture_returns_none():
 def test_planning_architecture_fn_empty_overview_returns_empty_string():
     """An empty overview returns '' (distinct from the no-architecture None case)."""
     agent = _mock_arch_agent(overview="")
-    fn = orchestrator._make_planning_architecture_fn(agent)
+    fn = orchestrator._make_planning_architecture_fn(lambda: agent)
 
     assert fn(spec_content="Spec", prd_content=None, repo_path="/x", client_context=None) == ""
 
@@ -661,9 +661,42 @@ def test_planning_architecture_fn_empty_overview_returns_empty_string():
 def test_planning_architecture_fn_agent_raises_returns_none():
     """The callback never propagates: an agent exception is swallowed to None."""
     agent = _mock_arch_agent(raises=RuntimeError("boom"))
-    fn = orchestrator._make_planning_architecture_fn(agent)
+    fn = orchestrator._make_planning_architecture_fn(lambda: agent)
 
     assert fn(spec_content="Spec", prd_content=None, repo_path="/x", client_context=None) is None
+
+
+def test_planning_architecture_fn_provider_raises_returns_none():
+    """A provider that cannot build the agent degrades to None, not an exception.
+
+    This guards the lazy/defensive resolution: an agent-construction failure (e.g. no
+    LLM provider configured) must not abort the Planning phase.
+    """
+
+    def _boom_provider():
+        raise RuntimeError("no LLM configured")
+
+    fn = orchestrator._make_planning_architecture_fn(_boom_provider)
+
+    assert fn(spec_content="Spec", prd_content=None, repo_path="/x", client_context=None) is None
+
+
+def test_planning_architecture_fn_resolves_provider_lazily_on_call():
+    """The provider is not invoked at factory time, only when the callback runs."""
+    calls = {"n": 0}
+    agent = _mock_arch_agent(overview="Lazy overview")
+
+    def _provider():
+        calls["n"] += 1
+        return agent
+
+    fn = orchestrator._make_planning_architecture_fn(_provider)
+    assert calls["n"] == 0, "provider must not be resolved until the callback is invoked"
+
+    result = fn(spec_content="Spec", prd_content=None, repo_path="/x", client_context=None)
+
+    assert result == "Lazy overview"
+    assert calls["n"] == 1
 
 
 def test_run_architecture_for_planning_module_level_success():
