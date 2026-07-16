@@ -534,7 +534,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
       mode: this.mode,
       client_id: '',
       client_secret: '',
-      signing_secret: '',
+      signing_secret: this.signingSecret.trim(),
       webhook_url: '',
       bot_token: '',
       default_channel: defaultChannel,
