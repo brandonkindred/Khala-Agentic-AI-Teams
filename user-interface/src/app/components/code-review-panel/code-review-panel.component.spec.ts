@@ -720,32 +720,31 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.reviewDuration(badTime)).toBeNull();
   });
 
-  it('stamps completedAt from the server timestamp when a live poll goes terminal', async () => {
+  it('stamps completedAt from the terminal updated_at, not a frozen last_activity_at', async () => {
     await setup();
-    // The terminal status carries the server-side time the job finished; the row's
-    // duration must use that, not the browser clock (which can be minutes/hours late
-    // for a backgrounded tab or delayed poll).
+    // A stale-failed job bumps updated_at to the terminal time but leaves
+    // last_activity_at frozen at the last progress event. The duration must use the
+    // terminal updated_at, or a timed-out review would look far shorter than it ran.
     apiSpy.getJobStatus.mockReturnValue(
       of({
         job_id: 'j1',
-        status: 'completed',
-        last_activity_at: '2026-03-01T00:10:00Z',
-        updated_at: '2026-03-01T00:09:00Z', // last_activity_at wins over updated_at
-        review_summary: { total_issues: 0, inline_comments: 0, event: 'APPROVE' },
+        status: 'failed',
+        last_activity_at: '2026-03-01T00:02:00Z', // frozen at last activity
+        updated_at: '2026-03-01T00:10:00Z', // terminal transition time (wins)
       }),
     );
     component.startReview(component.pulls[0]);
     const rec = component.reviewsFor(1)[0];
     expect(rec.completedAt).toBeUndefined(); // not terminal yet
-    vi.advanceTimersByTime(5000); // one poll tick -> completed
+    vi.advanceTimersByTime(5000); // one poll tick -> terminal
     expect(rec.completedAt).toBe(Date.parse('2026-03-01T00:10:00Z'));
   });
 
-  it('falls back to updated_at, then the browser clock, for the terminal timestamp', async () => {
+  it('falls back to last_activity_at, then the browser clock, for the terminal timestamp', async () => {
     await setup();
-    // No last_activity_at -> updated_at is used.
+    // No updated_at -> last_activity_at is used.
     apiSpy.getJobStatus.mockReturnValue(
-      of({ job_id: 'j1', status: 'completed', updated_at: '2026-03-02T00:00:00Z' }),
+      of({ job_id: 'j1', status: 'completed', last_activity_at: '2026-03-02T00:00:00Z' }),
     );
     component.startReview(component.pulls[0]);
     vi.advanceTimersByTime(5000);

@@ -506,15 +506,19 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
    * reached a terminal state.
    *
    * Preconditions: `status` is the terminal job-status payload for the review.
-   * Postconditions: returns the server's terminal-update timestamp
-   * (`last_activity_at`, else `updated_at`) parsed to ms when one is present and
-   * valid; otherwise falls back to the browser clock (`Date.now()`). Preferring the
-   * server time keeps the duration accurate when the browser observes the terminal
-   * status late (backgrounded tab, offline gap, delayed poll). Reads the clock only
-   * on the fallback path; otherwise pure.
+   * Postconditions: returns the server's terminal-update timestamp (`updated_at`,
+   * else `last_activity_at`) parsed to ms when one is present and valid; otherwise
+   * falls back to the browser clock (`Date.now()`). `updated_at` is preferred because
+   * it is stamped on the terminal transition itself — including when the stale-job
+   * monitor fails a dead worker, a path that bumps `updated_at` but leaves
+   * `last_activity_at` frozen at the last progress event (which would understate the
+   * duration of a timed-out review). Preferring a server timestamp also keeps the
+   * duration accurate when the browser observes the terminal status late (backgrounded
+   * tab, offline gap, delayed poll). Reads the clock only on the fallback path;
+   * otherwise pure.
    */
   private terminalTimestamp(status: CodingTeamJobStatus): number {
-    const serverTs = status.last_activity_at ?? status.updated_at;
+    const serverTs = status.updated_at ?? status.last_activity_at;
     if (serverTs) {
       const parsed = Date.parse(serverTs);
       if (!Number.isNaN(parsed)) return parsed;
