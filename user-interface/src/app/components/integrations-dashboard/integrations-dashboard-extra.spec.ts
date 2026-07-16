@@ -442,6 +442,37 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
     expect(api.updateSlackConfig).toHaveBeenCalled();
   });
 
+  it('saveAdvanced sends the trimmed signing secret', () => {
+    fixture.detectChanges();
+    component.slackEnabled = true;
+    component.mode = 'webhook';
+    component.webhookUrl = 'https://hooks.slack.com/services/T0/B0/' + 'x'.repeat(40);
+    component.signingSecret = '  s3cr3t  ';
+    component.saveAdvanced();
+    expect(api.updateSlackConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ signing_secret: 's3cr3t' }),
+    );
+  });
+
+  it('loadSlackConfig reflects signing_secret_configured and clears the input', () => {
+    api.getSlackConfig.mockReturnValue(
+      of({
+        enabled: true,
+        webhook_configured: false,
+        bot_token_configured: false,
+        channel_display_name: '',
+        default_channel: '',
+        notify_open_questions: true,
+        notify_pa_responses: true,
+        signing_secret_configured: true,
+      }),
+    );
+    component.signingSecret = 'typed-but-should-clear';
+    component.loadSlackConfig();
+    expect(component.signingSecretConfigured).toBe(true);
+    expect(component.signingSecret).toBe('');
+  });
+
   it('botTokenInvalid and webhookUrlInvalid edge cases', () => {
     fixture.detectChanges();
     component.botToken = '';
@@ -614,6 +645,9 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
     expect(component.hasUnsavedChanges()).toBe(true);
     component.googleAccountPassword = '';
     component.tradingViewToken = 'tv-secret';
+    expect(component.hasUnsavedChanges()).toBe(true);
+    component.tradingViewToken = '';
+    component.signingSecret = 'slack-signing-secret';
     expect(component.hasUnsavedChanges()).toBe(true);
   });
 

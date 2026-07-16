@@ -399,6 +399,26 @@
                   </mat-form-field>
                 </div>
 
+                <div class="form-grid">
+                  <mat-form-field appearance="outline">
+                    <mat-label>Signing secret</mat-label>
+                    <input
+                      matInput
+                      type="password"
+                      [(ngModel)]="signingSecret"
+                      placeholder="Slack app signing secret"
+                      autocomplete="new-password"
+                    />
+                    @if (signingSecretConfigured && !signingSecret) {
+                      <mat-hint align="end">Saved ✓</mat-hint>
+                    }
+                    <mat-hint>
+                      Required to receive events and slash commands. Copy it from your Slack app's
+                      Basic Information page. Without it, inbound events are rejected.
+                    </mat-hint>
+                  </mat-form-field>
+                </div>
+
                 <div class="setting-row">
                   <mat-slide-toggle [(ngModel)]="notifyOpenQuestions" color="primary">
                     Notify on open questions
