@@ -1572,24 +1572,32 @@ def list_jobs(running_only: bool = False) -> List[BlogJobListItem]:
 
 
 def _rebuild_api_models() -> None:
-    """Resolve PEP 563 annotations for Pydantic (e.g. dynamic import in tests)."""
+    """Resolve PEP 563 annotations for every Pydantic model defined in this module.
+
+    This module uses ``from __future__ import annotations``, so all annotations
+    are strings at runtime; Pydantic must resolve them against this module's
+    namespace before models with forward references can validate. We scan
+    ``globals()`` for locally-defined ``BaseModel`` subclasses so any model added
+    to this file is rebuilt automatically — there is no hand-maintained list to
+    fall out of sync (a new model that was forgotten would silently keep
+    unresolved annotations).
+
+    Preconditions:
+        - Called after all model classes in this module are defined (the module
+          bottom, or from a test helper once the module has finished executing).
+    Postconditions:
+        - Every ``BaseModel`` subclass defined in this module has its annotations
+          resolved. ``model_rebuild`` is a no-op for already-complete models, so
+          repeat calls are safe (idempotent).
+    Invariants:
+        - ``BaseModel`` subclasses imported from other modules are left untouched
+          (filtered by ``__module__``), matching the resolution scope of the
+          original hand-maintained list.
+    """
     _ns: Dict[str, Any] = {**globals()}
-    for _cls in (
-        AudienceDetails,
-        TitleChoiceResponse,
-        FullPipelineRequest,
-        FullPipelineResponse,
-        BlogJobStatusResponse,
-        BlogJobListItem,
-        ArtifactMeta,
-        ArtifactListResponse,
-        ArtifactContentResponse,
-        StartPipelineResponse,
-        CancelJobResponse,
-        DeleteJobResponse,
-        DraftFeedbackRequest,
-    ):
-        _cls.model_rebuild(_types_namespace=_ns)
+    for _obj in list(_ns.values()):
+        if isinstance(_obj, type) and issubclass(_obj, BaseModel) and _obj.__module__ == __name__:
+            _obj.model_rebuild(_types_namespace=_ns)
 
 
 # ── Story Bank endpoints ─────────────────────────────────────────────────────
