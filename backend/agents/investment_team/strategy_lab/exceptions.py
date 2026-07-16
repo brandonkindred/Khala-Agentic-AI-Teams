@@ -95,3 +95,14 @@ class SpecImplementabilityError(Exception):
         self.last_code = last_code
         self.drift_collector = drift_collector
         self.design_context = design_context
+
+
+class OrchestratorContractError(Exception):
+    """Raised when a strategy-lab orchestrator method's precondition,
+    postcondition, or invariant is violated.
+
+    Signals a bug in the caller (precondition) or callee (postcondition/
+    invariant) — never caught to recover; it should propagate and fail
+    the run. Used in place of bare ``assert`` so these checks are
+    enforced regardless of the ``-O`` / ``PYTHONOPTIMIZE`` flag.
+    """
