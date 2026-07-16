@@ -16,14 +16,14 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _patched_blog_client(monkeypatch, fake_job_client):
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
     return fake_job_client
 
 
 def _make_job(cache_dir: Path) -> str:
-    from shared.blog_job_store import create_blog_job
+    from agents.blogging.shared.blog_job_store import create_blog_job
 
     job_id = str(uuid.uuid4())
     create_blog_job(
@@ -39,7 +39,7 @@ def _make_job(cache_dir: Path) -> str:
 
 
 def test_create_then_start_then_complete(tmp_path: Path) -> None:
-    from shared.blog_job_store import (
+    from agents.blogging.shared.blog_job_store import (
         complete_blog_job,
         get_blog_job,
         start_blog_job,
@@ -79,7 +79,7 @@ def test_create_then_start_then_complete(tmp_path: Path) -> None:
 
 
 def test_complete_with_needs_review_status(tmp_path: Path) -> None:
-    from shared.blog_job_store import complete_blog_job, get_blog_job
+    from agents.blogging.shared.blog_job_store import complete_blog_job, get_blog_job
 
     job_id = _make_job(tmp_path)
     complete_blog_job(job_id, status="needs_human_review", cache_dir=tmp_path)
@@ -89,7 +89,7 @@ def test_complete_with_needs_review_status(tmp_path: Path) -> None:
 
 
 def test_fail_blog_job_records_error(tmp_path: Path) -> None:
-    from shared.blog_job_store import fail_blog_job, get_blog_job
+    from agents.blogging.shared.blog_job_store import fail_blog_job, get_blog_job
 
     job_id = _make_job(tmp_path)
     fail_blog_job(
@@ -107,7 +107,7 @@ def test_fail_blog_job_records_error(tmp_path: Path) -> None:
 
 
 def test_list_blog_jobs_filters_running_only(tmp_path: Path) -> None:
-    from shared.blog_job_store import (
+    from agents.blogging.shared.blog_job_store import (
         complete_blog_job,
         list_blog_jobs,
         start_blog_job,
@@ -128,7 +128,7 @@ def test_list_blog_jobs_filters_running_only(tmp_path: Path) -> None:
 
 
 def test_reset_blog_job_clears_progress(tmp_path: Path) -> None:
-    from shared.blog_job_store import (
+    from agents.blogging.shared.blog_job_store import (
         complete_blog_job,
         get_blog_job,
         reset_blog_job,
@@ -144,7 +144,7 @@ def test_reset_blog_job_clears_progress(tmp_path: Path) -> None:
 
 
 def test_approve_unapprove_blog_job(tmp_path: Path) -> None:
-    from shared.blog_job_store import (
+    from agents.blogging.shared.blog_job_store import (
         approve_blog_job,
         get_blog_job,
         unapprove_blog_job,
@@ -163,7 +163,7 @@ def test_approve_unapprove_blog_job(tmp_path: Path) -> None:
 
 
 def test_title_selection_and_love_rating(tmp_path: Path) -> None:
-    from shared.blog_job_store import (
+    from agents.blogging.shared.blog_job_store import (
         get_blog_job,
         is_waiting_for_title_selection,
         submit_title_ratings,
@@ -194,7 +194,7 @@ def test_title_selection_and_love_rating(tmp_path: Path) -> None:
 
 
 def test_title_ratings_without_love_stays_paused(tmp_path: Path) -> None:
-    from shared.blog_job_store import (
+    from agents.blogging.shared.blog_job_store import (
         clear_pending_title_feedback,
         get_blog_job,
         get_pending_title_feedback,
@@ -219,7 +219,7 @@ def test_title_ratings_without_love_stays_paused(tmp_path: Path) -> None:
 
 
 def test_story_chat_history(tmp_path: Path) -> None:
-    from shared.blog_job_store import (
+    from agents.blogging.shared.blog_job_store import (
         add_story_agent_message,
         complete_story_elicitation,
         get_blog_job,
@@ -254,13 +254,13 @@ def test_story_chat_history(tmp_path: Path) -> None:
 
 
 def test_is_waiting_for_story_input_missing_job(tmp_path: Path) -> None:
-    from shared.blog_job_store import is_waiting_for_story_input
+    from agents.blogging.shared.blog_job_store import is_waiting_for_story_input
 
     assert is_waiting_for_story_input("missing", cache_dir=tmp_path) is False
 
 
 def test_qa_pause_resume(tmp_path: Path) -> None:
-    from shared.blog_job_store import (
+    from agents.blogging.shared.blog_job_store import (
         add_blog_pending_questions,
         get_blog_job,
         is_waiting_for_blog_answers,
@@ -284,7 +284,7 @@ def test_qa_pause_resume(tmp_path: Path) -> None:
 
 
 def test_draft_feedback_cycle(tmp_path: Path) -> None:
-    from shared.blog_job_store import (
+    from agents.blogging.shared.blog_job_store import (
         get_blog_job,
         get_user_draft_feedback,
         is_waiting_for_draft_feedback,
@@ -325,7 +325,7 @@ def test_draft_feedback_cycle(tmp_path: Path) -> None:
 
 
 def test_medium_stats_run_dir_uses_custom_root(tmp_path: Path, monkeypatch) -> None:
-    from shared.blog_job_store import medium_stats_run_dir
+    from agents.blogging.shared.blog_job_store import medium_stats_run_dir
 
     custom = tmp_path / "custom-root"
     monkeypatch.setenv("BLOGGING_MEDIUM_STATS_ROOT", str(custom))
@@ -337,7 +337,7 @@ def test_medium_stats_run_dir_uses_custom_root(tmp_path: Path, monkeypatch) -> N
 
 
 def test_medium_stats_run_dir_default(tmp_path: Path, monkeypatch) -> None:
-    from shared.blog_job_store import medium_stats_run_dir
+    from agents.blogging.shared.blog_job_store import medium_stats_run_dir
 
     monkeypatch.delenv("BLOGGING_MEDIUM_STATS_ROOT", raising=False)
     out = medium_stats_run_dir("xyz", cache_dir=tmp_path)
@@ -348,7 +348,7 @@ def test_medium_stats_run_dir_default(tmp_path: Path, monkeypatch) -> None:
 
 def test_stale_monitor_stop_safe_when_not_started(tmp_path: Path, monkeypatch) -> None:
     """stop_blog_stale_monitor is a no-op when the monitor was never started."""
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     # Replace the global so we can assert the no-op path
     monkeypatch.setattr(bjs, "_blog_stale_monitor_stop", None)
@@ -362,7 +362,7 @@ def test_mark_all_running_jobs_failed_swallows_exceptions(tmp_path: Path, monkey
         def mark_all_active_jobs_interrupted(self, _reason: str) -> None:
             raise RuntimeError("nope")
 
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "_client", lambda *a, **kw: _Boom())
     # Must not raise

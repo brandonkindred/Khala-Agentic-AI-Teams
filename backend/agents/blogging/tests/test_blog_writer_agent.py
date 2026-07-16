@@ -3,9 +3,9 @@
 import re
 
 import pytest
-from blog_research_agent.models import ResearchReference
-from blog_writer_agent import BlogWriterAgent, WriterInput, WriterOutput
-from shared.content_plan import (
+from agents.blogging.blog_research_agent.models import ResearchReference
+from agents.blogging.blog_writer_agent import BlogWriterAgent, WriterInput, WriterOutput
+from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     RequirementsAnalysis,

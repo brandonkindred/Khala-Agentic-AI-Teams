@@ -8,10 +8,16 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
-from shared.content_plan import PlanningInput, PlanningPhaseResult
-from shared.content_planning_loop import complete_plan_json, run_content_planning_loop
-from shared.content_profile import LengthPolicy
-from shared.planning_config import planning_max_iterations, planning_max_parse_retries
+from agents.blogging.shared.content_plan import PlanningInput, PlanningPhaseResult
+from agents.blogging.shared.content_planning_loop import (
+    complete_plan_json,
+    run_content_planning_loop,
+)
+from agents.blogging.shared.content_profile import LengthPolicy
+from agents.blogging.shared.planning_config import (
+    planning_max_iterations,
+    planning_max_parse_retries,
+)
 from strands import Agent
 
 from llm_service import extract_json_from_response
@@ -81,6 +87,28 @@ class BlogPlanningAgent:
         max_parse_retries: Optional[int] = None,
         work_dir: Optional[Union[str, Path]] = None,
     ) -> PlanningPhaseResult:
+        """Generate and refine a ContentPlan until acceptance criteria or max iterations.
+
+        Preconditions:
+            ``planning_input`` is a valid :class:`PlanningInput`; ``length_policy``
+            is a valid :class:`LengthPolicy`. ``max_iterations`` and
+            ``max_parse_retries``, when omitted, default to
+            :func:`planning_max_iterations` and :func:`planning_max_parse_retries`
+            respectively.
+
+        Postconditions:
+            Returns a :class:`PlanningPhaseResult` wrapping a ``ContentPlan``
+            whose ``requirements_analysis`` satisfies the planner's own
+            self-evaluation (``plan_acceptable`` and ``scope_feasible``) and,
+            when this agent was constructed with a ``plan_critic``, that
+            critic's approval as well.
+
+        Raises:
+            PlanningError: If the plan JSON fails schema validation, if JSON
+                parsing fails after exhausting ``max_parse_retries`` attempts
+                in a given iteration, or if the loop fails to converge within
+                ``max_iterations`` iterations.
+        """
         max_iter = max_iterations if max_iterations is not None else planning_max_iterations()
         max_parse = (
             max_parse_retries if max_parse_retries is not None else planning_max_parse_retries()
@@ -134,7 +162,7 @@ class _BlogPlanningAgentRunner:
         Raises:
             TypeError: If ``body`` is not a ``dict``.
         """
-        from shared.content_profile import resolve_length_policy_from_request_dict
+        from agents.blogging.shared.content_profile import resolve_length_policy_from_request_dict
 
         if not isinstance(body, dict):
             raise TypeError(f"blogging.planner body must be a dict, got {type(body).__name__}")
@@ -168,7 +196,7 @@ def make_blog_planning_agent() -> _BlogPlanningAgentRunner:
         env-resolved LLM client and a default ``standard_article`` length
         policy.
     """
-    from shared.content_profile import ContentProfile, resolve_length_policy
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
 
     from llm_service import get_client
 

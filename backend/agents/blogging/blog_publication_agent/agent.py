@@ -12,12 +12,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from blog_copy_editor_agent import BlogCopyEditorAgent
-    from blog_writer_agent import BlogWriterAgent
+    from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent
+    from agents.blogging.blog_writer_agent import BlogWriterAgent
 
 from typing import Any as _Any
 
-from shared.content_plan import (
+from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     RequirementsAnalysis,
@@ -273,9 +273,9 @@ class BlogPublicationAgent:
         After rejection feedback is collected, run the draft-editor loop to revise
         the post. Uses human feedback + editor feedback. Resets loop count.
         """
-        from blog_copy_editor_agent import CopyEditorInput
-        from blog_copy_editor_agent.models import FeedbackItem
-        from blog_writer_agent import ReviseWriterInput
+        from agents.blogging.blog_copy_editor_agent import CopyEditorInput
+        from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+        from agents.blogging.blog_writer_agent import ReviseWriterInput
 
         meta_path = self.pending_dir / f"{submission_id}_meta.json"
         if not meta_path.exists():

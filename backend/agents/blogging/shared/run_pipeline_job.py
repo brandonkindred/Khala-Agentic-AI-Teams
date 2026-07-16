@@ -115,26 +115,21 @@ def _mark_cancelled_if_external(job_id: str, exc: BaseException) -> bool:
 
 
 def _import_shared(name: str) -> Any:
-    """Import ``shared.<name>`` across the package/sibling execution layouts.
+    """Import ``agents.blogging.shared.<name>``.
 
-    One resolver for the dual import paths every helper in this module needs
-    (installed-package ``blogging.shared.*`` vs in-tree sibling ``shared.*``),
-    so the fallback logic lives in exactly one place.
+    Single resolver so callers needing a ``shared`` submodule (kept dynamic to
+    tolerate its absence in degraded/partial layouts) go through one place.
 
     Preconditions:
         - ``name`` is a module name under the blogging ``shared`` package
           (e.g. ``"blog_job_store"``).
     Postconditions:
-        - Returns the imported module, trying ``blogging.shared.<name>`` first and
-          falling back to the sibling ``shared.<name>`` path; propagates
-          ImportError when neither layout resolves.
+        - Returns the imported module; propagates ImportError when it is
+          unavailable.
     """
     import importlib
 
-    try:
-        return importlib.import_module(f"blogging.shared.{name}")
-    except ImportError:  # pragma: no cover - sibling-import fallback for in-tree execution.
-        return importlib.import_module(f"shared.{name}")
+    return importlib.import_module(f"agents.blogging.shared.{name}")
 
 
 def build_brief_input(request_dict: Dict[str, Any]) -> Any:
@@ -148,10 +143,7 @@ def build_brief_input(request_dict: Dict[str, Any]) -> Any:
         - Returns a ``ResearchBriefInput`` with brief/audience/tone/max_results
           populated (title concept appended to the brief text when present).
     """
-    try:
-        from blog_research_agent.models import ResearchBriefInput
-    except ImportError:  # pragma: no cover - package-path fallback; sibling path covers tests.
-        from blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
 
     brief_text = (request_dict.get("brief") or "").strip()
     if request_dict.get("title_concept"):
@@ -360,29 +352,16 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
           on the job and swallowed.
     """
     try:
-        from agent_implementations.blog_writing_process_v2 import run_pipeline
-
-        from shared.content_profile import resolve_length_policy_from_request_dict
-    except ImportError:  # pragma: no cover - fallback for legacy 'blogging.*' import path; not exercised when running from the blogging package root.
-        try:
-            from blogging.agent_implementations.blog_writing_process_v2 import run_pipeline
-            from blogging.shared.content_profile import resolve_length_policy_from_request_dict
-        except ImportError as e:
-            logger.exception("Import failed for pipeline job %s", job_id)
-            _fail_job(job_id, str(e))
-            return
+        from agents.blogging.agent_implementations.blog_writing_process_v2 import run_pipeline
+        from agents.blogging.shared.content_profile import resolve_length_policy_from_request_dict
+    except ImportError as e:
+        logger.exception("Import failed for pipeline job %s", job_id)
+        _fail_job(job_id, str(e))
+        return
 
     try:
         start_blog_job = _import_shared("blog_job_store").start_blog_job
-        # Bind the exception classes from the top-level ``shared.errors`` module
-        # FIRST: blog_writing_process_v2 raises via its absolute
-        # ``from shared.errors import ...``, and in dual-layout runtimes
-        # ``blogging.shared.errors`` is a DISTINCT module object whose classes
-        # would never match these except clauses.
-        try:
-            import shared.errors as _errors
-        except ImportError:  # pragma: no cover - package-only layout; sibling path covers tests.
-            _errors = _import_shared("errors")
+        _errors = _import_shared("errors")
         BloggingError = _errors.BloggingError
         PlanningError = _errors.PlanningError
     except ImportError:

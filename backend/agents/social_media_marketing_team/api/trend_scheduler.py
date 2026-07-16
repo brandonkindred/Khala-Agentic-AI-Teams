@@ -7,9 +7,9 @@ import threading
 from typing import Optional
 
 import pytz
+from agents.blogging.blog_research_agent.tools.web_search import OllamaWebSearch
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from blog_research_agent.tools.web_search import OllamaWebSearch
 
 from social_media_marketing_team.trend_discovery_agent import TrendDiscoveryAgent
 from social_media_marketing_team.trend_models import TrendDigest

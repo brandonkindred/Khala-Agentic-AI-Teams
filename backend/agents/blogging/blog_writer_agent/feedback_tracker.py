@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:
-    from blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 
 
 def _normalise_location(loc: Optional[str]) -> str:

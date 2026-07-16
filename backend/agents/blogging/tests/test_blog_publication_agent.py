@@ -1,7 +1,7 @@
 """Tests for the blog publication agent."""
 
 import pytest
-from blog_publication_agent import (
+from agents.blogging.blog_publication_agent import (
     BlogPublicationAgent,
     SubmitDraftInput,
 )
@@ -60,8 +60,8 @@ def test_approve(agent, temp_blog_root) -> None:
 
 def test_reject_and_revision_loop(agent, temp_blog_root) -> None:
     """BlogPublicationAgent reject collects feedback; run_revision_loop revises draft."""
-    from blog_copy_editor_agent import BlogCopyEditorAgent
-    from blog_writer_agent import BlogWriterAgent
+    from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent
+    from agents.blogging.blog_writer_agent import BlogWriterAgent
 
     result = agent.submit_draft(
         SubmitDraftInput(

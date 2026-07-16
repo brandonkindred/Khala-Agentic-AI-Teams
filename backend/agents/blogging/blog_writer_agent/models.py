@@ -6,9 +6,9 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from blog_copy_editor_agent.models import FeedbackItem
+from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+from agents.blogging.shared.content_plan import ContentPlan, content_plan_to_outline_markdown
 from pydantic import BaseModel, Field, model_validator
-from shared.content_plan import ContentPlan, content_plan_to_outline_markdown
 
 from .feedback_tracker import PersistentFeedbackItem
 

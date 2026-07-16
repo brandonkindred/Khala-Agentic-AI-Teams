@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
-from shared.brand_spec import BrandSpec
+from agents.blogging.shared.brand_spec import BrandSpec
 
 from .models import CheckResult
 
