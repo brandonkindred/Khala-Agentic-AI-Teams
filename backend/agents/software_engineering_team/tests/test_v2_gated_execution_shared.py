@@ -183,6 +183,15 @@ def _coder_overwrites_config(**kwargs: Any) -> Dict[str, str]:
     return {"config.py": "MODIFIED\n"}
 
 
+def _batch_fix_alias_rewrite(**kwargs: Any) -> SimpleNamespace:
+    """A fix that rewrites the current file through an equivalent (aliased) key.
+
+    ``src/a.py`` and ``/src/a.py`` resolve to the same worktree path; returning the
+    alias exercises the canonical-path snapshotting in the rollback manifest.
+    """
+    return SimpleNamespace(files={"/src/a.py": "fixed-but-rejected\n"})
+
+
 def _doc_review(*, documentation=None, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
     if detail_callback is not None:
         detail_callback("doc")
@@ -565,10 +574,11 @@ def test_rollback_restores_preexisting_repo_file(tmp_path):
     """Rollback restores a pre-existing repo file the failed microtask overwrote.
 
     A file already in the worktree (never produced by a microtask, so never in
-    ``all_files``) must be restored to its original bytes on rollback — never
-    deleted. This is why the prior-value snapshot reads from disk rather than from
-    ``all_files``: an ``all_files``-based snapshot would see the pre-existing file
-    as "created here" and delete it.
+    ``all_files``) must be restored to its original bytes on disk — never deleted —
+    while staying absent from ``ExecutionResult.files`` (it is not execution output).
+    This is why the manifest keeps two snapshots: the disk snapshot restores the
+    bytes, and the ``all_files`` snapshot (``None`` for a never-produced key) keeps
+    it out of the result.
     """
     (tmp_path / "config.py").write_text("PRE\n", encoding="utf-8")
     mt = _microtask()
@@ -576,8 +586,30 @@ def test_rollback_restores_preexisting_repo_file(tmp_path):
     result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
 
     assert mt.status == MS.REVIEW_FAILED
-    assert (tmp_path / "config.py").read_text(encoding="utf-8") == "PRE\n"  # restored, not deleted
-    assert result.files.get("config.py") == "PRE\n"
+    assert (tmp_path / "config.py").read_text(encoding="utf-8") == "PRE\n"  # disk restored
+    assert "config.py" not in result.files  # not reported as execution output
+
+
+def test_rollback_canonicalizes_alias_keys(tmp_path):
+    """An alias spelling in a later fix does not defeat the worktree rollback.
+
+    The microtask writes ``src/a.py`` initially, then a failing fix rewrites the
+    same file through the equivalent key ``/src/a.py``. Both spellings resolve to
+    one path; on rollback that path must be removed (the microtask created it) with
+    no failed bytes left behind, and neither key may survive in the result.
+    """
+    mt = _microtask()
+    cfg = _make_gate_config(
+        coder=_coder,  # writes {"src/a.py": ...}
+        code_review_gate=_fail_gate(),
+        batch_fix=_batch_fix_alias_rewrite,
+    )
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert not (tmp_path / "src" / "a.py").exists()  # created path removed, no failed bytes
+    assert "src/a.py" not in result.files
+    assert "/src/a.py" not in result.files
 
 
 # ---------------------------------------------------------------------------
