@@ -156,11 +156,11 @@ def test_writer_format_feedback_item_line() -> None:
 
 def test_writer_revise_empty_draft() -> None:
     """revise() returns empty draft unchanged."""
+    from _content_plan_test_utils import make_requirements_analysis
     from blog_writer_agent.models import ReviseWriterInput
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -170,9 +170,7 @@ def test_writer_revise_empty_draft() -> None:
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     out = a.revise(
         ReviseWriterInput(
@@ -188,11 +186,11 @@ def test_writer_revise_empty_draft() -> None:
 
 
 def test_writer_revise_no_feedback_items() -> None:
+    from _content_plan_test_utils import make_requirements_analysis
     from blog_writer_agent.models import ReviseWriterInput
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -202,9 +200,7 @@ def test_writer_revise_no_feedback_items() -> None:
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     out = a.revise(
         ReviseWriterInput(

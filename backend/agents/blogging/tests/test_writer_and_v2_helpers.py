@@ -272,11 +272,11 @@ def test_ghost_writer_agent_construction() -> None:
 
 def test_ghost_writer_extract_gaps_from_plan_no_opportunities() -> None:
     """find_story_gaps falls back to LLM when plan has no story_opportunity fields."""
+    from _content_plan_test_utils import make_requirements_analysis
     from ghost_writer_agent.agent import GhostWriterElicitationAgent
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -289,9 +289,7 @@ def test_ghost_writer_extract_gaps_from_plan_no_opportunities() -> None:
             ContentPlanSection(title="A", coverage_description="cov", order=0),
         ],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     # When no story_opportunity on sections, _extract_gaps_from_plan returns []
@@ -300,11 +298,11 @@ def test_ghost_writer_extract_gaps_from_plan_no_opportunities() -> None:
 
 
 def test_ghost_writer_extract_gaps_from_plan_with_opportunities(monkeypatch) -> None:
+    from _content_plan_test_utils import make_requirements_analysis
     from ghost_writer_agent.agent import GhostWriterElicitationAgent
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -324,9 +322,7 @@ def test_ghost_writer_extract_gaps_from_plan_with_opportunities(monkeypatch) -> 
         narrative_flow="flow",
         sections=[sec_a, sec_b],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
 
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())

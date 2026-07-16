@@ -8,11 +8,11 @@ import pytest
 
 
 def _make_planning_result(iterations: int = 1, critic_report: dict | None = None):
+    from _content_plan_test_utils import make_requirements_analysis
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         PlanningPhaseResult,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -25,9 +25,7 @@ def _make_planning_result(iterations: int = 1, critic_report: dict | None = None
             ContentPlanSection(title="Conclusion", coverage_description="wrap", order=2),
         ],
         title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     return PlanningPhaseResult(
         content_plan=plan,
@@ -199,10 +197,10 @@ def test_run_planning_wraps_unknown_exception(monkeypatch) -> None:
 
 def test_extract_plan_keywords_returns_filtered_unique() -> None:
     import agent_implementations.blog_writing_process_v2 as v2
+    from _content_plan_test_utils import make_requirements_analysis
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -214,9 +212,7 @@ def test_extract_plan_keywords_returns_filtered_unique() -> None:
             ContentPlanSection(title="Cost Attribution", coverage_description="x", order=1),
         ],
         title_candidates=[TitleCandidate(title="t", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     kws = v2._extract_plan_keywords(plan)
     assert "and" not in kws

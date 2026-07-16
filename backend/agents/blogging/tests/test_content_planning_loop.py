@@ -10,11 +10,11 @@ import json
 from typing import Any
 
 import pytest
+from _content_plan_test_utils import make_requirements_analysis
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     PlanningInput,
-    RequirementsAnalysis,
     TitleCandidate,
 )
 from shared.content_planning_loop import (
@@ -71,9 +71,7 @@ def test_post_validate_plan_flags_out_of_bounds_section_count() -> None:
         narrative_flow="n",
         sections=sections,
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     out = post_validate_plan(plan, _policy_standard())
     assert out.requirements_analysis.plan_acceptable is False
@@ -88,9 +86,7 @@ def test_post_validate_plan_preserves_in_bounds_plan() -> None:
             ContentPlanSection(title=f"S{i}", coverage_description="x", order=i) for i in range(4)
         ],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     out = post_validate_plan(plan, _policy_standard())
     assert out.requirements_analysis.plan_acceptable is True
@@ -106,9 +102,7 @@ def test_post_validate_plan_uses_bounds_for_the_given_profile() -> None:
             ContentPlanSection(title=f"S{i}", coverage_description="x", order=i) for i in range(10)
         ],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     assert (
         post_validate_plan(plan, _policy_standard()).requirements_analysis.plan_acceptable is True
@@ -125,18 +119,12 @@ def test_is_planner_self_eval_satisfied() -> None:
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     assert is_planner_self_eval_satisfied(plan) is True
 
     plan2 = plan.model_copy(
-        update={
-            "requirements_analysis": RequirementsAnalysis(
-                plan_acceptable=False, scope_feasible=True, research_gaps=[]
-            )
-        }
+        update={"requirements_analysis": make_requirements_analysis(plan_acceptable=False)}
     )
     assert is_planner_self_eval_satisfied(plan2) is False
 
@@ -174,9 +162,7 @@ def test_build_refine_plan_prompt_includes_previous_plan_and_feedback() -> None:
         narrative_flow="n",
         sections=[ContentPlanSection(title="x", coverage_description="x", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=False, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(plan_acceptable=False),
     )
     out = build_refine_plan_prompt(inp, prev, "fix gaps")
     assert "fix gaps" in out

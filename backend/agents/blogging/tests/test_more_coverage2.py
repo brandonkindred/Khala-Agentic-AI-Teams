@@ -341,12 +341,12 @@ def test_planning_agent_make_default_init() -> None:
 
 def test_planning_agent_runner_delegates(monkeypatch) -> None:
     """The _BlogPlanningAgentRunner.run() delegates to BlogPlanningAgent.run."""
+    from _content_plan_test_utils import make_requirements_analysis
     from blog_planning_agent.agent import make_blog_planning_agent
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         PlanningPhaseResult,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -357,9 +357,7 @@ def test_planning_agent_runner_delegates(monkeypatch) -> None:
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     ppr = PlanningPhaseResult(
         content_plan=plan,

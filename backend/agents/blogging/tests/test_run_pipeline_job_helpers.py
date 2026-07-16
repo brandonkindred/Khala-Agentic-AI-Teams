@@ -193,21 +193,9 @@ def test_mark_job_cancelled_sets_status_and_returns_true(
 
 
 def _pipeline_doubles():
-    from _content_plan_test_utils import make_content_plan, make_planning_phase_result
-    from shared.content_plan import ContentPlanSection, TitleCandidate
+    from _content_plan_test_utils import make_pipeline_doubles
 
-    plan = make_content_plan(
-        overarching_topic="Topic",
-        narrative_flow="Flow",
-        sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
-        title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
-    )
-    ppr = make_planning_phase_result(plan, planning_wall_ms_total=5.0)
-
-    class _Draft:
-        draft = "# Draft\n\nBody."
-
-    return ppr, _Draft()
+    return make_pipeline_doubles(include_status=False)
 
 
 def test_finalize_blog_job_pass_completes(monkeypatch, patched_blog_job_store_client) -> None:

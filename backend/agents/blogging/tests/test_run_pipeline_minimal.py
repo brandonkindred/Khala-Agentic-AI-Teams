@@ -14,16 +14,9 @@ import pytest
 
 
 def _make_plan():
-    from _content_plan_test_utils import make_content_plan, make_planning_phase_result
-    from shared.content_plan import ContentPlanSection, TitleCandidate
+    from _content_plan_test_utils import make_minimal_planning_phase_result
 
-    plan = make_content_plan(
-        overarching_topic="Topic",
-        narrative_flow="Flow",
-        sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
-        title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
-    )
-    return make_planning_phase_result(plan)
+    return make_minimal_planning_phase_result()
 
 
 def test_run_pipeline_no_gates_no_job(monkeypatch, tmp_path: Path) -> None:

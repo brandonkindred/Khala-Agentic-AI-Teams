@@ -42,21 +42,11 @@ def _raise(exc: Exception):
 
 def _make_pipeline_doubles():
     """Build minimal planning_phase_result + draft_result + status fake."""
-    from _content_plan_test_utils import make_content_plan, make_planning_phase_result
-    from shared.content_plan import ContentPlanSection, TitleCandidate
+    from _content_plan_test_utils import make_pipeline_doubles
 
-    plan = make_content_plan(
-        overarching_topic="Topic",
-        narrative_flow="Flow",
-        sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
-        title_candidates=[TitleCandidate(title=_EXPECTED_TITLE, probability_of_success=0.8)],
+    return make_pipeline_doubles(
+        title=_EXPECTED_TITLE, probability=0.8, planning_wall_ms_total=10.0
     )
-    ppr = make_planning_phase_result(plan, planning_wall_ms_total=10.0)
-
-    class _Draft:
-        draft = "# Draft\n\nBody."
-
-    return ppr, _Draft(), "PASS"
 
 
 def test_full_pipeline_sync_success(client: TestClient, monkeypatch) -> None:
@@ -128,21 +118,14 @@ def test_resume_job_happy(client: TestClient, monkeypatch) -> None:
     assert job["status"] == "running"
 
 
-def test_restart_job_happy(client: TestClient, monkeypatch, fake_job_client) -> None:
+def test_restart_job_happy(client: TestClient, monkeypatch, patched_blog_job_store_client) -> None:
     """Restart uses both `shared.blog_job_store` and `blogging.shared.blog_job_store`
-    aliases — patch both so the in-memory fake client backs everything."""
+    aliases — `patched_blog_job_store_client` backs both so the in-memory fake client
+    covers everything `reset_blog_job` might import."""
     from shared import blog_job_store as bjs
 
     job_id = _create_job()
     bjs.update_blog_job(job_id, status="completed", request_payload={"brief": "x"})
-
-    # Also patch the alternative module path used by api/main.py for reset_blog_job
-    try:
-        from blogging.shared import blog_job_store as bjs_alt
-
-        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
-    except ImportError:
-        pass
 
     # Intercept the bounded async-job pool so we don't actually run the pipeline.
     monkeypatch.setattr(_api_main, "_submit_async_job", lambda fn, *a, **kw: None)

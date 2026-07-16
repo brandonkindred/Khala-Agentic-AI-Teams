@@ -41,7 +41,17 @@ _BLOG_JOB_HELPERS = (
 
 @pytest.fixture(autouse=True)
 def patched_blog_client(monkeypatch, fake_job_client) -> Any:
-    """Back ``shared.blog_job_store`` with the in-memory fake for every test in this package."""
+    """Back ``shared.blog_job_store`` with the in-memory fake for every test in this package.
+
+    Preconditions:
+        - ``fake_job_client`` (from ``job_service_client_fake``) is function-scoped, so every
+          fixture/test in a given test function observes the same fake instance.
+    Postconditions:
+        - ``shared.blog_job_store._client`` returns ``fake_job_client`` for the duration of the
+          test; ``monkeypatch`` restores the original on teardown. Autouse, so no test needs to
+          request this explicitly; ``patched_client`` and ``patched_blog_job_store_client`` below
+          rely on this fixture for the base patch rather than re-applying it themselves.
+    """
     from shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
@@ -49,18 +59,25 @@ def patched_blog_client(monkeypatch, fake_job_client) -> Any:
 
 
 @pytest.fixture
-def patched_client(monkeypatch, fake_job_client) -> Any:
+def patched_client(patched_blog_client, monkeypatch, fake_job_client) -> Any:
     """Back the blogging API with the in-memory fake job store.
 
-    Replaces the ``blog_job_store`` module client and rebinds the job-store helper
-    references captured inside ``api/main`` at import time, so every endpoint hits
-    the fake. Imports the shared app module lazily so test modules that never use
-    this fixture do not pay the ``api/main`` import cost.
+    Rebinds the job-store helper references captured inside ``api/main`` at import time, so
+    every endpoint hits the fake. The base ``blog_job_store._client`` patch is already applied
+    by the autouse ``patched_blog_client`` fixture (requested explicitly here to make the
+    dependency clear); this fixture only adds the ``api_main`` helper rebinding.
+
+    Preconditions:
+        - ``patched_blog_client`` has already patched ``shared.blog_job_store._client``.
+    Postconditions:
+        - Every name in ``_BLOG_JOB_HELPERS`` that exists on ``bjs`` is rebound onto
+          ``api_main``, so calls made through the FastAPI app resolve to the fake-backed
+          implementation. Imports the shared app module lazily so test modules that never use
+          this fixture do not pay the ``api/main`` import cost.
     """
     from _api_test_utils import api_main
     from shared import blog_job_store as bjs
 
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
     for name in _BLOG_JOB_HELPERS:
         helper = getattr(bjs, name, None)
         if helper is not None:
@@ -78,11 +95,20 @@ def client(patched_client) -> Any:
 
 
 @pytest.fixture
-def patched_blog_job_store_client(monkeypatch, fake_job_client) -> Any:
-    """Back ``shared.blog_job_store._client`` (and its ``blogging.shared`` alias, if loaded)."""
-    from shared import blog_job_store as bjs
+def patched_blog_job_store_client(patched_blog_client, monkeypatch, fake_job_client) -> Any:
+    """Back ``shared.blog_job_store._client`` and its ``blogging.shared`` alias, if loaded.
 
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
+    The base ``blog_job_store._client`` patch is already applied by the autouse
+    ``patched_blog_client`` fixture (requested explicitly here to make the dependency clear);
+    this fixture only adds the ``blogging.shared`` alias patch for the dual-import-path layout.
+
+    Preconditions:
+        - ``patched_blog_client`` has already patched ``shared.blog_job_store._client``.
+    Postconditions:
+        - If ``blogging.shared.blog_job_store`` is importable (the dual-layout case), its
+          ``_client`` is also patched to the same fake; otherwise this is a no-op beyond the
+          base patch already applied.
+    """
     try:
         from blogging.shared import blog_job_store as bjs_alt
 

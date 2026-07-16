@@ -16,11 +16,11 @@ def _agent():
 
 
 def _writer_input(**overrides):
+    from _content_plan_test_utils import make_requirements_analysis
     from blog_writer_agent.models import WriterInput
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -29,9 +29,7 @@ def _writer_input(**overrides):
         narrative_flow="flow",
         sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     kwargs = {
         "content_plan": plan,
@@ -69,11 +67,11 @@ def test_writer_run_happy_with_all_options(monkeypatch, tmp_path) -> None:
 
 
 def test_writer_run_empty_outline_returns_placeholder(monkeypatch) -> None:
+    from _content_plan_test_utils import make_requirements_analysis
     from blog_writer_agent.models import WriterInput
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -83,9 +81,7 @@ def test_writer_run_empty_outline_returns_placeholder(monkeypatch) -> None:
         narrative_flow="flow",
         sections=[ContentPlanSection(title="A", coverage_description="x", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     # Mock outline_for_prompt to return empty string
     monkeypatch.setattr(WriterInput, "outline_for_prompt", lambda self: "")
@@ -165,13 +161,13 @@ def test_writer_run_default_length_guidance(monkeypatch) -> None:
 
 
 def test_writer_revise_single_item_happy(monkeypatch) -> None:
+    from _content_plan_test_utils import make_requirements_analysis
     from blog_copy_editor_agent.models import FeedbackItem
     from blog_writer_agent.agent import BlogWriterAgent
     from blog_writer_agent.models import ReviseWriterInput
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -187,9 +183,7 @@ def test_writer_revise_single_item_happy(monkeypatch) -> None:
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     ri = ReviseWriterInput(
         draft="# Orig", feedback_items=[item], feedback_summary="s", content_plan=plan
@@ -207,13 +201,13 @@ def test_writer_revise_single_item_happy(monkeypatch) -> None:
 
 def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
     """All 2 attempts at _call_agent fail; _call_agent_json succeeds."""
+    from _content_plan_test_utils import make_requirements_analysis
     from blog_copy_editor_agent.models import FeedbackItem
     from blog_writer_agent.agent import BlogWriterAgent
     from blog_writer_agent.models import ReviseWriterInput
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -237,9 +231,7 @@ def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     ri = ReviseWriterInput(
         draft="# Orig", feedback_items=[item], feedback_summary="s", content_plan=plan
@@ -257,13 +249,13 @@ def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
 
 def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -> None:
     """All retries + fallback fail → original draft returned."""
+    from _content_plan_test_utils import make_requirements_analysis
     from blog_copy_editor_agent.models import FeedbackItem
     from blog_writer_agent.agent import BlogWriterAgent
     from blog_writer_agent.models import ReviseWriterInput
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -287,9 +279,7 @@ def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     ri = ReviseWriterInput(
         draft="# Orig", feedback_items=[item], feedback_summary="s", content_plan=plan
@@ -307,12 +297,12 @@ def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -
 
 def test_writer_build_revise_single_item_prompt(monkeypatch) -> None:
     """Smoke test the prompt building helper with title + stories + length_guidance."""
+    from _content_plan_test_utils import make_requirements_analysis
     from blog_copy_editor_agent.models import FeedbackItem
     from blog_writer_agent.models import ReviseWriterInput
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -323,9 +313,7 @@ def test_writer_build_revise_single_item_prompt(monkeypatch) -> None:
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     ri = ReviseWriterInput(
         draft="# d",
@@ -351,12 +339,12 @@ def test_writer_build_revise_single_item_prompt(monkeypatch) -> None:
 
 
 def test_writer_build_revise_single_item_prompt_default_length() -> None:
+    from _content_plan_test_utils import make_requirements_analysis
     from blog_copy_editor_agent.models import FeedbackItem
     from blog_writer_agent.models import ReviseWriterInput
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -367,9 +355,7 @@ def test_writer_build_revise_single_item_prompt_default_length() -> None:
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     ri = ReviseWriterInput(
         draft="# d",

@@ -14,21 +14,9 @@ def _setup_artifacts_root(monkeypatch, tmp_path: Path) -> None:
 
 
 def _make_pipeline_doubles():
-    from _content_plan_test_utils import make_content_plan, make_planning_phase_result
-    from shared.content_plan import ContentPlanSection, TitleCandidate
+    from _content_plan_test_utils import make_pipeline_doubles
 
-    plan = make_content_plan(
-        overarching_topic="Topic",
-        narrative_flow="Flow",
-        sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
-        title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
-    )
-    ppr = make_planning_phase_result(plan, planning_wall_ms_total=5.0)
-
-    class _Draft:
-        draft = "# Draft\n\nBody."
-
-    return ppr, _Draft(), "PASS"
+    return make_pipeline_doubles()
 
 
 def test_publish_terminal_swallows_publish_errors(monkeypatch) -> None:

@@ -484,11 +484,11 @@ def test_workflow_unpatched_replay_runs_legacy_monolith(monkeypatch) -> None:
 
 
 def _real_planning_phase_result():
+    from _content_plan_test_utils import make_requirements_analysis
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         PlanningPhaseResult,
-        RequirementsAnalysis,
         TitleCandidate,
     )
 
@@ -497,9 +497,7 @@ def _real_planning_phase_result():
         narrative_flow="Flow",
         sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
         title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
     return PlanningPhaseResult(
         content_plan=plan,

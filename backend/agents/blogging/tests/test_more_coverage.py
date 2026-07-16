@@ -238,10 +238,10 @@ def test_run_validators_from_work_dir_missing_brand_spec(tmp_path: Path, monkeyp
 
 
 def test_content_plan_to_content_brief_markdown_all_fields() -> None:
+    from _content_plan_test_utils import make_requirements_analysis
     from shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
         TitleScoring,
         content_plan_to_content_brief_markdown,
@@ -284,9 +284,7 @@ def test_content_plan_to_content_brief_markdown_all_fields() -> None:
                 ),
             )
         ],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+        requirements_analysis=make_requirements_analysis(),
     )
 
     md = content_plan_to_content_brief_markdown(plan)
