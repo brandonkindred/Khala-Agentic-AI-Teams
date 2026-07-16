@@ -160,16 +160,16 @@ All planning artifacts are written to a `plan/` folder at the project root (work
 ```bash
 cd software_engineering_team
 pip install -r requirements.txt
-python -m agent_implementations.run_team
+python -m agent_implementations.run_api_server
 ```
 
 Or from the project root:
 
 ```bash
-python software_engineering_team/agent_implementations/run_team.py
+python software_engineering_team/agent_implementations/run_api_server.py
 ```
 
-By default, the script uses `DummyLLMClient` for testing without an LLM. To use a real model (e.g. Ollama), set environment variables or edit `run_team.py` and set `USE_DUMMY = False`.
+This starts the team's HTTP API on `http://127.0.0.1:8000`; see [API](#api) below for the `/run-team` request format. By default the team uses `DummyLLMClient` for testing without an LLM (`LLM_PROVIDER=dummy`, the default). To use a real model (e.g. Ollama), set the environment variables below.
 
 **LLM configuration (environment variables):**
 
@@ -202,7 +202,7 @@ Example with Ollama:
 ```bash
 export LLM_PROVIDER=ollama
 export LLM_MODEL=qwen3.5:397b-cloud
-python -m agent_implementations.run_team
+python -m agent_implementations.run_api_server
 ```
 
 Ensure Ollama is running with the model (e.g. `ollama run qwen3.5:397b-cloud`). If you use a different API (OpenRouter, Together, etc.) or get a "model not found" error, set `LLM_MODEL` to a model your API supports (e.g. `export LLM_MODEL=llama3.2` for Ollama, or your provider's model id).
@@ -271,11 +271,10 @@ Then POST to `http://127.0.0.1:8000/run-team`:
 
 **Response:** Architecture overview, task IDs, task results, `git_branch_setup` (development branch), and status.
 
-Use `test_repo/` as a sample (includes `initial_spec.md`):
 ```bash
 curl -X POST http://127.0.0.1:8000/run-team \
   -H "Content-Type: application/json" \
-  -d '{"repo_path": "./test_repo"}'
+  -d '{"repo_path": "/path/to/your/git/repo"}'
 ```
 
 ## Logging and debugging
@@ -422,12 +421,10 @@ software_engineering_team/
 │   ├── spec_analysis_merger/     # Tech Lead: merges chunk analyses
 │   └── task_generator_agent/     # Tech Lead: fallback task plan from merged analysis
 ├── agent_implementations/
-│   ├── run_team.py   # CLI orchestration script
-│   └── run_api_server.py
+│   └── run_api_server.py   # HTTP API entry point (uvicorn)
 ├── shared/
 │   └── logging_config.py  # setup_logging() for consistent agent logs
 ├── tests/            # pytest suite (spec, agents, pipeline, API)
-├── test_repo/        # Sample repo with initial_spec.md
 ├── pyproject.toml
 └── requirements.txt
 ```
