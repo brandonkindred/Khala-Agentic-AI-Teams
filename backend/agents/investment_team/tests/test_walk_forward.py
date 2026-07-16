@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import pytest
+from pydantic import ValidationError
 
 from investment_team.execution.walk_forward import (
     DateRange,
@@ -369,7 +370,7 @@ def test_backtest_config_defaults_preserve_legacy_callers():
 def test_backtest_config_rejects_invalid_n_folds():
     from investment_team.models import BacktestConfig
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         BacktestConfig(start_date="2022-01-03", end_date="2022-12-30", n_folds=0)
 
 
@@ -406,5 +407,5 @@ def test_backtest_result_accepts_walk_forward_diagnostics():
 def test_backtest_result_legacy_fields_still_required():
     from investment_team.models import BacktestResult
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         BacktestResult()  # missing required core metrics
