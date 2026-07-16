@@ -144,6 +144,72 @@ def _batch_fix_unsafe(**kwargs: Any) -> SimpleNamespace:
     return SimpleNamespace(files={"../evil.py": "x"})
 
 
+def _batch_fix_adds_file(*, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
+    """A fix that keeps the current files and introduces one new (safe) key."""
+    if detail_callback is not None:
+        detail_callback("fixing")
+    files = dict(kwargs["current_files"])
+    files["src/new_helper.py"] = "def helper():\n    return 1\n"
+    return SimpleNamespace(files=files)
+
+
+def _coder_per_microtask(**kwargs: Any) -> Dict[str, str]:
+    """``mt-a`` owns ``shared.py``; every other microtask writes only its own file."""
+    if kwargs["microtask"].id == "mt-a":
+        return {"shared.py": "owned-by-a\n"}
+    return {"src/b.py": "print('b')\n"}
+
+
+def _cr_gate_fails_for(mid: str):
+    """Code-review gate that fails only for the microtask whose id is ``mid``."""
+
+    def _gate(**kwargs: Any) -> GateOutcome:
+        if kwargs["microtask"].id == mid:
+            return GateOutcome(passed=False, issues=[_issue()], summary="bad")
+        return GateOutcome(passed=True)
+
+    return _gate
+
+
+def _batch_fix_overwrites_shared(**kwargs: Any) -> SimpleNamespace:
+    """A fix that also rewrites ``shared.py`` — a file an earlier microtask produced."""
+    files = dict(kwargs["current_files"])
+    files["shared.py"] = "clobbered-by-b\n"
+    return SimpleNamespace(files=files)
+
+
+def _coder_overwrites_config(**kwargs: Any) -> Dict[str, str]:
+    """Coder that overwrites a pre-existing repo file (not produced by any microtask)."""
+    return {"config.py": "MODIFIED\n"}
+
+
+def _batch_fix_alias_rewrite(**kwargs: Any) -> SimpleNamespace:
+    """A fix that rewrites the current file through an equivalent (aliased) key.
+
+    ``src/a.py`` and ``/src/a.py`` resolve to the same worktree path; returning the
+    alias exercises the canonical-path snapshotting in the rollback manifest.
+    """
+    return SimpleNamespace(files={"/src/a.py": "fixed-but-rejected\n"})
+
+
+def _coder_writes(path: str):
+    """Build a coder that emits a single file at ``path``."""
+
+    def _coder_at(**kwargs: Any) -> Dict[str, str]:
+        return {path: "generated-then-rejected\n"}
+
+    return _coder_at
+
+
+def _batch_fix_writes(path: str):
+    """Build a batch fix that emits a single file at ``path`` (ignoring current files)."""
+
+    def _fix_at(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={path: "fixed-but-rejected\n"})
+
+    return _fix_at
+
+
 def _doc_review(*, documentation=None, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
     if detail_callback is not None:
         detail_callback("doc")
@@ -465,6 +531,200 @@ def test_code_review_unsafe_fix_breaks(tmp_path):
     _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
 
     assert mt.status == MS.REVIEW_FAILED
+
+
+def test_rollback_removes_files_added_by_batch_fix(tmp_path):
+    """A file introduced by a batch fix is rolled back with the rest on REVIEW_FAILED.
+
+    Regression test: the rollback manifest must grow to include keys added during
+    fix cycles. Here code review keeps failing until the retry cap is exhausted; the
+    single batch fix adds ``src/new_helper.py`` on top of the original ``src/a.py``.
+    When the microtask rolls back, BOTH keys must be gone from the returned
+    ``ExecutionResult.files`` — otherwise the new file leaks out of a failed microtask.
+    """
+    mt = _microtask()
+    cfg = _make_gate_config(code_review_gate=_fail_gate(), batch_fix=_batch_fix_adds_file)
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert "src/a.py" not in result.files
+    assert "src/new_helper.py" not in result.files
+    # The commit stages the worktree with ``git add -A``, so the created files must
+    # also be gone from disk — not just the in-memory result.
+    assert not (tmp_path / "src" / "a.py").exists()
+    assert not (tmp_path / "src" / "new_helper.py").exists()
+    # The microtask's own output record is cleared, so it reports no surviving files.
+    assert mt.output_files == {}
+
+
+def test_rollback_restores_earlier_microtask_file_on_overlap(tmp_path):
+    """A failed microtask's rollback restores an earlier microtask's overlapping file.
+
+    ``mt-a`` completes and owns ``shared.py``. ``mt-b`` then fails code review to
+    exhaustion; its batch fix rewrites ``shared.py`` (which ``mt-a`` produced). The
+    rollback must restore ``mt-a``'s version of ``shared.py`` — not delete it, and
+    not leak ``mt-b``'s clobbered content — while removing ``mt-b``'s own file.
+    """
+    mt_a = _microtask("mt-a")
+    mt_b = _microtask("mt-b")
+    cfg = _make_gate_config(
+        coder=_coder_per_microtask,
+        code_review_gate=_cr_gate_fails_for("mt-b"),
+        batch_fix=_batch_fix_overwrites_shared,
+    )
+    result = _run(
+        cfg,
+        [mt_a, mt_b],
+        tmp_path,
+        review_config=_config(cr=1, on_failure="skip_continue"),
+    )
+
+    assert mt_a.status == MS.COMPLETED
+    assert mt_b.status == MS.REVIEW_FAILED
+    assert result.files["shared.py"] == "owned-by-a\n"  # earlier version restored
+    assert "src/b.py" not in result.files  # mt-b's own file rolled back
+    # The worktree is reverted too, so the ``git add -A`` commit sees mt-a's bytes,
+    # not mt-b's clobber, and mt-b's own file is gone from disk.
+    assert (tmp_path / "shared.py").read_text(encoding="utf-8") == "owned-by-a\n"
+    assert not (tmp_path / "src" / "b.py").exists()
+
+
+def test_rollback_restores_preexisting_repo_file(tmp_path):
+    """Rollback restores a pre-existing repo file the failed microtask overwrote.
+
+    A file already in the worktree (never produced by a microtask, so never in
+    ``all_files``) must be restored to its original bytes on disk — never deleted —
+    while staying absent from ``ExecutionResult.files`` (it is not execution output).
+    This is why the manifest keeps two snapshots: the disk snapshot restores the
+    bytes, and the ``all_files`` snapshot (``None`` for a never-produced key) keeps
+    it out of the result.
+    """
+    (tmp_path / "config.py").write_text("PRE\n", encoding="utf-8")
+    mt = _microtask()
+    cfg = _make_gate_config(coder=_coder_overwrites_config, code_review_gate=_fail_gate())
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert (tmp_path / "config.py").read_text(encoding="utf-8") == "PRE\n"  # disk restored
+    assert "config.py" not in result.files  # not reported as execution output
+
+
+def test_rollback_canonicalizes_alias_keys(tmp_path):
+    """An alias spelling in a later fix does not defeat the worktree rollback.
+
+    The microtask writes ``src/a.py`` initially, then a failing fix rewrites the
+    same file through the equivalent key ``/src/a.py``. Both spellings resolve to
+    one path; on rollback that path must be removed (the microtask created it) with
+    no failed bytes left behind, and neither key may survive in the result.
+    """
+    mt = _microtask()
+    cfg = _make_gate_config(
+        coder=_coder,  # writes {"src/a.py": ...}
+        code_review_gate=_fail_gate(),
+        batch_fix=_batch_fix_alias_rewrite,
+    )
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert not (tmp_path / "src" / "a.py").exists()  # created path removed, no failed bytes
+    assert "src/a.py" not in result.files
+    assert "/src/a.py" not in result.files
+
+
+def test_rollback_restores_preexisting_binary_file(tmp_path):
+    """A pre-existing non-UTF-8 file at an output path is snapshotted/restored as bytes.
+
+    The prior-state read must not decode as UTF-8 (which would raise and spuriously
+    fail the microtask before review); on rollback the exact bytes are restored.
+    """
+    original = b"\xff\xfe\x00\x01not-utf8"
+    (tmp_path / "data.bin").write_bytes(original)
+    mt = _microtask()
+    cfg = _make_gate_config(coder=_coder_writes("data.bin"), code_review_gate=_fail_gate())
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    # Reached review (REVIEW_FAILED), not a bare FAILED from a decode error at snapshot.
+    assert mt.status == MS.REVIEW_FAILED
+    assert (tmp_path / "data.bin").read_bytes() == original  # restored byte-for-byte
+    assert "data.bin" not in result.files
+
+
+def test_rollback_preserves_dangling_symlink(tmp_path):
+    """Writing through a pre-existing dangling symlink is undone without orphaning bytes.
+
+    The text write follows the symlink and creates its target; on rollback the created
+    target is removed and the symlink itself is left intact — nothing the failed
+    microtask produced remains in the worktree.
+    """
+    (tmp_path / "link.py").symlink_to("real_target.py")  # dangling: target does not exist
+    mt = _microtask()
+    cfg = _make_gate_config(coder=_coder_writes("link.py"), code_review_gate=_fail_gate())
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert (tmp_path / "link.py").is_symlink()  # symlink itself preserved
+    assert not (tmp_path / "real_target.py").exists()  # created target removed
+    assert "link.py" not in result.files
+
+
+def test_rollback_preserves_dangling_symlink_chain(tmp_path):
+    """A chain of symlinks ending at a missing target is undone at the ultimate target.
+
+    ``link.py -> middle.py -> real.py`` (real.py missing): the write follows the whole
+    chain and creates ``real.py``; rollback removes only that created ultimate target
+    and leaves every symlink in the chain intact.
+    """
+    (tmp_path / "middle.py").symlink_to("real.py")  # middle -> real (missing)
+    (tmp_path / "link.py").symlink_to("middle.py")  # link -> middle -> real
+    mt = _microtask()
+    cfg = _make_gate_config(coder=_coder_writes("link.py"), code_review_gate=_fail_gate())
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert (tmp_path / "link.py").is_symlink()  # chain intact
+    assert (tmp_path / "middle.py").is_symlink()
+    assert not (tmp_path / "real.py").exists()  # created ultimate target removed
+    assert "link.py" not in result.files
+
+
+def test_rollback_restores_target_through_nondangling_symlink(tmp_path):
+    """Writing through a symlink to an existing in-repo file clobbers the target; on
+    rollback the target's prior bytes are restored and the symlink is left intact."""
+    (tmp_path / "real.py").write_text("REAL\n", encoding="utf-8")
+    (tmp_path / "alias.py").symlink_to("real.py")
+    mt = _microtask()
+    cfg = _make_gate_config(coder=_coder_writes("alias.py"), code_review_gate=_fail_gate())
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert (tmp_path / "alias.py").is_symlink()  # symlink intact
+    assert (tmp_path / "real.py").read_text(encoding="utf-8") == "REAL\n"  # target restored
+    assert "alias.py" not in result.files
+
+
+def test_rollback_canonicalizes_symlink_and_direct_path_aliases(tmp_path):
+    """One physical file written via a symlink then via its direct path collapses to a
+    single rollback entry, so the failed content is not restored over the original.
+
+    The coder writes through ``link.py`` (a symlink to ``real.py``); the failing fix
+    writes ``real.py`` directly. Both are the same physical file, so only the earliest
+    snapshot (``real.py``'s original bytes) is kept and restored.
+    """
+    (tmp_path / "real.py").write_text("ORIG\n", encoding="utf-8")
+    (tmp_path / "link.py").symlink_to("real.py")
+    mt = _microtask()
+    cfg = _make_gate_config(
+        coder=_coder_writes("link.py"),
+        code_review_gate=_fail_gate(),
+        batch_fix=_batch_fix_writes("real.py"),
+    )
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert (tmp_path / "real.py").read_text(encoding="utf-8") == "ORIG\n"  # not failed bytes
+    assert (tmp_path / "link.py").is_symlink()
+    assert "link.py" not in result.files
+    assert "real.py" not in result.files
 
 
 # ---------------------------------------------------------------------------

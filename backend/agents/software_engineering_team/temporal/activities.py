@@ -445,44 +445,20 @@ def plan_project_activity(
 
         agents = _get_agents()
 
-        from software_engineering_team.orchestrator import _make_planning_job_updater
+        from software_engineering_team.orchestrator import (
+            _make_planning_architecture_fn,
+            _make_planning_job_updater,
+        )
 
         # Shared with the thread path: rescales Planning's own 0-100 progress onto
         # the planning band so the Temporal bar stays monotone into the coding phase.
         _planning_updater = _make_planning_job_updater(job_id)
 
-        def _run_architecture(spec_content, prd_content, rp, client_context):
-            from architecture_expert.models import ArchitectureInput
-
-            from software_engineering_team.shared.models import ProductRequirements
-
-            req_desc = (spec_content or "").strip()
-            if prd_content:
-                req_desc = (req_desc + "\n\n" + prd_content.strip()).strip()
-            reqs = ProductRequirements(
-                title="Project",
-                description=req_desc or "See planning artifacts.",
-                acceptance_criteria=["Deliver according to spec."],
-                constraints=[],
-                priority="medium",
-                metadata={},
-            )
-            features_doc = prd_content or ""
-            arch_input = ArchitectureInput(
-                requirements=reqs,
-                technology_preferences=["Python", "FastAPI", "PostgreSQL", "Docker"],
-                project_overview={"features_and_functionality_doc": features_doc, "goals": ""},
-                features_and_functionality_doc=features_doc or None,
-            )
-            try:
-                arch_output = agents["architecture"].run(arch_input)
-                return (
-                    (arch_output.architecture.overview or "")
-                    if arch_output and arch_output.architecture
-                    else None
-                )
-            except Exception:
-                return None
+        # Identical wiring to the thread path: the shared factory owns architecture-input
+        # construction (including technology_preferences derivation) and resolves the agent
+        # lazily/defensively, so a construction failure degrades to no overview rather than
+        # aborting planning.
+        _run_architecture = _make_planning_architecture_fn(lambda: agents["architecture"])
 
         planning_result = run_planning_workflow(
             repo_path=str(path),

@@ -345,11 +345,11 @@ class EnvironmentStore:
             * ``status`` is ``None`` (no filter) or a status string to match.
         Postconditions:
             * Returns the ``EnvironmentInfo`` records found across the primary and
-              legacy directories, deduplicated by filename stem (which is the
-              ``agent_id`` for well-formed records named ``{agent_id}.json``); the
-              primary ``storage_dir`` is scanned first, so its record wins.
-              Results are filtered to ``status`` when given and sorted by
-              ``created_at`` descending.
+              legacy directories, deduplicated by ``agent_id`` (not filename stem,
+              so a legacy file whose name differs from its ``agent_id`` cannot
+              produce a duplicate entry); the primary ``storage_dir`` is scanned
+              first, so its record wins. Results are filtered to ``status`` when
+              given and sorted by ``created_at`` descending.
             * Unparseable or incomplete files are skipped; never raises.
         """
         environments: List[EnvironmentInfo] = []
@@ -360,11 +360,11 @@ class EnvironmentStore:
                 if not directory.exists():
                     continue
                 for env_file in directory.glob("*.json"):
-                    if env_file.stem in seen:
-                        continue
                     try:
                         data = json.loads(env_file.read_text(encoding="utf-8"))
                         env = EnvironmentInfo.from_dict(data)
+                        if env.agent_id in seen:
+                            continue
                         seen.add(env.agent_id)
                         if status is None or env.status == status:
                             environments.append(env)
