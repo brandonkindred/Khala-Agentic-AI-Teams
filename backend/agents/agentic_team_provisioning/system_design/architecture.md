@@ -161,7 +161,7 @@ graph LR
     UI --> Unified["Unified API<br/>(FastAPI, 0.0.0.0:8080)"]
     Unified --> Mount["/api/agentic-team-provisioning<br/>(TeamConfig in unified_api/config.py:194-197)"]
     Mount --> Orch["Orchestrator Agent<br/>(this team)"]
-    Unified -. mounted alongside .-> Others["19 other teams"]
+    Unified -. mounted alongside .-> Others["23 other teams"]
 
     classDef external fill:#f1f3f4,stroke:#5f6368,stroke-dasharray: 3 3
     classDef apiLayer fill:#e8f0fe,stroke:#1a73e8

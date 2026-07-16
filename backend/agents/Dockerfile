@@ -135,7 +135,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Copy every team and shared module (llm_service, shared_postgres,
 # shared_temporal, integrations, etc.) into /app/ so PYTHONPATH=/app can
 # import them by package name (e.g. `software_engineering_team.api.main`).
-# This covers all 20 enabled teams in unified_api/config.py TEAM_CONFIGS
+# This covers all 24 enabled teams in unified_api/config.py TEAM_CONFIGS
 # plus the shared infrastructure they depend on.
 COPY agents /app/
 

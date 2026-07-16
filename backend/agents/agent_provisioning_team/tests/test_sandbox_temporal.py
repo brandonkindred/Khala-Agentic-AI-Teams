@@ -258,33 +258,18 @@ async def test_sandbox_reaper_workflow_survives_activity_failure() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_sandbox_temporal_enabled_gates_on_env(monkeypatch) -> None:
+def test_sandbox_temporal_enabled_follows_is_temporal_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("TEMPORAL_ADDRESS", "localhost:7233")
     from agent_provisioning_team.temporal import sandbox_dispatch as sd
 
-    monkeypatch.setenv("PROVISION_THREAD_FALLBACK", "1")
+    assert sd.sandbox_temporal_enabled() is True
+
+
+def test_sandbox_temporal_disabled_without_address(monkeypatch) -> None:
+    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
+    from agent_provisioning_team.temporal import sandbox_dispatch as sd
+
     assert sd.sandbox_temporal_enabled() is False
-
-    monkeypatch.delenv("PROVISION_THREAD_FALLBACK", raising=False)
-    with patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=True):
-        assert sd.sandbox_temporal_enabled() is True
-    with patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=False):
-        assert sd.sandbox_temporal_enabled() is False
-
-
-def test_sandbox_temporal_enabled_delegates_to_shared_predicate() -> None:
-    """sandbox_temporal_enabled() must consult the single shared escape-hatch
-    check (agent_provisioning_team.temporal.client.provision_thread_fallback_enabled)
-    rather than its own copy of the PROVISION_THREAD_FALLBACK parsing — the same
-    function api/main.py's provisioning/deprovision dispatch uses, so the two
-    can never independently drift on which spellings disable Temporal."""
-    from agent_provisioning_team.temporal import sandbox_dispatch as sd
-
-    with patch(
-        "agent_provisioning_team.temporal.client.provision_thread_fallback_enabled",
-        return_value=True,
-    ) as mock_fallback:
-        assert sd.sandbox_temporal_enabled() is False
-    mock_fallback.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -294,7 +279,7 @@ async def test_acquire_sandbox_falls_back_to_direct() -> None:
     direct = AsyncMock(return_value=_handle())
     with (
         patch.object(sd, "sandbox_temporal_enabled", return_value=False),
-        patch("agent_provisioning_team.sandbox.acquire", new=direct),
+        patch.object(sd, "_acquire_sandbox_inprocess", new=direct),
     ):
         out = await sd.acquire_sandbox("blog.writer")
 
@@ -327,7 +312,7 @@ async def test_teardown_sandbox_falls_back_to_direct() -> None:
     direct = AsyncMock()
     with (
         patch.object(sd, "sandbox_temporal_enabled", return_value=False),
-        patch("agent_provisioning_team.sandbox.teardown", new=direct),
+        patch.object(sd, "_teardown_sandbox_inprocess", new=direct),
     ):
         await sd.teardown_sandbox("blog.writer")
 
@@ -465,7 +450,7 @@ def test_reraise_mapping_covers_every_sandbox_exception_type() -> None:
     def fake_translate(exc, mapping):
         captured["mapping"] = mapping
 
-    with patch("shared_temporal.translate_workflow_failure", new=fake_translate):
+    with patch.object(sd, "translate_workflow_failure", new=fake_translate):
         sd._reraise_sandbox_error(RuntimeError("dummy"))
 
     assert set(captured["mapping"]) == expected

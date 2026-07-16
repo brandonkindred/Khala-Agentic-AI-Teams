@@ -11,15 +11,17 @@ their docstring below for why).
 """
 
 from agent_provisioning_team.temporal.activities import (
-    audit_activity_v2,
-    compensate_activity_v2,
-    credentials_activity_v2,
-    deliver_activity_v2,
+    audit_activity,
+    compensate_activity,
+    credentials_activity,
+    deliver_activity,
     deprovision_activity,
-    documentation_activity_v2,
+    documentation_activity,
+    list_manifest_tools_activity,
+    mark_job_failed_activity,
     provision_tool_activity,
-    run_provisioning_activity,
-    setup_activity_v2,
+    record_account_provisioning_activity,
+    setup_activity,
 )
 from agent_provisioning_team.temporal.client import is_temporal_enabled
 from agent_provisioning_team.temporal.constants import TASK_QUEUE
@@ -36,23 +38,23 @@ from agent_provisioning_team.temporal.sandbox_workflows import (
 from agent_provisioning_team.temporal.workflows import (
     AgentDeprovisioningWorkflow,
     AgentProvisioningWorkflow,
-    AgentProvisioningWorkflowV2,
 )
 
 WORKFLOWS = [
     AgentProvisioningWorkflow,
-    AgentProvisioningWorkflowV2,
     AgentDeprovisioningWorkflow,
 ]
 ACTIVITIES = [
-    run_provisioning_activity,
-    setup_activity_v2,
-    credentials_activity_v2,
+    setup_activity,
+    list_manifest_tools_activity,
+    credentials_activity,
     provision_tool_activity,
-    audit_activity_v2,
-    documentation_activity_v2,
-    deliver_activity_v2,
-    compensate_activity_v2,
+    record_account_provisioning_activity,
+    audit_activity,
+    documentation_activity,
+    deliver_activity,
+    compensate_activity,
+    mark_job_failed_activity,
     deprovision_activity,
 ]
 
@@ -88,7 +90,6 @@ __all__ = [
     "SANDBOX_WORKFLOWS",
     "SANDBOX_ACTIVITIES",
     "AgentProvisioningWorkflow",
-    "AgentProvisioningWorkflowV2",
     "AgentDeprovisioningWorkflow",
     "SandboxAcquireWorkflow",
     "SandboxTeardownWorkflow",
