@@ -75,7 +75,7 @@ class ToolProvisionResult(BaseModel):
     error: Optional[str] = None
     details: Dict[str, Any] = Field(default_factory=dict)
     # Registry key of the provisioner that produced this result (e.g.
-    # "postgres_provisioner"). Used by ProvisioningOrchestrator._compensate()
+    # "postgres_provisioner"). Used by ProvisioningOrchestrator.compensate()
     # to look the provisioner back up for rollback. Optional/None for
     # backward compatibility with results serialized before #293.
     provisioner_key: Optional[str] = None

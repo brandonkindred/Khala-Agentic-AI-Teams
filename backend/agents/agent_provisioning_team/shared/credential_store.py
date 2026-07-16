@@ -1,19 +1,21 @@
 """
 Secure credential storage using Fernet encryption.
 
-Stores generated credentials encrypted at rest in .agent_cache/credentials/
+Stores generated credentials encrypted at rest under
+``${AGENT_CACHE:-.agent_cache}/agent_provisioning/credentials/`` (the same
+durable volume used by job/env state in compose).
 
 Key management
 --------------
 The store understands three sources of keys, in priority order:
 
-1. ``encryption_key=`` constructor argument (tests / explicit wiring).
-2. ``PROVISION_CREDENTIAL_KEY`` env var — comma-separated list of Fernet
-   keys. The FIRST key is always used for new encryptions; trailing keys
-   remain valid for decryption. This enables zero-downtime rotation via
-   ``cryptography.fernet.MultiFernet``.
-3. A key file at ``PA_CREDENTIAL_KEY_FILE`` or the dev fallback
-   ``<storage_dir>/.encryption_key`` (auto-generated in dev).
+    1. ``encryption_key=`` constructor argument (tests / explicit wiring).
+    2. ``PROVISION_CREDENTIAL_KEY`` env var — comma-separated list of Fernet
+       keys. The FIRST key is always used for new encryptions; trailing keys
+       remain valid for decryption. This enables zero-downtime rotation via
+       ``cryptography.fernet.MultiFernet``.
+    3. A key file at ``PA_CREDENTIAL_KEY_FILE`` or the dev fallback
+       ``<storage_dir>/.encryption_key`` (auto-generated in dev).
 
 In production set ``PROVISION_REQUIRE_KEY=1`` to disable the dev fallback
 and hard-fail if no key is configured.
@@ -28,7 +30,38 @@ from typing import Any, Dict, List, Optional
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
-DEFAULT_CREDENTIALS_DIR = Path(".agent_cache/provisioning_credentials")
+
+def default_credentials_dir() -> Path:
+    """Resolve the durable on-disk credential directory.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Returns ``${AGENT_CACHE:-.agent_cache}/agent_provisioning/credentials``
+          as a ``Path`` (directory need not exist yet).
+    """
+    root = Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
+    return root / "agent_provisioning" / "credentials"
+
+
+def legacy_credentials_dirs() -> List[Path]:
+    """Return pre-cutover credential directories for read/delete fallback.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Includes the historical default ``.agent_cache/provisioning_credentials``
+          and the same relative layout under ``AGENT_CACHE`` when set.
+    """
+    root = Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
+    return [
+        Path(".agent_cache") / "provisioning_credentials",
+        root / "provisioning_credentials",
+    ]
+
+
+# Retained for callers/tests that import the historical module constant.
+DEFAULT_CREDENTIALS_DIR = default_credentials_dir()
 
 
 class CredentialStoreConfigError(RuntimeError):
@@ -43,7 +76,7 @@ class CredentialStore:
         storage_dir: Optional[Path] = None,
         encryption_key: Optional[str] = None,
     ) -> None:
-        self.storage_dir = storage_dir or DEFAULT_CREDENTIALS_DIR
+        self.storage_dir = Path(storage_dir) if storage_dir is not None else default_credentials_dir()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
         keys = self._collect_keys(encryption_key)
@@ -54,6 +87,15 @@ class CredentialStore:
                     "found. Set PROVISION_CREDENTIAL_KEY or PA_CREDENTIAL_KEY_FILE."
                 )
             keys = [self._load_or_generate_key()]
+        elif (
+            encryption_key is None
+            and not os.environ.get("PROVISION_CREDENTIAL_KEY", "").strip()
+            and not os.environ.get("PA_CREDENTIAL_KEY_FILE")
+            and self._read_valid_key(self.storage_dir / ".encryption_key") is None
+        ):
+            # Upgrade: we decrypted via a legacy ``.encryption_key`` — persist it
+            # as the primary store key so later boots do not mint a divergent key.
+            self._publish_key_file(self.storage_dir / ".encryption_key", keys[0])
 
         try:
             self._fernets = [Fernet(k) for k in keys]
@@ -80,6 +122,21 @@ class CredentialStore:
         if file_key:
             keys.append(file_key)
 
+        # Primary store generated key — include whenever present so a store that
+        # already minted ``.encryption_key`` remains the encrypt preference, with
+        # legacy keys appended below as trailing decrypt-only keys.
+        if not override:
+            primary_key = self._read_valid_key(self.storage_dir / ".encryption_key")
+            if primary_key is not None:
+                keys.append(primary_key)
+
+        # Legacy cutover: include generated fallback keys from the old
+        # ``provisioning_credentials`` directories as trailing decrypt keys so
+        # MultiFernet can still open pre-move ``.enc`` files when the primary
+        # store minted a fresh ``.encryption_key``.
+        for legacy_key in self._legacy_fallback_keys():
+            keys.append(legacy_key)
+
         # Dedup while preserving order — first key wins for encryption.
         seen = set()
         out: List[bytes] = []
@@ -88,6 +145,16 @@ class CredentialStore:
                 seen.add(k)
                 out.append(k)
         return out
+
+    @staticmethod
+    def _legacy_fallback_keys() -> List[bytes]:
+        """Load valid ``.encryption_key`` files from pre-cutover credential dirs."""
+        keys: List[bytes] = []
+        for legacy_dir in legacy_credentials_dirs():
+            key = CredentialStore._read_valid_key(legacy_dir / ".encryption_key")
+            if key is not None:
+                keys.append(key)
+        return keys
 
     @staticmethod
     def _parse_key_list(raw: str) -> List[bytes]:
@@ -144,6 +211,13 @@ class CredentialStore:
         if existing is not None:
             return existing
 
+        # Upgrade path: migrate a legacy generated key into the primary store
+        # before minting a new one (otherwise legacy ``.enc`` files become
+        # undecryptable under a fresh primary key).
+        for legacy_key in self._legacy_fallback_keys():
+            self._publish_key_file(key_file, legacy_key)
+            return legacy_key
+
         # First-time creation (or repair of an invalid/partial file). Serialize
         # across processes sharing storage_dir so peers cannot each generate a
         # different key and clobber the other's.
@@ -156,14 +230,19 @@ class CredentialStore:
                 return existing
 
             key = Fernet.generate_key()
-            tmp = self.storage_dir / f".encryption_key.{os.getpid()}.{secrets.token_hex(8)}.tmp"
-            try:
-                tmp.write_bytes(key)
-                tmp.chmod(0o600)
-                os.replace(tmp, key_file)  # atomic within the same filesystem
-            finally:
-                tmp.unlink(missing_ok=True)  # no-op after a successful replace
+            self._publish_key_file(key_file, key)
             return key
+
+    def _publish_key_file(self, key_file: Path, key: bytes) -> None:
+        """Atomically write ``key`` to ``key_file`` (same-filesystem replace)."""
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = key_file.parent / f".encryption_key.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        try:
+            tmp.write_bytes(key)
+            tmp.chmod(0o600)
+            os.replace(tmp, key_file)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     @staticmethod
     def _lock_exclusive(handle) -> None:
@@ -229,8 +308,27 @@ class CredentialStore:
         return f"agent_{safe_agent_id}_{safe_tool}"[:63]
 
     def _agent_file(self, agent_id: str) -> Path:
-        """Get the credentials file path for an agent."""
+        """Get the credentials file path for an agent in the primary store."""
         return self.storage_dir / f"{agent_id}.enc"
+
+    def _agent_file_candidates(self, agent_id: str) -> List[Path]:
+        """Primary path first, then legacy locations from before the AGENT_CACHE move."""
+        return [self._agent_file(agent_id)] + [
+            legacy / f"{agent_id}.enc" for legacy in legacy_credentials_dirs()
+        ]
+
+    def _read_agent_credentials(self, agent_id: str) -> tuple[Optional[Dict[str, Any]], Optional[Path]]:
+        """Load decrypted credentials from the primary or a legacy path."""
+        for path in self._agent_file_candidates(agent_id):
+            if not path.exists():
+                continue
+            try:
+                encrypted = path.read_bytes()
+                decrypted = self.multifernet.decrypt(encrypted)
+                return json.loads(decrypted.decode()), path
+            except (InvalidToken, ValueError, OSError):
+                continue
+        return None, None
 
     def store_credentials(
         self,
@@ -262,21 +360,12 @@ class CredentialStore:
         tool_name: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Retrieve credentials for an agent (all or specific tool)."""
-        path = self._agent_file(agent_id)
-
-        if not path.exists():
+        all_creds, _src = self._read_agent_credentials(agent_id)
+        if all_creds is None:
             return None
-
-        try:
-            encrypted = path.read_bytes()
-            decrypted = self.multifernet.decrypt(encrypted)
-            all_creds = json.loads(decrypted.decode())
-
-            if tool_name:
-                return all_creds.get(tool_name)
-            return all_creds
-        except (InvalidToken, ValueError, OSError):
-            return None
+        if tool_name:
+            return all_creds.get(tool_name)
+        return all_creds
 
     def rotate_key(self, new_key: str) -> int:
         """Re-encrypt every stored agent file with a new Fernet key.
@@ -315,13 +404,21 @@ class CredentialStore:
         return rotated
 
     def delete_credentials(self, agent_id: str) -> bool:
-        """Delete all credentials for an agent."""
-        path = self._agent_file(agent_id)
-        if path.exists():
-            path.unlink()
-            return True
-        return False
+        """Delete all credentials for an agent (primary and legacy paths)."""
+        deleted = False
+        for path in self._agent_file_candidates(agent_id):
+            if path.exists():
+                path.unlink()
+                deleted = True
+        return deleted
 
     def list_agents(self) -> List[str]:
         """List all agent IDs with stored credentials."""
-        return [f.stem for f in self.storage_dir.glob("*.enc") if f.is_file()]
+        seen: set[str] = set()
+        for directory in [self.storage_dir, *legacy_credentials_dirs()]:
+            if not directory.exists():
+                continue
+            for path in directory.glob("*.enc"):
+                if path.is_file():
+                    seen.add(path.stem)
+        return sorted(seen)

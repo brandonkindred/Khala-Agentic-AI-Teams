@@ -177,3 +177,54 @@ def test_temporal_names_embedded_safely() -> None:
     body = entrypoint.build_wrapper_body("t", "pkg.mod", "app", "pkg.tw", payload)
     _compile(body)  # would SyntaxError if the payload escaped the string literal
     assert repr(payload) in body  # embedded verbatim via repr(), not executable
+
+
+def test_skip_active_job_interrupt_truthy(monkeypatch) -> None:
+    """TEAM_SKIP_ACTIVE_JOB_INTERRUPT skips mark_all_active_jobs_interrupted."""
+    import types
+
+    monkeypatch.setattr(entrypoint, "TEAM_SKIP_ACTIVE_JOB_INTERRUPT", True)
+    monkeypatch.setattr(entrypoint, "TEAM_NAME", "agent_provisioning_team")
+    calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self, team: str) -> None:
+            calls.append(f"init:{team}")
+
+        def mark_all_active_jobs_interrupted(self, reason: str) -> list[str]:
+            calls.append(reason)
+            return ["job-1"]
+
+    fake_mod = types.ModuleType("job_service_client")
+    fake_mod.JobServiceClient = FakeClient  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "job_service_client", fake_mod)
+
+    entrypoint._shutdown_hook()
+    entrypoint._startup_recovery()
+    assert calls == []
+
+
+def test_active_job_interrupt_runs_when_not_skipped(monkeypatch) -> None:
+    import types
+
+    monkeypatch.setattr(entrypoint, "TEAM_SKIP_ACTIVE_JOB_INTERRUPT", False)
+    monkeypatch.setattr(entrypoint, "TEAM_NAME", "coding_team")
+    calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self, team: str) -> None:
+            self.team = team
+
+        def mark_all_active_jobs_interrupted(self, reason: str) -> list[str]:
+            calls.append(reason)
+            return ["job-1"]
+
+    fake_mod = types.ModuleType("job_service_client")
+    fake_mod.JobServiceClient = FakeClient  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "job_service_client", fake_mod)
+
+    entrypoint._shutdown_hook()
+    entrypoint._startup_recovery()
+    assert len(calls) == 2
+    assert "shutting down" in calls[0]
+    assert "restarted" in calls[1]
