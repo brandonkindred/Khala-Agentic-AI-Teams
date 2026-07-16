@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -42,6 +43,9 @@ def test_environment_info_from_dict_roundtrip() -> None:
 
 
 def test_environment_info_updated_at_defaults_to_created_at() -> None:
+    """Preconditions: none. Postconditions: an ``EnvironmentInfo`` built
+    without an explicit ``updated_at`` round-trips through
+    ``to_dict``/``from_dict`` with ``updated_at == created_at``."""
     info = StoreEnvInfo(agent_id="a1", container_id="c1", container_name="c1")
     d = info.to_dict()
     restored = StoreEnvInfo.from_dict(d)
@@ -84,6 +88,9 @@ def test_environment_store_register_get_remove(tmp_path: Path) -> None:
 
 
 def test_environment_store_preserves_updated_at_on_get(tmp_path: Path) -> None:
+    """Preconditions: ``tmp_path`` is an empty, writable directory.
+    Postconditions: an explicit ``updated_at`` passed to ``register`` is
+    returned unchanged by a subsequent ``get``."""
     store = EnvironmentStore(storage_dir=tmp_path)
     env = StoreEnvInfo(
         agent_id="a1",
@@ -112,7 +119,9 @@ def test_environment_store_update_status(tmp_path: Path) -> None:
         )
     )
     original_created_at = store.get("a1").created_at
-    assert store.update_status("a1", "ready") is True
+    with patch("agent_provisioning_team.shared.environment_store.datetime") as mock_datetime:
+        mock_datetime.now.return_value = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        assert store.update_status("a1", "ready") is True
     updated = store.get("a1")
     assert updated.status == "ready"
     assert updated.updated_at is not None

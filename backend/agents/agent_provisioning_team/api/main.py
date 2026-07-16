@@ -695,6 +695,7 @@ class AgentStatusResponse(BaseModel):
     container_name: Optional[str] = None
     tools_provisioned: List[str] = Field(default_factory=list)
     created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 @app.get(
@@ -738,6 +739,7 @@ def list_agents(
             container_name=a.get("container_name"),
             tools_provisioned=a.get("tools_provisioned", []),
             created_at=a.get("created_at"),
+            updated_at=a.get("updated_at"),
         )
         for a in agents_data
     ]

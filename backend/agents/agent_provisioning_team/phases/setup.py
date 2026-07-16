@@ -106,6 +106,7 @@ def run_setup(
             workspace_path=env_info.workspace_path,
             status="running",
             tools_provisioned=[],
+            created_at=existing.created_at if existing else None,
         )
     )
 

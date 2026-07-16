@@ -107,8 +107,10 @@ class EnvironmentInfo:
         self.workspace_path = workspace_path
         self.status = status
         self.tools_provisioned = tools_provisioned or []
-        self.created_at = created_at or datetime.now(timezone.utc).isoformat()
-        self.updated_at = updated_at or self.created_at
+        self.created_at = (
+            created_at if created_at is not None else datetime.now(timezone.utc).isoformat()
+        )
+        self.updated_at = updated_at if updated_at is not None else self.created_at
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize this record to a plain dict for JSON persistence.
@@ -275,9 +277,10 @@ class EnvironmentStore:
             data, src = self._read_env_data(agent_id)
             if data is None:
                 return False
-            data["status"] = status
-            data["updated_at"] = datetime.now(timezone.utc).isoformat()
-            self._write_env_data(agent_id, data, source=src)
+            info = EnvironmentInfo.from_dict(data)
+            info.status = status
+            info.updated_at = datetime.now(timezone.utc).isoformat()
+            self._write_env_data(agent_id, info.to_dict(), source=src)
             return True
 
     def add_tool(self, agent_id: str, tool_name: str) -> bool:
@@ -305,19 +308,22 @@ class EnvironmentStore:
         Postconditions:
             * When the env file exists, every non-empty unique name in
               ``tool_names`` is present in ``tools_provisioned`` (order of first
-              appearance preserved for new names).
+              appearance preserved for new names) and ``updated_at`` is
+              refreshed.
             * Returns ``False`` when the env is missing or the file is corrupt.
         """
         with _lock:
             data, src = self._read_env_data(agent_id)
             if data is None:
                 return False
-            tools = list(data.get("tools_provisioned", []))
+            info = EnvironmentInfo.from_dict(data)
+            tools = list(info.tools_provisioned)
             for tool_name in tool_names:
                 if tool_name and tool_name not in tools:
                     tools.append(tool_name)
-            data["tools_provisioned"] = tools
-            self._write_env_data(agent_id, data, source=src)
+            info.tools_provisioned = tools
+            info.updated_at = datetime.now(timezone.utc).isoformat()
+            self._write_env_data(agent_id, info.to_dict(), source=src)
             return True
 
     def remove(self, agent_id: str) -> bool:
