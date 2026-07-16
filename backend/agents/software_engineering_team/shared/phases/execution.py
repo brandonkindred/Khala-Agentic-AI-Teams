@@ -82,6 +82,52 @@ class ReviewDependencies:
 _write_microtask_files = write_repo_text_files
 
 
+def _record_prior_values(
+    prior: Dict[str, Optional[str]],
+    all_files: Dict[str, str],
+    files: Dict[str, str],
+) -> None:
+    """Snapshot the pre-microtask value of each key this microtask is about to write.
+
+    The rollback manifest records, per key, the value that was in ``all_files``
+    *before this microtask first touched it* — so a rollback can restore an earlier
+    completed microtask's file when the two overlap, rather than deleting it. A key
+    already in ``prior`` keeps its earliest snapshot (later fix cycles must not
+    overwrite the pre-microtask baseline).
+
+    Preconditions:
+        Called *before* ``all_files.update(files)`` for the same ``files``, so
+        ``all_files.get(k)`` still reflects the state before this write.
+    Postconditions:
+        For each key of ``files`` not already in ``prior``, ``prior[key]`` is set to
+        ``all_files.get(key)`` (``None`` when the key was absent — i.e. this
+        microtask creates it). Keys already present in ``prior`` are left untouched.
+    """
+    for k in files:
+        if k not in prior:
+            prior[k] = all_files.get(k)
+
+
+def _rollback_microtask_files(
+    all_files: Dict[str, str], prior_values: Dict[str, Optional[str]]
+) -> None:
+    """Undo a microtask's contributions to ``all_files`` using the prior-value snapshot.
+
+    Preconditions:
+        ``prior_values`` maps each key the microtask touched to the value that was in
+        ``all_files`` before this microtask first wrote it (``None`` when absent).
+    Postconditions:
+        Each recorded key is restored to its prior value, or removed when the prior
+        value is ``None`` (the microtask created it). Keys the microtask never touched
+        are left unchanged.
+    """
+    for key, prior in prior_values.items():
+        if prior is None:
+            all_files.pop(key, None)
+        else:
+            all_files[key] = prior
+
+
 def write_microtask_output_or_fail(
     repo_path: Path,
     files: Dict[str, str],
@@ -90,7 +136,7 @@ def write_microtask_output_or_fail(
     task_id: str,
     review_failed_ids: set,
     all_files: Dict[str, str],
-    microtask_file_keys: set,
+    microtask_prior_values: Dict[str, Optional[str]],
     review_failed_status: Any,
 ) -> bool:
     """Write a microtask's output files, converting a rejected path into a failure.
@@ -104,12 +150,13 @@ def write_microtask_output_or_fail(
 
     Preconditions:
         ``review_failed_status`` is the team's ``MicrotaskStatus.REVIEW_FAILED``;
-        ``microtask_file_keys`` are the keys this microtask contributed to
-        ``all_files``.
+        ``microtask_prior_values`` maps each key this microtask contributed to
+        ``all_files`` to its pre-microtask value (see :func:`_record_prior_values`).
     Postconditions:
         On success the files are on disk and ``True`` is returned. On rejection no
-        unsafe file is written, ``mt`` is marked review-failed and its keys removed
-        from ``all_files``, and ``False`` is returned. Never raises for an unsafe path.
+        unsafe file is written, ``mt`` is marked review-failed, this microtask's
+        contributions are rolled back out of ``all_files`` (prior values restored),
+        and ``False`` is returned. Never raises for an unsafe path.
     """
     try:
         _write_microtask_files(repo_path, files)
@@ -119,8 +166,7 @@ def write_microtask_output_or_fail(
         mt.status = review_failed_status
         mt.notes = f"Rejected unsafe output path: {exc}"
         review_failed_ids.add(mt.id)
-        for fk in microtask_file_keys:
-            all_files.pop(fk, None)
+        _rollback_microtask_files(all_files, microtask_prior_values)
         return False
 
 
@@ -446,7 +492,7 @@ def _apply_code_review_retry_exhausted(
     task_id: str,
     review_failed_ids: set,
     all_files: Dict[str, str],
-    microtask_file_keys: set,
+    microtask_prior_values: Dict[str, Optional[str]],
     review_failed_status: Any,
 ) -> bool:
     """Mark retry-exhaustion REVIEW_FAILED unless write-path already failed.
@@ -457,8 +503,8 @@ def _apply_code_review_retry_exhausted(
         marked the microtask and rolled back files.
     Postconditions:
         When ``phase_failed`` was False: sets REVIEW_FAILED notes/status, records
-        ``code_review_retry_exhausted``, rolls back ``microtask_file_keys`` from
-        ``all_files``, and returns True.
+        ``code_review_retry_exhausted``, rolls back this microtask's contributions
+        from ``all_files`` (prior values restored), and returns True.
         When ``phase_failed`` was True: leaves notes/status/telemetry untouched
         and returns True (caller still stops the outer review cycle).
     """
@@ -478,8 +524,7 @@ def _apply_code_review_retry_exhausted(
         code_review_retry_cap,
         cr_outcome.summary,
     )
-    for fk in microtask_file_keys:
-        all_files.pop(fk, None)
+    _rollback_microtask_files(all_files, microtask_prior_values)
     return True
 
 
@@ -493,7 +538,7 @@ def _apply_grounding_circuit_breaker_trip(
     task_id: str,
     review_failed_ids: set,
     all_files: Dict[str, str],
-    microtask_file_keys: set,
+    microtask_prior_values: Dict[str, Optional[str]],
     review_failed_status: Any,
 ) -> bool:
     """Trip the grounding-failure circuit breaker for a hallucination-driven CR loop.
@@ -517,8 +562,8 @@ def _apply_grounding_circuit_breaker_trip(
         outcome (the last grounding-bad CR call when available; otherwise a
         synthetic ``passed=False`` copy of ``cr_outcome`` — never the final
         ``passed=True`` settle, which ``record_gate_outcome`` would silently
-        skip), rolls back ``microtask_file_keys`` from ``all_files``, and
-        returns True.
+        skip), rolls back this microtask's contributions from ``all_files``
+        (prior values restored), and returns True.
     """
     mt.status = review_failed_status
     review_failed_ids.add(mt.id)
@@ -542,8 +587,7 @@ def _apply_grounding_circuit_breaker_trip(
         mt.id,
         grounding_failure_streak,
     )
-    for fk in microtask_file_keys:
-        all_files.pop(fk, None)
+    _rollback_microtask_files(all_files, microtask_prior_values)
     return True
 
 
@@ -559,7 +603,7 @@ def _apply_cr_section_exit(
     task_id: str,
     review_failed_ids: set,
     all_files: Dict[str, str],
-    microtask_file_keys: set,
+    microtask_prior_values: Dict[str, Optional[str]],
     review_failed_status: Any,
     phase_failed: bool,
     on_failure: str,
@@ -603,7 +647,7 @@ def _apply_cr_section_exit(
             task_id=task_id,
             review_failed_ids=review_failed_ids,
             all_files=all_files,
-            microtask_file_keys=microtask_file_keys,
+            microtask_prior_values=microtask_prior_values,
             review_failed_status=review_failed_status,
         )
     elif not cr_outcome.passed:
@@ -615,7 +659,7 @@ def _apply_cr_section_exit(
             task_id=task_id,
             review_failed_ids=review_failed_ids,
             all_files=all_files,
-            microtask_file_keys=microtask_file_keys,
+            microtask_prior_values=microtask_prior_values,
             review_failed_status=review_failed_status,
         )
 
@@ -832,8 +876,12 @@ def run_gated_execution_impl(
                 models=models,
                 run_general_microtask=gate_config.run_general_microtask,
             )
-            # Track files this microtask introduced for rollback on failure.
-            microtask_file_keys = set(microtask_files.keys())
+            # Rollback manifest: for each key this microtask touches, remember the
+            # value that was in ``all_files`` beforehand, so a rollback restores an
+            # earlier microtask's overlapping file instead of deleting it. Recorded
+            # before every write (initial + fixes), always ahead of ``all_files.update``.
+            microtask_prior_values: Dict[str, Optional[str]] = {}
+            _record_prior_values(microtask_prior_values, all_files, microtask_files)
             # Route the initial write through the same guarded helper the review
             # cycles use, so an unsafe path in the first emission is a handled
             # REVIEW_FAILED (rolled back + recorded in review_failed_ids so
@@ -845,7 +893,7 @@ def run_gated_execution_impl(
                 task_id=task_id,
                 review_failed_ids=review_failed_ids,
                 all_files=all_files,
-                microtask_file_keys=microtask_file_keys,
+                microtask_prior_values=microtask_prior_values,
                 review_failed_status=microtask_status.REVIEW_FAILED,
             ):
                 continue
@@ -964,8 +1012,9 @@ def run_gated_execution_impl(
                 )
 
                 microtask_files = ps_result.files
-                # Accumulate keys introduced by the fix so a later rollback removes them too.
-                microtask_file_keys.update(microtask_files.keys())
+                # Snapshot prior values for any keys the fix introduced, before the
+                # write, so a later rollback restores them (or removes newly-created ones).
+                _record_prior_values(microtask_prior_values, all_files, microtask_files)
                 if not write_microtask_output_or_fail(
                     repo_path,
                     microtask_files,
@@ -973,7 +1022,7 @@ def run_gated_execution_impl(
                     task_id=task_id,
                     review_failed_ids=review_failed_ids,
                     all_files=all_files,
-                    microtask_file_keys=microtask_file_keys,
+                    microtask_prior_values=microtask_prior_values,
                     review_failed_status=microtask_status.REVIEW_FAILED,
                 ):
                     phase_failed = True
@@ -1024,7 +1073,7 @@ def run_gated_execution_impl(
                 task_id=task_id,
                 review_failed_ids=review_failed_ids,
                 all_files=all_files,
-                microtask_file_keys=microtask_file_keys,
+                microtask_prior_values=microtask_prior_values,
                 review_failed_status=microtask_status.REVIEW_FAILED,
                 phase_failed=phase_failed,
                 on_failure=config.on_failure,
@@ -1096,8 +1145,9 @@ def run_gated_execution_impl(
                 )
 
                 microtask_files = ps_result.files
-                # Accumulate keys introduced by the fix so a later rollback removes them too.
-                microtask_file_keys.update(microtask_files.keys())
+                # Snapshot prior values for any keys the fix introduced, before the
+                # write, so a later rollback restores them (or removes newly-created ones).
+                _record_prior_values(microtask_prior_values, all_files, microtask_files)
                 if not write_microtask_output_or_fail(
                     repo_path,
                     microtask_files,
@@ -1105,7 +1155,7 @@ def run_gated_execution_impl(
                     task_id=task_id,
                     review_failed_ids=review_failed_ids,
                     all_files=all_files,
-                    microtask_file_keys=microtask_file_keys,
+                    microtask_prior_values=microtask_prior_values,
                     review_failed_status=microtask_status.REVIEW_FAILED,
                 ):
                     phase_failed = True
@@ -1178,8 +1228,9 @@ def run_gated_execution_impl(
                 )
 
                 microtask_files = ps_result.files
-                # Accumulate keys introduced by the fix so a later rollback removes them too.
-                microtask_file_keys.update(microtask_files.keys())
+                # Snapshot prior values for any keys the fix introduced, before the
+                # write, so a later rollback restores them (or removes newly-created ones).
+                _record_prior_values(microtask_prior_values, all_files, microtask_files)
                 if not write_microtask_output_or_fail(
                     repo_path,
                     microtask_files,
@@ -1187,7 +1238,7 @@ def run_gated_execution_impl(
                     task_id=task_id,
                     review_failed_ids=review_failed_ids,
                     all_files=all_files,
-                    microtask_file_keys=microtask_file_keys,
+                    microtask_prior_values=microtask_prior_values,
                     review_failed_status=microtask_status.REVIEW_FAILED,
                 ):
                     phase_failed = True
@@ -1220,9 +1271,9 @@ def run_gated_execution_impl(
                     mt.id,
                     total_cycles,
                 )
-                # Rollback: remove this microtask's files from all_files
-                for fk in microtask_file_keys:
-                    all_files.pop(fk, None)
+                # Rollback: undo this microtask's contributions to all_files,
+                # restoring any files an earlier microtask had produced.
+                _rollback_microtask_files(all_files, microtask_prior_values)
                 # Security failures always stop regardless of on_failure setting
                 _force_stop = config.on_failure == "stop" or (
                     getattr(config, "security_failure_always_stops", True)

@@ -632,10 +632,15 @@ def test_write_repo_text_files_rejects_empty_path(tmp_path: Path):
 
 
 def test_write_microtask_output_or_fail_success_and_rejection(tmp_path: Path):
-    """Write microtask output helper: writes on a safe path, review-fails on unsafe."""
+    """Write microtask output helper: writes on a safe path, review-fails on unsafe.
+
+    The rollback restores each touched key to its pre-microtask value: a key this
+    microtask created (prior ``None``) is removed, and a key an earlier microtask
+    produced (prior not ``None``) is restored to that earlier value — not deleted.
+    """
     mt = SimpleNamespace(id="mt-1", status="in_progress", notes="")
     review_failed_ids: set = set()
-    all_files = {"kept.py": "k", "gen.py": "g"}
+    all_files = {"kept.py": "k", "gen.py": "g", "shared.py": "modified"}
 
     # Safe path → writes and returns True.
     ok = sh_exec.write_microtask_output_or_fail(
@@ -645,14 +650,16 @@ def test_write_microtask_output_or_fail_success_and_rejection(tmp_path: Path):
         task_id="t1",
         review_failed_ids=review_failed_ids,
         all_files=all_files,
-        microtask_file_keys={"gen.py"},
+        microtask_prior_values={"gen.py": None},
         review_failed_status="REVIEW_FAILED",
     )
     assert ok is True
     assert (tmp_path / "gen.py").read_text(encoding="utf-8") == "g2"
     assert not review_failed_ids
 
-    # Unsafe path → no exception, marks review-failed, rolls back this microtask's keys.
+    # Unsafe path → no exception, marks review-failed, rolls back this microtask's
+    # contributions: ``gen.py`` (created here → prior ``None``) is removed, while
+    # ``shared.py`` (an earlier microtask's file this one overwrote) is restored.
     rejected = sh_exec.write_microtask_output_or_fail(
         tmp_path,
         {"../evil.py": "x"},
@@ -660,15 +667,15 @@ def test_write_microtask_output_or_fail_success_and_rejection(tmp_path: Path):
         task_id="t1",
         review_failed_ids=review_failed_ids,
         all_files=all_files,
-        microtask_file_keys={"gen.py"},
+        microtask_prior_values={"gen.py": None, "shared.py": "orig"},
         review_failed_status="REVIEW_FAILED",
     )
     assert rejected is False
     assert mt.status == "REVIEW_FAILED"
     assert "mt-1" in review_failed_ids
-    assert (
-        "gen.py" not in all_files and "kept.py" in all_files
-    )  # only this microtask's keys rolled back
+    assert "gen.py" not in all_files  # created by this microtask → removed
+    assert all_files["kept.py"] == "k"  # untouched key left alone
+    assert all_files["shared.py"] == "orig"  # earlier microtask's file restored
     assert not (tmp_path.parent / "evil.py").exists()
 
 

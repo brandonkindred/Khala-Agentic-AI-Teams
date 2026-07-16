@@ -153,6 +153,31 @@ def _batch_fix_adds_file(*, detail_callback=None, **kwargs: Any) -> SimpleNamesp
     return SimpleNamespace(files=files)
 
 
+def _coder_per_microtask(**kwargs: Any) -> Dict[str, str]:
+    """``mt-a`` owns ``shared.py``; every other microtask writes only its own file."""
+    if kwargs["microtask"].id == "mt-a":
+        return {"shared.py": "owned-by-a\n"}
+    return {"src/b.py": "print('b')\n"}
+
+
+def _cr_gate_fails_for(mid: str):
+    """Code-review gate that fails only for the microtask whose id is ``mid``."""
+
+    def _gate(**kwargs: Any) -> GateOutcome:
+        if kwargs["microtask"].id == mid:
+            return GateOutcome(passed=False, issues=[_issue()], summary="bad")
+        return GateOutcome(passed=True)
+
+    return _gate
+
+
+def _batch_fix_overwrites_shared(**kwargs: Any) -> SimpleNamespace:
+    """A fix that also rewrites ``shared.py`` — a file an earlier microtask produced."""
+    files = dict(kwargs["current_files"])
+    files["shared.py"] = "clobbered-by-b\n"
+    return SimpleNamespace(files=files)
+
+
 def _doc_review(*, documentation=None, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
     if detail_callback is not None:
         detail_callback("doc")
@@ -493,6 +518,34 @@ def test_rollback_removes_files_added_by_batch_fix(tmp_path):
     assert mt.status == MS.REVIEW_FAILED
     assert "src/a.py" not in result.files
     assert "src/new_helper.py" not in result.files
+
+
+def test_rollback_restores_earlier_microtask_file_on_overlap(tmp_path):
+    """A failed microtask's rollback restores an earlier microtask's overlapping file.
+
+    ``mt-a`` completes and owns ``shared.py``. ``mt-b`` then fails code review to
+    exhaustion; its batch fix rewrites ``shared.py`` (which ``mt-a`` produced). The
+    rollback must restore ``mt-a``'s version of ``shared.py`` — not delete it, and
+    not leak ``mt-b``'s clobbered content — while removing ``mt-b``'s own file.
+    """
+    mt_a = _microtask("mt-a")
+    mt_b = _microtask("mt-b")
+    cfg = _make_gate_config(
+        coder=_coder_per_microtask,
+        code_review_gate=_cr_gate_fails_for("mt-b"),
+        batch_fix=_batch_fix_overwrites_shared,
+    )
+    result = _run(
+        cfg,
+        [mt_a, mt_b],
+        tmp_path,
+        review_config=_config(cr=1, on_failure="skip_continue"),
+    )
+
+    assert mt_a.status == MS.COMPLETED
+    assert mt_b.status == MS.REVIEW_FAILED
+    assert result.files["shared.py"] == "owned-by-a\n"  # earlier version restored
+    assert "src/b.py" not in result.files  # mt-b's own file rolled back
 
 
 # ---------------------------------------------------------------------------
