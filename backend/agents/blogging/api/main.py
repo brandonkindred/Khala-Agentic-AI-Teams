@@ -64,7 +64,9 @@ except ImportError:  # pragma: no cover - defensive ImportError fallback only tr
 
 try:
     from shared.blog_job_store import (
+        JOB_STATUS_CANCELLED,
         JOB_STATUS_COMPLETED,
+        JOB_STATUS_FAILED,
         JOB_STATUS_NEEDS_REVIEW,
         approve_blog_job,
         complete_blog_job,
@@ -106,6 +108,8 @@ except ImportError:  # pragma: no cover - defensive ImportError fallback for env
     is_waiting_for_draft_feedback = None
     JOB_STATUS_COMPLETED = "completed"
     JOB_STATUS_NEEDS_REVIEW = "needs_human_review"
+    JOB_STATUS_FAILED = "failed"
+    JOB_STATUS_CANCELLED = "cancelled"
     BloggingError = Exception
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -224,6 +228,25 @@ def _submit_async_job(target: Any, *args: Any) -> None:
     """
     _ensure_async_workers()
     _ASYNC_JOB_QUEUE.put((target, args))
+
+
+def _job_already_terminal(job_id: str) -> bool:
+    """True if the job was failed/cancelled or deleted before a worker started it.
+
+    The bounded worker pool can leave a job queued (status ``pending``) for a while when
+    all workers are busy. In that window the stale-job monitor may mark a long-queued job
+    failed, or a user may cancel it, before a worker dequeues it. Starting it anyway would
+    "resurrect" a terminal job (flip it back to ``running``), so the worker skips it.
+    ``get_blog_job`` returns None only for a genuinely-absent job — transient/HTTP errors
+    raise rather than returning None — so a missing job is treated as terminal too.
+
+    Preconditions: ``job_id`` is non-empty.
+    Postconditions: pure read; returns a bool (False when the job store is unavailable).
+    """
+    if get_blog_job is None:
+        return False
+    job = get_blog_job(job_id)
+    return job is None or job.get("status") in (JOB_STATUS_FAILED, JOB_STATUS_CANCELLED)
 
 
 def _run_blogging_service_shutdown() -> (
@@ -707,6 +730,9 @@ def _require_medium_integration() -> None:
 
 def _run_medium_stats_async_job(job_id: str, payload: MediumStatsRequest) -> None:
     """Background worker: scrape Medium stats and write medium_stats_report.json."""
+    if _job_already_terminal(job_id):
+        logger.info("Skipping Medium stats job %s: already terminal/gone before start", job_id)
+        return
     cfg = MediumStatsRunConfig(
         headless=payload.headless,
         timeout_ms=payload.timeout_ms,
@@ -770,6 +796,9 @@ def _run_pipeline_with_tracking(
     job_id: str, request: FullPipelineRequest
 ) -> None:  # pragma: no cover - background-thread pipeline driver; depends on the v2 orchestrator (which is itself omitted from coverage as an agent_implementations script) and on live job-store + SSE side effects. Hot paths are exercised end-to-end by integration tests; the request-validation and error-handling branches at the API boundary are covered by the synchronous /full-pipeline tests.
     """Run the full pipeline in a background thread with job tracking."""
+    if _job_already_terminal(job_id):
+        logger.info("Skipping pipeline job %s: already terminal/gone before start", job_id)
+        return
     try:
         import sys
         from pathlib import Path

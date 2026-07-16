@@ -1999,11 +1999,17 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
 
         # The fact-check and compliance gates are independent given the draft (and,
         # for compliance, the deterministic validator report), so they run
-        # concurrently below. Each gate is wrapped in its own error funnel that
-        # re-raises Temporal cancellation, BloggingError, and transient
-        # LLM-transport errors unwrapped — the latter so the Temporal activity
-        # funnel can retry the whole stage (see temporal.activities._run_stage) —
-        # and maps any other failure to its domain error type.
+        # concurrently below. Each returns ``(report, error)`` — CAPTURING (not
+        # raising) any failure it would otherwise raise — so that parallel_map runs
+        # BOTH gates to completion before the stage propagates a failure. That drain
+        # matters because both gates persist artifacts (fact_check_report.json /
+        # compliance_report.json) into the same work_dir: if one raised while the
+        # other was still running, parallel_map's fast-fail would abandon the running
+        # worker, which could later overwrite the report from a subsequent
+        # retry/rewrite. The captured error is Temporal cancellation, BloggingError,
+        # or a transient LLM-transport error (propagated unwrapped so the Temporal
+        # activity funnel can retry the stage — see temporal.activities._run_stage),
+        # or any other failure mapped to the gate's domain error type.
         #
         # These are nested (not module-level) deliberately: they take only the
         # per-iteration draft/validator report as parameters — so they never close
@@ -2015,23 +2021,24 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
         def _fact_check_gate(draft: str):
             # Reports progress under BlogPhase.FACT_CHECK.
             try:
-                return fact_check_agent.run(
+                report = fact_check_agent.run(
                     draft,
                     require_disclaimer_for=require_disclaimer_for,
                     work_dir=work_dir,
                     on_llm_request=lambda msg: _update(BlogPhase.FACT_CHECK, status_text=msg),
                 )
-            except (BloggingError, CancelledError, LLMRateLimitError, LLMTemporaryError):
-                raise
+                return report, None
+            except (BloggingError, CancelledError, LLMRateLimitError, LLMTemporaryError) as e:
+                return None, e
             except Exception as e:
                 if _is_external_cancellation(e):
-                    raise
-                raise FactCheckError(f"Fact check failed: {e}", cause=e) from e
+                    return None, e
+                return None, FactCheckError(f"Fact check failed: {e}", cause=e)
 
         def _compliance_gate(draft: str, validator_report):
             # Reports progress under BlogPhase.COMPLIANCE.
             try:
-                return compliance_agent.run(
+                report = compliance_agent.run(
                     draft,
                     brand_spec_prompt=brand_spec_prompt_text,
                     # validator_report is normally a Pydantic model, but the
@@ -2043,12 +2050,13 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                     work_dir=work_dir,
                     on_llm_request=lambda msg: _update(BlogPhase.COMPLIANCE, status_text=msg),
                 )
-            except (BloggingError, CancelledError, LLMRateLimitError, LLMTemporaryError):
-                raise
+                return report, None
+            except (BloggingError, CancelledError, LLMRateLimitError, LLMTemporaryError) as e:
+                return None, e
             except Exception as e:
                 if _is_external_cancellation(e):
-                    raise
-                raise ComplianceError(f"Compliance check failed: {e}", cause=e) from e
+                    return None, e
+                return None, ComplianceError(f"Compliance check failed: {e}", cause=e)
 
         for rewrite_iter in range(max_rewrite_iterations):
             _update(
@@ -2076,9 +2084,11 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
             # request-id contextvars propagate (a raw ThreadPoolExecutor would not;
             # see llm_service.attribution). partial() binds the current draft /
             # validator report eagerly; preserve_order keeps [fact, compliance]
-            # positional; skip_none=False because each gate always returns a report
-            # or raises.
-            fact_report, compliance_report = parallel_map(
+            # positional; skip_none=False because each gate always returns a
+            # (report, error) tuple. Because the gates capture rather than raise,
+            # parallel_map never fast-fails — both run to completion before we
+            # propagate any failure (no abandoned worker; see the gate comment above).
+            (fact_report, fact_error), (compliance_report, compliance_error) = parallel_map(
                 [
                     partial(_fact_check_gate, draft_result.draft),
                     partial(_compliance_gate, draft_result.draft, validator_report),
@@ -2088,6 +2098,20 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                 preserve_order=True,
                 skip_none=False,
             )
+
+            # Both gates have finished; propagate a failure (if any) with a fixed
+            # precedence: cancellation first, then a transient LLM-transport error
+            # (prefer a Temporal stage retry over a terminal domain failure), then the
+            # fact-check domain error, then the compliance one (input order).
+            gate_errors = [e for e in (fact_error, compliance_error) if e is not None]
+            for gate_error in gate_errors:
+                if isinstance(gate_error, CancelledError) or _is_external_cancellation(gate_error):
+                    raise gate_error
+            for gate_error in gate_errors:
+                if isinstance(gate_error, (LLMRateLimitError, LLMTemporaryError)):
+                    raise gate_error
+            if gate_errors:
+                raise gate_errors[0]
 
             all_pass = (
                 validator_report.status == "PASS"

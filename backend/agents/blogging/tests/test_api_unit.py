@@ -606,6 +606,19 @@ def test_async_job_worker_runs_jobs_and_survives_crash() -> None:
     assert ran == ["ok"]
 
 
+def test_job_already_terminal_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A queued job failed/cancelled or deleted before a worker starts it is treated as
+    terminal, so the worker skips it instead of resurrecting it."""
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "failed"})
+    assert _api_main._job_already_terminal("j1") is True
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "cancelled"})
+    assert _api_main._job_already_terminal("j1") is True
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: None)
+    assert _api_main._job_already_terminal("j1") is True
+    monkeypatch.setattr(_api_main, "get_blog_job", lambda jid: {"status": "running"})
+    assert _api_main._job_already_terminal("j1") is False
+
+
 def test_medium_stats_sync_when_integration_disabled(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -348,3 +348,31 @@ def test_both_gates_invoked_when_parallelized(monkeypatch, tmp_path: Path) -> No
     _, _, status = _run_gated_pipeline(v2, tmp_path)
     assert status == "PASS"
     assert calls == {"fact": 1, "compliance": 1}
+
+
+def test_gate_failure_drains_other_gate(monkeypatch, tmp_path: Path) -> None:
+    """When one gate raises, the other still runs to completion before the error
+    propagates — no abandoned worker that could overwrite a later attempt's artifact."""
+    import pytest
+    from blog_compliance_agent.models import ComplianceReport
+
+    from llm_service import LLMTemporaryError
+
+    compliance_calls = {"n": 0}
+
+    class _CountingCompliance:
+        def __init__(self, *a, **kw):
+            pass
+
+        def run(self, *a, **kw):
+            compliance_calls["n"] += 1
+            return ComplianceReport(status="PASS", violations=[], required_fixes=[], notes="ok")
+
+    v2 = _common_v2_setup(monkeypatch, validator_status="PASS")
+    monkeypatch.setattr(v2, "BlogFactCheckAgent", _raising_gate(LLMTemporaryError("503")))
+    monkeypatch.setattr(v2, "BlogComplianceAgent", _CountingCompliance)
+
+    with pytest.raises(LLMTemporaryError):
+        _run_gated_pipeline(v2, tmp_path)
+    # Compliance ran to completion even though fact-check failed (drain, not fast-fail).
+    assert compliance_calls["n"] == 1
