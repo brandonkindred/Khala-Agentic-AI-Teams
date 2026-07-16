@@ -111,9 +111,12 @@ class ProvisionerStateStore:
         """Bind the store to one provisioner's JSON file.
 
         Raises ``ValueError`` if ``provisioner_name`` is not a safe filename
-        component: it is interpolated into both ``self.path`` and the ``_save``
-        tempfile prefix, so validating it here keeps every write inside
-        ``storage_dir``.
+        component. The guard's containment role is on ``self.path`` — the
+        record's final location, ``storage_dir / f"{provisioner_name}.json"``.
+        ``_save`` also uses the validated name as a tempfile *prefix*, but that
+        write targets ``storage_dir`` explicitly via ``mkstemp(dir=...)``, so the
+        prefix cannot change the output directory; validating the name simply
+        keeps that prefix a well-formed filename fragment too.
         """
         self.provisioner_name = safe_path_component(provisioner_name, kind="provisioner_name")
         self.storage_dir = storage_dir or DEFAULT_STATE_DIR

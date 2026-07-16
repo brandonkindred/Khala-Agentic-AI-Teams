@@ -51,26 +51,26 @@ def safe_path_component(value: str, *, kind: str = "identifier") -> str:
     return value
 
 
-def candidate_paths(
-    identifier: str,
-    primary_dir: Path,
-    legacy_dirs: Iterable[Path],
-    extension: str,
-    *,
-    kind: str = "identifier",
-) -> list[Path]:
-    """Build the ``[primary, *legacy]`` record paths for a store, guarding once.
+def candidate_paths(primary: Path, legacy_dirs: Iterable[Path]) -> list[Path]:
+    """Return the ``[primary, *legacy]`` lookup paths for a store record.
 
     Stores keyed by an identifier look a record up in the primary store first,
-    then in the pre-``AGENT_CACHE`` legacy directories. Both the environment and
-    credential stores share this shape, differing only in ``extension``
-    (``.json`` vs ``.enc``) and their legacy directory list.
+    then in the pre-``AGENT_CACHE`` legacy directories. The environment and
+    credential stores share this shape and differ only in their legacy directory
+    list, so this helper removes the duplicated construction.
 
-    ``identifier`` is validated with :func:`safe_path_component` exactly once and
-    the validated value is reused for every candidate, so **no** path — primary
-    or legacy — is ever built from an unchecked identifier, independent of
-    evaluation order. Raises ``ValueError`` on an unsafe identifier before any
-    path is constructed. ``extension`` is appended verbatim (e.g. ``".json"``).
+    ``primary`` is the caller's already-validated primary path (built through the
+    store's guarded ``_*_file`` method, which runs :func:`safe_path_component`).
+    Each legacy candidate reuses ``primary.name`` — the same validated
+    ``{identifier}{ext}`` filename — in a legacy directory, so the identifier is
+    validated exactly once, at the caller, and no candidate is built from an
+    unchecked identifier.
+
+    Preconditions:
+        * ``primary`` was produced by a guarded ``_*_file`` method (its filename
+          component is already validated).
+    Postconditions:
+        * Returns ``primary`` followed by ``legacy / primary.name`` for each
+          legacy directory, in order.
     """
-    filename = f"{safe_path_component(identifier, kind=kind)}{extension}"
-    return [primary_dir / filename, *(legacy / filename for legacy in legacy_dirs)]
+    return [primary, *(legacy / primary.name for legacy in legacy_dirs)]

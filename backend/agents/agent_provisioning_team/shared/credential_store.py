@@ -315,23 +315,25 @@ class CredentialStore:
         """Return the credentials file path for ``agent_id`` in the primary store.
 
         Raises ``ValueError`` (via :func:`safe_path_component`) if ``agent_id`` is
-        not a safe filename component. Every reader/writer
-        (``_agent_file_candidates``, ``store_credentials``) evaluates this first,
-        so a malicious ``agent_id`` cannot read or overwrite encrypted secrets
-        outside ``storage_dir``. The returned path is always inside ``storage_dir``.
+        not a safe filename component. This is the store's single validation
+        chokepoint: ``store_credentials`` calls it directly, while
+        ``get_credentials`` / ``delete_credentials`` / ``_read_agent_credentials``
+        reach it through ``_agent_file_candidates``. So a malicious ``agent_id``
+        cannot read or overwrite encrypted secrets outside ``storage_dir``, and
+        the identifier is validated exactly once per operation. The returned path
+        is always inside ``storage_dir``.
         """
         return self.storage_dir / f"{safe_path_component(agent_id, kind='agent_id')}.enc"
 
     def _agent_file_candidates(self, agent_id: str) -> List[Path]:
         """Primary path first, then legacy locations from before the AGENT_CACHE move.
 
-        Both the primary and legacy candidates are built from the same guarded
-        ``agent_id`` via :func:`candidate_paths`, so a traversal id is rejected
-        regardless of path ordering.
+        The primary path comes from the guarded :meth:`_agent_file`; each legacy
+        candidate reuses that validated filename via :func:`candidate_paths`, so
+        the traversal guard runs once (in :meth:`_agent_file`) and every candidate
+        is derived from it.
         """
-        return candidate_paths(
-            agent_id, self.storage_dir, legacy_credentials_dirs(), ".enc", kind="agent_id"
-        )
+        return candidate_paths(self._agent_file(agent_id), legacy_credentials_dirs())
 
     def _read_agent_credentials(
         self, agent_id: str

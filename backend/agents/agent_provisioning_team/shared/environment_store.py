@@ -115,23 +115,23 @@ class EnvironmentStore:
         """Return the environment file path for ``agent_id`` in the primary store.
 
         Raises ``ValueError`` (via :func:`safe_path_component`) if ``agent_id`` is
-        not a safe filename component, so path traversal is blocked at the single
-        chokepoint every public method routes through — ``_env_file_candidates``
-        and ``_write_env_data`` both evaluate it first. The returned path is
-        always strictly inside ``storage_dir``.
+        not a safe filename component. This is the store's single validation
+        chokepoint: the write path calls it directly (``_write_env_data``) and the
+        read/remove path reaches it through ``_env_file_candidates``, so every
+        code path that turns ``agent_id`` into a path is guarded here exactly
+        once. The returned path is always strictly inside ``storage_dir``.
         """
         return self.storage_dir / f"{safe_path_component(agent_id, kind='agent_id')}.json"
 
     def _env_file_candidates(self, agent_id: str) -> List[Path]:
         """Primary path first, then legacy locations from before the AGENT_CACHE move.
 
-        Every candidate — primary and legacy — is built from the same guarded
-        ``agent_id`` via :func:`candidate_paths`, so the traversal guard is
-        unconditional and does not rely on the primary being evaluated first.
+        The primary path comes from the guarded :meth:`_env_file`; each legacy
+        candidate reuses that validated filename via :func:`candidate_paths`, so
+        the traversal guard runs once (in :meth:`_env_file`) and every candidate
+        is derived from it.
         """
-        return candidate_paths(
-            agent_id, self.storage_dir, legacy_environments_dirs(), ".json", kind="agent_id"
-        )
+        return candidate_paths(self._env_file(agent_id), legacy_environments_dirs())
 
     def _read_env_data(self, agent_id: str) -> tuple[Optional[Dict[str, Any]], Optional[Path]]:
         """Load environment JSON from the primary or a legacy path.
