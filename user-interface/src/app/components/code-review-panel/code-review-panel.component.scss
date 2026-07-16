@@ -1,3 +1,5 @@
+@use 'review-chips' as chips;
+
 .page-toolbar {
   margin-bottom: 0.5rem;
 }
@@ -196,18 +198,8 @@
   color: var(--mat-sys-on-secondary-container, #2a3441);
 }
 
-.cr-chip {
-  font-size: 0.72rem;
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  background: var(--mat-sys-surface-container-high, #ececec);
-  color: var(--mat-sys-on-surface, rgba(0, 0, 0, 0.75));
-
-  &--draft {
-    background: var(--mat-sys-tertiary-container, #efe2d0);
-    color: var(--mat-sys-on-tertiary-container, #4a3a1d);
-  }
-}
+// Chip look shared with the pr-review-detail / pending-issue-proposals children.
+@include chips.chip;
 
 .cr-pulls-paginator {
   margin-top: 0.5rem;
@@ -260,19 +252,9 @@
   }
 }
 
-.cr-job-status {
-  text-transform: capitalize;
-
-  &--completed {
-    color: var(--mat-sys-primary, #1a7f37);
-    font-weight: 600;
-  }
-
-  &--failed {
-    color: var(--mat-sys-error, #b3261e);
-    font-weight: 600;
-  }
-}
+// Status text shared with the pr-review-detail child (here it styles the
+// collapsed row's status badge; there it styles the reviews-table cells).
+@include chips.job-status;
 
 .cr-review-summary {
   display: flex;

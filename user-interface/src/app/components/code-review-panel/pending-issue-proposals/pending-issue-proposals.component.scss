@@ -1,16 +1,10 @@
-// Base chip look, duplicated from code-review-panel.component.scss's `.cr-chip`:
-// Angular's view encapsulation scopes each component's styles to its own
-// template, so a class defined only in the parent's stylesheet would not
-// style elements rendered by this (nested) component.
-.cr-chip {
-  font-size: 0.72rem;
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  background: var(--mat-sys-surface-container-high, #ececec);
-  color: var(--mat-sys-on-surface, rgba(0, 0, 0, 0.75));
-}
+@use '../review-chips' as chips;
 
-// Severity accents on the proposal chips (critical/high stand out).
+// Base chip look, shared with the parent panel via the code-review-panel partial.
+@include chips.chip;
+
+// Severity accents on the proposal chips (critical/high stand out) — specific to
+// this component, so they stay local rather than in the shared partial.
 .cr-chip--sev-critical,
 .cr-chip--sev-high {
   background: var(--mat-sys-error-container, #ffdad6);

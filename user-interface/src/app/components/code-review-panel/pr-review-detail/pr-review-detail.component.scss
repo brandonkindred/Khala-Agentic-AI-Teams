@@ -1,41 +1,9 @@
-// Base chip look, duplicated from code-review-panel.component.scss's `.cr-chip`:
-// Angular's view encapsulation scopes each component's styles to its own
-// template, so classes defined only in the parent's stylesheet would not style
-// the elements this (extracted) component renders.
-.cr-chip {
-  font-size: 0.72rem;
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  background: var(--mat-sys-surface-container-high, #ececec);
-  color: var(--mat-sys-on-surface, rgba(0, 0, 0, 0.75));
+@use '../review-chips' as chips;
 
-  &--draft {
-    background: var(--mat-sys-tertiary-container, #efe2d0);
-    color: var(--mat-sys-on-tertiary-container, #4a3a1d);
-  }
-
-  &--event {
-    background: var(--mat-sys-primary-container, #d7e3ff);
-    color: var(--mat-sys-on-primary-container, #001b3f);
-    font-weight: 600;
-  }
-}
-
-// Review run status text in the reviews table. Also duplicated from the parent,
-// which keeps its own copy for the collapsed row's status badge.
-.cr-job-status {
-  text-transform: capitalize;
-
-  &--completed {
-    color: var(--mat-sys-primary, #1a7f37);
-    font-weight: 600;
-  }
-
-  &--failed {
-    color: var(--mat-sys-error, #b3261e);
-    font-weight: 600;
-  }
-}
+// Chip look (outcome/draft chips) and review-run status text for the reviews
+// table, shared with the parent panel via the code-review-panel partial.
+@include chips.chip;
+@include chips.job-status;
 
 // ---------------------------------------------------------------------------
 // PR detail panel
