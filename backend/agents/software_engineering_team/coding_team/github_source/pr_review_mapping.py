@@ -655,6 +655,18 @@ _DUPLICATE_TITLE_THRESHOLD_NO_LOCATION = 0.8
 # env var, same convention as the two thresholds above.
 _DUPLICATE_TOKEN_OVERLAP_MIN_NO_LOCATION = 0.8
 
+# Minimum word-set (Jaccard) overlap additionally required for the "with location"
+# signal above too. The location signal alone is weaker corroboration than it looks
+# -- many genuinely distinct bugs share the same file -- so a low with-location ratio
+# bar (0.5) plus no token check lets the same "one differing keyword amid shared
+# boilerplate" false positive through even with the location signal present (e.g.
+# "hardcoded secret in config" vs "hardcoded timeout in config" both mentioning
+# config.py: ratio 0.83, but only 0.6 word-set overlap). Set lower than the
+# no-location floor (0.7 vs 0.8) since the location match is itself real corroborating
+# evidence a same-file paraphrase (reordered words, added filler) can still clear.
+# Overridable via env var, same convention as the other thresholds above.
+_DUPLICATE_TOKEN_OVERLAP_MIN_WITH_LOCATION = 0.7
+
 
 def _duplicate_threshold(env_var: str, default: float) -> float:
     """Read a float similarity-threshold override from the environment, defensively.
@@ -811,7 +823,14 @@ def find_matching_open_issue(
       - Structural + moderate text: the proposal's ``file_path`` appears in the
         candidate issue's title/body (:func:`_location_appears_in`) AND the
         proposal's description headline is at least somewhat similar to the issue's
-        title (>= :data:`_DUPLICATE_TITLE_THRESHOLD_WITH_LOCATION`, default 0.5).
+        title (>= :data:`_DUPLICATE_TITLE_THRESHOLD_WITH_LOCATION`, default 0.5) AND
+        their tokenized word-sets overlap at least
+        :data:`_DUPLICATE_TOKEN_OVERLAP_MIN_WITH_LOCATION` (default 0.7) -- the
+        location signal alone is weaker corroboration than it looks, since many
+        genuinely distinct bugs share the same file; the token-overlap requirement
+        guards against the same "one differing keyword amid shared boilerplate"
+        false positive described below, now also reachable via the location signal's
+        looser ratio bar (e.g. an issue that also happens to mention the same file).
       - Strong text alone: the headline/title character-level similarity clears
         :data:`_DUPLICATE_TITLE_THRESHOLD_NO_LOCATION` (default 0.8) AND their
         tokenized word-sets (:func:`_tokenize_for_similarity`) overlap at least
@@ -865,6 +884,10 @@ def find_matching_open_issue(
     no_location_token_overlap = _duplicate_threshold(
         "PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN", _DUPLICATE_TOKEN_OVERLAP_MIN_NO_LOCATION
     )
+    with_location_token_overlap = _duplicate_threshold(
+        "PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN_WITH_LOCATION",
+        _DUPLICATE_TOKEN_OVERLAP_MIN_WITH_LOCATION,
+    )
     headline_tokens = _tokenize_for_similarity(headline)
     best: Optional[Issue] = None
     best_ratio = -1.0
@@ -881,13 +904,14 @@ def find_matching_open_issue(
             if text_ratio > ratio:
                 ratio = text_ratio
                 best_text = text
-        text_alone_matches = ratio >= no_location and (
-            _jaccard_similarity(headline_tokens, _tokenize_for_similarity(best_text))
-            >= no_location_token_overlap
+        token_overlap = _jaccard_similarity(headline_tokens, _tokenize_for_similarity(best_text))
+        text_alone_matches = ratio >= no_location and token_overlap >= no_location_token_overlap
+        location_matches = (
+            _location_appears_in(file_path, issue)
+            and ratio >= with_location
+            and token_overlap >= with_location_token_overlap
         )
-        matches = (_location_appears_in(file_path, issue) and ratio >= with_location) or (
-            text_alone_matches
-        )
+        matches = location_matches or text_alone_matches
         if not matches:
             continue
         if (

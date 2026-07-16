@@ -600,14 +600,15 @@ def test_find_matching_open_issue_matches_own_single_location_title_wrapper() ->
 
 def test_find_matching_open_issue_location_plus_moderate_text_matches() -> None:
     proposal = proposal_from_findings(
-        [_Issue(file_path="src/a.py", description="null pointer dereference in parser")], 0
+        [_Issue(file_path="src/a.py", description="race condition in worker pool")], 0
     )
-    # Title is only moderately similar to the headline (ratio ~0.585, between the
-    # two thresholds), but the issue body repeats the exact file_path -- the
-    # location signal makes the looser "with location" bar sufficient.
-    issue = _open_issue(
-        1, "possible null pointer issue in the parser module", body="See `src/a.py:12` for details."
-    )
+    # Same words, reordered: character ratio (~0.509) barely clears the "with
+    # location" bar (0.5) but is well below the "no location" bar (0.8) -- and
+    # since every word carries over, word-set overlap (0.8) comfortably clears
+    # the with-location token-overlap floor (0.7) too. The issue body repeats
+    # the exact file_path, so the location signal makes the looser ratio bar
+    # sufficient.
+    issue = _open_issue(1, "worker pool race condition", body="See `src/a.py:12` for details.")
     assert find_matching_open_issue(proposal, [issue]) is issue
 
 
@@ -615,9 +616,9 @@ def test_find_matching_open_issue_moderate_text_without_location_does_not_match(
     proposal = proposal_from_findings(
         [_Issue(file_path="src/a.py", description="null pointer dereference in parser")], 0
     )
-    # Same moderate-similarity title as above (ratio ~0.585, below the "no
-    # location" bar of 0.8), but nothing in the issue mentions the file_path --
-    # moderate similarity alone is not enough.
+    # Moderate-similarity title (ratio ~0.585, below the "no location" bar of
+    # 0.8), but nothing in the issue mentions the file_path -- moderate
+    # similarity alone is not enough.
     issue = _open_issue(
         1, "possible null pointer issue in the parser module", body="unrelated notes"
     )
@@ -722,6 +723,43 @@ def test_find_matching_open_issue_token_overlap_env_override(
     assert find_matching_open_issue(proposal, [issue]) is None
 
 
+def test_find_matching_open_issue_location_signal_alone_insufficient_for_low_token_overlap() -> (
+    None
+):
+    # Regression (Codex-flagged): the location signal alone is weaker
+    # corroboration than it looks -- many genuinely distinct bugs share the
+    # same file. "hardcoded secret in config" vs "hardcoded timeout in
+    # config" both mentioning config.py clears the with-location ratio bar
+    # (0.83 >= 0.5) via the location signal, but word-set overlap (0.6) is
+    # below the with-location token-overlap floor (0.7), so this must not
+    # match even with the file_path present in the issue body.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="config.py", description="hardcoded secret in config")], 0
+    )
+    issue = _open_issue(
+        1, "hardcoded timeout in config", body="See `config.py` for where it's set."
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_with_location_token_overlap_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal = proposal_from_findings(
+        [_Issue(file_path="config.py", description="hardcoded secret in config")], 0
+    )
+    issue = _open_issue(
+        1, "hardcoded timeout in config", body="See `config.py` for where it's set."
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+    # A low override accepts the pair's 0.6 token overlap as sufficient.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN_WITH_LOCATION", "0.5")
+    assert find_matching_open_issue(proposal, [issue]) is issue
+    # Garbage falls back to the documented default rather than raising.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN_WITH_LOCATION", "not-a-float")
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
 def test_find_matching_open_issue_threshold_with_location_env_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -735,9 +773,14 @@ def test_find_matching_open_issue_threshold_with_location_env_override(
         1, "totally unrelated feature request", body="See `src/a.py:5` for context."
     )
     assert find_matching_open_issue(proposal, [issue]) is None
-    # A very low with-location override turns the location-corroborated, otherwise
-    # too-dissimilar pair into a match.
+    # A very low with-location override alone is still not enough -- the headline
+    # and title share zero tokens, so the (still-default) token-overlap floor
+    # blocks it.
     monkeypatch.setenv("PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION", "0.0")
+    assert find_matching_open_issue(proposal, [issue]) is None
+    # Also lowering the with-location token-overlap floor turns the
+    # location-corroborated, otherwise too-dissimilar pair into a match.
+    monkeypatch.setenv("PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN_WITH_LOCATION", "0.0")
     assert find_matching_open_issue(proposal, [issue]) is issue
     # Garbage falls back to the documented default rather than raising.
     monkeypatch.setenv("PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION", "not-a-float")
@@ -748,12 +791,25 @@ def test_find_matching_open_issue_location_in_title_matches() -> None:
     # The location signal must check the issue TITLE, not only its body: the
     # file_path here appears only in the title, and the body is blank.
     proposal = proposal_from_findings(
-        [_Issue(file_path="src/a.py", description="null pointer dereference in parser")], 0
+        [
+            _Issue(
+                file_path="a.py",
+                description="race condition detected inside the shared background worker pool",
+            )
+        ],
+        0,
     )
-    # Ratio (~0.505) clears the with-location bar (0.5) but not the no-location
-    # bar (0.8), so this match happens only because the location signal (title
+    # Reordered words plus the trailing file_path: ratio (~0.512) clears the
+    # with-location bar (0.5) but not the no-location bar (0.8); word-set
+    # overlap (~0.727) clears the with-location token-overlap floor (0.7) since
+    # the base headline is long enough that the two extra path tokens barely
+    # dilute it. This match happens only because the location signal (title
     # contains the file_path) is honored.
-    issue = _open_issue(1, "possible null pointer issue in the parser module for src/a.py", body="")
+    issue = _open_issue(
+        1,
+        "shared background worker pool race condition detected inside a.py",
+        body="",
+    )
     assert find_matching_open_issue(proposal, [issue]) is issue
 
 
@@ -776,13 +832,16 @@ def test_find_matching_open_issue_rejects_substring_within_unrelated_filename() 
 def test_find_matching_open_issue_location_signal_still_matches_at_path_boundary() -> None:
     # The stricter boundary check must not reject a genuine match: file_path
     # bounded by a path separator and punctuation (not embedded in a longer
-    # identifier) still counts as the location signal.
+    # identifier) still counts as the location signal. Same reordered-words
+    # pair as test_find_matching_open_issue_location_plus_moderate_text_matches
+    # (ratio ~0.509, token overlap ~0.8) so the with-location token-overlap
+    # floor (0.7) is also cleared.
     proposal = proposal_from_findings(
-        [_Issue(file_path="app.py", description="null pointer dereference in parser")], 0
+        [_Issue(file_path="app.py", description="race condition in worker pool")], 0
     )
     issue = _open_issue(
         1,
-        "possible null pointer issue in the parser module",
+        "worker pool race condition",
         body="See `src/app.py:12` for details.",
     )
     assert find_matching_open_issue(proposal, [issue]) is issue

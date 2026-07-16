@@ -3583,6 +3583,56 @@ class TestCreateReviewIssuesUnit:
         }
         assert saved == {"p0": True, "p1": False}
 
+    def test_multiple_failures_wrapped_in_composite_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: when more than one proposal fails, the caller must see every
+        failure, not just whichever happened to be first -- a plain re-raise of one
+        error would misleadingly suggest only that one proposal had a problem."""
+        from software_engineering_team.coding_team.api import main as api_main
+        from software_engineering_team.coding_team.api import pr_review
+
+        job = {
+            "github_context": {
+                "owner": "o",
+                "repo": "r",
+                "pr_number": 9,
+                "pr_url": "https://example/pull/9",
+            },
+            "status": "completed",
+            "review_summary": {
+                "pending_issue_proposals": [
+                    {"id": "p0", "description": "a", "issue_url": None},
+                    {"id": "p1", "description": "b", "issue_url": None},
+                ]
+            },
+        }
+        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return None
+
+            def create_issue(self, _o, _r, *, title, body, labels=None):
+                # Both proposals fail, each with a distinguishable error.
+                if "### Description\na" in body:
+                    raise GitHubAPIError(403, "boom-a")
+                raise GitHubAPIError(500, "boom-b")
+
+        monkeypatch.setattr(api_main, "GitHubClient", lambda **_k: _Client())
+        monkeypatch.setattr(api_main, "update_review", lambda *_a, **_k: None)
+        monkeypatch.setattr(api_main, "update_job", lambda *_a, **_k: None)
+
+        with pytest.raises(pr_review.MultipleIssueCreationErrors) as exc_info:
+            pr_review.create_review_issues("job1", ["p0", "p1"], token="t")
+        assert set(exc_info.value.failures) == {"p0", "p1"}
+        message = str(exc_info.value)
+        assert "p0" in message and "p1" in message
+        assert "boom-a" in message and "boom-b" in message
+
     def test_malformed_proposals_field_yields_no_candidates(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

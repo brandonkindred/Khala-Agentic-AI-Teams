@@ -627,6 +627,21 @@ unrelated bugs — so the tokenized descriptions must also overlap this much
 before a match is pre-linked. Parses defensively, same convention as the two
 threshold vars above.
 
+### PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN_WITH_LOCATION
+Word-set (Jaccard) overlap override (0.0–1.0, default `0.7`) additionally
+required, alongside `PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION`, for the
+`/review-pr` duplicate-issue check's location-corroborated signal (the
+finding's `file_path` appears in the candidate issue's title/body). The
+location signal alone is weaker corroboration than it looks — many
+genuinely distinct bugs share the same file — so the same "one differing
+keyword amid shared boilerplate" false positive described above (e.g.
+"hardcoded secret in config" vs "hardcoded timeout in config", both
+mentioning `config.py`) is also reachable via the looser with-location ratio
+bar; this closes that gap. Set lower than
+`PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN` (0.7 vs 0.8) since the location match
+is itself real corroborating evidence a same-file paraphrase can still
+clear. Parses defensively, same convention as the other threshold vars.
+
 ### PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES
 Caps how many of the reviewed repository's open issues the `/review-pr` flow's
 duplicate-issue check reads per review (default `100`). `GitHubClient.list_open_issues`

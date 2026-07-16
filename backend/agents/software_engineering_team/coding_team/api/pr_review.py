@@ -1461,6 +1461,23 @@ class RepoMismatchError(ValueError):
     """
 
 
+class MultipleIssueCreationErrors(GitHubAPIError):
+    """Raised when concurrently filing issues for multiple proposals fails for more than one.
+
+    A ``GitHubAPIError`` subclass so the existing ``except GitHubAPIError`` branch
+    in the route handler (→ HTTP 502) still catches it without any route change,
+    while carrying every individual failure -- not just the one that happens to be
+    re-raised -- so the caller's error message reflects the true extent of the
+    failures rather than misleadingly naming only one proposal.
+    """
+
+    def __init__(self, failures: Dict[str, BaseException]) -> None:
+        """Preconditions: ``failures`` is non-empty (proposal id -> the exception it raised)."""
+        self.failures = dict(failures)
+        summary = "; ".join(f"{pid}: {err}" for pid, err in failures.items())
+        super().__init__(status=502, body=f"{len(failures)} proposal(s) failed to file: {summary}")
+
+
 # Per-job locks serializing ``create_review_issues`` within this process, so two
 # concurrent requests for the same review (two browser tabs, a double-click)
 # cannot both load a proposal as unfiled and open duplicate GitHub issues. A
@@ -1725,7 +1742,11 @@ def create_review_issues(
           treats them). Raises ``GitHubAPIError`` when GitHub rejects an issue
           creation — every proposal's creation is attempted independently, so one
           rejection never stops another's, and any issue opened before the raise
-          is still recorded and persisted.
+          is still recorded and persisted. When exactly one proposal fails, its own
+          exception is re-raised unchanged; when more than one fails, raises
+          :class:`MultipleIssueCreationErrors` (a ``GitHubAPIError`` subclass)
+          carrying every individual failure, so the caller's error is never
+          misleadingly attributed to just one proposal when several actually failed.
     """
     # Serialize the whole load → create → persist section per job. The context is
     # loaded INSIDE the lock so a second same-process request that ran after the
@@ -1836,8 +1857,17 @@ def create_review_issues(
                                     job_id,
                                     errors[pid],
                                 )
-                        first_pid = next(pid for pid in needed if pid in errors)
-                        raise errors[first_pid]
+                        if len(errors) == 1:
+                            # A single failure: re-raise it as-is so its own type
+                            # (e.g. a specific GitHubAPIError subclass) still
+                            # reaches the caller unchanged.
+                            raise next(iter(errors.values()))
+                        # More than one proposal failed: a plain re-raise of
+                        # whichever happened to be first would misleadingly
+                        # report only one failure. Wrap every failure into a
+                        # single composite error instead, so the caller's error
+                        # message reflects the true extent of the failures.
+                        raise MultipleIssueCreationErrors(errors)
         finally:
             # Persist whatever was created — even when some proposals failed — so
             # a partially-successful request never loses the issues it did open.
