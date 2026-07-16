@@ -36,7 +36,12 @@ def run_orchestrator_activity(
     resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
     planning_only: bool = False,
 ) -> None:
-    """Execute the main Tech Lead orchestrator (run_orchestrator)."""
+    """Execute the main Tech Lead orchestrator (run_orchestrator).
+
+    Postconditions:
+        On failure the job is marked FAILED and the exception is re-raised so
+        Temporal can retry (per the workflow retry policy) and fail the workflow.
+    """
     try:
         from software_engineering_team.orchestrator import run_orchestrator
 
@@ -50,11 +55,17 @@ def run_orchestrator_activity(
     except Exception as e:
         logger.exception("Orchestrator activity failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise
 
 
 @activity.defn(name="retry_failed")
 def retry_failed_activity(job_id: str) -> None:
-    """Re-run failed tasks for a job (run_failed_tasks)."""
+    """Re-run failed tasks for a job (run_failed_tasks).
+
+    Postconditions:
+        On failure the job is marked FAILED and the exception is re-raised so
+        Temporal can retry (per the workflow retry policy) and fail the workflow.
+    """
     try:
         from software_engineering_team.orchestrator import run_failed_tasks
 
@@ -62,6 +73,7 @@ def retry_failed_activity(job_id: str) -> None:
     except Exception as e:
         logger.exception("Retry failed activity failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise
 
 
 def _run_frontend_code_v2_impl(
@@ -144,12 +156,18 @@ def run_frontend_code_v2_activity(
     task_dict: Dict[str, Any],
     architecture_overview: str = "",
 ) -> None:
-    """Execute frontend-code-v2 workflow."""
+    """Execute frontend-code-v2 workflow.
+
+    Postconditions:
+        On failure the job is marked FAILED and the exception is re-raised so
+        Temporal can retry (per the workflow retry policy) and fail the workflow.
+    """
     try:
         _run_frontend_code_v2_impl(job_id, repo_path, task_dict, architecture_overview)
     except Exception as e:
         logger.exception("Frontend-code-v2 activity failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise
 
 
 def _run_backend_code_v2_impl(
@@ -232,12 +250,18 @@ def run_backend_code_v2_activity(
     task_dict: Dict[str, Any],
     architecture_overview: str = "",
 ) -> None:
-    """Execute backend-code-v2 workflow."""
+    """Execute backend-code-v2 workflow.
+
+    Postconditions:
+        On failure the job is marked FAILED and the exception is re-raised so
+        Temporal can retry (per the workflow retry policy) and fail the workflow.
+    """
     try:
         _run_backend_code_v2_impl(job_id, repo_path, task_dict, architecture_overview)
     except Exception as e:
         logger.exception("Backend-code-v2 activity failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise
 
 
 def _run_product_analysis_impl(
@@ -294,12 +318,18 @@ def run_product_analysis_activity(
     spec_content: str,
     initial_spec_path: Optional[str] = None,
 ) -> None:
-    """Execute product-analysis workflow."""
+    """Execute product-analysis workflow.
+
+    Postconditions:
+        On failure the job is marked FAILED and the exception is re-raised so
+        Temporal can retry (per the workflow retry policy) and fail the workflow.
+    """
     try:
         _run_product_analysis_impl(job_id, repo_path, spec_content, initial_spec_path)
     except Exception as e:
         logger.exception("Product analysis activity failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -559,11 +589,8 @@ def execute_coding_team_activity(
     from software_engineering_team.temporal.phase_models import PlanResult as PlanResultModel
 
     try:
-        from software_engineering_team.orchestrator import (
-            _build_coding_team_plan_input,
-            _read_repo_code,
-            _truncate_for_context,
-        )
+        from shared_repo_context.repo_utils import read_repo_code, truncate_for_context
+        from software_engineering_team.orchestrator import _build_coding_team_plan_input
 
         plan_data = PlanResultModel.model_validate(plan_result)
         path = Path(repo_path).resolve()
@@ -573,7 +600,7 @@ def execute_coding_team_activity(
 
         adapter_result = PlanningAdapterResult.from_dict(plan_data.adapter_result_dict)
 
-        existing_code = _truncate_for_context(_read_repo_code(path), 8000)
+        existing_code = truncate_for_context(read_repo_code(path), 8000)
         if existing_code == "# No code files found":
             existing_code = None
 
