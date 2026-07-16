@@ -186,7 +186,7 @@ def test_resume_job_happy(client: TestClient, monkeypatch) -> None:
     )
 
     # Intercept the bounded async-job pool so we don't actually run the pipeline.
-    monkeypatch.setattr(_api_main._ASYNC_JOB_EXECUTOR, "submit", lambda fn, *a, **kw: None)
+    monkeypatch.setattr(_api_main, "_submit_async_job", lambda fn, *a, **kw: None)
 
     r = client.post(f"/job/{job_id}/resume")
     assert r.status_code == 200
@@ -213,7 +213,7 @@ def test_restart_job_happy(client: TestClient, monkeypatch, fake_job_client) -> 
         pass
 
     # Intercept the bounded async-job pool so we don't actually run the pipeline.
-    monkeypatch.setattr(_api_main._ASYNC_JOB_EXECUTOR, "submit", lambda fn, *a, **kw: None)
+    monkeypatch.setattr(_api_main, "_submit_async_job", lambda fn, *a, **kw: None)
 
     r = client.post(f"/job/{job_id}/restart")
     assert r.status_code == 200

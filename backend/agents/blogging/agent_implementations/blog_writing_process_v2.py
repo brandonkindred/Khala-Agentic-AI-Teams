@@ -2003,10 +2003,17 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
         # re-raises Temporal cancellation, BloggingError, and transient
         # LLM-transport errors unwrapped — the latter so the Temporal activity
         # funnel can retry the whole stage (see temporal.activities._run_stage) —
-        # and maps any other failure to its domain error type. Defined before the
-        # loop (taking the per-iteration draft/validator report as arguments) so
-        # they never close over a loop variable.
+        # and maps any other failure to its domain error type.
+        #
+        # These are nested (not module-level) deliberately: they take only the
+        # per-iteration draft/validator report as parameters — so they never close
+        # over the `rewrite_iter` loop variable — and intentionally close over the
+        # loop-INVARIANT collaborators built once above (the agents,
+        # require_disclaimer_for, work_dir, brand_spec_prompt_text, _update). That
+        # closure is accepted for conciseness; the gates' behavior is covered
+        # end-to-end via run_pipeline in test_run_pipeline_gates.py.
         def _fact_check_gate(draft: str):
+            # Reports progress under BlogPhase.FACT_CHECK.
             try:
                 return fact_check_agent.run(
                     draft,
@@ -2022,6 +2029,7 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                 raise FactCheckError(f"Fact check failed: {e}", cause=e) from e
 
         def _compliance_gate(draft: str, validator_report):
+            # Reports progress under BlogPhase.COMPLIANCE.
             try:
                 return compliance_agent.run(
                     draft,

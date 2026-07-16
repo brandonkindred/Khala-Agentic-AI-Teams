@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import sys
 import tempfile
+import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -155,19 +156,74 @@ else:
         RUN_ARTIFACTS_BASE,
     )
 
-# Async blogging jobs (the non-Temporal fallback) run on a shared, BOUNDED thread pool
-# instead of an unbounded ``threading.Thread`` per request. A pipeline thread can stay
-# alive for a long time — it blocks on human-in-the-loop polling until the user responds
-# or the ~1h stale-job monitor fires — so without a cap a burst of concurrent HITL jobs
-# would spawn proportionally many idle-but-alive OS threads (the scalability risk this
-# pool exists to bound). When every worker is busy, further submissions queue; the async
-# endpoints still return a job_id immediately. Temporal remains the durable path for high
-# HITL concurrency. Tunable via BLOGGING_ASYNC_MAX_WORKERS (clamped to >= 1, default 16).
+# Async blogging jobs (the non-Temporal fallback) run on a BOUNDED pool of daemon worker
+# threads draining a shared queue, instead of an unbounded ``threading.Thread`` per
+# request. A pipeline thread can stay alive for a long time — it blocks on
+# human-in-the-loop polling until the user responds or the ~1h stale-job monitor fires —
+# so without a cap a burst of concurrent HITL jobs would spawn proportionally many
+# idle-but-alive OS threads (the scalability risk this pool exists to bound). When every
+# worker is busy, further submissions queue; the async endpoints still return a job_id
+# immediately. The workers are daemon threads so an HITL-parked job never blocks process
+# shutdown/deploys (preserving the previous per-job ``daemon=True`` behavior) — a
+# ThreadPoolExecutor would instead join its non-daemon workers at interpreter exit and
+# hang until the wait cleared. Temporal remains the durable path for high HITL
+# concurrency. Tunable via BLOGGING_ASYNC_MAX_WORKERS (clamped to >= 1, default 16).
 _ASYNC_JOB_MAX_WORKERS = env_int("BLOGGING_ASYNC_MAX_WORKERS", 16, floor=1)
-_ASYNC_JOB_EXECUTOR = ThreadPoolExecutor(
-    max_workers=_ASYNC_JOB_MAX_WORKERS,
-    thread_name_prefix="blogging-async-job",
-)
+_ASYNC_JOB_QUEUE: "queue.Queue[Optional[tuple]]" = queue.Queue()
+_ASYNC_JOB_WORKERS_STARTED = False
+_ASYNC_JOB_WORKERS_LOCK = threading.Lock()
+
+
+def _async_job_worker() -> None:
+    """Daemon worker loop: run queued ``(target, args)`` jobs one at a time.
+
+    Preconditions:
+        - Queue items are ``(callable, args_tuple)`` or ``None`` (stop sentinel).
+    Postconditions:
+        - A job that raises is logged and skipped so one bad job never kills the worker
+          (the job funcs already fail their own job-store entry); the loop runs until the
+          process exits (daemon threads are reclaimed at interpreter shutdown) or a
+          ``None`` sentinel is dequeued.
+    """
+    while True:
+        item = _ASYNC_JOB_QUEUE.get()
+        try:
+            if item is None:
+                return
+            target, args = item
+            target(*args)
+        except Exception:
+            logger.exception("Async blogging job worker crashed on a job")
+        finally:
+            _ASYNC_JOB_QUEUE.task_done()
+
+
+def _ensure_async_workers() -> None:
+    """Lazily start the bounded set of daemon workers on first submit (idempotent, thread-safe)."""
+    global _ASYNC_JOB_WORKERS_STARTED
+    if _ASYNC_JOB_WORKERS_STARTED:
+        return
+    with _ASYNC_JOB_WORKERS_LOCK:
+        if _ASYNC_JOB_WORKERS_STARTED:
+            return
+        for i in range(_ASYNC_JOB_MAX_WORKERS):
+            threading.Thread(
+                target=_async_job_worker,
+                name=f"blogging-async-job-{i}",
+                daemon=True,
+            ).start()
+        _ASYNC_JOB_WORKERS_STARTED = True
+
+
+def _submit_async_job(target: Any, *args: Any) -> None:
+    """Enqueue a background job for the bounded daemon worker pool (returns immediately).
+
+    Preconditions: ``target`` is callable; ``args`` are its positional arguments.
+    Postconditions: the job is queued and will run on a worker as soon as one is free
+        (submissions beyond ``_ASYNC_JOB_MAX_WORKERS`` in-flight jobs wait in the queue).
+    """
+    _ensure_async_workers()
+    _ASYNC_JOB_QUEUE.put((target, args))
 
 
 def _run_blogging_service_shutdown() -> (
@@ -209,13 +265,10 @@ def _run_blogging_service_shutdown() -> (
     except Exception:
         logger.debug("Event-bus reaper shutdown skipped", exc_info=True)
 
-    # Stop accepting new async jobs and cancel any still-queued ones. Already-running
-    # pipeline threads (daemons) are not waited on — process teardown reclaims them,
-    # matching the previous per-job daemon-thread behavior.
-    try:
-        _ASYNC_JOB_EXECUTOR.shutdown(wait=False, cancel_futures=True)
-    except Exception:
-        logger.debug("Async-job executor shutdown skipped", exc_info=True)
+    # The async-job workers are daemon threads (see _submit_async_job): the interpreter
+    # reclaims them at exit without joining, so no explicit executor teardown is needed —
+    # an in-flight HITL-parked job never blocks process shutdown. Any active jobs were
+    # already marked interrupted above via mark_all_active_jobs_interrupted.
 
 
 # Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.
@@ -869,7 +922,7 @@ def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResp
         pass
 
     # Submit to the bounded async-job pool (Temporal is preferred when enabled above).
-    _ASYNC_JOB_EXECUTOR.submit(_run_pipeline_with_tracking, job_id, request)
+    _submit_async_job(_run_pipeline_with_tracking, job_id, request)
 
     logger.info("Started async pipeline job %s", job_id)
     return StartPipelineResponse(job_id=job_id, message="Pipeline started")
@@ -927,7 +980,7 @@ def medium_stats_async(payload: MediumStatsRequest) -> StartPipelineResponse:
         work_dir=work_dir,
         job_type="medium_stats",
     )
-    _ASYNC_JOB_EXECUTOR.submit(_run_medium_stats_async_job, job_id, payload)
+    _submit_async_job(_run_medium_stats_async_job, job_id, payload)
     logger.info("Started async Medium stats job %s", job_id)
     return StartPipelineResponse(job_id=job_id, message="Medium statistics job started")
 
@@ -1110,7 +1163,7 @@ def resume_blog_job(job_id: str) -> StartPipelineResponse:
     except ImportError:
         pass
 
-    _ASYNC_JOB_EXECUTOR.submit(_run_pipeline_with_tracking, job_id, request)
+    _submit_async_job(_run_pipeline_with_tracking, job_id, request)
     return StartPipelineResponse(job_id=job_id, message="Job resumed")
 
 
@@ -1155,7 +1208,7 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
     except ImportError:
         pass
 
-    _ASYNC_JOB_EXECUTOR.submit(_run_pipeline_with_tracking, job_id, request)
+    _submit_async_job(_run_pipeline_with_tracking, job_id, request)
     return StartPipelineResponse(job_id=job_id, message="Job restarted from scratch")
 
 

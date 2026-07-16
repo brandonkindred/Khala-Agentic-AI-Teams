@@ -534,7 +534,7 @@ def test_start_full_pipeline_async_creates_job(
         started.append((fn, args))
 
     # Intercept the bounded async-job pool so we don't actually run the pipeline.
-    monkeypatch.setattr(_api_main._ASYNC_JOB_EXECUTOR, "submit", _fake_submit)
+    monkeypatch.setattr(_api_main, "_submit_async_job", _fake_submit)
 
     body = {
         "brief": "How to ship faster",
@@ -554,13 +554,56 @@ def test_start_full_pipeline_async_creates_job(
     assert args[0] == data["job_id"]
 
 
-def test_async_job_executor_is_bounded() -> None:
-    """Async jobs run on a bounded ThreadPoolExecutor sized from BLOGGING_ASYNC_MAX_WORKERS."""
-    from concurrent.futures import ThreadPoolExecutor
+def test_async_job_pool_is_bounded_and_enqueues(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Async jobs are dispatched to a bounded worker pool via a queue, sized from
+    BLOGGING_ASYNC_MAX_WORKERS. Submit enqueues the (target, args) without running it."""
+    import queue
 
-    assert isinstance(_api_main._ASYNC_JOB_EXECUTOR, ThreadPoolExecutor)
     assert _api_main._ASYNC_JOB_MAX_WORKERS >= 1
-    assert _api_main._ASYNC_JOB_EXECUTOR._max_workers == _api_main._ASYNC_JOB_MAX_WORKERS
+    assert isinstance(_api_main._ASYNC_JOB_QUEUE, queue.Queue)
+
+    # Don't spin real worker threads; just verify submit enqueues the (target, args) job.
+    monkeypatch.setattr(_api_main, "_ensure_async_workers", lambda: None)
+    sentinel = object()
+    _api_main._submit_async_job(sentinel, "job-1", 2)
+    assert _api_main._ASYNC_JOB_QUEUE.get_nowait() == (sentinel, ("job-1", 2))
+
+
+def test_async_job_workers_are_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Workers are daemon threads so an HITL-parked job never blocks process shutdown."""
+    created: list[dict] = []
+
+    class _FakeThread:
+        def __init__(self, *a, **kw):
+            created.append(kw)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(_api_main.threading, "Thread", _FakeThread)
+    monkeypatch.setattr(_api_main, "_ASYNC_JOB_WORKERS_STARTED", False)
+    _api_main._ensure_async_workers()
+    assert len(created) == _api_main._ASYNC_JOB_MAX_WORKERS
+    assert all(kw.get("daemon") is True for kw in created)
+
+
+def test_async_job_worker_runs_jobs_and_survives_crash() -> None:
+    """The worker loop runs queued jobs, keeps going after a job raises, and stops on the
+    None sentinel (so one bad job never kills a worker)."""
+    ran: list[str] = []
+
+    def _ok():
+        ran.append("ok")
+
+    def _boom():
+        raise RuntimeError("job crashed")
+
+    # No real workers run in tests, so the shared queue is safe to drive directly.
+    _api_main._ASYNC_JOB_QUEUE.put((_ok, ()))
+    _api_main._ASYNC_JOB_QUEUE.put((_boom, ()))
+    _api_main._ASYNC_JOB_QUEUE.put(None)  # stop sentinel
+    _api_main._async_job_worker()
+    assert ran == ["ok"]
 
 
 def test_medium_stats_sync_when_integration_disabled(
@@ -595,7 +638,7 @@ def test_medium_stats_async_starts_job(
     monkeypatch.setattr(_api_main, "medium_stats_integration_eligible", lambda: (True, ""))
 
     # Intercept the bounded async-job pool so we don't actually run the Medium stats job.
-    monkeypatch.setattr(_api_main._ASYNC_JOB_EXECUTOR, "submit", lambda fn, *a, **kw: None)
+    monkeypatch.setattr(_api_main, "_submit_async_job", lambda fn, *a, **kw: None)
     monkeypatch.setenv("BLOGGING_MEDIUM_STATS_ROOT", str(tmp_path / "ms"))
 
     r = client.post("/medium-stats-async", json={})
