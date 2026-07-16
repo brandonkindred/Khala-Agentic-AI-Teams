@@ -700,12 +700,13 @@ def test_slack_events_valid_signature_dispatches():
     body = b'{"type":"event_callback","event":{"type":"app_mention"}}'
     with (
         patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("secret")),
-        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=True),
+        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=True) as verify,
         patch(f"{_SLACK_HANDLER}.dispatch_event") as disp,
     ):
         resp = client.post(_SLACK_EVENTS, content=body)
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
+    verify.assert_called_once()
     disp.assert_called_once()
 
 
@@ -727,24 +728,29 @@ def test_slack_events_url_verification_verified_when_secret_set():
     body = b'{"type":"url_verification","challenge":"abc123"}'
     with (
         patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("secret")),
-        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=False),
+        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=False) as verify,
     ):
         resp = client.post(_SLACK_EVENTS, content=body)
     assert resp.status_code == 401
+    verify.assert_called_once()
 
 
 def test_slack_events_invalid_json_returns_400():
-    """A non-JSON body is rejected with 400 before any verification."""
-    with patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("")):
+    """A non-JSON body is rejected with 400 before the config is even read."""
+    with patch(f"{_STORE_MODULE}.get_slack_config") as get_cfg:
         resp = client.post(_SLACK_EVENTS, content=b"not json{")
     assert resp.status_code == 400
+    # Parsing happens before any config access, so a store outage can't turn a
+    # malformed body into a 500.
+    get_cfg.assert_not_called()
 
 
 def test_slack_events_non_object_json_returns_400():
     """A valid-JSON-but-non-object body (e.g. a list) is rejected with 400, not a 500."""
-    with patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("")):
+    with patch(f"{_STORE_MODULE}.get_slack_config") as get_cfg:
         resp = client.post(_SLACK_EVENTS, content=b"[]")
     assert resp.status_code == 400
+    get_cfg.assert_not_called()
 
 
 def test_slack_commands_rejects_without_secret():
@@ -762,12 +768,13 @@ def test_slack_commands_valid_signature_processes():
     """Secret configured + valid signature: the command runs and its result is returned."""
     with (
         patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("secret")),
-        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=True),
+        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=True) as verify,
         patch(f"{_SLACK_HANDLER}.process_slash_command", return_value={"text": "hi"}) as proc,
     ):
         resp = client.post(_SLACK_COMMANDS, content=b"command=%2Fkhala&text=help")
     assert resp.status_code == 200
     assert resp.json() == {"text": "hi"}
+    verify.assert_called_once()
     proc.assert_called_once()
 
 
@@ -794,11 +801,12 @@ def test_slack_interactive_valid_signature_ok():
     """Secret configured + valid signature: returns ok."""
     with (
         patch(f"{_STORE_MODULE}.get_slack_config", return_value=_slack_cfg("secret")),
-        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=True),
+        patch(f"{_SLACK_HANDLER}.verify_slack_request", return_value=True) as verify,
     ):
         resp = client.post(_SLACK_INTERACTIVE, content=b"payload=%7B%7D")
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
+    verify.assert_called_once()
 
 
 def test_slack_interactive_invalid_signature_rejected():
