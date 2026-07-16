@@ -72,15 +72,34 @@ class BlogCopyEditorAgent:
             parts.append("--- WRITING STYLE GUIDE ---\n" + writing)
         self._style_prompt = "\n\n".join(parts)
 
-    def _write_feedback_to_path(self, output: CopyEditorOutput, path: Union[str, Path]) -> None:
-        """Serialize CopyEditorOutput to JSON and write to path. On failure log warning and do not raise."""
+    def _write_feedback_to_path(self, output: CopyEditorOutput, path: Union[str, Path]) -> bool:
+        """
+        Serialize CopyEditorOutput to JSON and write it to ``path``.
+
+        This is a best-effort side write: the returned CopyEditorOutput is always
+        authoritative, and a failed diagnostic write must never abort the copy-edit
+        run. Filesystem/serialization errors (permission denied, disk-full, invalid
+        path) are therefore caught, logged at WARNING, and reported via the return
+        value rather than raised.
+
+        Preconditions:
+            - output is a CopyEditorOutput.
+            - path is a non-empty filesystem path.
+        Postconditions:
+            - Returns True iff the JSON was successfully written to the resolved
+              form of ``path`` (``Path(path).resolve()``).
+            - Returns False on any filesystem/serialization error; in that case a
+              WARNING is logged and no exception propagates.
+        """
         try:
             p = Path(path).resolve()
             p.parent.mkdir(parents=True, exist_ok=True)
             data = output.to_dict()
             p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            return True
         except Exception as e:
             logger.warning("Failed to write editor feedback to %s: %s", path, e)
+            return False
 
     def run(
         self,
@@ -96,7 +115,11 @@ class BlogCopyEditorAgent:
             - copy_editor_input is a valid CopyEditorInput (draft non-empty).
         Postconditions:
             - Returns CopyEditorOutput with summary and feedback_items.
-            - If feedback_output_path is set, writes the same output to that path before returning.
+            - If feedback_output_path is set, best-effort writes the same output to
+              that path before returning. This write may silently fail (e.g. permission
+              denied or disk-full); such failures are logged at WARNING and never raised,
+              so the returned output is authoritative and callers must not assume the
+              file exists. `_write_feedback_to_path` returns whether the write succeeded.
         """
         draft = copy_editor_input.draft.strip()
         if not draft:
