@@ -91,7 +91,7 @@ BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 # draft, or escalates to the author at COPY_EDIT_ESCALATION_THRESHOLD — 500 is a
 # runaway-safety ceiling, not an expected iteration count.
 DRAFT_EDITOR_ITERATIONS = 500
-MAX_REWRITE_ITERATIONS = 100
+MAX_REWRITE_ITERATIONS = 10
 # After this many copy-edit revisions without editor approval, escalate to the user
 COPY_EDIT_ESCALATION_THRESHOLD = 10
 
@@ -2084,9 +2084,9 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                         details_str = ""
                         if check.details:
                             if "matches" in check.details:
-                                details_str = f" Found: {', '.join(str(m) for m in check.details['matches'][:3])}"
+                                details_str = f" Found: {', '.join(str(m) for m in check.details['matches'])}"
                             elif "violations" in check.details:
-                                details_str = f" Violations: {', '.join(str(v) for v in check.details['violations'][:3])}"
+                                details_str = f" Violations: {', '.join(str(v) for v in check.details['violations'])}"
                             elif "fk_grade" in check.details:
                                 details_str = f" FK grade: {check.details['fk_grade']}"
                         feedback_items.append(
