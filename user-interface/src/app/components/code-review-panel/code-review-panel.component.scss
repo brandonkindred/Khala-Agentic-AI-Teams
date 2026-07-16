@@ -436,5 +436,9 @@
   gap: 0.3rem;
 }
 
-// `.cr-proposals`/`.cr-proposal`/`.cr-chip--sev-*` styling now lives in
+// `.cr-proposals`/`.cr-proposal` styling lives in
 // pending-issue-proposals.component.scss, alongside the template that uses it.
+// The `.cr-chip--sev-*` severity accents are defined above in this file (see the
+// `.cr-chip` block): view encapsulation scopes styles to each component, so the
+// severity chips rendered here need their own copy even though the child defines
+// similar ones for its proposal chips.
