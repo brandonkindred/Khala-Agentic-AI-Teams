@@ -48,15 +48,16 @@ def run_setup(
         * On Docker provisioning failure: returns
           ``SetupResult(success=False, error=...)`` — nothing is created.
         * Atomicity: if the container is created but the environment cannot be
-          registered, the container is torn down and this attempt's own env record
-          (if the failed register wrote one) is cleared — both best effort —
-          before the exception propagates, so a failed setup never leaks orphaned
-          Docker resources or a stale record that a retry's early-return would
-          short-circuit onto, including across Temporal retries of this activity.
-          Teardown is skipped only when a *reused* container already has an
-          environment record (of any status — ``running``, ``ready``, ...), which
-          means a prior successful setup or a concurrent job owns and is using it;
-          tearing that down would break a live agent.
+          registered, this attempt's own env record (if the failed register wrote
+          one) is cleared and then the container is deleted — the container only if
+          the record removal is confirmed — before the exception propagates. That
+          ordering keeps record and container consistent, so a failed setup leaves
+          neither an orphaned container nor a stale record a retry's early-return
+          could short-circuit onto, including across Temporal retries of this
+          activity. Teardown is skipped entirely when a *reused* container already
+          has an environment record (of any status — ``running``, ``ready``, ...),
+          which means a prior successful setup or a concurrent job owns and is
+          using it; tearing that down would break a live agent.
     """
     env_store = environment_store or EnvironmentStore()
     docker = docker_provisioner or DockerProvisionerTool()
@@ -172,36 +173,45 @@ def run_setup(
                     agent_id,
                 )
         if not owned_by_other:
-            try:
-                teardown = docker.deprovision(agent_id)
-                # deprovision() reports failure (e.g. a `docker stop` timeout) via
-                # its result rather than raising, so inspect it — otherwise a
-                # failed rollback would leave the container silently orphaned.
-                if not getattr(teardown, "success", True):
-                    logger.error(
-                        "Setup rollback: container teardown for agent_id=%s reported "
-                        "failure; container may be orphaned: %s",
-                        agent_id,
-                        getattr(teardown, "error", None),
-                    )
-            except Exception:
-                logger.exception(
-                    "Setup rollback: failed to tear down container for agent_id=%s",
-                    agent_id,
-                )
-            # Clear any record this failed registration left (register can write a
-            # complete record and then raise on flush/close), so a retry's
-            # running-only early-return does not short-circuit onto the container
-            # we just deleted. Best effort; must not mask the original error. Safe
-            # because we only reach here when no *other* owner holds a record, so
-            # the record, if any, is this attempt's.
+            # Order matters: clear this attempt's own record BEFORE deleting the
+            # container, and delete the container only if the record is actually
+            # gone. register can write a complete record and then raise (flush /
+            # close), so deleting the container while a ``running`` record survives
+            # would let a retry's running-only early-return short-circuit onto the
+            # deleted container. Removing first keeps the two consistent: a failed
+            # removal leaves both in place (a retry safely reuses the existing
+            # container), and only a confirmed removal lets us reclaim the
+            # container. Safe because we only reach here when no *other* owner
+            # holds a record, so the record (if any) is this attempt's; on the
+            # retry-orphan path there is no record and remove is a no-op.
+            record_cleared = False
             try:
                 env_store.remove(agent_id)
+                record_cleared = True
             except Exception:
                 logger.exception(
-                    "Setup rollback: failed to remove env record for agent_id=%s",
+                    "Setup rollback: could not remove env record for agent_id=%s; "
+                    "leaving the container in place to stay consistent with it",
                     agent_id,
                 )
+            if record_cleared:
+                try:
+                    teardown = docker.deprovision(agent_id)
+                    # deprovision() reports failure (e.g. a `docker stop` timeout)
+                    # via its result rather than raising, so inspect it — otherwise
+                    # a failed rollback would leave the container silently orphaned.
+                    if not getattr(teardown, "success", True):
+                        logger.error(
+                            "Setup rollback: container teardown for agent_id=%s "
+                            "reported failure; container may be orphaned: %s",
+                            agent_id,
+                            getattr(teardown, "error", None),
+                        )
+                except Exception:
+                    logger.exception(
+                        "Setup rollback: failed to tear down container for agent_id=%s",
+                        agent_id,
+                    )
         raise
 
     return SetupResult(

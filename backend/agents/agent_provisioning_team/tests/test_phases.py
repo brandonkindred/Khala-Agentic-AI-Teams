@@ -333,6 +333,40 @@ def test_run_setup_clears_own_record_when_register_fails(tmp_path: Path) -> None
     env_store.remove.assert_called_once_with("a9")
 
 
+def test_run_setup_keeps_container_when_record_removal_fails(tmp_path: Path) -> None:
+    """If the record can't be removed, the container must be left in place.
+
+    Deleting the container while a ``running`` record survives would let a retry's
+    early-return short-circuit onto the deleted container, so a failed record
+    removal must prevent the teardown — record and container stay consistent.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = MagicMock()
+    env_store.get.return_value = None
+    env_store.register.side_effect = RuntimeError("register boom")
+    env_store.remove.side_effect = OSError("cannot remove")
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={"container_id": "c-new", "container_name": "agent-a11"},
+    )
+
+    with pytest.raises(RuntimeError, match="register boom"):
+        run_setup(
+            agent_id="a11",
+            manifest=ToolManifest(),
+            environment_store=env_store,
+            docker_provisioner=docker,
+        )
+
+    env_store.remove.assert_called_once_with("a11")
+    docker.deprovision.assert_not_called()
+
+
 def test_run_setup_rollback_survives_ownership_reread_failure(tmp_path: Path) -> None:
     """A failing ownership re-read must not abort the rollback or mask the error.
 
