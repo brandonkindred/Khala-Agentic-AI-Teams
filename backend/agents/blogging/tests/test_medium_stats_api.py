@@ -4,24 +4,18 @@ Backed by an in-memory FakeJobServiceClient — no Postgres or live job service
 required.  The async tests still poll a real background thread for completion.
 """
 
-import importlib.util
-import sys
 import time
-from pathlib import Path
 
 import pytest
+from _api_test_utils import load_isolated_api_main
 from fastapi.testclient import TestClient
 
-_blogging_root = Path(__file__).resolve().parent.parent
-if str(_blogging_root) not in sys.path:
-    sys.path.insert(0, str(_blogging_root))
-
-_spec = importlib.util.spec_from_file_location(
-    "blogging_api_main_medium",
-    _blogging_root / "api" / "main.py",
-)
-_api_main = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_api_main)
+# A private module instance (not the shared `_api_test_utils.api_main`): these
+# tests submit real jobs through the un-mocked async route, spinning up
+# api/main.py's real daemon worker pool. Sharing the module with test_api_unit
+# (which pokes the same queue directly, assuming no worker is draining it)
+# would race the two and hang — see _api_test_utils.py's module docstring.
+_api_main = load_isolated_api_main("blogging_api_main_medium")
 app = _api_main.app
 
 
