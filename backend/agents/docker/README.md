@@ -25,7 +25,6 @@ curl http://localhost:18001/health
 curl http://localhost:18002/health
 curl http://localhost:18003/health
 curl http://localhost:18004/health
-curl http://localhost:18005/health
 ```
 
 ## Environment Variables
@@ -52,7 +51,6 @@ LLM_MODEL=llama3.2:latest docker-compose up -d
 | 18002 | 8002 | Market Research | `POST /market-research/run` |
 | 18003 | 8003 | SOC2 Compliance | `POST /soc2-audit/run`, `GET /soc2-audit/status/{id}` |
 | 18004 | 8004 | Social Marketing | `POST /social-marketing/run`, `GET /social-marketing/status/{id}` |
-| 18005 | 8005 | Blog Research | `POST /research-and-review` |
 
 ### Example API Calls
 
@@ -61,11 +59,6 @@ LLM_MODEL=llama3.2:latest docker-compose up -d
 curl -X POST http://localhost:18000/run-team \
   -H "Content-Type: application/json" \
   -d '{"repo_path": "/workspace/my-project"}'
-
-# Blog Research
-curl -X POST http://localhost:18005/research-and-review \
-  -H "Content-Type: application/json" \
-  -d '{"topic": "Docker best practices", "audience": {"skill_level": "intermediate"}}'
 ```
 
 ## Spec File
@@ -126,7 +119,7 @@ docker build -t khala .
 docker-compose up -d
 
 # 3. Health endpoints respond
-for port in 18000 18001 18002 18003 18004 18005; do
+for port in 18000 18001 18002 18003 18004; do
   echo -n "Port $port: "
   curl -s -o /dev/null -w "%{http_code}" "http://localhost:$port/health"
   echo
@@ -168,8 +161,8 @@ docker exec khala supervisorctl status
 
 **Solutions:**
 1. Stop any existing khala container: `docker-compose down`
-2. Stop other services using ports 18000-18005 (or 8000-8005 if you changed the mapping)
-3. The default host ports are 18000-18005 to avoid conflicts with Ollama (11434) and common dev servers
+2. Stop other services using ports 18000-18004 (or 8000-8004 if you changed the mapping)
+3. The default host ports are 18000-18004 to avoid conflicts with Ollama (11434) and common dev servers
 
 ### Health Check Failures
 
@@ -178,7 +171,7 @@ docker exec khala supervisorctl status
 **Solutions:**
 1. Check logs: `docker logs khala`
 2. Verify all 6 API processes started: `docker exec khala supervisorctl status`
-3. Ensure ports 8000-8005 are not in use on the host
+3. Ensure ports 8000-8004 are not in use on the host
 
 ### Tool Verification
 

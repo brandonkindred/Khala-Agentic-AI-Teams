@@ -160,7 +160,7 @@ RUN mkdir -p /var/log/supervisor /workspace /var/lib/postgresql/data /run/postgr
 ARG SPEC_FILE=agents/docker/default_initial_spec.md
 COPY ${SPEC_FILE} /app/initial_spec.md
 
-# Expose ports: nginx (80), APIs (8000-8005), PostgreSQL (5432)
-EXPOSE 80 8000 8001 8002 8003 8004 8005 5432
+# Expose ports: nginx (80), APIs (8000-8004), PostgreSQL (5432)
+EXPOSE 80 8000 8001 8002 8003 8004 5432
 
 ENTRYPOINT ["/app/entrypoint.sh"]
