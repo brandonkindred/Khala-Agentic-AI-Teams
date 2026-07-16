@@ -51,6 +51,9 @@ from db import (
 from db import (
     update_job as db_update_job,
 )
+from db import (
+    update_job_if_not_cancelled as db_update_job_if_not_cancelled,
+)
 from fastapi import FastAPI, HTTPException, Query
 from models import (
     AppendEventRequest,
@@ -66,6 +69,7 @@ from models import (
     MarkStaleRequest,
     MarkStaleResponse,
     ReplaceJobRequest,
+    UpdateIfNotCancelledResponse,
     UpdateJobRequest,
 )
 from postgres import SCHEMA as JOB_SERVICE_SCHEMA
@@ -162,6 +166,18 @@ def list_jobs(team: str, statuses: list[str] | None = Query(default=None)):  # n
 def update_job(team: str, job_id: str, req: UpdateJobRequest):
     db_update_job(team, job_id, heartbeat=req.heartbeat, **req.fields)
     return JobResponse(job=db_get_job(team, job_id))
+
+
+@app.post("/jobs/{team}/{job_id}/update-if-not-cancelled", response_model=UpdateIfNotCancelledResponse)
+def update_job_if_not_cancelled(team: str, job_id: str, req: UpdateJobRequest):
+    """Atomically write ``req.fields`` unless the job is already cancelled.
+
+    The status guard lives in the SQL ``WHERE`` clause (see
+    ``db.update_job_if_not_cancelled``), so a cancel that lands between a
+    caller's read and this write is never overwritten.
+    """
+    updated = db_update_job_if_not_cancelled(team, job_id, heartbeat=req.heartbeat, **req.fields)
+    return UpdateIfNotCancelledResponse(updated=updated)
 
 
 # ---------------------------------------------------------------------------

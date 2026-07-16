@@ -274,6 +274,98 @@ def update_job(team: str, job_id: str, heartbeat: bool = True, **fields: Any) ->
                 )
 
 
+def update_job_if_not_cancelled(team: str, job_id: str, heartbeat: bool = True, **fields: Any) -> bool:
+    """Merge ``fields`` into the job's data and refresh timestamps, unless cancelled.
+
+    The cancelled-check and the write happen in one conditional ``UPDATE`` (status
+    guarded in the ``WHERE`` clause), closing the same check-then-act race
+    :func:`cancel_active_job` closes for cancellation itself — but for the opposite
+    direction: writing a new RUNNING/COMPLETED/FAILED status without clobbering a
+    cancellation that landed first.
+
+    Preconditions:
+        - Same as :func:`update_job` — ``fields`` values are JSON-serializable.
+        - ``fields`` MAY include ``status``; when present it is written to the
+          top-level column (mirrors :func:`update_job`) as long as the job is not
+          already cancelled.
+    Postconditions:
+        - Returns True and performs the write when the job exists and its status
+          is not ``'cancelled'``.
+        - Returns False and makes NO write when the job is missing OR already
+          cancelled — a cancelled job is terminal; the caller's queued status
+          transition is silently dropped rather than overwriting the cancellation.
+        - Guards ONLY on ``'cancelled'`` — unlike :func:`cancel_active_job` this does
+          NOT block on other terminal statuses (completed/failed/interrupted),
+          matching :func:`is_job_cancelled`'s existing (narrower) check exactly.
+    """
+    now = _now_iso()
+    new_status = fields.pop("status", None)
+    fields.pop("job_id", None)
+    fields.pop("team", None)
+    fields.pop("created_at", None)
+    fields.pop("updated_at", None)
+    fields.pop("last_heartbeat_at", None)
+    if fields.get("last_activity_at") is None:
+        fields["last_activity_at"] = now
+
+    with get_conn() as conn, conn.cursor() as cur:
+        if new_status is not None:
+            if heartbeat:
+                cur.execute(
+                    """
+                        UPDATE jobs
+                        SET data = data || %s::jsonb,
+                            status = %s,
+                            updated_at = %s,
+                            last_heartbeat_at = %s
+                        WHERE team = %s AND job_id = %s
+                          AND status != 'cancelled'
+                        RETURNING job_id
+                        """,
+                    (json.dumps(fields), new_status, now, now, team, job_id),
+                )
+            else:
+                cur.execute(
+                    """
+                        UPDATE jobs
+                        SET data = data || %s::jsonb,
+                            status = %s,
+                            updated_at = %s
+                        WHERE team = %s AND job_id = %s
+                          AND status != 'cancelled'
+                        RETURNING job_id
+                        """,
+                    (json.dumps(fields), new_status, now, team, job_id),
+                )
+        else:
+            if heartbeat:
+                cur.execute(
+                    """
+                        UPDATE jobs
+                        SET data = data || %s::jsonb,
+                            updated_at = %s,
+                            last_heartbeat_at = %s
+                        WHERE team = %s AND job_id = %s
+                          AND status != 'cancelled'
+                        RETURNING job_id
+                        """,
+                    (json.dumps(fields), now, now, team, job_id),
+                )
+            else:
+                cur.execute(
+                    """
+                        UPDATE jobs
+                        SET data = data || %s::jsonb,
+                            updated_at = %s
+                        WHERE team = %s AND job_id = %s
+                          AND status != 'cancelled'
+                        RETURNING job_id
+                        """,
+                    (json.dumps(fields), now, team, job_id),
+                )
+        return cur.fetchone() is not None
+
+
 def apply_patch(
     team: str,
     job_id: str,

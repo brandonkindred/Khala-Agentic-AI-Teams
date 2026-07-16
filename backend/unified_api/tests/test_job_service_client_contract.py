@@ -17,6 +17,7 @@ lock in the behaviours called out by review on PR #360:
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -124,6 +125,38 @@ def test_real_client_cancel_active_job_false_when_not_cancelled(
     _route_through_mock_transport(monkeypatch, lambda _req: httpx.Response(200, json={"cancelled": False}))
     client = JobServiceClient(team="t")
     assert client.cancel_active_job("j1") is False
+
+
+def test_real_client_update_job_if_not_cancelled_posts_and_parses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real client POSTs to /jobs/{team}/{job_id}/update-if-not-cancelled with
+    the same {heartbeat, fields} body as update_job, and returns the parsed `updated`."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["json"] = json.loads(request.content)
+        return httpx.Response(200, json={"updated": True})
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    assert client.update_job_if_not_cancelled("j1", status="running") is True
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://js.example/jobs/t/j1/update-if-not-cancelled"
+    assert captured["json"] == {"heartbeat": True, "fields": {"status": "running"}}
+
+
+def test_real_client_update_job_if_not_cancelled_false_when_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled job yields ``updated: false`` server-side -> False."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    _route_through_mock_transport(monkeypatch, lambda _req: httpx.Response(200, json={"updated": False}))
+    client = JobServiceClient(team="t")
+    assert client.update_job_if_not_cancelled("j1", status="running") is False
 
 
 def test_real_client_retries_on_remote_protocol_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -440,6 +473,48 @@ def test_fake_cancel_active_job_noop_on_missing(fake_job_client: FakeJobServiceC
     """Cancelling a job that does not exist returns False (no auto-create)."""
     assert fake_job_client.cancel_active_job("nope") is False
     assert fake_job_client.get_job("nope") is None
+
+
+# ---------------------------------------------------------------------------
+# Atomic conditional update — mirrors job_service/db.py
+# update_job_if_not_cancelled's conditional UPDATE, closing the TOCTOU race a
+# separate is_job_cancelled check + update_job write would leave open.
+# ---------------------------------------------------------------------------
+
+
+def test_fake_update_job_if_not_cancelled_updates_active_job(
+    fake_job_client: FakeJobServiceClient,
+) -> None:
+    fake_job_client.create_job("j1", status="pending")
+    assert fake_job_client.update_job_if_not_cancelled("j1", status="running") is True
+    assert fake_job_client.get_job("j1")["status"] == "running"
+
+
+def test_fake_update_job_if_not_cancelled_noop_on_cancelled(
+    fake_job_client: FakeJobServiceClient,
+) -> None:
+    fake_job_client.create_job("j1", status="cancelled")
+    assert fake_job_client.update_job_if_not_cancelled("j1", status="running") is False
+    assert fake_job_client.get_job("j1")["status"] == "cancelled"
+
+
+def test_fake_update_job_if_not_cancelled_noop_on_missing(
+    fake_job_client: FakeJobServiceClient,
+) -> None:
+    assert fake_job_client.update_job_if_not_cancelled("nope", status="running") is False
+    assert fake_job_client.get_job("nope") is None
+
+
+def test_fake_update_job_if_not_cancelled_does_not_block_on_other_terminal_statuses(
+    fake_job_client: FakeJobServiceClient,
+) -> None:
+    """Unlike ``cancel_active_job`` (which only allows pending/running), this
+    primitive guards ONLY on 'cancelled' — matching ``is_job_cancelled``'s
+    existing narrower check. A completed/failed job can still be written."""
+    for terminal in ("completed", "failed", "interrupted"):
+        fake_job_client.create_job(terminal, status=terminal)
+        assert fake_job_client.update_job_if_not_cancelled(terminal, note="x") is True
+        assert fake_job_client.get_job(terminal)["note"] == "x"
 
 
 # ---------------------------------------------------------------------------

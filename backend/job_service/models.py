@@ -66,6 +66,10 @@ class CancelResponse(BaseModel):
     cancelled: bool
 
 
+class UpdateIfNotCancelledResponse(BaseModel):
+    updated: bool
+
+
 class MarkStaleResponse(BaseModel):
     failed_job_ids: list[str]
 

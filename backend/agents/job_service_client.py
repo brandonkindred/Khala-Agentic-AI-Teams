@@ -272,6 +272,27 @@ class JobServiceClient:
             json={"heartbeat": heartbeat, "fields": fields},
         )
 
+    def update_job_if_not_cancelled(
+        self, job_id: str, *, heartbeat: bool = True, **fields: Any
+    ) -> bool:
+        """Atomically merge ``fields`` into ``job_id`` unless it is already cancelled.
+
+        Preconditions: ``job_id`` is non-empty (the caller validates).
+        Postconditions: returns True only when the server performed the write
+            because the job existed and was not cancelled. The cancelled-check is
+            evaluated in the same conditional UPDATE that performs the write, so a
+            cancel that lands between a caller's earlier read and this call is
+            never overwritten (no read-then-write race) — the same guarantee
+            ``cancel_active_job`` provides for cancellation itself, mirrored here
+            for RUNNING/COMPLETED/FAILED transitions.
+        """
+        resp = self._request(
+            "POST",
+            self._url(f"/jobs/{self.team}/{job_id}/update-if-not-cancelled"),
+            json={"heartbeat": heartbeat, "fields": fields},
+        )
+        return resp.json().get("updated", False)
+
     def append_event(
         self,
         job_id: str,

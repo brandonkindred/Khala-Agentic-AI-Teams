@@ -71,6 +71,23 @@ def test_is_cancelled_missing_returns_false(store) -> None:
     assert store.is_job_cancelled("missing") is False
 
 
+def test_update_job_if_not_cancelled_writes_when_active(store) -> None:
+    store.create_job("j1")
+    assert store.update_job_if_not_cancelled("j1", status="running") is True
+    assert store.get_job("j1")["status"] == "running"
+
+
+def test_update_job_if_not_cancelled_noop_when_cancelled(store) -> None:
+    store.create_job("j1")
+    store.update_job("j1", status="cancelled")
+    assert store.update_job_if_not_cancelled("j1", status="running") is False
+    assert store.get_job("j1")["status"] == "cancelled"
+
+
+def test_update_job_if_not_cancelled_missing_job_returns_false(store) -> None:
+    assert store.update_job_if_not_cancelled("missing", status="running") is False
+
+
 def test_delete_reports_whether_removed(store) -> None:
     store.create_job("j1")
     assert store.delete_job("j1") is True
@@ -109,3 +126,20 @@ def test_client_getter_is_resolved_at_call_time() -> None:
     store.create_job("j2")
     assert second.get_job("j2") is not None
     assert first.get_job("j2") is None
+
+
+def test_update_job_if_not_cancelled_client_getter_resolved_at_call_time() -> None:
+    """Same convention as ``test_client_getter_is_resolved_at_call_time``, for
+    the new field — no closure may cache the client returned at bind time."""
+    first = FakeJobServiceClient(team="first")
+    second = FakeJobServiceClient(team="second")
+    holder = {"client": first}
+    store = make_status_job_store(lambda: holder["client"])
+
+    first.create_job("j1")
+    holder["client"] = second
+    second.create_job("j1")
+
+    assert store.update_job_if_not_cancelled("j1", status="running") is True
+    assert second.get_job("j1")["status"] == "running"
+    assert first.get_job("j1")["status"] == "pending"
