@@ -101,8 +101,18 @@ def restore_account_provisioning(raw: Dict[str, Any]) -> AccountProvisioningSnap
 def restore_access_audit(raw: Dict[str, Any]) -> AccessAuditResult:
     """Reconstruct a validated access-audit result from a serialized result.
 
-    Unlike the sibling helpers, the audit phase has no local ``*Snapshot`` wrapper;
-    its restored form is the ``AccessAuditResult`` model itself.
+    Unlike the sibling helpers, this one returns ``AccessAuditResult`` directly
+    rather than a local ``*Snapshot`` wrapper — and that asymmetry is deliberate.
+    The sibling snapshots exist because their phases emit *ad-hoc* result objects
+    whose combined field shape matches no single model (they replace the unsafe
+    ``type("R", (), prior_results[...])()`` pattern described in the module
+    docstring), so a validated Pydantic wrapper has to be introduced. The audit
+    phase already produces a first-class ``AccessAuditResult`` model
+    (``run_access_audit``), so restoring it is just re-validating that same
+    model; wrapping it in a snapshot would add redundant indirection. Callers —
+    the Temporal ``audit_activity`` and ``ProvisioningResult.access_audit`` —
+    consume the ``AccessAuditResult`` shape directly, so returning it unwrapped
+    keeps that contract intact.
 
     Preconditions:
         * ``raw`` is a mapping matching the serialized (``model_dump``) shape of a
