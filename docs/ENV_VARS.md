@@ -490,6 +490,17 @@ reaps at a time.
 Optional root for pipeline run artifacts (default: `{tempdir}/blogging_runs`; Docker sets
 `/data/blogging/runs`).
 
+### BLOGGING_ASYNC_MAX_WORKERS
+Size of the bounded thread pool that runs asynchronous blogging jobs (the non-Temporal
+fallback path for `full-pipeline-async`, its resume/restart, and `medium-stats-async`).
+Default `16`, floor `1` (garbage/out-of-range values fall back to/clamp against these).
+Each pool worker can stay busy for a long time — a pipeline thread blocks on
+human-in-the-loop polling until the user responds or the ~1h stale-job monitor fires — so
+this caps the number of idle-but-alive OS threads under many concurrent HITL jobs. When
+every worker is busy, further async jobs queue (the endpoints still return a `job_id`
+immediately). Temporal remains the durable path for high HITL concurrency and is used
+instead whenever `TEMPORAL_ADDRESS` is set.
+
 ### BLOGGING_MEDIUM_STATS_ROOT
 Optional base dir for Medium stats job `work_dir` (default:
 `{AGENT_CACHE}/blogging_team/medium_stats_runs`).

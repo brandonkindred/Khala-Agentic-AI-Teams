@@ -243,3 +243,108 @@ def test_run_pipeline_with_gates_pass_after_one_rewrite(monkeypatch, tmp_path: P
         draft_editor_iterations=1,
     )
     assert status == "PASS"
+
+
+def _raising_gate(exc: Exception):
+    """A gate-agent stub class whose ``run`` raises ``exc``."""
+
+    class _Stub:
+        def __init__(self, *a, **kw):
+            pass
+
+        def run(self, *a, **kw):
+            raise exc
+
+    return _Stub
+
+
+def _run_gated_pipeline(v2, tmp_path):
+    from blog_research_agent.models import ResearchBriefInput
+
+    brief = ResearchBriefInput(brief="hi", max_results=5)
+    return v2.run_pipeline(
+        brief,
+        work_dir=tmp_path / "wd",
+        run_gates=True,
+        max_rewrite_iterations=1,
+        draft_editor_iterations=1,
+    )
+
+
+def test_gate_factcheck_transient_error_propagates_unwrapped(monkeypatch, tmp_path: Path) -> None:
+    """A transient LLM error from the fact-check gate propagates unwrapped (for Temporal retry)."""
+    import pytest
+
+    from llm_service import LLMTemporaryError
+
+    v2 = _common_v2_setup(monkeypatch, validator_status="PASS")
+    monkeypatch.setattr(v2, "BlogComplianceAgent", _stub_compliance("PASS"))
+    monkeypatch.setattr(v2, "BlogFactCheckAgent", _raising_gate(LLMTemporaryError("503")))
+
+    with pytest.raises(LLMTemporaryError):
+        _run_gated_pipeline(v2, tmp_path)
+
+
+def test_gate_factcheck_generic_error_maps_to_factcheckerror(monkeypatch, tmp_path: Path) -> None:
+    """A non-transient error from the fact-check gate maps to FactCheckError."""
+    import pytest
+    from shared.errors import FactCheckError
+
+    v2 = _common_v2_setup(monkeypatch, validator_status="PASS")
+    monkeypatch.setattr(v2, "BlogComplianceAgent", _stub_compliance("PASS"))
+    monkeypatch.setattr(v2, "BlogFactCheckAgent", _raising_gate(RuntimeError("boom")))
+
+    with pytest.raises(FactCheckError):
+        _run_gated_pipeline(v2, tmp_path)
+
+
+def test_gate_compliance_generic_error_maps_to_complianceerror(monkeypatch, tmp_path: Path) -> None:
+    """A non-transient error from the compliance gate maps to ComplianceError."""
+    import pytest
+    from shared.errors import ComplianceError
+
+    v2 = _common_v2_setup(monkeypatch, validator_status="PASS")
+    monkeypatch.setattr(v2, "BlogFactCheckAgent", _stub_factcheck("PASS", "PASS"))
+    monkeypatch.setattr(v2, "BlogComplianceAgent", _raising_gate(RuntimeError("boom")))
+
+    with pytest.raises(ComplianceError):
+        _run_gated_pipeline(v2, tmp_path)
+
+
+def test_both_gates_invoked_when_parallelized(monkeypatch, tmp_path: Path) -> None:
+    """Both gates run (concurrently) and their PASS reports combine to status=PASS."""
+    from blog_compliance_agent.models import ComplianceReport
+    from blog_fact_check_agent.models import FactCheckReport
+
+    calls = {"fact": 0, "compliance": 0}
+
+    class _CountingFact:
+        def __init__(self, *a, **kw):
+            pass
+
+        def run(self, *a, **kw):
+            calls["fact"] += 1
+            return FactCheckReport(
+                claims_status="PASS",
+                risk_status="PASS",
+                risk_flags=[],
+                required_disclaimers=[],
+                unverified_claims=[],
+                claims=[],
+            )
+
+    class _CountingCompliance:
+        def __init__(self, *a, **kw):
+            pass
+
+        def run(self, *a, **kw):
+            calls["compliance"] += 1
+            return ComplianceReport(status="PASS", violations=[], required_fixes=[], notes="ok")
+
+    v2 = _common_v2_setup(monkeypatch, validator_status="PASS")
+    monkeypatch.setattr(v2, "BlogFactCheckAgent", _CountingFact)
+    monkeypatch.setattr(v2, "BlogComplianceAgent", _CountingCompliance)
+
+    _, _, status = _run_gated_pipeline(v2, tmp_path)
+    assert status == "PASS"
+    assert calls == {"fact": 1, "compliance": 1}

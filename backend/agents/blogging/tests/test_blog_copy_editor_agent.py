@@ -207,3 +207,27 @@ def test_blog_copy_editor_agent_empty_draft_writes_file(tmp_path: Path) -> None:
     assert content["feedback_items"] == []
     assert result.summary
     assert len(result.feedback_items) == 0
+
+
+@pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
+def test_copy_editor_transient_error_reraises(monkeypatch, kind) -> None:
+    """A transient LLM-transport error propagates unwrapped (delegated to Temporal), no fallback."""
+    from blog_copy_editor_agent import agent as ce_mod
+
+    from llm_service import LLMRateLimitError, LLMTemporaryError
+
+    err_cls = LLMRateLimitError if kind == "rate_limit" else LLMTemporaryError
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise err_cls("transient outage")
+
+    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
+    )
+    with pytest.raises(err_cls):
+        agent.run(CopyEditorInput(draft="# d\n\nsome body text here"))

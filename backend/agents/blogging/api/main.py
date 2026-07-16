@@ -10,8 +10,8 @@ import logging
 import os
 import sys
 import tempfile
-import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -51,6 +51,7 @@ from job_service_client import (  # noqa: E402
     validate_job_for_action,
 )
 from shared_app import create_team_app  # noqa: E402
+from shared_env_config import env_int  # noqa: E402
 
 try:
     from shared.artifacts import ARTIFACT_NAMES, ARTIFACT_PRODUCER, read_artifact, write_artifact
@@ -154,6 +155,20 @@ else:
         RUN_ARTIFACTS_BASE,
     )
 
+# Async blogging jobs (the non-Temporal fallback) run on a shared, BOUNDED thread pool
+# instead of an unbounded ``threading.Thread`` per request. A pipeline thread can stay
+# alive for a long time — it blocks on human-in-the-loop polling until the user responds
+# or the ~1h stale-job monitor fires — so without a cap a burst of concurrent HITL jobs
+# would spawn proportionally many idle-but-alive OS threads (the scalability risk this
+# pool exists to bound). When every worker is busy, further submissions queue; the async
+# endpoints still return a job_id immediately. Temporal remains the durable path for high
+# HITL concurrency. Tunable via BLOGGING_ASYNC_MAX_WORKERS (clamped to >= 1, default 16).
+_ASYNC_JOB_MAX_WORKERS = env_int("BLOGGING_ASYNC_MAX_WORKERS", 16, floor=1)
+_ASYNC_JOB_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_ASYNC_JOB_MAX_WORKERS,
+    thread_name_prefix="blogging-async-job",
+)
+
 
 def _run_blogging_service_shutdown() -> (
     None
@@ -193,6 +208,14 @@ def _run_blogging_service_shutdown() -> (
         _shutdown_event_bus()
     except Exception:
         logger.debug("Event-bus reaper shutdown skipped", exc_info=True)
+
+    # Stop accepting new async jobs and cancel any still-queued ones. Already-running
+    # pipeline threads (daemons) are not waited on — process teardown reclaims them,
+    # matching the previous per-job daemon-thread behavior.
+    try:
+        _ASYNC_JOB_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        logger.debug("Async-job executor shutdown skipped", exc_info=True)
 
 
 # Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.
@@ -845,13 +868,8 @@ def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResp
     except ImportError:
         pass
 
-    # Start pipeline in background thread
-    thread = threading.Thread(
-        target=_run_pipeline_with_tracking,
-        args=(job_id, request),
-        daemon=True,
-    )
-    thread.start()
+    # Submit to the bounded async-job pool (Temporal is preferred when enabled above).
+    _ASYNC_JOB_EXECUTOR.submit(_run_pipeline_with_tracking, job_id, request)
 
     logger.info("Started async pipeline job %s", job_id)
     return StartPipelineResponse(job_id=job_id, message="Pipeline started")
@@ -909,12 +927,7 @@ def medium_stats_async(payload: MediumStatsRequest) -> StartPipelineResponse:
         work_dir=work_dir,
         job_type="medium_stats",
     )
-    thread = threading.Thread(
-        target=_run_medium_stats_async_job,
-        args=(job_id, payload),
-        daemon=True,
-    )
-    thread.start()
+    _ASYNC_JOB_EXECUTOR.submit(_run_medium_stats_async_job, job_id, payload)
     logger.info("Started async Medium stats job %s", job_id)
     return StartPipelineResponse(job_id=job_id, message="Medium statistics job started")
 
@@ -1097,12 +1110,7 @@ def resume_blog_job(job_id: str) -> StartPipelineResponse:
     except ImportError:
         pass
 
-    thread = threading.Thread(
-        target=_run_pipeline_with_tracking,
-        args=(job_id, request),
-        daemon=True,
-    )
-    thread.start()
+    _ASYNC_JOB_EXECUTOR.submit(_run_pipeline_with_tracking, job_id, request)
     return StartPipelineResponse(job_id=job_id, message="Job resumed")
 
 
@@ -1147,12 +1155,7 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
     except ImportError:
         pass
 
-    thread = threading.Thread(
-        target=_run_pipeline_with_tracking,
-        args=(job_id, request),
-        daemon=True,
-    )
-    thread.start()
+    _ASYNC_JOB_EXECUTOR.submit(_run_pipeline_with_tracking, job_id, request)
     return StartPipelineResponse(job_id=job_id, message="Job restarted from scratch")
 
 

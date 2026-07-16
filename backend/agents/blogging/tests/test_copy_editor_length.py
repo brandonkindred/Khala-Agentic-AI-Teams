@@ -126,7 +126,6 @@ def test_copy_editor_llm_json_parse_failure_uses_fallback(monkeypatch) -> None:
             return "not json"
 
     monkeypatch.setattr(ce_mod, "Agent", _Agent)
-    monkeypatch.setattr(ce_mod.time, "sleep", lambda s: None)
     a = _make_agent()
     out = a.run(_make_input(draft="# d\n\nshort"))
     assert "could not parse" in out.summary.lower()

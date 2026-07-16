@@ -7,22 +7,22 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 from strands import Agent
 
-from llm_service import LLMJsonParseError, extract_json_from_response
-from llm_service.backoff import rate_limit_retry_delay
+from llm_service import (
+    LLMJsonParseError,
+    LLMRateLimitError,
+    LLMTemporaryError,
+    extract_json_from_response,
+)
 
 from .models import CopyEditorInput, CopyEditorOutput, FeedbackItem
 from .prompts import COPY_EDITOR_PROMPT
 
 logger = logging.getLogger(__name__)
-
-# After llm_service exhausts HTTP retries, re-run complete_json a few times (timeouts, cloud blips).
-_MAX_COPY_EDITOR_LLM_ROUNDS = 3
 
 
 class BlogCopyEditorAgent:
@@ -206,49 +206,41 @@ class BlogCopyEditorAgent:
             "Keys: approved (boolean), summary (string), feedback_items (array of objects with "
             "category, severity, location?, issue, suggestion?)."
         )
-        for llm_round in range(_MAX_COPY_EDITOR_LLM_ROUNDS):
-            for json_attempt in range(2):
-                try:
-                    result = agent(
-                        working_prompt + "\n\nRespond with valid JSON only, no markdown fences."
-                    )
-                    data = extract_json_from_response(str(result).strip())
-                    break
-                except LLMJsonParseError as e:
-                    if json_attempt == 0:
-                        logger.warning(
-                            "Copy editor JSON parse failed (attempt 1), retrying with strict instruction: %s",
-                            e,
-                        )
-                        working_prompt = base_prompt + strict_json_suffix
-                    else:
-                        logger.warning(
-                            "Copy editor JSON parse failed after retry; using fallback output: %s",
-                            e,
-                        )
-                        data = {
-                            "summary": "Copy editor could not parse the model response. Please review the draft manually.",
-                            "feedback_items": [],
-                        }
-                        break
-                except Exception as e:
-                    if llm_round >= _MAX_COPY_EDITOR_LLM_ROUNDS - 1:
-                        raise
-                    wait = rate_limit_retry_delay(llm_round, 15.0, 60.0)
-                    logger.warning(
-                        "Copy editor LLM transport/timeout after service retries (agent round %d/%d, "
-                        "json sub-attempt %d): %s — sleeping %.0fs and retrying.",
-                        llm_round + 1,
-                        _MAX_COPY_EDITOR_LLM_ROUNDS,
-                        json_attempt + 1,
-                        e,
-                        wait,
-                    )
-                    time.sleep(wait)
-                    working_prompt = base_prompt
-                    break
-            if data is not None:
+        # The LLM client already exhausts its own 429 / transient-transport retry budgets
+        # before raising, so the copy editor adds no second blocking retry: a transient
+        # (or any other) LLM error propagates unwrapped for the Temporal activity funnel to
+        # retry the whole stage (thread mode fails the job). Only JSON-parse failures are
+        # handled here — one cheap, local strict re-prompt, then a manual-review fallback.
+        for json_attempt in range(2):
+            try:
+                result = agent(
+                    working_prompt + "\n\nRespond with valid JSON only, no markdown fences."
+                )
+                data = extract_json_from_response(str(result).strip())
                 break
+            except LLMJsonParseError as e:
+                if json_attempt == 0:
+                    logger.warning(
+                        "Copy editor JSON parse failed (attempt 1), retrying with strict instruction: %s",
+                        e,
+                    )
+                    working_prompt = base_prompt + strict_json_suffix
+                else:
+                    logger.warning(
+                        "Copy editor JSON parse failed after retry; using fallback output: %s",
+                        e,
+                    )
+                    data = {
+                        "summary": "Copy editor could not parse the model response. Please review the draft manually.",
+                        "feedback_items": [],
+                    }
+                    break
+            except (LLMRateLimitError, LLMTemporaryError):
+                # Transient transport error after the client's own retries: re-raise so
+                # Temporal (or the caller) owns the retry rather than a blocking sleep here.
+                # (Any other non-JSON error likewise propagates — the copy editor fails
+                # loudly instead of retrying in-process.)
+                raise
 
         if not data:
             data = {

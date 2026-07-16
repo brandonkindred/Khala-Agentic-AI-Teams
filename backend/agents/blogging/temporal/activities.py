@@ -174,10 +174,16 @@ def _run_stage(
           best-effort backstop, not a guarantee: a body that severs the chain can
           still be recorded as a failure, so callers must honor the "must not catch
           CancelledError" precondition.
+        - A transient LLM-transport error (``LLMRateLimitError``/``LLMTemporaryError``,
+          raised only after the LLM client exhausts its own retries) re-raises so
+          Temporal retries the whole stage, EXCEPT on the last attempt (or outside an
+          activity context) where it is funnelled to a FAIL DTO like any other handled
+          error — so the run terminates instead of retrying forever.
     """
     from temporalio.exceptions import CancelledError
 
     from blogging.shared.run_pipeline_job import start_pipeline_heartbeat
+    from llm_service import LLMRateLimitError, LLMTemporaryError
 
     # Start the heartbeat OUTSIDE the funnel: a heartbeat-start failure is an
     # infrastructure error (store/thread), so it must propagate to Temporal for
@@ -189,6 +195,24 @@ def _run_stage(
     except CancelledError:
         logger.info("Blog %s stage cancelled for job %s", failed_phase, job_id)
         raise
+    except (LLMRateLimitError, LLMTemporaryError) as e:
+        # Transient LLM-transport failure — the client already exhausted its own 429 /
+        # transient retries, and the agents no longer add a blocking in-process retry.
+        # Re-raise so Temporal retries the whole stage under the activity retry policy,
+        # EXCEPT on the final attempt (or outside an activity context, e.g. thread mode)
+        # where we mark the job failed and funnel a FAIL DTO so the run ends cleanly
+        # rather than retrying forever. Mirrors finalize_job_activity's last-attempt
+        # handling.
+        if not _is_last_attempt():
+            logger.warning(
+                "Blog %s stage hit a transient LLM error for job %s; deferring to Temporal retry: %s",
+                failed_phase,
+                job_id,
+                e,
+            )
+            raise
+        _fail_activity(job_id, e, failed_phase=failed_phase)
+        return fail_dto()
     except Exception as e:
         # The "body must not catch CancelledError" contract is enforced structurally
         # (not just documented) by _fail_activity: it inspects the exception chain via

@@ -185,15 +185,8 @@ def test_resume_job_happy(client: TestClient, monkeypatch) -> None:
         request_payload={"brief": "x"},
     )
 
-    # Threading replacement so we don't actually run the pipeline
-    class _NoOpThread:
-        def __init__(self, target=None, args=(), daemon=False, **kw):
-            pass
-
-        def start(self):
-            pass
-
-    monkeypatch.setattr(_api_main.threading, "Thread", _NoOpThread)
+    # Intercept the bounded async-job pool so we don't actually run the pipeline.
+    monkeypatch.setattr(_api_main._ASYNC_JOB_EXECUTOR, "submit", lambda fn, *a, **kw: None)
 
     r = client.post(f"/job/{job_id}/resume")
     assert r.status_code == 200
@@ -219,14 +212,8 @@ def test_restart_job_happy(client: TestClient, monkeypatch, fake_job_client) -> 
     except ImportError:
         pass
 
-    class _NoOpThread:
-        def __init__(self, target=None, args=(), daemon=False, **kw):
-            pass
-
-        def start(self):
-            pass
-
-    monkeypatch.setattr(_api_main.threading, "Thread", _NoOpThread)
+    # Intercept the bounded async-job pool so we don't actually run the pipeline.
+    monkeypatch.setattr(_api_main._ASYNC_JOB_EXECUTOR, "submit", lambda fn, *a, **kw: None)
 
     r = client.post(f"/job/{job_id}/restart")
     assert r.status_code == 200

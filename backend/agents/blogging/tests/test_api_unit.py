@@ -527,20 +527,14 @@ def test_restart_job_400_when_no_payload(client: TestClient) -> None:
 def test_start_full_pipeline_async_creates_job(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """POST /full-pipeline-async creates a job and starts a background thread, which we no-op."""
+    """POST /full-pipeline-async creates a job and submits it to the bounded async pool, no-oped."""
     started: list[Any] = []
 
-    class _NoOpThread:
-        def __init__(self, target=None, args=(), daemon=False, **kw):
-            self._target = target
-            self._args = args
-            started.append((target, args))
+    def _fake_submit(fn, *args, **kwargs):
+        started.append((fn, args))
 
-        def start(self):
-            pass
-
-    # Replace the threading module reference inside the API module.
-    monkeypatch.setattr(_api_main.threading, "Thread", _NoOpThread)
+    # Intercept the bounded async-job pool so we don't actually run the pipeline.
+    monkeypatch.setattr(_api_main._ASYNC_JOB_EXECUTOR, "submit", _fake_submit)
 
     body = {
         "brief": "How to ship faster",
@@ -554,6 +548,19 @@ def test_start_full_pipeline_async_creates_job(
     data = r.json()
     assert "job_id" in data
     assert started
+    # The submitted job is the pipeline runner bound to the returned job_id.
+    ((fn, args),) = started
+    assert fn is _api_main._run_pipeline_with_tracking
+    assert args[0] == data["job_id"]
+
+
+def test_async_job_executor_is_bounded() -> None:
+    """Async jobs run on a bounded ThreadPoolExecutor sized from BLOGGING_ASYNC_MAX_WORKERS."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    assert isinstance(_api_main._ASYNC_JOB_EXECUTOR, ThreadPoolExecutor)
+    assert _api_main._ASYNC_JOB_MAX_WORKERS >= 1
+    assert _api_main._ASYNC_JOB_EXECUTOR._max_workers == _api_main._ASYNC_JOB_MAX_WORKERS
 
 
 def test_medium_stats_sync_when_integration_disabled(
@@ -587,15 +594,8 @@ def test_medium_stats_async_starts_job(
 ) -> None:
     monkeypatch.setattr(_api_main, "medium_stats_integration_eligible", lambda: (True, ""))
 
-    class _NoOpThread:
-        def __init__(self, target=None, args=(), daemon=False, **kw):
-            self._target = target
-            self._args = args
-
-        def start(self):
-            pass
-
-    monkeypatch.setattr(_api_main.threading, "Thread", _NoOpThread)
+    # Intercept the bounded async-job pool so we don't actually run the Medium stats job.
+    monkeypatch.setattr(_api_main._ASYNC_JOB_EXECUTOR, "submit", lambda fn, *a, **kw: None)
     monkeypatch.setenv("BLOGGING_MEDIUM_STATS_ROOT", str(tmp_path / "ms"))
 
     r = client.post("/medium-stats-async", json={})
