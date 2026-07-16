@@ -600,6 +600,58 @@ a review outage (the failure is still recorded in the job store either way). Thi
 does not affect the distinct "no engine provider configured" deploy-misconfig
 abort, which remains a loud operator-facing comment.
 
+### PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION / PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION
+Similarity-ratio overrides (0.0–1.0) for the `/review-pr` flow's duplicate-issue
+check: before a pre-existing finding is offered to a human as a "file a new
+GitHub issue?" candidate, the reviewed repository's open issues are checked for
+one that already tracks the same bug (`difflib.SequenceMatcher` ratio between the
+finding's description headline and a candidate issue's title, casefolded). A
+match found this way is pre-linked to the existing issue instead of being offered
+for creation. `_WITH_LOCATION` (default `0.5`) applies when the finding's
+`file_path` also appears in the candidate issue's title/body (a corroborating
+structural signal, so a looser text bar is safe); `_NO_LOCATION` (default `0.8`)
+applies otherwise, requiring a near-identical headline/title on text alone. Each
+parses defensively: a missing, blank, unparsable, or out-of-range value falls
+back to its documented default (clamped to `[0.0, 1.0]` when it does parse)
+rather than raising or disabling the check.
+
+### PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN
+Word-set (Jaccard) overlap override (0.0–1.0, default `0.8`) additionally
+required, alongside `PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION`, for the
+`/review-pr` duplicate-issue check's text-alone signal (no `file_path` match to
+corroborate it). `SequenceMatcher`'s character-level ratio alone is fooled by
+two headlines sharing a long templated prefix/suffix around one differing
+keyword — e.g. "hardcoded secret in config" vs "hardcoded timeout in config"
+scores a character ratio above the default no-location bar despite describing
+unrelated bugs — so the tokenized descriptions must also overlap this much
+before a match is pre-linked. Parses defensively, same convention as the two
+threshold vars above.
+
+### PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN_WITH_LOCATION
+Word-set (Jaccard) overlap override (0.0–1.0, default `0.7`) additionally
+required, alongside `PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION`, for the
+`/review-pr` duplicate-issue check's location-corroborated signal (the
+finding's `file_path` appears in the candidate issue's title/body). The
+location signal alone is weaker corroboration than it looks — many
+genuinely distinct bugs share the same file — so the same "one differing
+keyword amid shared boilerplate" false positive described above (e.g.
+"hardcoded secret in config" vs "hardcoded timeout in config", both
+mentioning `config.py`) is also reachable via the looser with-location ratio
+bar; this closes that gap. Set lower than
+`PR_REVIEW_DUPLICATE_TOKEN_OVERLAP_MIN` (0.7 vs 0.8) since the location match
+is itself real corroborating evidence a same-file paraphrase can still
+clear. Parses defensively, same convention as the other threshold vars.
+
+### PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES
+Caps how many of the reviewed repository's open issues the `/review-pr` flow's
+duplicate-issue check reads per review (default `100`). `GitHubClient.list_open_issues`
+already paginates and self-limits at 1000, but reading that many issues synchronously
+on every review's critical path is real added latency for what is only an
+enhancement (skipping a redundant "file a new issue?" offer) — this trades recall
+(a match among issues past the cap won't be found) for bounded, predictable review
+latency. Parses defensively: a missing, blank, unparsable, or non-positive value
+falls back to the default rather than raising or disabling the cap.
+
 ### CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE
 Max entries in the coordinator's process-global map-phase outcome cache. The
 review→fix→re-review loop re-invokes the whole coordinator after every batch fix,
