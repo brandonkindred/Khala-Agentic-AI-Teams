@@ -8,7 +8,7 @@ Not a test module — the leading underscore keeps pytest from collecting it.
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -26,6 +26,7 @@ from .conftest import stub_design_loop
 
 
 def spec() -> StrategySpec:
+    """Canned StrategySpec (single long-entry/short-exit rule) used across the suite."""
     return StrategySpec(
         strategy_id="strat-wf-test",
         authored_by="test",
@@ -47,6 +48,7 @@ def spec() -> StrategySpec:
 
 
 def config(**overrides: Any) -> BacktestConfig:
+    """Build a BacktestConfig with sensible test defaults; overrides are merged in."""
     base: Dict[str, Any] = dict(
         start_date="2022-01-03",
         end_date="2022-12-30",
@@ -64,6 +66,7 @@ def mk_trade(
     symbol: str = "AAPL",
     hold: int = 5,
 ) -> TradeRecord:
+    """Build a single TradeRecord with a fixed price/shares baseline scaled by ``net`` P&L."""
     return TradeRecord(
         trade_num=1,
         entry_date=entry,
@@ -239,6 +242,39 @@ def minimal_strategy_code() -> str:
     )
 
 
+def recording_analysis_run() -> Tuple[Callable[..., str], Dict[str, Any]]:
+    """Build an AnalysisAgent.run stub that records its call kwargs.
+
+    Post: returns ``(stub, captured)``; ``captured`` is populated in place
+    once the stub — set via ``monkeypatch.setattr(orch.analysis_agent,
+    "run", stub)`` — has been invoked.
+    """
+    captured: Dict[str, Any] = {}
+
+    def _run(*_args, **kwargs) -> str:
+        captured.update(kwargs)
+        return "narrative"
+
+    return _run, captured
+
+
+class StubExecResult:
+    """Stand-in for the sandbox's execution result used by run_cycle stubs.
+
+    Post: reports a successful execution carrying the given trades; the
+    other fields mirror the subset of ``StrategyRunResult`` that
+    ``run_cycle`` reads.
+    """
+
+    def __init__(self, trades: List[TradeRecord]) -> None:
+        self.success = True
+        self.trades = trades
+        self.execution_time_seconds = 0.01
+        self.error_type = None
+        self.stderr = ""
+        self.execution_diagnostics = None
+
+
 def wire_run_cycle_stubs(
     orch: StrategyLabOrchestrator,
     monkeypatch: pytest.MonkeyPatch,
@@ -359,18 +395,9 @@ def wire_run_cycle_stubs(
         )
     )
 
-    class _StubExecResult:
-        def __init__(self):
-            self.success = True
-            self.trades = sample_trades
-            self.execution_time_seconds = 0.01
-            self.error_type = None
-            self.stderr = ""
-            self.execution_diagnostics = None
-
     monkeypatch.setattr(
         "investment_team.strategy_lab.orchestrator.run_strategy_code",
-        lambda *a, **k: _StubExecResult(),
+        lambda *a, **k: StubExecResult(sample_trades),
     )
     monkeypatch.setattr(
         "investment_team.strategy_lab.orchestrator.compute_metrics",

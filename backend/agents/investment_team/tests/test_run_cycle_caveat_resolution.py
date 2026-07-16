@@ -21,6 +21,7 @@ from ._walk_forward_test_helpers import (
     StubMarketDataService,
     orchestrator,
     raise_walk_forward,
+    recording_analysis_run,
     wire_run_cycle_stubs,
 )
 
@@ -81,13 +82,8 @@ def test_failed_alignment_records_caveat_on_acceptance_path(monkeypatch):
     # WINNING from metrics. The wide-stub above (``lambda *a, **k:
     # "narrative"``) would happily absorb that regression, so capture and
     # assert the kwarg directly here.
-    captured_analysis_kwargs: dict = {}
-
-    def _recording_analysis(*_args, **kwargs):
-        captured_analysis_kwargs.update(kwargs)
-        return "narrative"
-
-    monkeypatch.setattr(orch.analysis_agent, "run", _recording_analysis)
+    recording_analysis, captured_analysis_kwargs = recording_analysis_run()
+    monkeypatch.setattr(orch.analysis_agent, "run", recording_analysis)
 
     config = _config(walk_forward_enabled=True)
     record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
@@ -176,13 +172,8 @@ def test_failed_alignment_records_caveat_on_walk_forward_fallback(monkeypatch):
     # call site is shared, so a regression on either path is the same root
     # cause, but defensive duplication makes the failure mode obvious from
     # either test.
-    captured_analysis_kwargs: dict = {}
-
-    def _recording_analysis(*_args, **kwargs):
-        captured_analysis_kwargs.update(kwargs)
-        return "narrative"
-
-    monkeypatch.setattr(orch.analysis_agent, "run", _recording_analysis)
+    recording_analysis, captured_analysis_kwargs = recording_analysis_run()
+    monkeypatch.setattr(orch.analysis_agent, "run", recording_analysis)
 
     config = _config(walk_forward_enabled=True)
     record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)

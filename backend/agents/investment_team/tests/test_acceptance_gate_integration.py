@@ -16,6 +16,7 @@ from investment_team.models import BacktestResult, StrategyLabRecord
 from investment_team.strategy_lab.quality_gates.acceptance_gate import AcceptanceGate
 
 from ._walk_forward_test_helpers import (
+    StubExecResult,
     StubMarketDataService,
     minimal_custom_spec_dict,
     minimal_strategy_code,
@@ -185,18 +186,9 @@ def test_walk_forward_fallback_records_overfit_anomaly_as_caveat(monkeypatch):
     )
     overfit_trades = trades_across_year(n_per_month=4, base_pnl=80.0)
 
-    class _StubExecResult:
-        def __init__(self):
-            self.success = True
-            self.trades = overfit_trades
-            self.execution_time_seconds = 0.01
-            self.error_type = None
-            self.stderr = ""
-            self.execution_diagnostics = None
-
     monkeypatch.setattr(
         "investment_team.strategy_lab.orchestrator.run_strategy_code",
-        lambda *a, **k: _StubExecResult(),
+        lambda *a, **k: StubExecResult(overfit_trades),
     )
     monkeypatch.setattr(
         "investment_team.strategy_lab.orchestrator.compute_metrics",
