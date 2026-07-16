@@ -501,6 +501,14 @@ every worker is busy, further async jobs queue (the endpoints still return a `jo
 immediately). Temporal remains the durable path for high HITL concurrency and is used
 instead whenever `TEMPORAL_ADDRESS` is set.
 
+### BLOGGING_HITL_POLL_INTERVAL_S
+Poll cadence (seconds) for every human-in-the-loop wait loop in the blogging
+pipeline (draft feedback, uncertainty answers, title selection). Default `10`.
+One value keeps all HITL wait loops consistent and configurable in one place.
+Independent of the Temporal activity heartbeat — `start_pipeline_heartbeat`
+runs a background thread that heartbeats on its own schedule, so these
+blocking sleeps never risk a heartbeat timeout.
+
 ### BLOGGING_MEDIUM_STATS_ROOT
 Optional base dir for Medium stats job `work_dir` (default:
 `{AGENT_CACHE}/blogging_team/medium_stats_runs`).
