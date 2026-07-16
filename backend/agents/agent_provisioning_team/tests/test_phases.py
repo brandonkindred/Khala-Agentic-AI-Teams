@@ -557,6 +557,39 @@ def test_audit_single_tool_no_provisioner_returns_error() -> None:
     assert "No provisioner" in v.errors[0]
 
 
+def test_audit_single_tool_uses_provisioner_key_when_name_mismatches_registry() -> None:
+    """Regression test: tool_name and registry key stems can differ (e.g.
+    "postgresql" tool name vs "postgres_provisioner" registry key), so
+    audit_single_tool must resolve via the explicit provisioner_key rather
+    than guessing f"{tool_name}_provisioner"."""
+    from agent_provisioning_team.models import AccessVerification
+    from agent_provisioning_team.phases.access_audit import audit_single_tool
+
+    postgres_prov = MagicMock()
+    postgres_prov.verify_access.return_value = AccessVerification(
+        tool_name="postgresql", passed=True, actual_permissions=["read", "write"]
+    )
+    registry = {"postgres_provisioner": postgres_prov}
+
+    with patch(
+        "agent_provisioning_team.phases.access_audit.build_default_tool_agents",
+        return_value=registry,
+    ):
+        v = audit_single_tool("a1", "postgresql", provisioner_key="postgres_provisioner")
+    assert v.passed is True
+    postgres_prov.verify_access.assert_called_once_with("a1")
+
+    # Without the key, the fragile f"{tool_name}_provisioner" guess
+    # ("postgresql_provisioner") still fails to find the same registry entry.
+    with patch(
+        "agent_provisioning_team.phases.access_audit.build_default_tool_agents",
+        return_value=registry,
+    ):
+        v_no_key = audit_single_tool("a1", "postgresql")
+    assert v_no_key.passed is False
+    assert "No provisioner" in v_no_key.errors[0]
+
+
 def test_generate_audit_report_includes_status() -> None:
     from agent_provisioning_team.models import AccessVerification
     from agent_provisioning_team.phases.access_audit import generate_audit_report

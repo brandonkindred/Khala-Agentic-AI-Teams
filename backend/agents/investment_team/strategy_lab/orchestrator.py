@@ -80,7 +80,7 @@ from .agents.zero_trade_repair import ZeroTradeRepairAgent
 from .alignment_findings import AlignmentFinding
 from .backtest_cache import BacktestCache
 from .coverage_probe import format_coverage_report
-from .exceptions import SpecImplementabilityError
+from .exceptions import OrchestratorContractError, SpecImplementabilityError
 from .market_regime import RegimeSummary, compute_regime_summary
 from .mechanical_repair import RepairAction, demote_code_path, repair_spec, select_code_path
 from .phases import (
@@ -245,7 +245,7 @@ def build_spec_from_dict(strategy_dict: Dict[str, Any], *, strategy_id: str) -> 
         exit_rules=strategy_dict.get("exit_rules", []),
         sizing=strategy_dict.get("sizing", DEFAULT_SIZING_PAYLOAD),
         target_symbols=strategy_dict.get("target_symbols", []),
-        risk_limits=strategy_dict.get("risk_limits", {}),
+        risk_limits=strategy_dict.get("risk_limits") or {},
         speculative=strategy_dict.get("speculative", False),
         requires_custom_code=_coerce_requires_custom_code(
             strategy_dict.get("requires_custom_code")
@@ -2180,8 +2180,9 @@ class StrategyLabOrchestrator:
         # Post-condition: success and round-exhaustion are mutually exclusive.
         if execution_succeeded and max_rounds_exhausted:
             raise RuntimeError(
-                "synthesis loop returned both execution_succeeded and max_rounds_exhausted; "
-                "this is a bug in the round-evaluation loop above."
+                "synthesis loop invariant violated: both execution_succeeded and "
+                f"max_rounds_exhausted are True after round {round_num}; this is a bug "
+                "in the round-evaluation loop above."
             )
         return _SynthesisLoopOutcome(
             spec=spec,
@@ -2473,8 +2474,10 @@ class StrategyLabOrchestrator:
           3. Otherwise (or if the repair did not commit), fall through
              to the generic refinement agent via ``_refine_or_exhaust``.
         """
-        assert critical_anomalies, "_handle_critical_anomalies requires at least one critical"
-        assert isinstance(market_data, dict) and market_data, "market_data must be non-empty"
+        if not critical_anomalies:
+            raise ValueError("_handle_critical_anomalies requires at least one critical")
+        if not isinstance(market_data, dict) or not market_data:
+            raise ValueError("market_data must be non-empty")
 
         # ── 1: Build the failure-details prompt block (also used by generic refine) ──
         failure_details = "\n".join(f"- {g.details}" for g in critical_anomalies)
@@ -2789,9 +2792,9 @@ class StrategyLabOrchestrator:
           8. Commit proposal as new known-good state; continue.
         """
         if align_round < 0:
-            raise ValueError(f"align_round must be non-negative, got {align_round}")
+            raise OrchestratorContractError(f"align_round must be non-negative, got {align_round}")
         if not isinstance(market_data, dict) or not market_data:
-            raise ValueError("market_data must be non-empty")
+            raise OrchestratorContractError("market_data must be non-empty")
 
         # Step 1 — audit the current ledger and record the alignment gates.
         report = self._audit_and_record_alignment(
@@ -4305,7 +4308,7 @@ class StrategyLabOrchestrator:
         # branch above returns before reaching this point, so reaching
         # this line implies the gate has passed for this design attempt.
         if not design_outcome.ready:
-            raise RuntimeError(
+            raise OrchestratorContractError(
                 "DESIGN_REVIEW → CODE_SYNTHESIS boundary invariant violated: "
                 "design_outcome.ready is False but the short-circuit branch "
                 "did not return. This is a bug in _run_design_attempt."

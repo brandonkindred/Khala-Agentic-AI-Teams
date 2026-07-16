@@ -13,6 +13,7 @@ from typing import Any, Dict
 import pytest
 
 from investment_team.models import BacktestConfig
+from investment_team.strategy_lab.exceptions import OrchestratorContractError
 from investment_team.strategy_lab.orchestrator import (
     StrategyLabOrchestrator,
     _DesignLoopOutcome,
@@ -89,8 +90,8 @@ class _ReadyFlipsToNotReadyOutcome:
 
 def test_orchestrate_design_and_review_raises_when_ready_flips_false() -> None:
     """If ``design_outcome.ready`` is no longer true by the time the
-    boundary guard runs, the guard must raise ``RuntimeError`` — not
-    silently proceed to emit the phase transition and return a
+    boundary guard runs, the guard must raise ``OrchestratorContractError``
+    — not silently proceed to emit the phase transition and return a
     ``record=None`` result, which is what a stripped-under--O bare
     ``assert`` would have allowed."""
     orch = StrategyLabOrchestrator()
@@ -106,7 +107,7 @@ def test_orchestrate_design_and_review_raises_when_ready_flips_false() -> None:
 
     orch._run_design_loop = lambda **_kw: flaky_outcome
 
-    with pytest.raises(RuntimeError, match="boundary invariant violated"):
+    with pytest.raises(OrchestratorContractError, match="boundary invariant violated"):
         orch._orchestrate_design_and_review(
             prior_records=[],
             signal_brief=None,

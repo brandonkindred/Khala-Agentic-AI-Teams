@@ -2309,6 +2309,17 @@ def test_build_review_evidence_no_diff():
     assert orch_mod._build_review_evidence("ONLY SUMMARY", "") == "ONLY SUMMARY"
 
 
+def test_default_stack_specs_returns_independent_copy():
+    """Mutating one call's result must never leak into the module template or another caller."""
+    a = orch_mod._default_stack_specs()
+    b = orch_mod._default_stack_specs()
+    assert a == b
+    assert a is not b
+    a[0]["tools_services"].append("Rust")
+    assert "Rust" not in orch_mod._DEFAULT_STACK_SPECS[0]["tools_services"]
+    assert "Rust" not in orch_mod._default_stack_specs()[0]["tools_services"]
+
+
 def test_tech_lead_review_reports_progress_and_clears_activity(tmp_path, monkeypatch):
     """_review_and_merge bridges Tech Lead reports into the job record and clears
     current_activity after each task's review (success and rejection alike)."""
