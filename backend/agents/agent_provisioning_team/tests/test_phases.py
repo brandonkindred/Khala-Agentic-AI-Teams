@@ -109,8 +109,8 @@ def test_run_setup_preserves_created_at_and_refreshes_updated_at_on_reregister(
     tmp_path: Path,
 ) -> None:
     """Re-registering a non-running environment keeps the original created_at
-    but stamps updated_at with the current (replacement) time, not the stale
-    created_at."""
+    and previously provisioned tools, but stamps updated_at with the current
+    (replacement) time, not the stale created_at."""
     from agent_provisioning_team.phases.setup import run_setup
     from agent_provisioning_team.shared.environment_store import (
         EnvironmentInfo as StoreEnvInfo,
@@ -126,6 +126,7 @@ def test_run_setup_preserves_created_at_and_refreshes_updated_at_on_reregister(
             container_name="agent-a3",
             workspace_path="/workspace/a3",
             status="stopped",
+            tools_provisioned=["pg"],
             created_at="2020-01-01T00:00:00+00:00",
             updated_at="2020-01-01T00:00:00+00:00",
         )
@@ -156,6 +157,7 @@ def test_run_setup_preserves_created_at_and_refreshes_updated_at_on_reregister(
     stored = env_store.get("a3")
     assert stored.created_at == "2020-01-01T00:00:00+00:00"
     assert stored.updated_at != "2020-01-01T00:00:00+00:00"
+    assert stored.tools_provisioned == ["pg"]
 
 
 def test_run_setup_returns_failure_on_docker_error(tmp_path: Path) -> None:

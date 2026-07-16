@@ -27,6 +27,9 @@ from agent_provisioning_team.shared.environment_store import EnvironmentStore
 
 
 def test_environment_info_from_dict_roundtrip() -> None:
+    """Preconditions: none. Postconditions: an ``EnvironmentInfo`` with an
+    explicit ``updated_at`` round-trips through ``to_dict``/``from_dict``
+    preserving all fields, including ``updated_at``."""
     info = StoreEnvInfo(
         agent_id="a1",
         container_id="c1",
@@ -52,6 +55,22 @@ def test_environment_info_updated_at_defaults_to_created_at() -> None:
     assert d["updated_at"] == info.created_at
     restored = StoreEnvInfo.from_dict(d)
     assert restored.updated_at == restored.created_at
+
+
+def test_environment_info_from_dict_defaults_updated_at_when_key_absent() -> None:
+    """Preconditions: ``data`` is a legacy-shaped dict with no ``updated_at``
+    key at all (e.g. a record written before this field existed).
+    Postconditions: ``from_dict`` defaults ``updated_at`` to ``created_at``
+    rather than raising or leaving it unset."""
+    legacy_data = {
+        "agent_id": "a1",
+        "container_id": "c1",
+        "container_name": "c1",
+        "workspace_path": "/w",
+        "created_at": "2024-01-01T00:00:00+00:00",
+    }
+    restored = StoreEnvInfo.from_dict(legacy_data)
+    assert restored.updated_at == "2024-01-01T00:00:00+00:00"
 
 
 def test_environment_store_defaults_under_agent_cache(tmp_path: Path, monkeypatch) -> None:
@@ -113,6 +132,11 @@ def test_environment_store_register_rejects_none(tmp_path: Path) -> None:
 
 
 def test_environment_store_update_status(tmp_path: Path) -> None:
+    """Preconditions: ``tmp_path`` is an empty, writable directory.
+    Postconditions: ``update_status`` on a missing agent returns ``False``;
+    on an existing agent it updates ``status``, refreshes ``updated_at`` to a
+    value distinct from the original ``created_at``, and that refreshed value
+    is stable across a subsequent ``get``."""
     store = EnvironmentStore(storage_dir=tmp_path)
 
     # update on missing returns False
@@ -187,6 +211,10 @@ def test_environment_store_add_tool_handles_corrupt(tmp_path: Path) -> None:
 
 
 def test_environment_store_list_all(tmp_path: Path) -> None:
+    """Preconditions: ``tmp_path`` is an empty, writable directory.
+    Postconditions: ``list_all`` returns every registered environment,
+    filters correctly by ``status``, and preserves each entry's
+    ``updated_at``."""
     store = EnvironmentStore(storage_dir=tmp_path)
 
     store.register(
@@ -196,6 +224,7 @@ def test_environment_store_list_all(tmp_path: Path) -> None:
             container_name="c1",
             workspace_path="/w",
             status="ready",
+            updated_at="2024-03-01T00:00:00+00:00",
         )
     )
     store.register(
@@ -214,6 +243,7 @@ def test_environment_store_list_all(tmp_path: Path) -> None:
     ready = store.list_all(status="ready")
     assert len(ready) == 1
     assert ready[0].agent_id == "a1"
+    assert ready[0].updated_at == "2024-03-01T00:00:00+00:00"
 
 
 def test_environment_store_list_all_dedupes_by_agent_id_not_stem(tmp_path: Path) -> None:
