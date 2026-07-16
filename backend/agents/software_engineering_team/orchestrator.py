@@ -24,11 +24,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # These two sys.path insertions are still required by this module itself:
 # below (and further down), it does *bare* (non-dotted) imports of its own
 # sibling sub-packages -- `from qa_agent import ...`, `from tech_lead_agent
-# import ...`, `from architecture_expert import ...`, `from spec_parser
-# import ...` -- rather than `from software_engineering_team.qa_agent
-# import ...`. The app launcher putting `backend/agents` on sys.path
-# (run_unified_api.py / unified_api/main.py) only resolves *dotted* imports
-# like `software_engineering_team.shared`; it doesn't reach these bare names,
+# import ...`, `from architecture_expert import ...` -- rather than
+# `from software_engineering_team.qa_agent import ...`. The app launcher
+# putting `backend/agents` on sys.path (run_unified_api.py /
+# unified_api/main.py) only resolves *dotted* imports like
+# `software_engineering_team.shared`; it doesn't reach these bare names,
 # which need `software_engineering_team/` (and, for `architecture_expert`,
 # the hyphenated `architect-agents/` beneath it, which can't itself be a
 # dotted import segment) directly on sys.path.
