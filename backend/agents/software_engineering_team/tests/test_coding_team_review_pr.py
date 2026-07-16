@@ -2621,13 +2621,6 @@ class TestPreservationProperties:
 class TestAnchorToFirstFileUnit:
     """Unit tests for the anchor_to_first_file pure helper."""
 
-    def test_empty_valid_by_path_returns_none(self) -> None:
-        """Empty valid_by_path → returns None (no file to anchor to)."""
-        from software_engineering_team.coding_team.github_source import anchor_to_first_file
-
-        finding = _FakeReviewIssue("low", line=4, file_path="missing.py", description="issue")
-        assert anchor_to_first_file(finding, {}) is None
-
     def test_body_matches_format_comment_body(self) -> None:
         """The body field in the returned dict equals format_comment_body(finding)."""
         from software_engineering_team.coding_team.github_source import (

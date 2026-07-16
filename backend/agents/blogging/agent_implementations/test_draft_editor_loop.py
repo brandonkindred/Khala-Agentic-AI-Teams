@@ -16,7 +16,6 @@ from agents.blogging.blog_copy_editor_agent import (  # noqa: E402
     BlogCopyEditorAgent,
     CopyEditorInput,
 )
-from agents.blogging.blog_research_agent.models import ResearchReference  # noqa: E402
 from agents.blogging.blog_writer_agent import (  # noqa: E402
     BlogWriterAgent,
     ReviseWriterInput,
@@ -39,13 +38,6 @@ _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
 STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
 BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 
-CONTEXT_BRIEF = "LLM observability best practices for large enterprises."
-PLACEHOLDER_REF = ResearchReference(
-    title="LLM Observability Guide",
-    url="https://example.com/observability",
-    summary="Best practices for monitoring LLMs in production.",
-    key_points=["Tracing", "Cost attribution", "Prompt versioning"],
-)
 CONTENT_PLAN = ContentPlan(
     overarching_topic="LLM observability for enterprises",
     narrative_flow="Problem, practices, wrap-up.",
