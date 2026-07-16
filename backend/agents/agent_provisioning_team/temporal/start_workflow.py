@@ -41,11 +41,10 @@ DEFAULT_DESCRIBE_TIMEOUT_S = 5.0
 def _start_workflow_timeout_s() -> float:
     """Parse ``AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S``.
 
-    Preconditions:
-        * Environment value, when set, should be a finite numeric string.
     Postconditions:
-        * Returns a float ``>= 1.0``; unparseable / overflowing / non-finite
-          values fall back to ``DEFAULT_START_WORKFLOW_TIMEOUT_S``.
+        * Always returns a float ``>= 1.0``.
+        * Unparseable / overflowing / non-finite environment values fall back
+          to ``DEFAULT_START_WORKFLOW_TIMEOUT_S`` (no caller precondition).
     """
     raw = os.environ.get(
         "AGENT_PROVISIONING_START_WORKFLOW_TIMEOUT_S",

@@ -60,12 +60,15 @@ def test_deprovision_activity_rejects_blank_agent() -> None:
 @pytest.mark.asyncio
 async def test_deprovision_workflow_returns_activity_result() -> None:
     from agent_provisioning_team.temporal import workflows as wf
+    from agent_provisioning_team.temporal.workflows import PHASE_TIMEOUT
 
     captured: dict = {}
 
     async def fake_exec(activity_fn, *args, **kwargs):
         captured["name"] = getattr(activity_fn, "__name__", str(activity_fn))
         captured["args"] = kwargs.get("args")
+        captured["schedule_to_close_timeout"] = kwargs.get("schedule_to_close_timeout")
+        captured["retry_policy"] = kwargs.get("retry_policy")
         return {"agent_id": "a", "success": True, "details": {}, "error": None}
 
     with patch.object(wf.workflow, "execute_activity", new=fake_exec):
@@ -74,6 +77,8 @@ async def test_deprovision_workflow_returns_activity_result() -> None:
     assert result["success"] is True
     assert captured["name"] == "deprovision_activity"
     assert captured["args"] == ["a", True]
+    assert captured["schedule_to_close_timeout"] == PHASE_TIMEOUT
+    assert captured["retry_policy"] is wf.DEFAULT_RETRY_POLICY
 
 
 @pytest.mark.asyncio
@@ -152,8 +157,11 @@ def test_run_deprovision_workflow_uses_client_timeout_exceeding_phase_timeout() 
     with patch.object(sw, "execute_workflow_sync", side_effect=fake_execute):
         sw.run_deprovision_workflow("a")
 
+    from agent_provisioning_team.temporal.constants import CLIENT_TIMEOUT_MARGIN_S
+
     assert captured["execute_timeout_s"] == DEPROVISION_CLIENT_TIMEOUT_S
-    assert DEPROVISION_CLIENT_TIMEOUT_S > PHASE_TIMEOUT.total_seconds()
+    assert DEPROVISION_CLIENT_TIMEOUT_S >= PHASE_TIMEOUT.total_seconds() + CLIENT_TIMEOUT_MARGIN_S
+    assert CLIENT_TIMEOUT_MARGIN_S >= 60
 
 
 # ---------------------------------------------------------------------------

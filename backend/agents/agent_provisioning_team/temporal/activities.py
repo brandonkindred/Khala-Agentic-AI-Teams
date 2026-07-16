@@ -3,9 +3,11 @@
 Per-phase activities used by ``AgentProvisioningWorkflow``. The per-tool
 provision step is its own activity (``provision_tool_activity``) so a workflow
 can fan out across tools in parallel with independent retry/heartbeat policies.
-Each activity takes ``job_id`` as its first argument and writes phase/progress
-updates back to ``job_store`` directly so ``GET /provision/status/{job_id}``
-shows live progress without any signal plumbing.
+Most activities take ``job_id`` as their first argument and write phase/progress
+updates back to ``job_store`` so ``GET /provision/status/{job_id}`` shows live
+progress without signal plumbing. Exceptions: ``list_manifest_tools_activity``
+takes ``manifest_path`` only, and ``deprovision_activity`` takes ``agent_id``
+first (no provision job row).
 
 Invariants:
     * Activities heartbeat periodically for long-running work.
@@ -239,19 +241,12 @@ def credentials_activity(
             # subsequent resumes cannot re-read plaintext.
             # ``store_credentials`` overwrites per tool and is safe under Temporal
             # activity retry — do not swallow store failures (retry until durable).
-            from agent_provisioning_team.shared.credential_store import CredentialStore
+            from agent_provisioning_team.phases.credential_generation import (
+                store_credentials_payload,
+            )
 
-            store = CredentialStore()
             for name, cred in snap.credentials.items():
-                store.store_credentials(
-                    agent_id=agent_id,
-                    tool_name=name,
-                    credentials={
-                        "username": cred.username,
-                        "password": cred.password,
-                        "token": cred.token,
-                    },
-                )
+                store_credentials_payload(agent_id, name, cred.model_dump())
             tool_names = sorted(snap.credentials.keys()) or list(snap.tool_names)
             _js.add_completed_phase(
                 job_id,
@@ -263,6 +258,11 @@ def credentials_activity(
                 "credentials": {k: v.model_dump() for k, v in snap.credentials.items()},
             }
         if not stored:
+            if not snap.credentials:
+                raise RuntimeError(
+                    f"cannot restore credential_generation for agent={agent_id}: "
+                    "prior checkpoint has no credentials and CredentialStore is empty"
+                )
             raise RuntimeError(
                 f"cannot restore credential_generation for agent={agent_id}: "
                 "CredentialStore has no credentials"
@@ -583,12 +583,16 @@ def record_account_provisioning_activity(
         * ``completed_phases`` includes ``account_provisioning`` and
           ``phase_results`` carries sanitized tool results (no plaintext
           ``credentials``; sensitive ``details`` redacted).
+        * When ``agent_id`` is set, successful tool results that carry a
+          ``credentials`` dump are written to ``CredentialStore`` (including
+          enriched fields) so resume can rebuild documentation/deliver material
+          after the checkpoint strips plaintext.
         * Job progress reports ``tools_completed`` / ``tools_total`` from the
           finished result list so status polls no longer show ``0/N``.
         * When ``agent_id`` is set, successful tool names are written once via
           ``EnvironmentStore.add_tools`` (safe after parallel fan-out).
-        * Raises when job-store writes fail so Temporal retries the checkpoint
-          before later phases run (resume depends on this phase being recorded).
+        * Raises when job-store / credential-store writes fail so Temporal
+          retries the checkpoint before later phases run.
     """
     assert job_id, "job_id must be non-empty"
     from agent_provisioning_team.phases.deliver import sanitize_tool_results_for_checkpoint
@@ -596,6 +600,29 @@ def record_account_provisioning_activity(
     results = list(tool_results_dump)
     tools_total = len(results)
     tools_completed = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
+    # Persist provisioner-enriched credentials (connection_string, SSH keys, …)
+    # into CredentialStore before the job-store checkpoint strips them. Resume
+    # after this phase reloads enrichment from the store — sanitized
+    # ``tool_results`` intentionally keep ``credentials=None``.
+    if agent_id:
+        from agent_provisioning_team.phases.credential_generation import store_credentials_payload
+        from agent_provisioning_team.shared.environment_store import EnvironmentStore
+
+        for raw in results:
+            if not isinstance(raw, dict) or not raw.get("success"):
+                continue
+            tool_name = raw.get("tool_name")
+            creds = raw.get("credentials")
+            if isinstance(tool_name, str) and tool_name and isinstance(creds, dict):
+                store_credentials_payload(agent_id, tool_name, creds)
+
+        names = [
+            r.get("tool_name")
+            for r in results
+            if isinstance(r, dict) and r.get("success") and r.get("tool_name")
+        ]
+        EnvironmentStore().add_tools(agent_id, [n for n in names if isinstance(n, str)])
+
     # Job-store checkpoint must not retain plaintext credentials / connection strings.
     sanitized = sanitize_tool_results_for_checkpoint(results)
     payload = {"success": True, "tool_results": sanitized}
@@ -608,15 +635,6 @@ def record_account_provisioning_activity(
         tools_completed=tools_completed,
         tools_total=tools_total,
     )
-    if agent_id:
-        from agent_provisioning_team.shared.environment_store import EnvironmentStore
-
-        names = [
-            r.get("tool_name")
-            for r in results
-            if isinstance(r, dict) and r.get("success") and r.get("tool_name")
-        ]
-        EnvironmentStore().add_tools(agent_id, [n for n in names if isinstance(n, str)])
     return payload
 
 

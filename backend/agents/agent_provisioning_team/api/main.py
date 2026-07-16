@@ -8,7 +8,7 @@ import concurrent.futures
 import contextlib
 import logging
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -122,8 +122,23 @@ def _fail_job_after_start_error(job_id: str, exc: BaseException) -> None:
     mark_job_failed(job_id, error=str(exc))
 
 
+class ProvisionStarter(Protocol):
+    """Callable that starts ``AgentProvisioningWorkflow`` for a job."""
+
+    def __call__(
+        self,
+        job_id: str,
+        agent_id: str,
+        manifest_path: str,
+        *,
+        skip_phases: Optional[List[str]] = None,
+        prior_results: Optional[Dict[str, Any]] = None,
+        replace_existing: bool = False,
+    ) -> None: ...
+
+
 def _invoke_provision_starter(
-    starter: Any,
+    starter: ProvisionStarter,
     *,
     job_id: str,
     agent_id: str,

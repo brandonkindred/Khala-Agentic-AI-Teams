@@ -238,6 +238,9 @@ def sanitize_tool_results_for_checkpoint(
           via the same rules as API response redaction.
         * ``tool_name``, ``success``, ``permissions``, ``error``, and
           ``provisioner_key`` are preserved for resume / compensate.
+        * Callers that need enriched credentials after resume must have
+          persisted them to ``CredentialStore`` before writing this checkpoint
+          (see ``record_account_provisioning_activity``).
     """
     sanitized: List[Dict[str, Any]] = []
     for raw in tool_results:

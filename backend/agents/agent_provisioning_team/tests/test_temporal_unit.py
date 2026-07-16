@@ -935,7 +935,7 @@ def test_credentials_activity_migrates_legacy_plaintext_and_redacts_checkpoint()
             return_value={},
         ),
         patch(
-            "agent_provisioning_team.shared.credential_store.CredentialStore",
+            "agent_provisioning_team.phases.credential_generation.CredentialStore",
             return_value=store,
         ),
         patch("temporalio.activity.heartbeat"),
@@ -1076,6 +1076,50 @@ def test_record_account_provisioning_strips_plaintext_secrets() -> None:
     assert stored["details"]["db_name"] == "ok"
     assert stored["provisioner_key"] == "postgres_provisioner"
     assert "s3cret" not in str(out)
+
+
+def test_record_account_provisioning_persists_enriched_credentials(tmp_path: Path) -> None:
+    """Enriched fields survive in CredentialStore after the sanitized checkpoint."""
+    from agent_provisioning_team.phases.credential_generation import get_stored_credentials
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+    from agent_provisioning_team.temporal import activities
+
+    results = [
+        {
+            "tool_name": "postgresql",
+            "success": True,
+            "provisioner_key": "postgres_provisioner",
+            "permissions": [],
+            "credentials": {
+                "tool_name": "postgresql",
+                "username": "u",
+                "password": "p",
+                "connection_string": "postgres://u:p@host/db",
+                "extra": {"db": "app"},
+            },
+            "details": {},
+        }
+    ]
+    store = CredentialStore(storage_dir=tmp_path)
+    with (
+        patch.object(activities._js, "add_completed_phase") as mock_phase,
+        patch.object(activities._js, "update_job"),
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore"
+        ) as mock_env_cls,
+        patch(
+            "agent_provisioning_team.phases.credential_generation.CredentialStore",
+            return_value=store,
+        ),
+    ):
+        mock_env_cls.return_value = MagicMock()
+        out = activities.record_account_provisioning_activity("job-1", results, "agent-1")
+
+    assert out["tool_results"][0]["credentials"] is None
+    assert mock_phase.call_args.args[2]["tool_results"][0]["credentials"] is None
+    restored = get_stored_credentials("agent-1", credential_store=store)
+    assert restored["postgresql"].connection_string == "postgres://u:p@host/db"
+    assert restored["postgresql"].extra == {"db": "app"}
 
 
 def test_record_account_provisioning_raises_when_job_store_fails() -> None:

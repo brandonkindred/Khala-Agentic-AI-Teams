@@ -4,7 +4,7 @@ Credential generation phase: Generate passwords and tokens for tools.
 This is phase 2 of the provisioning workflow.
 """
 
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..models import (
     CredentialGenerationResult,
@@ -160,11 +160,50 @@ def get_stored_credentials(
 
     credentials: Dict[str, GeneratedCredentials] = {}
     for tool_name, cred_data in stored.items():
+        if not isinstance(cred_data, dict):
+            continue
         credentials[tool_name] = GeneratedCredentials(
             tool_name=tool_name,
             username=cred_data.get("username"),
             password=cred_data.get("password"),
             token=cred_data.get("token"),
+            ssh_private_key=cred_data.get("ssh_private_key"),
+            ssh_public_key=cred_data.get("ssh_public_key"),
+            connection_string=cred_data.get("connection_string"),
+            extra=dict(cred_data.get("extra") or {}),
         )
 
     return credentials
+
+
+def store_credentials_payload(
+    agent_id: str,
+    tool_name: str,
+    credentials: Dict[str, Any],
+    *,
+    credential_store: Optional[CredentialStore] = None,
+) -> None:
+    """Persist a full credentials dump (including enriched fields) to the store.
+
+    Preconditions:
+        * ``agent_id`` / ``tool_name`` are non-empty.
+        * ``credentials`` is a mapping (may include connection_string / SSH / extra).
+    Postconditions:
+        * ``CredentialStore`` holds the durable fields for ``tool_name`` under ``agent_id``.
+    """
+    assert agent_id, "agent_id must be non-empty"
+    assert tool_name, "tool_name must be non-empty"
+    cred_store = credential_store or CredentialStore()
+    cred_store.store_credentials(
+        agent_id=agent_id,
+        tool_name=tool_name,
+        credentials={
+            "username": credentials.get("username"),
+            "password": credentials.get("password"),
+            "token": credentials.get("token"),
+            "ssh_private_key": credentials.get("ssh_private_key"),
+            "ssh_public_key": credentials.get("ssh_public_key"),
+            "connection_string": credentials.get("connection_string"),
+            "extra": dict(credentials.get("extra") or {}),
+        },
+    )

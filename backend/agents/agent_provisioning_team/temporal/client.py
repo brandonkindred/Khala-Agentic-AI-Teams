@@ -5,9 +5,9 @@ team shares one cached client and event loop (one source of truth) — and, in
 particular, one ``DataConverter`` with the shared gzip payload codec
 (``shared_temporal.codec``). This module stays as a compatibility shim for
 existing ``agent_provisioning_team.temporal.client`` imports (worker, API,
-sandbox dispatch, package ``__init__``). Prefer importing from
-``shared_temporal.client`` in new code; do not remove this shim while those
-call sites remain.
+sandbox dispatch, package ``__init__``). Prefer ``shared_temporal.client`` for
+new call sites. Remove this shim only after no in-package imports remain
+(grep ``agent_provisioning_team.temporal.client``).
 """
 
 from __future__ import annotations

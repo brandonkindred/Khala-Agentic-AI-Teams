@@ -188,6 +188,17 @@ def test_environment_store_get_handles_corrupt(tmp_path: Path) -> None:
     assert store.get("x") is None
 
 
+def test_environment_store_get_treats_incomplete_record_as_absent(tmp_path: Path) -> None:
+    """Partial JSON missing required keys must not 500 callers of get()."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    (tmp_path / "partial.json").write_text(
+        json.dumps({"agent_id": "partial", "status": "running"}),
+        encoding="utf-8",
+    )
+    assert store.get("partial") is None
+    assert store.exists("partial") is False
+
+
 def test_environment_store_reads_legacy_path_and_migrates_on_write(
     tmp_path: Path, monkeypatch
 ) -> None:

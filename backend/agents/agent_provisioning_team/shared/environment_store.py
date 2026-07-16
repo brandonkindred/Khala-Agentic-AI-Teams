@@ -117,14 +117,26 @@ class EnvironmentStore:
         ]
 
     def _read_env_data(self, agent_id: str) -> tuple[Optional[Dict[str, Any]], Optional[Path]]:
-        """Load environment JSON from the primary or a legacy path."""
+        """Load environment JSON from the primary or a legacy path.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+        Postconditions:
+            * Returns ``(data, path)`` when a candidate file parses as a dict with
+              the required ``agent_id`` / ``container_id`` / ``container_name`` keys.
+            * Malformed JSON or incomplete records are skipped (treated as absent).
+        """
+        required = ("agent_id", "container_id", "container_name")
         for path in self._env_file_candidates(agent_id):
             if not path.exists():
                 continue
             try:
-                return json.loads(path.read_text(encoding="utf-8")), path
-            except (json.JSONDecodeError, KeyError, OSError):
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
                 continue
+            if not isinstance(data, dict) or any(k not in data for k in required):
+                continue
+            return data, path
         return None, None
 
     def _write_env_data(self, agent_id: str, data: Dict[str, Any], source: Optional[Path] = None) -> None:
@@ -146,7 +158,11 @@ class EnvironmentStore:
             data, _src = self._read_env_data(agent_id)
             if data is None:
                 return None
-            return EnvironmentInfo.from_dict(data)
+            try:
+                return EnvironmentInfo.from_dict(data)
+            except (KeyError, TypeError, ValueError):
+                # Malformed / partial legacy records are treated as absent.
+                return None
 
     def update_status(self, agent_id: str, status: str) -> bool:
         """Update the status of an environment."""
@@ -222,5 +238,7 @@ class EnvironmentStore:
         return environments
 
     def exists(self, agent_id: str) -> bool:
-        """Check if an environment exists for an agent."""
-        return any(path.exists() for path in self._env_file_candidates(agent_id))
+        """Check if a valid environment record exists for an agent."""
+        with _lock:
+            data, _src = self._read_env_data(agent_id)
+            return data is not None
