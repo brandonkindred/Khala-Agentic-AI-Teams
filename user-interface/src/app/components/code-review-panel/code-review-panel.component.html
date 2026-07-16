@@ -157,6 +157,18 @@
                     @if (pull.draft) {
                       <span class="cr-chip cr-chip--draft">draft</span>
                     }
+                    <!-- One PR link per pull request, hoisted out of the per-run rows. -->
+                    @if (pull.html_url) {
+                      <a
+                        class="cr-pull-detail__link"
+                        [href]="pull.html_url"
+                        target="_blank"
+                        rel="noopener"
+                        aria-label="Open pull request on GitHub"
+                      >
+                        <mat-icon>open_in_new</mat-icon>
+                      </a>
+                    }
                   </div>
                   <p class="cr-pull-detail__meta">
                     <code>{{ pull.head }}</code> → <code>{{ pull.base }}</code>
@@ -204,8 +216,9 @@
                           <th scope="col">Status</th>
                           <th scope="col">Outcome</th>
                           <th scope="col">Findings</th>
+                          <th scope="col">Severity</th>
                           <th scope="col">Started</th>
-                          <th scope="col">Link</th>
+                          <th scope="col">Duration</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -239,16 +252,21 @@
                                 —
                               }
                             </td>
-                            <td>{{ rec.startedAt | date: 'short' }}</td>
                             <td>
-                              @if (rec.prUrl) {
-                                <a [href]="rec.prUrl" target="_blank" rel="noopener" aria-label="Open PR">
-                                  <mat-icon>open_in_new</mat-icon>
-                                </a>
-                              } @else {
-                                —
+                              @if (severityEntries(rec.reviewSummary); as sev) {
+                                @if (sev.length > 0) {
+                                  <span class="cr-findings">
+                                    @for (e of sev; track e.level) {
+                                      <span class="cr-chip cr-chip--sev-{{ e.level }}">{{ e.count }} {{ e.level }}</span>
+                                    }
+                                  </span>
+                                } @else {
+                                  —
+                                }
                               }
                             </td>
+                            <td>{{ rec.startedAt | date: 'short' }}</td>
+                            <td>{{ reviewDuration(rec) ?? '—' }}</td>
                           </tr>
                         }
                       </tbody>

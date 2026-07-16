@@ -619,6 +619,111 @@ describe('CodeReviewPanelComponent', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Review metrics: duration + severity breakdown
+  // -------------------------------------------------------------------------
+
+  it('formats review duration only for terminal runs that carry a completion time', async () => {
+    await setup();
+    const start = Date.parse('2026-01-01T00:00:00Z');
+    // Still running: no duration yet.
+    expect(component.reviewDuration(record({ status: 'running', startedAt: start }))).toBeNull();
+    // Terminal but no completedAt (e.g. a legacy row): still no duration.
+    expect(component.reviewDuration(record({ status: 'completed', startedAt: start }))).toBeNull();
+    // Seconds only / minutes+seconds / hours+minutes.
+    expect(
+      component.reviewDuration(record({ status: 'completed', startedAt: start, completedAt: start + 45_000 })),
+    ).toBe('45s');
+    expect(
+      component.reviewDuration(record({ status: 'completed', startedAt: start, completedAt: start + 83_000 })),
+    ).toBe('1m 23s');
+    expect(
+      component.reviewDuration(
+        record({ status: 'completed', startedAt: start, completedAt: start + (2 * 3600 + 5 * 60) * 1000 }),
+      ),
+    ).toBe('2h 5m');
+    // Completed-before-started (clock skew) is treated as unknown, not a negative time.
+    expect(
+      component.reviewDuration(record({ status: 'completed', startedAt: start, completedAt: start - 1000 })),
+    ).toBeNull();
+  });
+
+  it('returns only the non-zero severity counts in critical→info order', async () => {
+    await setup();
+    // No summary / no counts -> empty.
+    expect(component.severityEntries(undefined)).toEqual([]);
+    expect(component.severityEntries({ total_issues: 0, inline_comments: 0, event: 'COMMENT' })).toEqual([]);
+    // Mixed counts: zeros dropped, fixed critical→info order preserved.
+    expect(
+      component.severityEntries({
+        total_issues: 6,
+        inline_comments: 0,
+        event: 'REQUEST_CHANGES',
+        severity_counts: { critical: 1, high: 0, medium: 2, low: 0, info: 3 },
+      }),
+    ).toEqual([
+      { level: 'critical', count: 1 },
+      { level: 'medium', count: 2 },
+      { level: 'info', count: 3 },
+    ]);
+    // Every level zero -> empty.
+    expect(
+      component.severityEntries({
+        total_issues: 0,
+        inline_comments: 0,
+        event: 'APPROVE',
+        severity_counts: { critical: 0, high: 0, medium: 0, low: 0, info: 0 },
+      }),
+    ).toEqual([]);
+  });
+
+  it('maps created_at/completed_at into the record and derives a duration', async () => {
+    integrationsSpy.getGitHubReviewHistory.mockReturnValue(
+      of([
+        {
+          job_id: 'c1',
+          pr_number: 1,
+          status: 'completed',
+          review_summary: { total_issues: 0, inline_comments: 0, event: 'APPROVE' },
+          created_at: '2026-02-01T00:00:00Z',
+          completed_at: '2026-02-01T00:01:30Z',
+        },
+        {
+          job_id: 'c2',
+          pr_number: 1,
+          status: 'completed',
+          created_at: '2026-02-01T00:00:00Z',
+          completed_at: 'not-a-real-date', // exercises the invalid-timestamp fallback
+        },
+      ] as CodeReviewRunItem[]),
+    );
+    await setup();
+    const [withTime, badTime] = component.reviewsFor(1);
+    expect(withTime.completedAt).toBe(Date.parse('2026-02-01T00:01:30Z'));
+    expect(component.reviewDuration(withTime)).toBe('1m 30s');
+    // An unparseable completed_at leaves completedAt undefined (no duration shown).
+    expect(badTime.completedAt).toBeUndefined();
+    expect(component.reviewDuration(badTime)).toBeNull();
+  });
+
+  it('stamps completedAt when a live poll first reaches a terminal status', async () => {
+    await setup();
+    apiSpy.getJobStatus.mockReturnValue(
+      of({
+        job_id: 'j1',
+        status: 'completed',
+        review_summary: { total_issues: 0, inline_comments: 0, event: 'APPROVE' },
+      }),
+    );
+    component.startReview(component.pulls[0]);
+    const rec = component.reviewsFor(1)[0];
+    expect(rec.completedAt).toBeUndefined(); // not terminal yet
+    vi.advanceTimersByTime(5000); // one poll tick -> completed
+    expect(rec.completedAt).toBeDefined();
+    // The stamped completion yields a (non-null) duration for the row.
+    expect(component.reviewDuration(rec)).not.toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
   // Teardown
   // -------------------------------------------------------------------------
 
@@ -662,6 +767,89 @@ describe('CodeReviewPanelComponent', () => {
     component.togglePull(component.pulls[0]);
     fixture.detectChanges();
     expect(el.querySelector('.cr-pull-detail')).toBeNull();
+  });
+
+  it('hoists a single PR link into the detail header and drops the per-row link', async () => {
+    integrationsSpy.getGitHubReviewHistory.mockReturnValue(
+      of([
+        {
+          job_id: 'r1',
+          pr_number: 1,
+          pr_url: 'https://example.com/pull/1',
+          status: 'completed',
+          review_summary: { total_issues: 1, inline_comments: 1, event: 'COMMENT', severity_counts: { high: 1 } },
+          created_at: '2026-02-01T00:00:00Z',
+          completed_at: '2026-02-01T00:00:30Z',
+        },
+      ] as CodeReviewRunItem[]),
+    );
+    await setup();
+    component.togglePull(component.pulls[0]);
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    // The PR link now lives once in the detail header, sourced from the PR's html_url.
+    const link = el.querySelector('.cr-pull-detail__link') as HTMLAnchorElement | null;
+    expect(link).toBeTruthy();
+    expect(link?.getAttribute('href')).toBe('https://example.com/pull/1');
+    // No per-run link remains inside the reviews table rows.
+    expect(el.querySelector('.cr-reviews-table tbody a')).toBeNull();
+  });
+
+  it('renders non-zero severity chips and the duration in each review row', async () => {
+    integrationsSpy.getGitHubReviewHistory.mockReturnValue(
+      of([
+        {
+          job_id: 'r1',
+          pr_number: 1,
+          status: 'completed',
+          review_summary: {
+            total_issues: 4,
+            inline_comments: 2,
+            comment_findings: 1,
+            event: 'REQUEST_CHANGES',
+            severity_counts: { critical: 1, high: 0, medium: 3, low: 0, info: 0 },
+          },
+          created_at: '2026-02-01T00:00:00Z',
+          completed_at: '2026-02-01T00:02:00Z',
+        },
+      ] as CodeReviewRunItem[]),
+    );
+    await setup();
+    component.togglePull(component.pulls[0]);
+    fixture.detectChanges();
+    const row = fixture.nativeElement.querySelector('.cr-reviews-table tbody tr') as HTMLElement;
+    // Only the non-zero levels render, in critical→info order.
+    const sevChips = Array.from(row.querySelectorAll('[class*="cr-chip--sev-"]'));
+    expect(sevChips.map((c) => c.textContent?.trim())).toEqual(['1 critical', '3 medium']);
+    expect(row.querySelector('.cr-chip--sev-high')).toBeNull();
+    expect(row.querySelector('.cr-chip--sev-info')).toBeNull();
+    // The last cell (Duration) shows the computed elapsed time.
+    const cells = row.querySelectorAll('td');
+    expect(cells[cells.length - 1].textContent?.trim()).toBe('2m 0s');
+  });
+
+  it('shows an em dash for severity and duration when a review has neither', async () => {
+    integrationsSpy.getGitHubReviewHistory.mockReturnValue(
+      of([
+        {
+          job_id: 'r1',
+          pr_number: 1,
+          status: 'completed',
+          // No severity_counts and no completed_at (e.g. a legacy row).
+          review_summary: { total_issues: 0, inline_comments: 0, event: 'APPROVE' },
+          created_at: '2026-02-01T00:00:00Z',
+        },
+      ] as CodeReviewRunItem[]),
+    );
+    await setup();
+    component.togglePull(component.pulls[0]);
+    fixture.detectChanges();
+    const row = fixture.nativeElement.querySelector('.cr-reviews-table tbody tr') as HTMLElement;
+    const cells = row.querySelectorAll('td');
+    // Columns: Status | Outcome | Findings | Severity | Started | Duration.
+    expect(cells[3].textContent?.trim()).toBe('—'); // severity
+    expect(cells[5].textContent?.trim()).toBe('—'); // duration
+    expect(row.querySelector('[class*="cr-chip--sev-"]')).toBeNull();
   });
 
   it('updates the rendered row badge + table as a live poll completes', async () => {

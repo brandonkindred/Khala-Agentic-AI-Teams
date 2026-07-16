@@ -829,6 +829,50 @@ class TestReviewEndpoint:
         assert job["review_summary"]["inline_comments"] == 1
         assert job["review_summary"]["file_comments"] == 1
         assert job["review_summary"]["comment_findings"] == 0
+        # The two PR findings (one high inline, one low file-level) are broken down
+        # by severity for the Code Review page's per-review metrics.
+        assert job["review_summary"]["severity_counts"] == {
+            "critical": 0,
+            "high": 1,
+            "medium": 0,
+            "low": 1,
+            "info": 0,
+        }
+
+    def test_review_summary_counts_findings_by_severity(self, review_app) -> None:
+        # Findings across several severities, plus an unknown level and a
+        # pre-existing bug: only the five known levels of PR findings are counted,
+        # severity matching is case-insensitive, and the pre-existing bug (excluded
+        # from the PR review) does not inflate the counts.
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue("critical", line=2, description="crit one"),
+                _FakeReviewIssue("high", line=2, description="high one"),
+                _FakeReviewIssue("HIGH", line=2, description="high two, cased"),
+                _FakeReviewIssue("info", line=2, description="info one"),
+                _FakeReviewIssue("bogus", line=2, description="unknown severity ignored"),
+                _FakeReviewIssue(
+                    "high",
+                    line=4,
+                    file_path="unchanged.py",
+                    description="pre-existing bug",
+                    pre_existing=True,
+                ),
+            ],
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        # Five PR findings counted (the pre-existing bug is excluded); the "bogus"
+        # level is ignored rather than bucketed, "HIGH" folds into "high".
+        assert job["review_summary"]["total_issues"] == 5
+        assert job["review_summary"]["severity_counts"] == {
+            "critical": 1,
+            "high": 2,
+            "medium": 0,
+            "low": 0,
+            "info": 1,
+        }
 
     def test_review_body_and_inline_comments_are_token_scrubbed(self, review_app) -> None:
         # LLM output (summary + inline finding text) can echo a credential from the

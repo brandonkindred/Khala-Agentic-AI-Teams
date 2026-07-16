@@ -38,6 +38,9 @@ export interface PrReviewRecord {
   repo: string;
   /** Milliseconds since epoch when the review started (for the table timestamp). */
   startedAt: number;
+  /** Milliseconds since epoch when the review reached a terminal state, if known.
+   * Drives the row's duration; absent while the review is still running. */
+  completedAt?: number;
   status: string;
   statusText?: string;
   reviewSummary?: CodeReviewSummary;
@@ -342,12 +345,16 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
 
   private toRecord(item: CodeReviewRunItem, repo: GitHubRepoItem): PrReviewRecord {
     const parsed = Date.parse(item.created_at);
+    // completed_at is present only on terminal runs; an unparseable/absent value
+    // leaves completedAt undefined so the row shows no duration.
+    const completed = item.completed_at ? Date.parse(item.completed_at) : NaN;
     return {
       jobId: item.job_id,
       prNumber: item.pr_number,
       owner: repo.owner,
       repo: repo.name,
       startedAt: Number.isNaN(parsed) ? Date.now() : parsed,
+      completedAt: Number.isNaN(completed) ? undefined : completed,
       status: item.status,
       statusText: item.status_text,
       reviewSummary: item.review_summary,
@@ -469,6 +476,10 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
         record.prUrl = status.github_pr_url ?? record.prUrl;
         record.error = status.error;
         if (isCodingTeamTerminalStatus(status.status)) {
+          // The live status carries no completion timestamp, so stamp one when the
+          // run first goes terminal — this lets the row show a duration without a
+          // reload. `??=` so a value from a prior hydrate is never overwritten.
+          record.completedAt ??= Date.now();
           this.disposePoller(record.jobId);
         }
         this.cdr.markForCheck();
@@ -528,6 +539,51 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
    */
   commentFindings(summary: CodeReviewSummary): number {
     return summary.comment_findings ?? summary.body_findings ?? 0;
+  }
+
+  /** Fixed critical→info ordering for the per-row severity metric chips. */
+  private static readonly SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'] as const;
+
+  /**
+   * Human-readable elapsed time of a review run (e.g. "45s", "1m 23s", "2h 5m").
+   *
+   * Preconditions: `record` is a review record held by this component.
+   * Postconditions: returns a formatted duration string when the run is terminal
+   * and carries a `completedAt` no earlier than `startedAt`; otherwise null (the
+   * template renders "—" for a running review or a record without timestamps).
+   * Pure — no side effects.
+   */
+  reviewDuration(record: PrReviewRecord): string | null {
+    if (!this.isRecordTerminal(record) || record.completedAt === undefined) return null;
+    const ms = record.completedAt - record.startedAt;
+    if (ms < 0) return null;
+    const totalSec = Math.floor(ms / 1000);
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  /**
+   * Non-zero severity counts of a review, in fixed critical→info order, for the
+   * per-row severity chips.
+   *
+   * Preconditions: `summary` may be undefined (review still running / no summary).
+   * Postconditions: returns one `{ level, count }` entry per severity whose count
+   * is greater than zero; returns [] when there is no summary, no `severity_counts`,
+   * or every level is zero. Pure — no side effects.
+   */
+  severityEntries(summary: CodeReviewSummary | undefined): { level: string; count: number }[] {
+    const counts = summary?.severity_counts;
+    if (!counts) return [];
+    const entries: { level: string; count: number }[] = [];
+    for (const level of CodeReviewPanelComponent.SEVERITY_ORDER) {
+      const count = counts[level] ?? 0;
+      if (count > 0) entries.push({ level, count });
+    }
+    return entries;
   }
 
   /** Row status badge text derived from the latest review, or null when none. */

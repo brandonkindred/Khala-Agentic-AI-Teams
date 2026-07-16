@@ -144,6 +144,15 @@ export interface CodeReviewSummary {
   body_findings?: number;
   /** Findings that could not be posted as their own comment (review still submitted). */
   comments_failed?: number;
+  /** Count of posted PR findings by severity. Absent on reviews run before this
+   * shipped; each level is optional and omitted-or-0 means "none at that level". */
+  severity_counts?: {
+    critical?: number;
+    high?: number;
+    medium?: number;
+    low?: number;
+    info?: number;
+  };
   event: string;
   /** Pre-existing bugs the reviewer flagged in unchanged code, offered as
    * GitHub-issue candidates. Absent on reviews run before this feature. */

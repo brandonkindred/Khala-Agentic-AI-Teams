@@ -1024,6 +1024,17 @@ def _run_pr_review_body(
             )
 
             comment_findings = len(standalone)
+            # Break the posted PR findings down by severity so the Code Review page
+            # can show per-review severity metrics. Aggregated over ``pr_issues``
+            # (the findings actually posted on this PR), so the counts sum to
+            # ``total_issues``; pre-existing-bug proposals are excluded. Unknown or
+            # blank severities are ignored rather than bucketed, keeping the map to
+            # the five documented levels.
+            severity_counts = {lvl: 0 for lvl in ("critical", "high", "medium", "low", "info")}
+            for issue in pr_issues:
+                lvl = str(getattr(issue, "severity", "") or "").lower()
+                if lvl in severity_counts:
+                    severity_counts[lvl] += 1
             review_summary = {
                 "total_issues": len(pr_issues),
                 "inline_comments": inline_count,
@@ -1032,6 +1043,7 @@ def _run_pr_review_body(
                 "comments_failed": comments_failed,
                 "event": event,
                 "files_reviewed": files_reviewed,
+                "severity_counts": severity_counts,
                 # Findings that matched an already-RESOLVED existing PR comment and
                 # so were dropped rather than re-posted (see
                 # partition_issues_by_existing_comments above).
