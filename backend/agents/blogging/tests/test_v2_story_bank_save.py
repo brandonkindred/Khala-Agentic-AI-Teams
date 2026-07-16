@@ -8,6 +8,8 @@ narrative could otherwise defeat.
 
 from __future__ import annotations
 
+import pytest
+
 
 def _gap(title: str, context: str = "ctx"):
     from ghost_writer_agent.models import StoryGap
@@ -92,3 +94,20 @@ def test_save_narratives_one_failure_does_not_abort_the_rest(monkeypatch) -> Non
     assert saved == 2
     persisted = {c["section_title"] for c in calls}
     assert persisted == {"First", "Third"}
+
+
+def test_save_narratives_reraises_cancellation(monkeypatch) -> None:
+    """A Temporal cancellation must propagate, not be swallowed by the non-fatal guard."""
+    import agent_implementations.blog_writing_process_v2 as v2
+    from shared import story_bank
+    from temporalio.exceptions import CancelledError
+
+    def _cancelling_save(**kw):
+        raise CancelledError("cancelled")
+
+    monkeypatch.setattr(story_bank, "save_story", _cancelling_save)
+
+    with pytest.raises(CancelledError):
+        v2._save_narratives_to_story_bank(
+            [(_gap("A"), "story")], topic_keywords=[], job_id=None, llm_client=None
+        )

@@ -974,6 +974,10 @@ def _save_narratives_to_story_bank(
           continues so one bad story never loses the remaining saves.
         - Returns the count of narratives *successfully* persisted (0 ..
           ``len(collected_story_pairs)``).
+
+    Raises:
+        CancelledError: a Temporal-native (or otherwise external) cancellation propagates
+            unchanged — it is never swallowed by the non-fatal per-pair guard.
     """
     from shared.story_bank import save_story
 
@@ -989,7 +993,11 @@ def _save_narratives_to_story_bank(
                 llm_client=llm_client,
             )
             saved += 1
+        except CancelledError:
+            raise
         except Exception as e:  # non-fatal: one bad story must not lose the rest
+            if _is_external_cancellation(e):
+                raise
             logger.warning(
                 "Story bank save failed for section %r (non-fatal): %s",
                 story_gap.section_title,
@@ -1117,12 +1125,19 @@ def run_planning_stage(
                     # Persist each narrative to the story bank for reuse across future posts.
                     try:
                         topic_keywords = _extract_plan_keywords(plan)
-                        _save_narratives_to_story_bank(
+                        saved_count = _save_narratives_to_story_bank(
                             collected_story_pairs,
                             topic_keywords=topic_keywords,
                             job_id=job_id,
                             llm_client=llm_client,
                         )
+                        logger.info(
+                            "Story bank: persisted %d of %d elicited narrative(s)",
+                            saved_count,
+                            len(collected_story_pairs),
+                        )
+                    except CancelledError:
+                        raise
                     except Exception as e:
                         logger.warning("Story bank save failed (non-fatal): %s", e)
 
