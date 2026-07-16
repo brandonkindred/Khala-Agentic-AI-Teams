@@ -408,8 +408,10 @@ class EnvironmentStore:
               produce a duplicate entry); the primary ``storage_dir`` is scanned
               first, so its record wins. Results are filtered to ``status`` when
               given and sorted by ``created_at`` descending.
-            * Unparseable, non-dict (e.g. a JSON array), or incomplete files are
-              skipped; never raises. A record whose ``agent_id`` fails
+            * Unparseable, non-dict (e.g. a JSON array), incomplete, or
+              unreadable files (e.g. permissions changed or the file was
+              deleted between the directory scan and the read) are skipped;
+              never raises. A record whose ``agent_id`` fails
               :func:`safe_path_component` (e.g. a path-traversal string like
               ``"../../etc/passwd"`` planted in a malicious or malformed file)
               is skipped too, so every returned ``agent_id`` is safe for
@@ -434,7 +436,7 @@ class EnvironmentStore:
                         seen.add(env.agent_id)
                         if status is None or env.status == status:
                             environments.append(env)
-                    except (json.JSONDecodeError, KeyError, ValueError):
+                    except (json.JSONDecodeError, KeyError, ValueError, OSError):
                         continue
 
         environments.sort(key=lambda e: e.created_at or "", reverse=True)
