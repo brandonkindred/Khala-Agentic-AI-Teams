@@ -25,6 +25,7 @@ convenience.
 
 from __future__ import annotations
 
+import copy
 import logging
 import threading  # noqa: F401 - re-exported so coding_team.orchestrator.threading stays patchable
 from pathlib import Path
@@ -102,7 +103,10 @@ def _build_review_evidence(summary: str, diff: str) -> str:
     return f"{summary}\n\n--- DIFF ---\n{diff}"
 
 
-# Default coding-team roster when planning/snapshot provide no stacks.
+# Default coding-team roster when planning/snapshot provide no stacks. Internal template only --
+# never hand this list (or its dict entries) to a caller directly, since an in-place mutation
+# would corrupt the default for every subsequent job that falls back to it. Use
+# _default_stack_specs() below, which returns an independent deep copy.
 _DEFAULT_STACK_SPECS: List[Dict[str, Any]] = [
     {
         "name": "frontend_v2",
@@ -113,6 +117,16 @@ _DEFAULT_STACK_SPECS: List[Dict[str, Any]] = [
         "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
     },
 ]
+
+
+def _default_stack_specs() -> List[Dict[str, Any]]:
+    """A fresh, independent copy of the default coding-team roster.
+
+    Postconditions:
+        - Returns a deep copy of ``_DEFAULT_STACK_SPECS``; mutating the result (or any nested
+          list/dict within it) never affects the module-level template or any other caller's copy.
+    """
+    return copy.deepcopy(_DEFAULT_STACK_SPECS)
 
 
 def _feature_branch_name(task: Task) -> str:
@@ -268,7 +282,7 @@ def run_coding_team_orchestrator(
             # Explicit "retry the failed tasks" entry (e.g. the SE retry path): also demote terminal
             # FAILED tasks to TO_DO so the swarm re-attempts them. Default resume leaves them FAILED.
             graph.reset_failed()
-        stacks_raw = existing.get("stack_specs") or _DEFAULT_STACK_SPECS
+        stacks_raw = existing.get("stack_specs") or _default_stack_specs()
     else:
         # Plan the task graph, pausing for the user if the Tech Lead raises a decision it must not
         # make. None means either a pause ended without answers (the pause cycle already set the
@@ -304,7 +318,7 @@ def run_coding_team_orchestrator(
             )
             return
         tasks_raw = out.get("tasks") or []
-        stacks_raw = out.get("stacks") or _DEFAULT_STACK_SPECS
+        stacks_raw = out.get("stacks") or _default_stack_specs()
         for idx, t in enumerate(tasks_raw, start=1):
             if not isinstance(t, dict):
                 logger.warning("Skipping malformed task graph entry at index %s: %r", idx, t)
