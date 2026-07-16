@@ -80,6 +80,19 @@ def test_environment_store_register_rejects_none(tmp_path: Path) -> None:
         store.register(None)
 
 
+def test_environment_store_register_rejects_empty_agent_id(tmp_path: Path) -> None:
+    store = EnvironmentStore(storage_dir=tmp_path)
+    with pytest.raises(ValueError, match="agent_id must not be empty"):
+        store.register(
+            StoreEnvInfo(
+                agent_id="",
+                container_id="c1",
+                container_name="c1",
+                workspace_path="/w",
+            )
+        )
+
+
 def test_environment_store_update_status(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
 
@@ -206,6 +219,28 @@ def test_environment_store_list_all_skips_corrupt(tmp_path: Path) -> None:
 
     out = store.list_all()
     # Only the valid one shows up.
+    assert {e.agent_id for e in out} == {"a1"}
+
+
+def test_environment_store_list_all_skips_unsafe_agent_id(tmp_path: Path) -> None:
+    """A path-traversal-shaped agent_id from a malicious/malformed file must not surface."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(agent_id="a1", container_id="c1", container_name="c1", workspace_path="/w")
+    )
+    # register() would reject this via safe_path_component, so write it directly.
+    (tmp_path / "evil.json").write_text(
+        json.dumps(
+            {
+                "agent_id": "../../etc/passwd",
+                "container_id": "c2",
+                "container_name": "c2",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = store.list_all()
     assert {e.agent_id for e in out} == {"a1"}
 
 

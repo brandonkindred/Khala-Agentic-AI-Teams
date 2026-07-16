@@ -97,12 +97,14 @@ class SpecImplementabilityError(Exception):
         self.design_context = design_context
 
 
-class OrchestratorContractError(Exception):
+class OrchestratorContractError(ValueError):
     """Raised when a strategy-lab orchestrator method's precondition,
     postcondition, or invariant is violated.
 
     Signals a bug in the caller (precondition) or callee (postcondition/
     invariant) — never caught to recover; it should propagate and fail
     the run. Used in place of bare ``assert`` so these checks are
-    enforced regardless of the ``-O`` / ``PYTHONOPTIMIZE`` flag.
+    enforced regardless of the ``-O`` / ``PYTHONOPTIMIZE`` flag. Subclasses
+    ``ValueError`` so it composes with existing ``except ValueError``
+    handling for malformed-input contract violations.
     """

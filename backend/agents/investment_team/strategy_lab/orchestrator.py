@@ -2792,9 +2792,9 @@ class StrategyLabOrchestrator:
              if critical: terminate.
           8. Commit proposal as new known-good state; continue.
         """
-        if not (align_round >= 0):
-            raise OrchestratorContractError("align_round must be non-negative")
-        if not (isinstance(market_data, dict) and market_data):
+        if align_round < 0:
+            raise OrchestratorContractError(f"align_round must be non-negative, got {align_round}")
+        if not isinstance(market_data, dict) or not market_data:
             raise OrchestratorContractError("market_data must be non-empty")
 
         # Step 1 — audit the current ledger and record the alignment gates.
