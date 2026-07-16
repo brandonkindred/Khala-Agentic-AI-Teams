@@ -106,6 +106,13 @@ def run_setup(
     # stamps ``reused`` onto the result). Only a newly created container may be
     # rolled back below — tearing down a reused container would destroy another
     # job's healthy agent, since every store is keyed solely by agent_id.
+    #
+    # LIMITATION: this signal reflects only *this* provision() result, not
+    # exclusive ownership. Concurrent provisioning of the same agent_id is not
+    # serialized anywhere in the pipeline, so a rollback here (like every other
+    # agent_id-keyed teardown, including the workflow's compensate path) could
+    # race a concurrent job that has adopted the same container. Agent-level
+    # serialization is tracked as separate follow-up work.
     newly_created = not result.details.get("reused", False)
 
     if progress_callback:
@@ -142,7 +149,17 @@ def run_setup(
         # reused container belongs to another job and is left untouched.
         if newly_created:
             try:
-                docker.deprovision(agent_id)
+                teardown = docker.deprovision(agent_id)
+                # deprovision() reports failure (e.g. a `docker stop` timeout) via
+                # its result rather than raising, so inspect it — otherwise a
+                # failed rollback would leave the container silently orphaned.
+                if teardown is not None and not getattr(teardown, "success", True):
+                    logger.error(
+                        "Setup rollback: container teardown for agent_id=%s reported "
+                        "failure; container may be orphaned: %s",
+                        agent_id,
+                        getattr(teardown, "error", None),
+                    )
             except Exception:
                 logger.exception(
                     "Setup rollback: failed to tear down container for agent_id=%s",

@@ -7,6 +7,7 @@ coverage on every branch.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -229,6 +230,45 @@ def test_run_setup_rollback_swallows_deprovision_error(tmp_path: Path) -> None:
         )
 
     docker.deprovision.assert_called_once_with("a5")
+
+
+def test_run_setup_rollback_reports_failed_teardown(tmp_path: Path, caplog) -> None:
+    """A rollback whose teardown *reports* failure (not raises) must be logged.
+
+    ``DockerProvisionerTool.deprovision`` returns ``DeprovisionResult(success=False)``
+    instead of raising, so an unchecked call would leave the container silently
+    orphaned. The rollback inspects the result and logs the orphaned container.
+    """
+    from agent_provisioning_team.models import DeprovisionResult
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = MagicMock()
+    env_store.get.return_value = None
+    env_store.register.side_effect = RuntimeError("register boom")
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={"container_id": "c-new", "container_name": "agent-a6"},
+    )
+    docker.deprovision.return_value = DeprovisionResult(
+        tool_name="docker", success=False, error="docker stop timed out"
+    )
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(RuntimeError, match="register boom"):
+            run_setup(
+                agent_id="a6",
+                manifest=ToolManifest(),
+                environment_store=env_store,
+                docker_provisioner=docker,
+            )
+
+    docker.deprovision.assert_called_once_with("a6")
+    assert "orphaned" in caplog.text
+    assert "a6" in caplog.text
 
 
 # ---------------------------------------------------------------------------
