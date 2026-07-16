@@ -473,11 +473,11 @@ describe('PrReviewRunsService', () => {
     expect(service.badgeLabel(1)).toBeNull();
     expect(service.badgeClass(1)).toBe('');
 
-    service.reviews.set(1, [record({ status: 'running' })]);
+    service['_reviews'].set(1, [record({ status: 'running' })]);
     expect(service.badgeLabel(1)).toBe('running');
     expect(service.isLatestRunning(1)).toBe(true);
 
-    service.reviews.set(1, [record({ status: 'failed' })]);
+    service['_reviews'].set(1, [record({ status: 'failed' })]);
     expect(service.badgeLabel(1)).toBe('failed');
     expect(service.badgeClass(1)).toBe('cr-job-status--failed');
   });

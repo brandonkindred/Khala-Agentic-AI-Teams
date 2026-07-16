@@ -129,9 +129,9 @@
                 }
 
                 <!-- Live status badge from the PR's latest review run -->
-                @if (badgeLabel(pull.number); as label) {
-                  <span class="cr-row-badge cr-job-status {{ badgeClass(pull.number) }}">
-                    @if (isLatestRunning(pull.number)) {
+                @if (reviewRuns.badgeLabel(pull.number); as label) {
+                  <span class="cr-row-badge cr-job-status {{ reviewRuns.badgeClass(pull.number) }}">
+                    @if (reviewRuns.isLatestRunning(pull.number)) {
                       <mat-spinner diameter="14"></mat-spinner>
                     }
                     {{ label }}
@@ -151,13 +151,13 @@
               @if (expandedPrNumber === pull.number) {
                 <app-pr-review-detail
                   [pull]="pull"
-                  [reviews]="reviewsFor(pull.number)"
+                  [reviews]="reviewRuns.reviewsFor(pull.number)"
                   [starting]="isStarting(pull)"
-                  [reviewError]="reviewErrorFor(pull.number)"
-                  [creatingIssues]="creatingIssues"
-                  [createIssueErrors]="createIssueErrors"
+                  [reviewError]="reviewRuns.reviewErrorFor(pull.number)"
+                  [creatingIssues]="reviewRuns.creatingIssues"
+                  [createIssueErrors]="reviewRuns.createIssueErrors"
                   (startReviewRequested)="startReview($event)"
-                  (createIssuesRequested)="createIssuesFor($event.record, $event.ids)"
+                  (createIssuesRequested)="reviewRuns.createIssuesFor($event.record, $event.ids)"
                 />
               }
             </div>

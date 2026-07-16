@@ -49,7 +49,12 @@ export class PrReviewRunsService implements OnDestroy {
 
   // All review runs per PR number, newest-first. Hydrated from the backend on
   // load and updated live by the per-job pollers below.
-  reviews = new Map<number, PrReviewRecord[]>();
+  private _reviews = new Map<number, PrReviewRecord[]>();
+
+  /** Read-only view so external code cannot bypass reset/hydrate/startReview to mutate state directly. */
+  get reviews(): ReadonlyMap<number, PrReviewRecord[]> {
+    return this._reviews;
+  }
 
   // Per-PR "Start Review" failures, shown inside that PR's expanded panel so a
   // start error and a list-load error never clobber each other.
@@ -99,7 +104,7 @@ export class PrReviewRunsService implements OnDestroy {
    */
   reset(repo: GitHubRepoItem | null): void {
     this.stopAllPollers();
-    this.reviews = new Map();
+    this._reviews = new Map();
     this.reviewErrors.clear();
     this.currentRepo = repo;
   }
@@ -139,7 +144,7 @@ export class PrReviewRunsService implements OnDestroy {
           // Records that still have a live poller must survive the rebuild as the
           // same object their poller writes to, or the UI stops updating.
           const live = new Map<string, PrReviewRecord>();
-          for (const list of this.reviews.values()) {
+          for (const list of this._reviews.values()) {
             for (const record of list) {
               if (this.pollers.has(record.jobId)) live.set(record.jobId, record);
             }
@@ -165,7 +170,7 @@ export class PrReviewRunsService implements OnDestroy {
             list.unshift(record); // newest-first
             map.set(record.prNumber, list);
           }
-          this.reviews = map;
+          this._reviews = map;
           for (const list of map.values()) {
             for (const record of list) {
               if (!isCodingTeamTerminalStatus(record.status) && !record.error) {
@@ -259,9 +264,9 @@ export class PrReviewRunsService implements OnDestroy {
           // If they switched away, don't spin an orphan poller for an off-screen record —
           // the hydrate on return re-fetches this run's history and attaches a fresh poller.
           if (this.currentRepo?.full_name === repo.full_name) {
-            const list = this.reviews.get(pull.number) ?? [];
+            const list = this._reviews.get(pull.number) ?? [];
             list.unshift(record); // newest-first
-            this.reviews.set(pull.number, list);
+            this._reviews.set(pull.number, list);
             this.startPolling(record);
           }
           this.cdr.markForCheck();
@@ -334,7 +339,7 @@ export class PrReviewRunsService implements OnDestroy {
 
   /** All review runs for a PR, newest-first. */
   reviewsFor(prNumber: number): PrReviewRecord[] {
-    return this.reviews.get(prNumber) ?? [];
+    return this._reviews.get(prNumber) ?? [];
   }
 
   /** The most recent review run for a PR, or null. */

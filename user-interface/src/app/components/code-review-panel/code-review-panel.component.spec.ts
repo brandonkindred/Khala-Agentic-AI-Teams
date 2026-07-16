@@ -177,12 +177,12 @@ describe('CodeReviewPanelComponent', () => {
 
   it('collapsing the expanded repo drops all repo-scoped state', async () => {
     await setup();
-    component.reviews.set(1, [record()]);
+    component['reviewRuns']['_reviews'].set(1, [record()]);
     component.toggleRepo(component.repos[0]); // collapse
     expect(component.selectedRepo).toBeNull();
     expect(component.pulls.length).toBe(0);
     expect(component.pullsLoaded).toBe(false);
-    expect(component.reviews.size).toBe(0);
+    expect(component['reviewRuns'].reviews.size).toBe(0);
   });
 
   it('treats a config check error as unconfigured', async () => {
@@ -272,7 +272,7 @@ describe('CodeReviewPanelComponent', () => {
     integrationsSpy.getGitHubReviewHistory.mockReturnValue(throwError(() => new Error('nope')));
     await setup();
     expect(component.pullsLoaded).toBe(true);
-    expect(component.reviews.size).toBe(0);
+    expect(component['reviewRuns'].reviews.size).toBe(0);
   });
 
   // -------------------------------------------------------------------------
@@ -297,31 +297,22 @@ describe('CodeReviewPanelComponent', () => {
   // -------------------------------------------------------------------------
   // The review-run domain (hydration, polling, starting reviews, badge derivation,
   // issue creation) is owned by PrReviewRunsService and covered by its own spec
-  // (pr-review-runs.service.spec.ts); this just confirms the component wires its
-  // public API through to the injected service instance.
+  // (pr-review-runs.service.spec.ts); the template binds to `reviewRuns` directly
+  // for all of that (see the DOM integration tests below). `isStarting`/`startReview`
+  // are the only methods this component still wraps, since they need `selectedRepo`,
+  // which only this component holds — this confirms that threading.
 
-  it('delegates review-run actions to the injected PrReviewRunsService and exposes its state by reference', async () => {
+  it('threads selectedRepo through isStarting/startReview to the injected PrReviewRunsService', async () => {
     await setup();
     const reviewRuns = component['reviewRuns'];
+    const isStartingSpy = vi.spyOn(reviewRuns, 'isStarting');
     const startSpy = vi.spyOn(reviewRuns, 'startReview').mockImplementation(() => undefined);
-    const createSpy = vi.spyOn(reviewRuns, 'createIssuesFor').mockImplementation(() => undefined);
+
+    component.isStarting(component.pulls[0]);
+    expect(isStartingSpy).toHaveBeenCalledWith(component.selectedRepo, component.pulls[0].number);
 
     component.startReview(component.pulls[0]);
     expect(startSpy).toHaveBeenCalledWith(component.selectedRepo, component.pulls[0]);
-
-    const rec = record();
-    component.createIssuesFor(rec, ['p0']);
-    expect(createSpy).toHaveBeenCalledWith(rec, ['p0']);
-
-    // Same object references — mutating one is visible through the other.
-    expect(component.reviews).toBe(reviewRuns.reviews);
-    expect(component.creatingIssues).toBe(reviewRuns.creatingIssues);
-    expect(component.createIssueErrors).toBe(reviewRuns.createIssueErrors);
-
-    // `latestReview`/`hasReviews` are thin pass-throughs too.
-    reviewRuns.reviews.set(1, [record()]);
-    expect(component.latestReview(1)).toBe(reviewRuns.latestReview(1));
-    expect(component.hasReviews(1)).toBe(true);
   });
 
   // -------------------------------------------------------------------------

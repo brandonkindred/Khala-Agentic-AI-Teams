@@ -17,7 +17,6 @@ import type { GitHubPullRequestItem, GitHubRepoItem } from '../../models/integra
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
-import type { PrReviewRecord } from './pr-review-record.model';
 
 // Re-exported so existing importers of `PrReviewRecord` from this module keep working;
 // the interface now lives in ./pr-review-record.model so both this panel and its
@@ -33,8 +32,10 @@ export type { PrReviewRecord } from './pr-review-record.model';
  *
  * This component owns repo/PR-list browsing and pagination; the review-run domain
  * (hydration, live polling, starting reviews, filing issues from proposals, and the
- * row status badge derivation) is owned by the injected `PrReviewRunsService` — see
- * that service for the contract of everything this component delegates to it.
+ * row status badge derivation) is owned by the injected `PrReviewRunsService`. The
+ * template binds directly to `reviewRuns` for all of that — this class only wraps
+ * `isStarting`/`startReview`, which need this component's own `selectedRepo` threaded
+ * through. See `PrReviewRunsService` for the contract of everything else.
  */
 @Component({
   selector: 'app-code-review-panel',
@@ -58,7 +59,8 @@ export type { PrReviewRecord } from './pr-review-record.model';
 export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   private readonly api = inject(CodingTeamApiService);
   private readonly integrationsApi = inject(IntegrationsApiService);
-  private readonly reviewRuns = inject(PrReviewRunsService);
+  /** Exposed (not private) so the template can bind to it directly, e.g. `reviewRuns.badgeLabel(...)`. */
+  protected readonly reviewRuns = inject(PrReviewRunsService);
 
   healthCheck = (): ReturnType<CodingTeamApiService['health']> => this.api.health();
 
@@ -236,24 +238,10 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     this.expandedPrNumber = this.expandedPrNumber === pull.number ? null : pull.number;
   }
 
-  // --- Delegates to PrReviewRunsService -------------------------------------
-  // The template binds these exact names; each forwards to the service, passing
-  // `selectedRepo` through where the service needs to know which repo is active.
-
-  /** Reviews whose Start Review request is in flight (disables the button). */
-  get creatingIssues(): Set<string> {
-    return this.reviewRuns.creatingIssues;
-  }
-
-  /** Per-review "create issues" failure, shown beneath that review's proposals. */
-  get createIssueErrors(): Map<string, string> {
-    return this.reviewRuns.createIssueErrors;
-  }
-
-  /** All review runs per PR number, newest-first (exposed for direct test/debug access). */
-  get reviews(): Map<number, PrReviewRecord[]> {
-    return this.reviewRuns.reviews;
-  }
+  // --- The only review-run wrappers this component needs ---------------------
+  // Everything else in PrReviewRunsService's public API is bound directly by the
+  // template (`reviewRuns.badgeLabel(...)`, etc.). These two remain component
+  // methods because they need `selectedRepo`, which only this component holds.
 
   isStarting(pull: GitHubPullRequestItem): boolean {
     return this.reviewRuns.isStarting(this.selectedRepo, pull.number);
@@ -262,37 +250,5 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   startReview(pull: GitHubPullRequestItem): void {
     if (!this.selectedRepo) return;
     this.reviewRuns.startReview(this.selectedRepo, pull);
-  }
-
-  reviewErrorFor(prNumber: number): string | null {
-    return this.reviewRuns.reviewErrorFor(prNumber);
-  }
-
-  reviewsFor(prNumber: number): PrReviewRecord[] {
-    return this.reviewRuns.reviewsFor(prNumber);
-  }
-
-  latestReview(prNumber: number): PrReviewRecord | null {
-    return this.reviewRuns.latestReview(prNumber);
-  }
-
-  hasReviews(prNumber: number): boolean {
-    return this.reviewRuns.hasReviews(prNumber);
-  }
-
-  isLatestRunning(prNumber: number): boolean {
-    return this.reviewRuns.isLatestRunning(prNumber);
-  }
-
-  badgeLabel(prNumber: number): string | null {
-    return this.reviewRuns.badgeLabel(prNumber);
-  }
-
-  badgeClass(prNumber: number): string {
-    return this.reviewRuns.badgeClass(prNumber);
-  }
-
-  createIssuesFor(record: PrReviewRecord, ids: string[]): void {
-    this.reviewRuns.createIssuesFor(record, ids);
   }
 }
