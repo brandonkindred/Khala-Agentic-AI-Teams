@@ -545,6 +545,77 @@ async def test_workflow_setup_failure_compensates_and_marks_failed(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_workflow_setup_failure_compensation_raises(tmp_path) -> None:
+    """A failing compensation must be logged, not mask the original setup error.
+
+    The except-block wraps compensation in a nested try/except: if
+    ``compensate_activity`` raises, it is logged via ``workflow.logger.error``
+    and the original ``setup_activity`` exception still propagates. The job is
+    still marked failed afterwards.
+    """
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "setup_activity": RuntimeError("setup boom"),
+            "compensate_activity": RuntimeError("compensate boom"),
+            "mark_job_failed_activity": None,
+        }
+    )
+
+    # `workflow.logger.error` raises outside a workflow event loop, so patch the
+    # logger to a mock — this both keeps the harness happy and lets us assert the
+    # compensation-failure branch was taken.
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "logger") as mock_logger,
+    ):
+        with pytest.raises(RuntimeError, match="setup boom"):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    # Compensation was attempted (and raised), the failure was logged, and the
+    # job was still marked failed despite the compensation error.
+    assert _call(stub, "compensate_activity")["args"] == ["agent-1", [], "job-1"]
+    mock_logger.error.assert_called_once()
+    fail_call = _call(stub, "mark_job_failed_activity")
+    assert fail_call["args"][0] == "job-1"
+    assert "setup boom" in fail_call["args"][1]
+
+
+@pytest.mark.asyncio
+async def test_workflow_setup_failure_mark_failed_raises(tmp_path) -> None:
+    """A failing mark_job_failed must be logged, not mask the original error.
+
+    The except-block wraps the terminal ``mark_job_failed_activity`` write in a
+    nested try/except: if it raises, it is logged via ``workflow.logger.error``
+    and the original provisioning exception still propagates.
+    """
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "setup_activity": RuntimeError("setup boom"),
+            "compensate_activity": None,
+            "mark_job_failed_activity": RuntimeError("mark boom"),
+        }
+    )
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "logger") as mock_logger,
+    ):
+        with pytest.raises(RuntimeError, match="setup boom"):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    # Compensation succeeded (no log); the mark_job_failed failure was logged
+    # exactly once and did not mask the original setup exception.
+    assert "mark_job_failed_activity" in [c["name"] for c in stub.calls]
+    mock_logger.error.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_workflow_marks_failed_on_documentation_error(tmp_path) -> None:
     """Documentation failure persists terminal failure before re-raising."""
     from agent_provisioning_team.temporal import workflows as wf
