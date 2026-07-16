@@ -757,6 +757,39 @@ def test_find_matching_open_issue_location_in_title_matches() -> None:
     assert find_matching_open_issue(proposal, [issue]) is issue
 
 
+def test_find_matching_open_issue_uses_description_body_for_truncated_title() -> None:
+    # Regression (Codex-flagged): a headline long enough that _proposal_title
+    # truncates the filed issue's TITLE to fit _ISSUE_TITLE_MAX scores a low
+    # ratio against that truncated title, even though the issue BODY's
+    # "### Description" section (rendered by build_issue_from_proposal) always
+    # carries the full, untruncated text -- so a rerun must still recognize its
+    # own previously-filed issue via the body excerpt.
+    long_headline = " ".join(["distinct", "unusual", "descriptive", "word"] * 30)
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", severity="high", description=long_headline)], 0
+    )
+    truncated_title = long_headline[:105].rstrip() + "…"
+    issue = _open_issue(
+        1,
+        f"[high] {truncated_title}",
+        body=f"- **Location:** `src/a.py`\n\n### Description\n{long_headline}\n\n### Suggested fix\nfix it",
+    )
+    assert find_matching_open_issue(proposal, [issue]) is issue
+
+
+def test_find_matching_open_issue_ignores_description_section_when_absent() -> None:
+    # A human-filed issue (or one without Khala's "### Description" structure)
+    # must fall back to title-only matching -- no false match conjured from an
+    # absent section.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", description="off-by-one error")], 0
+    )
+    issue = _open_issue(
+        1, "unrelated feature request", body="src/a.py mentioned here but nothing else"
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
 def test_annotate_duplicate_proposals_marks_matched_and_preserves_order_and_length() -> None:
     proposals = [
         proposal_from_findings(

@@ -740,6 +740,32 @@ def _normalized_issue_title(title: str) -> str:
     return match.group(1) if match else (title or "")
 
 
+_ISSUE_DESCRIPTION_SECTION_RE = re.compile(
+    r"###\s*Description\s*\n+(.*?)(?:\n\n#|\Z)", re.IGNORECASE | re.DOTALL
+)
+
+
+def _issue_description_excerpt(issue: Issue) -> str:
+    """Extract the untruncated finding description from a Khala-filed issue's body.
+
+    ``build_issue_from_proposal`` always renders a proposal's full description
+    verbatim under a ``### Description`` heading in the issue BODY, even though
+    ``_proposal_title`` truncates that same text (to ``_ISSUE_TITLE_MAX``) for the
+    issue TITLE. A long headline's truncated title can score a misleadingly low
+    similarity ratio against a fresh proposal's full headline even when it is the
+    very same finding -- extracting this section lets the caller compare against
+    the untruncated text instead, whenever doing so scores higher.
+
+    Postconditions:
+        - Returns the text between a ``### Description`` heading and the next
+          markdown heading (or the end of the body), stripped -- or ``""`` when no
+          such heading is present (a human-filed issue, or one from another tool,
+          never carries this exact structure). Never raises.
+    """
+    match = _ISSUE_DESCRIPTION_SECTION_RE.search(issue.body or "")
+    return match.group(1).strip() if match else ""
+
+
 def _location_appears_in(file_path: str, issue: Issue) -> bool:
     """True when a finding's file_path is a substring of an existing issue's title/body.
 
@@ -790,7 +816,13 @@ def find_matching_open_issue(
     strips Khala's own severity-prefix/occurrences-suffix wrapper (if present), so
     a rerun still recognizes an issue Khala itself filed on a previous review --
     without this, the wrapper text dilutes the similarity ratio enough to drop a
-    genuine match (especially a short headline) below threshold.
+    genuine match (especially a short headline) below threshold. The headline is
+    also compared against :func:`_issue_description_excerpt` (the issue body's
+    ``### Description`` section, when present) and whichever of the two scores
+    higher is used -- a Khala-filed issue's TITLE may be truncated to fit
+    ``_ISSUE_TITLE_MAX``, but its body always carries the full, untruncated
+    description, so a long headline's rerun still recognizes its own previously
+    filed issue even though the title alone would score too low.
 
     Pure and side-effect-free: no GitHub/network access. ``open_issues`` must already
     be a materialized (or safely re-iterable) snapshot -- callers fetch it ONCE per
@@ -827,9 +859,19 @@ def find_matching_open_issue(
     best_ratio = -1.0
     for issue in open_issues:
         candidate_title = _normalized_issue_title(issue.title or "").casefold()
-        ratio = SequenceMatcher(None, headline, candidate_title).ratio()
+        description_excerpt = _issue_description_excerpt(issue).casefold()
+        candidate_texts = [candidate_title]
+        if description_excerpt:
+            candidate_texts.append(description_excerpt)
+        ratio = -1.0
+        best_text = candidate_title
+        for text in candidate_texts:
+            text_ratio = SequenceMatcher(None, headline, text).ratio()
+            if text_ratio > ratio:
+                ratio = text_ratio
+                best_text = text
         text_alone_matches = ratio >= no_location and (
-            _jaccard_similarity(headline_tokens, _tokenize_for_similarity(candidate_title))
+            _jaccard_similarity(headline_tokens, _tokenize_for_similarity(best_text))
             >= no_location_token_overlap
         )
         matches = (_location_appears_in(file_path, issue) and ratio >= with_location) or (
