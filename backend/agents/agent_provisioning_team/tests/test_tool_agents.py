@@ -688,7 +688,7 @@ def test_postgres_provision_full_path(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_postgres_provision_handles_duplicate_role(tmp_path: Path, monkeypatch) -> None:
-    import psycopg2
+    psycopg2 = pytest.importorskip("psycopg2")
 
     from agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_provisioning_team.tool_agents.postgres_provisioner import PostgresProvisionerTool
