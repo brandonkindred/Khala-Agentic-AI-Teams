@@ -95,6 +95,20 @@ class BlogComplianceAgent:
 
         Returns:
             ComplianceReport with status PASS or FAIL.
+
+        Preconditions:
+            - ``self._model`` is a usable LLM client (enforced in ``__init__``).
+            - ``draft`` and ``brand_spec_prompt`` are strings (empty is tolerated but
+              low-signal — an empty draft yields an uninformative report).
+        Postconditions:
+            - Always returns a ``ComplianceReport`` (never ``None``); ``status`` is
+              normalized to ``"PASS"`` or ``"FAIL"``.
+            - A transient LLM-transport error (``LLMRateLimitError`` / ``LLMTemporaryError``)
+              propagates unwrapped so the caller (or Temporal) can retry; a non-transient
+              LLM failure fails closed with a ``status="FAIL"`` fallback report rather than
+              raising.
+            - When ``work_dir`` is set and ``write_artifact`` is available, the report is
+              persisted as ``compliance_report.json``.
         """
         brand_summary = (brand_spec_prompt or "").strip()
 

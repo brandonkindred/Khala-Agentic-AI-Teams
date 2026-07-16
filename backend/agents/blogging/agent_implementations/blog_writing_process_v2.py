@@ -2019,7 +2019,9 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
         # closure is accepted for conciseness; the gates' behavior is covered
         # end-to-end via run_pipeline in test_run_pipeline_gates.py.
         def _fact_check_gate(draft: str):
-            # Reports progress under BlogPhase.FACT_CHECK.
+            # Both gates report progress under BlogPhase.FACT_CHECK — the umbrella phase
+            # for this concurrent step — so the two callbacks don't flip the UI phase
+            # back and forth between FACT_CHECK and COMPLIANCE while they run together.
             try:
                 report = fact_check_agent.run(
                     draft,
@@ -2036,7 +2038,8 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                 return None, FactCheckError(f"Fact check failed: {e}", cause=e)
 
         def _compliance_gate(draft: str, validator_report):
-            # Reports progress under BlogPhase.COMPLIANCE.
+            # Reports progress under BlogPhase.FACT_CHECK too — see _fact_check_gate; the
+            # umbrella phase keeps the concurrent gates from flip-flopping the UI phase.
             try:
                 report = compliance_agent.run(
                     draft,
@@ -2048,7 +2051,7 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                     if hasattr(validator_report, "model_dump")
                     else None,
                     work_dir=work_dir,
-                    on_llm_request=lambda msg: _update(BlogPhase.COMPLIANCE, status_text=msg),
+                    on_llm_request=lambda msg: _update(BlogPhase.FACT_CHECK, status_text=msg),
                 )
                 return report, None
             except (BloggingError, CancelledError, LLMRateLimitError, LLMTemporaryError) as e:

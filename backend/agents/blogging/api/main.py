@@ -191,13 +191,17 @@ def _async_job_worker() -> None:
     """
     while True:
         item = _ASYNC_JOB_QUEUE.get()
+        job_id = "unknown"
         try:
             if item is None:
                 return
             target, args = item
+            # Both async targets take job_id as their first positional arg; capture it
+            # up front so a crash can be correlated with the specific job in the logs.
+            job_id = args[0] if args else "unknown"
             target(*args)
         except Exception:
-            logger.exception("Async blogging job worker crashed on a job")
+            logger.exception("Async blogging job worker crashed on job %s", job_id)
         finally:
             _ASYNC_JOB_QUEUE.task_done()
 
