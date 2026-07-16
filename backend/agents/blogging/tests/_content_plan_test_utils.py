@@ -3,8 +3,10 @@
 Centralizes the ContentPlan construction boilerplate previously copy-pasted
 (with per-file variations in topic, section count, and title-candidate count)
 across several test modules. Every field a caller's assertions depend on must
-be passed explicitly; only ``requirements_analysis`` defaults are shared,
-since every call site uses the identical accepted/feasible/no-gaps triple.
+be passed explicitly; only ``requirements_analysis`` and a minimal
+``title_candidates`` default are shared, since every call site uses the
+identical accepted/feasible/no-gaps triple and overrides ``title_candidates``
+explicitly whenever it needs a different shape.
 """
 
 from __future__ import annotations
