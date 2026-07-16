@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -436,8 +437,56 @@ def _get_task_stats() -> Dict[str, Any]:
     }
 
 
-def _get_agents() -> Dict[str, Any]:
-    """Build the SE agent fleet, keyed by role.
+class _LazyAgentRegistry(Mapping):
+    """Role-keyed mapping of SE agents, each built on first access and cached.
+
+    Values are produced by zero-argument factories the first time their key is
+    subscripted, then memoized. Membership tests and iteration never trigger
+    construction — only ``registry[key]`` does. This is why the thread-mode /
+    Temporal pipeline, which reads only ``registry["architecture"]``, no longer
+    pays the ``get_client`` provider-store read (and, for ``devops``, a large
+    sub-agent fan-out) for the roles it never consumes.
+
+    Preconditions:
+        - ``factories`` maps role names (str) to zero-argument callables.
+    Postconditions:
+        - ``self[key]`` returns the cached result of ``factories[key]()``; the
+          factory runs at most once per key. A key absent from ``factories``
+          raises ``KeyError``.
+    Invariants:
+        - ``__contains__`` / ``__iter__`` / ``__len__`` reflect the factory key
+          set without constructing any agent.
+
+    Note: ``values()`` / ``items()`` (inherited from ``Mapping``) would force
+    construction of every remaining agent; no caller uses them.
+    """
+
+    def __init__(self, factories: Dict[str, Callable[[], Any]]) -> None:
+        assert all(callable(f) for f in factories.values()), "factories must be zero-arg callables"
+        self._factories = factories
+        self._cache: Dict[str, Any] = {}
+
+    def __getitem__(self, key: str) -> Any:
+        if key not in self._factories:
+            raise KeyError(key)
+        if key not in self._cache:
+            self._cache[key] = self._factories[key]()
+        return self._cache[key]
+
+    def __contains__(self, key: object) -> bool:
+        # Override ``Mapping``'s default, which would call ``__getitem__`` and
+        # thereby construct the agent — the exact cost this registry avoids.
+        return key in self._factories
+
+    def __iter__(self):
+        return iter(self._factories)
+
+    def __len__(self) -> int:
+        return len(self._factories)
+
+
+def _get_agents() -> Mapping[str, Any]:
+    """Build the lazy SE agent fleet, keyed by role.
 
     Each agent uses ``get_client(key)`` for per-agent model configuration. The
     main pipeline uses ``planning_team`` for planning; the spec-intake /
@@ -446,18 +495,26 @@ def _get_agents() -> Dict[str, Any]:
 
     Audit (kept honest here so future readers do not assume the dict is fully
     consumed): the two production callers of ``_get_agents`` — the thread-mode
-    orchestrator below and ``temporal/activities.py`` — currently read only
-    ``agents["architecture"]`` from the returned dict. Per-task backend/frontend
-    work is delegated to the coding-team / code-v2 sub-teams, which construct
-    their own tool agents via ``_build_tool_agents`` rather than reading them
-    from this dict. The remaining entries are retained because the integration
-    tests in ``test_backend_code_v2_integration.py`` and
+    orchestrator below and ``temporal/activities.py`` — read only
+    ``agents["architecture"]`` from the returned mapping. Per-task
+    backend/frontend work is delegated to the coding-team / code-v2 sub-teams,
+    which construct their own tool agents via ``_build_tool_agents`` rather than
+    reading them from this mapping. The remaining entries are retained because
+    the integration tests in ``test_backend_code_v2_integration.py`` and
     ``test_frontend_code_v2_integration.py`` pin the presence of the v2 team
     leads, and this function is the canonical fleet factory for the thread-mode
-    pipeline. Eagerly constructing every agent on each call is real startup
-    overhead (each entry calls ``get_client``); converting the unused entries to
-    lazy handles is tracked as a follow-up rather than a behavioral change for
-    this refactor PR.
+    pipeline.
+
+    Returns a lazy mapping (:class:`_LazyAgentRegistry`): each role's agent is
+    constructed on first subscript and then cached; membership tests and
+    iteration never construct. Since only ``architecture`` is read in
+    production, the other roles cost nothing unless a caller asks for them —
+    which avoids eagerly paying ``get_client`` (and the ``devops`` sub-agent
+    fan-out) on every call.
+
+    Postconditions:
+        - Returns a ``Mapping[str, Any]`` over the SE role names; ``result[key]``
+          lazily builds and caches the corresponding agent.
     """
     from acceptance_verifier_agent import AcceptanceVerifierAgent
     from accessibility_agent import AccessibilityExpertAgent
@@ -476,25 +533,31 @@ def _get_agents() -> Dict[str, Any]:
 
     from agent_repair_team import RepairExpertAgent
 
-    return {
-        "architecture": ArchitectureExpertAgent(get_client("architecture")),
-        "integration": IntegrationAgent(get_client("integration")),
-        "acceptance_verifier": AcceptanceVerifierAgent(get_client("acceptance_verifier")),
-        "tech_lead": TechLeadAgent(get_client("tech_lead")),
-        "devops": DevOpsTeamLeadAgent(get_client("devops")),
-        "backend": _lazy_init_backend_code_v2_team(),
-        "frontend_code_v2": _lazy_init_frontend_code_v2_team(),
-        "security": CybersecurityExpertAgent(get_client("security")),
-        "qa": QAExpertAgent(get_client("qa")),
-        "accessibility": AccessibilityExpertAgent(get_client("accessibility")),
-        "code_review": CodeReviewAgent(get_client("code_review")),
-        "dbc_comments": DbcCommentsAgent(get_client("dbc_comments")),
-        "documentation": DocumentationAgent(get_client("documentation")),
-        "git_setup": GitSetupAgent(),
-        "repair": RepairExpertAgent(get_client("repair")),
-        "linting_tool_agent": LintingToolAgent(get_client("linting_tool_agent")),
-        "build_fix_specialist": BuildFixSpecialistAgent(get_client("build_fix_specialist")),
-    }
+    return _LazyAgentRegistry(
+        {
+            "architecture": lambda: ArchitectureExpertAgent(get_client("architecture")),
+            "integration": lambda: IntegrationAgent(get_client("integration")),
+            "acceptance_verifier": lambda: AcceptanceVerifierAgent(
+                get_client("acceptance_verifier")
+            ),
+            "tech_lead": lambda: TechLeadAgent(get_client("tech_lead")),
+            "devops": lambda: DevOpsTeamLeadAgent(get_client("devops")),
+            "backend": _lazy_init_backend_code_v2_team,
+            "frontend_code_v2": _lazy_init_frontend_code_v2_team,
+            "security": lambda: CybersecurityExpertAgent(get_client("security")),
+            "qa": lambda: QAExpertAgent(get_client("qa")),
+            "accessibility": lambda: AccessibilityExpertAgent(get_client("accessibility")),
+            "code_review": lambda: CodeReviewAgent(get_client("code_review")),
+            "dbc_comments": lambda: DbcCommentsAgent(get_client("dbc_comments")),
+            "documentation": lambda: DocumentationAgent(get_client("documentation")),
+            "git_setup": GitSetupAgent,
+            "repair": lambda: RepairExpertAgent(get_client("repair")),
+            "linting_tool_agent": lambda: LintingToolAgent(get_client("linting_tool_agent")),
+            "build_fix_specialist": lambda: BuildFixSpecialistAgent(
+                get_client("build_fix_specialist")
+            ),
+        }
+    )
 
 
 def _lazy_init_backend_code_v2_team():
