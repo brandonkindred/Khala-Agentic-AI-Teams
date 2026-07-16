@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Tuple,
 
 if TYPE_CHECKING:
     from blog_writer_agent.models import WriterOutput
+    from ghost_writer_agent.models import StoryGap
 
 from blog_compliance_agent import BlogComplianceAgent
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
@@ -946,6 +947,45 @@ def run_pipeline(
     return ctx.planning_phase_result, ctx.draft_result, ctx.status
 
 
+def _save_narratives_to_story_bank(
+    collected_story_pairs: List[Tuple["StoryGap", str]],
+    *,
+    topic_keywords: List[str],
+    job_id: Optional[str],
+    llm_client: Any,
+) -> int:
+    """Persist each elicited narrative to the story bank under its own story gap.
+
+    The gap→narrative pairing is captured at collection time (see ``run_planning_stage``),
+    so each narrative is stored against the exact gap it was elicited for — no substring
+    re-matching, which was O(n*m) and could mis-associate a narrative with a gap whose
+    ``section_title`` merely appeared as a substring of another section's story.
+
+    Preconditions:
+        - Each entry in ``collected_story_pairs`` is ``(gap, raw_narrative)`` where
+          ``raw_narrative`` is the unformatted narrative text (no
+          ``"[Story for section: ...]"`` prefix).
+        - ``topic_keywords`` is the keyword list to tag every saved story with.
+
+    Postconditions:
+        - ``save_story`` is called exactly once per pair, using that pair's own gap
+          ``section_title`` and ``section_context``.
+        - Returns the number of narratives persisted (== ``len(collected_story_pairs)``).
+    """
+    from shared.story_bank import save_story
+
+    for story_gap, raw_narrative in collected_story_pairs:
+        save_story(
+            narrative=raw_narrative,
+            section_title=story_gap.section_title,
+            section_context=story_gap.section_context,
+            keywords=topic_keywords,
+            source_job_id=job_id,
+            llm_client=llm_client,
+        )
+    return len(collected_story_pairs)
+
+
 def run_planning_stage(
     ctx: "PipelineContext",
 ) -> Optional[Tuple[PlanningPhaseResult, Optional["WriterOutput"], PipelineStatus]]:
@@ -998,7 +1038,7 @@ def run_planning_stage(
     elicited_stories_text: Optional[str] = None
     if job_id is not None and job_updater is not None:
         try:
-            from ghost_writer_agent import GhostWriterElicitationAgent
+            from ghost_writer_agent import GhostWriterElicitationAgent, StoryGap
             from shared.blog_job_store import (
                 add_story_agent_message,
                 complete_story_elicitation,
@@ -1016,6 +1056,9 @@ def run_planning_stage(
 
             if story_gaps:
                 collected_narratives: list[str] = []
+                # Preserve the gap→narrative pairing at collection time so the story-bank
+                # save loop below doesn't have to re-derive it by fragile substring matching.
+                collected_story_pairs: list[tuple[StoryGap, str]] = []
 
                 for idx, gap in enumerate(story_gaps):
                     job_data = get_blog_job(job_id)
@@ -1051,6 +1094,7 @@ def run_planning_stage(
                         collected_narratives.append(
                             f"[Story for section: {gap.section_title}]\n{result.narrative}"
                         )
+                        collected_story_pairs.append((gap, result.narrative))
 
                 if collected_narratives:
                     elicited_stories_text = "\n\n".join(collected_narratives)
@@ -1058,22 +1102,13 @@ def run_planning_stage(
 
                     # Persist each narrative to the story bank for reuse across future posts.
                     try:
-                        from shared.story_bank import save_story
-
                         topic_keywords = _extract_plan_keywords(plan)
-                        for story_idx, story_gap in enumerate(story_gaps):
-                            # Find the matching narrative (format: "[Story for section: ...]\n<narrative>")
-                            for narr in collected_narratives:
-                                if story_gap.section_title in narr:
-                                    raw_narrative = narr.split("\n", 1)[1] if "\n" in narr else narr
-                                    save_story(
-                                        narrative=raw_narrative,
-                                        section_title=story_gap.section_title,
-                                        section_context=story_gap.section_context,
-                                        keywords=topic_keywords,
-                                        source_job_id=job_id,
-                                        llm_client=llm_client,
-                                    )
+                        _save_narratives_to_story_bank(
+                            collected_story_pairs,
+                            topic_keywords=topic_keywords,
+                            job_id=job_id,
+                            llm_client=llm_client,
+                        )
                     except Exception as e:
                         logger.warning("Story bank save failed (non-fatal): %s", e)
 
