@@ -1284,6 +1284,57 @@ def test_generic_refine_leaves_flag_unset() -> None:
     assert conformance_calls == [], "generic-refine path must not re-run conformance"
 
 
+def test_handle_critical_anomalies_rejects_empty_critical_anomalies() -> None:
+    """An empty ``critical_anomalies`` violates the precondition and must
+    raise ``ValueError`` rather than being silently skipped (as a bare
+    ``assert`` would be under ``python -O``)."""
+    orch = StrategyLabOrchestrator()
+
+    with pytest.raises(
+        ValueError, match="_handle_critical_anomalies requires at least one critical"
+    ):
+        orch._handle_critical_anomalies(
+            spec=_spec(),
+            code="# original code\n",
+            trades=[],
+            metrics=_metrics_for(),
+            exec_result=_zero_trade_exec_result(),
+            market_data=_market_data(),
+            config=_config(),
+            critical_anomalies=[],
+            all_gate_results=[],
+            refinement_attempts=[],
+            zero_trade_attempts=[],
+            round_num=0,
+            emit=lambda *a, **k: None,
+        )
+
+
+@pytest.mark.parametrize("bad_market_data", [{}, None, "not-a-dict"])
+def test_handle_critical_anomalies_rejects_invalid_market_data(bad_market_data) -> None:
+    """Empty/non-dict ``market_data`` violates the precondition and must
+    raise ``ValueError`` rather than being silently skipped (as a bare
+    ``assert`` would be under ``python -O``)."""
+    orch = StrategyLabOrchestrator()
+
+    with pytest.raises(ValueError, match="market_data must be non-empty"):
+        orch._handle_critical_anomalies(
+            spec=_spec(),
+            code="# original code\n",
+            trades=[],
+            metrics=_metrics_for(),
+            exec_result=_zero_trade_exec_result(),
+            market_data=bad_market_data,
+            config=_config(),
+            critical_anomalies=[_critical_anomaly()],
+            all_gate_results=[],
+            refinement_attempts=[],
+            zero_trade_attempts=[],
+            round_num=0,
+            emit=lambda *a, **k: None,
+        )
+
+
 # ---------------------------------------------------------------------------
 # ENTRY_WITH_NO_EXIT routing (#874)
 # ---------------------------------------------------------------------------

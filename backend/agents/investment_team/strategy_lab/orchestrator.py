@@ -2473,8 +2473,10 @@ class StrategyLabOrchestrator:
           3. Otherwise (or if the repair did not commit), fall through
              to the generic refinement agent via ``_refine_or_exhaust``.
         """
-        assert critical_anomalies, "_handle_critical_anomalies requires at least one critical"
-        assert isinstance(market_data, dict) and market_data, "market_data must be non-empty"
+        if not critical_anomalies:
+            raise ValueError("_handle_critical_anomalies requires at least one critical")
+        if not isinstance(market_data, dict) or not market_data:
+            raise ValueError("market_data must be non-empty")
 
         # ── 1: Build the failure-details prompt block (also used by generic refine) ──
         failure_details = "\n".join(f"- {g.details}" for g in critical_anomalies)
