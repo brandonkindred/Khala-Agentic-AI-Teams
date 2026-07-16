@@ -13,16 +13,40 @@ from agent_provisioning_team.anatomy_assets import (
 )
 
 
-def test_load_agent_anatomy_text_non_empty():
-    text = load_agent_anatomy_text()
-    assert "Input" in text or "input" in text.lower()
+def test_load_agent_anatomy_text_cached(monkeypatch) -> None:
+    from agent_provisioning_team import anatomy_assets
+
+    # Reset the cache via monkeypatch so it is restored on teardown regardless
+    # of outcome (no manual reset that a mid-test failure could skip).
+    monkeypatch.setattr(anatomy_assets, "_anatomy_text_cache", None)
+    first = load_agent_anatomy_text()
+    second = load_agent_anatomy_text()
+    assert first is second  # second call returns the cached value
+    assert "Input" in first or "input" in first.lower()  # non-empty content
     assert AGENT_ANATOMY_MD.is_file()
+
+
+def test_load_agent_anatomy_text_missing_file(monkeypatch) -> None:
+    from agent_provisioning_team import anatomy_assets
+
+    # Point at a non-existent file and clear the cache so the read actually
+    # runs; monkeypatch restores both attributes on teardown.
+    monkeypatch.setattr(anatomy_assets, "AGENT_ANATOMY_MD", anatomy_assets.PACKAGE_DIR / "ghost.md")
+    monkeypatch.setattr(anatomy_assets, "_anatomy_text_cache", None)
+    out = anatomy_assets.load_agent_anatomy_text()
+    assert "Missing file" in out
 
 
 def test_get_anatomy_prompt_preamble_includes_spec():
     pre = get_anatomy_prompt_preamble()
     assert "AGENT_ANATOMY.md" in pre or "anatomy" in pre.lower()
     assert load_agent_anatomy_text() in pre
+
+
+def test_get_anatomy_prompt_preamble_includes_diagram_block() -> None:
+    pre = get_anatomy_prompt_preamble()
+    assert "AGENT_ANATOMY.md" in pre
+    assert "diagram" in pre.lower()
 
 
 def test_copy_anatomy_bundle_to_directory(tmp_path: Path):
@@ -47,65 +71,11 @@ def test_try_materialize_anatomy_bundle_skips_invalid(bad: str):
     assert try_materialize_anatomy_bundle(bad) is None
 
 
-# -------------------------------------------------------------------------
-# anatomy_assets caching, bundle materialisation, and missing-file/dir fallbacks.
-# -------------------------------------------------------------------------
-
-
-def test_load_agent_anatomy_text_cached() -> None:
-    from agent_provisioning_team import anatomy_assets
-
-    # Reset cache
-    anatomy_assets._anatomy_text_cache = None
-    first = anatomy_assets.load_agent_anatomy_text()
-    second = anatomy_assets.load_agent_anatomy_text()
-    assert first is second
-
-
-def test_try_materialize_anatomy_bundle_root_skip() -> None:
-    from agent_provisioning_team.anatomy_assets import try_materialize_anatomy_bundle
-
-    assert try_materialize_anatomy_bundle(".") is None
-    assert try_materialize_anatomy_bundle("/") is None
-    assert try_materialize_anatomy_bundle("") is None
-
-
-def test_try_materialize_anatomy_bundle_writes_files(tmp_path: Path) -> None:
-    from agent_provisioning_team.anatomy_assets import try_materialize_anatomy_bundle
-
-    result = try_materialize_anatomy_bundle(str(tmp_path))
-    # If the source AGENT_ANATOMY.md exists in the package, result is a path.
-    if result is not None:
-        assert Path(result).exists()
-        assert (Path(result) / "AGENT_ANATOMY.md").exists()
-
-
 def test_list_design_asset_paths() -> None:
     from agent_provisioning_team.anatomy_assets import list_design_asset_paths
 
     paths = list_design_asset_paths()
     assert isinstance(paths, list)
-
-
-def test_get_anatomy_prompt_preamble_includes_diagram_block() -> None:
-    from agent_provisioning_team.anatomy_assets import get_anatomy_prompt_preamble
-
-    text = get_anatomy_prompt_preamble()
-    assert "AGENT_ANATOMY.md" in text
-    assert "diagram" in text.lower()
-
-
-def test_load_agent_anatomy_text_missing_file(monkeypatch) -> None:
-    from agent_provisioning_team import anatomy_assets
-
-    # Force the path attribute to a non-existent file.
-    monkeypatch.setattr(anatomy_assets, "AGENT_ANATOMY_MD", anatomy_assets.PACKAGE_DIR / "ghost.md")
-    anatomy_assets._anatomy_text_cache = None
-    out = anatomy_assets.load_agent_anatomy_text()
-    assert "Missing file" in out
-
-    # Reset cache so subsequent tests see the real content again.
-    anatomy_assets._anatomy_text_cache = None
 
 
 def test_list_design_asset_paths_missing_dir(monkeypatch) -> None:

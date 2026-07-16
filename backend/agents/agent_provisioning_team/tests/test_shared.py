@@ -1,8 +1,9 @@
 """Unit tests for shared helpers.
 
 Covers job_store, environment_store, logging_context, phase_state,
-provisioner_state edge cases, llm_client, and tool_manifest helpers
-that aren't already exercised in the integration matrix.
+provisioner_state edge cases, llm_client, tool_manifest, and
+tool_agent_registry helpers that aren't already exercised in the
+integration matrix.
 """
 
 from __future__ import annotations
