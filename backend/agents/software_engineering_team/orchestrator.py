@@ -418,6 +418,105 @@ def _build_planning_answer_callback(job_id: str) -> Callable[[list], list]:
     return _cb
 
 
+def _make_planning_architecture_fn(arch_agent: Any) -> Callable[..., Optional[str]]:
+    """Build the architecture callback handed to the Planning document-production phase.
+
+    The merged Architecture Expert runs inside Planning: this factory binds the SE
+    architecture agent into the callback Planning invokes (by keyword) to turn the
+    validated spec / PRD / client context into a high-level architecture overview.
+
+    Preconditions:
+        - ``arch_agent`` exposes ``run(ArchitectureInput) -> ArchitectureOutput`` (the SE
+          ``ArchitectureExpertAgent``; duck-typed so tests may pass a mock).
+    Postconditions:
+        - Returns a callback ``(spec_content, prd_content, repo_path, client_context)
+          -> Optional[str]`` that never raises: it yields the architecture overview string
+          (possibly ``""``) on success, or ``None`` when the agent produces no architecture
+          or raises.
+    """
+
+    def _run_architecture_for_planning(
+        spec_content: str,
+        prd_content: Optional[str],
+        repo_path: str,  # part of the Planning callback contract; unused here
+        client_context: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        """Produce an architecture overview from Planning's spec / PRD / client context.
+
+        Preconditions:
+            - Invoked by Planning document production with keyword arguments; ``spec_content``
+              may be empty and ``prd_content`` / ``client_context`` may be ``None``.
+        Postconditions:
+            - Returns ``architecture.overview`` (possibly ``""``) on success, or ``None`` when
+              the agent yields no architecture or raises.
+        Invariants:
+            - Never propagates an exception into the Planning workflow.
+        """
+        from architecture_expert.models import ArchitectureInput
+
+        from software_engineering_team.shared.models import ProductRequirements
+
+        req_desc = (spec_content or "").strip()
+        if (prd_content or "").strip():
+            req_desc = (req_desc + "\n\n" + prd_content.strip()).strip()
+        if not req_desc:
+            req_desc = "See Planning handoff artifacts."
+        acceptance = ["Deliver according to spec and planning artifacts."]
+        if client_context and client_context.get("success_criteria"):
+            acceptance = list(client_context["success_criteria"])
+        requirements = ProductRequirements(
+            title="Project",
+            description=req_desc,
+            acceptance_criteria=acceptance,
+            constraints=[],
+            priority="medium",
+            metadata={},
+        )
+        features_parts = []
+        if prd_content:
+            features_parts.append(prd_content)
+        if client_context:
+            if client_context.get("problem_summary"):
+                features_parts.append(
+                    "## Problem summary\n" + (client_context["problem_summary"] or "")
+                )
+            if client_context.get("opportunity_statement"):
+                features_parts.append(
+                    "## Opportunity\n" + (client_context["opportunity_statement"] or "")
+                )
+        features_doc = "\n\n".join(features_parts) if features_parts else ""
+        goals = ""
+        if client_context and (
+            client_context.get("problem_summary") or client_context.get("opportunity_statement")
+        ):
+            goals = (
+                (client_context.get("problem_summary") or "")
+                + "\n"
+                + (client_context.get("opportunity_statement") or "")
+            )
+        project_overview = {
+            "features_and_functionality_doc": features_doc,
+            "goals": goals.strip(),
+        }
+        arch_input = ArchitectureInput(
+            requirements=requirements,
+            technology_preferences=["Python", "FastAPI", "PostgreSQL", "Docker"],
+            project_overview=project_overview,
+            features_and_functionality_doc=features_doc or None,
+        )
+        try:
+            arch_output = arch_agent.run(arch_input)
+            return (
+                (arch_output.architecture.overview or "")
+                if arch_output and arch_output.architecture
+                else None
+            )
+        except Exception:
+            return None
+
+    return _run_architecture_for_planning
+
+
 def _get_task_stats() -> Dict[str, Any]:
     """Get task counts from execution tracker: completed, in_progress, queued."""
     snap = execution_tracker.snapshot()
@@ -769,83 +868,13 @@ def run_orchestrator(
 
         _planning_job_updater = _make_planning_job_updater(job_id)
 
-        def _run_architecture_for_planning(  # pragma: no cover  # integration-only: runs ArchitectureExpert LLM
-            spec_content: str,
-            prd_content: Optional[str],
-            repo_path: str,
-            client_context: Optional[Dict[str, Any]],
-        ) -> Optional[str]:
-            """Produce architecture overview during Planning document production (merged Architecture Expert)."""
-            from architecture_expert.models import ArchitectureInput
-
-            from software_engineering_team.shared.models import ProductRequirements
-
-            req_desc = (spec_content or "").strip()
-            if (prd_content or "").strip():
-                req_desc = (req_desc + "\n\n" + prd_content.strip()).strip()
-            if not req_desc:
-                req_desc = "See Planning handoff artifacts."
-            acceptance = ["Deliver according to spec and planning artifacts."]
-            if client_context and client_context.get("success_criteria"):
-                acceptance = list(client_context["success_criteria"])
-            requirements = ProductRequirements(
-                title="Project",
-                description=req_desc,
-                acceptance_criteria=acceptance,
-                constraints=[],
-                priority="medium",
-                metadata={},
-            )
-            features_parts = []
-            if prd_content:
-                features_parts.append(prd_content)
-            if client_context:
-                if client_context.get("problem_summary"):
-                    features_parts.append(
-                        "## Problem summary\n" + (client_context["problem_summary"] or "")
-                    )
-                if client_context.get("opportunity_statement"):
-                    features_parts.append(
-                        "## Opportunity\n" + (client_context["opportunity_statement"] or "")
-                    )
-            features_doc = "\n\n".join(features_parts) if features_parts else ""
-            goals = ""
-            if client_context and (
-                client_context.get("problem_summary") or client_context.get("opportunity_statement")
-            ):
-                goals = (
-                    (client_context.get("problem_summary") or "")
-                    + "\n"
-                    + (client_context.get("opportunity_statement") or "")
-                )
-            project_overview = {
-                "features_and_functionality_doc": features_doc,
-                "goals": goals.strip(),
-            }
-            arch_agent = agents["architecture"]
-            arch_input = ArchitectureInput(
-                requirements=requirements,
-                technology_preferences=["Python", "FastAPI", "PostgreSQL", "Docker"],
-                project_overview=project_overview,
-                features_and_functionality_doc=features_doc or None,
-            )
-            try:
-                arch_output = arch_agent.run(arch_input)
-                return (
-                    (arch_output.architecture.overview or "")
-                    if arch_output and arch_output.architecture
-                    else None
-                )
-            except Exception:
-                return None
-
         planning_result = run_planning_workflow(
             repo_path=str(path),
             spec_content=validated_spec,
             use_product_analysis=False,
             llm=get_client("project_planning"),
             job_updater=_planning_job_updater,
-            run_architecture_fn=_run_architecture_for_planning,
+            run_architecture_fn=_make_planning_architecture_fn(agents["architecture"]),
             # Never let Planning silently auto-decide a clarification question on this path:
             # escalate to the user, and fail closed if escalation is somehow unavailable.
             answer_callback=_build_planning_answer_callback(job_id),
