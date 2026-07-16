@@ -25,16 +25,13 @@ This document describes the architecture of the Software Engineering Team — a 
 
 ## 1. System Context and Entry Points
 
-Users invoke the system through either a FastAPI HTTP API or a CLI script. When Temporal is not configured, the API starts `run_orchestrator` in a background thread; when `TEMPORAL_ADDRESS` is set, it starts a Temporal workflow that runs the same logic via activities. The orchestrator reads `initial_spec.md` from the provided work path and writes planning artifacts to `plan/`, backend code to `backend/`, and frontend code to `frontend/`.
+Users invoke the system through a FastAPI HTTP API — run standalone via `agent_implementations/run_api_server.py` or mounted under the Unified API. When Temporal is not configured, the API starts `run_orchestrator` in a background thread; when `TEMPORAL_ADDRESS` is set, it starts a Temporal workflow that runs the same logic via activities. The orchestrator reads `initial_spec.md` from the provided work path and writes planning artifacts to `plan/`, backend code to `backend/`, and frontend code to `frontend/`.
 
 ```mermaid
 flowchart LR
     User["User / Client"]
 
-    subgraph entry [Entry Points]
-        API["FastAPI Server\napi/main.py"]
-        CLI["CLI Script\nrun_team.py"]
-    end
+    API["FastAPI Server\napi/main.py"]
 
     Orch["run_orchestrator\n(background thread)"]
     JobStore["Job Store\n(status, progress, results)"]
@@ -47,9 +44,7 @@ flowchart LR
     end
 
     User -->|"HTTP"| API
-    User -->|"CLI"| CLI
     API -->|"POST /run-team"| Orch
-    CLI --> Orch
     Orch -->|"reads"| Spec
     Orch -->|"updates"| JobStore
     Orch -->|"writes"| PlanDir

@@ -4,7 +4,7 @@ The Unified API Server consolidates all Khala team APIs under a single entry poi
 
 ## Overview
 
-Instead of running multiple API servers on different ports, the unified server mounts all 20 team APIs under namespaced prefixes on a single port (default: 8080). Teams can also be deployed as standalone microservices; when a `*_SERVICE_URL` env var is set for a team, the unified API proxies requests to that external service instead of mounting in-process.
+Instead of running multiple API servers on different ports, the unified server mounts all 24 team APIs under namespaced prefixes on a single port (default: 8080). Teams can also be deployed as standalone microservices; when a `*_SERVICE_URL` env var is set for a team, the unified API proxies requests to that external service instead of mounting in-process.
 
 ```mermaid
 graph TB
@@ -34,6 +34,10 @@ graph TB
             StartupAdv["/api/startup-advisor"]
             UAFounder["/api/user-agent-founder"]
             Deep["/api/deepthought"]
+            JobMatch["/api/job-matching"]
+            UserProfile["/api/user-profile"]
+            ProductDelivery["/api/product-delivery"]
+            AgentStudio["/api/agent-studio"]
         end
     end
     
@@ -104,6 +108,10 @@ Execution stays in agent code (e.g. `agent_git_tools` + `GitToolContext`); these
 | Startup Advisor | `/api/startup-advisor` | `/api/startup-advisor/docs` |
 | User Agent Founder | `/api/user-agent-founder` | `/api/user-agent-founder/docs` |
 | Deepthought | `/api/deepthought` | `/api/deepthought/docs` |
+| Job Matching | `/api/job-matching` | `/api/job-matching/docs` |
+| User Profile | `/api/user-profile` | `/api/user-profile/docs` |
+| Product Delivery | `/api/product-delivery` | `/api/product-delivery/docs` |
+| Agent Studio | `/api/agent-studio` | `/api/agent-studio/docs` |
 
 ### Team configuration hierarchy (`config.py`)
 
@@ -206,7 +214,7 @@ If a team API fails to import (missing dependencies, configuration errors), the 
 
 ```
 2024-01-15 10:00:00 [WARNING] unified_api: Could not mount Investment Team API: No module named 'investment_team'
-2024-01-15 10:00:00 [INFO] unified_api: Mounted 19/20 team APIs
+2024-01-15 10:00:00 [INFO] unified_api: Mounted 23/24 team APIs
 ```
 
 ## Example Usage
