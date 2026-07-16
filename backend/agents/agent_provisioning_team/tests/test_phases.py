@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from agent_provisioning_team.models import (
     AccessAuditResult,
     DeliverResult,
@@ -135,6 +137,98 @@ def test_cleanup_setup_calls_docker_and_env_store(tmp_path: Path) -> None:
     assert result is True
     docker.deprovision.assert_called_once_with("a1")
     env_store.remove.assert_called_once_with("a1")
+
+
+def test_run_setup_rolls_back_new_container_when_register_fails(tmp_path: Path) -> None:
+    """Atomic setup: a newly created container is torn down if register fails."""
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = MagicMock()
+    env_store.get.return_value = None
+    env_store.register.side_effect = RuntimeError("register boom")
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={
+            "container_id": "c-new",
+            "container_name": "agent-a2",
+            "ssh_port": 22002,
+            "workspace_path": "/workspace/a2",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="register boom"):
+        run_setup(
+            agent_id="a2",
+            manifest=ToolManifest(),
+            environment_store=env_store,
+            docker_provisioner=docker,
+        )
+
+    # The container this call just created is torn down before the error propagates.
+    docker.deprovision.assert_called_once_with("a2")
+
+
+def test_run_setup_keeps_reused_container_when_register_fails(tmp_path: Path) -> None:
+    """Atomic setup: a *reused* container is never torn down (it belongs to a prior job)."""
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = MagicMock()
+    env_store.get.return_value = None
+    env_store.register.side_effect = RuntimeError("register boom")
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={
+            "container_id": "c-existing",
+            "container_name": "agent-a4",
+            "reused": True,
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="register boom"):
+        run_setup(
+            agent_id="a4",
+            manifest=ToolManifest(),
+            environment_store=env_store,
+            docker_provisioner=docker,
+        )
+
+    docker.deprovision.assert_not_called()
+
+
+def test_run_setup_rollback_swallows_deprovision_error(tmp_path: Path) -> None:
+    """The best-effort rollback must not mask the original register failure."""
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = MagicMock()
+    env_store.get.return_value = None
+    env_store.register.side_effect = RuntimeError("register boom")
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={"container_id": "c-new", "container_name": "agent-a5"},
+    )
+    docker.deprovision.side_effect = RuntimeError("teardown boom")
+
+    with pytest.raises(RuntimeError, match="register boom"):
+        run_setup(
+            agent_id="a5",
+            manifest=ToolManifest(),
+            environment_store=env_store,
+            docker_provisioner=docker,
+        )
+
+    docker.deprovision.assert_called_once_with("a5")
 
 
 # ---------------------------------------------------------------------------

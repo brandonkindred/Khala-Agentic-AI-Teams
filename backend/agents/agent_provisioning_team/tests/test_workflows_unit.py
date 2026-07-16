@@ -515,12 +515,12 @@ async def test_workflow_compensates_succeeded_tools_on_checkpoint_failure(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_workflow_setup_failure_compensates_and_marks_failed(tmp_path) -> None:
-    """Setup failure must compensate (tear down a partial container) then mark failed.
+async def test_workflow_setup_failure_marks_failed_without_compensate(tmp_path) -> None:
+    """A setup failure is rolled back atomically inside ``run_setup``.
 
-    ``setup_activity`` runs ``docker run`` before the phase completes, so a raise
-    can leave a live container behind. The workflow compensates with an empty
-    succeeded list — idempotent when nothing was created — before marking failed.
+    The workflow therefore marks the job failed but must NOT run agent_id-keyed
+    compensation for a setup failure — doing so could tear down a healthy
+    environment a prior job provisioned for the same agent.
     """
     from agent_provisioning_team.temporal import workflows as wf
 
@@ -528,7 +528,6 @@ async def test_workflow_setup_failure_compensates_and_marks_failed(tmp_path) -> 
     stub = _ExecActivityStub(
         {
             "setup_activity": RuntimeError("setup boom"),
-            "compensate_activity": None,
             "mark_job_failed_activity": None,
         }
     )
@@ -537,28 +536,30 @@ async def test_workflow_setup_failure_compensates_and_marks_failed(tmp_path) -> 
         with pytest.raises(RuntimeError, match="setup boom"):
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
-    compensate_call = _call(stub, "compensate_activity")
-    assert compensate_call["args"] == ["agent-1", [], "job-1"]
+    fn_names = [c["name"] for c in stub.calls]
+    assert "compensate_activity" not in fn_names
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
     assert "setup boom" in fail_call["args"][1]
 
 
 @pytest.mark.asyncio
-async def test_workflow_setup_failure_compensation_raises(tmp_path) -> None:
-    """A failing compensation must be logged, not mask the original setup error.
+async def test_workflow_credentials_failure_compensation_raises(tmp_path) -> None:
+    """A failing compensation must be logged, not mask the original error.
 
-    The except-block wraps compensation in a nested try/except: if
-    ``compensate_activity`` raises, it is logged via ``workflow.logger.error``
-    and the original ``setup_activity`` exception still propagates. The job is
-    still marked failed afterwards.
+    After setup succeeds, a credentials failure triggers ``compensate([])`` to
+    tear down the Docker env. The except-block wraps that in a nested try/except:
+    if ``compensate_activity`` raises, it is logged via ``workflow.logger.error``
+    and the original credentials exception still propagates. The job is still
+    marked failed afterwards.
     """
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
     stub = _ExecActivityStub(
         {
-            "setup_activity": RuntimeError("setup boom"),
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "credentials_activity": RuntimeError("cred boom"),
             "compensate_activity": RuntimeError("compensate boom"),
             "mark_job_failed_activity": None,
         }
@@ -571,7 +572,7 @@ async def test_workflow_setup_failure_compensation_raises(tmp_path) -> None:
         patch.object(wf.workflow, "execute_activity", new=stub),
         patch.object(wf.workflow, "logger") as mock_logger,
     ):
-        with pytest.raises(RuntimeError, match="setup boom"):
+        with pytest.raises(RuntimeError, match="cred boom"):
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     # Compensation was attempted (and raised), the failure was logged, and the
@@ -580,23 +581,26 @@ async def test_workflow_setup_failure_compensation_raises(tmp_path) -> None:
     mock_logger.error.assert_called_once()
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
-    assert "setup boom" in fail_call["args"][1]
+    assert "cred boom" in fail_call["args"][1]
 
 
 @pytest.mark.asyncio
-async def test_workflow_setup_failure_mark_failed_raises(tmp_path) -> None:
+async def test_workflow_credentials_failure_mark_failed_raises(tmp_path) -> None:
     """A failing mark_job_failed must be logged, not mask the original error.
 
-    The except-block wraps the terminal ``mark_job_failed_activity`` write in a
-    nested try/except: if it raises, it is logged via ``workflow.logger.error``
-    and the original provisioning exception still propagates.
+    After setup succeeds, a credentials failure triggers compensation (which
+    succeeds here) and then the terminal ``mark_job_failed_activity`` write. The
+    except-block wraps that write in a nested try/except: if it raises, it is
+    logged via ``workflow.logger.error`` and the original credentials exception
+    still propagates.
     """
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
     stub = _ExecActivityStub(
         {
-            "setup_activity": RuntimeError("setup boom"),
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "credentials_activity": RuntimeError("cred boom"),
             "compensate_activity": None,
             "mark_job_failed_activity": RuntimeError("mark boom"),
         }
@@ -606,11 +610,11 @@ async def test_workflow_setup_failure_mark_failed_raises(tmp_path) -> None:
         patch.object(wf.workflow, "execute_activity", new=stub),
         patch.object(wf.workflow, "logger") as mock_logger,
     ):
-        with pytest.raises(RuntimeError, match="setup boom"):
+        with pytest.raises(RuntimeError, match="cred boom"):
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     # Compensation succeeded (no log); the mark_job_failed failure was logged
-    # exactly once and did not mask the original setup exception.
+    # exactly once and did not mask the original credentials exception.
     assert "mark_job_failed_activity" in [c["name"] for c in stub.calls]
     mock_logger.error.assert_called_once()
 

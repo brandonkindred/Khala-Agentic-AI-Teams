@@ -392,10 +392,13 @@ class AgentProvisioningWorkflow:
             * On any unhandled phase failure (setup, credentials, tools, audit,
               docs, deliver): ``mark_job_failed_activity`` records terminal
               failure before the exception propagates (tool failures also
-              compensate succeeded tools first). Any pre-tool failure — setup,
-              credentials, or manifest-list — calls ``compensate_activity`` with
-              an empty succeeded list to tear down partial Docker env /
-              credentials (idempotent no-op when nothing was created).
+              compensate succeeded tools first). A setup failure is rolled back
+              atomically inside ``run_setup`` itself, so the workflow does NOT
+              run ``agent_id``-keyed compensation for it (which could tear down a
+              healthy environment a prior job left for the same agent). Once
+              setup has succeeded, credentials / manifest-list failures call
+              ``compensate_activity`` with an empty succeeded list to tear down
+              the Docker env setup created.
             * After a successful tool fan-out (not a restored skip),
               ``account_provisioning`` is written to ``completed_phases`` /
               ``phase_results`` before later phases run.
@@ -411,6 +414,7 @@ class AgentProvisioningWorkflow:
         skip = set(skip_phases or [])
         prior = prior_results or {}
         terminal_failure_recorded = False
+        setup_completed = False
         tools_phase_compensated = False
         account_provisioning_done = False
         succeeded_tools: list[dict] = []
@@ -419,6 +423,7 @@ class AgentProvisioningWorkflow:
             environment_dump = await self._execute_setup_phase(
                 job_id, agent_id, manifest_path, skip, prior
             )
+            setup_completed = True
 
             # Freeze manifest tools once for credential + provision phases so a
             # mid-run file edit cannot change the tool set under us.
@@ -486,15 +491,20 @@ class AgentProvisioningWorkflow:
                 onboarding_dump,
             )
         except Exception as exc:
-            # Pre-tool failures leave Docker/credentials behind → compensate([]).
-            # This includes a setup phase that raises after `docker run` created
-            # the container but before the phase completed: compensate([]) tears
-            # that container down (idempotent no-op when nothing was created).
+            # Compensation is gated on `setup_completed`: only once setup returns
+            # do we know a Docker environment exists for this agent_id. A setup
+            # failure is NOT compensated here — `run_setup` is atomic and rolls
+            # back only what it created, so a setup that created nothing (or left
+            # a partial container) is already cleaned up. Running agent_id-keyed
+            # compensation on a setup failure could instead tear down a healthy
+            # environment a prior job provisioned for the same agent.
+            # Credentials / manifest-list failures after setup → compensate([])
+            # to tear down the Docker env that setup created.
             # Fan-out completed but checkpoint/later phase not durable yet →
             # compensate the tools that already succeeded.
             # Nested try/except: compensation / terminal writes must not mask
             # the original failure if Temporal activity retries are exhausted.
-            if not account_provisioning_done and not tools_phase_compensated:
+            if setup_completed and not account_provisioning_done and not tools_phase_compensated:
                 try:
                     await self._compensate_failed_tools(agent_id, succeeded_tools, job_id)
                 except Exception as comp_exc:
