@@ -34,6 +34,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
+from .path_safety import safe_path_component
+
 DEFAULT_STATE_DIR = (
     Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
     / "agent_provisioning_team"
@@ -106,10 +108,20 @@ class ProvisionerStateStore:
     """
 
     def __init__(self, provisioner_name: str, storage_dir: Optional[Path] = None) -> None:
-        self.provisioner_name = provisioner_name
+        """Bind the store to one provisioner's JSON file.
+
+        Raises ``ValueError`` if ``provisioner_name`` is not a safe filename
+        component. The guard's containment role is on ``self.path`` — the
+        record's final location, ``storage_dir / f"{provisioner_name}.json"``.
+        ``_save`` also uses the validated name as a tempfile *prefix*, but that
+        write targets ``storage_dir`` explicitly via ``mkstemp(dir=...)``, so the
+        prefix cannot change the output directory; validating the name simply
+        keeps that prefix a well-formed filename fragment too.
+        """
+        self.provisioner_name = safe_path_component(provisioner_name, kind="provisioner_name")
         self.storage_dir = storage_dir or DEFAULT_STATE_DIR
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self.path = self.storage_dir / f"{provisioner_name}.json"
+        self.path = self.storage_dir / f"{self.provisioner_name}.json"
 
     # ---- I/O ----
     def _load(self) -> Dict[str, Dict[str, Any]]:
@@ -153,7 +165,20 @@ class ProvisionerStateStore:
 
     # ---- Public API ----
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        """Return the flat details dict for ``agent_id`` (backwards-compatible)."""
+        """Return the flat details dict for ``agent_id`` (backwards-compatible).
+
+        Read-only and intentionally lock-free: ``_save`` commits with an atomic
+        ``os.replace``, so every ``_load`` observes a whole committed snapshot
+        (never a torn write) without taking ``_PROCESS_LOCK`` — the lock only
+        serialises the read-modify-write mutators. A concurrent write may make
+        this return the pre- or post-write snapshot, which is acceptable for the
+        idempotency lookups this store backs.
+
+        An empty stored ``details`` dict is treated as absent and returned as
+        ``None`` (indistinguishable from a missing key). This "empty is absent"
+        rule is intentional and shared with ``list_agents`` and
+        ``get_or_create``.
+        """
         row = self._load().get(agent_id)
         if row is None:
             return None
@@ -174,7 +199,11 @@ class ProvisionerStateStore:
             return False
 
     def list_agents(self) -> Dict[str, Dict[str, Any]]:
-        """Return every agent's flat details dict (legacy shape preserved)."""
+        """Return every agent's flat details dict (legacy shape preserved).
+
+        Lock-free read (see :meth:`get`); agents whose stored ``details`` is
+        empty are omitted, matching ``get``'s "empty is absent" rule.
+        """
         return {aid: dict(row["details"]) for aid, row in self._load().items() if row["details"]}
 
     def get_or_create(
@@ -210,7 +239,10 @@ class ProvisionerStateStore:
             data[agent_id] = row
 
     def list_compensations(self, agent_id: str) -> List[CompensationRecord]:
-        """Return the compensation records for ``agent_id`` in registration order."""
+        """Return the compensation records for ``agent_id`` in registration order.
+
+        Lock-free read (see :meth:`get`).
+        """
         row = self._load().get(agent_id)
         if row is None:
             return []
