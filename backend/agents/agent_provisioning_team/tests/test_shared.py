@@ -448,6 +448,35 @@ def test_environment_store_list_all_dedups_by_agent_id_not_filename(tmp_path: Pa
     assert {e.agent_id for e in out} == {"agent_q", "agent_r"}
 
 
+def test_environment_store_list_all_skips_unreadable_file(tmp_path: Path) -> None:
+    """An OSError from env_file.read_text() (permissions, deleted mid-scan) must not propagate."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(agent_id="a1", container_id="c1", container_name="c1", workspace_path="/w")
+    )
+    unreadable = tmp_path / "unreadable.json"
+    unreadable.write_text(
+        json.dumps(
+            StoreEnvInfo(
+                agent_id="a2", container_id="c2", container_name="c2", workspace_path="/w"
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+
+    original_read_text = Path.read_text
+
+    def flaky_read_text(self: Path, *args, **kwargs):
+        if self == unreadable:
+            raise OSError("simulated permission error")
+        return original_read_text(self, *args, **kwargs)
+
+    with patch.object(Path, "read_text", flaky_read_text):
+        out = store.list_all()
+
+    assert {e.agent_id for e in out} == {"a1"}
+
+
 def test_environment_store_get_handles_corrupt(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
     (tmp_path / "x.json").write_text("not json", encoding="utf-8")
