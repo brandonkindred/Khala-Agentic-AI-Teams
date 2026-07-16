@@ -92,11 +92,33 @@ def audit_single_tool(
     agent_id: str,
     tool_name: str,
     provisioner: Optional[ToolProvisionerInterface] = None,
+    provisioner_key: Optional[str] = None,
 ) -> AccessVerification:
-    """Re-verify a single tool by delegating to its provisioner."""
-    provs = build_default_tool_agents()
-    provisioner_name = f"{tool_name}_provisioner"
-    prov = provisioner or provs.get(provisioner_name)
+    """Re-verify a single tool by delegating to its provisioner.
+
+    Preconditions:
+        * ``agent_id`` and ``tool_name`` are non-empty.
+        * When given, ``provisioner_key`` is the tool's registry key — the
+          same value stamped onto ``ToolProvisionResult.provisioner_key`` by
+          ``run_account_provisioning`` (``tool.provisioner`` from the
+          manifest, e.g. ``"postgres_provisioner"``) and consumed by
+          ``ProvisioningOrchestrator.compensate()``. It is NOT derived from
+          ``tool_name`` — a tool's manifest name and its provisioner
+          registry key are independent (e.g. tool_name "postgresql" maps to
+          registry key "postgres_provisioner").
+    Postconditions:
+        * Returns the resolved provisioner's ``verify_access(agent_id)``
+          result, or a failed ``AccessVerification`` naming ``tool_name``
+          when no provisioner could be resolved.
+    """
+    assert agent_id, "agent_id must be non-empty"
+    assert tool_name, "tool_name must be non-empty"
+
+    prov = provisioner
+    if prov is None:
+        provs = build_default_tool_agents()
+        key = provisioner_key or f"{tool_name}_provisioner"
+        prov = provs.get(key)
 
     if prov is None:
         return AccessVerification(
