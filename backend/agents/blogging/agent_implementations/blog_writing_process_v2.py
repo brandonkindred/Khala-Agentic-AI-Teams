@@ -968,22 +968,34 @@ def _save_narratives_to_story_bank(
         - ``topic_keywords`` is the keyword list to tag every saved story with.
 
     Postconditions:
-        - ``save_story`` is called exactly once per pair, using that pair's own gap
+        - ``save_story`` is attempted exactly once per pair, using that pair's own gap
           ``section_title`` and ``section_context``.
-        - Returns the number of narratives persisted (== ``len(collected_story_pairs)``).
+        - A ``save_story`` failure for one pair is caught and logged (non-fatal); the batch
+          continues so one bad story never loses the remaining saves.
+        - Returns the count of narratives *successfully* persisted (0 ..
+          ``len(collected_story_pairs)``).
     """
     from shared.story_bank import save_story
 
+    saved = 0
     for story_gap, raw_narrative in collected_story_pairs:
-        save_story(
-            narrative=raw_narrative,
-            section_title=story_gap.section_title,
-            section_context=story_gap.section_context,
-            keywords=topic_keywords,
-            source_job_id=job_id,
-            llm_client=llm_client,
-        )
-    return len(collected_story_pairs)
+        try:
+            save_story(
+                narrative=raw_narrative,
+                section_title=story_gap.section_title,
+                section_context=story_gap.section_context,
+                keywords=topic_keywords,
+                source_job_id=job_id,
+                llm_client=llm_client,
+            )
+            saved += 1
+        except Exception as e:  # non-fatal: one bad story must not lose the rest
+            logger.warning(
+                "Story bank save failed for section %r (non-fatal): %s",
+                story_gap.section_title,
+                e,
+            )
+    return saved
 
 
 def run_planning_stage(
@@ -1090,7 +1102,9 @@ def run_planning_stage(
                         gap_index=0,
                         job_updater=job_updater,
                     )
-                    if result.narrative:
+                    # Guard against empty/whitespace-only narratives — never persist a
+                    # blank story to the bank or emit one into the draft.
+                    if result.narrative and result.narrative.strip():
                         collected_narratives.append(
                             f"[Story for section: {gap.section_title}]\n{result.narrative}"
                         )

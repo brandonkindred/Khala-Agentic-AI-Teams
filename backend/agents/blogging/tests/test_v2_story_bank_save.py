@@ -61,3 +61,34 @@ def test_save_narratives_empty_pairs_is_noop(monkeypatch) -> None:
 
     assert saved == 0
     assert calls == []
+
+
+def test_save_narratives_one_failure_does_not_abort_the_rest(monkeypatch) -> None:
+    """A single save_story failure is non-fatal; remaining pairs still persist."""
+    import agent_implementations.blog_writing_process_v2 as v2
+    from shared import story_bank
+
+    calls: list[dict] = []
+
+    def _flaky_save(**kw):
+        # The middle gap fails; the first and third must still be saved.
+        if kw["section_title"] == "Boom":
+            raise RuntimeError("db down")
+        calls.append(kw)
+
+    monkeypatch.setattr(story_bank, "save_story", _flaky_save)
+
+    pairs = [
+        (_gap("First"), "story one"),
+        (_gap("Boom"), "story two"),
+        (_gap("Third"), "story three"),
+    ]
+
+    saved = v2._save_narratives_to_story_bank(
+        pairs, topic_keywords=["k"], job_id="job-2", llm_client=None
+    )
+
+    # Only the two successful saves are counted, and both were actually persisted.
+    assert saved == 2
+    persisted = {c["section_title"] for c in calls}
+    assert persisted == {"First", "Third"}
