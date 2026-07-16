@@ -206,3 +206,27 @@ def test_blog_copy_editor_agent_empty_draft_writes_file(tmp_path: Path) -> None:
     assert content["feedback_items"] == []
     assert result.summary
     assert len(result.feedback_items) == 0
+
+
+def test_write_feedback_to_path_returns_true_on_success(tmp_path: Path) -> None:
+    """_write_feedback_to_path returns True and creates the file (incl. parents) on success."""
+    agent = BlogCopyEditorAgent(llm_client=DummyLLMClient())
+    output = CopyEditorOutput(summary="ok", feedback_items=[])
+    target = tmp_path / "nested" / "dir" / "fb.json"
+
+    assert agent._write_feedback_to_path(output, target) is True
+    assert target.exists()
+    assert json.loads(target.read_text(encoding="utf-8"))["summary"] == "ok"
+
+
+def test_write_feedback_to_path_returns_false_on_failure(tmp_path: Path) -> None:
+    """_write_feedback_to_path reports failure via return value (False) instead of raising."""
+    agent = BlogCopyEditorAgent(llm_client=DummyLLMClient())
+    output = CopyEditorOutput(summary="ok", feedback_items=[])
+    # A regular file cannot double as a parent directory, so mkdir(parents=True) fails.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+    target = blocker / "fb.json"
+
+    assert agent._write_feedback_to_path(output, target) is False
+    assert not target.exists()
