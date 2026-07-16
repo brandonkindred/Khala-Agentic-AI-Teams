@@ -1,10 +1,8 @@
 """Temporal tests for the Agent Provisioning team.
 
 Covers routing (including the Temporal-required 503 path), skip_phases/
-prior_results plumbing on /resume, progress writes from v2 activities, and
-Pattern A exports. Mocks Temporal at the HTTP boundary rather than spinning
-up WorkflowEnvironment — matches the SE team's test_temporal_integration.py
-style and keeps the suite fast.
+prior_results plumbing on /resume, progress writes from activities, and
+Pattern A exports. Mocks Temporal at the HTTP boundary to keep the suite fast.
 """
 
 from __future__ import annotations

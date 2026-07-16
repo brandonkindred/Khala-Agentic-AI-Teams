@@ -271,6 +271,28 @@ def test_credential_store_list_agents(tmp_path: Path) -> None:
     assert out == ["a1", "a2"]
 
 
+def test_credential_store_reads_legacy_path(tmp_path: Path, monkeypatch) -> None:
+    """Pre-cutover ``.agent_cache/provisioning_credentials`` files remain readable."""
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    monkeypatch.chdir(tmp_path)
+    key = CredentialStore.generate_key()
+    primary = tmp_path / "primary"
+    writer = CredentialStore(storage_dir=primary, encryption_key=key)
+    writer.store_credentials("legacy-a1", "pg", {"password": "secret"})
+
+    legacy_dir = tmp_path / ".agent_cache" / "provisioning_credentials"
+    legacy_dir.mkdir(parents=True)
+    legacy_file = legacy_dir / "legacy-a1.enc"
+    legacy_file.write_bytes((primary / "legacy-a1.enc").read_bytes())
+
+    reader = CredentialStore(storage_dir=tmp_path / "empty-primary", encryption_key=key)
+    assert reader.get_credentials("legacy-a1", "pg") == {"password": "secret"}
+    assert "legacy-a1" in reader.list_agents()
+    assert reader.delete_credentials("legacy-a1") is True
+    assert not legacy_file.exists()
+
+
 def test_credential_store_store_credentials_handles_corrupt_existing(tmp_path: Path) -> None:
     """If an existing encrypted file is corrupt, store overwrites it."""
     from agent_provisioning_team.shared.credential_store import CredentialStore

@@ -188,6 +188,62 @@ def test_environment_store_get_handles_corrupt(tmp_path: Path) -> None:
     assert store.get("x") is None
 
 
+def test_environment_store_reads_legacy_path_and_migrates_on_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Pre-cutover ``.agent_cache/provisioning_environments`` files remain visible."""
+    monkeypatch.chdir(tmp_path)
+    legacy_dir = tmp_path / ".agent_cache" / "provisioning_environments"
+    legacy_dir.mkdir(parents=True)
+    legacy_payload = {
+        "agent_id": "legacy-a1",
+        "container_id": "c-legacy",
+        "container_name": "agent-legacy-a1",
+        "ssh_host": "localhost",
+        "ssh_port": 22,
+        "workspace_path": "/workspace",
+        "status": "running",
+        "tools_provisioned": ["pg"],
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    (legacy_dir / "legacy-a1.json").write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    primary = tmp_path / "new" / "environments"
+    store = EnvironmentStore(storage_dir=primary)
+
+    fetched = store.get("legacy-a1")
+    assert fetched is not None
+    assert fetched.container_id == "c-legacy"
+
+    assert store.update_status("legacy-a1", "stopped") is True
+    assert (primary / "legacy-a1.json").is_file()
+    assert not (legacy_dir / "legacy-a1.json").exists()
+
+
+def test_environment_store_remove_clears_legacy_copy(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    legacy_dir = tmp_path / ".agent_cache" / "provisioning_environments"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "legacy-a2.json").write_text(
+        json.dumps(
+            {
+                "agent_id": "legacy-a2",
+                "container_id": "c2",
+                "container_name": "agent-legacy-a2",
+                "workspace_path": "/w",
+                "status": "running",
+                "tools_provisioned": [],
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = EnvironmentStore(storage_dir=tmp_path / "primary")
+    assert store.remove("legacy-a2") is True
+    assert not (legacy_dir / "legacy-a2.json").exists()
+
+
 # ---------------------------------------------------------------------------
 # job_store
 # ---------------------------------------------------------------------------

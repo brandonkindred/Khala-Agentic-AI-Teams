@@ -44,6 +44,22 @@ def default_credentials_dir() -> Path:
     return root / "agent_provisioning" / "credentials"
 
 
+def legacy_credentials_dirs() -> List[Path]:
+    """Return pre-cutover credential directories for read/delete fallback.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Includes the historical default ``.agent_cache/provisioning_credentials``
+          and the same relative layout under ``AGENT_CACHE`` when set.
+    """
+    root = Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
+    return [
+        Path(".agent_cache") / "provisioning_credentials",
+        root / "provisioning_credentials",
+    ]
+
+
 # Retained for callers/tests that import the historical module constant.
 DEFAULT_CREDENTIALS_DIR = default_credentials_dir()
 
@@ -246,8 +262,27 @@ class CredentialStore:
         return f"agent_{safe_agent_id}_{safe_tool}"[:63]
 
     def _agent_file(self, agent_id: str) -> Path:
-        """Get the credentials file path for an agent."""
+        """Get the credentials file path for an agent in the primary store."""
         return self.storage_dir / f"{agent_id}.enc"
+
+    def _agent_file_candidates(self, agent_id: str) -> List[Path]:
+        """Primary path first, then legacy locations from before the AGENT_CACHE move."""
+        return [self._agent_file(agent_id)] + [
+            legacy / f"{agent_id}.enc" for legacy in legacy_credentials_dirs()
+        ]
+
+    def _read_agent_credentials(self, agent_id: str) -> tuple[Optional[Dict[str, Any]], Optional[Path]]:
+        """Load decrypted credentials from the primary or a legacy path."""
+        for path in self._agent_file_candidates(agent_id):
+            if not path.exists():
+                continue
+            try:
+                encrypted = path.read_bytes()
+                decrypted = self.multifernet.decrypt(encrypted)
+                return json.loads(decrypted.decode()), path
+            except (InvalidToken, ValueError, OSError):
+                continue
+        return None, None
 
     def store_credentials(
         self,
@@ -279,21 +314,12 @@ class CredentialStore:
         tool_name: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Retrieve credentials for an agent (all or specific tool)."""
-        path = self._agent_file(agent_id)
-
-        if not path.exists():
+        all_creds, _src = self._read_agent_credentials(agent_id)
+        if all_creds is None:
             return None
-
-        try:
-            encrypted = path.read_bytes()
-            decrypted = self.multifernet.decrypt(encrypted)
-            all_creds = json.loads(decrypted.decode())
-
-            if tool_name:
-                return all_creds.get(tool_name)
-            return all_creds
-        except (InvalidToken, ValueError, OSError):
-            return None
+        if tool_name:
+            return all_creds.get(tool_name)
+        return all_creds
 
     def rotate_key(self, new_key: str) -> int:
         """Re-encrypt every stored agent file with a new Fernet key.
@@ -332,13 +358,21 @@ class CredentialStore:
         return rotated
 
     def delete_credentials(self, agent_id: str) -> bool:
-        """Delete all credentials for an agent."""
-        path = self._agent_file(agent_id)
-        if path.exists():
-            path.unlink()
-            return True
-        return False
+        """Delete all credentials for an agent (primary and legacy paths)."""
+        deleted = False
+        for path in self._agent_file_candidates(agent_id):
+            if path.exists():
+                path.unlink()
+                deleted = True
+        return deleted
 
     def list_agents(self) -> List[str]:
         """List all agent IDs with stored credentials."""
-        return [f.stem for f in self.storage_dir.glob("*.enc") if f.is_file()]
+        seen: set[str] = set()
+        for directory in [self.storage_dir, *legacy_credentials_dirs()]:
+            if not directory.exists():
+                continue
+            for path in directory.glob("*.enc"):
+                if path.is_file():
+                    seen.add(path.stem)
+        return sorted(seen)
