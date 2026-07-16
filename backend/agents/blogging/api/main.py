@@ -6,10 +6,10 @@ Supports synchronous and asynchronous execution with job polling and SSE streami
 
 from __future__ import annotations
 
+import json as json_module  # noqa: E402
 import logging
 import os
 import queue
-import sys
 import tempfile
 import threading
 import uuid
@@ -17,36 +17,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-_blogging_root = Path(__file__).resolve().parent.parent
-if (
-    str(_blogging_root) not in sys.path
-):  # pragma: no cover - path-bootstrap branch runs only when blogging package root is missing from sys.path; tests always import via package path so this is unreachable.
-    sys.path.insert(0, str(_blogging_root))
-
-import json as json_module  # noqa: E402
-
-from blog_medium_stats_agent.agent import BlogMediumStatsAgent  # noqa: E402
-from blog_medium_stats_agent.models import MediumStatsReport, MediumStatsRunConfig  # noqa: E402
-from blog_research_agent.models import ResearchBriefInput  # noqa: E402
-from fastapi import HTTPException, Query  # noqa: E402
-from fastapi.responses import Response, StreamingResponse  # noqa: E402
-from pydantic import BaseModel, Field  # noqa: E402
-from shared.brand_spec import brand_spec_prompt_configured  # noqa: E402
-from shared.content_plan import (  # noqa: E402
+from agents.blogging.blog_medium_stats_agent.agent import BlogMediumStatsAgent  # noqa: E402
+from agents.blogging.blog_medium_stats_agent.models import (  # noqa: E402
+    MediumStatsReport,
+    MediumStatsRunConfig,
+)
+from agents.blogging.blog_research_agent.models import ResearchBriefInput  # noqa: E402
+from agents.blogging.postgres import SCHEMA as BLOGGING_POSTGRES_SCHEMA  # noqa: E402
+from agents.blogging.shared.brand_spec import brand_spec_prompt_configured  # noqa: E402
+from agents.blogging.shared.content_plan import (  # noqa: E402
     content_plan_summary_text,
     content_plan_to_outline_markdown,
 )
-from shared.content_profile import (  # noqa: E402
+from agents.blogging.shared.content_profile import (  # noqa: E402
     ContentProfile,
     LengthPolicy,
     SeriesContext,
     resolve_length_policy,
 )
-from shared.errors import BloggingError, PlanningError  # noqa: E402
-from shared.medium_integration_access import medium_stats_integration_eligible  # noqa: E402
-from shared.medium_stats_api import MediumStatsRequest  # noqa: E402
+from agents.blogging.shared.errors import BloggingError, PlanningError  # noqa: E402
+from agents.blogging.shared.medium_integration_access import (
+    medium_stats_integration_eligible,  # noqa: E402
+)
+from agents.blogging.shared.medium_stats_api import MediumStatsRequest  # noqa: E402
+from fastapi import HTTPException, Query  # noqa: E402
+from fastapi.responses import Response, StreamingResponse  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 
-from blogging.postgres import SCHEMA as BLOGGING_POSTGRES_SCHEMA  # noqa: E402
 from job_service_client import (  # noqa: E402
     JOB_STATUS_INTERRUPTED,
     RESTARTABLE_STATUSES,
@@ -57,7 +54,12 @@ from shared_app import create_team_app  # noqa: E402
 from shared_env_config import env_int  # noqa: E402
 
 try:
-    from shared.artifacts import ARTIFACT_NAMES, ARTIFACT_PRODUCER, read_artifact, write_artifact
+    from agents.blogging.shared.artifacts import (
+        ARTIFACT_NAMES,
+        ARTIFACT_PRODUCER,
+        read_artifact,
+        write_artifact,
+    )
 except ImportError:  # pragma: no cover - defensive ImportError fallback only triggered when blogging shared module is missing entirely; not exercised in tests because conftest guarantees the import path resolves.
     ARTIFACT_NAMES = ()
     ARTIFACT_PRODUCER = {}
@@ -65,7 +67,7 @@ except ImportError:  # pragma: no cover - defensive ImportError fallback only tr
     write_artifact = None
 
 try:
-    from shared.blog_job_store import (
+    from agents.blogging.shared.blog_job_store import (
         JOB_STATUS_CANCELLED,
         JOB_STATUS_COMPLETED,
         JOB_STATUS_FAILED,
@@ -306,7 +308,7 @@ def _run_blogging_service_shutdown() -> (
 ):  # pragma: no cover - process-lifecycle shutdown hook driven by uvicorn; meaningful exercise needs a live server and real Temporal/job-service clients. All branches are defensive try/except around external subsystems.
     """Runs while Uvicorn still has the event loop; before process exit (replaces atexit hook)."""
     try:
-        from shared.blog_job_store import stop_blog_stale_monitor
+        from agents.blogging.shared.blog_job_store import stop_blog_stale_monitor
 
         stop_blog_stale_monitor()
     except Exception:
@@ -327,14 +329,14 @@ def _run_blogging_service_shutdown() -> (
 
     logger.info("Blogging service shutdown: stopping Temporal worker…")
     try:
-        from blogging.temporal.worker import shutdown_blogging_temporal_components
+        from agents.blogging.temporal.worker import shutdown_blogging_temporal_components
 
         shutdown_blogging_temporal_components(worker_shutdown_timeout=8.0)
     except Exception:
         logger.warning("Temporal worker shutdown failed", exc_info=True)
 
     try:
-        from shared.job_event_bus import shutdown as _shutdown_event_bus
+        from agents.blogging.shared.job_event_bus import shutdown as _shutdown_event_bus
 
         _shutdown_event_bus()
     except Exception:
@@ -468,11 +470,9 @@ class FullPipelineResponse(BaseModel):
 def _import_run_pipeline() -> Callable[..., Any]:
     """Lazily import and return the v2 pipeline orchestrator.
 
-    The module-level ``sys.path`` bootstrap (top of this file) already guarantees
-    ``_blogging_root`` is importable before either call site runs, so this only needs
-    to perform the (deliberately lazy, to avoid a heavy import at module load) import.
+    Deliberately lazy to avoid a heavy import at module load.
     """
-    from agent_implementations.blog_writing_process_v2 import run_pipeline
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import run_pipeline
 
     return run_pipeline
 
@@ -855,7 +855,7 @@ def _run_medium_stats_async_job(job_id: str, payload: MediumStatsRequest) -> Non
 def _publish_terminal_event(job_id: str, event_type: str, **kwargs: Any) -> None:
     """Publish a terminal SSE event and clean up subscribers."""
     try:
-        from shared.job_event_bus import cleanup_job, publish
+        from agents.blogging.shared.job_event_bus import cleanup_job, publish
 
         publish(job_id, kwargs, event_type=event_type)
         cleanup_job(job_id)
@@ -920,7 +920,7 @@ def _run_pipeline_with_tracking(
                 except Exception as e:
                     logger.warning("Failed to update job %s: %s", job_id, e)
             try:
-                from shared.job_event_bus import publish
+                from agents.blogging.shared.job_event_bus import publish
 
                 publish(job_id, kwargs, event_type="update")
             except Exception:
@@ -1021,8 +1021,8 @@ def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResp
 
     # When Temporal is enabled, start workflow for resumable state; otherwise run in thread
     try:
-        from blogging.temporal.client import is_temporal_enabled
-        from blogging.temporal.start_workflow import start_full_pipeline_workflow
+        from agents.blogging.temporal.client import is_temporal_enabled
+        from agents.blogging.temporal.start_workflow import start_full_pipeline_workflow
 
         if is_temporal_enabled():
             request_dict = request.model_dump(mode="json")
@@ -1132,7 +1132,7 @@ _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "needs_human
 )
 def stream_job_status(job_id: str) -> StreamingResponse:
     """SSE stream for a pipeline job. Falls back gracefully if job is already terminal."""
-    from shared.job_event_bus import subscribe, unsubscribe
+    from agents.blogging.shared.job_event_bus import subscribe, unsubscribe
 
     from shared_sse import sse_job_stream_sync, sse_line
 
@@ -1263,8 +1263,8 @@ def resume_blog_job(job_id: str) -> StartPipelineResponse:
     request = FullPipelineRequest(**payload)
 
     try:
-        from blogging.temporal.client import is_temporal_enabled
-        from blogging.temporal.start_workflow import start_full_pipeline_workflow
+        from agents.blogging.temporal.client import is_temporal_enabled
+        from agents.blogging.temporal.start_workflow import start_full_pipeline_workflow
 
         if is_temporal_enabled():
             request_dict = request.model_dump(mode="json")
@@ -1301,15 +1301,15 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
             status_code=400, detail="Original request payload not available for restart."
         )
 
-    from blogging.shared.blog_job_store import reset_blog_job
+    from agents.blogging.shared.blog_job_store import reset_blog_job
 
     reset_blog_job(job_id)
 
     request = FullPipelineRequest(**payload)
 
     try:
-        from blogging.temporal.client import is_temporal_enabled
-        from blogging.temporal.start_workflow import start_full_pipeline_workflow
+        from agents.blogging.temporal.client import is_temporal_enabled
+        from agents.blogging.temporal.start_workflow import start_full_pipeline_workflow
 
         if is_temporal_enabled():
             request_dict = request.model_dump(mode="json")
@@ -1499,7 +1499,7 @@ def story_response(job_id: str, request: StoryResponseRequest) -> BlogJobStatusR
     submit_story_user_message(job_id, request.message.strip())
     # Notify the ghost writer's event subscription so it wakes immediately
     try:
-        from shared.job_event_bus import publish
+        from agents.blogging.shared.job_event_bus import publish
 
         publish(job_id, {"story_response_received": True}, event_type="story_update")
     except Exception:  # pragma: no cover - defensive guard around event bus; failures here must not break the API response.
@@ -1532,7 +1532,7 @@ def skip_story_gap(job_id: str) -> BlogJobStatusResponse:
     skip_current_story_gap(job_id)
     # Notify the ghost writer's event subscription so it wakes immediately
     try:
-        from shared.job_event_bus import publish
+        from agents.blogging.shared.job_event_bus import publish
 
         publish(job_id, {"story_gap_skipped": True}, event_type="story_update")
     except Exception:  # pragma: no cover - defensive guard around event bus; failures here must not break the API response.
@@ -1774,7 +1774,7 @@ def _rebuild_api_models() -> None:
 @app.get("/stories", tags=["story-bank"])
 def list_stories(limit: int = 50, offset: int = 0) -> list:
     """List all persisted author stories, newest first."""
-    from shared.story_bank import list_stories as _list
+    from agents.blogging.shared.story_bank import list_stories as _list
 
     return _list(limit=limit, offset=offset)
 
@@ -1782,7 +1782,7 @@ def list_stories(limit: int = 50, offset: int = 0) -> list:
 @app.get("/stories/{story_id}", tags=["story-bank"])
 def get_story(story_id: str) -> dict:
     """Retrieve a single story by ID."""
-    from shared.story_bank import get_story as _get
+    from agents.blogging.shared.story_bank import get_story as _get
 
     result = _get(story_id)
     if result is None:
@@ -1795,7 +1795,7 @@ def get_story(story_id: str) -> dict:
 @app.delete("/stories/{story_id}", tags=["story-bank"])
 def delete_story(story_id: str) -> dict:
     """Delete a story from the bank."""
-    from shared.story_bank import delete_story as _delete
+    from agents.blogging.shared.story_bank import delete_story as _delete
 
     if not _delete(story_id):
         from fastapi import HTTPException
@@ -1807,7 +1807,7 @@ def delete_story(story_id: str) -> dict:
 @app.get("/stories/search/{keywords}", tags=["story-bank"])
 def search_stories(keywords: str, limit: int = 5) -> list:
     """Search stories by comma-separated keywords."""
-    from shared.story_bank import find_relevant_stories
+    from agents.blogging.shared.story_bank import find_relevant_stories
 
     kw_list = [k.strip() for k in keywords.split(",") if k.strip()]
     return find_relevant_stories(kw_list, limit=limit)

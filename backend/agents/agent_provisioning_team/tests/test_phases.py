@@ -103,6 +103,63 @@ def test_run_setup_creates_new_container(tmp_path: Path) -> None:
     assert result.success is True
     assert result.environment.container_id == "c-new"
     assert env_store.exists("a2")
+    stored = env_store.get("a2")
+    assert stored.updated_at == stored.created_at
+
+
+def test_run_setup_preserves_created_at_and_refreshes_updated_at_on_reregister(
+    tmp_path: Path,
+) -> None:
+    """Re-registering a non-running environment keeps the original created_at
+    and previously provisioned tools, but stamps updated_at with the current
+    (replacement) time, not the stale created_at."""
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import (
+        EnvironmentInfo as StoreEnvInfo,
+    )
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = EnvironmentStore(storage_dir=tmp_path / "envs")
+    env_store.register(
+        StoreEnvInfo(
+            agent_id="a3",
+            container_id="c-old",
+            container_name="agent-a3",
+            workspace_path="/workspace/a3",
+            status="stopped",
+            tools_provisioned=["pg"],
+            created_at="2020-01-01T00:00:00+00:00",
+            updated_at="2020-01-01T00:00:00+00:00",
+        )
+    )
+
+    manifest = ToolManifest()
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={
+            "container_id": "c-new",
+            "container_name": "agent-a3",
+            "ssh_port": 22003,
+            "workspace_path": "/workspace/a3",
+        },
+    )
+
+    result = run_setup(
+        agent_id="a3",
+        manifest=manifest,
+        environment_store=env_store,
+        docker_provisioner=docker,
+        progress_callback=lambda msg: None,
+    )
+
+    assert result.success is True
+    stored = env_store.get("a3")
+    assert stored.created_at == "2020-01-01T00:00:00+00:00"
+    assert stored.updated_at != "2020-01-01T00:00:00+00:00"
+    assert stored.tools_provisioned == ["pg"]
 
 
 def test_run_setup_returns_failure_on_docker_error(tmp_path: Path) -> None:

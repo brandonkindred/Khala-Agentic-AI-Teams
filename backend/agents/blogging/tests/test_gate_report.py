@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import pytest
-from blog_compliance_agent.models import ComplianceReport, Violation
-from blog_copy_editor_agent.models import CopyEditorOutput, FeedbackItem
-from blog_fact_check_agent.models import FactCheckReport
-from blog_plan_critic_agent.models import PlanCriticReport, PlanViolation
+from agents.blogging.blog_compliance_agent.models import ComplianceReport, Violation
+from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput, FeedbackItem
+from agents.blogging.blog_fact_check_agent.models import FactCheckReport
+from agents.blogging.blog_plan_critic_agent.models import PlanCriticReport, PlanViolation
+from agents.blogging.shared import GateReport, GateViolation
+from agents.blogging.shared.gate_report import GateSeverity, GateStatus
+from agents.blogging.validators.models import CheckResult, ValidatorReport
 from pydantic import ValidationError
-from shared import GateReport, GateViolation
-from shared.gate_report import GateSeverity, GateStatus
-from validators.models import CheckResult, ValidatorReport
 
 
 def test_status_and_severity_literals_are_shared():

@@ -8,6 +8,8 @@ predicate-side validators.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from pydantic import ValidationError
 
@@ -120,6 +122,16 @@ def test_format_number_renders_floats_with_repr() -> None:
     assert out in {"0.05", str(0.05)}
 
 
+def test_format_number_avoids_scientific_notation_for_small_floats() -> None:
+    # repr(1e-05) == "1e-05"; the adapter's decimal-only regex (\d+(?:\.\d+)?)
+    # can't parse scientific notation, so the fallback must never emit one.
+    for value in (1e-5, -1e-5, 1.5e-8):
+        out = _format_number(value)
+        assert "e" not in out.lower()
+        assert float(out) == value
+        assert re.fullmatch(r"-?\d+(?:\.\d+)?", out)
+
+
 def test_format_number_rejects_non_finite() -> None:
     with pytest.raises(ValueError):
         _format_number(float("nan"))
@@ -151,11 +163,8 @@ def test_format_indicator_ref_with_alt_source_appends_modifier() -> None:
     assert "source=high" in out
 
 
-def test_format_indicator_ref_vwap_with_alt_source_branch() -> None:
-    """vwap() has no other args, so source must wedge inside the empty parens."""
-    # vwap doesn't allow source per the registry, but the helper handles the
-    # ``inner.endswith("(")`` branch when the base is arg-less. Use sma with
-    # arg-less base via a temporary override of param.
+def test_format_indicator_ref_rsi_with_alt_source_branch() -> None:
+    """Same comma-append branch of ``_with_source`` as the sma case above, for rsi."""
     ref = IndicatorRef(name="rsi", source="high")
     out = _format_indicator_ref(ref)
     assert "source=high" in out

@@ -9,8 +9,8 @@ the brand and writing style.
 import logging
 from pathlib import Path
 
-from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
-from shared.style_loader import load_style_file
+from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
+from agents.blogging.shared.style_loader import load_style_file
 
 from llm_service import get_strands_model
 

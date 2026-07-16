@@ -10,14 +10,14 @@ import json
 from typing import Any
 
 import pytest
-from shared.content_plan import (
+from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     PlanningInput,
     RequirementsAnalysis,
     TitleCandidate,
 )
-from shared.content_planning_loop import (
+from agents.blogging.shared.content_planning_loop import (
     build_generate_plan_prompt,
     build_refine_plan_prompt,
     complete_plan_json,
@@ -25,8 +25,8 @@ from shared.content_planning_loop import (
     post_validate_plan,
     run_content_planning_loop,
 )
-from shared.content_profile import ContentProfile, resolve_length_policy
-from shared.errors import PlanningError
+from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+from agents.blogging.shared.errors import PlanningError
 
 
 def _policy_standard():

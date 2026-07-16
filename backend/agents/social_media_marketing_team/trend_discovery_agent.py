@@ -14,8 +14,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from blog_research_agent.models import CandidateResult, SearchQuery
-from blog_research_agent.tools.web_search import OllamaWebSearch, WebSearchError
+from agents.blogging.blog_research_agent.models import CandidateResult, SearchQuery
+from agents.blogging.blog_research_agent.tools.web_search import OllamaWebSearch, WebSearchError
 from strands import Agent
 
 from llm_service import get_strands_model

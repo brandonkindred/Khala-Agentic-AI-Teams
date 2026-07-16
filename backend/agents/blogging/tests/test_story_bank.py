@@ -128,7 +128,7 @@ def fake_pg(monkeypatch: pytest.MonkeyPatch):
     def _fake_get_conn(database=None):
         yield _FakeConn(db)
 
-    import blogging.shared.story_bank as sb
+    import agents.blogging.shared.story_bank as sb
 
     monkeypatch.setattr(sb, "get_conn", _fake_get_conn)
     yield db
@@ -140,7 +140,7 @@ def fake_pg(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_save_story_persists_row_with_generated_id(fake_pg):
-    from blogging.shared.story_bank import save_story
+    from agents.blogging.shared.story_bank import save_story
 
     sid = save_story(
         narrative="I once built a thing",
@@ -162,7 +162,7 @@ def test_save_story_persists_row_with_generated_id(fake_pg):
 
 
 def test_save_story_handles_no_keywords_and_no_job_id(fake_pg):
-    from blogging.shared.story_bank import save_story
+    from agents.blogging.shared.story_bank import save_story
 
     sid = save_story(narrative="solo story")
     row = fake_pg["stories"][sid]
@@ -171,7 +171,7 @@ def test_save_story_handles_no_keywords_and_no_job_id(fake_pg):
 
 
 def test_save_story_calls_llm_for_summary_when_provided(fake_pg):
-    from blogging.shared.story_bank import save_story
+    from agents.blogging.shared.story_bank import save_story
 
     class _StubLLM:
         def __init__(self):
@@ -189,7 +189,7 @@ def test_save_story_calls_llm_for_summary_when_provided(fake_pg):
 
 
 def test_save_story_llm_failure_is_non_fatal(fake_pg, caplog):
-    from blogging.shared.story_bank import save_story
+    from agents.blogging.shared.story_bank import save_story
 
     class _ExplodingLLM:
         def complete(self, *a, **k):
@@ -209,14 +209,14 @@ def test_save_story_llm_failure_is_non_fatal(fake_pg, caplog):
 
 
 def test_find_relevant_stories_returns_empty_for_empty_query(fake_pg):
-    from blogging.shared.story_bank import find_relevant_stories, save_story
+    from agents.blogging.shared.story_bank import find_relevant_stories, save_story
 
     save_story(narrative="x", keywords=["python"])
     assert find_relevant_stories([]) == []
 
 
 def test_find_relevant_stories_scores_by_keyword_overlap(fake_pg):
-    from blogging.shared.story_bank import find_relevant_stories, save_story
+    from agents.blogging.shared.story_bank import find_relevant_stories, save_story
 
     a = save_story(narrative="A", keywords=["python", "web", "api"])
     b = save_story(narrative="B", keywords=["python", "ml"])
@@ -229,7 +229,7 @@ def test_find_relevant_stories_scores_by_keyword_overlap(fake_pg):
 
 
 def test_find_relevant_stories_ignores_case_and_whitespace(fake_pg):
-    from blogging.shared.story_bank import find_relevant_stories, save_story
+    from agents.blogging.shared.story_bank import find_relevant_stories, save_story
 
     sid = save_story(narrative="A", keywords=["Python", "  Web  "])
     results = find_relevant_stories(["PYTHON"], limit=5)
@@ -238,7 +238,7 @@ def test_find_relevant_stories_ignores_case_and_whitespace(fake_pg):
 
 def test_find_relevant_stories_returns_keywords_as_list_not_json(fake_pg):
     """psycopg3 returns JSONB as Python list — no json.loads needed."""
-    from blogging.shared.story_bank import find_relevant_stories, save_story
+    from agents.blogging.shared.story_bank import find_relevant_stories, save_story
 
     save_story(narrative="A", keywords=["python"])
     results = find_relevant_stories(["python"])
@@ -247,7 +247,7 @@ def test_find_relevant_stories_returns_keywords_as_list_not_json(fake_pg):
 
 
 def test_find_relevant_stories_applies_limit(fake_pg):
-    from blogging.shared.story_bank import find_relevant_stories, save_story
+    from agents.blogging.shared.story_bank import find_relevant_stories, save_story
 
     for i in range(6):
         save_story(narrative=f"story-{i}", keywords=["python"])
@@ -256,7 +256,7 @@ def test_find_relevant_stories_applies_limit(fake_pg):
 
 
 def test_find_relevant_stories_llm_rerank_reorders_when_enough_candidates(fake_pg):
-    from blogging.shared.story_bank import find_relevant_stories, save_story
+    from agents.blogging.shared.story_bank import find_relevant_stories, save_story
 
     # Save stories with summaries so the rerank path activates.
     class _SummaryLLM:
@@ -285,7 +285,7 @@ def test_find_relevant_stories_llm_rerank_reorders_when_enough_candidates(fake_p
 
 
 def test_find_relevant_stories_rerank_failure_falls_back_to_keyword(fake_pg):
-    from blogging.shared.story_bank import find_relevant_stories, save_story
+    from agents.blogging.shared.story_bank import find_relevant_stories, save_story
 
     class _BrokenLLM:
         def complete(self, *a, **k):
@@ -314,7 +314,7 @@ def test_find_relevant_stories_rerank_failure_falls_back_to_keyword(fake_pg):
 
 
 def test_list_stories_orders_newest_first(fake_pg, monkeypatch):
-    from blogging.shared import story_bank as sb
+    from agents.blogging.shared import story_bank as sb
 
     # Force deterministic timestamps by patching datetime.now inside the module.
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -338,7 +338,7 @@ def test_list_stories_orders_newest_first(fake_pg, monkeypatch):
 
 
 def test_list_stories_respects_limit_and_offset(fake_pg):
-    from blogging.shared.story_bank import list_stories, save_story
+    from agents.blogging.shared.story_bank import list_stories, save_story
 
     for i in range(5):
         save_story(narrative=f"s-{i}")
@@ -350,7 +350,7 @@ def test_list_stories_respects_limit_and_offset(fake_pg):
 
 
 def test_get_story_returns_dict_for_existing(fake_pg):
-    from blogging.shared.story_bank import get_story, save_story
+    from agents.blogging.shared.story_bank import get_story, save_story
 
     sid = save_story(narrative="hello", keywords=["a", "b"])
     story = get_story(sid)
@@ -362,13 +362,13 @@ def test_get_story_returns_dict_for_existing(fake_pg):
 
 
 def test_get_story_returns_none_for_missing(fake_pg):
-    from blogging.shared.story_bank import get_story
+    from agents.blogging.shared.story_bank import get_story
 
     assert get_story("nope") is None
 
 
 def test_delete_story_returns_true_on_hit(fake_pg):
-    from blogging.shared.story_bank import delete_story, save_story
+    from agents.blogging.shared.story_bank import delete_story, save_story
 
     sid = save_story(narrative="x")
     assert delete_story(sid) is True
@@ -376,6 +376,6 @@ def test_delete_story_returns_true_on_hit(fake_pg):
 
 
 def test_delete_story_returns_false_on_miss(fake_pg):
-    from blogging.shared.story_bank import delete_story
+    from agents.blogging.shared.story_bank import delete_story
 
     assert delete_story("never-existed") is False

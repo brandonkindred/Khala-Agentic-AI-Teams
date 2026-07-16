@@ -6,7 +6,7 @@ import json
 
 
 def _make_agent():
-    from blog_copy_editor_agent import BlogCopyEditorAgent
+    from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent
 
     from llm_service import DummyLLMClient
 
@@ -18,7 +18,7 @@ def _make_agent():
 
 
 def _make_input(**kw):
-    from blog_copy_editor_agent.models import CopyEditorInput
+    from agents.blogging.blog_copy_editor_agent.models import CopyEditorInput
 
     defaults = {
         "draft": "# Draft\n\n" + " ".join(["word"] * 1500),  # ~1500 words
@@ -38,7 +38,7 @@ def _make_input(**kw):
 
 
 def _patch_agent_response(monkeypatch, response_json: dict) -> None:
-    from blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
 
     class _Agent:
         def __init__(self, *a, **kw):
@@ -116,7 +116,7 @@ def test_copy_editor_technical_deep_dive_thin_draft(monkeypatch) -> None:
 
 def test_copy_editor_llm_json_parse_failure_uses_fallback(monkeypatch) -> None:
     """Failure to parse JSON → fallback summary returned."""
-    from blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
 
     class _Agent:
         def __init__(self, *a, **kw):

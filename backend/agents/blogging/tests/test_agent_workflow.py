@@ -1,7 +1,7 @@
 from unittest.mock import patch
 
-from blog_research_agent.agent import ResearchAgent
-from blog_research_agent.models import (
+from agents.blogging.blog_research_agent.agent import ResearchAgent
+from agents.blogging.blog_research_agent.models import (
     CandidateResult,
     ResearchBriefInput,
     SearchQuery,
@@ -92,7 +92,7 @@ def test_research_agent_run_end_to_end() -> None:
     agent = ResearchAgent(llm_client=llm, web_search=StubSearch(), web_fetcher=StubFetcher())
 
     # Avoid real arXiv HTTP calls in tests
-    with patch("blog_research_agent.agent.search_arxiv", return_value=[]):
+    with patch("agents.blogging.blog_research_agent.agent.search_arxiv", return_value=[]):
         brief = ResearchBriefInput(
             brief="Test brief about a topic",
             audience="Testers",

@@ -5,8 +5,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from blog_research_agent.models import CandidateResult
-from blog_research_agent.tools.web_search import WebSearchError
+from agents.blogging.blog_research_agent.models import CandidateResult
+from agents.blogging.blog_research_agent.tools.web_search import WebSearchError
 
 from llm_service import DummyLLMClient
 from social_media_marketing_team.trend_discovery_agent import TrendDiscoveryAgent

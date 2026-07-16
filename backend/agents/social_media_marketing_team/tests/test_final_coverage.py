@@ -157,7 +157,7 @@ def test_load_winners_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_trend_agent_logs_when_synthesis_throws(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     """If the agent invocation raises, the except branch (lines 184-187) logs
     a warning and returns an empty topic list."""
-    from blog_research_agent.models import CandidateResult
+    from agents.blogging.blog_research_agent.models import CandidateResult
 
     from llm_service import DummyLLMClient
     from social_media_marketing_team.trend_discovery_agent import TrendDiscoveryAgent

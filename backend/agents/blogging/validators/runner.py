@@ -8,8 +8,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from shared.artifacts import read_artifact, write_artifact
-from shared.brand_spec import BrandSpec
+from agents.blogging.shared.artifacts import read_artifact, write_artifact
+from agents.blogging.shared.brand_spec import BrandSpec
 
 from .checks import (
     check_banned_patterns,
