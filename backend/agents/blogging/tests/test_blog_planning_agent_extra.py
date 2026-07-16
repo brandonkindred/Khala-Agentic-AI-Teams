@@ -6,10 +6,10 @@ import json
 from typing import Any
 
 import pytest
-from blog_planning_agent.agent import BlogPlanningAgent
-from shared.content_plan import PlanningInput
-from shared.content_profile import ContentProfile, resolve_length_policy
-from shared.errors import PlanningError
+from agents.blogging.blog_planning_agent.agent import BlogPlanningAgent
+from agents.blogging.shared.content_plan import PlanningInput
+from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+from agents.blogging.shared.errors import PlanningError
 
 
 def _policy_standard():
@@ -97,7 +97,7 @@ def test_complete_plan_json_raises_after_max_parse_retries(monkeypatch) -> None:
 
 def test_run_refines_with_critic_feedback(monkeypatch) -> None:
     """Iteration 2 uses critic feedback (last_critic_report path)."""
-    from blog_plan_critic_agent.models import PlanCriticReport
+    from agents.blogging.blog_plan_critic_agent.models import PlanCriticReport
 
     from llm_service import DummyLLMClient
 

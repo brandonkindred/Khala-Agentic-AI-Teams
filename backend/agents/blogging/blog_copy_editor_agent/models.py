@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from agents.blogging.shared.gate_report import GateReport
 from pydantic import BaseModel, Field
-from shared.gate_report import GateReport
 
 
 class FeedbackItem(BaseModel):

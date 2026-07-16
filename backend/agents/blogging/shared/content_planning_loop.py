@@ -39,7 +39,7 @@ from .content_profile import LengthPolicy
 from .errors import PlanningError
 
 if TYPE_CHECKING:
-    from blog_plan_critic_agent import BlogPlanCriticAgent, PlanCriticReport
+    from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent, PlanCriticReport
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +221,7 @@ def run_content_planning_loop(
     # critic is present at all, not on any per-iteration state.
     build_refine_feedback_from_critic: Optional[Callable[["PlanCriticReport"], str]] = None
     if plan_critic is not None:
-        from blog_plan_critic_agent.agent import build_refine_feedback_from_critic
+        from agents.blogging.blog_plan_critic_agent.agent import build_refine_feedback_from_critic
 
     for iteration in range(1, max_iterations + 1):
         if iteration == 1:

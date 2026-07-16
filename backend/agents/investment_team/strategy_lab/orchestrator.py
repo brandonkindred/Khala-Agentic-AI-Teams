@@ -2540,11 +2540,11 @@ class StrategyLabOrchestrator:
             all_gate_results.extend(zt_outcome.new_gates)
             if zt_outcome.committed:
                 if zt_outcome.new_spec is None:
-                    raise OrchestratorContractError("committed ZTR must carry new_spec")
+                    raise ValueError("committed ZTR must carry new_spec")
                 if zt_outcome.new_metrics is None:
-                    raise OrchestratorContractError("committed ZTR must carry new_metrics")
+                    raise ValueError("committed ZTR must carry new_metrics")
                 if zt_outcome.new_exec_result is None:
-                    raise OrchestratorContractError("committed ZTR must carry new_exec_result")
+                    raise ValueError("committed ZTR must carry new_exec_result")
                 refinement_attempts.append(
                     f"zero-trade repair: {zt_outcome.changes_made}"
                     if zt_outcome.changes_made
@@ -4816,13 +4816,13 @@ class StrategyLabOrchestrator:
         emitting ``"evaluation"`` to the event stream.
         """
         if not isinstance(spec, StrategySpec):
-            raise OrchestratorContractError("spec must be a StrategySpec")
+            raise TypeError(f"spec must be a StrategySpec, got {type(spec).__name__}")
         if not isinstance(code, str):
-            raise OrchestratorContractError("code must be a string")
-        if not (isinstance(failure_phase, str) and failure_phase):
-            raise OrchestratorContractError("failure_phase must be non-empty")
-        if not (round_num >= 0):
-            raise OrchestratorContractError("round_num must be non-negative")
+            raise TypeError(f"code must be a string, got {type(code).__name__}")
+        if not isinstance(failure_phase, str) or not failure_phase:
+            raise ValueError(f"failure_phase must be a non-empty string, got {failure_phase!r}")
+        if round_num < 0:
+            raise ValueError(f"round_num must be non-negative, got {round_num}")
 
         if round_num >= MAX_CODE_REFINEMENT_ROUNDS - 1:
             logger.warning(

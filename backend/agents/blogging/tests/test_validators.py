@@ -1,15 +1,20 @@
 """Unit tests for deterministic validators."""
 
 import pytest
-from shared.brand_spec import BrandSpec, FormattingConfig, ReadabilityConfig, VoiceConfig
-from validators.checks import (
+from agents.blogging.shared.brand_spec import (
+    BrandSpec,
+    FormattingConfig,
+    ReadabilityConfig,
+    VoiceConfig,
+)
+from agents.blogging.validators.checks import (
     check_banned_patterns,
     check_banned_phrases,
     check_paragraph_length,
     check_reading_level,
     check_required_sections,
 )
-from validators.runner import run_validators
+from agents.blogging.validators.runner import run_validators
 
 
 @pytest.fixture

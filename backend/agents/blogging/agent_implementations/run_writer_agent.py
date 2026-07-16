@@ -9,14 +9,14 @@ research_document and outline, or use placeholders for testing.
 import logging
 from pathlib import Path
 
-from blog_writer_agent import BlogWriterAgent, WriterInput
-from shared.content_plan import (
+from agents.blogging.blog_writer_agent import BlogWriterAgent, WriterInput
+from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     RequirementsAnalysis,
     TitleCandidate,
 )
-from shared.style_loader import load_style_file
+from agents.blogging.shared.style_loader import load_style_file
 
 from llm_service import get_strands_model
 

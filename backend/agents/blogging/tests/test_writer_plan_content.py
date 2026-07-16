@@ -8,7 +8,7 @@ import pytest
 
 
 def _agent_with_guidelines():
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import DummyLLMClient
 
@@ -39,19 +39,19 @@ def _valid_plan_dict() -> dict[str, Any]:
 
 
 def _planning_input():
-    from shared.content_plan import PlanningInput
+    from agents.blogging.shared.content_plan import PlanningInput
 
     return PlanningInput(brief="hi", length_policy_context="ctx", research_digest="rd")
 
 
 def _length_policy():
-    from shared.content_profile import ContentProfile, resolve_length_policy
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
 
     return resolve_length_policy(content_profile=ContentProfile.standard_article)
 
 
 def test_complete_plan_json_first_attempt_succeeds(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent_with_guidelines()
     monkeypatch.setattr(
@@ -68,7 +68,7 @@ def test_complete_plan_json_first_attempt_succeeds(monkeypatch) -> None:
 
 def test_complete_plan_json_falls_back_to_second_attempt(monkeypatch) -> None:
     """First call returns empty dict; the second call (extract_json_from_response) parses successfully."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent_with_guidelines()
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", lambda self, p, **kw: {})
@@ -82,8 +82,8 @@ def test_complete_plan_json_falls_back_to_second_attempt(monkeypatch) -> None:
 
 
 def test_complete_plan_json_raises_after_retries(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
-    from shared.errors import PlanningError
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.shared.errors import PlanningError
 
     from llm_service import LLMJsonParseError
 
@@ -102,7 +102,7 @@ def test_complete_plan_json_raises_after_retries(monkeypatch) -> None:
 
 def test_plan_content_converges_first_iteration(monkeypatch) -> None:
     """plan_content returns successfully when the first plan is acceptable."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent_with_guidelines()
     monkeypatch.setattr(
@@ -116,8 +116,8 @@ def test_plan_content_converges_first_iteration(monkeypatch) -> None:
 
 
 def test_plan_content_invalid_schema_raises(monkeypatch) -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
-    from shared.errors import PlanningError
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.shared.errors import PlanningError
 
     a = _agent_with_guidelines()
     monkeypatch.setattr(
@@ -131,7 +131,7 @@ def test_plan_content_invalid_schema_raises(monkeypatch) -> None:
 
 def test_plan_content_refines_when_not_acceptable(monkeypatch) -> None:
     """When plan_acceptable=False, iterate once more then succeed."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent_with_guidelines()
     state = {"i": 0}
@@ -150,7 +150,7 @@ def test_plan_content_refines_when_not_acceptable(monkeypatch) -> None:
 
 def test_plan_content_fills_missing_title_candidates(monkeypatch) -> None:
     """If the plan has no title candidates, one is synthesised from topic."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent_with_guidelines()
     plan = _valid_plan_dict()
@@ -166,7 +166,7 @@ def test_plan_content_fills_missing_title_candidates(monkeypatch) -> None:
 
 def test_plan_content_with_plan_critic(monkeypatch) -> None:
     """plan_critic provided → critic.run is called and result merged."""
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent_with_guidelines()
     monkeypatch.setattr(
@@ -191,8 +191,8 @@ def test_plan_content_with_plan_critic(monkeypatch) -> None:
 
 def test_plan_content_max_iterations_exhausted(monkeypatch) -> None:
     """Critic never approves → PlanningError raised after max_iterations."""
-    from blog_writer_agent.agent import BlogWriterAgent
-    from shared.errors import PlanningError
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.shared.errors import PlanningError
 
     a = _agent_with_guidelines()
     monkeypatch.setattr(

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -26,17 +27,50 @@ from agent_provisioning_team.shared.environment_store import EnvironmentStore
 
 
 def test_environment_info_from_dict_roundtrip() -> None:
+    """Preconditions: none. Postconditions: an ``EnvironmentInfo`` with an
+    explicit ``updated_at`` round-trips through ``to_dict``/``from_dict``
+    preserving all fields, including ``updated_at``."""
     info = StoreEnvInfo(
         agent_id="a1",
         container_id="c1",
         container_name="agent-a1",
         workspace_path="/w",
         tools_provisioned=["pg", "redis"],
+        updated_at="2024-01-02T00:00:00+00:00",
     )
     d = info.to_dict()
     restored = StoreEnvInfo.from_dict(d)
     assert restored.agent_id == "a1"
     assert restored.tools_provisioned == ["pg", "redis"]
+    assert restored.updated_at == "2024-01-02T00:00:00+00:00"
+
+
+def test_environment_info_updated_at_defaults_to_created_at() -> None:
+    """Preconditions: none. Postconditions: an ``EnvironmentInfo`` built
+    without an explicit ``updated_at`` round-trips through
+    ``to_dict``/``from_dict`` with ``updated_at == created_at``."""
+    info = StoreEnvInfo(agent_id="a1", container_id="c1", container_name="c1")
+    d = info.to_dict()
+    assert "updated_at" in d
+    assert d["updated_at"] == info.created_at
+    restored = StoreEnvInfo.from_dict(d)
+    assert restored.updated_at == restored.created_at
+
+
+def test_environment_info_from_dict_defaults_updated_at_when_key_absent() -> None:
+    """Preconditions: ``data`` is a legacy-shaped dict with no ``updated_at``
+    key at all (e.g. a record written before this field existed).
+    Postconditions: ``from_dict`` defaults ``updated_at`` to ``created_at``
+    rather than raising or leaving it unset."""
+    legacy_data = {
+        "agent_id": "a1",
+        "container_id": "c1",
+        "container_name": "c1",
+        "workspace_path": "/w",
+        "created_at": "2024-01-01T00:00:00+00:00",
+    }
+    restored = StoreEnvInfo.from_dict(legacy_data)
+    assert restored.updated_at == "2024-01-01T00:00:00+00:00"
 
 
 def test_environment_store_defaults_under_agent_cache(tmp_path: Path, monkeypatch) -> None:
@@ -74,26 +108,91 @@ def test_environment_store_register_get_remove(tmp_path: Path) -> None:
     assert store.get("a1") is None
 
 
+def test_environment_store_preserves_updated_at_on_get(tmp_path: Path) -> None:
+    """Preconditions: ``tmp_path`` is an empty, writable directory.
+    Postconditions: an explicit ``updated_at`` passed to ``register`` is
+    returned unchanged by a subsequent ``get``."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    env = StoreEnvInfo(
+        agent_id="a1",
+        container_id="c1",
+        container_name="c1",
+        workspace_path="/w",
+        updated_at="2024-06-01T12:00:00+00:00",
+    )
+    store.register(env)
+    fetched = store.get("a1")
+    assert fetched.updated_at == "2024-06-01T12:00:00+00:00"
+
+
 def test_environment_store_register_rejects_none(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
     with pytest.raises(ValueError, match="env_info must not be None"):
         store.register(None)
 
 
-def test_environment_store_register_rejects_empty_agent_id(tmp_path: Path) -> None:
-    store = EnvironmentStore(storage_dir=tmp_path)
-    with pytest.raises(ValueError, match="agent_id must not be empty"):
-        store.register(
-            StoreEnvInfo(
-                agent_id="",
-                container_id="c1",
-                container_name="c1",
-                workspace_path="/w",
-            )
+def test_environment_info_construction_rejects_empty_agent_id() -> None:
+    """Construction-time validation now fires before ``register`` ever runs."""
+    with pytest.raises(ValueError, match="agent_id must be a non-empty string"):
+        StoreEnvInfo(
+            agent_id="",
+            container_id="c1",
+            container_name="c1",
+            workspace_path="/w",
         )
 
 
+def test_environment_store_register_rejects_empty_agent_id(tmp_path: Path) -> None:
+    """``register``'s own guard still fires for an instance mutated after
+    construction (a freshly-constructed instance can never have an empty
+    ``agent_id``)."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    env = StoreEnvInfo(
+        agent_id="a1",
+        container_id="c1",
+        container_name="c1",
+        workspace_path="/w",
+    )
+    env.agent_id = ""
+    with pytest.raises(ValueError, match="agent_id must not be empty"):
+        store.register(env)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"agent_id": ""},
+        {"agent_id": None},
+        {"container_id": ""},
+        {"container_id": None},
+        {"container_name": ""},
+        {"container_name": None},
+        {"ssh_port": 0},
+        {"ssh_port": -1},
+        {"ssh_port": 65536},
+        {"ssh_port": "22"},
+    ],
+)
+def test_environment_info_rejects_invalid_fields(kwargs: dict) -> None:
+    """Preconditions: ``kwargs`` overrides exactly one required field with an
+    invalid value. Postconditions: construction raises ``ValueError``."""
+    base = {
+        "agent_id": "a1",
+        "container_id": "c1",
+        "container_name": "c1",
+        "workspace_path": "/w",
+    }
+    base.update(kwargs)
+    with pytest.raises(ValueError):
+        StoreEnvInfo(**base)
+
+
 def test_environment_store_update_status(tmp_path: Path) -> None:
+    """Preconditions: ``tmp_path`` is an empty, writable directory.
+    Postconditions: ``update_status`` on a missing agent returns ``False``;
+    on an existing agent it updates ``status``, refreshes ``updated_at`` to a
+    value distinct from the original ``created_at``, and that refreshed value
+    is stable across a subsequent ``get``."""
     store = EnvironmentStore(storage_dir=tmp_path)
 
     # update on missing returns False
@@ -107,8 +206,18 @@ def test_environment_store_update_status(tmp_path: Path) -> None:
             workspace_path="/w",
         )
     )
-    assert store.update_status("a1", "ready") is True
-    assert store.get("a1").status == "ready"
+    original_created_at = store.get("a1").created_at
+    with patch("agent_provisioning_team.shared.environment_store.datetime") as mock_datetime:
+        mock_datetime.now.return_value = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        assert store.update_status("a1", "ready") is True
+    updated = store.get("a1")
+    assert updated.status == "ready"
+    assert updated.updated_at is not None
+    assert updated.updated_at != original_created_at
+
+    # Verify round-trip: a second get preserves the same updated_at
+    refetched = store.get("a1")
+    assert refetched.updated_at == updated.updated_at
 
 
 def test_environment_store_update_status_handles_corrupt(tmp_path: Path) -> None:
@@ -116,6 +225,18 @@ def test_environment_store_update_status_handles_corrupt(tmp_path: Path) -> None
     bad = tmp_path / "broken.json"
     bad.write_text("{not json", encoding="utf-8")
     assert store.update_status("broken", "ready") is False
+
+
+def test_environment_store_update_status_handles_invalid_field(tmp_path: Path) -> None:
+    """A well-formed JSON record with an invalid field value (e.g. an empty
+    ``container_id``) fails ``EnvironmentInfo`` construction inside
+    ``from_dict`` — ``update_status`` must return ``False``, not raise."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    (tmp_path / "bad-record.json").write_text(
+        json.dumps({"agent_id": "bad-record", "container_id": "", "container_name": "c1"}),
+        encoding="utf-8",
+    )
+    assert store.update_status("bad-record", "ready") is False
 
 
 def test_environment_store_add_tool(tmp_path: Path) -> None:
@@ -157,7 +278,31 @@ def test_environment_store_add_tool_handles_corrupt(tmp_path: Path) -> None:
     assert store.add_tool("broken", "pg") is False
 
 
+def test_environment_store_add_tool_handles_invalid_field(tmp_path: Path) -> None:
+    """A well-formed JSON record with an invalid field value (e.g. an
+    out-of-range ``ssh_port``) fails ``EnvironmentInfo`` construction inside
+    ``from_dict`` — ``add_tool``/``add_tools`` must return ``False``, not
+    raise."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    (tmp_path / "bad-record.json").write_text(
+        json.dumps(
+            {
+                "agent_id": "bad-record",
+                "container_id": "c1",
+                "container_name": "c1",
+                "ssh_port": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert store.add_tool("bad-record", "pg") is False
+
+
 def test_environment_store_list_all(tmp_path: Path) -> None:
+    """Preconditions: ``tmp_path`` is an empty, writable directory.
+    Postconditions: ``list_all`` returns every registered environment,
+    filters correctly by ``status``, and preserves each entry's
+    ``updated_at``."""
     store = EnvironmentStore(storage_dir=tmp_path)
 
     store.register(
@@ -167,6 +312,7 @@ def test_environment_store_list_all(tmp_path: Path) -> None:
             container_name="c1",
             workspace_path="/w",
             status="ready",
+            updated_at="2024-03-01T00:00:00+00:00",
         )
     )
     store.register(
@@ -185,6 +331,7 @@ def test_environment_store_list_all(tmp_path: Path) -> None:
     ready = store.list_all(status="ready")
     assert len(ready) == 1
     assert ready[0].agent_id == "a1"
+    assert ready[0].updated_at == "2024-03-01T00:00:00+00:00"
 
 
 def test_environment_store_list_all_dedupes_by_agent_id_not_stem(tmp_path: Path) -> None:
@@ -222,6 +369,19 @@ def test_environment_store_list_all_skips_corrupt(tmp_path: Path) -> None:
     assert {e.agent_id for e in out} == {"a1"}
 
 
+def test_environment_store_list_all_skips_non_dict_json(tmp_path: Path) -> None:
+    """A file containing a JSON array (not an object) must be skipped, not raise."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(agent_id="a1", container_id="c1", container_name="c1", workspace_path="/w")
+    )
+    (tmp_path / "array.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+
+    out = store.list_all()
+    # Only the valid one shows up.
+    assert {e.agent_id for e in out} == {"a1"}
+
+
 def test_environment_store_list_all_skips_unsafe_agent_id(tmp_path: Path) -> None:
     """A path-traversal-shaped agent_id from a malicious/malformed file must not surface."""
     store = EnvironmentStore(storage_dir=tmp_path)
@@ -242,6 +402,50 @@ def test_environment_store_list_all_skips_unsafe_agent_id(tmp_path: Path) -> Non
 
     out = store.list_all()
     assert {e.agent_id for e in out} == {"a1"}
+
+
+def test_environment_store_list_all_dedups_by_agent_id_not_filename(tmp_path: Path) -> None:
+    store = EnvironmentStore(storage_dir=tmp_path)
+
+    # Two stale/misnamed files, each named after a *different* agent than the
+    # one in its own contents: "agent_p.json" actually describes "agent_q",
+    # and "agent_q.json" actually describes "agent_r". Glob visits them in
+    # filename order (agent_p.json, then agent_q.json).
+    #
+    # Buggy behavior: after processing agent_p.json, "agent_q" lands in
+    # `seen` (from its *contents*). The next file, agent_q.json, is then
+    # checked by its *filename stem* ("agent_q"), which now matches `seen`
+    # purely by coincidence, so it gets skipped without ever being read —
+    # silently dropping the real "agent_r" record.
+    (tmp_path / "agent_p.json").write_text(
+        json.dumps(
+            StoreEnvInfo(
+                agent_id="agent_q",
+                container_id="p-container",
+                container_name="p-name",
+                workspace_path="/w",
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "agent_q.json").write_text(
+        json.dumps(
+            StoreEnvInfo(
+                agent_id="agent_r",
+                container_id="q-container",
+                container_name="q-name",
+                workspace_path="/w",
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+
+    out = store.list_all()
+
+    # Both distinct agent_ids ("agent_q" from agent_p.json, "agent_r" from
+    # agent_q.json) must be present -- neither is a real duplicate of the
+    # other, so neither should be dropped.
+    assert {e.agent_id for e in out} == {"agent_q", "agent_r"}
 
 
 def test_environment_store_get_handles_corrupt(tmp_path: Path) -> None:

@@ -15,15 +15,9 @@ from conftest import setup_artifacts_root as _setup_artifacts_root
 
 @pytest.fixture
 def patched_client(monkeypatch, fake_job_client):
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    try:
-        from blogging.shared import blog_job_store as bjs_alt
-
-        monkeypatch.setattr(bjs_alt, "_client", lambda *a, **kw: fake_job_client)
-    except ImportError:
-        pass
     return fake_job_client
 
 
@@ -31,7 +25,7 @@ def test_publish_terminal_swallows_publish_errors(monkeypatch) -> None:
     """A raising bus is swallowed. Patched via _import_shared — production resolves
     blogging.shared.job_event_bus first, a distinct module object from shared.job_event_bus,
     so patching only the sibling module would never reach the code under test."""
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     calls: list[str] = []
 
@@ -54,8 +48,8 @@ def test_fail_job_works_via_shared_blog_job_store(
     monkeypatch, patched_client, tmp_path: Path
 ) -> None:
     """_fail_job records the failure (status/error) via the shared job store."""
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -73,8 +67,8 @@ def test_fail_job_works_via_shared_blog_job_store(
 
 def test_publish_publishes_via_job_event_bus(monkeypatch, tmp_path: Path, patched_client) -> None:
     """A full run publishes at least one ``update`` event through the SSE bus."""
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     _setup_artifacts_root(monkeypatch, tmp_path)
 
@@ -84,18 +78,18 @@ def test_publish_publishes_via_job_event_bus(monkeypatch, tmp_path: Path, patche
         seen.append((event_type, dict(payload)))
 
     try:
-        from blogging.shared import job_event_bus as bus_b
+        from agents.blogging.shared import job_event_bus as bus_b
 
         monkeypatch.setattr(bus_b, "publish", fake_publish)
     except ImportError:
         pass
-    from shared import job_event_bus as bus_s
+    from agents.blogging.shared import job_event_bus as bus_s
 
     monkeypatch.setattr(bus_s, "publish", fake_publish)
 
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(
-        "agent_implementations.blog_writing_process_v2.run_pipeline",
+        "agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline",
         lambda *a, **kw: (ppr, draft, status),
     )
 
@@ -110,8 +104,8 @@ def test_job_updater_swallows_publish_exception(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
     """A raising SSE publish is swallowed; the run still completes."""
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
 
     _setup_artifacts_root(monkeypatch, tmp_path)
 
@@ -124,18 +118,18 @@ def test_job_updater_swallows_publish_exception(
     # Patch BOTH module objects: production resolves blogging.shared.job_event_bus
     # first (distinct from the sibling shared.job_event_bus in this layout).
     try:
-        from blogging.shared import job_event_bus as bus_b
+        from agents.blogging.shared import job_event_bus as bus_b
 
         monkeypatch.setattr(bus_b, "publish", boom)
     except ImportError:
         pass
-    from shared import job_event_bus as bus_s
+    from agents.blogging.shared import job_event_bus as bus_s
 
     monkeypatch.setattr(bus_s, "publish", boom)
 
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(
-        "agent_implementations.blog_writing_process_v2.run_pipeline",
+        "agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline",
         lambda *a, **kw: (ppr, draft, status),
     )
 
@@ -149,9 +143,9 @@ def test_job_updater_swallows_publish_exception(
 
 def test_external_cancellation_planning_path(monkeypatch, tmp_path: Path, patched_client) -> None:
     """A PlanningError wrapping a Temporal cancellation marks the job cancelled."""
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
-    from shared.errors import PlanningError
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
+    from agents.blogging.shared.errors import PlanningError
     from temporalio.exceptions import CancelledError as TemporalCancelled
 
     _setup_artifacts_root(monkeypatch, tmp_path)
@@ -162,7 +156,7 @@ def test_external_cancellation_planning_path(monkeypatch, tmp_path: Path, patche
         err.__cause__ = cancel
         raise err
 
-    monkeypatch.setattr("agent_implementations.blog_writing_process_v2.run_pipeline", boom)
+    monkeypatch.setattr("agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", boom)
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -175,9 +169,9 @@ def test_external_cancellation_blogging_error_path(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
     """A BloggingError wrapping a Temporal cancellation marks the job cancelled."""
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
-    from shared.errors import DraftError
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
+    from agents.blogging.shared.errors import DraftError
     from temporalio.exceptions import CancelledError as TemporalCancelled
 
     _setup_artifacts_root(monkeypatch, tmp_path)
@@ -188,7 +182,7 @@ def test_external_cancellation_blogging_error_path(
         err.__cause__ = cancel
         raise err
 
-    monkeypatch.setattr("agent_implementations.blog_writing_process_v2.run_pipeline", boom)
+    monkeypatch.setattr("agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", boom)
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -201,8 +195,8 @@ def test_external_cancellation_unexpected_error_path(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
     """A generic error wrapping a Temporal cancellation marks the job cancelled."""
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
     from temporalio.exceptions import CancelledError as TemporalCancelled
 
     _setup_artifacts_root(monkeypatch, tmp_path)
@@ -213,7 +207,7 @@ def test_external_cancellation_unexpected_error_path(
         err.__cause__ = cancel
         raise err
 
-    monkeypatch.setattr("agent_implementations.blog_writing_process_v2.run_pipeline", boom)
+    monkeypatch.setattr("agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", boom)
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -226,9 +220,9 @@ def test_mark_cancelled_swallows_update_exception(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
     """A failing update inside the cancellation path is swallowed (no crash)."""
-    from shared import blog_job_store as bjs
-    from shared import run_pipeline_job as rpj
-    from shared.errors import PlanningError
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import run_pipeline_job as rpj
+    from agents.blogging.shared.errors import PlanningError
     from temporalio.exceptions import CancelledError as TemporalCancelled
 
     _setup_artifacts_root(monkeypatch, tmp_path)
@@ -250,7 +244,7 @@ def test_mark_cancelled_swallows_update_exception(
         err.__cause__ = cancel
         raise err
 
-    monkeypatch.setattr("agent_implementations.blog_writing_process_v2.run_pipeline", boom)
+    monkeypatch.setattr("agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", boom)
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -261,7 +255,7 @@ def test_pipeline_heartbeat_loop_runs_body_directly(
     monkeypatch, tmp_path: Path, patched_client
 ) -> None:
     """Drive the inner ``_pipeline_heartbeat`` body by patching threading.Event.wait."""
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     _setup_artifacts_root(monkeypatch, tmp_path)
 
@@ -280,13 +274,13 @@ def test_pipeline_heartbeat_loop_runs_body_directly(
 
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(
-        "agent_implementations.blog_writing_process_v2.run_pipeline",
+        "agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline",
         lambda *a, **kw: (ppr, draft, status),
     )
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
-    from shared import run_pipeline_job as rpj_run
+    from agents.blogging.shared import run_pipeline_job as rpj_run
 
     rpj_run.run_blog_full_pipeline_job(job_id, {"brief": "hi"})
 

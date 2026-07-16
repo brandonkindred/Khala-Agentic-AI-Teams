@@ -13,13 +13,13 @@ from a CLI prompt, API, or another system.
 import logging
 from pathlib import Path
 
-from blog_copy_editor_agent import BlogCopyEditorAgent
-from blog_publication_agent import (
+from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent
+from agents.blogging.blog_publication_agent import (
     BlogPublicationAgent,
     SubmitDraftInput,
 )
-from blog_writer_agent import BlogWriterAgent
-from shared.style_loader import load_style_file
+from agents.blogging.blog_writer_agent import BlogWriterAgent
+from agents.blogging.shared.style_loader import load_style_file
 
 from llm_service import get_strands_model
 

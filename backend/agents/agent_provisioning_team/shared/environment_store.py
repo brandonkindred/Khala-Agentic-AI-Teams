@@ -52,11 +52,31 @@ _lock = threading.Lock()
 class EnvironmentInfo:
     """Information about a provisioned environment.
 
+    Attributes:
+        agent_id: Identifier of the agent this environment belongs to.
+        container_id: Docker container ID backing the environment.
+        container_name: Docker container name backing the environment.
+        ssh_host: Host used to reach the environment over SSH.
+        ssh_port: Port used to reach the environment over SSH.
+        workspace_path: Path to the agent's workspace inside the container.
+        status: Current lifecycle status (e.g. ``running``, ``ready``).
+        tools_provisioned: Names of tools provisioned into the environment.
+        created_at: ISO-8601 timestamp of when the record was first created.
+        updated_at: ISO-8601 timestamp of the most recent status/field update;
+            defaults to ``created_at`` when not explicitly supplied.
+
     Invariants:
         * ``tools_provisioned`` is always a ``list`` (never ``None``) —
           construction coerces a ``None`` argument to ``[]``.
         * ``created_at`` is always an ISO-8601 timestamp string — construction
           defaults it to the current UTC time when not supplied.
+        * ``updated_at`` is always an ISO-8601 timestamp string — construction
+          defaults it to ``created_at`` when not supplied.
+        * ``agent_id``, ``container_id``, and ``container_name`` are always
+          non-empty ``str`` values, and ``ssh_port`` is always an ``int`` in
+          ``1-65535`` — construction is the sole enforcement point (including
+          via ``from_dict``, which delegates to ``__init__``), so no
+          constructed instance can violate these.
     """
 
     def __init__(
@@ -70,6 +90,7 @@ class EnvironmentInfo:
         status: str = "running",
         tools_provisioned: Optional[List[str]] = None,
         created_at: Optional[str] = None,
+        updated_at: Optional[str] = None,
     ) -> None:
         """Construct an environment record.
 
@@ -83,7 +104,21 @@ class EnvironmentInfo:
               given list.
             * ``created_at`` is the current UTC time in ISO format when not
               supplied, else the given value.
+            * ``updated_at`` is ``created_at`` when not supplied, else the
+              given value.
+            * Raises ``ValueError`` when ``agent_id``, ``container_id``, or
+              ``container_name`` is not a non-empty ``str``, or when
+              ``ssh_port`` is not an ``int`` in ``1-65535``.
         """
+        for field_name, value in (
+            ("agent_id", agent_id),
+            ("container_id", container_id),
+            ("container_name", container_name),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{field_name} must be a non-empty string, got {value!r}")
+        if not isinstance(ssh_port, int) or not (1 <= ssh_port <= 65535):
+            raise ValueError(f"ssh_port must be a valid port number (1-65535), got {ssh_port!r}")
         self.agent_id = agent_id
         self.container_id = container_id
         self.container_name = container_name
@@ -92,7 +127,10 @@ class EnvironmentInfo:
         self.workspace_path = workspace_path
         self.status = status
         self.tools_provisioned = tools_provisioned or []
-        self.created_at = created_at or datetime.now(timezone.utc).isoformat()
+        self.created_at = (
+            created_at if created_at is not None else datetime.now(timezone.utc).isoformat()
+        )
+        self.updated_at = updated_at if updated_at is not None else self.created_at
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize this record to a plain dict for JSON persistence.
@@ -103,7 +141,8 @@ class EnvironmentInfo:
             * Returns a ``Dict[str, Any]`` with exactly the keys
               ``agent_id``, ``container_id``, ``container_name``,
               ``ssh_host``, ``ssh_port``, ``workspace_path``, ``status``,
-              ``tools_provisioned``, ``created_at``, mirroring instance state.
+              ``tools_provisioned``, ``created_at``, ``updated_at``,
+              mirroring instance state.
         """
         return {
             "agent_id": self.agent_id,
@@ -115,6 +154,7 @@ class EnvironmentInfo:
             "status": self.status,
             "tools_provisioned": self.tools_provisioned,
             "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }
 
     @classmethod
@@ -129,8 +169,11 @@ class EnvironmentInfo:
             * Returns a new ``EnvironmentInfo`` populated from ``data``,
               applying the same defaults as ``__init__`` for optional fields
               (``ssh_host``, ``ssh_port``, ``workspace_path``, ``status``,
-              ``tools_provisioned``, ``created_at``) when absent from
-              ``data``.
+              ``tools_provisioned``, ``created_at``, ``updated_at``) when
+              absent from ``data``.
+            * Delegates to ``__init__``, so also raises ``ValueError`` when
+              ``agent_id``, ``container_id``, or ``container_name`` is not a
+              non-empty ``str``, or ``ssh_port`` is not a valid port number.
         """
         return cls(
             agent_id=data["agent_id"],
@@ -142,6 +185,7 @@ class EnvironmentInfo:
             status=data.get("status", "running"),
             tools_provisioned=data.get("tools_provisioned", []),
             created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
         )
 
 
@@ -271,15 +315,20 @@ class EnvironmentStore:
         Postconditions:
             * When the env exists, sets ``status`` and refreshes ``updated_at``,
               rewrites the record to the primary store, and returns ``True``.
-            * Returns ``False`` when the env is missing or its file is corrupt.
+            * Returns ``False`` when the env is missing or its file is corrupt
+              (including a well-formed record with an invalid field value).
         """
         with _lock:
             data, src = self._read_env_data(agent_id)
             if data is None:
                 return False
-            data["status"] = status
-            data["updated_at"] = datetime.now(timezone.utc).isoformat()
-            self._write_env_data(agent_id, data, source=src)
+            try:
+                info = EnvironmentInfo.from_dict(data)
+            except (KeyError, TypeError, ValueError):
+                return False
+            info.status = status
+            info.updated_at = datetime.now(timezone.utc).isoformat()
+            self._write_env_data(agent_id, info.to_dict(), source=src)
             return True
 
     def add_tool(self, agent_id: str, tool_name: str) -> bool:
@@ -307,19 +356,26 @@ class EnvironmentStore:
         Postconditions:
             * When the env file exists, every non-empty unique name in
               ``tool_names`` is present in ``tools_provisioned`` (order of first
-              appearance preserved for new names).
-            * Returns ``False`` when the env is missing or the file is corrupt.
+              appearance preserved for new names) and ``updated_at`` is
+              refreshed.
+            * Returns ``False`` when the env is missing or the file is corrupt
+              (including a well-formed record with an invalid field value).
         """
         with _lock:
             data, src = self._read_env_data(agent_id)
             if data is None:
                 return False
-            tools = list(data.get("tools_provisioned", []))
+            try:
+                info = EnvironmentInfo.from_dict(data)
+            except (KeyError, TypeError, ValueError):
+                return False
+            tools = list(info.tools_provisioned)
             for tool_name in tool_names:
                 if tool_name and tool_name not in tools:
                     tools.append(tool_name)
-            data["tools_provisioned"] = tools
-            self._write_env_data(agent_id, data, source=src)
+            info.tools_provisioned = tools
+            info.updated_at = datetime.now(timezone.utc).isoformat()
+            self._write_env_data(agent_id, info.to_dict(), source=src)
             return True
 
     def remove(self, agent_id: str) -> bool:
@@ -352,11 +408,12 @@ class EnvironmentStore:
               produce a duplicate entry); the primary ``storage_dir`` is scanned
               first, so its record wins. Results are filtered to ``status`` when
               given and sorted by ``created_at`` descending.
-            * Unparseable or incomplete files are skipped; never raises. A record
-              whose ``agent_id`` fails :func:`safe_path_component` (e.g. a
-              path-traversal string like ``"../../etc/passwd"`` planted in a
-              malicious or malformed file) is skipped too, so every returned
-              ``agent_id`` is safe for callers to use in a filename or path.
+            * Unparseable, non-dict (e.g. a JSON array), or incomplete files are
+              skipped; never raises. A record whose ``agent_id`` fails
+              :func:`safe_path_component` (e.g. a path-traversal string like
+              ``"../../etc/passwd"`` planted in a malicious or malformed file)
+              is skipped too, so every returned ``agent_id`` is safe for
+              callers to use in a filename or path.
         """
         environments: List[EnvironmentInfo] = []
         seen: set[str] = set()
@@ -368,6 +425,8 @@ class EnvironmentStore:
                 for env_file in directory.glob("*.json"):
                     try:
                         data = json.loads(env_file.read_text(encoding="utf-8"))
+                        if not isinstance(data, dict):
+                            continue
                         env = EnvironmentInfo.from_dict(data)
                         safe_path_component(env.agent_id, kind="agent_id")
                         if env.agent_id in seen:

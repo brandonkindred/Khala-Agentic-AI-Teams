@@ -8,16 +8,16 @@ the activity/workflow modules keep their heavy imports inside function bodies so
 temporalio sandbox can re-import them safely.
 """
 
-from blogging.temporal.activities import (
+from agents.blogging.temporal.activities import (
     draft_stage_activity,
     finalize_job_activity,
     gates_stage_activity,
     plan_stage_activity,
     run_full_pipeline_activity,
 )
-from blogging.temporal.client import is_temporal_enabled
-from blogging.temporal.constants import TASK_QUEUE
-from blogging.temporal.workflows import BlogFullPipelineWorkflow
+from agents.blogging.temporal.client import is_temporal_enabled
+from agents.blogging.temporal.constants import TASK_QUEUE
+from agents.blogging.temporal.workflows import BlogFullPipelineWorkflow
 
 WORKFLOWS = [BlogFullPipelineWorkflow]
 ACTIVITIES = [
