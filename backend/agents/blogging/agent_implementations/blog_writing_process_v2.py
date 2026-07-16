@@ -104,6 +104,12 @@ COPY_EDIT_ESCALATION_THRESHOLD = 10
 # schedule, so these blocking sleeps never risk a heartbeat timeout.
 HITL_POLL_INTERVAL_S = int(os.getenv("BLOGGING_HITL_POLL_INTERVAL_S", "10"))
 
+# A human-in-the-loop wait can poll the job store for up to ~1h; a single transient
+# job-store read blip should not fail the whole job. Tolerate this many CONSECUTIVE
+# read failures (sleeping a poll interval between each) before giving up and letting the
+# error propagate — a persistent outage still surfaces, a momentary one is ridden out.
+HITL_MAX_CONSECUTIVE_READ_ERRORS = 5
+
 # Default model - use environment variable or this default
 DEFAULT_MODEL = "deepseek-v4-pro:cloud"
 
@@ -162,10 +168,41 @@ def _wait_for_hitl(
           (``get_blog_job`` is None). The caller aborts with its own FAIL result.
         - Returns False once ``is_waiting`` became False without a terminal state
           (a human responded) — the caller reads the response.
+        - A transient job-store read failure (``is_waiting``/``get_blog_job`` raising)
+          is ridden out: it is logged and retried on the next poll, up to
+          ``HITL_MAX_CONSECUTIVE_READ_ERRORS`` CONSECUTIVE failures, after which the
+          error propagates (a persistent outage still fails the job). ``on_poll`` errors
+          are not caught — they propagate immediately.
         - Does not mutate job state; ``on_poll`` may.
     """
-    while is_waiting(job_id):
-        job_data = get_blog_job(job_id)
+    consecutive_read_errors = 0
+    while True:
+        # Wrap only the job-store reads: a transient blip during a long HITL wait should
+        # retry next poll, not fail the whole job. on_poll (below) stays outside so its
+        # errors surface immediately.
+        try:
+            if not is_waiting(job_id):
+                return False
+            job_data = get_blog_job(job_id)
+        except Exception as e:
+            consecutive_read_errors += 1
+            if consecutive_read_errors > HITL_MAX_CONSECUTIVE_READ_ERRORS:
+                logger.warning(
+                    "HITL wait for job %s: %d consecutive job-store read failures; giving up",
+                    job_id,
+                    consecutive_read_errors,
+                )
+                raise
+            logger.warning(
+                "HITL wait for job %s: transient job-store read failure (%d/%d), retrying: %s",
+                job_id,
+                consecutive_read_errors,
+                HITL_MAX_CONSECUTIVE_READ_ERRORS,
+                e,
+            )
+            time.sleep(HITL_POLL_INTERVAL_S)
+            continue
+        consecutive_read_errors = 0
         if job_data is None:
             # The job was deleted from the store mid-wait. ``get_blog_job`` only
             # returns None for a genuinely-absent job (transient/HTTP errors raise),
@@ -177,7 +214,6 @@ def _wait_for_hitl(
         if on_poll is not None and on_poll(job_id):
             continue
         time.sleep(HITL_POLL_INTERVAL_S)
-    return False
 
 
 def _apply_stage_model_override(base: LLMClient, model: Optional[str]) -> LLMClient:

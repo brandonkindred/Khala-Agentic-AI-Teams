@@ -120,10 +120,13 @@ class BlogFactCheckAgent:
                     e,
                 )
                 continue
-            except (LLMRateLimitError, LLMTemporaryError):
+            except (LLMRateLimitError, LLMTemporaryError) as e:
                 # Transient LLM-transport errors (raised only after the client exhausts its
                 # own retries) propagate unwrapped so the Temporal activity funnel can retry
                 # the whole stage, instead of being masked as a terminal FactCheckError.
+                # Log at the agent boundary so the transient failure is visible in thread
+                # mode too (outside Temporal, which would otherwise be the only logger).
+                logger.warning("Fact-check agent hit a transient LLM error, re-raising: %s", e)
                 raise
             except Exception as e:
                 # logger.exception captures the full traceback at ERROR level so an

@@ -208,8 +208,17 @@ def _async_job_worker() -> None:
         job_id = args[0] if args else "unknown"
         try:
             target(*args)
-        except Exception:
+        except Exception as e:
             logger.exception("Async blogging job worker crashed on job %s", job_id)
+            # Safety net: the job funcs mark their own job-store entry failed on error, but
+            # if one crashes BEFORE reaching its own handler (e.g. a TypeError while building
+            # inputs), mark it failed here so it doesn't sit in 'running' until the ~1h stale
+            # monitor reaps it. Best-effort — bookkeeping must never kill the worker loop.
+            if fail_blog_job is not None and job_id != "unknown":
+                try:
+                    fail_blog_job(job_id, error=str(e))
+                except Exception:
+                    logger.warning("Could not mark crashed job %s failed", job_id, exc_info=True)
 
 
 def _ensure_async_workers() -> None:
@@ -239,7 +248,10 @@ def _submit_async_job(target: Callable[..., Any], *args: Any) -> None:
     # Enforce the callable precondition at the boundary rather than letting a
     # non-callable slip through and only surface as a TypeError when a worker
     # dequeues it (where the bad item is logged and dropped, obscuring the caller bug).
-    assert callable(target), f"async job target must be callable, got {type(target).__name__}"
+    # An explicit raise (not assert) so the guard survives `python -O`/PYTHONOPTIMIZE,
+    # which strips asserts — matching shared_concurrency.parallel_map's boundary checks.
+    if not callable(target):
+        raise TypeError(f"async job target must be callable, got {type(target).__name__}")
     _ensure_async_workers()
     _ASYNC_JOB_QUEUE.put((target, args))
 

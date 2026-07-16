@@ -573,9 +573,10 @@ def test_async_job_pool_is_bounded_and_enqueues(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_submit_async_job_rejects_non_callable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The callable precondition is enforced at submit time, not deferred to a worker."""
+    """The callable precondition is enforced at submit time (explicit raise so it survives
+    python -O), not deferred to a worker."""
     monkeypatch.setattr(_api_main, "_ensure_async_workers", lambda: None)
-    with pytest.raises(AssertionError):
+    with pytest.raises(TypeError):
         _api_main._submit_async_job(object(), "job-1")
 
 
@@ -614,6 +615,23 @@ def test_async_job_worker_runs_jobs_and_survives_crash() -> None:
     _api_main._ASYNC_JOB_QUEUE.put(None)  # stop sentinel
     _api_main._async_job_worker()
     assert ran == ["ok"]
+
+
+def test_async_job_worker_marks_crashed_job_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A job that crashes before failing its own store entry is marked failed by the worker
+    as a safety net, so it doesn't sit in 'running' until the stale monitor reaps it."""
+    failed: list = []
+    monkeypatch.setattr(
+        _api_main, "fail_blog_job", lambda job_id, error=None: failed.append((job_id, error))
+    )
+
+    def _boom(job_id):
+        raise RuntimeError("crashed before own handler")
+
+    _api_main._ASYNC_JOB_QUEUE.put((_boom, ("job-x",)))
+    _api_main._ASYNC_JOB_QUEUE.put(None)  # stop sentinel
+    _api_main._async_job_worker()
+    assert failed == [("job-x", "crashed before own handler")]
 
 
 def test_job_already_terminal_guard(monkeypatch: pytest.MonkeyPatch) -> None:

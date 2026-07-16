@@ -168,9 +168,12 @@ class BlogComplianceAgent:
                             "Wrote compliance_report.json (fallback): status=%s", report.status
                         )
                     return report
-            except (LLMRateLimitError, LLMTemporaryError):
+            except (LLMRateLimitError, LLMTemporaryError) as e:
                 # Transient transport error after the client's own retries: re-raise so
                 # Temporal (or the caller) owns the retry instead of a blocking sleep here.
+                # Log at the agent boundary so the transient failure is visible in thread
+                # mode too (outside Temporal, which would otherwise be the only logger).
+                logger.warning("Compliance agent hit a transient LLM error, re-raising: %s", e)
                 raise
             except Exception as e:
                 # logger.exception captures the full traceback at ERROR level so an

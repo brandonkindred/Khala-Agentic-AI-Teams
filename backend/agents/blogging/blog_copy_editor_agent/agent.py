@@ -254,9 +254,12 @@ class BlogCopyEditorAgent:
                         "Copy editor could not parse the model response. Please review the draft manually."
                     )
                     break
-            except (LLMRateLimitError, LLMTemporaryError):
+            except (LLMRateLimitError, LLMTemporaryError) as e:
                 # Transient transport error after the client's own retries: re-raise so
                 # Temporal (or the caller) owns the retry rather than a blocking sleep here.
+                # Log at the agent boundary so the transient failure is visible in thread
+                # mode too (outside Temporal, which would otherwise be the only logger).
+                logger.warning("Copy editor hit a transient LLM error, re-raising: %s", e)
                 raise
             except Exception as e:
                 # Any other unexpected error (a non-transient LLM failure, or a bug like

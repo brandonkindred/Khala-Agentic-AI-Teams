@@ -218,3 +218,44 @@ def test_wait_for_hitl_returns_false_when_wait_clears(monkeypatch) -> None:
         return calls["n"] < 2  # waiting once, then cleared
 
     assert v2._wait_for_hitl("job-y", _is_waiting) is False
+
+
+def test_wait_for_hitl_rides_out_transient_read_error(monkeypatch) -> None:
+    """A transient job-store read failure is retried on the next poll rather than failing
+    the whole job."""
+    import agent_implementations.blog_writing_process_v2 as v2
+
+    monkeypatch.setattr(v2.time, "sleep", lambda *_a, **_kw: None)
+
+    reads = {"n": 0}
+
+    def _get(_job_id: str):
+        reads["n"] += 1
+        if reads["n"] == 1:
+            raise RuntimeError("job-store blip")
+        return {"status": "cancelled"}  # terminal on the retry
+
+    monkeypatch.setattr(v2, "get_blog_job", _get)
+    # is_waiting stays True; the terminal status ends the loop after the retried read.
+    assert v2._wait_for_hitl("job-z", lambda _job_id: True) is True
+    assert reads["n"] == 2
+
+
+def test_wait_for_hitl_reraises_after_persistent_read_errors(monkeypatch) -> None:
+    """Consecutive read failures beyond the bound propagate — a persistent job-store outage
+    still fails the job instead of looping forever."""
+    import agent_implementations.blog_writing_process_v2 as v2
+
+    monkeypatch.setattr(v2.time, "sleep", lambda *_a, **_kw: None)
+
+    attempts = {"n": 0}
+
+    def _boom(_job_id: str):
+        attempts["n"] += 1
+        raise RuntimeError("job-store down")
+
+    monkeypatch.setattr(v2, "get_blog_job", _boom)
+    with pytest.raises(RuntimeError, match="job-store down"):
+        v2._wait_for_hitl("job-z", lambda _job_id: True)
+    # One more attempt than the tolerated bound, then it gives up.
+    assert attempts["n"] == v2.HITL_MAX_CONSECUTIVE_READ_ERRORS + 1
