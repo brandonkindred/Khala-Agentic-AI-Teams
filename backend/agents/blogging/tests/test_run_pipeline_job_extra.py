@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from conftest import make_content_plan, make_planning_phase_result
 
 
 @pytest.fixture
@@ -30,29 +31,15 @@ def _setup_artifacts_root(monkeypatch, tmp_path: Path) -> None:
 
 
 def _make_pipeline_doubles():
-    from shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        PlanningPhaseResult,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from shared.content_plan import ContentPlanSection, TitleCandidate
 
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="Topic",
         narrative_flow="Flow",
         sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
         title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
-    ppr = PlanningPhaseResult(
-        content_plan=plan,
-        planning_iterations_used=1,
-        parse_retry_count=0,
-        planning_wall_ms_total=5.0,
-    )
+    ppr = make_planning_phase_result(plan=plan, planning_wall_ms_total=5.0)
 
     class _Draft:
         draft = "# Draft\n\nBody."
