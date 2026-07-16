@@ -677,6 +677,10 @@ def test_write_microtask_output_or_fail_success_and_rejection(tmp_path: Path):
     assert all_files["kept.py"] == "k"  # untouched key left alone
     assert all_files["shared.py"] == "orig"  # earlier microtask's file restored
     assert not (tmp_path.parent / "evil.py").exists()
+    # Rollback also reverts the worktree, not just the in-memory dict: the
+    # created file is unlinked and the overwritten file's prior bytes are restored.
+    assert not (tmp_path / "gen.py").exists()
+    assert (tmp_path / "shared.py").read_text(encoding="utf-8") == "orig"
 
 
 def _issue(**kw):

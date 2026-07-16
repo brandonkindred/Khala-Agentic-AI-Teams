@@ -178,6 +178,11 @@ def _batch_fix_overwrites_shared(**kwargs: Any) -> SimpleNamespace:
     return SimpleNamespace(files=files)
 
 
+def _coder_overwrites_config(**kwargs: Any) -> Dict[str, str]:
+    """Coder that overwrites a pre-existing repo file (not produced by any microtask)."""
+    return {"config.py": "MODIFIED\n"}
+
+
 def _doc_review(*, documentation=None, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
     if detail_callback is not None:
         detail_callback("doc")
@@ -518,6 +523,10 @@ def test_rollback_removes_files_added_by_batch_fix(tmp_path):
     assert mt.status == MS.REVIEW_FAILED
     assert "src/a.py" not in result.files
     assert "src/new_helper.py" not in result.files
+    # The commit stages the worktree with ``git add -A``, so the created files must
+    # also be gone from disk — not just the in-memory result.
+    assert not (tmp_path / "src" / "a.py").exists()
+    assert not (tmp_path / "src" / "new_helper.py").exists()
 
 
 def test_rollback_restores_earlier_microtask_file_on_overlap(tmp_path):
@@ -546,6 +555,29 @@ def test_rollback_restores_earlier_microtask_file_on_overlap(tmp_path):
     assert mt_b.status == MS.REVIEW_FAILED
     assert result.files["shared.py"] == "owned-by-a\n"  # earlier version restored
     assert "src/b.py" not in result.files  # mt-b's own file rolled back
+    # The worktree is reverted too, so the ``git add -A`` commit sees mt-a's bytes,
+    # not mt-b's clobber, and mt-b's own file is gone from disk.
+    assert (tmp_path / "shared.py").read_text(encoding="utf-8") == "owned-by-a\n"
+    assert not (tmp_path / "src" / "b.py").exists()
+
+
+def test_rollback_restores_preexisting_repo_file(tmp_path):
+    """Rollback restores a pre-existing repo file the failed microtask overwrote.
+
+    A file already in the worktree (never produced by a microtask, so never in
+    ``all_files``) must be restored to its original bytes on rollback — never
+    deleted. This is why the prior-value snapshot reads from disk rather than from
+    ``all_files``: an ``all_files``-based snapshot would see the pre-existing file
+    as "created here" and delete it.
+    """
+    (tmp_path / "config.py").write_text("PRE\n", encoding="utf-8")
+    mt = _microtask()
+    cfg = _make_gate_config(coder=_coder_overwrites_config, code_review_gate=_fail_gate())
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert (tmp_path / "config.py").read_text(encoding="utf-8") == "PRE\n"  # restored, not deleted
+    assert result.files.get("config.py") == "PRE\n"
 
 
 # ---------------------------------------------------------------------------
