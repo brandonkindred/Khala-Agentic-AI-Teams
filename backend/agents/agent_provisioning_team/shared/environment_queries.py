@@ -32,6 +32,7 @@ def get_agent_status_dict(
         "container_name": env.container_name,
         "tools_provisioned": env.tools_provisioned,
         "created_at": env.created_at,
+        "updated_at": env.updated_at,
     }
 
 
@@ -55,6 +56,7 @@ def list_agent_status_dicts(
             "container_name": env.container_name,
             "tools_provisioned": env.tools_provisioned,
             "created_at": env.created_at,
+            "updated_at": env.updated_at,
         }
         for env in store.list_all(status=status)
     ]
