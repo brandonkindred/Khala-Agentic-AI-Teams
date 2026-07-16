@@ -964,6 +964,8 @@ def run_gated_execution_impl(
                 )
 
                 microtask_files = ps_result.files
+                # Accumulate keys introduced by the fix so a later rollback removes them too.
+                microtask_file_keys.update(microtask_files.keys())
                 if not write_microtask_output_or_fail(
                     repo_path,
                     microtask_files,
@@ -1094,6 +1096,8 @@ def run_gated_execution_impl(
                 )
 
                 microtask_files = ps_result.files
+                # Accumulate keys introduced by the fix so a later rollback removes them too.
+                microtask_file_keys.update(microtask_files.keys())
                 if not write_microtask_output_or_fail(
                     repo_path,
                     microtask_files,
@@ -1174,6 +1178,8 @@ def run_gated_execution_impl(
                 )
 
                 microtask_files = ps_result.files
+                # Accumulate keys introduced by the fix so a later rollback removes them too.
+                microtask_file_keys.update(microtask_files.keys())
                 if not write_microtask_output_or_fail(
                     repo_path,
                     microtask_files,

@@ -144,6 +144,15 @@ def _batch_fix_unsafe(**kwargs: Any) -> SimpleNamespace:
     return SimpleNamespace(files={"../evil.py": "x"})
 
 
+def _batch_fix_adds_file(*, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
+    """A fix that keeps the current files and introduces one new (safe) key."""
+    if detail_callback is not None:
+        detail_callback("fixing")
+    files = dict(kwargs["current_files"])
+    files["src/new_helper.py"] = "def helper():\n    return 1\n"
+    return SimpleNamespace(files=files)
+
+
 def _doc_review(*, documentation=None, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
     if detail_callback is not None:
         detail_callback("doc")
@@ -465,6 +474,25 @@ def test_code_review_unsafe_fix_breaks(tmp_path):
     _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
 
     assert mt.status == MS.REVIEW_FAILED
+
+
+def test_rollback_removes_files_added_by_batch_fix(tmp_path):
+    """A file introduced by a batch fix is rolled back with the rest on REVIEW_FAILED.
+
+    Regression test: ``microtask_file_keys`` (the rollback manifest) must grow to
+    include keys added during fix cycles. Here code review keeps failing until the
+    retry cap is exhausted; the single batch fix adds ``src/new_helper.py`` on top
+    of the original ``src/a.py``. When the microtask rolls back, BOTH keys must be
+    gone from the returned ``ExecutionResult.files`` — otherwise the new file leaks
+    out of a failed microtask.
+    """
+    mt = _microtask()
+    cfg = _make_gate_config(code_review_gate=_fail_gate(), batch_fix=_batch_fix_adds_file)
+    result = _run(cfg, [mt], tmp_path, review_config=_config(cr=1, on_failure="skip_continue"))
+
+    assert mt.status == MS.REVIEW_FAILED
+    assert "src/a.py" not in result.files
+    assert "src/new_helper.py" not in result.files
 
 
 # ---------------------------------------------------------------------------
