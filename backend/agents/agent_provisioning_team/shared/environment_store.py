@@ -380,11 +380,12 @@ class EnvironmentStore:
               produce a duplicate entry); the primary ``storage_dir`` is scanned
               first, so its record wins. Results are filtered to ``status`` when
               given and sorted by ``created_at`` descending.
-            * Unparseable or incomplete files are skipped; never raises. A record
-              whose ``agent_id`` fails :func:`safe_path_component` (e.g. a
-              path-traversal string like ``"../../etc/passwd"`` planted in a
-              malicious or malformed file) is skipped too, so every returned
-              ``agent_id`` is safe for callers to use in a filename or path.
+            * Unparseable, non-dict (e.g. a JSON array), or incomplete files are
+              skipped; never raises. A record whose ``agent_id`` fails
+              :func:`safe_path_component` (e.g. a path-traversal string like
+              ``"../../etc/passwd"`` planted in a malicious or malformed file)
+              is skipped too, so every returned ``agent_id`` is safe for
+              callers to use in a filename or path.
         """
         environments: List[EnvironmentInfo] = []
         seen: set[str] = set()
@@ -396,6 +397,8 @@ class EnvironmentStore:
                 for env_file in directory.glob("*.json"):
                     try:
                         data = json.loads(env_file.read_text(encoding="utf-8"))
+                        if not isinstance(data, dict):
+                            continue
                         env = EnvironmentInfo.from_dict(data)
                         safe_path_component(env.agent_id, kind="agent_id")
                         if env.agent_id in seen:
