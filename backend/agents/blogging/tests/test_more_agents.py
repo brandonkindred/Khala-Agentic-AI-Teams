@@ -96,7 +96,7 @@ def test_compliance_run_fallback_on_persistent_parse_failure(monkeypatch, tmp_pa
 
 
 def test_compliance_run_with_exception_fallback(monkeypatch, tmp_path) -> None:
-    """If the agent raises a non-JSON exception, the LLM round retries and eventually falls back."""
+    """A non-transient, non-JSON exception falls back to a fail-closed report (no retry)."""
     from blog_compliance_agent import agent as agent_mod
     from blog_compliance_agent.agent import BlogComplianceAgent
 
@@ -108,10 +108,34 @@ def test_compliance_run_with_exception_fallback(monkeypatch, tmp_path) -> None:
             raise RuntimeError("LLM totally down")
 
     monkeypatch.setattr(agent_mod, "Agent", _Agent)
-    monkeypatch.setattr(agent_mod.time, "sleep", lambda *a, **kw: None)
     a = BlogComplianceAgent(llm_client=object())
     report = a.run("draft", brand_spec_prompt="brand", work_dir=tmp_path)
     assert report.status == "FAIL"
+
+
+@pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
+def test_compliance_run_transient_error_reraises(monkeypatch, tmp_path, kind) -> None:
+    """A transient LLM-transport error re-raises (delegated to Temporal), never fallback."""
+    from blog_compliance_agent import agent as agent_mod
+    from blog_compliance_agent.agent import BlogComplianceAgent
+
+    from llm_service import LLMRateLimitError, LLMTemporaryError
+
+    err_cls = LLMRateLimitError if kind == "rate_limit" else LLMTemporaryError
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise err_cls("transient outage")
+
+    monkeypatch.setattr(agent_mod, "Agent", _Agent)
+    a = BlogComplianceAgent(llm_client=object())
+    with pytest.raises(err_cls):
+        a.run("draft", brand_spec_prompt="brand", work_dir=tmp_path)
+    # Fail-closed report must NOT have been written for a transient error.
+    assert not (tmp_path / "compliance_report.json").exists()
 
 
 def test_compliance_status_normalization(monkeypatch, tmp_path) -> None:
