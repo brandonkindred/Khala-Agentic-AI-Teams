@@ -667,6 +667,7 @@ services:
     container_name: khala-road-trip-service
     depends_on:
       postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base
