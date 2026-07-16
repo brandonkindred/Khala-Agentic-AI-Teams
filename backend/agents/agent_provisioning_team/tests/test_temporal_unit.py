@@ -507,6 +507,14 @@ def test_best_effort_job_store_swallows_exceptions() -> None:
         activities._best_effort_job_store(activities._js.create_job, "j", "a", "m")
 
 
+def test_best_effort_job_store_skips_non_callable(caplog) -> None:
+    from agent_provisioning_team.temporal import activities
+
+    with caplog.at_level("ERROR"):
+        activities._best_effort_job_store(None, "j")  # type: ignore[arg-type]
+    assert any("not callable" in r.message for r in caplog.records)
+
+
 def test_best_effort_job_store_does_not_log_credential_payloads(caplog) -> None:
     from agent_provisioning_team.temporal import activities
 

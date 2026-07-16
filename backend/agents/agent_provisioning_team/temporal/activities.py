@@ -53,8 +53,10 @@ def _load_ctx(manifest_path: str):
     ``ProvisioningOrchestrator()`` is intentionally constructed per call. Its
     ``__init__`` only wires local ``CredentialStore`` / ``EnvironmentStore``
     (mkdir + optional Fernet key file) and builds in-process provisioner
-    objects — no network or DB pool warmup — so a process-global cache is
-    unnecessary for activity use.
+    objects via ``build_default_tool_agents()`` — plain class construction, no
+    network, DB pool, or config-file I/O — so a process-global cache is
+    unnecessary for activity use. Do not introduce a module-level singleton
+    unless profiling shows construction dominating activity latency.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
     from agent_provisioning_team.shared.tool_manifest import load_manifest
@@ -87,10 +89,20 @@ def _safe_job_store_log_args(*args: Any, **kwargs: Any) -> tuple[list[str], list
 
 
 def _best_effort_job_store(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
-    """Best-effort job_store call. Store hiccups must never fail the activity."""
+    """Best-effort job_store call. Store hiccups must never fail the activity.
+
+    Preconditions:
+        * ``fn`` should be a callable (programming errors are logged and skipped).
+    Postconditions:
+        * On success: ``fn(*args, **kwargs)`` has run.
+        * On failure / non-callable ``fn``: logs and returns without raising.
+    """
     # Pass the real callable (not a name string) so renames stay searchable.
     # Incorrect args for a valid callable are still caught — progress writes
     # must not abort the activity and leave Temporal retries opaque.
+    if not callable(fn):
+        logger.error("job_store callable is not callable: %r", fn)
+        return
     try:
         fn(*args, **kwargs)
     except Exception:
@@ -245,6 +257,9 @@ def credentials_activity(
             # subsequent resumes cannot re-read plaintext.
             # ``store_credentials`` overwrites per tool and is safe under Temporal
             # activity retry — do not swallow store failures (retry until durable).
+            # Remove this branch once job-store credential_generation checkpoints
+            # no longer embed plaintext ``credentials`` maps (grep phase_results
+            # for non-empty credentials dumps under credential_generation).
             from agent_provisioning_team.phases.credential_generation import (
                 store_credentials_payload,
             )
