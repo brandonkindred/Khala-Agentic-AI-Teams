@@ -826,7 +826,10 @@ def _format_number(x: float) -> str:
     rounded = round(x)
     if math.isclose(x, rounded, rel_tol=1e-12, abs_tol=0) and -1e16 < x < 1e16:
         return str(rounded)
-    return repr(x)
+    # ``repr(x)`` can emit scientific notation (e.g. ``repr(1e-05)`` ==
+    # ``'1e-05'``), which the adapter regex does not parse. Fixed-point
+    # formatting guarantees decimal output for any finite float.
+    return f"{x:.10f}".rstrip("0").rstrip(".")
 
 
 def _with_source(base: str, source: str) -> str:

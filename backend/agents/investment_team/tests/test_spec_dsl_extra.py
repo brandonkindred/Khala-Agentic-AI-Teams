@@ -120,6 +120,12 @@ def test_format_number_renders_floats_with_repr() -> None:
     assert out in {"0.05", str(0.05)}
 
 
+def test_format_number_avoids_scientific_notation_for_small_floats() -> None:
+    out = _format_number(1e-5)
+    assert out == "0.00001"
+    assert "e" not in out.lower()
+
+
 def test_format_number_rejects_non_finite() -> None:
     with pytest.raises(ValueError):
         _format_number(float("nan"))
