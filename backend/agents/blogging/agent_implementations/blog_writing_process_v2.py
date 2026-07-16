@@ -481,6 +481,11 @@ def _fill_story_placeholders(
     narrative replaces the placeholder.
 
     Returns ``(updated_draft_result, updated_elicited_stories_text)``.
+
+    Raises:
+        CancelledError: a Temporal-native (or otherwise external) cancellation
+            propagates unchanged — the non-fatal story-bank-save guard below
+            never swallows it.
     """
     from agents.blogging.blog_writer_agent.models import WriterInput, WriterOutput
     from agents.blogging.ghost_writer_agent import GhostWriterElicitationAgent
@@ -570,7 +575,11 @@ def _fill_story_placeholders(
                     source_job_id=job_id,
                     llm_client=llm_client,
                 )
+            except CancelledError:
+                raise
             except Exception as e:
+                if _is_external_cancellation(e):
+                    raise
                 logger.warning("Story bank save failed (non-fatal): %s", e)
         else:
             # No narrative and not skipped — treat as no usable material

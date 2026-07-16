@@ -174,6 +174,26 @@ def test_environment_store_list_all(tmp_path: Path) -> None:
     assert ready[0].agent_id == "a1"
 
 
+def test_environment_store_list_all_dedupes_by_agent_id_not_stem(tmp_path: Path) -> None:
+    """A legacy file whose stem differs from its agent_id must not produce a duplicate."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(agent_id="agent_123", container_id="c1", container_name="c1", workspace_path="/w")
+    )
+    # Legacy file named differently from the agent_id it contains.
+    (tmp_path / "backup.json").write_text(
+        json.dumps(
+            StoreEnvInfo(
+                agent_id="agent_123", container_id="c1", container_name="c1", workspace_path="/w"
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+
+    out = store.list_all()
+    assert len([e for e in out if e.agent_id == "agent_123"]) == 1
+
+
 def test_environment_store_list_all_skips_corrupt(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
     store.register(

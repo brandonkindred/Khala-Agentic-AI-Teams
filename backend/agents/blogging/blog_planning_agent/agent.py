@@ -122,6 +122,24 @@ class _BlogPlanningAgentRunner:
         self._default_length_policy = length_policy
 
     def run(self, body: dict) -> dict:
+        """Run the wrapped :class:`BlogPlanningAgent` against a raw JSON request body.
+
+        Preconditions:
+            ``body`` must be a ``dict``. It may optionally contain a
+            ``length_policy`` dict block (resolved via
+            :func:`resolve_length_policy_from_request_dict`) and a
+            ``planning_input`` block validated as :class:`PlanningInput`; if
+            ``planning_input`` is absent, ``body`` itself is used as the
+            planning input block. If ``length_policy`` is absent or empty,
+            the runner's default length policy (set at construction) is used.
+
+        Postconditions:
+            Returns a JSON-serializable ``dict`` — the ``mode="json"`` dump
+            of the resulting :class:`PlanningPhaseResult`.
+
+        Raises:
+            TypeError: If ``body`` is not a ``dict``.
+        """
         from agents.blogging.shared.content_profile import resolve_length_policy_from_request_dict
 
         if not isinstance(body, dict):
@@ -147,6 +165,14 @@ def make_blog_planning_agent() -> _BlogPlanningAgentRunner:
     production, ``DummyLLMClient`` when ``LLM_PROVIDER=dummy``) into a
     :class:`BlogPlanningAgent` and returns a runner that accepts a JSON body
     from :class:`shared_agent_invoke.shim`.
+
+    Preconditions:
+        None (zero-arg).
+
+    Postconditions:
+        Returns a :class:`_BlogPlanningAgentRunner` wired to an
+        env-resolved LLM client and a default ``standard_article`` length
+        policy.
     """
     from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
 

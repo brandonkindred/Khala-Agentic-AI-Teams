@@ -4,6 +4,14 @@ The three API test modules (``test_api_unit``, ``test_api_temporal_and_501s``,
 ``test_api_extra``) import ``api_main``/``app`` from here so the module is loaded
 once and shared (via Python's own import cache); the ``patched_client``/``client``
 fixtures live in ``conftest.py`` and reuse the same objects.
+
+Imported via its fully-qualified ``agents.blogging.api.main`` path rather than
+the bare ``api.main`` a synthetic-module loader used to work around: every team
+under ``backend/agents/`` ships its own top-level ``api`` package, so a bare
+``api.main`` import risks binding whichever team's package a test session
+touches first for the rest of the run. The fully-qualified path is cached in
+``sys.modules`` under its own unique key per team, so that collision cannot
+happen here regardless of collection order.
 """
 
 from __future__ import annotations
