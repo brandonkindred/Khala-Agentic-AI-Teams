@@ -180,7 +180,7 @@ def test_blog_copy_editor_agent_feedback_file_roundtrip(tmp_path: Path) -> None:
 
 def test_blog_copy_editor_agent_no_path_no_file(monkeypatch) -> None:
     """When feedback_output_path is not passed, the agent never attempts to write a feedback file."""
-    from blog_copy_editor_agent import agent as ce_mod
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
 
     llm = DummyLLMClient()
     agent = BlogCopyEditorAgent(

@@ -74,6 +74,7 @@ def test_fill_story_placeholders_user_skips_all(monkeypatch, patched_client, tmp
 
     # Stub GhostWriterElicitationAgent.conduct_interview to return skipped
     import agents.blogging.ghost_writer_agent as gw
+
     class _StubGhost:
         def __init__(self, *a, **kw):
             pass
@@ -117,6 +118,7 @@ def test_fill_story_placeholders_user_provides_narrative(
     bjs.create_blog_job(job_id, "brief")
 
     import agents.blogging.ghost_writer_agent as gw
+
     class _StubGhost:
         def __init__(self, *a, **kw):
             pass
@@ -163,6 +165,7 @@ def test_fill_story_placeholders_redraft_fails_keeps_original(
     bjs.create_blog_job(job_id, "brief")
 
     import agents.blogging.ghost_writer_agent as gw
+
     class _StubGhost:
         def __init__(self, *a, **kw):
             pass
@@ -201,16 +204,16 @@ def test_fill_story_placeholders_story_bank_save_cancellation_propagates(
 ) -> None:
     """A Temporal cancellation raised from the story-bank save must propagate,
     not be swallowed by the non-fatal save guard."""
-    import agent_implementations.blog_writing_process_v2 as v2
-    from ghost_writer_agent.models import StoryElicitationResult
-    from shared import blog_job_store as bjs
-    from shared import story_bank
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.ghost_writer_agent.models import StoryElicitationResult
+    from agents.blogging.shared import blog_job_store as bjs
+    from agents.blogging.shared import story_bank
     from temporalio.exceptions import CancelledError
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
 
-    import ghost_writer_agent as gw
+    import agents.blogging.ghost_writer_agent as gw
 
     class _StubGhost:
         def __init__(self, *a, **kw):
@@ -233,7 +236,7 @@ def test_fill_story_placeholders_story_bank_save_cancellation_propagates(
 
     class _StubAgent:
         def run(self, *a, **kw):
-            from blog_writer_agent.models import WriterOutput
+            from agents.blogging.blog_writer_agent.models import WriterOutput
 
             return WriterOutput(draft="# Should not get here")
 
@@ -266,6 +269,7 @@ def test_fill_story_placeholders_cancelled_break(monkeypatch, patched_client, tm
 
     # Even though the ghost writer would be invoked, the cancel check breaks first
     import agents.blogging.ghost_writer_agent as gw
+
     class _StubGhost:
         def __init__(self, *a, **kw):
             pass
