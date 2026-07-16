@@ -36,14 +36,10 @@ class _PromptCapturingLLM(DummyLLMClient):
 
     def __init__(self) -> None:
         super().__init__()
-        self.last_prompt: str = ""
         self.all_prompts: list[str] = []
-        self.last_complete_json_prompt: str = ""
 
     def complete_json(self, prompt: str, **kwargs: object) -> dict:
-        self.last_prompt = prompt
         self.all_prompts.append(prompt)
-        self.last_complete_json_prompt = prompt
         lowered = prompt.lower() if isinstance(prompt, str) else ""
         # Self-review prompt: return empty issues list
         if "review this draft" in lowered:
