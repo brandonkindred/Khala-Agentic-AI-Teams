@@ -239,10 +239,13 @@ def run_team_llm_review(
     if review_context is not None:
         if review_context.architecture is not None:
             # Lazy import: code_review_agent submodules are imported on demand
-            # rather than at module scope elsewhere in the review call chain
-            # (e.g. _code_review_step's CodeReviewInput import), so this module
-            # follows the same convention rather than adding a new eager edge.
-            from code_review_agent.architecture_context import render_architecture_context
+            # rather than at module scope, matching this module's other lazy
+            # import of code_review_agent.coordinator in run_llm_review above
+            # (fully qualified, since code_review_agent is a subpackage of
+            # software_engineering_team, not a top-level package).
+            from software_engineering_team.code_review_agent.architecture_context import (
+                render_architecture_context,
+            )
 
             architecture_context = render_architecture_context(review_context.architecture)
         spec_content = review_context.spec_content or ""

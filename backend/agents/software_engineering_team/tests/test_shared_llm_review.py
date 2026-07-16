@@ -39,6 +39,7 @@ class _Issue:
 
 
 _PROMPT = "reqs={requirements} ac={acceptance_criteria}\n{code}"
+_PROMPT_WITH_CONTEXT = "{architecture_context}|{spec_content}|{requirements}|{code}"
 
 
 def _parse_one_issue(_raw: str):
@@ -149,12 +150,10 @@ def test_run_llm_review_forwards_architecture_context_and_spec_content():
         prompts.append(prompt)
         return "raw"
 
-    prompt_with_context = "{architecture_context}|{spec_content}|{requirements}|{code}"
-
     run_llm_review(
         task=_task(),
         files={"x.py": "code"},
-        prompt_template=prompt_with_context,
+        prompt_template=_PROMPT_WITH_CONTEXT,
         parse_template=lambda _raw: {"issues": []},
         issue_factory=_Issue,
         invoke_model=invoke,
@@ -170,7 +169,7 @@ def test_run_llm_review_forwards_architecture_context_and_spec_content():
     run_llm_review(
         task=_task(),
         files={"x.py": "code"},
-        prompt_template=prompt_with_context,
+        prompt_template=_PROMPT_WITH_CONTEXT,
         parse_template=lambda _raw: {"issues": []},
         issue_factory=_Issue,
         invoke_model=invoke,
@@ -288,8 +287,6 @@ def test_run_llm_review_grounding_kill_switch_keeps_ungrounded():
 # ---------------------------------------------------------------------------
 # run_team_llm_review: the review_context bounding step both V2 teams share
 # ---------------------------------------------------------------------------
-
-_PROMPT_WITH_CONTEXT = "{architecture_context}|{spec_content}|{requirements}|{code}"
 
 
 def test_run_team_llm_review_forwards_architecture_and_spec_content():
