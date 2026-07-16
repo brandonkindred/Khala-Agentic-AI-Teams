@@ -46,7 +46,7 @@ The teams share infrastructure — the gateway with its optional security pre-sc
 
 ### What exactly is Khala?
 
-A personal project to figure out how to build agentic AI teams that work together. This started as a vibe-coded experiment and that was a disaster, so now I'm turning it into a real engineered system, and from there into the thing I'm really after, which is **an agentic AI that can look at a problem, decide what kind of team would solve it, spin up ephemeral specialist agents to do the work, learn from what landed and what didn't, and keep the agents that earn their keep.** The 20 teams here today are the substrate for that learning, not the destination. Follow along.
+A personal project to figure out how to build agentic AI teams that work together. This started as a vibe-coded experiment and that was a disaster, so now I'm turning it into a real engineered system, and from there into the thing I'm really after, which is **an agentic AI that can look at a problem, decide what kind of team would solve it, spin up ephemeral specialist agents to do the work, learn from what landed and what didn't, and keep the agents that earn their keep.** The 24 teams here today are the substrate for that learning, not the destination. Follow along.
 
 If you want to build, tinker, and help push the frontier of multi-agent systems then welcome aboard.
 
