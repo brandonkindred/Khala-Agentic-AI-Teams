@@ -559,11 +559,8 @@ def execute_coding_team_activity(
     from software_engineering_team.temporal.phase_models import PlanResult as PlanResultModel
 
     try:
-        from software_engineering_team.orchestrator import (
-            _build_coding_team_plan_input,
-            _read_repo_code,
-            _truncate_for_context,
-        )
+        from shared_repo_context.repo_utils import read_repo_code, truncate_for_context
+        from software_engineering_team.orchestrator import _build_coding_team_plan_input
 
         plan_data = PlanResultModel.model_validate(plan_result)
         path = Path(repo_path).resolve()
@@ -573,7 +570,7 @@ def execute_coding_team_activity(
 
         adapter_result = PlanningAdapterResult.from_dict(plan_data.adapter_result_dict)
 
-        existing_code = _truncate_for_context(_read_repo_code(path), 8000)
+        existing_code = truncate_for_context(read_repo_code(path), 8000)
         if existing_code == "# No code files found":
             existing_code = None
 
