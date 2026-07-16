@@ -60,6 +60,7 @@ class EnvironmentInfo:
         status: str = "running",
         tools_provisioned: Optional[List[str]] = None,
         created_at: Optional[str] = None,
+        updated_at: Optional[str] = None,
     ) -> None:
         self.agent_id = agent_id
         self.container_id = container_id
@@ -70,6 +71,7 @@ class EnvironmentInfo:
         self.status = status
         self.tools_provisioned = tools_provisioned or []
         self.created_at = created_at or datetime.now(timezone.utc).isoformat()
+        self.updated_at = updated_at or self.created_at
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -82,6 +84,7 @@ class EnvironmentInfo:
             "status": self.status,
             "tools_provisioned": self.tools_provisioned,
             "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }
 
     @classmethod
@@ -96,6 +99,7 @@ class EnvironmentInfo:
             status=data.get("status", "running"),
             tools_provisioned=data.get("tools_provisioned", []),
             created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
         )
 
 

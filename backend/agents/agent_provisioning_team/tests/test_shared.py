@@ -32,11 +32,13 @@ def test_environment_info_from_dict_roundtrip() -> None:
         container_name="agent-a1",
         workspace_path="/w",
         tools_provisioned=["pg", "redis"],
+        updated_at="2024-01-02T00:00:00+00:00",
     )
     d = info.to_dict()
     restored = StoreEnvInfo.from_dict(d)
     assert restored.agent_id == "a1"
     assert restored.tools_provisioned == ["pg", "redis"]
+    assert restored.updated_at == "2024-01-02T00:00:00+00:00"
 
 
 def test_environment_store_defaults_under_agent_cache(tmp_path: Path, monkeypatch) -> None:
@@ -89,7 +91,9 @@ def test_environment_store_update_status(tmp_path: Path) -> None:
         )
     )
     assert store.update_status("a1", "ready") is True
-    assert store.get("a1").status == "ready"
+    updated = store.get("a1")
+    assert updated.status == "ready"
+    assert updated.updated_at is not None
 
 
 def test_environment_store_update_status_handles_corrupt(tmp_path: Path) -> None:
