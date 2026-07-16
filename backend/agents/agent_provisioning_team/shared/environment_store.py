@@ -280,8 +280,10 @@ class EnvironmentStore:
             * ``status`` is ``None`` (no filter) or a status string to match.
         Postconditions:
             * Returns the ``EnvironmentInfo`` records found across the primary and
-              legacy directories, deduplicated by ``agent_id`` (the primary store
-              wins), filtered to ``status`` when given, and sorted by
+              legacy directories, deduplicated by filename stem (which is the
+              ``agent_id`` for well-formed records named ``{agent_id}.json``); the
+              primary ``storage_dir`` is scanned first, so its record wins.
+              Results are filtered to ``status`` when given and sorted by
               ``created_at`` descending.
             * Unparseable or incomplete files are skipped; never raises.
         """
