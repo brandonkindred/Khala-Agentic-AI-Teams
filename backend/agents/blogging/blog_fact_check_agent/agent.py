@@ -15,7 +15,12 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from strands import Agent
 
-from llm_service import LLMJsonParseError, extract_json_from_response
+from llm_service import (
+    LLMJsonParseError,
+    LLMRateLimitError,
+    LLMTemporaryError,
+    extract_json_from_response,
+)
 
 from .models import FactCheckReport
 from .prompts import FACT_CHECK_PROMPT
@@ -115,8 +120,19 @@ class BlogFactCheckAgent:
                     e,
                 )
                 continue
+            except (LLMRateLimitError, LLMTemporaryError) as e:
+                # Transient LLM-transport errors (raised only after the client exhausts its
+                # own retries) propagate unwrapped so the Temporal activity funnel can retry
+                # the whole stage, instead of being masked as a terminal FactCheckError.
+                # Log at the agent boundary so the transient failure is visible in thread
+                # mode too (outside Temporal, which would otherwise be the only logger).
+                logger.warning("Fact-check agent hit a transient LLM error, re-raising: %s", e)
+                raise
             except Exception as e:
-                logger.error("Fact-check failed: %s", e)
+                # logger.exception captures the full traceback at ERROR level so an
+                # unexpected/programming error is visible before being wrapped in the
+                # domain FactCheckError (which the gate funnel treats as a BloggingError).
+                logger.exception("Fact-check failed: %s", e)
                 raise FactCheckError(f"Fact-check failed: {e}", cause=e) from e
 
         if data is None:
