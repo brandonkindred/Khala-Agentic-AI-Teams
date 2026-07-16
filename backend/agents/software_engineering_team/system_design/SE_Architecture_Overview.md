@@ -2,7 +2,7 @@
 
 ## 1. System Context
 
-The Software Engineering Team is one of 20 agent teams in the Khala platform. It receives project specifications from users, orchestrates multi-phase software development, and produces production-ready code repositories.
+The Software Engineering Team is one of 24 agent teams in the Khala platform. It receives project specifications from users, orchestrates multi-phase software development, and produces production-ready code repositories.
 
 ```mermaid
 flowchart TD

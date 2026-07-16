@@ -260,16 +260,29 @@ class TaskGraphService:
 
     def assign_task_to_agent(self, task_id: str, agent_id: str) -> bool:
         """
-        Assign task T to agent A. Allowed only if:
-        - A has no current task or A's current task has status merged
-        - T's dependencies are all merged
-        - T exists and is in TO_DO or not yet assigned
-        Returns True if assigned, False otherwise.
+        Assign task T to agent A.
+
+        Preconditions:
+            - `task_id` refers to a task tracked by this graph (no-op returning
+              False if it does not).
+            - T's status is TO_DO. A task already IN_PROGRESS/IN_REVIEW/MERGED/
+              FAILED is not re-assignable; assigning it would let two agents work
+              the same task and orphan the previous agent's mapping.
+            - A has no current task, or A's current task has status MERGED.
+            - Every dependency of T has status MERGED.
+        Postconditions:
+            - On success (returns True): T.status is IN_PROGRESS,
+              T.assigned_agent_id is `agent_id`, and `_agent_to_task[agent_id]`
+              maps to `task_id`.
+            - On failure (returns False): no task or mapping state is mutated.
         """
         with self._lock:
             task = self._tasks.get(task_id)
             if not task:
                 logger.warning("Task %s not found", task_id)
+                return False
+            if task.status != TaskStatus.TO_DO:
+                logger.warning("Task %s not assignable in status %s", task_id, task.status.value)
                 return False
             current = self._agent_to_task.get(agent_id)
             if current:
