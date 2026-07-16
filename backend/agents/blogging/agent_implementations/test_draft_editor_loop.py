@@ -26,7 +26,7 @@ from shared.style_loader import load_style_file  # noqa: E402
 from llm_service import DummyLLMClient  # noqa: E402
 
 # Keep in sync with DRAFT_EDITOR_ITERATIONS in blog_writing_process_v2.py
-DRAFT_EDITOR_ITERATIONS = 500
+DRAFT_EDITOR_ITERATIONS = 30
 
 _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
 STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
