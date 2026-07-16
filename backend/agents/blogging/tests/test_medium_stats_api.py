@@ -4,33 +4,11 @@ Backed by an in-memory FakeJobServiceClient — no Postgres or live job service
 required.  The async tests still poll a real background thread for completion.
 """
 
-import importlib.util
-import sys
 import time
-from pathlib import Path
 
 import pytest
+from _api_test_utils import api_main as _api_main
 from fastapi.testclient import TestClient
-
-_blogging_root = Path(__file__).resolve().parent.parent
-if str(_blogging_root) not in sys.path:
-    sys.path.insert(0, str(_blogging_root))
-
-_spec = importlib.util.spec_from_file_location(
-    "blogging_api_main_medium",
-    _blogging_root / "api" / "main.py",
-)
-_api_main = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_api_main)
-app = _api_main.app
-
-
-@pytest.fixture(autouse=True)
-def _patched_blog_client(monkeypatch, fake_job_client):
-    from shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    return fake_job_client
 
 
 @pytest.fixture(autouse=True)
@@ -42,11 +20,6 @@ def _medium_stats_tmp_dir(monkeypatch, tmp_path):
         "medium_stats_run_dir",
         lambda jid, **kw: bjs.medium_stats_run_dir(jid, cache_dir=tmp_path),
     )
-
-
-@pytest.fixture
-def client() -> TestClient:
-    return TestClient(app)
 
 
 def test_medium_stats_sync_returns_503_without_integration(client: TestClient) -> None:
