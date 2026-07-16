@@ -165,7 +165,20 @@ class ProvisionerStateStore:
 
     # ---- Public API ----
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        """Return the flat details dict for ``agent_id`` (backwards-compatible)."""
+        """Return the flat details dict for ``agent_id`` (backwards-compatible).
+
+        Read-only and intentionally lock-free: ``_save`` commits with an atomic
+        ``os.replace``, so every ``_load`` observes a whole committed snapshot
+        (never a torn write) without taking ``_PROCESS_LOCK`` — the lock only
+        serialises the read-modify-write mutators. A concurrent write may make
+        this return the pre- or post-write snapshot, which is acceptable for the
+        idempotency lookups this store backs.
+
+        An empty stored ``details`` dict is treated as absent and returned as
+        ``None`` (indistinguishable from a missing key). This "empty is absent"
+        rule is intentional and shared with ``list_agents`` and
+        ``get_or_create``.
+        """
         row = self._load().get(agent_id)
         if row is None:
             return None
@@ -186,7 +199,11 @@ class ProvisionerStateStore:
             return False
 
     def list_agents(self) -> Dict[str, Dict[str, Any]]:
-        """Return every agent's flat details dict (legacy shape preserved)."""
+        """Return every agent's flat details dict (legacy shape preserved).
+
+        Lock-free read (see :meth:`get`); agents whose stored ``details`` is
+        empty are omitted, matching ``get``'s "empty is absent" rule.
+        """
         return {aid: dict(row["details"]) for aid, row in self._load().items() if row["details"]}
 
     def get_or_create(
@@ -222,7 +239,10 @@ class ProvisionerStateStore:
             data[agent_id] = row
 
     def list_compensations(self, agent_id: str) -> List[CompensationRecord]:
-        """Return the compensation records for ``agent_id`` in registration order."""
+        """Return the compensation records for ``agent_id`` in registration order.
+
+        Lock-free read (see :meth:`get`).
+        """
         row = self._load().get(agent_id)
         if row is None:
             return []

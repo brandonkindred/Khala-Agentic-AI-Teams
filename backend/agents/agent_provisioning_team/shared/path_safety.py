@@ -24,29 +24,43 @@ from pathlib import Path
 # longer name such as "a..b" is not a traversal and is allowed.
 _SAFE_COMPONENT = re.compile(r"[A-Za-z0-9._-]+")
 
+# Upper bound on a single filename component. 255 is the per-name limit on the
+# common Linux filesystems (ext4, XFS); real identifiers are far shorter
+# (provisioning agent_ids are <=120 chars). This cap is a backstop against
+# pathologically long inputs — filesystem-limit errors, wasted memory, or
+# resource-exhaustion DoS — not a traversal guard (the allowlist handles that).
+_MAX_COMPONENT_LEN = 255
+
 
 def safe_path_component(value: str, *, kind: str = "identifier") -> str:
     """Validate that ``value`` is safe to embed in a filename and return it.
 
-    A value is safe when it matches ``[A-Za-z0-9._-]+`` and is not the bare
-    directory token ``.`` or ``..``. That set covers every real identifier —
-    slugs, UUIDs, and dotted names such as ``blog.writer`` — while excluding
-    anything that could change directories: path separators (``/``, ``\\``),
-    NUL bytes, and whitespace are already outside the character class. A double
-    dot *inside* a longer name (e.g. ``a..b``) is harmless, because the class
-    forbids separators, so ``..`` can only traverse when it is the whole
-    component — and such names are therefore accepted.
+    A value is safe when it is a ``str`` of at most ``_MAX_COMPONENT_LEN``
+    characters that matches ``[A-Za-z0-9._-]+`` and is not the bare directory
+    token ``.`` or ``..``. That set covers every real identifier — slugs, UUIDs,
+    and dotted names such as ``blog.writer`` — while excluding anything that
+    could change directories: path separators (``/``, ``\\``), NUL bytes, and
+    whitespace are already outside the character class. A double dot *inside* a
+    longer name (e.g. ``a..b``) is harmless, because the class forbids
+    separators, so ``..`` can only traverse when it is the whole component — and
+    such names are therefore accepted.
 
-    Returns ``value`` byte-for-byte when it is safe, so callers that key files
-    by the identifier round-trip unchanged. Raises ``ValueError`` (never
-    silently coerces) otherwise. ``kind`` only customises the error message
-    (e.g. ``"agent_id"``).
+    Preconditions:
+        * ``value`` is a ``str``. ``kind`` only customises the error message
+          (e.g. ``"agent_id"``).
+    Postconditions:
+        * Returns ``value`` byte-for-byte when it is safe, so callers that key
+          files by the identifier round-trip unchanged.
+        * Raises ``ValueError`` (never silently coerces) when ``value`` is not a
+          string, exceeds ``_MAX_COMPONENT_LEN``, or is not a safe component.
     """
-    if (
-        not isinstance(value, str)
-        or _SAFE_COMPONENT.fullmatch(value) is None
-        or value in (".", "..")
-    ):
+    if not isinstance(value, str):
+        raise ValueError(f"unsafe {kind} for a filesystem path: {value!r}")
+    # Length first (cheap) so a pathological megabyte input is rejected before
+    # the regex scans it.
+    if len(value) > _MAX_COMPONENT_LEN:
+        raise ValueError(f"{kind} exceeds maximum length of {_MAX_COMPONENT_LEN}: {len(value)}")
+    if _SAFE_COMPONENT.fullmatch(value) is None or value in (".", ".."):
         raise ValueError(f"unsafe {kind} for a filesystem path: {value!r}")
     return value
 

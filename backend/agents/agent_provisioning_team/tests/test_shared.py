@@ -1017,3 +1017,7 @@ def test_provisioner_state_save_handles_io_error(tmp_path: Path, monkeypatch) ->
     with patch("os.replace", side_effect=OSError("io")):
         with pytest.raises(OSError):
             store.put("a1", {"x": 1})
+
+    # The mkstemp tempfile is unlinked on failure and the target file was never
+    # created (os.replace raised), so the store dir is left clean.
+    assert list(tmp_path.iterdir()) == []
