@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
+from .path_safety import safe_path_component
+
 
 def default_credentials_dir() -> Path:
     """Resolve the durable on-disk credential directory.
@@ -76,7 +78,9 @@ class CredentialStore:
         storage_dir: Optional[Path] = None,
         encryption_key: Optional[str] = None,
     ) -> None:
-        self.storage_dir = Path(storage_dir) if storage_dir is not None else default_credentials_dir()
+        self.storage_dir = (
+            Path(storage_dir) if storage_dir is not None else default_credentials_dir()
+        )
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
         keys = self._collect_keys(encryption_key)
@@ -308,8 +312,18 @@ class CredentialStore:
         return f"agent_{safe_agent_id}_{safe_tool}"[:63]
 
     def _agent_file(self, agent_id: str) -> Path:
-        """Get the credentials file path for an agent in the primary store."""
-        return self.storage_dir / f"{agent_id}.enc"
+        """Get the credentials file path for an agent in the primary store.
+
+        Preconditions:
+            * ``agent_id`` is a safe filename component (``[A-Za-z0-9._-]+`` with
+              no ``..``); otherwise ``ValueError`` is raised. Every reader/writer
+              (``_agent_file_candidates``, ``store_credentials``) evaluates this
+              first, so the guard prevents a malicious ``agent_id`` from reading
+              or overwriting encrypted secrets outside ``storage_dir``.
+        Postconditions:
+            * Returns a path strictly inside ``storage_dir``.
+        """
+        return self.storage_dir / f"{safe_path_component(agent_id, kind='agent_id')}.enc"
 
     def _agent_file_candidates(self, agent_id: str) -> List[Path]:
         """Primary path first, then legacy locations from before the AGENT_CACHE move."""
@@ -317,7 +331,9 @@ class CredentialStore:
             legacy / f"{agent_id}.enc" for legacy in legacy_credentials_dirs()
         ]
 
-    def _read_agent_credentials(self, agent_id: str) -> tuple[Optional[Dict[str, Any]], Optional[Path]]:
+    def _read_agent_credentials(
+        self, agent_id: str
+    ) -> tuple[Optional[Dict[str, Any]], Optional[Path]]:
         """Load decrypted credentials from the primary or a legacy path."""
         for path in self._agent_file_candidates(agent_id):
             if not path.exists():

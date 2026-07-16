@@ -54,6 +54,7 @@ from ..shared.job_store import (
 from ..shared.job_store import (
     reset_job as store_reset_job,
 )
+from ..shared.path_safety import safe_path_component
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,25 @@ init_otel(service_name="agent-provisioning-team", team_key="agent_provisioning")
 
 
 _TEMPORAL_REQUIRED_MESSAGE = "Temporal is required for agent provisioning (set TEMPORAL_ADDRESS)"
+
+
+def _require_safe_agent_id(agent_id: str) -> str:
+    """Validate an ``agent_id`` path parameter before it reaches the stores.
+
+    Path parameters bypass the request-model ``field_validator``, so the
+    ``{agent_id}`` routes call this to mirror that guard.
+
+    Preconditions:
+        * ``agent_id`` is a safe filename component (``[A-Za-z0-9._-]+``, no ``..``).
+    Postconditions:
+        * Returns ``agent_id`` unchanged, or raises ``HTTPException(422)`` so a
+          traversal attempt surfaces as a clean client error rather than a 500.
+    """
+    try:
+        return safe_path_component(agent_id, kind="agent_id")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
 
 # Resume is for interrupted/failed jobs only. ``running``/``pending`` share a stable
 # Temporal workflow id (``agent-provisioning-{job_id}``); a second start fails with
@@ -77,9 +97,7 @@ PROVISION_RESUMABLE_STATUSES: frozenset[str] = frozenset(
 # When start acceptance times out we leave pending/running; those are recoverable
 # only if Temporal has no open execution for the stable workflow id. Replacing an
 # open live run would terminate it without compensation and can leak resources.
-_STRANDED_START_STATUSES: frozenset[str] = frozenset(
-    {JOB_STATUS_PENDING, JOB_STATUS_RUNNING}
-)
+_STRANDED_START_STATUSES: frozenset[str] = frozenset({JOB_STATUS_PENDING, JOB_STATUS_RUNNING})
 
 
 def _is_indeterminate_workflow_start(exc: BaseException) -> bool:
@@ -250,9 +268,7 @@ def _validate_job_for_reprovision(
     )
 
     if provisioning_workflow_is_open(job_id):
-        raise ValueError(
-            f"Job {job_id} has an active Temporal workflow; cannot be {action_label}"
-        )
+        raise ValueError(f"Job {job_id} has an active Temporal workflow; cannot be {action_label}")
     return data
 
 
@@ -639,6 +655,7 @@ def deprovision_agent(
           client-wait timeouts (``TimeoutError``) are returned as
           ``DeprovisionResponse(success=False, ...)`` (not 500).
     """
+    _require_safe_agent_id(agent_id)
     runner = _require_deprovision_runner()
     try:
         return DeprovisionResponse.model_validate(runner(agent_id, force))
@@ -705,6 +722,7 @@ class AgentStatusResponse(BaseModel):
 )
 def get_agent_status(agent_id: str) -> AgentStatusResponse:
     """Get status of a provisioned agent."""
+    _require_safe_agent_id(agent_id)
     status = _get_agent_status(agent_id)
 
     if status is None:

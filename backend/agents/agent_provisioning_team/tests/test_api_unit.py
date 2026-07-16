@@ -12,13 +12,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from agent_provisioning_team.api import main as api_main
 from agent_provisioning_team.api.main import app
 from agent_provisioning_team.models import (
+    DeprovisionRequest,
     DeprovisionResponse,
     EnvironmentInfo,
     ProvisioningResult,
+    ProvisionRequest,
 )
 
 client = TestClient(app)
@@ -62,6 +65,43 @@ def test_require_deprovision_runner_returns_503_when_temporal_check_raises() -> 
         with pytest.raises(HTTPException) as exc_info:
             api_main._require_deprovision_runner()
     assert exc_info.value.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# agent_id path-traversal guard (HTTP edge)
+# ---------------------------------------------------------------------------
+
+
+_TRAVERSAL_IDS = ["../../etc/passwd", "a/b", "..\\..\\x", "/etc/passwd", "..", "."]
+
+
+@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
+def test_get_agent_status_rejects_traversal_agent_id(bad_id: str) -> None:
+    """The {agent_id} path param is validated to a 422 before hitting the store."""
+    with pytest.raises(HTTPException) as exc_info:
+        api_main.get_agent_status(bad_id)
+    assert exc_info.value.status_code == 422
+
+
+@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
+def test_deprovision_agent_rejects_traversal_agent_id(bad_id: str) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        api_main.deprovision_agent(bad_id)
+    assert exc_info.value.status_code == 422
+
+
+@pytest.mark.parametrize("bad_id", _TRAVERSAL_IDS)
+def test_provision_request_rejects_traversal_agent_id(bad_id: str) -> None:
+    """The request-model validator turns a traversal id into a 422 (ValidationError)."""
+    with pytest.raises(ValidationError):
+        ProvisionRequest(agent_id=bad_id)
+    with pytest.raises(ValidationError):
+        DeprovisionRequest(agent_id=bad_id)
+
+
+def test_provision_request_allows_dotted_agent_id() -> None:
+    assert ProvisionRequest(agent_id="blog.writer").agent_id == "blog.writer"
+    assert DeprovisionRequest(agent_id="blog.writer").agent_id == "blog.writer"
 
 
 # ---------------------------------------------------------------------------

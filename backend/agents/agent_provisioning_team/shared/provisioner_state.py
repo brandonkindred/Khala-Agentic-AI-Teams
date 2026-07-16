@@ -34,6 +34,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
+from .path_safety import safe_path_component
+
 DEFAULT_STATE_DIR = (
     Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
     / "agent_provisioning_team"
@@ -106,10 +108,19 @@ class ProvisionerStateStore:
     """
 
     def __init__(self, provisioner_name: str, storage_dir: Optional[Path] = None) -> None:
-        self.provisioner_name = provisioner_name
+        """Bind the store to one provisioner's JSON file.
+
+        Preconditions:
+            * ``provisioner_name`` is a safe filename component
+              (``[A-Za-z0-9._-]+`` with no ``..``); otherwise ``ValueError`` is
+              raised. It is interpolated into both ``self.path`` and the ``_save``
+              tempfile prefix, so validating it once here keeps every write inside
+              ``storage_dir``.
+        """
+        self.provisioner_name = safe_path_component(provisioner_name, kind="provisioner_name")
         self.storage_dir = storage_dir or DEFAULT_STATE_DIR
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self.path = self.storage_dir / f"{provisioner_name}.json"
+        self.path = self.storage_dir / f"{self.provisioner_name}.json"
 
     # ---- I/O ----
     def _load(self) -> Dict[str, Dict[str, Any]]:

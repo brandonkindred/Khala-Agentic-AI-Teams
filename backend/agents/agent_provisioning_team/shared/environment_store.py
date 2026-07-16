@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .path_safety import safe_path_component
+
 
 def default_environments_dir() -> Path:
     """Resolve the durable on-disk environment registry directory.
@@ -42,6 +44,7 @@ def legacy_environments_dirs() -> List[Path]:
         Path(".agent_cache") / "provisioning_environments",
         root / "provisioning_environments",
     ]
+
 
 _lock = threading.Lock()
 
@@ -103,12 +106,24 @@ class EnvironmentStore:
     """Store for tracking active agent environments."""
 
     def __init__(self, storage_dir: Optional[Path] = None) -> None:
-        self.storage_dir = Path(storage_dir) if storage_dir is not None else default_environments_dir()
+        self.storage_dir = (
+            Path(storage_dir) if storage_dir is not None else default_environments_dir()
+        )
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
     def _env_file(self, agent_id: str) -> Path:
-        """Get the environment file path for an agent in the primary store."""
-        return self.storage_dir / f"{agent_id}.json"
+        """Get the environment file path for an agent in the primary store.
+
+        Preconditions:
+            * ``agent_id`` is a safe filename component (``[A-Za-z0-9._-]+`` with
+              no ``..``); otherwise ``ValueError`` is raised. This is the single
+              chokepoint every public method routes through (``_env_file_candidates``
+              and ``_write_env_data`` both evaluate it first), so the guard blocks
+              path traversal on every read and write path.
+        Postconditions:
+            * Returns a path strictly inside ``storage_dir``.
+        """
+        return self.storage_dir / f"{safe_path_component(agent_id, kind='agent_id')}.json"
 
     def _env_file_candidates(self, agent_id: str) -> List[Path]:
         """Primary path first, then legacy locations from before the AGENT_CACHE move."""
@@ -139,7 +154,9 @@ class EnvironmentStore:
             return data, path
         return None, None
 
-    def _write_env_data(self, agent_id: str, data: Dict[str, Any], source: Optional[Path] = None) -> None:
+    def _write_env_data(
+        self, agent_id: str, data: Dict[str, Any], source: Optional[Path] = None
+    ) -> None:
         """Persist environment JSON to the primary store, dropping a legacy copy."""
         primary = self._env_file(agent_id)
         primary.parent.mkdir(parents=True, exist_ok=True)
