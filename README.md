@@ -216,12 +216,15 @@ Growing the collective is a first-class feature, not an afterthought — it's th
 
 ### Core Dev
 - [`backend/agents/software_engineering_team/`](backend/agents/software_engineering_team/README.md) — the flagship SE pipeline (planning, coding, review, release)
+- [`backend/agents/software_engineering_team/coding_team/`](backend/agents/software_engineering_team/coding_team/) — tech lead + specialists wired to a task graph; no README yet
 - [`backend/agents/planning_team/`](backend/agents/planning_team/README.md)
 - [`backend/agents/ai_systems_team/`](backend/agents/ai_systems_team/README.md)
 - [`backend/agents/agent_provisioning_team/`](backend/agents/agent_provisioning_team/README.md)
 - [`backend/agents/agentic_team_provisioning/`](backend/agents/agentic_team_provisioning/)
 - [`backend/agents/user_agent_founder/`](backend/agents/user_agent_founder/README.md)
 - [`backend/agents/deepthought/`](backend/agents/deepthought/README.md)
+- [`backend/agents/product_delivery/`](backend/agents/product_delivery/README.md) — persistent backlog → groom → sprint plan → run → release loop
+- [`backend/agents/agent_studio/`](backend/agents/agent_studio/) — no README yet; see `backend/unified_api/config.py` (`TEAM_CONFIGS`) for the mount
 
 ### Business
 - [`backend/agents/market_research_team/`](backend/agents/market_research_team/README.md)
@@ -229,6 +232,7 @@ Growing the collective is a first-class feature, not an afterthought — it's th
 - [`backend/agents/investment_team/`](backend/agents/investment_team/README.md) — Advisor/IPS + Strategy Lab
 - [`backend/agents/sales_team/`](backend/agents/sales_team/README.md)
 - [`backend/agents/startup_advisor/`](backend/agents/startup_advisor/README.md)
+- [`backend/agents/job_matching_team/`](backend/agents/job_matching_team/README.md)
 
 ### Content
 - [`backend/agents/blogging/`](backend/agents/blogging/README.md)
@@ -240,10 +244,13 @@ Growing the collective is a first-class feature, not an afterthought — it's th
 - [`backend/agents/accessibility_audit_team/`](backend/agents/accessibility_audit_team/README.md)
 - [`backend/agents/nutrition_meal_planning_team/`](backend/agents/nutrition_meal_planning_team/README.md)
 - [`backend/agents/road_trip_planning_team/`](backend/agents/road_trip_planning_team/README.md)
+- [`backend/agents/user_profile/`](backend/agents/user_profile/README.md)
 
 ### Platform
 - [`backend/agents/`](backend/agents/README.md) — backend agent monorepo overview
 - [`backend/unified_api/`](backend/unified_api/README.md) — mounts, `TeamConfig`, logical sub-teams
+
+This list is not exhaustive — cross-check the roster tables above (24 teams) against `TEAM_CONFIGS` in [`backend/unified_api/config.py`](backend/unified_api/config.py) for the authoritative set.
 
 </details>
 
