@@ -1,0 +1,88 @@
+<div class="cr-proposals">
+  <h4 class="cr-proposals__title">
+    <mat-icon>bug_report</mat-icon>
+    Pre-existing bugs found (not on this PR)
+  </h4>
+  <p class="cr-proposals__hint">
+    The reviewer noticed these in code this pull request didn't change, so
+    they were not commented on the PR. Select the ones worth tracking and file
+    them as GitHub issues.
+  </p>
+  <ul class="cr-proposals__list">
+    @for (p of proposals; track p.id) {
+      <li class="cr-proposal">
+        @if (p.issue_url) {
+          @if (p.matched_existing) {
+            <span class="cr-proposal__matched">
+              <mat-icon>link</mat-icon>
+              already tracked
+            </span>
+          } @else {
+            <span class="cr-proposal__filed">
+              <mat-icon>check_circle</mat-icon>
+              filed
+            </span>
+          }
+        } @else {
+          <label class="cr-proposal__select" [attr.aria-label]="'Select ' + p.description">
+            <input
+              type="checkbox"
+              [checked]="isProposalSelected(p.id)"
+              (change)="toggleProposal(p.id)"
+            />
+          </label>
+        }
+        <span class="cr-chip cr-chip--sev-{{ p.severity }}">{{ p.severity }}</span>
+        @if (proposalLocation(p); as loc) {
+          <code class="cr-proposal__loc">{{ loc }}</code>
+        }
+        <span class="cr-proposal__desc">{{ p.description }}</span>
+        @if (p.issue_url) {
+          <a
+            [href]="p.issue_url"
+            target="_blank"
+            rel="noopener"
+            [attr.aria-label]="'Open issue #' + p.issue_number"
+          >
+            <mat-icon>open_in_new</mat-icon>
+          </a>
+        }
+        @if (isCombinedProposal(p)) {
+          <ul class="cr-proposal__locations">
+            @for (loc of p.locations; track $index) {
+              <li class="cr-proposal__location">
+                @if (locationText(loc); as locText) {
+                  <code class="cr-proposal__loc">{{ locText }}</code>
+                }
+                <span class="cr-proposal__location-desc">{{ loc.description }}</span>
+              </li>
+            }
+          </ul>
+        }
+      </li>
+    }
+  </ul>
+  @if (openProposals.length > 0) {
+    <div class="cr-proposals__actions">
+      <button
+        mat-flat-button
+        color="primary"
+        (click)="requestCreateIssues()"
+        [disabled]="selectedCount === 0 || creatingIssues"
+      >
+        @if (creatingIssues) {
+          <mat-spinner diameter="18"></mat-spinner>
+          Creating…
+        } @else {
+          <ng-container>
+            <mat-icon>add</mat-icon>
+            Create GitHub issue(s) ({{ selectedCount }})
+          </ng-container>
+        }
+      </button>
+    </div>
+  }
+  @if (createIssueError) {
+    <app-inline-banner variant="error" [message]="createIssueError" />
+  }
+</div>

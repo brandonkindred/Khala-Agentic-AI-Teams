@@ -72,6 +72,17 @@ def _build_workflow_runner() -> Any:
         "botocore",
         "urllib3",
         "httpx",
+        # numpy and pandas use C extension modules that can only be loaded once
+        # per process. If any module in the workflow's transitive import graph
+        # (e.g. market_regime.py, indicators.py) imports them at the top level,
+        # the Temporal sandbox's re-import during workflow replay triggers
+        # "cannot load module more than once per process". Passing them through
+        # makes the sandbox share the already-loaded instances rather than
+        # attempting a second load. This is safe because workflow run() bodies
+        # in this repo never call numpy/pandas directly — those calls live
+        # exclusively in activity code.
+        "numpy",
+        "pandas",
     )
     return SandboxedWorkflowRunner(restrictions=restrictions)
 

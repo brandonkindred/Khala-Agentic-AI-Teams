@@ -80,12 +80,12 @@ ANSWER_WAIT_POLL_INTERVAL_S = _ANSWER_WAIT_POLL_INTERVAL_S
 # connection reset, or the brief connect failures during a job-service restart), it re-polls
 # instead of crashing a long HITL wait. Everything the client does NOT retry is deliberately left
 # to propagate rather than be swallowed and spun to the timeout: permanent transport faults
-# (``UnsupportedProtocol``, ``LocalProtocolError``, ``ProxyError``) and HTTP status errors. Note
-# ``ConnectTimeout`` is also NOT in this set and is NOT matched by ``ConnectError`` below: it is an
-# ``httpx.TimeoutException``, a different branch from ``ConnectError`` (a ``NetworkError``) and not
-# a subclass of it (MRO: ConnectTimeout -> TimeoutException -> TransportError), so it propagates.
+# (``UnsupportedProtocol``, ``LocalProtocolError``, ``ProxyError``) and HTTP status errors.
+# ``ConnectTimeout`` is listed explicitly: it is an ``httpx.TimeoutException``, not a
+# ``ConnectError`` subclass (MRO: ConnectTimeout -> TimeoutException -> TransportError).
 _TRANSIENT_JOB_READ_ERRORS = (
     httpx.ConnectError,
+    httpx.ConnectTimeout,
     httpx.PoolTimeout,
     httpx.ReadTimeout,
     httpx.WriteTimeout,

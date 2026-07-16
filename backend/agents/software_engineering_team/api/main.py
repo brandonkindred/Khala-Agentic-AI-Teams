@@ -190,6 +190,13 @@ from software_engineering_team.coding_team.api.routes import (  # noqa: E402
 from software_engineering_team.coding_team.api.routes import (  # noqa: E402
     reviews as coding_team_reviews,
 )
+from software_engineering_team.coding_team.api.routes._common import (  # noqa: E402
+    register_job_service_unavailable_handlers,
+)
+
+# Coding-team routes (and SE's own job-store routes) call JobServiceClient;
+# map exhausted transport errors to 503 on this process's app (production entry).
+register_job_service_unavailable_handlers(app)
 
 app.include_router(jobs.router)
 app.include_router(hitl.router)

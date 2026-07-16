@@ -17,10 +17,11 @@ from software_engineering_team.coding_team.github_source.pr_review_mapping impor
     find_matching_open_issue,
     format_comment_body,
     format_issue_comment,
+    group_similar_findings,
     inline_comment_to_timeline_body,
     map_issues_to_comments,
     parse_valid_lines,
-    proposal_from_finding,
+    proposal_from_findings,
     render_annotated_hunks,
     split_review_comments,
 )
@@ -393,11 +394,53 @@ def test_choose_event_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# proposal_from_finding / build_issue_from_proposal
+# group_similar_findings
 # ---------------------------------------------------------------------------
 
 
-def test_proposal_from_finding_serializes_fields() -> None:
+def test_group_similar_findings_merges_near_duplicates_same_category() -> None:
+    findings = [
+        _Issue(category="standards", description="bare import `os` should be scoped"),
+        _Issue(category="standards", description="bare import `sys` should be scoped"),
+        _Issue(category="standards", description="bare import `re` should be scoped"),
+    ]
+    groups = group_similar_findings(findings)
+    assert len(groups) == 1
+    assert groups[0] == findings
+
+
+def test_group_similar_findings_never_merges_across_categories() -> None:
+    findings = [
+        _Issue(category="standards", description="bare import `os` should be scoped"),
+        _Issue(category="logic", description="bare import `os` should be scoped"),
+    ]
+    groups = group_similar_findings(findings)
+    assert len(groups) == 2
+
+
+def test_group_similar_findings_keeps_dissimilar_descriptions_separate() -> None:
+    findings = [
+        _Issue(category="logic", description="off-by-one error in loop bound"),
+        _Issue(category="logic", description="null pointer dereference on missing config"),
+    ]
+    groups = group_similar_findings(findings)
+    assert len(groups) == 2
+
+
+def test_group_similar_findings_preserves_order() -> None:
+    a = _Issue(category="logic", description="off-by-one error in loop bound")
+    b = _Issue(category="logic", description="off-by-one error in the loop bound")
+    c = _Issue(category="logic", description="null pointer dereference on missing config")
+    groups = group_similar_findings([a, b, c])
+    assert groups == [[a, b], [c]]
+
+
+# ---------------------------------------------------------------------------
+# proposal_from_findings / build_issue_from_proposal
+# ---------------------------------------------------------------------------
+
+
+def test_proposal_from_findings_serializes_single_finding_group() -> None:
     issue = _Issue(
         severity="critical",
         category="logic",
@@ -406,7 +449,7 @@ def test_proposal_from_finding_serializes_fields() -> None:
         description="latent bug",
         suggestion="do X",
     )
-    p = proposal_from_finding(issue, 2)
+    p = proposal_from_findings([issue], 2)
     assert p == {
         "id": "p2",
         "severity": "critical",
@@ -415,29 +458,71 @@ def test_proposal_from_finding_serializes_fields() -> None:
         "line": 12,
         "description": "latent bug",
         "suggestion": "do X",
+        "locations": [
+            {
+                "file_path": "src/a.py",
+                "line": 12,
+                "description": "latent bug",
+                "suggestion": "do X",
+            }
+        ],
         "issue_number": None,
         "issue_url": None,
     }
 
 
-def test_proposal_from_finding_drops_nonpositive_line_and_defaults() -> None:
-    p = proposal_from_finding(_Issue(severity="", category="", file_path="", line=0), 0)
+def test_proposal_from_findings_drops_nonpositive_line_and_defaults() -> None:
+    p = proposal_from_findings([_Issue(severity="", category="", file_path="", line=0)], 0)
     assert p["line"] is None
     assert p["severity"] == "info"
     assert p["category"] == "general"
     assert p["file_path"] == ""
 
 
-def test_build_issue_from_proposal_full_detail() -> None:
-    p = proposal_from_finding(
+def test_proposal_from_findings_combines_a_group() -> None:
+    findings = [
+        _Issue(
+            severity="medium",
+            category="standards",
+            file_path="src/a.py",
+            line=1,
+            description="bare import `os`",
+            suggestion="scope the import",
+        ),
         _Issue(
             severity="high",
-            category="logic",
-            file_path="src/a.py",
-            line=12,
-            description="off-by-one",
-            suggestion="use <=",
+            category="standards",
+            file_path="src/b.py",
+            line=5,
+            description="bare import `sys`",
+            suggestion="scope the import",
         ),
+    ]
+    p = proposal_from_findings(findings, 0)
+    # Severity is the most urgent across the group; top-level fields mirror
+    # the first (representative) finding; locations carries every finding.
+    assert p["severity"] == "high"
+    assert p["category"] == "standards"
+    assert p["file_path"] == "src/a.py"
+    assert p["line"] == 1
+    assert p["description"] == "bare import `os`"
+    assert len(p["locations"]) == 2
+    assert p["locations"][0]["file_path"] == "src/a.py"
+    assert p["locations"][1]["file_path"] == "src/b.py"
+
+
+def test_build_issue_from_proposal_full_detail() -> None:
+    p = proposal_from_findings(
+        [
+            _Issue(
+                severity="high",
+                category="logic",
+                file_path="src/a.py",
+                line=12,
+                description="off-by-one",
+                suggestion="use <=",
+            )
+        ],
         0,
     )
     title, body = build_issue_from_proposal(p, pr_number=7, pr_url="https://x/pull/7")
@@ -450,8 +535,8 @@ def test_build_issue_from_proposal_full_detail() -> None:
 
 
 def test_build_issue_from_proposal_no_file_and_no_suggestion() -> None:
-    p = proposal_from_finding(
-        _Issue(severity="low", file_path="", line=None, description="x", suggestion=""),
+    p = proposal_from_findings(
+        [_Issue(severity="low", file_path="", line=None, description="x", suggestion="")],
         0,
     )
     title, body = build_issue_from_proposal(p, pr_number=1, pr_url="u")
@@ -462,12 +547,12 @@ def test_build_issue_from_proposal_no_file_and_no_suggestion() -> None:
 
 def test_build_issue_from_proposal_blank_description_and_title_truncation() -> None:
     # Blank description -> generic headline and a placeholder description line.
-    p_blank = proposal_from_finding(_Issue(description="", suggestion=""), 0)
+    p_blank = proposal_from_findings([_Issue(description="", suggestion="")], 0)
     title, body = build_issue_from_proposal(p_blank, pr_number=1, pr_url="u")
     assert "code review finding" in title
     assert "_No description provided._" in body
     # A very long description is truncated to a single-line, bounded title.
-    p_long = proposal_from_finding(_Issue(description="Z" * 400), 0)
+    p_long = proposal_from_findings([_Issue(description="Z" * 400)], 0)
     long_title, _ = build_issue_from_proposal(p_long, pr_number=1, pr_url="u")
     assert len(long_title) <= 120
     assert long_title.endswith("…")
@@ -490,8 +575,8 @@ def _open_issue(number: int, title: str, body: str = "") -> Issue:
 
 
 def test_find_matching_open_issue_location_plus_moderate_text_matches() -> None:
-    proposal = proposal_from_finding(
-        _Issue(file_path="src/a.py", description="null pointer dereference in parser"), 0
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", description="null pointer dereference in parser")], 0
     )
     # Title is only moderately similar to the headline (ratio ~0.585, between the
     # two thresholds), but the issue body repeats the exact file_path -- the
@@ -503,8 +588,8 @@ def test_find_matching_open_issue_location_plus_moderate_text_matches() -> None:
 
 
 def test_find_matching_open_issue_moderate_text_without_location_does_not_match() -> None:
-    proposal = proposal_from_finding(
-        _Issue(file_path="src/a.py", description="null pointer dereference in parser"), 0
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", description="null pointer dereference in parser")], 0
     )
     # Same moderate-similarity title as above (ratio ~0.585, below the "no
     # location" bar of 0.8), but nothing in the issue mentions the file_path --
@@ -516,24 +601,24 @@ def test_find_matching_open_issue_moderate_text_without_location_does_not_match(
 
 
 def test_find_matching_open_issue_strong_text_alone_matches_without_location() -> None:
-    proposal = proposal_from_finding(
-        _Issue(file_path="", description="off-by-one error in loop bound"), 0
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", description="off-by-one error in loop bound")], 0
     )
     issue = _open_issue(1, "off-by-one error in loop bound", body="")
     assert find_matching_open_issue(proposal, [issue]) is issue
 
 
 def test_find_matching_open_issue_dissimilar_and_no_location_returns_none() -> None:
-    proposal = proposal_from_finding(
-        _Issue(file_path="src/a.py", description="off-by-one error"), 0
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", description="off-by-one error")], 0
     )
     issue = _open_issue(1, "unrelated feature request", body="nothing to do with this")
     assert find_matching_open_issue(proposal, [issue]) is None
 
 
 def test_find_matching_open_issue_empty_open_issues_returns_none() -> None:
-    proposal = proposal_from_finding(
-        _Issue(file_path="src/a.py", description="off-by-one error"), 0
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", description="off-by-one error")], 0
     )
     assert find_matching_open_issue(proposal, []) is None
 
@@ -541,16 +626,16 @@ def test_find_matching_open_issue_empty_open_issues_returns_none() -> None:
 def test_find_matching_open_issue_blank_file_path_never_triggers_location_signal() -> None:
     # Regression: an empty file_path must never "match" via the location signal,
     # since "" is a substring of every string in Python.
-    proposal = proposal_from_finding(
-        _Issue(file_path="", description="a mildly related headline"), 0
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", description="a mildly related headline")], 0
     )
     issue = _open_issue(1, "a totally different headline", body="")
     assert find_matching_open_issue(proposal, [issue]) is None
 
 
 def test_find_matching_open_issue_picks_highest_ratio_among_multiple_matches() -> None:
-    proposal = proposal_from_finding(
-        _Issue(file_path="", description="off-by-one error in loop bound"), 0
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", description="off-by-one error in loop bound")], 0
     )
     close = _open_issue(1, "off-by-one error in the loop bound", body="")
     exact = _open_issue(2, "off-by-one error in loop bound", body="")
@@ -558,8 +643,8 @@ def test_find_matching_open_issue_picks_highest_ratio_among_multiple_matches() -
 
 
 def test_find_matching_open_issue_ties_break_by_lowest_issue_number() -> None:
-    proposal = proposal_from_finding(
-        _Issue(file_path="", description="off-by-one error in loop bound"), 0
+    proposal = proposal_from_findings(
+        [_Issue(file_path="", description="off-by-one error in loop bound")], 0
     )
     first = _open_issue(5, "off-by-one error in loop bound", body="")
     second = _open_issue(2, "off-by-one error in loop bound", body="")
@@ -567,7 +652,7 @@ def test_find_matching_open_issue_ties_break_by_lowest_issue_number() -> None:
 
 
 def test_find_matching_open_issue_threshold_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    proposal = proposal_from_finding(_Issue(file_path="", description="off-by-one error"), 0)
+    proposal = proposal_from_findings([_Issue(file_path="", description="off-by-one error")], 0)
     issue = _open_issue(1, "unrelated feature request", body="")
     assert find_matching_open_issue(proposal, [issue]) is None
     # A very low override turns the otherwise-dissimilar pair into a match.
@@ -581,8 +666,8 @@ def test_find_matching_open_issue_threshold_env_override(monkeypatch: pytest.Mon
 def test_find_matching_open_issue_threshold_with_location_env_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    proposal = proposal_from_finding(
-        _Issue(file_path="src/a.py", description="race condition in worker pool"), 0
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", description="race condition in worker pool")], 0
     )
     # The file_path appears in the issue body (location signal present), but the
     # headline/title ratio (~0.16) is far below both the default with-location
@@ -603,8 +688,8 @@ def test_find_matching_open_issue_threshold_with_location_env_override(
 def test_find_matching_open_issue_location_in_title_matches() -> None:
     # The location signal must check the issue TITLE, not only its body: the
     # file_path here appears only in the title, and the body is blank.
-    proposal = proposal_from_finding(
-        _Issue(file_path="src/a.py", description="null pointer dereference in parser"), 0
+    proposal = proposal_from_findings(
+        [_Issue(file_path="src/a.py", description="null pointer dereference in parser")], 0
     )
     # Ratio (~0.505) clears the with-location bar (0.5) but not the no-location
     # bar (0.8), so this match happens only because the location signal (title
@@ -615,11 +700,11 @@ def test_find_matching_open_issue_location_in_title_matches() -> None:
 
 def test_annotate_duplicate_proposals_marks_matched_and_preserves_order_and_length() -> None:
     proposals = [
-        proposal_from_finding(
-            _Issue(file_path="", description="off-by-one error in loop bound"), 0
+        proposal_from_findings(
+            [_Issue(file_path="", description="off-by-one error in loop bound")], 0
         ),
-        proposal_from_finding(_Issue(file_path="", description="unrelated latent bug"), 1),
-        proposal_from_finding(_Issue(file_path="", description="another unrelated bug"), 2),
+        proposal_from_findings([_Issue(file_path="", description="unrelated latent bug")], 1),
+        proposal_from_findings([_Issue(file_path="", description="another unrelated bug")], 2),
     ]
     match = _open_issue(9, "off-by-one error in loop bound", body="")
     out = annotate_duplicate_proposals(proposals, [match])
@@ -636,7 +721,9 @@ def test_annotate_duplicate_proposals_marks_matched_and_preserves_order_and_leng
 
 def test_annotate_duplicate_proposals_does_not_mutate_input() -> None:
     proposals = [
-        proposal_from_finding(_Issue(file_path="", description="off-by-one error in loop bound"), 0)
+        proposal_from_findings(
+            [_Issue(file_path="", description="off-by-one error in loop bound")], 0
+        )
     ]
     match = _open_issue(9, "off-by-one error in loop bound", body="")
     annotate_duplicate_proposals(proposals, [match])
@@ -645,7 +732,7 @@ def test_annotate_duplicate_proposals_does_not_mutate_input() -> None:
 
 
 def test_annotate_duplicate_proposals_empty_open_issues_all_unmatched() -> None:
-    proposals = [proposal_from_finding(_Issue(file_path="", description="off-by-one error"), 0)]
+    proposals = [proposal_from_findings([_Issue(file_path="", description="off-by-one error")], 0)]
     out = annotate_duplicate_proposals(proposals, [])
     assert out[0]["matched_existing"] is False
     assert out[0]["issue_url"] is None
@@ -674,3 +761,43 @@ def test_duplicate_check_max_open_issues_garbage_or_non_positive_falls_back_to_d
     assert duplicate_check_max_open_issues() == 100
     monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "-5")
     assert duplicate_check_max_open_issues() == 100
+
+
+def test_build_issue_from_proposal_multi_location_body_and_title() -> None:
+    findings = [
+        _Issue(
+            severity="medium",
+            category="standards",
+            file_path="src/a.py",
+            line=1,
+            description="bare import `os`",
+            suggestion="scope the import",
+        ),
+        _Issue(
+            severity="medium",
+            category="standards",
+            file_path="src/b.py",
+            line=5,
+            description="bare import `sys`",
+            suggestion="scope the import",
+        ),
+        _Issue(
+            severity="medium",
+            category="standards",
+            file_path="src/c.py",
+            line=None,
+            description="bare import `re`",
+            suggestion="scope the import",
+        ),
+    ]
+    p = proposal_from_findings(findings, 0)
+    title, body = build_issue_from_proposal(p, pr_number=1, pr_url="u")
+    assert title.endswith("(3 occurrences)")
+    assert "### Locations" in body
+    assert "- `src/a.py:1` — bare import `os`" in body
+    assert "- `src/b.py:5` — bare import `sys`" in body
+    assert "- `src/c.py` — bare import `re`" in body
+    assert "**Location:**" not in body
+    # Identical suggestions across every location dedupe to one bullet.
+    assert body.count("scope the import") == 1
+    assert "### Suggested fixes" in body

@@ -2994,16 +2994,54 @@ class TestPreExistingFindings:
         assert len(summary["pending_issue_proposals"]) == 1
 
     def test_status_text_mentions_preexisting_count(self, review_app) -> None:
-        """The job's status text reports how many pre-existing bugs were found."""
+        """The job's status text reports how many pre-existing bug proposals were
+        found. Two distinct (non-similar) descriptions stay separate proposals."""
         job = _run_review_with(
             review_app,
             [
                 _FakeReviewIssue("high", line=2),
-                _FakeReviewIssue("low", line=2, file_path="legacy.py", pre_existing=True),
-                _FakeReviewIssue("low", line=2, file_path="legacy.py", pre_existing=True),
+                _FakeReviewIssue(
+                    "low",
+                    line=2,
+                    file_path="legacy.py",
+                    description="latent bug alpha",
+                    pre_existing=True,
+                ),
+                _FakeReviewIssue(
+                    "low",
+                    line=2,
+                    file_path="legacy.py",
+                    description="unrelated null check",
+                    pre_existing=True,
+                ),
             ],
         )
         assert "2 pre-existing bugs to review" in job["status_text"]
+
+    def test_status_text_counts_combined_proposal_once(self, review_app) -> None:
+        """Similar pre-existing findings collapse into one proposal, and the status
+        text counts the combined proposal, not the raw finding count."""
+        job = _run_review_with(
+            review_app,
+            [
+                _FakeReviewIssue(
+                    "low",
+                    line=2,
+                    file_path="legacy.py",
+                    description="bare import `os`",
+                    pre_existing=True,
+                ),
+                _FakeReviewIssue(
+                    "low",
+                    line=2,
+                    file_path="legacy.py",
+                    description="bare import `sys`",
+                    pre_existing=True,
+                ),
+            ],
+        )
+        assert "1 pre-existing bug to review" in job["status_text"]
+        assert len(job["review_summary"]["pending_issue_proposals"]) == 1
 
     def test_preexisting_tag_on_context_line_is_not_overridden(self, review_app) -> None:
         """A pre_existing-tagged finding on a diff CONTEXT line (shown for anchoring

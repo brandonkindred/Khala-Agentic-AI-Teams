@@ -152,6 +152,7 @@ def _code_review_gate(
     deps: ReviewDependencies,
     detail_callback: Callable[[str], None],
     review_context: Optional[ReviewContext] = None,
+    enable_llm_review_grounding: bool = True,
 ) -> GateOutcome:
     """Run the frontend code-review gate (build + lint + code review agents only)."""
     from .review import run_microtask_review
@@ -170,8 +171,14 @@ def _code_review_gate(
         tool_agents=deps.tool_agents,
         detail_callback=detail_callback,
         review_context=review_context,
+        enable_llm_review_grounding=enable_llm_review_grounding,
     )
-    return GateOutcome(passed=r.passed, issues=r.issues, summary=r.summary)
+    return GateOutcome(
+        passed=r.passed,
+        issues=r.issues,
+        summary=r.summary,
+        raw_issue_count=getattr(r, "raw_issue_count", None),
+    )
 
 
 def _qa_gate(

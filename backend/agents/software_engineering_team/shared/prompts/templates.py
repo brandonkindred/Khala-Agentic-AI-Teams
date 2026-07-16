@@ -27,6 +27,9 @@ from software_engineering_team.shared.coding_standards import (
 from software_engineering_team.shared.coding_standards import (
     REVIEW_PRIORITY_FRAMEWORK as _REVIEW_PRIORITY_FRAMEWORK,
 )
+from software_engineering_team.shared.prompts.requirement_citation import (
+    REQUIREMENT_CITATION_GUARDRAIL,
+)
 
 # ---------------------------------------------------------------------------
 # Planning prompt
@@ -225,7 +228,8 @@ def build_code_review_prompt(*, project_kind: str, extra_verify_clause: str = ""
     Postconditions:
         Returns the prompt preserving the ``{requirements}``,
         ``{acceptance_criteria}``, ``{architecture_context}``, ``{spec_content}``,
-        ``{code}`` slots.
+        ``{code}`` slots. Includes the Spec Compliance citation guardrail and an
+        optional ``requirement_citation:`` field (prompt-only; not parsed here).
     """
     return (
         f"You are an expert Code Review Agent for a {project_kind} project.\n\n"
@@ -233,6 +237,8 @@ def build_code_review_prompt(*, project_kind: str, extra_verify_clause: str = ""
         + "\n"
         + f"After checking these priorities, also verify: {extra_verify_clause}correctness against "
         + "requirements and acceptance criteria, testing coverage, and build/lint readiness.\n\n"
+        + REQUIREMENT_CITATION_GUARDRAIL
+        + "\n\n"
         + "**Requirements:**\n{requirements}\n\n"
         + "**Acceptance criteria:**\n{acceptance_criteria}\n\n"
         + "**Architecture context:**\n{architecture_context}\n\n"
@@ -241,7 +247,9 @@ def build_code_review_prompt(*, project_kind: str, extra_verify_clause: str = ""
         + "**Output format (template – use exactly these section headers):**\n\n"
         + "## PASSED ##\ntrue\n## END PASSED ##\n"
         + "## ISSUES ##\n---\nsource: code_review\nseverity: critical|high|medium|low|info\n"
-        + "description: what is wrong\nfile_path: which file\nrecommendation: how to fix it\n---\n"
+        + "description: what is wrong\nfile_path: which file\nrecommendation: how to fix it\n"
+        + "requirement_citation: optional verbatim quote from Requirements/Acceptance "
+        + "Criteria/Specification/Architecture\n---\n"
         + "## END ISSUES ##\n"
         + "## SUMMARY ##\noverall assessment\n## END SUMMARY ##\n\n"
         + '- Use "---" to separate each issue block. Omit ## ISSUES ## / ## END ISSUES ## if there are no issues.\n'

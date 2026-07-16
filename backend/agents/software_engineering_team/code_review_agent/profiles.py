@@ -16,15 +16,13 @@ coordinator's parser and the ``DummyLLMClient`` test stubs work unchanged no
 matter which profile is in effect.
 
 Invariants:
-    * ``build_review_system_prompt(ReviewProfile.CODE_REVIEW)`` is byte-identical
-      to the canonical :data:`code_review_agent.prompts.CODE_REVIEW_PROMPT` — the
-      default profile reproduces today's reviewer behavior exactly. This is
-      locked by an equivalence test (``tests/test_review_profiles.py``).
+    * Profiles are the source of truth. ``code_review_agent.prompts.CODE_REVIEW_PROMPT``
+      is a derived alias of ``build_review_system_prompt(ReviewProfile.CODE_REVIEW)``
+      (locked by ``tests/test_review_profiles.py``).
     * The skeleton pieces (:data:`_SHARED_ROLE_AND_SETTLED`,
-      :data:`_SHARED_OUTPUT_SECTION`) are verbatim slices of that canonical
-      prompt, so the non-default profiles reuse exactly the same coding
-      standards, settled-decisions guidance, and JSON output contract — only the
-      ``role_line`` and ``criteria_block`` differ.
+      :data:`_SHARED_OUTPUT_SECTION`) are shared across profiles so they reuse
+      the same coding standards, settled-decisions guidance, and JSON output
+      contract — only the ``role_line`` and ``criteria_block`` differ.
 """
 
 from __future__ import annotations
@@ -37,15 +35,17 @@ from software_engineering_team.shared.coding_standards import (
     REVIEW_STANDARDS,
 )
 from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
+from software_engineering_team.shared.prompts.requirement_citation import (
+    REQUIREMENT_CITATION_GUARDRAIL,
+)
 
 
 class ReviewProfile(str, Enum):
     """Role/criteria profile selecting how the shared engine judges a submission.
 
     Invariants: the members exhaust the gates routed through the engine.
-    ``CODE_REVIEW`` is the default and reproduces the legacy reviewer
-    byte-for-byte; the others swap in a gate-specific persona and checklist while
-    keeping the same JSON output contract.
+    ``CODE_REVIEW`` is the default; the others swap in a gate-specific persona
+    and checklist while keeping the same JSON output contract.
     """
 
     CODE_REVIEW = "code_review"
@@ -70,17 +70,15 @@ class _ProfileSpec:
     criteria_block: str
 
 
-# --- Shared skeleton pieces (verbatim slices of CODE_REVIEW_PROMPT) -----------
-# These three constants are exact substrings of the canonical reviewer prompt.
-# ``tests/test_review_profiles.py`` asserts each one is ``in CODE_REVIEW_PROMPT``,
-# which both proves the transcription is exact and pins the shared contract.
+# --- Shared skeleton pieces -----------------------------------------------------
+# These constants are reused across every profile so the JSON output contract and
+# settled-decisions guidance stay identical. ``tests/test_review_profiles.py``
+# asserts each one appears in the derived ``CODE_REVIEW_PROMPT``.
 
 # NOTE: the composed prompt carries TWO role statements — the profile's own
 # ``role_line`` (set above each criteria block) and this generic "**Your role:**"
-# section. That duplication is inherited verbatim from the legacy
-# ``CODE_REVIEW_PROMPT`` and is preserved deliberately so the default profile stays
-# byte-identical (locked by ``test_review_profiles``). Collapsing the two is left
-# for a future prompt-cleanup that re-baselines the equivalence guard.
+# section. That duplication is preserved deliberately for continuity with the
+# historical reviewer prompt. Collapsing the two is left for a future cleanup.
 _SHARED_ROLE_AND_SETTLED = (
     "\n\n**Your role:**\n"
     "You review code that has been written by a coding agent (Frontend or Backend) for a "
@@ -190,7 +188,8 @@ _CODE_REVIEW_CRITERIA = (
     "1. **Spec Compliance** - Does the code implement what the specification requires?\n"
     "   - Does it meet the acceptance criteria for the task?\n"
     "   - Does it align with the overall project specification?\n"
-    "   - Are there missing features or incomplete implementations?\n\n"
+    "   - Are there missing features or incomplete implementations?\n"
+    "   - " + REQUIREMENT_CITATION_GUARDRAIL + "\n\n"
     "2. **Naming Conventions** - Are names appropriate and follow conventions?\n"
     "   - React: PascalCase for components (e.g., `TaskList.tsx`, `UserProfile.tsx`)\n"
     "   - Angular: kebab-case for components (e.g., `task-list/`, `user-profile/`)\n"
@@ -273,9 +272,11 @@ _SPEC_CONFORMANCE_CRITERIA = (
     "**You check for:**\n\n"
     "1. **Spec Compliance** - Does the code implement every behavior the specification and task "
     "requirements call for? Flag missing features, partial implementations, and behavior that "
-    "contradicts the spec.\n\n"
+    "contradicts the spec. " + REQUIREMENT_CITATION_GUARDRAIL + "\n\n"
     "2. **Acceptance Criteria** - Does the code satisfy each acceptance criterion for the task? "
-    "Flag any criterion that is unmet or only partially met.\n\n"
+    "Flag any criterion that is unmet or only partially met. "
+    + REQUIREMENT_CITATION_GUARDRAIL
+    + "\n\n"
     "3. **Integration** - Do imports resolve, are routes/components/services registered, and do "
     "API contracts match the rest of the codebase? Flag code that does not wire into the existing "
     "system.\n\n"
@@ -314,7 +315,9 @@ _SENIOR_ARCHITECTURE_CRITERIA = (
     "and established patterns? Flag designs that cut across boundaries or duplicate existing "
     "capabilities.\n\n"
     "2. **Spec Coverage** - Taking the specification as a whole, what required capabilities does "
-    "this change leave unaddressed? Flag material coverage gaps.\n\n"
+    "this change leave unaddressed? Flag material coverage gaps. "
+    + REQUIREMENT_CITATION_GUARDRAIL
+    + "\n\n"
     "3. **Maintainability & Risk** - Does the change introduce coupling, hidden state, or "
     "complexity that will be costly to maintain or risky to extend?"
 )
@@ -378,8 +381,8 @@ def build_review_system_prompt(profile: ReviewProfile | str) -> str:
         * Returns a non-empty prompt string whose JSON output contract is
           identical across all profiles (so the coordinator parser and test
           stubs are profile-agnostic).
-        * ``build_review_system_prompt(ReviewProfile.CODE_REVIEW)`` is
-          byte-identical to ``code_review_agent.prompts.CODE_REVIEW_PROMPT``.
+        * ``code_review_agent.prompts.CODE_REVIEW_PROMPT`` is derived from
+          ``build_review_system_prompt(ReviewProfile.CODE_REVIEW)``.
         * Pure; no side effects.
     """
     spec = REVIEW_PROFILES[ReviewProfile(profile)]

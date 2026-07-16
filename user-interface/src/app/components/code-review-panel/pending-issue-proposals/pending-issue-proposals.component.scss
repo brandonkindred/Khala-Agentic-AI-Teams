@@ -1,0 +1,130 @@
+// Base chip look, duplicated from code-review-panel.component.scss's `.cr-chip`:
+// Angular's view encapsulation scopes each component's styles to its own
+// template, so a class defined only in the parent's stylesheet would not
+// style elements rendered by this (nested) component.
+.cr-chip {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: var(--mat-sys-surface-container-high, #ececec);
+  color: var(--mat-sys-on-surface, rgba(0, 0, 0, 0.75));
+}
+
+// Severity accents on the proposal chips (critical/high stand out).
+.cr-chip--sev-critical,
+.cr-chip--sev-high {
+  background: var(--mat-sys-error-container, #ffdad6);
+  color: var(--mat-sys-on-error-container, #410002);
+  font-weight: 600;
+}
+
+.cr-proposals {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+  border-radius: 8px;
+  background: var(--mat-sys-surface-container-low, #f6f6f6);
+
+  &__title {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0 0 0.25rem;
+    font-size: 0.95rem;
+  }
+
+  &__hint {
+    margin: 0 0 0.5rem;
+    font-size: 0.82rem;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+  }
+
+  &__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  &__actions {
+    margin-top: 0.6rem;
+  }
+}
+
+.cr-proposal {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+
+  &__select {
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+  }
+
+  &__filed {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    font-size: 0.72rem;
+    color: var(--mat-sys-primary, #0b57d0);
+
+    mat-icon {
+      font-size: 1rem;
+      width: 1rem;
+      height: 1rem;
+    }
+  }
+
+  &__matched {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    font-size: 0.72rem;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+
+    mat-icon {
+      font-size: 1rem;
+      width: 1rem;
+      height: 1rem;
+    }
+  }
+
+  &__loc {
+    font-size: 0.75rem;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+  }
+
+  &__desc {
+    flex: 1 1 12rem;
+    font-size: 0.85rem;
+  }
+
+  // A combined proposal's per-finding breakdown; forced onto its own row
+  // below the proposal's summary line (the parent <li> is a flex container).
+  &__locations {
+    flex: 1 1 100%;
+    list-style: none;
+    margin: 0.3rem 0 0;
+    padding: 0.3rem 0 0 1.4rem;
+    border-top: 1px dashed var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  &__location {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  &__location-desc {
+    font-size: 0.78rem;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+  }
+}

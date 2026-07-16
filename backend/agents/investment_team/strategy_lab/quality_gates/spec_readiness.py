@@ -234,15 +234,65 @@ _INDICATOR_REQUIRED_PARAMS: dict[str, frozenset[str]] = {
 }
 
 # Indicator concept vocabulary for prose mentions in the hypothesis.
+# Word-boundary anchored so substrings like "thematic" don't accidentally
+# match "ema". This vocabulary covers every DSL indicator name and its
+# common prose aliases. It is shared with ``audit_recent_runs.py`` (which
+# keeps a byte-for-byte replica) so both the narrative-fidelity gate and
+# the audit tool operate on the same indicator term set and cannot diverge.
+# ``williams_r`` precedes ``williams`` so the regex engine's first-
+# alternative-wins matching captures the full DSL token rather than the
+# bare prose alias.
 _CONCEPT_TERMS = re.compile(
     r"\b(rsi|macd|moving\s+average|ema|sma|bollinger|atr|stochastic|adx|vwap|"
     r"donchian|keltner|obv|on[\s-]balance\s+volume|mfi|money\s+flow|roc|"
     r"rate\s+of\s+change|cci|williams_r|williams)\b",
     re.IGNORECASE,
 )
+
+# Broader concept vocabulary used by ``strategy_validator.py``'s
+# hypothesis-vs-rules consistency gate. Extends ``_CONCEPT_TERMS`` with
+# pure strategy-concept words (breakout, mean reversion, momentum,
+# volatility, volume) that have no DSL indicator mapping but are still
+# relevant to consistency checking. These extra terms are NOT included in
+# ``_CONCEPT_TERMS`` (and therefore not in ``audit_recent_runs.py``'s
+# replica) because the audit's phantom-detection logic requires every
+# recognised term to have a ``_CONCEPT_TO_INDICATOR_NAMES`` entry.
+# ``strategy_validator.py`` imports this constant so both files share one
+# definition and cannot silently diverge.
+_CONCEPT_TERMS_BROAD = re.compile(
+    r"\b(rsi|macd|moving\s+average|ema|sma|bollinger|atr|breakout|"
+    r"mean\s+reversion|momentum|volatility|volume|vwap|stochastic|adx|obv|"
+    r"on[\s-]balance\s+volume|donchian|keltner|mfi|money\s+flow|roc|"
+    r"rate\s+of\s+change|cci|williams_r|williams)\b",
+    re.IGNORECASE,
+)
 # Map each prose concept to the set of DSL indicator names that satisfy it.
 # A concept is "orphan" iff *none* of its allowed indicators appears in the
 # spec's predicates — so "moving average" is satisfied by either SMA or EMA.
+def extract_known_tickers(text: str) -> set[str]:
+    """Extract every known ticker mentioned in ``text``.
+
+    Uses word-bounded, case-insensitive matching against the full symbol
+    whitelist and strips Yahoo-provider suffixes (``=F``, ``=X``, ``-USD``)
+    before returning so callers receive canonical bare symbols.
+
+    Preconditions:
+        ``text`` is a string (empty allowed).
+    Postconditions:
+        Returns a set of upper-cased canonical ticker strings (no provider
+        suffixes) that were found in ``text`` and belong to the known symbol
+        whitelist. The empty set is returned when ``text`` is empty or no
+        known ticker appears.
+    Invariants:
+        Pure function; no I/O, no mutation of module state.
+    """
+    assert isinstance(text, str), "text must be a str"
+    return {
+        _canonicalize_ticker(m.group(0))
+        for m in _SYMBOL_REGEX.finditer(text or "")
+    }
+
+
 _CONCEPT_TO_INDICATOR_NAMES: dict[str, frozenset[str]] = {
     "rsi": frozenset({"rsi"}),
     "macd": frozenset({"macd"}),

@@ -360,14 +360,20 @@ class TaskGraphService:
             return newly_failed
 
     def get_next_eligible_subtask(self, task_id: str) -> Optional[Any]:
-        """Return the next subtask that does not depend on an incomplete subtask, or None."""
+        """Return the next TO_DO subtask whose subtask-deps are all MERGED, or None.
+
+        Preconditions:
+            - ``task_id`` refers to a task in this graph (or the method returns None).
+        Postconditions:
+            - The returned subtask, if any, is TO_DO and not already IN_PROGRESS, IN_REVIEW, or MERGED.
+        """
         with self._lock:
             task = self._tasks.get(task_id)
             if not task or not task.subtasks:
                 return None
             completed_ids = {s.id for s in task.subtasks if s.status == TaskStatus.MERGED}
             for st in task.subtasks:
-                if st.status == TaskStatus.MERGED:
+                if st.status in (TaskStatus.MERGED, TaskStatus.IN_PROGRESS, TaskStatus.IN_REVIEW):
                     continue
                 if all(dep in completed_ids for dep in st.dependencies):
                     return st

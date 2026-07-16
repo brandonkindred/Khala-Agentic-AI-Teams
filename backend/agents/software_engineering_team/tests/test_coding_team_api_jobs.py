@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+import httpx
 from fastapi.testclient import TestClient
 
 from software_engineering_team.coding_team.api import main as api
@@ -93,3 +94,26 @@ def test_jobs_active_filter_pushed_to_store(monkeypatch):
     assert seen == {"active_only": True}
     assert client.get("/jobs").status_code == 200
     assert seen == {"active_only": False}
+
+
+def test_jobs_returns_503_on_job_service_connect_timeout(monkeypatch):
+    """Exhausted job-service transport failures must surface as 503 (retryable),
+    not an unhandled ASGI 500."""
+
+    def boom(**kw):
+        raise httpx.ConnectTimeout("timed out")
+
+    monkeypatch.setattr(api, "list_jobs", boom)
+    r = client.get("/jobs")
+    assert r.status_code == 503
+    assert "job service" in r.json()["detail"].lower()
+
+
+def test_status_returns_503_on_job_service_connect_timeout(monkeypatch):
+    def boom(job_id):
+        raise httpx.ConnectTimeout("timed out")
+
+    monkeypatch.setattr(api, "get_job", boom)
+    r = client.get("/status/j1")
+    assert r.status_code == 503
+    assert "job service" in r.json()["detail"].lower()

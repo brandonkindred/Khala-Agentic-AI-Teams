@@ -12,8 +12,10 @@ orchestration so it lives in one place; each team passes in its own
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, TypeVar
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Generic, List, TypeVar
 
+from software_engineering_team.shared.issue_grounding import drop_ungrounded_issues
 from software_engineering_team.shared.models import Task
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,28 @@ logger = logging.getLogger(__name__)
 # The two V2 teams each own a distinct ``ReviewIssue`` type, so the helper is
 # generic over whatever the caller's ``issue_factory`` produces.
 IssueT = TypeVar("IssueT")
+
+
+@dataclass(frozen=True)
+class LlmReviewOutput(Generic[IssueT]):
+    """Result of one :func:`run_llm_review` call: kept issues plus the raw count.
+
+    The grounding filter (``drop_ungrounded_issues``) can silently discard every
+    finding a review produced; without the pre-filter count, a caller cannot
+    distinguish "the LLM found nothing" from "the LLM found things but grounding
+    rejected all of them" — the latter is the signal a circuit breaker needs.
+
+    Preconditions: constructed only by ``run_llm_review``.
+
+    Postconditions/Invariants:
+        - ``raw_issue_count == len(issues)`` measured before the grounding
+          filter ran (or unconditionally when grounding is disabled/skipped),
+          so ``raw_issue_count >= len(issues)`` always holds.
+        - Empty input (no non-blank files) yields ``LlmReviewOutput([], 0)``.
+    """
+
+    issues: List[IssueT]
+    raw_issue_count: int
 
 
 def run_llm_review(
@@ -35,7 +59,8 @@ def run_llm_review(
     warn_threshold: int,
     architecture_context: str = "",
     spec_content: str = "",
-) -> List[IssueT]:
+    enable_llm_review_grounding: bool = True,
+) -> LlmReviewOutput[IssueT]:
     """LLM-based code review when no external review agent is available.
 
     Preconditions:
@@ -55,13 +80,21 @@ def run_llm_review(
           size-bounded excerpts (the caller is expected to have applied its own
           cap before calling, since this runs once per chunk); both default to
           ``""`` so a caller without this context yet is unaffected.
+        - ``enable_llm_review_grounding`` defaults True; when False, findings are
+          returned without the ungrounded-claim filter (kill switch).
 
     Postconditions:
+        - Returns an :class:`LlmReviewOutput` whose ``raw_issue_count`` is the
+          number of issues parsed across all chunks *before* any grounding
+          filter runs, and whose ``issues`` are those same issues after the
+          filter (or unchanged when grounding is disabled/skipped); see
+          :class:`LlmReviewOutput`.
         - Inputs that exceed the per-call budget are split into function-aware
           chunks (cuts land between whole functions/methods, never mid-body)
           and every chunk is reviewed; issues from all chunks are returned.
           No file content is silently truncated away, so a large file's tail is
-          reviewed rather than dropped. Blank files contribute nothing.
+          reviewed rather than dropped. Blank files contribute nothing, so
+          empty input returns ``LlmReviewOutput([], 0)``.
         - A chunk that is itself over budget (a single line longer than the cap,
           e.g. a minified bundle) is hard-split before the LLM call, with the
           ``### path ###`` header re-attached to every piece (``cap_review_chunk``)
@@ -71,6 +104,10 @@ def run_llm_review(
           from the other chunks are still returned (one bad chunk never aborts
           the whole review).
         - Small inputs are reviewed in a single call, as before.
+        - When ``enable_llm_review_grounding`` is True, findings whose description
+          or recommendation contain checkable proper-noun phrases absent from the
+          task grounding corpus are dropped before return; unknown file paths
+          are blanked rather than dropped.
     """
     # Imported lazily (not at module level) so importing this helper does not
     # pull in the whole code_review_agent package; this also matches the V2
@@ -83,7 +120,7 @@ def run_llm_review(
 
     blocks = [(path, content) for path, content in files.items() if content and content.strip()]
     if not blocks:
-        return []
+        return LlmReviewOutput(issues=[], raw_issue_count=0)
     # Budget each prompt at the same per-call size the old code truncated to,
     # but split at function/method boundaries so no construct is severed and no
     # file tail is dropped.
@@ -130,4 +167,20 @@ def run_llm_review(
                             recommendation=item.get("recommendation", ""),
                         )
                     )
-    return issues
+    raw_issue_count = len(issues)
+    if enable_llm_review_grounding and issues:
+
+        def _on_dropped(issue: Any) -> None:
+            logger.warning("LLM code review: dropping ungrounded finding: %s", issue)
+
+        requirements = task.requirements or task.description or ""
+        issues = drop_ungrounded_issues(
+            issues,
+            files=files,
+            requirements=requirements,
+            acceptance_criteria=task.acceptance_criteria,
+            spec_content=spec_content,
+            architecture_context=architecture_context,
+            on_dropped=_on_dropped,
+        )
+    return LlmReviewOutput(issues=issues, raw_issue_count=raw_issue_count)

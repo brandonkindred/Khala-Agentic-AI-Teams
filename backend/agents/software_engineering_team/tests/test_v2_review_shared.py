@@ -284,6 +284,59 @@ def test_run_review_threads_repo_path_into_tool_agents(tmp_path: Path) -> None:
     assert captured["repo_path"] == str(tmp_path)
 
 
+def test_run_review_raw_issue_count_from_llm_fallback(tmp_path: Path) -> None:
+    """run_review forwards the LLM fallback's pre-grounding raw_issue_count onto
+    ReviewResult via _code_review_step's _ReviewStepResult return value."""
+    from software_engineering_team.shared.llm_review import LlmReviewOutput
+
+    config = _build_config()
+    result = run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: LlmReviewOutput(
+            issues=[ReviewIssue(source="code_review", severity="low", description="kept")],
+            raw_issue_count=3,
+        ),
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+    )
+    assert result.raw_issue_count == 3
+    assert any(i.description == "kept" for i in result.issues)
+
+
+def test_run_review_raw_issue_count_none_when_code_review_agent_succeeds(tmp_path: Path) -> None:
+    """When the external code_review_agent succeeds, the LLM fallback never runs, so
+    raw_issue_count stays None -- there is no raw/grounded distinction to report."""
+    config = _build_config()
+
+    class _Issue:
+        severity = "medium"
+        description = "from agent"
+        file_path = "x.py"
+        recommendation = ""
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[_Issue()])
+
+    result = run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+    assert result.raw_issue_count is None
+    assert any(i.description == "from agent" for i in result.issues)
+
+
 # ---------------------------------------------------------------------------
 # run_microtask_review branches
 # ---------------------------------------------------------------------------
@@ -424,6 +477,31 @@ def test_microtask_code_review_agent_path_and_raise(tmp_path: Path) -> None:
         build_verify_fn=_build_verify_fn,
     )
     assert any(i.description == "llm" for i in result2.issues)
+
+
+def test_microtask_raw_issue_count_from_llm_fallback(tmp_path: Path) -> None:
+    """run_microtask_review forwards the LLM fallback's raw_issue_count too
+    via _code_review_step's _ReviewStepResult return value."""
+    from software_engineering_team.shared.llm_review import LlmReviewOutput
+
+    config = _build_config()
+    result = run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: LlmReviewOutput(
+            issues=[ReviewIssue(source="code_review", severity="low", description="kept")],
+            raw_issue_count=5,
+        ),
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+    )
+    assert result.raw_issue_count == 5
 
 
 def test_code_review_agent_receives_architecture_and_spec_content(tmp_path: Path) -> None:

@@ -705,6 +705,9 @@ describe('CodeReviewPanelComponent', () => {
   // -------------------------------------------------------------------------
   // Pre-existing-bug proposals -> GitHub issues
   // -------------------------------------------------------------------------
+  // Proposal formatting/selection now live in PendingIssueProposalsComponent
+  // (see pending-issue-proposals.component.spec.ts); this component only
+  // gates whether that child is shown and owns the actual create-issues call.
 
   function proposal(id: string, over: Record<string, unknown> = {}): PendingIssueProposal {
     return {
@@ -742,29 +745,10 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.hasProposals(running)).toBe(false);
     const done = terminalRecordWith([proposal('p0')]);
     expect(component.hasProposals(done)).toBe(true);
-    expect(component.proposalsFor(done).length).toBe(1);
-    expect(component.openProposals(done).length).toBe(1);
+    expect(component.hasProposals(terminalRecordWith([]))).toBe(false);
   });
 
-  it('formats a proposal location (path:line, path, or empty)', async () => {
-    await setup();
-    expect(component.proposalLocation(proposal('p0'))).toBe('a.py:3');
-    expect(component.proposalLocation(proposal('p0', { line: null }))).toBe('a.py');
-    expect(component.proposalLocation(proposal('p0', { file_path: '', line: null }))).toBe('');
-  });
-
-  it('toggles proposal selection and tracks the count', async () => {
-    await setup();
-    expect(component.isProposalSelected('j1', 'p0')).toBe(false);
-    component.toggleProposal('j1', 'p0');
-    expect(component.isProposalSelected('j1', 'p0')).toBe(true);
-    expect(component.selectedCount('j1')).toBe(1);
-    component.toggleProposal('j1', 'p0');
-    expect(component.isProposalSelected('j1', 'p0')).toBe(false);
-    expect(component.selectedCount('j1')).toBe(0);
-  });
-
-  it('files selected proposals and merges the updated list back', async () => {
+  it('files the given proposal ids and merges the updated list back', async () => {
     await setup();
     const rec = terminalRecordWith([proposal('p0'), proposal('p1')]);
     integrationsSpy.createGitHubReviewIssues.mockReturnValue(
@@ -779,53 +763,23 @@ describe('CodeReviewPanelComponent', () => {
         ],
       }),
     );
-    component.toggleProposal('j1', 'p0');
-    component.createIssuesFor(rec);
+    component.createIssuesFor(rec, ['p0']);
     expect(integrationsSpy.createGitHubReviewIssues).toHaveBeenCalledWith(
       'acme',
       'widgets',
       'j1',
       ['p0'],
     );
-    // The record's proposals now reflect the filed issue; selection is cleared.
+    // The record's proposals now reflect the filed issue.
     expect(rec.reviewSummary?.pending_issue_proposals?.[0].issue_url).toBe('https://x/issues/5');
-    expect(component.selectedCount('j1')).toBe(0);
-    expect(component.openProposals(rec).length).toBe(1);
     expect(component.isCreatingIssues('j1')).toBe(false);
   });
 
-  it('does nothing when creating issues with no selection', async () => {
+  it('does nothing when creating issues with no ids', async () => {
     await setup();
     const rec = terminalRecordWith([proposal('p0')]);
-    component.createIssuesFor(rec);
+    component.createIssuesFor(rec, []);
     expect(integrationsSpy.createGitHubReviewIssues).not.toHaveBeenCalled();
-  });
-
-  it('drops a proposal skipped server-side from the selection, not just the ones it created', async () => {
-    await setup();
-    const rec = terminalRecordWith([proposal('p0'), proposal('p1')]);
-    // p1 was already filed by another tab before this request landed: the
-    // server skips it (not in `created`) but the returned proposals already
-    // show its issue_url set.
-    integrationsSpy.createGitHubReviewIssues.mockReturnValue(
-      of({
-        job_id: 'j1',
-        created: [
-          { proposal_id: 'p0', issue_number: 5, issue_url: 'https://x/issues/5', title: 't' },
-        ],
-        proposals: [
-          proposal('p0', { issue_number: 5, issue_url: 'https://x/issues/5' }),
-          proposal('p1', { issue_number: 9, issue_url: 'https://x/issues/9' }),
-        ],
-      }),
-    );
-    component.toggleProposal('j1', 'p0');
-    component.toggleProposal('j1', 'p1');
-    component.createIssuesFor(rec);
-    // Both are gone from the selection — p0 because it was just created, p1
-    // because the updated proposal list shows it is no longer open — instead
-    // of p1 lingering selected forever because it was never in `created`.
-    expect(component.selectedCount('j1')).toBe(0);
   });
 
   it('surfaces a create-issue error', async () => {
@@ -834,110 +788,9 @@ describe('CodeReviewPanelComponent', () => {
     integrationsSpy.createGitHubReviewIssues.mockReturnValue(
       throwError(() => ({ error: { detail: 'no scope' } })),
     );
-    component.toggleProposal('j1', 'p0');
-    component.createIssuesFor(rec);
+    component.createIssuesFor(rec, ['p0']);
     expect(component.createIssueErrorFor('j1')).toBe('no scope');
     expect(component.isCreatingIssues('j1')).toBe(false);
-  });
-
-  it('renders the proposals section and creates issues from the template', async () => {
-    integrationsSpy.getGitHubReviewHistory.mockReturnValue(
-      of([
-        {
-          job_id: 'j9',
-          pr_number: 1,
-          pr_url: 'https://example.com/pull/1',
-          status: 'completed',
-          review_summary: {
-            total_issues: 0,
-            inline_comments: 0,
-            event: 'COMMENT',
-            pending_issue_proposals: [proposal('p0', { description: 'latent leak' })],
-          },
-          created_at: '2026-01-01T00:00:00Z',
-        } as CodeReviewRunItem,
-      ]),
-    );
-    integrationsSpy.createGitHubReviewIssues.mockReturnValue(
-      of({
-        job_id: 'j9',
-        created: [
-          { proposal_id: 'p0', issue_number: 1, issue_url: 'https://x/1', title: 't' },
-        ],
-        proposals: [proposal('p0', { issue_number: 1, issue_url: 'https://x/1' })],
-      }),
-    );
-    await setup();
-    component.togglePull(component.pulls[0]);
-    fixture.detectChanges();
-    const host = fixture.nativeElement as HTMLElement;
-    expect(host.querySelector('.cr-proposals')?.textContent).toContain('latent leak');
-    // Select the proposal checkbox, then click "Create GitHub issue(s)".
-    const checkbox = host.querySelector('.cr-proposal__select input') as HTMLInputElement;
-    checkbox.click();
-    fixture.detectChanges();
-    const button = Array.from(host.querySelectorAll('button')).find((b) =>
-      b.textContent?.includes('Create GitHub issue'),
-    ) as HTMLButtonElement;
-    button.click();
-    fixture.detectChanges();
-    expect(integrationsSpy.createGitHubReviewIssues).toHaveBeenCalledWith(
-      'acme',
-      'widgets',
-      'j9',
-      ['p0'],
-    );
-    expect(host.querySelector('.cr-proposal__filed')).toBeTruthy();
-  });
-
-  it('treats a matched-existing proposal as not open/selectable, same as a filed one', async () => {
-    await setup();
-    const rec = terminalRecordWith([
-      proposal('p0', {
-        issue_number: 42,
-        issue_url: 'https://x/issues/42',
-        matched_existing: true,
-      }),
-    ]);
-    expect(component.openProposals(rec).length).toBe(0);
-  });
-
-  it('renders "already tracked" for a matched proposal and "filed" for a Khala-filed one', async () => {
-    integrationsSpy.getGitHubReviewHistory.mockReturnValue(
-      of([
-        {
-          job_id: 'j9',
-          pr_number: 1,
-          pr_url: 'https://example.com/pull/1',
-          status: 'completed',
-          review_summary: {
-            total_issues: 0,
-            inline_comments: 0,
-            event: 'COMMENT',
-            pending_issue_proposals: [
-              proposal('p0', {
-                description: 'already tracked bug',
-                issue_number: 42,
-                issue_url: 'https://x/issues/42',
-                matched_existing: true,
-              }),
-              proposal('p1', {
-                description: 'freshly filed bug',
-                issue_number: 7,
-                issue_url: 'https://x/issues/7',
-              }),
-            ],
-          },
-          created_at: '2026-01-01T00:00:00Z',
-        } as CodeReviewRunItem,
-      ]),
-    );
-    await setup();
-    component.togglePull(component.pulls[0]);
-    fixture.detectChanges();
-    const host = fixture.nativeElement as HTMLElement;
-    expect(host.querySelector('.cr-proposal__matched')?.textContent).toContain('already tracked');
-    expect(host.querySelector('.cr-proposal__filed')?.textContent).toContain('filed');
   });
 
 });

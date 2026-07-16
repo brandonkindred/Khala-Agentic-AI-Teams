@@ -54,7 +54,7 @@ def test_run_llm_review_parses_issues():
         prompts.append(prompt)
         return "raw"
 
-    issues = run_llm_review(
+    out = run_llm_review(
         task=_task(),
         files={"x.py": "code"},
         prompt_template=_PROMPT,
@@ -66,9 +66,10 @@ def test_run_llm_review_parses_issues():
     )
 
     assert len(prompts) == 1  # single call for a small input
-    assert len(issues) == 1
-    assert issues[0].description == "bad code"
-    assert issues[0].file_path == "x.py"
+    assert len(out.issues) == 1
+    assert out.issues[0].description == "bad code"
+    assert out.issues[0].file_path == "x.py"
+    assert out.raw_issue_count == 1  # nothing grounded away, so raw == kept
 
 
 def test_run_llm_review_skips_blank_files():
@@ -79,7 +80,7 @@ def test_run_llm_review_skips_blank_files():
         calls["n"] += 1
         return "raw"
 
-    issues = run_llm_review(
+    out = run_llm_review(
         task=_task(),
         files={"empty.py": "   \n\t"},
         prompt_template=_PROMPT,
@@ -90,7 +91,8 @@ def test_run_llm_review_skips_blank_files():
         warn_threshold=20,
     )
 
-    assert issues == []
+    assert out.issues == []
+    assert out.raw_issue_count == 0
     assert calls["n"] == 0
 
 
@@ -112,7 +114,7 @@ def test_run_llm_review_chunks_large_file_and_skips_failing_chunk(caplog):
     assert len(big) > 60_000  # forces more than one chunk
 
     with caplog.at_level(logging.WARNING, logger="software_engineering_team.shared.llm_review"):
-        issues = run_llm_review(
+        out = run_llm_review(
             task=_task(),
             files={"big.py": big},
             prompt_template=_PROMPT,
@@ -128,7 +130,8 @@ def test_run_llm_review_chunks_large_file_and_skips_failing_chunk(caplog):
     assert "fn_0000" in joined  # head reviewed
     assert "fn_2499" in joined  # tail reviewed, not truncated
     # First chunk raised; remaining chunks each yield one parsed issue.
-    assert len(issues) == calls["n"] - 1
+    assert len(out.issues) == calls["n"] - 1
+    assert out.raw_issue_count == len(out.issues)  # nothing grounded away here
     # The many-chunks warning fired because chunk count exceeded warn_threshold=0.
     assert any(
         rec.levelno == logging.WARNING and "large review" in rec.getMessage()
@@ -204,3 +207,79 @@ def test_run_llm_review_preserves_header_on_oversized_single_line():
     assert len(prompts) > 1  # the oversized line was hard-split across prompts
     assert not any(line in prompt for prompt in prompts)  # no single prompt holds it whole
     assert all("### bundle.py ###" in prompt for prompt in prompts)  # header on every piece
+
+
+def test_run_llm_review_drops_ungrounded_insurance_hallucination(caplog):
+    """Meal-planning task + fabricated Insurance Provider finding is dropped
+    before return (regression for the LLM-fallback hallucination loop)."""
+
+    def parse_insurance(_raw: str):
+        return {
+            "issues": [
+                {
+                    "description": "index.html does not support Insurance Provider ZephyrCare",
+                    "severity": "high",
+                    "file_path": "index.html",
+                    "recommendation": "Add ZephyrCare to the provider dropdown",
+                }
+            ]
+        }
+
+    with caplog.at_level(logging.WARNING, logger="software_engineering_team.shared.llm_review"):
+        out = run_llm_review(
+            task=_task(
+                requirements="Build a meal planning UI for weekly menus",
+                description="Meal planner",
+                acceptance_criteria=["user can plan meals for the week"],
+            ),
+            files={"index.html": "<html><body>Meal Planner</body></html>"},
+            prompt_template=_PROMPT,
+            parse_template=parse_insurance,
+            issue_factory=_Issue,
+            invoke_model=lambda _p: "raw",
+            max_chars=60_000,
+            warn_threshold=20,
+            enable_llm_review_grounding=True,
+        )
+    assert out.issues == []
+    # The raw count is captured before grounding, so a caller can tell "the LLM
+    # fabricated and grounding caught it" apart from "the LLM found nothing".
+    assert out.raw_issue_count >= 1
+    assert len(out.issues) < out.raw_issue_count
+    assert any(
+        rec.levelno == logging.WARNING and "ZephyrCare" in rec.getMessage()
+        for rec in caplog.records
+    ), "Dropped issue should be logged at WARNING with full payload"
+
+
+def test_run_llm_review_grounding_kill_switch_keeps_ungrounded():
+    """enable_llm_review_grounding=False preserves today's behavior (no drop)."""
+
+    def parse_insurance(_raw: str):
+        return {
+            "issues": [
+                {
+                    "description": "index.html does not support Insurance Provider ZephyrCare",
+                    "severity": "high",
+                    "file_path": "index.html",
+                }
+            ]
+        }
+
+    out = run_llm_review(
+        task=_task(
+            requirements="Build a meal planning UI for weekly menus",
+            acceptance_criteria=["user can plan meals for the week"],
+        ),
+        files={"index.html": "<html></html>"},
+        prompt_template=_PROMPT,
+        parse_template=parse_insurance,
+        issue_factory=_Issue,
+        invoke_model=lambda _p: "raw",
+        max_chars=60_000,
+        warn_threshold=20,
+        enable_llm_review_grounding=False,
+    )
+    assert len(out.issues) == 1
+    assert "Insurance Provider" in out.issues[0].description
+    assert out.raw_issue_count == 1  # kill switch still reports the raw count

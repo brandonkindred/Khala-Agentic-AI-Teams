@@ -6,11 +6,10 @@ decompose the orchestrator god-file into named collaborators) — pure structura
 move, no behavior change. Composed onto ``CodingTeamSwarm`` in that module
 alongside the assignment and review mixins.
 
-A few names used here (``MAX_TASK_REVISIONS``, ``ActivityBridge``,
-``_no_change_revisit_cap``, ``_feature_branch_name``) are defined in
-``orchestrator.py`` itself. They are referenced via a late-bound module
-reference (``_orch.NAME``, resolved at call time) rather than imported by name at
-module load time, for two reasons: (1) a module-level
+Names defined in ``orchestrator.py`` (``MAX_TASK_REVISIONS``, ``ActivityBridge``,
+``_feature_branch_name``) are referenced via a late-bound module reference
+(``_orch.NAME``, resolved at call time) rather than imported by name at module
+load time, for two reasons: (1) a module-level
 ``from software_engineering_team.coding_team.orchestrator import NAME`` would be
 a circular import (orchestrator.py imports this module before those names are
 defined in its own namespace), and (2) several of them (``MAX_TASK_REVISIONS``,
@@ -18,6 +17,9 @@ defined in its own namespace), and (2) several of them (``MAX_TASK_REVISIONS``,
 ``software_engineering_team.coding_team.orchestrator`` in tests — a name copied
 at import time would not observe that patch, while a late-bound module attribute
 lookup does.
+
+``_no_change_revisit_cap`` lives in ``progress_config`` and is late-bound the same
+way so tests can monkeypatch it on that module.
 """
 
 from __future__ import annotations
@@ -169,7 +171,7 @@ class _ImplementationMixin:
             - Returns True iff ``no_change_revisits`` has reached the configured no-change cap, i.e.
               the caller should escalate to the Tech Lead instead of bouncing the task again.
         """
-        from software_engineering_team.coding_team import orchestrator as _orch
+        from software_engineering_team.coding_team import progress_config as _pc
 
         digest = self._branch_digest(task, diff=diff)
         if task.last_change_digest and task.last_change_digest == digest:
@@ -177,7 +179,7 @@ class _ImplementationMixin:
         else:
             no_change = 0
         self.graph.update_task(task.id, no_change_revisits=no_change, last_change_digest=digest)
-        return no_change >= _orch._no_change_revisit_cap()
+        return no_change >= _pc._no_change_revisit_cap()
 
     def _escalate_to_tech_lead(self, task: Task) -> None:
         """Hand a task stuck in a no-change loop to the Tech Lead for direction; apply the verdict.

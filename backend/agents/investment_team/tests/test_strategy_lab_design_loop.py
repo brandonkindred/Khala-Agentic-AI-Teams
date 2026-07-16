@@ -1546,3 +1546,30 @@ def test_readiness_sizing_coherence_critical_stalls_loop(
         for c in record.critiques
         for i in c.get("issues", [])
     ), record.critiques
+
+
+def test_design_review_receives_hypothesis_rules_finding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """S5b: the design reviewer must be shown the hypothesis/rules consistency
+    finding so a narrative/DSL mismatch is reconciled in the design loop. Here the
+    hypothesis is about volume/OBV while the rules use RSI — a genuine mismatch —
+    so the finding must appear in the reviewer's deterministic findings."""
+    orch = StrategyLabOrchestrator()
+
+    mismatched = {**_spec_dict(), "hypothesis": "A volume-driven breakout on rising OBV."}
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (mismatched, "scripted"))
+
+    captured: Dict[str, Any] = {}
+
+    def _review(spec, findings, prior_critiques=None):
+        captured["findings"] = list(findings)
+        return SpecCritique(ready=True, rationale="ok")
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _review)
+    monkeypatch.setattr(orch.design_agent, "revise", lambda *a, **kw: (mismatched, "x"))
+    _force_synthesis_skip(monkeypatch, orch, _VALID_CODE)
+    _short_circuit_synthesis(monkeypatch)
+
+    orch.run_cycle(prior_records=[], config=_config())
+
+    details = [getattr(f, "details", "") for f in captured.get("findings", [])]
+    assert any("Hypothesis/rules consistency" in d for d in details), details

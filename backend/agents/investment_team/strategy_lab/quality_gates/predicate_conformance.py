@@ -153,7 +153,7 @@ class _ShadowContext:
         source: str = "close",
         **params,
     ) -> Optional[float]:
-        """Shadow mirror of ``StrategyContext.indicator`` (issue #703).
+        """Shadow mirror of ``StrategyContext.indicator``.
 
         Routes through the same shared ``indicator_value`` accessor the real
         context uses, so a strategy that reads indicators via ``ctx.indicator``

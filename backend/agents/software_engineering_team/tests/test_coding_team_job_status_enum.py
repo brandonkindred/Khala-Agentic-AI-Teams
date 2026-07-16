@@ -65,7 +65,7 @@ def test_hitl_terminal_success_statuses_regression_lock():
 
 def test_hitl_terminal_statuses_regression_lock():
     # _TERMINAL_STATUSES is module-private by convention only; this suite already reaches into
-    # underscore-prefixed internals elsewhere (job_store._client, orch_mod._render_context_file,
+    # underscore-prefixed internals elsewhere (job_store._client, repo_context._render_context_file,
     # cache._entries) so a direct regression-lock assertion here matches established style, on
     # top of (not instead of) the behavioral coverage below via hitl.is_terminal().
     assert hitl._TERMINAL_STATUSES == frozenset(
