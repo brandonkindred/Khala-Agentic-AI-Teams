@@ -1,0 +1,129 @@
+<div class="cr-pull-detail">
+  <!-- PR details -->
+  <div class="cr-pull-detail__pr">
+    <span class="cr-pr-number">#{{ pull.number }}</span>
+    <span class="cr-pr-title">{{ pull.title }}</span>
+    @if (pull.draft) {
+      <span class="cr-chip cr-chip--draft">draft</span>
+    }
+    <!-- One PR link per pull request, hoisted out of the per-run rows. -->
+    @if (pull.html_url) {
+      <a
+        class="cr-pull-detail__link"
+        [href]="pull.html_url"
+        target="_blank"
+        rel="noopener"
+        aria-label="Open pull request on GitHub"
+      >
+        <mat-icon>open_in_new</mat-icon>
+      </a>
+    }
+  </div>
+  <p class="cr-pull-detail__meta">
+    <code>{{ pull.head }}</code> → <code>{{ pull.base }}</code>
+    @if (pull.author) { · by {{ pull.author }} }
+  </p>
+  @if (pull.body_preview) {
+    <p class="cr-pull-detail__preview">{{ pull.body_preview }}</p>
+  }
+  <p class="cr-pull-detail__hint">
+    The reviewer will read the diff and post one GitHub review with inline comments on the
+    problematic lines.
+  </p>
+
+  <div class="cr-pull-detail__actions">
+    <button mat-flat-button color="primary" (click)="onStartReview()" [disabled]="starting">
+      @if (starting) {
+        <mat-spinner diameter="18"></mat-spinner>
+        Starting…
+      } @else {
+        <ng-container>
+          <mat-icon>play_arrow</mat-icon>
+          Start Review
+        </ng-container>
+      }
+    </button>
+  </div>
+
+  @if (reviewError) {
+    <app-inline-banner variant="error" [message]="reviewError" />
+  }
+
+  <!-- All review runs for this PR (newest-first). Reused below by the proposals loop. -->
+  @if (reviews.length > 0) {
+    <table class="cr-reviews-table">
+      <thead>
+        <tr>
+          <th scope="col">Status</th>
+          <th scope="col">Outcome</th>
+          <th scope="col">Findings</th>
+          <th scope="col">Severity</th>
+          <th scope="col">Started</th>
+          <th scope="col">Duration</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (rec of reviews; track rec.jobId) {
+          <tr>
+            <td>
+              <span class="cr-job-status cr-job-status--{{ rec.status }}">
+                {{ rec.status }}
+              </span>
+              @if (!isRecordTerminal(rec) && !rec.error) {
+                <mat-spinner diameter="14"></mat-spinner>
+              }
+            </td>
+            <td>
+              @if (rec.error) {
+                <span class="cr-job-status--failed">{{ rec.error }}</span>
+              } @else if (rec.reviewSummary) {
+                <span class="cr-chip cr-chip--event">{{ rec.reviewSummary.event }}</span>
+              } @else {
+                —
+              }
+            </td>
+            <td>
+              @if (rec.reviewSummary; as s) {
+                <span class="cr-findings">
+                  <span class="cr-chip">{{ s.total_issues }} finding(s)</span>
+                  <span class="cr-chip">{{ s.inline_comments }} inline</span>
+                  <span class="cr-chip">{{ commentFindings(s) }} comments</span>
+                </span>
+              } @else {
+                —
+              }
+            </td>
+            <td>
+              @if (severityEntries(rec.reviewSummary); as sev) {
+                @if (sev.length > 0) {
+                  <span class="cr-findings">
+                    @for (e of sev; track e.level) {
+                      <span class="cr-chip cr-chip--sev-{{ e.level }}">{{ e.count }} {{ e.level }}</span>
+                    }
+                  </span>
+                } @else {
+                  —
+                }
+              }
+            </td>
+            <td>{{ rec.startedAt | date: 'short' }}</td>
+            <td>{{ reviewDuration(rec) ?? '—' }}</td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  }
+
+  <!-- Pre-existing bugs the reviewer found in unchanged code:
+       offered as GitHub-issue candidates, one block per run. -->
+  @for (rec of reviews; track rec.jobId) {
+    @if (hasProposals(rec)) {
+      <app-pending-issue-proposals
+        [proposals]="rec.reviewSummary!.pending_issue_proposals!"
+        [creatingIssues]="isCreatingIssues(rec.jobId)"
+        [createIssueError]="createIssueErrorFor(rec.jobId)"
+        (createIssuesRequested)="onCreateIssues(rec, $event)"
+      />
+    }
+  }
+</div>

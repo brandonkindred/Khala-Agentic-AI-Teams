@@ -1,8 +1,9 @@
 """Unit tests for shared helpers.
 
 Covers job_store, environment_store, logging_context, phase_state,
-provisioner_state edge cases, llm_client, and tool_manifest helpers
-that aren't already exercised in the integration matrix.
+provisioner_state edge cases, llm_client, tool_manifest, and
+tool_agent_registry helpers that aren't already exercised in the
+integration matrix.
 """
 
 from __future__ import annotations
@@ -1000,3 +1001,19 @@ def test_clear_compensations_on_missing_agent(tmp_path: Path) -> None:
     store = ProvisionerStateStore("xx", storage_dir=tmp_path)
     # Should be a no-op rather than raising.
     store.clear_compensations("missing")
+
+
+# -------------------------------------------------------------------------
+# ProvisionerStateStore atomic-write failure cleanup.
+# -------------------------------------------------------------------------
+
+
+def test_provisioner_state_save_handles_io_error(tmp_path: Path, monkeypatch) -> None:
+    from agent_provisioning_team.shared.provisioner_state import ProvisionerStateStore
+
+    store = ProvisionerStateStore("x", storage_dir=tmp_path)
+
+    # Force os.replace to raise to exercise the cleanup path.
+    with patch("os.replace", side_effect=OSError("io")):
+        with pytest.raises(OSError):
+            store.put("a1", {"x": 1})

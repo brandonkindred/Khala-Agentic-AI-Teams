@@ -10,7 +10,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from _api_test_utils import NoOpThread
 from _api_test_utils import api_main as _api_main
 from _api_test_utils import create_job as _create_job
 from fastapi.testclient import TestClient
@@ -131,8 +130,8 @@ def test_resume_job_happy(client: TestClient, monkeypatch) -> None:
         request_payload={"brief": "x"},
     )
 
-    # Threading replacement so we don't actually run the pipeline
-    monkeypatch.setattr(_api_main.threading, "Thread", NoOpThread)
+    # Intercept the bounded async-job pool so we don't actually run the pipeline.
+    monkeypatch.setattr(_api_main, "_submit_async_job", lambda fn, *a, **kw: None)
 
     r = client.post(f"/job/{job_id}/resume")
     assert r.status_code == 200
@@ -158,7 +157,8 @@ def test_restart_job_happy(client: TestClient, monkeypatch, fake_job_client) -> 
     except ImportError:
         pass
 
-    monkeypatch.setattr(_api_main.threading, "Thread", NoOpThread)
+    # Intercept the bounded async-job pool so we don't actually run the pipeline.
+    monkeypatch.setattr(_api_main, "_submit_async_job", lambda fn, *a, **kw: None)
 
     r = client.post(f"/job/{job_id}/restart")
     assert r.status_code == 200
