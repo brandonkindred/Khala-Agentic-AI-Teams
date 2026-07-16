@@ -14,7 +14,6 @@ Execution:
 
 from __future__ import annotations
 
-import functools
 import logging
 import sys
 import time
@@ -420,6 +419,11 @@ def _build_planning_answer_callback(job_id: str) -> Callable[[list], list]:
     return _cb
 
 
+# Fallback technology_preferences for the Architecture Expert when the client hasn't
+# specified tech_constraints during Planning intake/discovery; this repo's own stack.
+_DEFAULT_TECHNOLOGY_PREFERENCES = ["Python", "FastAPI", "PostgreSQL", "Docker"]
+
+
 def _run_architecture_for_planning(
     arch_agent: Any,
     spec_content: str,
@@ -441,6 +445,10 @@ def _run_architecture_for_planning(
     Postconditions:
         - Returns ``architecture.overview`` (possibly ``""``) on success, or ``None`` when
           the agent yields no architecture or raises.
+        - ``technology_preferences`` passed to the architecture agent are drawn from
+          ``client_context["tech_constraints"]`` (the ``ClientContext.tech_constraints``
+          gathered during Planning intake/discovery) when present and non-empty, falling
+          back to ``_DEFAULT_TECHNOLOGY_PREFERENCES`` otherwise.
     Invariants:
         - Never propagates an exception into the Planning workflow.
     """
@@ -456,6 +464,11 @@ def _run_architecture_for_planning(
     acceptance = ["Deliver according to spec and planning artifacts."]
     if client_context and client_context.get("success_criteria"):
         acceptance = list(client_context["success_criteria"])
+    technology_preferences = (
+        list(client_context["tech_constraints"])
+        if client_context and client_context.get("tech_constraints")
+        else list(_DEFAULT_TECHNOLOGY_PREFERENCES)
+    )
     requirements = ProductRequirements(
         title="Project",
         description=req_desc,
@@ -492,7 +505,7 @@ def _run_architecture_for_planning(
     }
     arch_input = ArchitectureInput(
         requirements=requirements,
-        technology_preferences=["Python", "FastAPI", "PostgreSQL", "Docker"],
+        technology_preferences=technology_preferences,
         project_overview=project_overview,
         features_and_functionality_doc=features_doc or None,
     )
@@ -507,23 +520,44 @@ def _run_architecture_for_planning(
         return None
 
 
-def _make_planning_architecture_fn(arch_agent: Any) -> Callable[..., Optional[str]]:
+def _make_planning_architecture_fn(
+    arch_agent_provider: Callable[[], Any],
+) -> Callable[..., Optional[str]]:
     """Build the architecture callback handed to the Planning document-production phase.
 
     The merged Architecture Expert runs inside Planning: this factory binds the SE
     architecture agent into the callback Planning invokes (by keyword) to turn the
     validated spec / PRD / client context into a high-level architecture overview.
 
+    The agent is resolved *lazily* through ``arch_agent_provider`` when Planning first
+    invokes the callback, and *defensively*: a provider that raises (e.g. the agent
+    cannot be built because no LLM provider is configured) degrades to no architecture
+    overview rather than aborting the Planning phase. Passing a provider — rather than an
+    already-resolved agent — keeps the ``_LazyAgentRegistry`` subscript out of the caller's
+    ``try`` boundary so its construction cost and failures land inside this guard.
+
     Preconditions:
-        - ``arch_agent`` exposes ``run(ArchitectureInput) -> ArchitectureOutput`` (the SE
-          ``ArchitectureExpertAgent``; duck-typed so tests may pass a mock).
+        - ``arch_agent_provider`` is a zero-argument callable returning an object that
+          exposes ``run(ArchitectureInput) -> ArchitectureOutput`` (the SE
+          ``ArchitectureExpertAgent``; duck-typed so tests may pass a mock). It is called
+          once per callback invocation and may raise.
     Postconditions:
         - Returns a callback ``(spec_content, prd_content, repo_path, client_context)
           -> Optional[str]`` that never raises: it yields the architecture overview string
-          (possibly ``""``) on success, or ``None`` when the agent produces no architecture
-          or raises.
+          (possibly ``""``) on success, or ``None`` when the provider raises, the agent
+          produces no architecture, or the agent raises.
     """
-    return functools.partial(_run_architecture_for_planning, arch_agent)
+
+    def _fn(spec_content, prd_content, repo_path, client_context) -> Optional[str]:
+        try:
+            arch_agent = arch_agent_provider()
+        except Exception:
+            return None
+        return _run_architecture_for_planning(
+            arch_agent, spec_content, prd_content, repo_path, client_context
+        )
+
+    return _fn
 
 
 def _get_task_stats() -> Dict[str, Any]:
@@ -945,7 +979,7 @@ def run_orchestrator(
             use_product_analysis=False,
             llm=get_client("project_planning"),
             job_updater=_planning_job_updater,
-            run_architecture_fn=_make_planning_architecture_fn(agents["architecture"]),
+            run_architecture_fn=_make_planning_architecture_fn(lambda: agents["architecture"]),
             # Never let Planning silently auto-decide a clarification question on this path:
             # escalate to the user, and fail closed if escalation is somehow unavailable.
             answer_callback=_build_planning_answer_callback(job_id),
