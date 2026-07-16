@@ -108,8 +108,6 @@ def test_blog_copy_editor_agent_run() -> None:
     assert isinstance(result, CopyEditorOutput)
     assert result.summary
     assert isinstance(result.feedback_items, list)
-    # DummyLLMClient may return zero or more feedback items depending on prompt
-    assert len(result.feedback_items) >= 0
     if result.feedback_items:
         item = result.feedback_items[0]
         assert item.category
