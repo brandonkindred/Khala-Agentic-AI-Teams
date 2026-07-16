@@ -68,7 +68,8 @@ class BlogCopyEditorAgent:
             - output is a CopyEditorOutput.
             - path is a non-empty filesystem path.
         Postconditions:
-            - Returns True iff the JSON was written to a resolved copy of ``path``.
+            - Returns True iff the JSON was successfully written to the resolved
+              form of ``path`` (``Path(path).resolve()``).
             - Returns False on any filesystem/serialization error; in that case a
               WARNING is logged and no exception propagates.
         """
