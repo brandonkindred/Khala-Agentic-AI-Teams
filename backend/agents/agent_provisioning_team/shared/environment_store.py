@@ -350,7 +350,12 @@ class EnvironmentStore:
               produce a duplicate entry); the primary ``storage_dir`` is scanned
               first, so its record wins. Results are filtered to ``status`` when
               given and sorted by ``created_at`` descending.
-            * Unparseable or incomplete files are skipped; never raises.
+            * Unparseable or incomplete files are skipped; never raises. A record
+              whose ``agent_id`` fails :func:`safe_path_component` (e.g. a
+              path-traversal string smuggled into the file's contents rather than
+              its filename) is likewise skipped, so every ``agent_id`` this method
+              returns is safe for callers to use in a path, for display, or for
+              logging.
         """
         environments: List[EnvironmentInfo] = []
         seen: set[str] = set()
@@ -363,12 +368,13 @@ class EnvironmentStore:
                     try:
                         data = json.loads(env_file.read_text(encoding="utf-8"))
                         env = EnvironmentInfo.from_dict(data)
+                        safe_path_component(env.agent_id, kind="agent_id")
                         if env.agent_id in seen:
                             continue
                         seen.add(env.agent_id)
                         if status is None or env.status == status:
                             environments.append(env)
-                    except (json.JSONDecodeError, KeyError):
+                    except (json.JSONDecodeError, KeyError, ValueError):
                         continue
 
         environments.sort(key=lambda e: e.created_at or "", reverse=True)

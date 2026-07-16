@@ -209,6 +209,28 @@ def test_environment_store_list_all_skips_corrupt(tmp_path: Path) -> None:
     assert {e.agent_id for e in out} == {"a1"}
 
 
+def test_environment_store_list_all_skips_unsafe_agent_id(tmp_path: Path) -> None:
+    """A file whose *contents* declare a path-traversal agent_id must be skipped.
+
+    The filename alone is validated on write (via safe_path_component), but
+    list_all discovers records by globbing the directory, so a file planted
+    directly on disk can carry an agent_id that was never checked.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(agent_id="a1", container_id="c1", container_name="c1", workspace_path="/w")
+    )
+    # Contents disagree with the (safe) filename: agent_id is a traversal string.
+    (tmp_path / "malicious.json").write_text(
+        json.dumps({"agent_id": "../../etc/passwd", "container_id": "c2", "container_name": "c2"}),
+        encoding="utf-8",
+    )
+
+    out = store.list_all()
+    # Only the legitimately registered environment shows up.
+    assert {e.agent_id for e in out} == {"a1"}
+
+
 def test_environment_store_get_handles_corrupt(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
     (tmp_path / "x.json").write_text("not json", encoding="utf-8")
