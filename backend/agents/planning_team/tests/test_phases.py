@@ -271,6 +271,38 @@ def test_run_discovery_with_mock_llm():
     assert artifacts["discovery"]["opportunity_statement"] == "Y"
 
 
+def test_run_discovery_extracts_tech_constraints():
+    """Explicitly-required technologies flow from the LLM into ClientContext.tech_constraints.
+
+    This is what lets the SE Architecture Expert derive technology_preferences from the
+    project instead of always falling back to the default stack.
+    """
+    context = {
+        "client_context": ClientContext(client_name="Acme"),
+        "spec_content": "Must be built in Rust with PostgreSQL.",
+    }
+    llm = make_llm(
+        '{"problem_summary": "Need X", "opportunity_statement": "Y",'
+        ' "target_users": ["u1"], "success_criteria": ["c1"],'
+        ' "tech_constraints": ["Rust", "PostgreSQL"], "assumptions": []}'
+    )
+    ctx_update, artifacts = run_discovery(context, llm=llm)
+    cc = ctx_update["client_context"]
+    assert cc.tech_constraints == ["Rust", "PostgreSQL"]
+    assert artifacts["discovery"]["tech_constraints"] == ["Rust", "PostgreSQL"]
+
+
+def test_run_discovery_absent_tech_constraints_defaults_empty():
+    """When the LLM omits tech_constraints, ClientContext keeps the empty default."""
+    context = {"client_context": ClientContext(), "spec_content": "Some material"}
+    llm = make_llm(
+        '{"problem_summary": "P", "opportunity_statement": "",'
+        ' "target_users": [], "success_criteria": [], "assumptions": []}'
+    )
+    ctx_update, _ = run_discovery(context, llm=llm)
+    assert ctx_update["client_context"].tech_constraints == []
+
+
 def test_run_discovery_brief_only_and_spec_only():
     for key in ("initial_brief", "spec_content"):
         context = {"client_context": ClientContext(), key: "Some material"}
@@ -287,11 +319,13 @@ def test_run_discovery_multi_section_unions_lists():
     responses = {
         "Heading 0": (
             '{"problem_summary": "P1", "opportunity_statement": "O1",'
-            ' "target_users": ["admin", "user"], "success_criteria": ["fast"], "assumptions": []}'
+            ' "target_users": ["admin", "user"], "success_criteria": ["fast"],'
+            ' "tech_constraints": ["Rust"], "assumptions": []}'
         ),
         "Heading 1": (
             '{"problem_summary": "P2", "opportunity_statement": "O2",'
-            ' "target_users": ["User", "guest"], "success_criteria": ["fast", "cheap"], "assumptions": ["x"]}'
+            ' "target_users": ["User", "guest"], "success_criteria": ["fast", "cheap"],'
+            ' "tech_constraints": ["rust", "Postgres"], "assumptions": ["x"]}'
         ),
     }
     context = {
@@ -305,6 +339,8 @@ def test_run_discovery_multi_section_unions_lists():
     assert cc.problem_summary == "P1"
     assert sorted(u.lower() for u in cc.target_users) == ["admin", "guest", "user"]
     assert sorted(cc.success_criteria) == ["cheap", "fast"]
+    # tech_constraints union: case-insensitive dedupe keeps the first-seen casing.
+    assert cc.tech_constraints == ["Rust", "Postgres"]
 
 
 def test_run_discovery_accepts_dict_client_context():
