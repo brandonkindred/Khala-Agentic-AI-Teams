@@ -286,12 +286,19 @@ class BlogCopyEditorAgent:
                 # strands wraps model failures in EventLoopException; unwrap to classify.
                 cause = e.original_exception if isinstance(e, EventLoopException) else e
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
-                    # Transient transport error after the client's own retries: re-raise so
-                    # Temporal (or the caller) owns the retry rather than a blocking sleep here.
+                    # Transient transport error after the client's own retries: re-raise the
+                    # UNWRAPPED cause so Temporal (or the caller) owns the retry rather than a
+                    # blocking sleep here. It must be the cause, not `e`: the Temporal stage
+                    # funnel (_run_stage) catches only LLMRateLimitError/LLMTemporaryError to
+                    # trigger a retry — re-raising the EventLoopException wrapper would slip
+                    # past it into the terminal-failure handler. `raise cause` inside this
+                    # except block still chains the wrapper via __context__ for debugging.
                     # Log at the agent boundary so it is visible in thread mode too (outside
                     # Temporal, which would otherwise be the only logger).
-                    logger.warning("Copy editor hit a transient LLM error, re-raising: %s", e)
-                    raise
+                    logger.warning(
+                        "Copy editor hit a transient LLM error, re-raising for retry: %s", cause
+                    )
+                    raise cause
                 # Any other unexpected error (a non-transient LLM failure, or a bug like
                 # AttributeError) degrades to a manual-review fallback rather than crashing
                 # the draft stage. The traceback is logged at ERROR level so the root cause

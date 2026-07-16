@@ -316,18 +316,26 @@ def test_invoke_llm_raw_transient_error_reraises(monkeypatch) -> None:
     assert calls["n"] == 1  # no blocking retry here
 
 
-def test_invoke_llm_wrapped_transient_error_reraises(monkeypatch) -> None:
-    """A transient error wrapped in strands' EventLoopException is unwrapped and re-raised."""
+def test_invoke_llm_wrapped_transient_error_reraises_unwrapped(monkeypatch) -> None:
+    """A transient error wrapped in EventLoopException re-raises as the UNWRAPPED cause.
+
+    The Temporal stage funnel catches only LLMRateLimitError/LLMTemporaryError to trigger
+    a retry, so re-raising the EventLoopException wrapper would land in its terminal-failure
+    handler instead. The unwrapped cause must propagate.
+    """
     agent = _make_agent()
+    wrapped = LLMRateLimitError("429 after client retries")
 
     def side_effect(prompt: str) -> str:
-        raise EventLoopException(LLMRateLimitError("429 after client retries"))
+        raise EventLoopException(wrapped)
 
     _patch_agent(monkeypatch, side_effect)
 
-    # Without the unwrap this would slip past the transient check into the fallback.
-    with pytest.raises(EventLoopException):
+    with pytest.raises(LLMRateLimitError) as excinfo:
         agent._invoke_editor_llm("base")
+    # The exact unwrapped instance propagates, not the EventLoopException wrapper.
+    assert excinfo.value is wrapped
+    assert not isinstance(excinfo.value, EventLoopException)
 
 
 def test_invoke_llm_non_transient_error_degrades_to_fallback(monkeypatch) -> None:
