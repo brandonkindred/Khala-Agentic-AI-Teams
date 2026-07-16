@@ -80,6 +80,19 @@ def test_environment_store_register_rejects_none(tmp_path: Path) -> None:
         store.register(None)
 
 
+def test_environment_store_register_rejects_empty_agent_id(tmp_path: Path) -> None:
+    store = EnvironmentStore(storage_dir=tmp_path)
+    with pytest.raises(ValueError, match="agent_id must not be empty"):
+        store.register(
+            StoreEnvInfo(
+                agent_id="",
+                container_id="c1",
+                container_name="c1",
+                workspace_path="/w",
+            )
+        )
+
+
 def test_environment_store_update_status(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
 
