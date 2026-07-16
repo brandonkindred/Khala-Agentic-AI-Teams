@@ -324,7 +324,7 @@ def test_slack_oauth_connect_returns_url_and_client_id():
     assert resp.status_code == 200
     data = resp.json()
     assert "slack.com/oauth/v2/authorize" in data["url"]
-    assert data["client_id"] == "cid-123"
+    assert data["client_id"] == "opaque-cid"
     assert "test-state-xyz" in data["url"]
 
 
