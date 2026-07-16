@@ -113,6 +113,13 @@ def _resolve_physical_path_in_repo(root: Path, full_path: Path) -> Optional[Path
     Keying the rollback manifest by this realpath is what makes an alias share the
     one earliest snapshot instead of re-snapshotting already-failed bytes.
 
+    Limitation:
+        ``realpath`` does not coalesce *hard links* (two directory entries for one
+        inode resolve to two distinct paths), so writing one physical file through
+        two hard-linked names within a single microtask is not deduplicated. This is
+        left unsupported deliberately: git stores no hard links, so a freshly-cloned
+        worktree cannot contain them, making this unreachable in the pipeline.
+
     Postconditions:
         Returns the fully-resolved path when it is strictly inside ``root``; ``None``
         when it resolves to ``root`` itself or escapes it (a write through a link that
