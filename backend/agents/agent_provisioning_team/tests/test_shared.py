@@ -38,6 +38,20 @@ def test_environment_info_from_dict_roundtrip() -> None:
     assert restored.tools_provisioned == ["pg", "redis"]
 
 
+def test_environment_store_defaults_under_agent_cache(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path / "agents"))
+    from agent_provisioning_team.shared.environment_store import (
+        EnvironmentStore,
+        default_environments_dir,
+    )
+
+    expected = tmp_path / "agents" / "agent_provisioning" / "environments"
+    assert default_environments_dir() == expected
+    store = EnvironmentStore()
+    assert store.storage_dir == expected
+    assert expected.is_dir()
+
+
 def test_environment_store_register_get_remove(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
     assert store.get("missing") is None

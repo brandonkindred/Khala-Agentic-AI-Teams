@@ -5,12 +5,27 @@ Maintains mapping of agent IDs to their container information.
 """
 
 import json
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-DEFAULT_ENVIRONMENTS_DIR = Path(".agent_cache/provisioning_environments")
+
+def default_environments_dir() -> Path:
+    """Resolve the durable on-disk environment registry directory.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Returns ``${AGENT_CACHE:-.agent_cache}/agent_provisioning/environments``
+          as a ``Path`` (directory need not exist yet).
+    """
+    root = Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
+    return root / "agent_provisioning" / "environments"
+
+
+DEFAULT_ENVIRONMENTS_DIR = default_environments_dir()
 
 _lock = threading.Lock()
 
@@ -72,7 +87,7 @@ class EnvironmentStore:
     """Store for tracking active agent environments."""
 
     def __init__(self, storage_dir: Optional[Path] = None) -> None:
-        self.storage_dir = storage_dir or DEFAULT_ENVIRONMENTS_DIR
+        self.storage_dir = Path(storage_dir) if storage_dir is not None else default_environments_dir()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
     def _env_file(self, agent_id: str) -> Path:

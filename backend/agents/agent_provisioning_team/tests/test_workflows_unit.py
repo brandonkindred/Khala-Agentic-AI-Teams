@@ -90,6 +90,10 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
                 "tool_name": call["args"][2],
                 "success": True,
                 "provisioner_key": "x",
+                "credentials": {
+                    "tool_name": call["args"][2],
+                    "connection_string": f"conn-{call['args'][2]}",
+                },
             },
             "record_account_provisioning_activity": {"success": True, "tool_results": []},
             "audit_activity": {"passed": True, "verifications": []},
@@ -114,6 +118,8 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
     assert "audit_activity" in fn_names
     assert "documentation_activity" in fn_names
     assert "deliver_activity" in fn_names
+    assert _call(stub, "documentation_activity")["args"][3]["postgresql"]["connection_string"] == "conn-postgresql"
+    assert _call(stub, "deliver_activity")["args"][3]["redis"]["connection_string"] == "conn-redis"
 
 
 @pytest.mark.asyncio

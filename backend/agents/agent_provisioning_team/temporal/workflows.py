@@ -98,6 +98,38 @@ class AgentProvisioningWorkflow:
         ]
         return tool_results_dump, succeeded, failures
 
+    @staticmethod
+    def _merge_enriched_credentials(
+        credentials_by_tool: dict[str, dict[str, Any]], tool_results_dump: list[dict]
+    ) -> dict[str, dict[str, Any]]:
+        """Merge provisioner-enriched credential fields back into the credential map.
+
+        Provisioners may mutate ``GeneratedCredentials`` during per-tool provision
+        (for example connection strings or SSH key material). Documentation and
+        deliver need those enriched values, while the raw credential-generation
+        snapshot only contains the pre-provision fields.
+
+        Preconditions:
+            * ``credentials_by_tool`` is keyed by tool name.
+            * ``tool_results_dump`` entries are serializable tool-result dumps.
+        Postconditions:
+            * Returns a new mapping where any successful tool result carrying a
+              ``credentials`` dump overlays that dump onto the same tool key.
+            * Tools without enriched credentials preserve their original entry.
+        """
+        merged = {name: dict(payload) for name, payload in credentials_by_tool.items()}
+        for result in tool_results_dump:
+            if not isinstance(result, dict) or not result.get("success"):
+                continue
+            tool_name = result.get("tool_name")
+            creds = result.get("credentials")
+            if not tool_name or not isinstance(creds, dict):
+                continue
+            base = dict(merged.get(tool_name, {}))
+            base.update(creds)
+            merged[tool_name] = base
+        return merged
+
     async def _run_tool_provisioning_phase(
         self,
         job_id: str,
@@ -407,6 +439,7 @@ class AgentProvisioningWorkflow:
                 prior,
             )
             succeeded_tools = list(succeeded)
+            credentials_by_tool = self._merge_enriched_credentials(credentials_by_tool, tool_results_dump)
 
             if failures:
                 await self._compensate_failed_tools(agent_id, succeeded, job_id)
