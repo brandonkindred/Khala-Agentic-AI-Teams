@@ -8,6 +8,8 @@ predicate-side validators.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from pydantic import ValidationError
 
@@ -118,6 +120,16 @@ def test_format_number_renders_integers_as_int() -> None:
 def test_format_number_renders_floats_with_repr() -> None:
     out = _format_number(0.05)
     assert out in {"0.05", str(0.05)}
+
+
+def test_format_number_avoids_scientific_notation_for_small_floats() -> None:
+    # repr(1e-05) == "1e-05"; the adapter's decimal-only regex (\d+(?:\.\d+)?)
+    # can't parse scientific notation, so the fallback must never emit one.
+    for value in (1e-5, -1e-5, 1.5e-8):
+        out = _format_number(value)
+        assert "e" not in out.lower()
+        assert float(out) == value
+        assert re.fullmatch(r"-?\d+(?:\.\d+)?", out)
 
 
 def test_format_number_rejects_non_finite() -> None:
