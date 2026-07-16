@@ -107,7 +107,10 @@ def run_setup(
             status="running",
             tools_provisioned=existing.tools_provisioned if existing else [],
             created_at=existing.created_at if existing else None,
-            updated_at=datetime.now(timezone.utc).isoformat(),
+            # Only stamp a fresh updated_at when replacing an existing record;
+            # for a brand-new registration, leave it unset so it defaults to
+            # the same created_at value rather than a few microseconds before it.
+            updated_at=(datetime.now(timezone.utc).isoformat() if existing else None),
         )
     )
 

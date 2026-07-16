@@ -103,6 +103,8 @@ def test_run_setup_creates_new_container(tmp_path: Path) -> None:
     assert result.success is True
     assert result.environment.container_id == "c-new"
     assert env_store.exists("a2")
+    stored = env_store.get("a2")
+    assert stored.updated_at == stored.created_at
 
 
 def test_run_setup_preserves_created_at_and_refreshes_updated_at_on_reregister(
