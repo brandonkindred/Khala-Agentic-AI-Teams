@@ -216,6 +216,7 @@ Growing the collective is a first-class feature, not an afterthought — it's th
 
 ### Core Dev
 - [`backend/agents/software_engineering_team/`](backend/agents/software_engineering_team/README.md) — the flagship SE pipeline (planning, coding, review, release)
+- [`backend/agents/software_engineering_team/coding_team/`](backend/agents/software_engineering_team/coding_team/) — tech lead + specialists wired to a task graph; no README yet
 - [`backend/agents/planning_team/`](backend/agents/planning_team/README.md)
 - [`backend/agents/ai_systems_team/`](backend/agents/ai_systems_team/README.md)
 - [`backend/agents/agent_provisioning_team/`](backend/agents/agent_provisioning_team/README.md)
