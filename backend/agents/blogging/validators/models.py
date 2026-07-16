@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from agents.blogging.shared.gate_report import GateReport, GateStatus
 from pydantic import BaseModel, Field
-from shared.gate_report import GateReport, GateStatus
 
 
 class CheckResult(BaseModel):

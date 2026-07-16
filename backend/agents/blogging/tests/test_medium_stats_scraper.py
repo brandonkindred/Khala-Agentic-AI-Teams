@@ -1,7 +1,7 @@
 """Unit tests for Medium stats parsing helpers (no Playwright)."""
 
-from blog_medium_stats_agent.models import MediumPostStats, MediumStatsReport
-from blog_medium_stats_agent.scraper import (
+from agents.blogging.blog_medium_stats_agent.models import MediumPostStats, MediumStatsReport
+from agents.blogging.blog_medium_stats_agent.scraper import (
     extract_posts_from_html,
     parse_metrics_from_text,
     parse_number,

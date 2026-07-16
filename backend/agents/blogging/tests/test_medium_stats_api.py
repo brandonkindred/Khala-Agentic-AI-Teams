@@ -7,7 +7,7 @@ required.  The async tests still poll a real background thread for completion.
 import time
 
 import pytest
-from _api_test_utils import load_api_module
+from _api_test_utils import load_isolated_api_main
 from fastapi.testclient import TestClient
 
 # A private module instance (not the shared `_api_test_utils.api_main`): these
@@ -15,13 +15,13 @@ from fastapi.testclient import TestClient
 # api/main.py's real daemon worker pool. Sharing the module with test_api_unit
 # (which pokes the same queue directly, assuming no worker is draining it)
 # would race the two and hang — see _api_test_utils.py's module docstring.
-_api_main = load_api_module("blogging_api_main_medium")
+_api_main = load_isolated_api_main("blogging_api_main_medium")
 app = _api_main.app
 
 
 @pytest.fixture(autouse=True)
 def _patched_blog_client(monkeypatch, fake_job_client):
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
     return fake_job_client
@@ -29,7 +29,7 @@ def _patched_blog_client(monkeypatch, fake_job_client):
 
 @pytest.fixture(autouse=True)
 def _medium_stats_tmp_dir(monkeypatch, tmp_path):
-    from shared import blog_job_store as bjs
+    from agents.blogging.shared import blog_job_store as bjs
 
     monkeypatch.setattr(
         _api_main,
@@ -56,7 +56,7 @@ def test_medium_stats_async_writes_artifact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Async job completes and persists medium_stats_report.json when collect is mocked."""
-    from blog_medium_stats_agent.models import MediumPostStats, MediumStatsReport
+    from agents.blogging.blog_medium_stats_agent.models import MediumPostStats, MediumStatsReport
 
     class FakeBlogMediumStatsAgent:
         def collect(self, cfg=None):
@@ -107,7 +107,7 @@ def test_jobs_list_includes_job_type_for_medium_stats(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from blog_medium_stats_agent.models import MediumStatsReport
+    from agents.blogging.blog_medium_stats_agent.models import MediumStatsReport
 
     class FakeBlogMediumStatsAgent:
         def collect(self, cfg=None):

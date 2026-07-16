@@ -13,6 +13,7 @@ directly with stubs for the agent and ``run_strategy_code``.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -1230,6 +1231,28 @@ def test_ztr_commit_clears_flag_for_conforming_repair_code() -> None:
     assert recovery.ran_on_non_conforming_code is False
 
 
+@pytest.mark.parametrize(
+    "missing_field,expected_message",
+    [
+        ("new_spec", "committed ZTR must carry new_spec"),
+        ("new_metrics", "committed ZTR must carry new_metrics"),
+        ("new_exec_result", "committed ZTR must carry new_exec_result"),
+    ],
+)
+def test_ztr_commit_missing_field_raises_value_error(
+    missing_field: str, expected_message: str
+) -> None:
+    """A committed zero-trade repair outcome that omits a field it must carry
+    raises ``ValueError`` rather than silently propagating ``None`` (the
+    postcondition check must not be a bare ``assert``, which `-O` strips)."""
+    outcome = dataclasses.replace(_committed_repair_outcome(), **{missing_field: None})
+    orch = StrategyLabOrchestrator()
+    orch.zero_trade_repairer = _StubRepairer(outcome)  # type: ignore[assignment]
+
+    with pytest.raises(ValueError, match=expected_message):
+        _drive_anomaly_recovery(orch)
+
+
 def test_generic_refine_leaves_flag_unset() -> None:
     """When no zero-trade repair commits (diagnostics carry no category), the
     generic-refine path leaves the flag None so the caller keeps the round's
@@ -1259,6 +1282,57 @@ def test_generic_refine_leaves_flag_unset() -> None:
     )
     assert recovery.ran_on_non_conforming_code is None
     assert conformance_calls == [], "generic-refine path must not re-run conformance"
+
+
+def test_handle_critical_anomalies_rejects_empty_critical_anomalies() -> None:
+    """An empty ``critical_anomalies`` violates the precondition and must
+    raise ``ValueError`` rather than being silently skipped (as a bare
+    ``assert`` would be under ``python -O``)."""
+    orch = StrategyLabOrchestrator()
+
+    with pytest.raises(
+        ValueError, match="_handle_critical_anomalies requires at least one critical"
+    ):
+        orch._handle_critical_anomalies(
+            spec=_spec(),
+            code="# original code\n",
+            trades=[],
+            metrics=_metrics_for(),
+            exec_result=_zero_trade_exec_result(),
+            market_data=_market_data(),
+            config=_config(),
+            critical_anomalies=[],
+            all_gate_results=[],
+            refinement_attempts=[],
+            zero_trade_attempts=[],
+            round_num=0,
+            emit=lambda *a, **k: None,
+        )
+
+
+@pytest.mark.parametrize("bad_market_data", [{}, None, "not-a-dict"])
+def test_handle_critical_anomalies_rejects_invalid_market_data(bad_market_data) -> None:
+    """Empty/non-dict ``market_data`` violates the precondition and must
+    raise ``ValueError`` rather than being silently skipped (as a bare
+    ``assert`` would be under ``python -O``)."""
+    orch = StrategyLabOrchestrator()
+
+    with pytest.raises(ValueError, match="market_data must be non-empty"):
+        orch._handle_critical_anomalies(
+            spec=_spec(),
+            code="# original code\n",
+            trades=[],
+            metrics=_metrics_for(),
+            exec_result=_zero_trade_exec_result(),
+            market_data=bad_market_data,
+            config=_config(),
+            critical_anomalies=[_critical_anomaly()],
+            all_gate_results=[],
+            refinement_attempts=[],
+            zero_trade_attempts=[],
+            round_num=0,
+            emit=lambda *a, **k: None,
+        )
 
 
 # ---------------------------------------------------------------------------

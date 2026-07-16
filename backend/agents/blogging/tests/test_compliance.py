@@ -3,8 +3,8 @@
 from pathlib import Path
 
 import pytest
-from blog_compliance_agent import BlogComplianceAgent
-from shared.brand_spec import load_brand_spec_prompt
+from agents.blogging.blog_compliance_agent import BlogComplianceAgent
+from agents.blogging.shared.brand_spec import load_brand_spec_prompt
 
 from llm_service import DummyLLMClient
 

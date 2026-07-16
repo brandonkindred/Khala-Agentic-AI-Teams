@@ -139,6 +139,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # plus the shared infrastructure they depend on.
 COPY agents /app/
 
+# `agents /app/` flattens every team straight into /app/<team>, so no /app/agents/
+# directory exists here (unlike team_service/agent_sandbox_image, which preserve
+# the agents/ prefix). The blogging team's internal code imports itself as
+# agents.blogging.*, so give it a namespace-package view of /app under
+# agents/ via a symlink shim, added only to the blogging/social-marketing
+# supervisord programs' PYTHONPATH below.
+RUN mkdir -p /app/_pypath_shim && ln -s /app /app/_pypath_shim/agents
+
 # Copy the built Angular UI
 COPY --from=ui-build /build/dist/user-interface/browser /app/ui
 

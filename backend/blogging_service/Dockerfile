@@ -26,15 +26,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY agents/shared_env /app/shared_env
 
 # Typed env-config helpers (env_bool/env_int/env_float; leaf, stdlib-only).
-# Imported by blogging.shared.job_event_bus.
+# Imported by agents.blogging.shared.job_event_bus.
 COPY agents/shared_env_config /app/shared_env_config
 
 # Shared per-job SSE event bus (BusState + pure publish/subscribe/reap; leaf).
-# Imported by blogging.shared.job_event_bus.
+# Imported by agents.blogging.shared.job_event_bus.
 COPY agents/shared_job_event_bus /app/shared_job_event_bus
 
 # Shared SSE streaming helper (framing + per-job stream generators; leaf).
-# Imported by blogging.api.main's job-status stream endpoint.
+# Imported by agents.blogging.api.main's job-status stream endpoint.
 COPY agents/shared_sse /app/shared_sse
 
 # Neutral JSON-salvage engine (stdlib-only leaf; lazy-imports json-repair from
@@ -69,17 +69,17 @@ COPY agents/user_profile /app/user_profile
 COPY agents/shared_temporal /app/shared_temporal
 
 # Shared OpenTelemetry helpers (init_otel/instrument_fastapi_app) imported by
-# blogging.api.main. Falls through to no-op when the opentelemetry SDK
+# agents.blogging.api.main. Falls through to no-op when the opentelemetry SDK
 # packages are not installed, so no extra deps needed in this slim image.
 COPY agents/shared_observability /app/shared_observability
 
-# Team FastAPI app factory (create_team_app) imported by blogging.api.main.
+# Team FastAPI app factory (create_team_app) imported by agents.blogging.api.main.
 # Wraps init_otel + the schema-registering lifespan; depends only on
 # shared_observability (above) and a lazy shared_postgres import (below).
 COPY agents/shared_app /app/shared_app
 
 # Minimal unified_api modules needed by blogging Medium integration.
-# These are lazy-imported by blogging/shared/medium_integration_access.py.
+# These are lazy-imported by agents/blogging/shared/medium_integration_access.py.
 COPY unified_api/__init__.py /app/unified_api/__init__.py
 COPY unified_api/integrations_store.py /app/unified_api/integrations_store.py
 COPY unified_api/integration_credentials.py /app/unified_api/integration_credentials.py
@@ -88,7 +88,10 @@ COPY unified_api/google_browser_login_credentials.py /app/unified_api/google_bro
 COPY unified_api/medium_browser_login.py /app/unified_api/medium_browser_login.py
 
 # ── Blogging team code ───────────────────────────────────────────────────────
-COPY agents/blogging /app/blogging
+# Copied under /app/agents/blogging (not /app/blogging) so it resolves as the
+# agents.blogging.* namespace package, matching the import path used throughout
+# backend/agents/blogging/**.
+COPY agents/blogging /app/agents/blogging
 
 # ── Entrypoint ───────────────────────────────────────────────────────────────
 COPY blogging_service/entrypoint.py /app/entrypoint.py
@@ -100,7 +103,7 @@ RUN adduser --disabled-password --gecos "" --uid 1000 appuser \
 USER appuser
 
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app:/app/blogging
+ENV PYTHONPATH=/app
 EXPOSE 8090
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=5 \

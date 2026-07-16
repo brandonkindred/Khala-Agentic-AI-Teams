@@ -17,21 +17,21 @@ import pytest
 
 
 def test_extract_draft_after_marker_marker_present() -> None:
-    from blog_writer_agent.agent import _extract_draft_after_marker
+    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
 
     raw = '{"draft": 0}\n---DRAFT---\n# Hello\n\nBody\n'
     assert _extract_draft_after_marker(raw).startswith("# Hello")
 
 
 def test_extract_draft_after_marker_marker_inline() -> None:
-    from blog_writer_agent.agent import _extract_draft_after_marker
+    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
 
     raw = "---DRAFT---# Hi"
     assert _extract_draft_after_marker(raw).startswith("# Hi")
 
 
 def test_extract_draft_after_marker_falls_back_to_json() -> None:
-    from blog_writer_agent.agent import _extract_draft_after_marker
+    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
 
     raw = '{"draft": "# Title\\n\\nBody"}'
     out = _extract_draft_after_marker(raw)
@@ -39,7 +39,7 @@ def test_extract_draft_after_marker_falls_back_to_json() -> None:
 
 
 def test_extract_draft_after_marker_empty_inputs() -> None:
-    from blog_writer_agent.agent import _extract_draft_after_marker
+    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
 
     assert _extract_draft_after_marker("") == ""
     assert _extract_draft_after_marker(None) == ""  # type: ignore[arg-type]
@@ -47,7 +47,7 @@ def test_extract_draft_after_marker_empty_inputs() -> None:
 
 
 def test_write_draft_to_path_creates_parents(tmp_path: Path) -> None:
-    from blog_writer_agent.agent import _write_draft_to_path
+    from agents.blogging.blog_writer_agent.agent import _write_draft_to_path
 
     target = tmp_path / "a" / "b" / "draft.md"
     _write_draft_to_path("# draft\n", target)
@@ -55,7 +55,7 @@ def test_write_draft_to_path_creates_parents(tmp_path: Path) -> None:
 
 
 def test_writer_agent_requires_guidelines() -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import DummyLLMClient
 
@@ -66,14 +66,14 @@ def test_writer_agent_requires_guidelines() -> None:
 
 
 def test_writer_agent_assertion_on_none_llm() -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     with pytest.raises(AssertionError):
         BlogWriterAgent(llm_client=None)
 
 
 def test_writer_agent_style_prompt_merge() -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import DummyLLMClient
 
@@ -88,7 +88,7 @@ def test_writer_agent_style_prompt_merge() -> None:
 
 
 def test_writer_agent_deterministic_self_check() -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import DummyLLMClient
 
@@ -107,7 +107,7 @@ def test_writer_agent_deterministic_self_check() -> None:
 
 
 def test_writer_agent_deterministic_self_check_clean_draft() -> None:
-    from blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import DummyLLMClient
 
@@ -129,7 +129,7 @@ def test_writer_agent_deterministic_self_check_clean_draft() -> None:
 
 
 def test_v2_extract_story_placeholders() -> None:
-    from agent_implementations.blog_writing_process_v2 import (
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         _extract_story_placeholders,
     )
 
@@ -149,7 +149,7 @@ Some paragraph.
 def test_v2_extract_plan_keywords() -> None:
     from types import SimpleNamespace
 
-    from agent_implementations.blog_writing_process_v2 import (
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         _extract_plan_keywords,
     )
 
@@ -168,7 +168,7 @@ def test_v2_extract_plan_keywords() -> None:
 
 
 def test_v2_extract_plan_keywords_handles_empty() -> None:
-    from agent_implementations.blog_writing_process_v2 import (
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         _extract_plan_keywords,
     )
 
@@ -177,7 +177,7 @@ def test_v2_extract_plan_keywords_handles_empty() -> None:
 
 
 def test_v2_is_external_cancellation_temporal() -> None:
-    from agent_implementations.blog_writing_process_v2 import (
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         _is_external_cancellation,
     )
     from temporalio.exceptions import CancelledError
@@ -188,7 +188,7 @@ def test_v2_is_external_cancellation_temporal() -> None:
 
 
 def test_v2_planning_llm_client_passthrough(monkeypatch) -> None:
-    from agent_implementations.blog_writing_process_v2 import (
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         build_plan_critic_agent,
         plan_critic_llm_client,
         planning_llm_client,
@@ -211,7 +211,7 @@ def test_v2_planning_llm_client_override_keeps_failover(monkeypatch) -> None:
     """With BLOG_PLANNING_MODEL / BLOG_PLAN_CRITIC_MODEL set, the helpers return a
     failover-preserving variant that pins the model (rather than collapsing to a
     single non-failover client)."""
-    from agent_implementations.blog_writing_process_v2 import (
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         plan_critic_llm_client,
         planning_llm_client,
     )
@@ -232,7 +232,7 @@ def test_v2_planning_llm_client_override_keeps_failover(monkeypatch) -> None:
 
 
 def test_v2_build_plan_critic_agent_when_enabled(monkeypatch) -> None:
-    from agent_implementations.blog_writing_process_v2 import (
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         build_plan_critic_agent,
     )
 
@@ -250,7 +250,7 @@ def test_v2_build_plan_critic_agent_when_enabled(monkeypatch) -> None:
 
 
 def test_ghost_writer_no_experience_phrase() -> None:
-    from ghost_writer_agent.agent import _is_no_experience
+    from agents.blogging.ghost_writer_agent.agent import _is_no_experience
 
     assert _is_no_experience("skip") is True
     assert _is_no_experience("SKIP.") is True
@@ -262,7 +262,7 @@ def test_ghost_writer_no_experience_phrase() -> None:
 
 
 def test_ghost_writer_agent_construction() -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -272,8 +272,8 @@ def test_ghost_writer_agent_construction() -> None:
 
 def test_ghost_writer_extract_gaps_from_plan_no_opportunities() -> None:
     """find_story_gaps falls back to LLM when plan has no story_opportunity fields."""
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
-    from shared.content_plan import (
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -300,8 +300,8 @@ def test_ghost_writer_extract_gaps_from_plan_no_opportunities() -> None:
 
 
 def test_ghost_writer_extract_gaps_from_plan_with_opportunities(monkeypatch) -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
-    from shared.content_plan import (
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.shared.content_plan import (
         ContentPlan,
         ContentPlanSection,
         RequirementsAnalysis,
@@ -340,15 +340,14 @@ def test_ghost_writer_extract_gaps_from_plan_with_opportunities(monkeypatch) -> 
 
 def test_ghost_writer_generate_friendly_seeds_fallback(monkeypatch) -> None:
     """When the LLM call raises, _generate_friendly_seeds falls back to generic seeds."""
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
 
     # Patch the Agent class globally inside ghost_writer_agent.agent
-    import ghost_writer_agent.agent as gw_agent
-
+    import agents.blogging.ghost_writer_agent.agent as gw_agent
     class _BoomAgent:
         def __init__(self, *a, **kw):
             pass
@@ -363,7 +362,7 @@ def test_ghost_writer_generate_friendly_seeds_fallback(monkeypatch) -> None:
 
 
 def test_ghost_writer_generate_friendly_seeds_empty_input() -> None:
-    from ghost_writer_agent.agent import GhostWriterElicitationAgent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
 
@@ -378,9 +377,12 @@ def test_ghost_writer_generate_friendly_seeds_empty_input() -> None:
 
 def test_graphs_build_returns_objects() -> None:
     """Smoke-test the build_* helpers — confirms imports + composition work."""
-    from graphs.copy_edit_swarm import build_copy_edit_swarm
-    from graphs.pipeline_graph import build_post_review_graph, build_pre_review_graph
-    from graphs.rewrite_swarm import build_rewrite_swarm
+    from agents.blogging.graphs.copy_edit_swarm import build_copy_edit_swarm
+    from agents.blogging.graphs.pipeline_graph import (
+        build_post_review_graph,
+        build_pre_review_graph,
+    )
+    from agents.blogging.graphs.rewrite_swarm import build_rewrite_swarm
 
     assert build_copy_edit_swarm() is not None
     assert build_rewrite_swarm() is not None

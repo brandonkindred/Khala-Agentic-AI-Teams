@@ -37,16 +37,17 @@ def _build_pipeline_context(job_id: str, request_dict: Dict[str, Any]) -> Any:
           job updater, and work_dir. Stage-produced fields (plan/draft/etc.) are left
           at their defaults for the caller to seed from the prior stage's DTO.
     """
-    from blogging.agent_implementations.blog_writing_process_v2 import (
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         DRAFT_EDITOR_ITERATIONS,
         PipelineContext,
     )
-    from blogging.shared.content_profile import resolve_length_policy_from_request_dict
-    from blogging.shared.run_pipeline_job import (
+    from agents.blogging.shared.content_profile import resolve_length_policy_from_request_dict
+    from agents.blogging.shared.run_pipeline_job import (
         _get_run_artifacts_base,
         build_brief_input,
         make_job_updater,
     )
+
     from llm_service import get_strands_model
 
     work_dir = _get_run_artifacts_base() / job_id
@@ -86,7 +87,7 @@ def _fail_activity(job_id: str, exc: Exception, failed_phase: Optional[str]) -> 
           the coarse ``failed_phase`` stage name, preserving the pre-decomposition
           granularity of the job store's ``failed_phase`` field.
     """
-    from blogging.shared.run_pipeline_job import (
+    from agents.blogging.shared.run_pipeline_job import (
         _fail_job,
         _is_external_cancellation,
         _publish_terminal,
@@ -180,10 +181,10 @@ def _run_stage(
           activity context) where it is funnelled to a FAIL DTO like any other handled
           error — so the run terminates instead of retrying forever.
     """
+    from agents.blogging.shared.errors import BloggingError
+    from agents.blogging.shared.run_pipeline_job import start_pipeline_heartbeat
     from temporalio.exceptions import CancelledError
 
-    from blogging.shared.errors import BloggingError
-    from blogging.shared.run_pipeline_job import start_pipeline_heartbeat
     from llm_service import LLMRateLimitError, LLMTemporaryError
 
     # Start the heartbeat OUTSIDE the funnel: a heartbeat-start failure is an
@@ -250,8 +251,8 @@ def plan_stage_activity(job_id: str, request_dict: Dict[str, Any]) -> Dict[str, 
           ``FAIL`` DTO is returned so the workflow short-circuits; only
           Temporal-native ``CancelledError`` propagates.
     """
-    from blogging.shared.blog_job_store import start_blog_job
-    from blogging.temporal.phase_models import PlanningStageResult
+    from agents.blogging.shared.blog_job_store import start_blog_job
+    from agents.blogging.temporal.phase_models import PlanningStageResult
 
     # Start the job OUTSIDE the funnel: a start_blog_job failure (store unavailable,
     # job already exists) is an infrastructure error, not a pipeline failure, so it
@@ -260,7 +261,7 @@ def plan_stage_activity(job_id: str, request_dict: Dict[str, Any]) -> Dict[str, 
     start_blog_job(job_id)
 
     def _body() -> Dict[str, Any]:
-        from blogging.agent_implementations.blog_writing_process_v2 import run_planning_stage
+        from agents.blogging.agent_implementations.blog_writing_process_v2 import run_planning_stage
 
         ctx = _build_pipeline_context(job_id, request_dict)
         ctx.job_updater(work_dir=str(ctx.work_dir))
@@ -298,8 +299,8 @@ def draft_stage_activity(
           propagates. A malformed input DTO raises out of the activity (a
           code/schema defect must fail loudly, not read as a pipeline failure).
     """
-    from blogging.shared.content_plan import PlanningPhaseResult
-    from blogging.temporal.phase_models import DraftStageResult
+    from agents.blogging.shared.content_plan import PlanningPhaseResult
+    from agents.blogging.temporal.phase_models import DraftStageResult
 
     # Rebuild inputs OUTSIDE the funnel: a malformed inter-activity DTO is a code
     # bug (or cross-deploy schema skew), not a pipeline failure.
@@ -307,7 +308,7 @@ def draft_stage_activity(
     elicited_stories_text = planning_stage.get("elicited_stories_text")
 
     def _body() -> Dict[str, Any]:
-        from blogging.agent_implementations.blog_writing_process_v2 import run_draft_stage
+        from agents.blogging.agent_implementations.blog_writing_process_v2 import run_draft_stage
 
         ctx = _build_pipeline_context(job_id, request_dict)
         ctx.planning_phase_result = ppr
@@ -351,10 +352,9 @@ def gates_stage_activity(
           Temporal-native ``CancelledError`` propagates. A malformed input DTO
           raises out of the activity (code/schema defects fail loudly).
     """
-    from blog_writer_agent.models import WriterOutput
-
-    from blogging.shared.content_plan import PlanningPhaseResult
-    from blogging.temporal.phase_models import GatesStageResult
+    from agents.blogging.blog_writer_agent.models import WriterOutput
+    from agents.blogging.shared.content_plan import PlanningPhaseResult
+    from agents.blogging.temporal.phase_models import GatesStageResult
 
     # Rebuild inputs OUTSIDE the funnel: a malformed inter-activity DTO is a code
     # bug (or cross-deploy schema skew), not a pipeline failure.
@@ -363,7 +363,7 @@ def gates_stage_activity(
     elicited_stories_text = draft_stage.get("elicited_stories_text")
 
     def _body() -> Dict[str, Any]:
-        from blogging.agent_implementations.blog_writing_process_v2 import run_gates_stage
+        from agents.blogging.agent_implementations.blog_writing_process_v2 import run_gates_stage
 
         ctx = _build_pipeline_context(job_id, request_dict)
         ctx.planning_phase_result = ppr
@@ -404,11 +404,10 @@ def finalize_job_activity(
           must fail loudly, not read as a retryable store error) — matching the
           draft/gates contract.
     """
-    from blog_writer_agent.models import WriterOutput
+    from agents.blogging.blog_writer_agent.models import WriterOutput
+    from agents.blogging.shared.content_plan import PlanningPhaseResult
+    from agents.blogging.shared.run_pipeline_job import finalize_blog_job
     from temporalio.exceptions import CancelledError
-
-    from blogging.shared.content_plan import PlanningPhaseResult
-    from blogging.shared.run_pipeline_job import finalize_blog_job
 
     # Rebuild inputs OUTSIDE the retry funnel: a malformed inter-activity DTO is a
     # code bug (or cross-deploy schema skew), not a transient store error.
@@ -448,9 +447,8 @@ def run_full_pipeline_activity(job_id: str, request_dict: Dict[str, Any]) -> Non
         - ``run_blog_full_pipeline_job`` has run to completion (it owns all job
           store updates and error handling); re-raises whatever it raises.
     """
+    from agents.blogging.shared.run_pipeline_job import run_blog_full_pipeline_job
     from temporalio.exceptions import CancelledError
-
-    from blogging.shared.run_pipeline_job import run_blog_full_pipeline_job
 
     try:
         run_blog_full_pipeline_job(job_id, request_dict)

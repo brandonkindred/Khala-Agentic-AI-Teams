@@ -41,7 +41,7 @@ def load_style_file(path: Union[str, Path], label: str = "file") -> str:
         return ""
 
     try:
-        from author_profile import load_author_profile, render_template
+        from agents.blogging.author_profile import load_author_profile, render_template
 
         return render_template(raw, load_author_profile()).strip()
     except Exception as e:  # noqa: BLE001 — render failure shouldn't crash agents

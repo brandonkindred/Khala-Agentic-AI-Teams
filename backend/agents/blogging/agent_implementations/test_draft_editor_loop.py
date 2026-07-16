@@ -12,15 +12,22 @@ from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput  # noqa: E402
-from blog_writer_agent import BlogWriterAgent, ReviseWriterInput, WriterInput  # noqa: E402
-from shared.content_plan import (  # noqa: E402
+from agents.blogging.blog_copy_editor_agent import (  # noqa: E402
+    BlogCopyEditorAgent,
+    CopyEditorInput,
+)
+from agents.blogging.blog_writer_agent import (  # noqa: E402
+    BlogWriterAgent,
+    ReviseWriterInput,
+    WriterInput,
+)
+from agents.blogging.shared.content_plan import (  # noqa: E402
     ContentPlan,
     ContentPlanSection,
     RequirementsAnalysis,
     TitleCandidate,
 )
-from shared.style_loader import load_style_file  # noqa: E402
+from agents.blogging.shared.style_loader import load_style_file  # noqa: E402
 
 from llm_service import DummyLLMClient  # noqa: E402
 

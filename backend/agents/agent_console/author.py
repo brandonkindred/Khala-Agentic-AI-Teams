@@ -5,7 +5,7 @@ run is tagged with a best-effort handle so that when auth lands, a
 migration can map these rows to user ids without data loss.
 
 The profile already exists for the blogging pipeline
-(:mod:`blogging.author_profile`). We reuse its loader so the contract
+(:mod:`agents.blogging.author_profile`). We reuse its loader so the contract
 stays single-sourced.
 """
 
@@ -33,7 +33,7 @@ def resolve_author() -> str:
     are never blocked by profile problems.
     """
     try:
-        from blogging.author_profile import load_author_profile  # noqa: PLC0415
+        from agents.blogging.author_profile import load_author_profile  # noqa: PLC0415
     except Exception:
         logger.debug("author_profile module unavailable; using %s", ANONYMOUS, exc_info=True)
         return ANONYMOUS

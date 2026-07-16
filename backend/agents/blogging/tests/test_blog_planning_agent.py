@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from blog_planning_agent import BlogPlanningAgent
-from shared.content_plan import (
+from agents.blogging.blog_planning_agent import BlogPlanningAgent
+from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     PlanningInput,
@@ -11,7 +11,11 @@ from shared.content_plan import (
     TitleCandidate,
     section_count_bounds_for_profile,
 )
-from shared.content_profile import ContentProfile, LengthPolicy, resolve_length_policy
+from agents.blogging.shared.content_profile import (
+    ContentProfile,
+    LengthPolicy,
+    resolve_length_policy,
+)
 
 from llm_service import DummyLLMClient
 

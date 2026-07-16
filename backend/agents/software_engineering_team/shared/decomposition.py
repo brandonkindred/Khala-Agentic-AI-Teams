@@ -319,7 +319,9 @@ class RecursiveProcessor(Generic[T]):
             agent_name: Name for logging purposes.
             process_fn: Optional custom processing function. If not provided,
                        resolves ``llm`` via ``resolve_strands_model`` and runs
-                       a one-shot Strands agent on ``prompt``.
+                       a one-shot Strands agent on ``prompt``; the agent's raw
+                       response is then parsed as JSON via
+                       ``extract_json_from_response``.
             context: Existing decomposition context (for recursive calls).
 
         Returns:
