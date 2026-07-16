@@ -38,6 +38,20 @@ def test_environment_info_from_dict_roundtrip() -> None:
     assert restored.tools_provisioned == ["pg", "redis"]
 
 
+def test_environment_store_defaults_under_agent_cache(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path / "agents"))
+    from agent_provisioning_team.shared.environment_store import (
+        EnvironmentStore,
+        default_environments_dir,
+    )
+
+    expected = tmp_path / "agents" / "agent_provisioning" / "environments"
+    assert default_environments_dir() == expected
+    store = EnvironmentStore()
+    assert store.storage_dir == expected
+    assert expected.is_dir()
+
+
 def test_environment_store_register_get_remove(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
     assert store.get("missing") is None
@@ -102,6 +116,20 @@ def test_environment_store_add_tool(tmp_path: Path) -> None:
     assert store.get("a1").tools_provisioned == ["pg"]
 
 
+def test_environment_store_add_tools_batch(tmp_path: Path) -> None:
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(
+            agent_id="a1",
+            container_id="c1",
+            container_name="c1",
+            workspace_path="/w",
+        )
+    )
+    assert store.add_tools("a1", ["pg", "redis", "pg"]) is True
+    assert store.get("a1").tools_provisioned == ["pg", "redis"]
+
+
 def test_environment_store_add_tool_handles_corrupt(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
     bad = tmp_path / "broken.json"
@@ -158,6 +186,73 @@ def test_environment_store_get_handles_corrupt(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
     (tmp_path / "x.json").write_text("not json", encoding="utf-8")
     assert store.get("x") is None
+
+
+def test_environment_store_get_treats_incomplete_record_as_absent(tmp_path: Path) -> None:
+    """Partial JSON missing required keys must not 500 callers of get()."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    (tmp_path / "partial.json").write_text(
+        json.dumps({"agent_id": "partial", "status": "running"}),
+        encoding="utf-8",
+    )
+    assert store.get("partial") is None
+    assert store.exists("partial") is False
+
+
+def test_environment_store_reads_legacy_path_and_migrates_on_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Pre-cutover ``.agent_cache/provisioning_environments`` files remain visible."""
+    monkeypatch.chdir(tmp_path)
+    legacy_dir = tmp_path / ".agent_cache" / "provisioning_environments"
+    legacy_dir.mkdir(parents=True)
+    legacy_payload = {
+        "agent_id": "legacy-a1",
+        "container_id": "c-legacy",
+        "container_name": "agent-legacy-a1",
+        "ssh_host": "localhost",
+        "ssh_port": 22,
+        "workspace_path": "/workspace",
+        "status": "running",
+        "tools_provisioned": ["pg"],
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    (legacy_dir / "legacy-a1.json").write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    primary = tmp_path / "new" / "environments"
+    store = EnvironmentStore(storage_dir=primary)
+
+    fetched = store.get("legacy-a1")
+    assert fetched is not None
+    assert fetched.container_id == "c-legacy"
+
+    assert store.update_status("legacy-a1", "stopped") is True
+    assert (primary / "legacy-a1.json").is_file()
+    assert not (legacy_dir / "legacy-a1.json").exists()
+
+
+def test_environment_store_remove_clears_legacy_copy(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    legacy_dir = tmp_path / ".agent_cache" / "provisioning_environments"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "legacy-a2.json").write_text(
+        json.dumps(
+            {
+                "agent_id": "legacy-a2",
+                "container_id": "c2",
+                "container_name": "agent-legacy-a2",
+                "workspace_path": "/w",
+                "status": "running",
+                "tools_provisioned": [],
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = EnvironmentStore(storage_dir=tmp_path / "primary")
+    assert store.remove("legacy-a2") is True
+    assert not (legacy_dir / "legacy-a2.json").exists()
 
 
 # ---------------------------------------------------------------------------
