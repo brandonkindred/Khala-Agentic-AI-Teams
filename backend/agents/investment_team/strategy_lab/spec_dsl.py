@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import math
-from typing import Annotated, Any, Iterator, Literal, Optional, Sequence, Union
+from typing import Annotated, Any, Callable, Iterator, Literal, Optional, Sequence, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
@@ -840,59 +840,95 @@ def _with_source(base: str, source: str) -> str:
     return f"{inner}, source={source})"
 
 
+def _format_period_indicator(ref: IndicatorRef) -> str:
+    """Format the `name(period)` shape shared by single-period indicators.
+
+    Covers both source-aware indicators (sma/ema/rsi/roc) and
+    source-forbidding ones (atr/adx/vwap/mfi/cci/williams_r) — for the
+    latter ``ref.source`` is always ``"close"`` (enforced by
+    ``IndicatorRef._validate_params``), so ``_with_source`` is a no-op.
+    """
+    return _with_source(f"{ref.name}({ref.param('period')})", ref.source)
+
+
+def _format_macd(ref: IndicatorRef) -> str:
+    output = ref.param("output")
+    macd_name = "macd" if output == "macd" else f"macd_{output}"
+    base = f"{macd_name}({ref.param('fast')},{ref.param('slow')},{ref.param('signal')})"
+    return _with_source(base, ref.source)
+
+
+def _format_bollinger(ref: IndicatorRef) -> str:
+    period = ref.param("period")
+    num_std = float(ref.param("num_std"))
+    band = ref.param("band")
+    base = f"bollinger_{band}({period},{_format_number(num_std)})"
+    return _with_source(base, ref.source)
+
+
+def _format_stochastic(ref: IndicatorRef) -> str:
+    output = ref.param("output")
+    return f"stochastic_{output}({ref.param('k_period')},{ref.param('d_period')})"
+
+
+def _format_donchian(ref: IndicatorRef) -> str:
+    band = ref.param("band")
+    return f"donchian_{band}({ref.param('period')})"
+
+
+def _format_keltner(ref: IndicatorRef) -> str:
+    band = ref.param("band")
+    multiplier = float(ref.param("multiplier"))
+    return (
+        f"keltner_{band}({ref.param('period')},{ref.param('atr_period')},"
+        f"{_format_number(multiplier)})"
+    )
+
+
+def _format_obv(ref: IndicatorRef) -> str:
+    return "obv()"
+
+
+# Dict dispatch replaces a 16-branch if/elif chain: adding an indicator's
+# formatter is a single entry here instead of a new branch, mirroring the
+# dict-keyed convention already used for this indicator list elsewhere
+# (``INDICATOR_HELPER_NAME`` / ``INDICATOR_PARAM_SPECS`` in
+# ``indicators.registry_metadata``).
+_INDICATOR_FORMATTERS: dict[IndicatorName, Callable[[IndicatorRef], str]] = {
+    "sma": _format_period_indicator,
+    "ema": _format_period_indicator,
+    "rsi": _format_period_indicator,
+    "macd": _format_macd,
+    "bollinger": _format_bollinger,
+    "atr": _format_period_indicator,
+    "adx": _format_period_indicator,
+    "stochastic": _format_stochastic,
+    "vwap": _format_period_indicator,
+    "donchian": _format_donchian,
+    "keltner": _format_keltner,
+    "obv": _format_obv,
+    "mfi": _format_period_indicator,
+    "roc": _format_period_indicator,
+    "cci": _format_period_indicator,
+    "williams_r": _format_period_indicator,
+}
+
+# Explicit raise (mirrors the ``INDICATOR_HELPER_NAME`` guard above): a DSL
+# indicator missing a formatter here would otherwise only surface as a
+# ``TypeError`` the first time an LLM prompt renders that indicator.
+if set(_INDICATOR_FORMATTERS) != set(IndicatorName.__args__):
+    raise RuntimeError(
+        "indicator formatter map (_INDICATOR_FORMATTERS) must cover every DSL "
+        f"IndicatorName literal; mismatch: {set(IndicatorName.__args__) ^ set(_INDICATOR_FORMATTERS)}"
+    )
+
+
 def _format_indicator_ref(ref: IndicatorRef) -> str:
-    name = ref.name
-    if name == "sma":
-        base = f"sma({ref.param('period')})"
-        return _with_source(base, ref.source)
-    if name == "ema":
-        base = f"ema({ref.param('period')})"
-        return _with_source(base, ref.source)
-    if name == "rsi":
-        base = f"rsi({ref.param('period')})"
-        return _with_source(base, ref.source)
-    if name == "macd":
-        output = ref.param("output")
-        macd_name = "macd" if output == "macd" else f"macd_{output}"
-        base = f"{macd_name}({ref.param('fast')},{ref.param('slow')},{ref.param('signal')})"
-        return _with_source(base, ref.source)
-    if name == "bollinger":
-        period = ref.param("period")
-        num_std = float(ref.param("num_std"))
-        band = ref.param("band")
-        base = f"bollinger_{band}({period},{_format_number(num_std)})"
-        return _with_source(base, ref.source)
-    if name == "atr":
-        return f"atr({ref.param('period')})"
-    if name == "adx":
-        return f"adx({ref.param('period')})"
-    if name == "stochastic":
-        output = ref.param("output")
-        return f"stochastic_{output}({ref.param('k_period')},{ref.param('d_period')})"
-    if name == "vwap":
-        return f"vwap({ref.param('period')})"
-    if name == "donchian":
-        band = ref.param("band")
-        return f"donchian_{band}({ref.param('period')})"
-    if name == "keltner":
-        band = ref.param("band")
-        multiplier = float(ref.param("multiplier"))
-        return (
-            f"keltner_{band}({ref.param('period')},{ref.param('atr_period')},"
-            f"{_format_number(multiplier)})"
-        )
-    if name == "obv":
-        return "obv()"
-    if name == "mfi":
-        return f"mfi({ref.param('period')})"
-    if name == "roc":
-        base = f"roc({ref.param('period')})"
-        return _with_source(base, ref.source)
-    if name == "cci":
-        return f"cci({ref.param('period')})"
-    if name == "williams_r":
-        return f"williams_r({ref.param('period')})"
-    raise TypeError(f"unknown IndicatorRef name: {name!r}")
+    """Render an `IndicatorRef` to prose via `_INDICATOR_FORMATTERS`."""
+    formatter = _INDICATOR_FORMATTERS.get(ref.name)
+    if formatter is None:
+        raise TypeError(f"unknown IndicatorRef name: {ref.name!r}")
+    return formatter(ref)
 
 
 def _format_side(side: Union[IndicatorRef, str, int, float]) -> str:

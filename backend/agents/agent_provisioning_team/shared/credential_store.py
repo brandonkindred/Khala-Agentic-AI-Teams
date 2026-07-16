@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
+from .path_safety import candidate_paths, safe_path_component
+
 
 def default_credentials_dir() -> Path:
     """Resolve the durable on-disk credential directory.
@@ -76,7 +78,9 @@ class CredentialStore:
         storage_dir: Optional[Path] = None,
         encryption_key: Optional[str] = None,
     ) -> None:
-        self.storage_dir = Path(storage_dir) if storage_dir is not None else default_credentials_dir()
+        self.storage_dir = (
+            Path(storage_dir) if storage_dir is not None else default_credentials_dir()
+        )
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
         keys = self._collect_keys(encryption_key)
@@ -308,16 +312,32 @@ class CredentialStore:
         return f"agent_{safe_agent_id}_{safe_tool}"[:63]
 
     def _agent_file(self, agent_id: str) -> Path:
-        """Get the credentials file path for an agent in the primary store."""
-        return self.storage_dir / f"{agent_id}.enc"
+        """Return the credentials file path for ``agent_id`` in the primary store.
+
+        Raises ``ValueError`` (via :func:`safe_path_component`) if ``agent_id`` is
+        not a safe filename component. This is the store's single validation
+        chokepoint: ``store_credentials`` calls it directly, while
+        ``get_credentials`` / ``delete_credentials`` / ``_read_agent_credentials``
+        reach it through ``_agent_file_candidates``. So a malicious ``agent_id``
+        cannot read or overwrite encrypted secrets outside ``storage_dir``, and
+        the identifier is validated exactly once per operation. The returned path
+        is always inside ``storage_dir``.
+        """
+        return self.storage_dir / f"{safe_path_component(agent_id, kind='agent_id')}.enc"
 
     def _agent_file_candidates(self, agent_id: str) -> List[Path]:
-        """Primary path first, then legacy locations from before the AGENT_CACHE move."""
-        return [self._agent_file(agent_id)] + [
-            legacy / f"{agent_id}.enc" for legacy in legacy_credentials_dirs()
-        ]
+        """Primary path first, then legacy locations from before the AGENT_CACHE move.
 
-    def _read_agent_credentials(self, agent_id: str) -> tuple[Optional[Dict[str, Any]], Optional[Path]]:
+        The primary path comes from the guarded :meth:`_agent_file`; each legacy
+        candidate reuses that validated filename via :func:`candidate_paths`, so
+        the traversal guard runs once (in :meth:`_agent_file`) and every candidate
+        is derived from it.
+        """
+        return candidate_paths(self._agent_file(agent_id), legacy_credentials_dirs())
+
+    def _read_agent_credentials(
+        self, agent_id: str
+    ) -> tuple[Optional[Dict[str, Any]], Optional[Path]]:
         """Load decrypted credentials from the primary or a legacy path."""
         for path in self._agent_file_candidates(agent_id):
             if not path.exists():

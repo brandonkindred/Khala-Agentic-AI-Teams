@@ -10,7 +10,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from agent_provisioning_team.shared.path_safety import safe_path_component
 
 
 class Phase(str, Enum):
@@ -201,6 +203,17 @@ class ProvisionRequest(BaseModel):
         description="Custom workspace path inside the container",
     )
 
+    @field_validator("agent_id")
+    @classmethod
+    def _agent_id_is_safe(cls, v: str) -> str:
+        """Reject an agent_id that would escape the on-disk stores.
+
+        The value is keyed into ``storage_dir / f"{agent_id}.<ext>"`` by the
+        environment and credential stores, so a raised ``ValueError`` here turns
+        a traversal attempt into a clean 422 at the HTTP edge instead of a 500.
+        """
+        return safe_path_component(v, kind="agent_id")
+
 
 class ProvisionJobResponse(BaseModel):
     """Response when starting a provisioning job."""
@@ -248,6 +261,12 @@ class DeprovisionRequest(BaseModel):
 
     agent_id: str = Field(..., description="Agent ID to deprovision")
     force: bool = Field(default=False, description="Force removal even if errors occur")
+
+    @field_validator("agent_id")
+    @classmethod
+    def _agent_id_is_safe(cls, v: str) -> str:
+        """Reject an agent_id that would escape the on-disk stores (path traversal)."""
+        return safe_path_component(v, kind="agent_id")
 
 
 class DeprovisionResponse(BaseModel):
