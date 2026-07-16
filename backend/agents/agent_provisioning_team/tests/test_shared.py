@@ -131,17 +131,60 @@ def test_environment_store_register_rejects_none(tmp_path: Path) -> None:
         store.register(None)
 
 
-def test_environment_store_register_rejects_empty_agent_id(tmp_path: Path) -> None:
-    store = EnvironmentStore(storage_dir=tmp_path)
-    with pytest.raises(ValueError, match="agent_id must not be empty"):
-        store.register(
-            StoreEnvInfo(
-                agent_id="",
-                container_id="c1",
-                container_name="c1",
-                workspace_path="/w",
-            )
+def test_environment_info_construction_rejects_empty_agent_id() -> None:
+    """Construction-time validation now fires before ``register`` ever runs."""
+    with pytest.raises(ValueError, match="agent_id must be a non-empty string"):
+        StoreEnvInfo(
+            agent_id="",
+            container_id="c1",
+            container_name="c1",
+            workspace_path="/w",
         )
+
+
+def test_environment_store_register_rejects_empty_agent_id(tmp_path: Path) -> None:
+    """``register``'s own guard still fires for an instance mutated after
+    construction (a freshly-constructed instance can never have an empty
+    ``agent_id``)."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    env = StoreEnvInfo(
+        agent_id="a1",
+        container_id="c1",
+        container_name="c1",
+        workspace_path="/w",
+    )
+    env.agent_id = ""
+    with pytest.raises(ValueError, match="agent_id must not be empty"):
+        store.register(env)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"agent_id": ""},
+        {"agent_id": None},
+        {"container_id": ""},
+        {"container_id": None},
+        {"container_name": ""},
+        {"container_name": None},
+        {"ssh_port": 0},
+        {"ssh_port": -1},
+        {"ssh_port": 65536},
+        {"ssh_port": "22"},
+    ],
+)
+def test_environment_info_rejects_invalid_fields(kwargs: dict) -> None:
+    """Preconditions: ``kwargs`` overrides exactly one required field with an
+    invalid value. Postconditions: construction raises ``ValueError``."""
+    base = {
+        "agent_id": "a1",
+        "container_id": "c1",
+        "container_name": "c1",
+        "workspace_path": "/w",
+    }
+    base.update(kwargs)
+    with pytest.raises(ValueError):
+        StoreEnvInfo(**base)
 
 
 def test_environment_store_update_status(tmp_path: Path) -> None:
@@ -184,6 +227,18 @@ def test_environment_store_update_status_handles_corrupt(tmp_path: Path) -> None
     assert store.update_status("broken", "ready") is False
 
 
+def test_environment_store_update_status_handles_invalid_field(tmp_path: Path) -> None:
+    """A well-formed JSON record with an invalid field value (e.g. an empty
+    ``container_id``) fails ``EnvironmentInfo`` construction inside
+    ``from_dict`` — ``update_status`` must return ``False``, not raise."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    (tmp_path / "bad-record.json").write_text(
+        json.dumps({"agent_id": "bad-record", "container_id": "", "container_name": "c1"}),
+        encoding="utf-8",
+    )
+    assert store.update_status("bad-record", "ready") is False
+
+
 def test_environment_store_add_tool(tmp_path: Path) -> None:
     store = EnvironmentStore(storage_dir=tmp_path)
     assert store.add_tool("missing", "pg") is False
@@ -221,6 +276,26 @@ def test_environment_store_add_tool_handles_corrupt(tmp_path: Path) -> None:
     bad = tmp_path / "broken.json"
     bad.write_text("not json", encoding="utf-8")
     assert store.add_tool("broken", "pg") is False
+
+
+def test_environment_store_add_tool_handles_invalid_field(tmp_path: Path) -> None:
+    """A well-formed JSON record with an invalid field value (e.g. an
+    out-of-range ``ssh_port``) fails ``EnvironmentInfo`` construction inside
+    ``from_dict`` — ``add_tool``/``add_tools`` must return ``False``, not
+    raise."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    (tmp_path / "bad-record.json").write_text(
+        json.dumps(
+            {
+                "agent_id": "bad-record",
+                "container_id": "c1",
+                "container_name": "c1",
+                "ssh_port": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert store.add_tool("bad-record", "pg") is False
 
 
 def test_environment_store_list_all(tmp_path: Path) -> None:

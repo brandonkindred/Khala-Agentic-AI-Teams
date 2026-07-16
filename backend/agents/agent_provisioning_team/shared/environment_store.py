@@ -72,6 +72,11 @@ class EnvironmentInfo:
           defaults it to the current UTC time when not supplied.
         * ``updated_at`` is always an ISO-8601 timestamp string — construction
           defaults it to ``created_at`` when not supplied.
+        * ``agent_id``, ``container_id``, and ``container_name`` are always
+          non-empty ``str`` values, and ``ssh_port`` is always an ``int`` in
+          ``1-65535`` — construction is the sole enforcement point (including
+          via ``from_dict``, which delegates to ``__init__``), so no
+          constructed instance can violate these.
     """
 
     def __init__(
@@ -101,7 +106,19 @@ class EnvironmentInfo:
               supplied, else the given value.
             * ``updated_at`` is ``created_at`` when not supplied, else the
               given value.
+            * Raises ``ValueError`` when ``agent_id``, ``container_id``, or
+              ``container_name`` is not a non-empty ``str``, or when
+              ``ssh_port`` is not an ``int`` in ``1-65535``.
         """
+        for field_name, value in (
+            ("agent_id", agent_id),
+            ("container_id", container_id),
+            ("container_name", container_name),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{field_name} must be a non-empty string, got {value!r}")
+        if not isinstance(ssh_port, int) or not (1 <= ssh_port <= 65535):
+            raise ValueError(f"ssh_port must be a valid port number (1-65535), got {ssh_port!r}")
         self.agent_id = agent_id
         self.container_id = container_id
         self.container_name = container_name
@@ -154,6 +171,9 @@ class EnvironmentInfo:
               (``ssh_host``, ``ssh_port``, ``workspace_path``, ``status``,
               ``tools_provisioned``, ``created_at``, ``updated_at``) when
               absent from ``data``.
+            * Delegates to ``__init__``, so also raises ``ValueError`` when
+              ``agent_id``, ``container_id``, or ``container_name`` is not a
+              non-empty ``str``, or ``ssh_port`` is not a valid port number.
         """
         return cls(
             agent_id=data["agent_id"],
@@ -295,13 +315,17 @@ class EnvironmentStore:
         Postconditions:
             * When the env exists, sets ``status`` and refreshes ``updated_at``,
               rewrites the record to the primary store, and returns ``True``.
-            * Returns ``False`` when the env is missing or its file is corrupt.
+            * Returns ``False`` when the env is missing or its file is corrupt
+              (including a well-formed record with an invalid field value).
         """
         with _lock:
             data, src = self._read_env_data(agent_id)
             if data is None:
                 return False
-            info = EnvironmentInfo.from_dict(data)
+            try:
+                info = EnvironmentInfo.from_dict(data)
+            except (KeyError, TypeError, ValueError):
+                return False
             info.status = status
             info.updated_at = datetime.now(timezone.utc).isoformat()
             self._write_env_data(agent_id, info.to_dict(), source=src)
@@ -334,13 +358,17 @@ class EnvironmentStore:
               ``tool_names`` is present in ``tools_provisioned`` (order of first
               appearance preserved for new names) and ``updated_at`` is
               refreshed.
-            * Returns ``False`` when the env is missing or the file is corrupt.
+            * Returns ``False`` when the env is missing or the file is corrupt
+              (including a well-formed record with an invalid field value).
         """
         with _lock:
             data, src = self._read_env_data(agent_id)
             if data is None:
                 return False
-            info = EnvironmentInfo.from_dict(data)
+            try:
+                info = EnvironmentInfo.from_dict(data)
+            except (KeyError, TypeError, ValueError):
+                return False
             tools = list(info.tools_provisioned)
             for tool_name in tool_names:
                 if tool_name and tool_name not in tools:
