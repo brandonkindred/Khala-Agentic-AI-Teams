@@ -2521,11 +2521,12 @@ class StrategyLabOrchestrator:
             )
             all_gate_results.extend(zt_outcome.new_gates)
             if zt_outcome.committed:
-                assert zt_outcome.new_spec is not None, "committed ZTR must carry new_spec"
-                assert zt_outcome.new_metrics is not None, "committed ZTR must carry new_metrics"
-                assert zt_outcome.new_exec_result is not None, (
-                    "committed ZTR must carry new_exec_result"
-                )
+                if zt_outcome.new_spec is None:
+                    raise ValueError("committed ZTR must carry new_spec")
+                if zt_outcome.new_metrics is None:
+                    raise ValueError("committed ZTR must carry new_metrics")
+                if zt_outcome.new_exec_result is None:
+                    raise ValueError("committed ZTR must carry new_exec_result")
                 refinement_attempts.append(
                     f"zero-trade repair: {zt_outcome.changes_made}"
                     if zt_outcome.changes_made
