@@ -6,7 +6,7 @@ This document describes the high-level architecture of the Blogging Agent Suite:
 
 ## 1. System Context
 
-The blogging team operates as one of 20 agent teams within the Strands Agents platform. It is mounted at `/api/blogging` by the Unified API and accessed through the Angular 19 frontend.
+The blogging team operates as one of 24 agent teams within the Strands Agents platform. It is mounted at `/api/blogging` by the Unified API and accessed through the Angular 19 frontend.
 
 ```mermaid
 graph TD

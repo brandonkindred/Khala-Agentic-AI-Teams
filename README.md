@@ -46,7 +46,7 @@ The teams share infrastructure — the gateway with its optional security pre-sc
 
 ### What exactly is Khala?
 
-A personal project to figure out how to build agentic AI teams that work together. This started as a vibe-coded experiment and that was a disaster, so now I'm turning it into a real engineered system, and from there into the thing I'm really after, which is **an agentic AI that can look at a problem, decide what kind of team would solve it, spin up ephemeral specialist agents to do the work, learn from what landed and what didn't, and keep the agents that earn their keep.** The 20 teams here today are the substrate for that learning, not the destination. Follow along.
+A personal project to figure out how to build agentic AI teams that work together. This started as a vibe-coded experiment and that was a disaster, so now I'm turning it into a real engineered system, and from there into the thing I'm really after, which is **an agentic AI that can look at a problem, decide what kind of team would solve it, spin up ephemeral specialist agents to do the work, learn from what landed and what didn't, and keep the agents that earn their keep.** The 24 teams here today are the substrate for that learning, not the destination. Follow along.
 
 If you want to build, tinker, and help push the frontier of multi-agent systems then welcome aboard.
 
@@ -95,6 +95,9 @@ Today Khala ships with 24 specialist teams behind one gateway, grouped loosely f
 | **Agentic Team Provisioning** | `/api/agentic-team-provisioning` | Describe the team you wish you had; it designs the roster and the process for you. |
 | **User Agent Founder** | `/api/user-agent-founder` | An autonomous "founder" that drives the SE team the way a real one would. |
 | **Deepthought** | `/api/deepthought` | Asks itself what specialists it needs, spawns them, synthesizes the answer. Turtles all the way down. |
+| **Product Delivery** | `/api/product-delivery` | A persistent backlog — products to stories — groomed by WSJF/RICE and fed by real feedback. |
+| **Agent Studio** | `/api/agent-studio` | Author one agent end to end: draft it, clone from the registry, then save and register it live. |
+| **User Profile** | `/api/user-profile` | One profile to bind them all — the registry linking you to every artifact the other teams produce. |
 
 ### Business — the grown-up functions
 
@@ -122,6 +125,7 @@ Today Khala ships with 24 specialist teams behind one gateway, grouped loosely f
 | **Accessibility Audit** | `/api/accessibility-audit` | WCAG 2.2 and Section 508 findings for web and mobile, without the slow consultancy. |
 | **Nutrition & Meal Planning** | `/api/nutrition-meal-planning` | Personalized meal plans that learn what you actually ate and liked. |
 | **Road Trip Planning** | `/api/road-trip-planning` | Tell it where, who, and what you care about. It builds the day-by-day and reworks it on the fly. |
+| **Job Matching** | `/api/job-matching` | Scans open roles against your profile and hands back a ranked, best-to-apply-first shortlist. |
 
 > …and more on the way. Run `GET /teams` on a live instance for the authoritative roster.
 
