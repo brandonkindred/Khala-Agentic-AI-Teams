@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Tuple,
 
 if TYPE_CHECKING:
     from blog_writer_agent.models import WriterOutput
+    from ghost_writer_agent.models import StoryGap
 
 from blog_compliance_agent import BlogComplianceAgent
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
@@ -88,11 +89,11 @@ _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
 STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
 BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 # Hard upper bound on the draft/copy-edit loop iterations (the `for iteration in
-# range(1, draft_editor_iterations + 1)` cap in run_draft_stage). It is deliberately
-# high because the loop normally exits *early* when the copy editor approves the
-# draft, or escalates to the author at COPY_EDIT_ESCALATION_THRESHOLD — 500 is a
-# runaway-safety ceiling, not an expected iteration count.
-DRAFT_EDITOR_ITERATIONS = 500
+# range(1, draft_editor_iterations + 1)` cap in run_draft_stage). The loop normally
+# exits *early* when the copy editor approves the draft, or escalates to the author
+# every COPY_EDIT_ESCALATION_THRESHOLD iterations — 30 is a runaway-safety ceiling
+# (3x the escalation threshold), not an expected iteration count.
+DRAFT_EDITOR_ITERATIONS = 30
 MAX_REWRITE_ITERATIONS = 100
 # After this many copy-edit revisions without editor approval, escalate to the user
 COPY_EDIT_ESCALATION_THRESHOLD = 10
@@ -1033,6 +1034,65 @@ def run_pipeline(
     return ctx.planning_phase_result, ctx.draft_result, ctx.status
 
 
+def _save_narratives_to_story_bank(
+    collected_story_pairs: List[Tuple["StoryGap", str]],
+    *,
+    topic_keywords: List[str],
+    job_id: Optional[str],
+    llm_client: Any,
+) -> int:
+    """Persist each elicited narrative to the story bank under its own story gap.
+
+    The gap→narrative pairing is captured at collection time (see ``run_planning_stage``),
+    so each narrative is stored against the exact gap it was elicited for — no substring
+    re-matching, which was O(n*m) and could mis-associate a narrative with a gap whose
+    ``section_title`` merely appeared as a substring of another section's story.
+
+    Preconditions:
+        - Each entry in ``collected_story_pairs`` is ``(gap, raw_narrative)`` where
+          ``raw_narrative`` is the unformatted narrative text (no
+          ``"[Story for section: ...]"`` prefix).
+        - ``topic_keywords`` is the keyword list to tag every saved story with.
+
+    Postconditions:
+        - ``save_story`` is attempted exactly once per pair, using that pair's own gap
+          ``section_title`` and ``section_context``.
+        - A ``save_story`` failure for one pair is caught and logged (non-fatal); the batch
+          continues so one bad story never loses the remaining saves.
+        - Returns the count of narratives *successfully* persisted (0 ..
+          ``len(collected_story_pairs)``).
+
+    Raises:
+        CancelledError: a Temporal-native (or otherwise external) cancellation propagates
+            unchanged — it is never swallowed by the non-fatal per-pair guard.
+    """
+    from shared.story_bank import save_story
+
+    saved = 0
+    for story_gap, raw_narrative in collected_story_pairs:
+        try:
+            save_story(
+                narrative=raw_narrative,
+                section_title=story_gap.section_title,
+                section_context=story_gap.section_context,
+                keywords=topic_keywords,
+                source_job_id=job_id,
+                llm_client=llm_client,
+            )
+            saved += 1
+        except CancelledError:
+            raise
+        except Exception as e:  # non-fatal: one bad story must not lose the rest
+            if _is_external_cancellation(e):
+                raise
+            logger.warning(
+                "Story bank save failed for section %r (non-fatal): %s",
+                story_gap.section_title,
+                e,
+            )
+    return saved
+
+
 def run_planning_stage(
     ctx: "PipelineContext",
 ) -> Optional[Tuple[PlanningPhaseResult, Optional["WriterOutput"], PipelineStatus]]:
@@ -1085,7 +1145,7 @@ def run_planning_stage(
     elicited_stories_text: Optional[str] = None
     if job_id is not None and job_updater is not None:
         try:
-            from ghost_writer_agent import GhostWriterElicitationAgent
+            from ghost_writer_agent import GhostWriterElicitationAgent, StoryGap
             from shared.blog_job_store import (
                 add_story_agent_message,
                 complete_story_elicitation,
@@ -1103,6 +1163,9 @@ def run_planning_stage(
 
             if story_gaps:
                 collected_narratives: list[str] = []
+                # Preserve the gap→narrative pairing at collection time so the story-bank
+                # save loop below doesn't have to re-derive it by fragile substring matching.
+                collected_story_pairs: list[tuple[StoryGap, str]] = []
 
                 for idx, gap in enumerate(story_gaps):
                     job_data = get_blog_job(job_id)
@@ -1134,10 +1197,13 @@ def run_planning_stage(
                         gap_index=0,
                         job_updater=job_updater,
                     )
-                    if result.narrative:
+                    # Guard against empty/whitespace-only narratives — never persist a
+                    # blank story to the bank or emit one into the draft.
+                    if result.narrative and result.narrative.strip():
                         collected_narratives.append(
                             f"[Story for section: {gap.section_title}]\n{result.narrative}"
                         )
+                        collected_story_pairs.append((gap, result.narrative))
 
                 if collected_narratives:
                     elicited_stories_text = "\n\n".join(collected_narratives)
@@ -1145,22 +1211,20 @@ def run_planning_stage(
 
                     # Persist each narrative to the story bank for reuse across future posts.
                     try:
-                        from shared.story_bank import save_story
-
                         topic_keywords = _extract_plan_keywords(plan)
-                        for story_idx, story_gap in enumerate(story_gaps):
-                            # Find the matching narrative (format: "[Story for section: ...]\n<narrative>")
-                            for narr in collected_narratives:
-                                if story_gap.section_title in narr:
-                                    raw_narrative = narr.split("\n", 1)[1] if "\n" in narr else narr
-                                    save_story(
-                                        narrative=raw_narrative,
-                                        section_title=story_gap.section_title,
-                                        section_context=story_gap.section_context,
-                                        keywords=topic_keywords,
-                                        source_job_id=job_id,
-                                        llm_client=llm_client,
-                                    )
+                        saved_count = _save_narratives_to_story_bank(
+                            collected_story_pairs,
+                            topic_keywords=topic_keywords,
+                            job_id=job_id,
+                            llm_client=llm_client,
+                        )
+                        logger.info(
+                            "Story bank: persisted %d of %d elicited narrative(s)",
+                            saved_count,
+                            len(collected_story_pairs),
+                        )
+                    except CancelledError:
+                        raise
                     except Exception as e:
                         logger.warning("Story bank save failed (non-fatal): %s", e)
 

@@ -52,7 +52,7 @@ def record_review_start(
     pr_number: int,
     pr_url: Optional[str],
     author: str,
-) -> None:
+) -> datetime:
     """Insert a ``pending`` row for a newly-started review (best-effort).
 
     Preconditions:
@@ -60,9 +60,14 @@ def record_review_start(
     Postconditions:
         - On success a ``code_review_runs`` row exists for ``job_id``. A
           duplicate ``job_id`` is ignored. Never raises; no-op without Postgres.
+        - Returns the server-clock ``created_at`` stamped on the row — the same
+          value whether or not the write succeeds (and even when Postgres is
+          disabled), so a caller can surface a consistent server-side start time
+          (e.g. to compute a live review duration on one clock).
     """
+    created_at = _now()
     if not is_postgres_enabled():
-        return
+        return created_at
     try:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -70,10 +75,11 @@ def record_review_start(
                       (job_id, owner, repo, pr_number, pr_url, status, author, created_at)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (job_id) DO NOTHING""",
-                (job_id, owner, repo, pr_number, pr_url, "pending", author, _now()),
+                (job_id, owner, repo, pr_number, pr_url, "pending", author, created_at),
             )
     except Exception:  # noqa: BLE001 - persistence must never break the review
         logger.warning("code_review_runs: record_review_start failed", exc_info=True)
+    return created_at
 
 
 @timed_query(store=_STORE, op="update_review")

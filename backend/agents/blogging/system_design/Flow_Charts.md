@@ -150,7 +150,7 @@ flowchart TD
     WriterRevise --> WriterDone[Updated draft]
 
     ContinueLoop --> IterCheck
-    WriterDone --> IterCheck{Max iterations<br/>reached?<br/>(default 500)}
+    WriterDone --> IterCheck{Max iterations<br/>reached?<br/>(default 30)}
     IterCheck -->|No| EditorRun
     IterCheck -->|Yes| Exhausted([Accept draft<br/>Max iterations])
 
