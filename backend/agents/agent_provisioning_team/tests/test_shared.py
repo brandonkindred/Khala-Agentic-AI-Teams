@@ -328,6 +328,34 @@ def test_credential_store_allows_dotted_agent_id(tmp_path: Path) -> None:
     assert store.get_credentials("blog.writer") == {"pg": {"user": "x"}}
 
 
+def test_stores_accept_max_length_identifier(tmp_path: Path) -> None:
+    """A max-length identifier round-trips: the generated filename (plus the
+    provisioner tempfile decoration) stays within the filesystem name limit, so
+    no store raises ENAMETOOLONG.
+    """
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+    from agent_provisioning_team.shared.path_safety import _MAX_COMPONENT_LEN
+    from agent_provisioning_team.shared.provisioner_state import ProvisionerStateStore
+
+    long_id = "a" * _MAX_COMPONENT_LEN
+
+    env = EnvironmentStore(storage_dir=tmp_path / "env")
+    env.register(
+        StoreEnvInfo(agent_id=long_id, container_id="c", container_name="c", workspace_path="/w")
+    )
+    assert env.get(long_id).container_id == "c"
+
+    cred = CredentialStore(storage_dir=tmp_path / "cred")
+    cred.store_credentials(long_id, "pg", {"u": "x"})
+    assert cred.get_credentials(long_id) == {"pg": {"u": "x"}}
+
+    # The provisioner writes a ``.{name}.XXXXXXXX.json`` tempfile — the worst case
+    # for name-length overhead — so a successful put proves the reserve is enough.
+    ps = ProvisionerStateStore(long_id, storage_dir=tmp_path / "ps")
+    ps.put("a1", {"k": 1})
+    assert ps.get("a1") == {"k": 1}
+
+
 # ---------------------------------------------------------------------------
 # job_store
 # ---------------------------------------------------------------------------

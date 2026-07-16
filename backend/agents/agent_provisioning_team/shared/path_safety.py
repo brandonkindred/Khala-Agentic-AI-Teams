@@ -24,12 +24,19 @@ from pathlib import Path
 # longer name such as "a..b" is not a traversal and is allowed.
 _SAFE_COMPONENT = re.compile(r"[A-Za-z0-9._-]+")
 
-# Upper bound on a single filename component. 255 is the per-name limit on the
-# common Linux filesystems (ext4, XFS); real identifiers are far shorter
-# (provisioning agent_ids are <=120 chars). This cap is a backstop against
-# pathologically long inputs — filesystem-limit errors, wasted memory, or
-# resource-exhaustion DoS — not a traversal guard (the allowlist handles that).
-_MAX_COMPONENT_LEN = 255
+# Upper bound on a validated identifier. It is derived from the per-name limit
+# on the common Linux filesystems (ext4, XFS), minus the decoration the stores
+# add when they turn the identifier into an actual filename, so the *generated*
+# name — not just the identifier — always fits. The worst case is
+# ``ProvisionerStateStore._save``'s tempfile, ``.{name}.XXXXXXXX.json`` (two
+# dots + an 8-char random token + a 5-char suffix ≈ 15 bytes); the env/credential
+# stores add far less (``.json`` / ``.enc``). Reserving 20 bytes covers that with
+# a small margin. This is a backstop against pathologically long inputs
+# (filesystem-limit errors, wasted memory, resource-exhaustion DoS), not a
+# traversal guard — and real identifiers are far shorter (agent_ids are <=120).
+_NAME_MAX = 255
+_MAX_SUFFIX_OVERHEAD = 20
+_MAX_COMPONENT_LEN = _NAME_MAX - _MAX_SUFFIX_OVERHEAD  # 235
 
 
 def safe_path_component(value: str, *, kind: str = "identifier") -> str:
