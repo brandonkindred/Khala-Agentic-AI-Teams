@@ -303,6 +303,21 @@ def find_side_effect_impact_activity(
           callers only within the submission's own files plus the
           ``existing_codebase`` excerpt via ``search_codebase`` — the
           ``search_repository`` tool has nothing to search without a reader.
+        - **This hits this pass harder than the other two activities in this
+          module.** Since Temporal is this agent's default execution mode
+          (``CodeReviewAgent.run()`` dispatches here whenever Temporal is
+          reachable, which both production callers that build a real
+          ``repo_reader`` — the PR-review flow and the SE per-task pipeline —
+          do not opt out of), ``search_repository`` is a complete no-op in the
+          default deployment: it has nothing to search, so this pass's entire
+          reason for existing (finding an out-of-diff caller whose assumptions
+          a behavior change breaks) does not function there. The other two
+          activities degrade more gracefully (the false-positive filter only
+          loses one narrow confirmation; the architecture pass still gets
+          partial value from the ``existing_codebase`` excerpt). Tracked for a
+          real fix (force-in-process for reader-backed reviews, or threading a
+          serializable repo identifier through the Temporal payload) rather
+          than being addressed here.
         - Never raises: the wrapped function is itself fail-safe (disabled via
           env, wrong profile, or any setup/LLM failure all degrade to an empty
           list), so an activity failure here would only ever be an unexpected

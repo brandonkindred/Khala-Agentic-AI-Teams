@@ -80,11 +80,23 @@ _ALLOWED_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
 # ``false_positive_filter._SEARCH_MATCH_LIMIT``'s rationale for ``search_codebase``.
 _REPO_SEARCH_MATCH_LIMIT = 60
 
-# Cap on how many repository files a single ``search_repository`` call will scan,
-# so a huge repository cannot make one tool call scan thousands of files. Bounded
-# independent of ``RepoReader.list_files()``'s own listing cap (5,000 by default)
-# -- this keeps a single query's cost predictable even against that ceiling.
-_REPO_SEARCH_FILE_SCAN_LIMIT = 1_500
+# Cap on how many repository files a single ``search_repository`` call will scan.
+# Deliberately conservative relative to the PR-review path's ``GitHubRepoReader``,
+# which caps at ``DEFAULT_MAX_FETCHES = 200`` distinct file fetches for the WHOLE
+# review (coding_team/github_source/repo_reader.py) -- and that one reader instance
+# is shared across the false-positive filter, the architecture-consistency pass,
+# and this pass (coordinator.py builds one ``shared_index``/``repo_reader`` and
+# passes it to all three, with this pass running LAST). Every scanned file costs
+# one fetch (``GitHubRepoReader`` has no cheaper contains-only check), so a limit
+# anywhere near the full 200 could single-handedly exhaust whatever budget the
+# earlier two passes left, starving every later ``read_file``/``search_repository``
+# call -- including this pass's own further tool calls -- for the rest of the
+# review. 40 keeps one call's worst case a small fraction of the shared budget
+# while still covering realistic caller searches, especially combined with
+# ``search_codebase``, ``list_files``, and the model's own targeted ``read_file``/
+# ``find_function_at_line`` calls. ``DiskRepoReader`` (the SE-pipeline path) has no
+# such fetch cap, so this bound is a pure safety margin there, not a functional one.
+_REPO_SEARCH_FILE_SCAN_LIMIT = 40
 
 
 def _search_repository(

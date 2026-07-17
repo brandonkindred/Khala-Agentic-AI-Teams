@@ -753,17 +753,29 @@ call for the whole submission (never once per chunk) with read access to the
 rest of the repository (the same `read_file`/`list_files`/`search_codebase`/
 `find_function_at_line` tools the false-positive filter and architecture pass
 use, plus a new `search_repository` tool that searches the REST of the
-repository — beyond the submission — for a substring, since finding a changed
-function's callers outside the diff is this pass's whole purpose and
-`search_codebase` is explicitly submission-only). It can only ADD findings, in
-one category: `side-effects` — a behavior change (return value, exceptions,
-side effects, ordering/timing) whose new behavior breaks a tool-verified
-caller, or a real behavior change that ships with no documentation update. It
+repository — beyond the submission — for a substring, capped well below the
+GitHub PR-review path's shared per-review fetch budget since three passes draw
+from the same budget and this one runs last). It can only ADD findings, in one
+category: `side-effects` — the current implementation's behavior (return
+value, exceptions, side effects, ordering/timing) breaking a tool-verified
+caller, or not matching what the function's own docstring/comments claim.
+This pass is only ever given CURRENT file content, never a prior revision, so
+it judges behavior as written now rather than comparing against history. It
 never removes or alters any finding the map phase, the false-positive filter,
 or the architecture pass already produced. `search_repository` requires a
 repository reader to be attached (the GitHub PR-review path and the
 software-engineering pipeline both supply one; without one, this pass can
 still find callers within the submission's own files via `search_codebase`).
+
+**Known limitation:** Temporal is this agent's default execution mode, and
+`repo_reader` is not forwarded across the Temporal activity boundary — so in
+the default deployment, `search_repository` has nothing to search and this
+pass's caller-impact detection is limited to callers already present in the
+submission. This is a pre-existing limitation of the whole engine (the
+false-positive filter and architecture pass inherit it too), not something
+specific to this pass, though it costs this pass the most since repo-wide
+caller search is its entire purpose.
+
 Any setup or LLM failure is fail-safe: it is logged and yields no additional
 findings, so a broken pass never blocks or changes the rest of the review. Set
 to `false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
