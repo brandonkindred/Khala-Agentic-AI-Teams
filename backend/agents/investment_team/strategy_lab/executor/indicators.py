@@ -191,9 +191,19 @@ def _na_safe(s: pd.Series) -> np.ndarray:
     rebuilt object-dtype input; nullable ``Float64``/``Int64`` may reach here
     unchanged and carry ``pd.NA``).
     Postconditions: a float64 ndarray whose missing values are ``NaN`` — so a
-    missing price propagates as ``NaN`` through the registry (matching the prior
-    pandas behaviour) rather than raising ``TypeError`` in ``float(pd.NA)``. Plain
-    ``float64`` passes through unchanged.
+    missing value propagates as ``NaN`` rather than raising ``TypeError`` in
+    ``float(pd.NA)``. Plain ``float64`` passes through unchanged.
+
+    NaN handling is deliberately **best-effort**, matching the streaming registry
+    this module is derived from (and the live engine, which validates bars upstream
+    and so never sees a NaN): a missing value flows into the registry as ``NaN``
+    and is **not** skipped. For the windowed indicators it therefore blanks the
+    windows spanning the gap; for the incremental-state indicators (obv/mfi/
+    bollinger) a NaN persists in the running total rather than recovering once the
+    gap scrolls out. This differs from the old pandas ``skipna`` rolling/cumsum
+    semantics on purpose — restoring those would re-diverge this reference from the
+    runtime it exists to model. Callers that need gap-recovery must clean their
+    inputs first, as the engine does.
     """
     return s.to_numpy(dtype="float64", na_value=np.nan)
 
@@ -358,10 +368,16 @@ def macd(
     than the cap — otherwise the coverage probe (which resolves MACD through this
     helper) would score MACD predicates differently from the engine it models.
     """
-    # Lazy import (mirrors :func:`_windowed_obv`): only reached in-package
-    # (coverage probe / tests), never in the flat sandbox where MACD's math runs
-    # through the scalar ``strategy_indicators`` API instead.
-    from ..runtime_window import STREAMING_WINDOW_BARS
+    # Lazy import with the same package/flat-layout fallback as ``IndicatorRegistry``:
+    # in the normal sandbox MACD's math runs through the scalar ``strategy_indicators``
+    # API, but ``streaming_harness``'s defensive indicators-only fallback copies THIS
+    # module in as the top-level ``indicators.py`` (no parent package), where a bare
+    # ``from ..runtime_window`` would raise ImportError. The harness copies
+    # ``runtime_window.py`` at the sandbox root, so the flat import resolves there.
+    try:
+        from ..runtime_window import STREAMING_WINDOW_BARS
+    except ImportError:  # flat sandbox layout
+        from runtime_window import STREAMING_WINDOW_BARS  # type: ignore[no-redef]
 
     s = _coerce_series(series)
     f, sl, sg = int(fast), int(slow), int(signal)

@@ -156,6 +156,43 @@ def test_indicators_accept_nullable_dtype_with_pd_na() -> None:
     assert len(ind.atr(high, low, close, 2)) == 4
 
 
+def test_macd_runtime_window_import_resolves_in_flat_sandbox_layout(tmp_path) -> None:
+    """``macd``'s ``STREAMING_WINDOW_BARS`` lookup must survive the harness's
+    indicators-only fallback layout, where this Series module is copied in as the
+    top-level ``indicators.py`` (no parent package) and a bare ``from ..runtime_window``
+    would raise ``ImportError``. The harness copies ``runtime_window.py`` at the sandbox
+    root, so the lazy import must fall back to the flat ``from runtime_window`` there.
+    """
+    import importlib.util
+    import shutil
+    import sys
+    from pathlib import Path
+
+    from investment_team.strategy_lab import runtime_window as _rw_mod
+    from investment_team.strategy_lab.indicators import streaming as _streaming_mod
+
+    shutil.copy2(Path(ind.__file__), tmp_path / "indicators.py")  # pandas impl AS the root module
+    shutil.copy2(Path(_streaming_mod.__file__), tmp_path / "_streaming_indicators.py")
+    shutil.copy2(Path(_rw_mod.__file__), tmp_path / "runtime_window.py")
+
+    sys.path.insert(0, str(tmp_path))
+    for name in ("indicators", "_streaming_indicators", "runtime_window"):
+        sys.modules.pop(name, None)
+    try:
+        spec = importlib.util.spec_from_file_location("indicators", tmp_path / "indicators.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["indicators"] = mod
+        spec.loader.exec_module(mod)
+        # Calling macd triggers the lazy STREAMING_WINDOW_BARS import; it must resolve
+        # flat rather than raising "attempted relative import with no known parent package".
+        line, signal, _hist = mod.macd(pd.Series([100.0 + i for i in range(40)]))
+        assert len(line) == 40 and not pd.isna(line.iloc[-1])
+    finally:
+        sys.path.remove(str(tmp_path))
+        for name in ("indicators", "_streaming_indicators", "runtime_window"):
+            sys.modules.pop(name, None)
+
+
 # ---------------------------------------------------------------------------
 # Indicator registry
 # ---------------------------------------------------------------------------
