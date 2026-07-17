@@ -140,6 +140,49 @@ def test_run_workflow_background_completion_unchanged_by_audit_write(monkeypatch
     ]
 
 
+def test_run_workflow_background_survives_audit_write_failure(monkeypatch) -> None:
+    """A failure inside the audit-write call must not cascade into the outer
+    try/except and mark an already-COMPLETED job FAILED."""
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+
+    import planning_team.api.main as main_module
+
+    fake_result = {
+        "success": True,
+        "handoff_package": {"summary": "hp", "open_questions": [], "resolved_questions": []},
+        "summary": "Planning completed; handoff package ready.",
+    }
+
+    monkeypatch.setattr(main_module, "run_workflow", lambda **kw: fake_result)
+    monkeypatch.setattr(main_module, "_get_llm", lambda: object())
+    monkeypatch.setattr(main_module, "update_job", lambda job_id, **fields: None)
+
+    completed_calls = []
+    monkeypatch.setattr(
+        main_module,
+        "mark_job_completed",
+        lambda job_id, **fields: completed_calls.append((job_id, fields)),
+    )
+    failed_calls = []
+    monkeypatch.setattr(
+        main_module,
+        "mark_job_failed",
+        lambda job_id, error: failed_calls.append((job_id, error)),
+    )
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated audit-write failure")
+
+    monkeypatch.setattr(main_module, "record_planning_run", _boom)
+
+    main_module.run_workflow_background(
+        "job-thread-2", "/repo", "Acme", "brief", None, False, False
+    )
+
+    assert len(completed_calls) == 1
+    assert failed_calls == []
+
+
 # ---------------------------------------------------------------------------
 # Live-Postgres tests.
 # ---------------------------------------------------------------------------

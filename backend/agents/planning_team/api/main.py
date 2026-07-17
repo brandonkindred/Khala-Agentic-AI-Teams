@@ -163,14 +163,23 @@ def run_workflow_background(
                 handoff_package=handoff_package,
                 summary=result.get("summary"),
             )
-            record_planning_run(
-                job_id,
-                client_name=client_name,
-                summary=result.get("summary") or "",
-                handoff_summary=_handoff_field(handoff_package, "summary") or "",
-                open_questions=_handoff_field(handoff_package, "open_questions") or [],
-                resolved_questions=_handoff_field(handoff_package, "resolved_questions") or [],
-            )
+            try:
+                record_planning_run(
+                    job_id,
+                    client_name=client_name,
+                    summary=result.get("summary") or "",
+                    handoff_summary=_handoff_field(handoff_package, "summary") or "",
+                    open_questions=_handoff_field(handoff_package, "open_questions") or [],
+                    resolved_questions=_handoff_field(handoff_package, "resolved_questions") or [],
+                )
+            except Exception:
+                # Belt-and-braces on top of record_planning_run's own internal guard: this
+                # call sits inside the outer try/except that marks the job FAILED on any
+                # error, so a failure here must never escape and overwrite the COMPLETED
+                # status just set above.
+                logger.debug(
+                    "planning_runs audit enrichment failed for job %s", job_id, exc_info=True
+                )
         else:
             mark_job_failed(job_id, error=result.get("failure_reason", "Workflow failed"))
     except Exception as e:

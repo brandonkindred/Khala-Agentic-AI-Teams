@@ -256,6 +256,26 @@ def test_finalize_activity_marks_completed(job_store):
     assert job_store["jobs"]["job-1"]["status"] == "completed"
 
 
+def test_finalize_activity_survives_audit_read_failure(monkeypatch, job_store):
+    """A transient job-service read failure while gathering audit fields must not
+    undo the COMPLETED status just written, nor fail the activity (which would
+    trigger a spurious Temporal retry of an already-successful finalize)."""
+    job_store["jobs"]["job-2"] = {"handoff_package": {"summary": "hp"}}
+
+    from planning_team.shared import job_store as js
+
+    def _boom(job_id):
+        raise RuntimeError("simulated job-service read failure")
+
+    monkeypatch.setattr(js, "get_job", _boom)
+
+    result = A.finalize_planning_activity("job-2", {"repo_path": "/x"})
+
+    assert result == {"success": True, "summary": "Planning completed; handoff package ready."}
+    assert job_store["jobs"]["job-2"]["status"] == "completed"
+    assert job_store["failed"] == []
+
+
 def test_legacy_run_planning_activity_delegates(monkeypatch):
     """The legacy single-activity path (kept for rollout replay) delegates to the
     same run_workflow_background the thread-mode /run endpoint uses."""

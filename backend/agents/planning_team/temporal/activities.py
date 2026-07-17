@@ -490,9 +490,13 @@ def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str
           handoff is preserved, not clobbered). Returns ``{"success": True, ...}``.
           This is the sole terminal-success writer for the Temporal path.
         - Re-reads the persisted ``handoff_package`` and best-effort records one
-          ``planning_runs`` row via ``record_planning_run``; that write is a
-          guarded no-op when Postgres is unconfigured and never affects the
-          return value above.
+          ``planning_runs`` row via ``record_planning_run``. This whole audit
+          step — the re-read included — is wrapped in its own guard: a failure
+          here (e.g. a transient job-service read error) is logged and
+          swallowed rather than propagating into ``_guarded``, which would
+          otherwise overwrite the COMPLETED status just set above with FAILED
+          and trigger a spurious Temporal retry of an already-successful
+          finalize. It never affects the return value above.
     """
     from planning_team.models import Phase
     from planning_team.postgres.writer import record_planning_run
@@ -502,21 +506,24 @@ def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str
 
     def _work() -> Dict[str, Any]:
         mark_job_completed(job_id, summary=summary)
-        job = get_job(job_id) or {}
-        handoff = job.get("handoff_package")
-        handoff = handoff if isinstance(handoff, dict) else {}
-        client_context = handoff.get("client_context")
-        client_name = (
-            client_context.get("client_name") if isinstance(client_context, dict) else None
-        )
-        record_planning_run(
-            job_id,
-            client_name=client_name,
-            summary=summary,
-            handoff_summary=handoff.get("summary") or "",
-            open_questions=handoff.get("open_questions") or [],
-            resolved_questions=handoff.get("resolved_questions") or [],
-        )
+        try:
+            job = get_job(job_id) or {}
+            handoff = job.get("handoff_package")
+            handoff = handoff if isinstance(handoff, dict) else {}
+            client_context = handoff.get("client_context")
+            client_name = (
+                client_context.get("client_name") if isinstance(client_context, dict) else None
+            )
+            record_planning_run(
+                job_id,
+                client_name=client_name,
+                summary=summary,
+                handoff_summary=handoff.get("summary") or "",
+                open_questions=handoff.get("open_questions") or [],
+                resolved_questions=handoff.get("resolved_questions") or [],
+            )
+        except Exception:
+            logger.debug("planning_runs audit enrichment failed for job %s", job_id, exc_info=True)
         return {"success": True, "summary": summary}
 
     # current_phase stays at the last real phase (sub_agent_provisioning); the
