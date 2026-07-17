@@ -25,12 +25,19 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { MatTableModule } from '@angular/material/table';
 import { MatSortModule } from '@angular/material/sort';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
+import { MatDialog } from '@angular/material/dialog';
 import { RouterLink } from '@angular/router';
 import { Subscription, timer, switchMap, takeWhile } from 'rxjs';
+import { map } from 'rxjs/operators';
 
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
+import { NotificationService } from '../../core/notification.service';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import {
+  ConfirmDialogComponent,
+  type ConfirmDialogData,
+} from '../../shared/confirm-dialog/confirm-dialog.component';
 import type {
   PaperTradingSession,
   PaperTradingComparison,
@@ -149,6 +156,8 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   private readonly api = inject(InvestmentApiService);
   private readonly integrations = inject(IntegrationsApiService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly dialog = inject(MatDialog);
+  private readonly notify = inject(NotificationService);
 
   /**
    * TradingView data-source status, used to show/hide the "using free public
@@ -976,57 +985,74 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return 'gate-' + gate.severity;
   }
 
+  /** Opens the shared Material confirm dialog and emits `true` only when confirmed. */
+  private confirmDestructive(data: ConfirmDialogData) {
+    return this.dialog
+      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, { data })
+      .afterClosed()
+      .pipe(map((result) => result === true));
+  }
+
   deleteRecord(record: StrategyLabRecord): void {
     const id = record.lab_record_id;
     const shortHyp = record.strategy.hypothesis.slice(0, 60) + (record.strategy.hypothesis.length > 60 ? '…' : '');
-    if (
-      !confirm(
-        `Delete this strategy lab run?\n\n${shortHyp}\n\nThis removes the record, its backtest, and any paper-trading sessions for it. This cannot be undone.`
-      )
-    ) {
-      return;
-    }
-    this.error = null;
-    this.deletingLabRecordId = id;
-    this.api
-      .deleteStrategyLabRecord(id)
+    this.confirmDestructive({
+      title: 'Delete strategy lab run',
+      message: `Delete this strategy lab run?\n\n${shortHyp}\n\nThis removes the record, its backtest, and any paper-trading sessions for it. This cannot be undone.`,
+      confirmLabel: 'Delete',
+      variant: 'danger',
+    })
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-      next: () => {
-        this.deletingLabRecordId = null;
-        this.loadResults();
-      },
-      error: (err) => {
-        this.deletingLabRecordId = null;
-        this.error = err?.error?.detail || err?.message || 'Failed to delete strategy.';
-      },
-    });
+      .subscribe((confirmed) => {
+        if (!confirmed) return;
+        this.error = null;
+        this.deletingLabRecordId = id;
+        this.api
+          .deleteStrategyLabRecord(id)
+          .pipe(takeUntilDestroyed(this.destroyRef))
+          .subscribe({
+            next: () => {
+              this.deletingLabRecordId = null;
+              this.loadResults();
+              this.notify.saved('Strategy lab run deleted.');
+            },
+            error: (err) => {
+              this.deletingLabRecordId = null;
+              this.error = err?.error?.detail || err?.message || 'Failed to delete strategy.';
+            },
+          });
+      });
   }
 
   clearAllLabData(): void {
-    if (
-      !confirm(
-        'Delete ALL strategy lab runs, lab strategies/backtests, and paper-trading sessions?\n\nThis cannot be undone.'
-      )
-    ) {
-      return;
-    }
-    this.error = null;
-    this.clearingAll = true;
-    this.api
-      .clearStrategyLabStorage()
+    this.confirmDestructive({
+      title: 'Clear all strategy lab data',
+      message:
+        'Delete ALL strategy lab runs, lab strategies/backtests, and paper-trading sessions?\n\nThis cannot be undone.',
+      confirmLabel: 'Delete all',
+      variant: 'danger',
+    })
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-      next: () => {
-        this.clearingAll = false;
-        this.paperTradingSessions = {};
-        this.loadResults();
-      },
-      error: (err) => {
-        this.clearingAll = false;
-        this.error = err?.error?.detail || err?.message || 'Failed to clear strategy lab data.';
-      },
-    });
+      .subscribe((confirmed) => {
+        if (!confirmed) return;
+        this.error = null;
+        this.clearingAll = true;
+        this.api
+          .clearStrategyLabStorage()
+          .pipe(takeUntilDestroyed(this.destroyRef))
+          .subscribe({
+            next: () => {
+              this.clearingAll = false;
+              this.paperTradingSessions = {};
+              this.loadResults();
+              this.notify.saved('Strategy lab data cleared.');
+            },
+            error: (err) => {
+              this.clearingAll = false;
+              this.error = err?.error?.detail || err?.message || 'Failed to clear strategy lab data.';
+            },
+          });
+      });
   }
 
   // ---------------------------------------------------------------------------
