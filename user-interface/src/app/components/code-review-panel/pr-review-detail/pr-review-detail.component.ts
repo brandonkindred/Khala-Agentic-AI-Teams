@@ -49,9 +49,10 @@ export class PrReviewDetailComponent {
   /**
    * Every review run recorded for this PR, newest-first. Passed by reference from
    * the parent (its `reviewsFor(pull.number)`); records are mutated in place by the
-   * parent's pollers, so this array must not be copied.
+   * parent's pollers, so this array must not be copied. Read-only here — this panel
+   * only renders it and never mutates it.
    */
-  @Input({ required: true }) reviews!: PrReviewRecord[];
+  @Input({ required: true }) reviews!: readonly PrReviewRecord[];
 
   /** Whether a Start Review request for this PR is currently in flight. */
   @Input() starting = false;
@@ -60,10 +61,10 @@ export class PrReviewDetailComponent {
   @Input() reviewError: string | null = null;
 
   /** Job ids whose "create issues" request is in flight (drives the child's spinner). */
-  @Input({ required: true }) creatingIssues!: Set<string>;
+  @Input({ required: true }) creatingIssues!: ReadonlySet<string>;
 
   /** Per-job "create issues" failures, keyed by job id. */
-  @Input({ required: true }) createIssueErrors!: Map<string, string>;
+  @Input({ required: true }) createIssueErrors!: ReadonlyMap<string, string>;
 
   /** Emitted (with the PR) when the user clicks Start Review. */
   @Output() startReviewRequested = new EventEmitter<GitHubPullRequestItem>();

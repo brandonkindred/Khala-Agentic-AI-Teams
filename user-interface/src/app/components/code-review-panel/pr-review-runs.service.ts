@@ -57,19 +57,36 @@ export class PrReviewRunsService implements OnDestroy {
   }
 
   // Per-PR "Start Review" failures, shown inside that PR's expanded panel so a
-  // start error and a list-load error never clobber each other.
-  reviewErrors = new Map<number, string>();
+  // start error and a list-load error never clobber each other. Private — read
+  // through `reviewErrorFor`, mutated only by `reset`/`startReview`.
+  private readonly reviewErrors = new Map<number, string>();
 
   // Reviews whose Start Review request is in flight (disables the button). Keyed by
   // `owner/repo#number`, NOT bare PR number: PR numbers collide across repositories, so a
   // bare-number key would let an in-flight start in one repo block the same-numbered PR in
-  // another (and is why this set does NOT need clearing on repo switch).
-  starting = new Set<string>();
+  // another (and is why this set does NOT need clearing on repo switch). Private — read
+  // through `isStarting`.
+  private readonly starting = new Set<string>();
 
-  // Job ids whose "create issues" request is in flight (disables the button).
-  creatingIssues = new Set<string>();
-  // Per-review "create issues" failure, shown beneath that review's proposals.
-  createIssueErrors = new Map<string, string>();
+  // Job ids whose "create issues" request is in flight (disables the button). Private
+  // backing field; the template/child bind to the read-only `creatingIssues` view below,
+  // and only `createIssuesFor` mutates it.
+  private readonly _creatingIssues = new Set<string>();
+
+  /** Read-only view of the in-flight "create issues" job ids (template/child binding). */
+  get creatingIssues(): ReadonlySet<string> {
+    return this._creatingIssues;
+  }
+
+  // Per-review "create issues" failure, shown beneath that review's proposals. Private
+  // backing field behind the read-only `createIssueErrors` view below; only
+  // `createIssuesFor` mutates it.
+  private readonly _createIssueErrors = new Map<string, string>();
+
+  /** Read-only view of per-job "create issues" failures (template/child binding). */
+  get createIssueErrors(): ReadonlyMap<string, string> {
+    return this._createIssueErrors;
+  }
 
   // The repo whose reviews/pollers this service currently holds; set by `reset`.
   private currentRepo: GitHubRepoItem | null = null;
@@ -229,12 +246,27 @@ export class PrReviewRunsService implements OnDestroy {
     return !!repo && this.starting.has(this.startKey(repo, prNumber));
   }
 
-  /** The "Start Review" error for a PR, if its last attempt failed. */
+  /**
+   * The "Start Review" error for a PR, if its last attempt failed.
+   *
+   * Preconditions: `prNumber` is a PR number from the current repo's list.
+   * Postconditions: returns the stored start-review error for `prNumber`, or null when the
+   * last attempt did not fail. Pure — no side effects.
+   */
   reviewErrorFor(prNumber: number): string | null {
     return this.reviewErrors.get(prNumber) ?? null;
   }
 
-  /** Start a code review on `pull` in `repo`, recording it and polling it live. */
+  /**
+   * Start a code review on `pull` in `repo`, recording it and polling it live.
+   *
+   * Preconditions: `repo` is the currently-expanded repo; `pull` is one of its open PRs.
+   * Postconditions: no-op when a start for `owner/repo#pull.number` is already in flight.
+   * Otherwise fires the start request; on success, and only while `currentRepo` is still
+   * `repo`, prepends a new `PrReviewRecord` to that PR's list and begins polling it; on
+   * failure, and only while still on `repo`, records the message under `pull.number` in
+   * `reviewErrors`. Always calls `markForCheck()`.
+   */
   startReview(repo: GitHubRepoItem, pull: GitHubPullRequestItem): void {
     const key = this.startKey(repo, pull.number);
     if (this.starting.has(key)) return;
@@ -337,32 +369,69 @@ export class PrReviewRunsService implements OnDestroy {
     this.pollers.clear();
   }
 
-  /** All review runs for a PR, newest-first. */
-  reviewsFor(prNumber: number): PrReviewRecord[] {
+  /**
+   * All review runs for a PR, newest-first.
+   *
+   * Preconditions: `prNumber` is a PR number.
+   * Postconditions: returns this PR's review list (empty when it has none). The array is
+   * the service's own storage typed read-only — callers must not mutate it, and it stays
+   * the *same* reference the live pollers write to (so the detail child sees live updates).
+   * Pure — no side effects.
+   */
+  reviewsFor(prNumber: number): readonly PrReviewRecord[] {
     return this._reviews.get(prNumber) ?? [];
   }
 
-  /** The most recent review run for a PR, or null. */
+  /**
+   * The most recent review run for a PR, or null.
+   *
+   * Preconditions: `prNumber` is a PR number.
+   * Postconditions: returns the newest recorded run for `prNumber`, or null when it has
+   * none. Pure — no side effects.
+   */
   latestReview(prNumber: number): PrReviewRecord | null {
     return this.reviewsFor(prNumber)[0] ?? null;
   }
 
-  /** True when a PR has at least one recorded review run. */
+  /**
+   * True when a PR has at least one recorded review run.
+   *
+   * Preconditions: `prNumber` is a PR number.
+   * Postconditions: returns true iff `prNumber` has one or more recorded runs. Pure.
+   */
   hasReviews(prNumber: number): boolean {
     return this.reviewsFor(prNumber).length > 0;
   }
 
-  /** True when a PR's latest review is still running (drives the row spinner). */
+  /**
+   * True when a PR's latest review is still running (drives the row spinner).
+   *
+   * Preconditions: `prNumber` is a PR number.
+   * Postconditions: returns true iff `prNumber`'s latest run is non-terminal and un-errored.
+   * Pure — delegates to `isLatestRunning` in review-metrics.
+   */
   isLatestRunning(prNumber: number): boolean {
     return isLatestRunningFor(this.latestReview(prNumber));
   }
 
-  /** Row status badge text derived from the latest review, or null when none. */
+  /**
+   * Row status badge text derived from the latest review, or null when none.
+   *
+   * Preconditions: `prNumber` is a PR number.
+   * Postconditions: returns the badge label for `prNumber`'s latest run, or null when it
+   * has none. Pure — delegates to `badgeLabel` in review-metrics.
+   */
   badgeLabel(prNumber: number): string | null {
     return badgeLabelFor(this.latestReview(prNumber));
   }
 
-  /** Row status badge CSS class derived from the latest review. */
+  /**
+   * Row status badge CSS class derived from the latest review.
+   *
+   * Preconditions: `prNumber` is a PR number.
+   * Postconditions: returns the badge CSS class for `prNumber`'s latest run (`''` when it
+   * has none). Pure — delegates to `badgeClass` in review-metrics.
+   */
   badgeClass(prNumber: number): string {
     return badgeClassFor(this.latestReview(prNumber));
   }
@@ -372,18 +441,26 @@ export class PrReviewRunsService implements OnDestroy {
    * review. On success the record's proposal list is replaced with the
    * server's updated copy (filed proposals now carry `issue_url`) — the child
    * component reconciles its own selection against that fresh list.
+   *
+   * Preconditions: `record` is one of this repo's review runs; `ids` are proposal ids
+   * from that run's summary.
+   * Postconditions: no-op when `ids` is empty or a request for `record.jobId` is already
+   * in flight. Otherwise marks the job in `creatingIssues` for the request's duration; on
+   * success replaces `record.reviewSummary.pending_issue_proposals` with the server's copy;
+   * on failure records the message in `createIssueErrors` under `record.jobId`. Always
+   * calls `markForCheck()`.
    */
   createIssuesFor(record: PrReviewRecord, ids: string[]): void {
     const jobId = record.jobId;
-    if (ids.length === 0 || this.creatingIssues.has(jobId)) return;
-    this.creatingIssues.add(jobId);
-    this.createIssueErrors.delete(jobId);
+    if (ids.length === 0 || this._creatingIssues.has(jobId)) return;
+    this._creatingIssues.add(jobId);
+    this._createIssueErrors.delete(jobId);
     this.integrationsApi
       .createGitHubReviewIssues(record.owner, record.repo, jobId, ids)
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (resp) => {
-          this.creatingIssues.delete(jobId);
+          this._creatingIssues.delete(jobId);
           if (record.reviewSummary) {
             record.reviewSummary = {
               ...record.reviewSummary,
@@ -393,8 +470,8 @@ export class PrReviewRunsService implements OnDestroy {
           this.cdr.markForCheck();
         },
         error: (err: unknown) => {
-          this.creatingIssues.delete(jobId);
-          this.createIssueErrors.set(jobId, extractErrorDetail(err, 'Failed to create issue(s).'));
+          this._creatingIssues.delete(jobId);
+          this._createIssueErrors.set(jobId, extractErrorDetail(err, 'Failed to create issue(s).'));
           this.cdr.markForCheck();
         },
       });
