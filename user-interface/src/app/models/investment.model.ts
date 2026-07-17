@@ -878,21 +878,98 @@ export interface InvestmentJobsListResponse {
   jobs: InvestmentJobSummary[];
 }
 
-export interface StrategyLabStreamEvent {
-  type:
-    | 'snapshot'
-    | 'progress'
-    | 'cycle_complete'
-    | 'cycle_skipped'
-    | 'cycle_errored'
-    | 'batch_start'
-    | 'batch_complete'
-    | 'batch_warning'
-    | 'complete'
-    | 'error'
-    | 'done';
-  [key: string]: unknown;
+// SSE stream events. One interface per real `type` value emitted by
+// investment_team/api/main.py's _publish() calls — every field the backend
+// actually sends is modeled, not just what handleStreamEvent() reads today,
+// EXCEPT `progress`: its payload comes from 50+ on_phase() call sites across
+// the backend orchestrator and isn't exhaustively catalogued, so its field
+// set below is scoped to what handleStreamEvent() currently consumes. `ts`
+// (an ISO timestamp publish() stamps on most, but not all, frames) is
+// deliberately omitted — nothing reads it and its presence isn't uniform.
+
+/** Initial/refresh snapshot — wire shape matches the polling endpoint 1:1. */
+export interface StrategyLabSnapshotEvent extends StrategyLabRunStatus { type: 'snapshot'; }
+
+/**
+ * Per-cycle progress ping. `cycle_index` and `phase` are the only fields the
+ * backend guarantees on every progress event; the rest are sent on some (not
+ * all) events depending on which phase/sub_phase is reporting, so they stay
+ * optional here — same as handleStreamEvent() already assumes. `phase` is
+ * `string`, not the narrower StrategyLabPhase: the backend's real phase set
+ * (`designing`, `design_review`, `aligning`, `telemetry`, `phase_transition`,
+ * paper-trading phases, ...) is open-ended and already broader than that enum.
+ */
+export interface StrategyLabProgressEvent {
+  type: 'progress';
+  cycle_index: number;
+  phase: string;
+  sub_phase?: string;
+  refinement_round?: number;
+  strategy?: { asset_class: string; hypothesis: string };
+  metrics?: Record<string, number>;
+  checks_passed?: number;
+  checks_total?: number;
+  symbols_count?: number;
+  bars_count?: number;
+  trades_count?: number;
+  execution_time?: number;
+  failure_phase?: string;
+  changes_made?: string;
+  is_winning?: boolean;
 }
+
+export interface StrategyLabCycleCompleteEvent { type: 'cycle_complete'; cycle_index: number; record_id: string; completed_cycles: number; batch_index: number; }
+/** `reason` is an ordinary backend string, not a closed enum (only "no_market_data" occurs today). */
+export interface StrategyLabCycleSkippedEvent  { type: 'cycle_skipped'; cycle_index: number; reason: string; batch_index: number; }
+/** `reason` is an ordinary backend string (an exception class name, or "tracker_merge_failed"), not a closed enum. */
+export interface StrategyLabCycleErroredEvent  { type: 'cycle_errored'; cycle_index: number; batch_index: number; reason: string; error: string; }
+
+export interface StrategyLabBatchStartEvent    { type: 'batch_start'; batch_index: number; total_batches: number; batch_size: number; completed_batches: number; }
+export interface StrategyLabBatchCompleteEvent { type: 'batch_complete'; batch_index: number; total_batches: number; completed_batches: number; }
+/** `reason` is an ordinary backend string, not a closed enum (only "signal_brief_failed" occurs today). */
+export interface StrategyLabBatchWarningEvent  { type: 'batch_warning'; batch_index: number; reason: string; }
+
+export interface StrategyLabCompleteEvent {
+  type: 'complete';
+  message: string;
+  status: 'completed' | 'completed_with_errors';
+  completed_count: number;
+  skipped_count: number;
+  errored_count: number;
+  errored_details: StrategyLabErroredDetail[];
+  completed_batches: number;
+  total_batches: number;
+}
+
+/**
+ * `detail` and `error` are mutually exclusive on the wire (three strategy-lab
+ * call sites send `detail`; one shared-infra "subscription reclaimed" call
+ * site sends `error`), but both are modeled as optional on one flat interface
+ * — not a nested per-key sub-union — so handleStreamEvent()'s existing
+ * `event['detail'] as string` read keeps compiling unchanged.
+ */
+export interface StrategyLabErrorEvent { type: 'error'; detail?: string; error?: string; }
+
+/**
+ * Sole terminal frame — always exactly `{ type: 'done' }`. The investment-api
+ * service's streamRunStatus() intercepts it (`data.type === 'done'` calls
+ * `subscriber.complete()` instead of forwarding it), so handleStreamEvent()
+ * never actually receives one in practice.
+ */
+export interface StrategyLabDoneEvent { type: 'done'; }
+
+export type StrategyLabStreamEvent =
+  | StrategyLabSnapshotEvent
+  | StrategyLabProgressEvent
+  | StrategyLabCycleCompleteEvent
+  | StrategyLabCycleSkippedEvent
+  | StrategyLabCycleErroredEvent
+  | StrategyLabBatchStartEvent
+  | StrategyLabBatchCompleteEvent
+  | StrategyLabBatchWarningEvent
+  | StrategyLabCompleteEvent
+  | StrategyLabErrorEvent
+  | StrategyLabDoneEvent;
 
 // ---------------------------------------------------------------------------
 // Paper Trading Models
