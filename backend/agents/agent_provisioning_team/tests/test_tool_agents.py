@@ -531,8 +531,12 @@ def test_docker_provisioner_is_idempotent_on_existing_state(tmp_path: Path) -> N
         first = prov.provision("a1", {}, GeneratedCredentials(tool_name="docker"))
         assert first.success
 
-    # Second call doesn't shell out (no patch needed); reuses state
-    second = prov.provision("a1", {}, GeneratedCredentials(tool_name="docker"))
+    # Second call reuses state; _on_reuse's liveness probe must see the
+    # container as confirmed-alive here, or it (correctly) treats the reuse
+    # as stale and refuses it.
+    exists = SimpleNamespace(returncode=0, stdout="abc\n", stderr="")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub([], inspect=exists)):
+        second = prov.provision("a1", {}, GeneratedCredentials(tool_name="docker"))
     assert second.success
     assert second.details.get("reused") is True
 
@@ -858,7 +862,9 @@ def test_docker_on_reuse_populates_credentials(tmp_path: Path) -> None:
     )
 
     creds = GeneratedCredentials(tool_name="docker")
-    result = prov.provision("a1", {}, creds)
+    exists = SimpleNamespace(returncode=0, stdout="abc\n", stderr="")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub([], inspect=exists)):
+        result = prov.provision("a1", {}, creds)
     assert result.success is True
     assert creds.extra["container_id"] == "abcd"
 
