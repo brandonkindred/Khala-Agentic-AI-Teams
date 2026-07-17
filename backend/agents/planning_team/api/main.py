@@ -163,20 +163,18 @@ def run_workflow_background(
                 summary=result.get("summary"),
             )
             handoff = result.get("handoff_package") or {}
-            # open_questions/resolved_questions read from the handoff are currently
-            # always [] on a normal run: HandoffPackage defaults both to [], and the
-            # setdefault above that would otherwise carry over the run's real
-            # questions is a documented no-op (kept that way so a non-empty
-            # handoff.open_questions doesn't pause every SE-driven run). The audit
-            # row faithfully mirrors the handoff as it exists today; sourcing the
-            # run's actual questions is tracked as separate follow-up work.
+            # open_questions/resolved_questions are sourced from result, not the
+            # handoff: handoff.open_questions/.resolved_questions are deliberately
+            # left empty (see orchestrator.py) so a non-empty handoff doesn't pause
+            # every SE-driven run. result carries the run's actual questions as
+            # their own top-level keys instead.
             record_planning_run(
                 job_id,
                 client_name=client_name,
                 summary=result.get("summary") or "",
                 handoff_summary=handoff.get("summary") or "",
-                open_questions=handoff.get("open_questions") or [],
-                resolved_questions=handoff.get("resolved_questions") or [],
+                open_questions=result.get("open_questions") or [],
+                resolved_questions=result.get("resolved_questions") or [],
             )
         else:
             mark_job_failed(job_id, error=result.get("failure_reason", "Workflow failed"))

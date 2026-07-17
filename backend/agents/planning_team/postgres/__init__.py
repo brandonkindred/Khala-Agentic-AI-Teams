@@ -5,8 +5,8 @@ team's FastAPI lifespan calls ``shared_postgres.register_team_schemas(SCHEMA)``.
 
 One table, ``planning_runs``: an audit record of each planning run, keyed by
 ``job_id``, holding the client name, run summary, handoff summary, and the
-open/resolved discovery questions as JSONB. Table-only in this change — no
-code writes to it yet; a follow-up change adds the writer.
+open/resolved discovery questions as JSONB. See ``postgres.writer`` for the
+best-effort writer that populates it at run finalize.
 """
 
 from __future__ import annotations
