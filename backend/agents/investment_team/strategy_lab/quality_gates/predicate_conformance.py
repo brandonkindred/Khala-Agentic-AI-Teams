@@ -417,27 +417,42 @@ class PredicateConformanceGate(GateResultsMixin):
                 rule_id=fixture.rule_id,
             )
 
-        if callable(getattr(strategy, "on_start", None)):
-            try:
-                strategy.on_start(ctx)
-            except Exception:
-                pass
+        # Bracket every call into strategy code with this fixture's own
+        # registries dict as the ambient _active_registries context (see
+        # strategy_indicators._shared_registry): a strategy that reads
+        # indicators via the standalone wrappers (`from indicators import
+        # bollinger_bands`) instead of ctx.indicator() would otherwise share
+        # a registry with whatever other execution last ran on this worker
+        # thread. Resetting via the token (not a blind clear) means this is
+        # correct even if a future caller nests or interleaves _check_fixture
+        # calls, not just for today's strictly-sequential fixture loop.
+        from ..executor.strategy_indicators import _active_registries
 
-        if fixture.rule_kind == "signal_exit":
-            pos_side = _SideStr("short") if _infer_short_from_spec(spec) else _SideStr("long")
-            ctx._positions[fixture.symbol] = _SimplePosition(
-                symbol=fixture.symbol,
-                side=pos_side,
-                entry_price=100.0,
-            )
+        token = _active_registries.set(ctx._indicator_registries)
+        try:
+            if callable(getattr(strategy, "on_start", None)):
+                try:
+                    strategy.on_start(ctx)
+                except Exception:
+                    pass
 
-        for i, bar in enumerate(fixture.bars):
-            shadow_bar = _to_shadow_bar(bar, fixture.symbol)
-            ctx._ingest_bar(shadow_bar, i)
-            try:
-                strategy.on_bar(ctx, shadow_bar)
-            except Exception:
-                pass
+            if fixture.rule_kind == "signal_exit":
+                pos_side = _SideStr("short") if _infer_short_from_spec(spec) else _SideStr("long")
+                ctx._positions[fixture.symbol] = _SimplePosition(
+                    symbol=fixture.symbol,
+                    side=pos_side,
+                    entry_price=100.0,
+                )
+
+            for i, bar in enumerate(fixture.bars):
+                shadow_bar = _to_shadow_bar(bar, fixture.symbol)
+                ctx._ingest_bar(shadow_bar, i)
+                try:
+                    strategy.on_bar(ctx, shadow_bar)
+                except Exception:
+                    pass
+        finally:
+            _active_registries.reset(token)
 
         orders_at: Dict[int, List[_OrderRecord]] = {}
         for o in ctx.orders:

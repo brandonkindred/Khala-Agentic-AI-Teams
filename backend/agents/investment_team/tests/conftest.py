@@ -121,8 +121,8 @@ def _temporal_dispatch_inline(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_indicator_registries() -> None:
-    """Clear strategy_indicators' thread-local shared-registry cache per test.
+def _reset_indicator_registries():
+    """Clear strategy_indicators' shared-registry fallback caches per test.
 
     ``strategy_indicators._shared_registry`` reuses one ``IndicatorRegistry``
     per (thread, symbol) across calls instead of constructing fresh each time.
@@ -133,15 +133,28 @@ def _reset_indicator_registries() -> None:
     test queries the same symbol — silently mutating state left over from a
     different bar sequence rather than starting cold.
 
+    Also force-clears the ``_active_registries`` contextvar both before and
+    after the test. Tests that exercise it directly (e.g. to prove the
+    contextvar takes precedence over the thread-local fallback) are expected
+    to reset their own ``Token`` via ``try``/``finally``; this is a defensive
+    backstop, not the primary mechanism, so a test with a bug in that
+    cleanup — or a future test that forgets it — can't leave a stale
+    registries dict active for whatever test runs next on this thread.
+
     Preconditions:
         None (import is lazy so tests that never touch strategy_indicators
         are unaffected).
     Postconditions:
-        Every test starts with an empty shared-registry cache on this thread.
+        Every test starts with, and leaves behind, an empty shared-registry
+        cache on this thread and no ``_active_registries`` context set.
     """
     from investment_team.strategy_lab.executor import strategy_indicators as si
 
     si._reset_shared_registries()
+    si._active_registries.set(None)
+    yield
+    si._reset_shared_registries()
+    si._active_registries.set(None)
 
 
 @pytest.fixture

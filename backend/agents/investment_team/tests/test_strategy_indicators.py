@@ -235,6 +235,30 @@ def test_shared_registry_tolerates_raising_timestamp_descriptor() -> None:
     assert si.ema(bars, 5) == pytest.approx(si.ema(plain, 5))
 
 
+def test_shared_registry_prefers_active_registries_contextvar_over_thread_local() -> None:
+    """Regression test for a sixth bug caught in code review: the 16
+    standalone wrapper functions have no ``registries`` parameter, so
+    ``StrategyContext``/``_ShadowContext`` cannot pass their own dict when a
+    strategy calls e.g. ``sma(...)`` directly instead of ``ctx.indicator()``.
+    ``_shared_registry`` now checks the ``_active_registries`` contextvar —
+    set by those two classes around every call into strategy code (see
+    ``streaming_harness.py``'s ``_HARNESS_SCRIPT`` and
+    ``predicate_conformance.py``'s ``_check_fixture``) — before falling back
+    to the thread-local cache. This proves the precedence directly: with the
+    contextvar set, a wrapper call must land in *that* dict, not the
+    thread-local one, even though both are available."""
+    bars = _bars(20)
+    own_dict: dict = {}
+    token = si._active_registries.set(own_dict)
+    try:
+        si.ema(bars, 5)
+    finally:
+        si._active_registries.reset(token)
+
+    assert own_dict  # the call landed in the contextvar's dict...
+    assert si._thread_local.registries == {}  # ...not the thread-local fallback
+
+
 # ---------------------------------------------------------------------------
 # Flat sandbox layout: the module imports the impl as ``_indicators_impl``
 # ---------------------------------------------------------------------------

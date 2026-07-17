@@ -25,7 +25,11 @@ from investment_team.strategy_lab.executor.predicate_evaluator import (
     BarRecord,
     StreamingHistoryView,
 )
-from investment_team.strategy_lab.executor.strategy_indicators import ema, indicator_value
+from investment_team.strategy_lab.executor.strategy_indicators import (
+    bollinger_bands,
+    ema,
+    indicator_value,
+)
 from investment_team.strategy_lab.quality_gates.code_conformance import CodeConformanceGate
 from investment_team.strategy_lab.quality_gates.predicate_conformance import (
     _ShadowBar,
@@ -452,6 +456,66 @@ def test_interleaved_contexts_do_not_corrupt_each_others_indicator_state() -> No
 
     got_a = ctx_a.indicator("bollinger", period=20, band="upper")
     got_b = ctx_b.indicator("bollinger", period=20, band="upper")
+    exp_a = _engine_latest(
+        _engine_view(a), IndicatorRef(name="bollinger", params={"period": 20, "band": "upper"})
+    )
+    exp_b = _engine_latest(
+        _engine_view(b), IndicatorRef(name="bollinger", params={"period": 20, "band": "upper"})
+    )
+    assert got_a == pytest.approx(exp_a)
+    assert got_b == pytest.approx(exp_b)
+    assert got_a != pytest.approx(got_b)  # fixtures must actually differ
+
+
+def test_interleaved_standalone_wrapper_calls_do_not_corrupt_each_others_indicator_state() -> None:
+    """Regression test for a sixth bug caught in code review: the fourth
+    bug's fix (instance-owned ``_indicator_registries``, see
+    ``test_interleaved_contexts_do_not_corrupt_each_others_indicator_state``)
+    only covers ``ctx.indicator(...)``. The 16 standalone wrapper functions
+    have no ``registries`` parameter, so a strategy calling e.g.
+    ``bollinger_bands(...)`` directly (a documented, supported call shape —
+    see ``strategy_indicators``'s module docstring) always fell through to a
+    cache *shared* with whatever other execution last ran on this thread,
+    regardless of which context's dispatch was driving it.
+
+    This is not a theoretical risk: sharing one registry across two
+    different bar streams for the same symbol reliably corrupts
+    deque-stateful indicators like ``bollinger`` — verified empirically
+    (~91% of trials returned a value blended from both streams, via
+    ``streaming.py``'s ``_advance_kind`` misclassifying the second stream's
+    tail as a "slide" continuation of the first's cached deque state).
+
+    ``_active_registries`` (a contextvar) closes this: ``StrategyContext``/
+    ``_ShadowContext`` bracket every call into strategy code with
+    ``.set(self._indicator_registries)``/``.reset(token)`` (see
+    ``streaming_harness.py``'s ``_HARNESS_SCRIPT`` and
+    ``predicate_conformance.py``'s ``_check_fixture``), so a standalone
+    wrapper resolves to the *dispatching* context's own dict instead. This
+    test brackets manually to prove the underlying mechanism directly, the
+    same way the fourth bug's regression test manually interleaves two
+    contexts even though no current caller genuinely interleaves them.
+    """
+    from investment_team.strategy_lab.executor import strategy_indicators as si
+
+    a = _make_diverging_bars(60, symbol="X", seed=1)
+    b = _make_diverging_bars(60, symbol="X", seed=99)
+    ctx_a = StrategyContext(emit=lambda _d: None)
+    ctx_b = StrategyContext(emit=lambda _d: None)  # constructed before either runs
+
+    got_a = got_b = None
+    for i in range(20, 61):
+        token = si._active_registries.set(ctx_a._indicator_registries)
+        try:
+            got_a = bollinger_bands(a[:i], period=20)[0]  # (upper, middle, lower)
+        finally:
+            si._active_registries.reset(token)
+
+        token = si._active_registries.set(ctx_b._indicator_registries)
+        try:
+            got_b = bollinger_bands(b[:i], period=20)[0]
+        finally:
+            si._active_registries.reset(token)
+
     exp_a = _engine_latest(
         _engine_view(a), IndicatorRef(name="bollinger", params={"period": 20, "band": "upper"})
     )
