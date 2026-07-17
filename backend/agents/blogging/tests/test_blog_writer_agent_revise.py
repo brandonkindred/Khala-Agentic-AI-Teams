@@ -1,34 +1,28 @@
-"""Tests for BlogWriterAgent.revise (plan-first batch feedback processing)."""
+"""Tests for BlogWriterAgent.revise (plan-first batch feedback processing).
+
+Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
+from _content_plan_test_utils import make_content_plan
 from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 from agents.blogging.blog_writer_agent import BlogWriterAgent, ReviseWriterInput
-from agents.blogging.shared.content_plan import (
-    ContentPlan,
-    ContentPlanSection,
-    RequirementsAnalysis,
-    TitleCandidate,
-)
+from agents.blogging.shared.content_plan import ContentPlan, ContentPlanSection, TitleCandidate
 
 from llm_service import DummyLLMClient
 
 
 def _minimal_plan() -> ContentPlan:
-    return ContentPlan(
+    return make_content_plan(
         overarching_topic="Test topic",
         narrative_flow="Intro, main, wrap.",
         sections=[
             ContentPlanSection(title="Intro", coverage_description="Hook", order=0),
         ],
         title_candidates=[TitleCandidate(title="T1", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True,
-            scope_feasible=True,
-            research_gaps=[],
-        ),
     )
 
 

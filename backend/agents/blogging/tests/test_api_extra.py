@@ -42,39 +42,17 @@ def _raise(exc: Exception):
 
 def _make_pipeline_doubles():
     """Build minimal planning_phase_result + draft_result + status fake."""
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        PlanningPhaseResult,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from _content_plan_test_utils import make_pipeline_doubles
 
-    plan = ContentPlan(
-        overarching_topic="Topic",
-        narrative_flow="Flow",
-        sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
-        title_candidates=[TitleCandidate(title=_EXPECTED_TITLE, probability_of_success=0.8)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
+    return make_pipeline_doubles(
+        title=_EXPECTED_TITLE, probability=0.8, planning_wall_ms_total=10.0
     )
-    ppr = PlanningPhaseResult(
-        content_plan=plan,
-        planning_iterations_used=1,
-        parse_retry_count=0,
-        planning_wall_ms_total=10.0,
-    )
-
-    class _Draft:
-        draft = "# Draft\n\nBody."
-
-    return ppr, _Draft(), "PASS"
 
 
 def test_full_pipeline_sync_success(client: TestClient, monkeypatch) -> None:
     """POST /full-pipeline returns success when run_pipeline returns PASS."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+
     ppr, draft, status = _make_pipeline_doubles()
     monkeypatch.setattr(v2, "run_pipeline", lambda *a, **kw: (ppr, draft, status))
 
@@ -105,6 +83,7 @@ def test_full_pipeline_sync_planning_error(client: TestClient, monkeypatch) -> N
 
 def test_full_pipeline_sync_unknown_error(client: TestClient, monkeypatch) -> None:
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+
     monkeypatch.setattr(v2, "run_pipeline", _raise(RuntimeError("crash")))
 
     r = client.post("/full-pipeline", json={"brief": "x"})
@@ -139,15 +118,12 @@ def test_resume_job_happy(client: TestClient, monkeypatch) -> None:
     assert job["status"] == "running"
 
 
-def test_restart_job_happy(client: TestClient, monkeypatch, fake_job_client) -> None:
-    """Restart uses both `shared.blog_job_store` and `blogging.shared.blog_job_store`
-    aliases — patch both so the in-memory fake client backs everything."""
+def test_restart_job_happy(client: TestClient, monkeypatch) -> None:
+    """Restart uses `agents.blogging.shared.blog_job_store`, backed by the in-memory fake."""
     from agents.blogging.shared import blog_job_store as bjs
 
     job_id = _create_job()
     bjs.update_blog_job(job_id, status="completed", request_payload={"brief": "x"})
-
-    # Also patch the alternative module path used by api/main.py for reset_blog_job
 
     # Intercept the bounded async-job pool so we don't actually run the pipeline.
     monkeypatch.setattr(_api_main, "_submit_async_job", lambda fn, *a, **kw: None)
@@ -345,6 +321,7 @@ def test_publish_terminal_event_swallows() -> None:
 def test_publish_terminal_event_swallows_publish_failure(monkeypatch) -> None:
     """Publishes an event but cleanup_job is missing → swallow."""
     import agents.blogging.shared.job_event_bus as bus
+
     def boom(*a, **kw):
         raise RuntimeError("nope")
 
