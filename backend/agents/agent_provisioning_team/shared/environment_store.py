@@ -357,14 +357,23 @@ class EnvironmentStore:
         keys present" check) keeps the two methods from disagreeing on a
         present-but-invalid record — disagreement that previously let such a
         record be misread as confirmed absence.
+
+        Deliberately does not pre-check with ``Path.exists()``: it stats the
+        path and treats *any* ``OSError`` (not just "doesn't exist") as
+        `False`, so a transient stat failure (e.g. a parent directory
+        temporarily returning ``EACCES``) would be indistinguishable from
+        confirmed absence and this method would wrongly report readable.
+        Attempting the read directly and catching ``FileNotFoundError``
+        specifically (rather than ``OSError`` broadly) preserves that
+        distinction.
         """
         assert agent_id, "agent_id must be non-empty"
         with _lock:
             for path in self._env_file_candidates(agent_id):
                 try:
-                    if not path.exists():
-                        continue
                     data = json.loads(path.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    continue
                 except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                     return False
                 if not isinstance(data, dict):

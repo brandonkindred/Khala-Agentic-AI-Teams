@@ -542,7 +542,7 @@ async def test_workflow_compensates_on_tool_failure(tmp_path) -> None:
     compensate_call = _call(stub, "compensate_activity")
     assert compensate_call["args"][0] == "agent-1"
     assert compensate_call["args"][1] == [
-        {"tool_name": "postgresql", "provisioner_key": "postgres_provisioner"}
+        {"tool_name": "postgresql", "provisioner_key": "postgres_provisioner", "reused": False}
     ]
     assert [c["name"] for c in stub.calls].count("mark_job_failed_activity") == 1
 
@@ -649,7 +649,7 @@ async def test_workflow_resume_tool_set_mismatch_compensates_prior_successes(tmp
     compensate_call = _call(stub, "compensate_activity")
     assert compensate_call["args"][0] == "agent-1"
     assert compensate_call["args"][1] == [
-        {"tool_name": "postgresql", "provisioner_key": "postgres_provisioner"}
+        {"tool_name": "postgresql", "provisioner_key": "postgres_provisioner", "reused": False}
     ]
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
@@ -709,7 +709,7 @@ async def test_workflow_resume_with_prior_failed_tools_compensates(tmp_path) -> 
 
     compensate_call = _call(stub, "compensate_activity")
     assert compensate_call["args"][1] == [
-        {"tool_name": "postgresql", "provisioner_key": "postgres_provisioner"}
+        {"tool_name": "postgresql", "provisioner_key": "postgres_provisioner", "reused": False}
     ]
     assert "mark_job_failed_activity" in [c["name"] for c in stub.calls]
 
@@ -749,7 +749,7 @@ async def test_workflow_handles_non_dict_provision_results(tmp_path) -> None:
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     assert _call(stub, "compensate_activity")["args"][1] == [
-        {"tool_name": "postgresql", "provisioner_key": "x"}
+        {"tool_name": "postgresql", "provisioner_key": "x", "reused": False}
     ]
 
 
@@ -788,7 +788,7 @@ async def test_workflow_handles_dict_failure_results(tmp_path) -> None:
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     assert _call(stub, "compensate_activity")["args"][1] == [
-        {"tool_name": "postgresql", "provisioner_key": "x"}
+        {"tool_name": "postgresql", "provisioner_key": "x", "reused": False}
     ]
 
 

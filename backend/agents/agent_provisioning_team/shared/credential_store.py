@@ -432,6 +432,34 @@ class CredentialStore:
                 deleted = True
         return deleted
 
+    def delete_tool_credentials(self, agent_id: str, tool_name: str) -> bool:
+        """Remove one tool's credential entry, preserving the agent's others.
+
+        Preconditions:
+            * ``agent_id`` / ``tool_name`` are non-empty.
+        Postconditions:
+            * When ``agent_id`` has no stored credentials, or none for
+              ``tool_name``, returns ``False`` and nothing is written.
+            * Otherwise ``tool_name``'s entry is removed and the remaining
+              entries are re-encrypted back to the primary store path (the
+              same target ``store_credentials`` always writes to); returns
+              ``True``. Used by compensation to purge a single tool's
+              generated-but-now-stale secret (its account was just rolled
+              back) without discarding the agent's other, still-valid tools'
+              credentials the way ``delete_credentials`` would.
+        """
+        assert agent_id, "agent_id must be non-empty"
+        assert tool_name, "tool_name must be non-empty"
+        existing, _src = self._read_agent_credentials(agent_id)
+        if not existing or tool_name not in existing:
+            return False
+        del existing[tool_name]
+        path = self._agent_file(agent_id)
+        encrypted = self.multifernet.encrypt(json.dumps(existing).encode())
+        path.write_bytes(encrypted)
+        path.chmod(0o600)
+        return True
+
     def list_agents(self) -> List[str]:
         """List all agent IDs with stored credentials."""
         seen: set[str] = set()

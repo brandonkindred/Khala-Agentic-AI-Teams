@@ -166,6 +166,32 @@ def test_environment_store_readable_false_on_unreadable_record_content(tmp_path:
         assert store.readable("a1") is False
 
 
+def test_environment_store_readable_false_when_exists_probe_swallows_permission_error(
+    tmp_path: Path,
+) -> None:
+    """readable() must not rely on Path.exists() to prove absence.
+
+    Path.exists() catches ANY OSError from the underlying stat() call —
+    including a transient EACCES on a parent directory — and returns False,
+    indistinguishable from "genuinely doesn't exist". A caller that
+    pre-checks with .exists() before reading would then skip straight past a
+    record it couldn't actually rule out, misreporting a real access failure
+    as confirmed absence. readable() must attempt the read directly instead
+    so a real access failure surfaces as an OSError from that read, rather
+    than being silently swallowed by .exists() first.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(agent_id="a1", container_id="c1", container_name="n1", workspace_path="/w")
+    )
+
+    with (
+        patch.object(Path, "exists", return_value=False),
+        patch.object(Path, "read_text", side_effect=PermissionError("EACCES")),
+    ):
+        assert store.readable("a1") is False
+
+
 def test_environment_store_readable_false_on_unreadable_legacy_copy(tmp_path: Path) -> None:
     """An unreadable LEGACY-location record also probes False.
 

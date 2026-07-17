@@ -104,6 +104,42 @@ def test_credential_store_delete_missing_returns_false(tmp_path: Path) -> None:
     assert store.delete_credentials("nobody") is False
 
 
+def test_credential_store_delete_tool_credentials_removes_one_tool_only(tmp_path: Path) -> None:
+    """Deleting one tool's entry must leave the agent's other tools intact."""
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    store = CredentialStore(storage_dir=tmp_path)
+    store.store_credentials("a1", "pg", {"password": "p"})
+    store.store_credentials("a1", "redis", {"password": "r"})
+
+    assert store.delete_tool_credentials("a1", "pg") is True
+
+    assert store.get_credentials("a1", "pg") is None
+    assert store.get_credentials("a1", "redis") == {"password": "r"}
+
+
+def test_credential_store_delete_tool_credentials_missing_agent_returns_false(
+    tmp_path: Path,
+) -> None:
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    store = CredentialStore(storage_dir=tmp_path)
+    assert store.delete_tool_credentials("nobody", "pg") is False
+
+
+def test_credential_store_delete_tool_credentials_missing_tool_returns_false(
+    tmp_path: Path,
+) -> None:
+    """The agent exists but never had this tool — nothing to remove."""
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    store = CredentialStore(storage_dir=tmp_path)
+    store.store_credentials("a1", "pg", {"password": "p"})
+
+    assert store.delete_tool_credentials("a1", "redis") is False
+    assert store.get_credentials("a1", "pg") == {"password": "p"}
+
+
 def test_credential_store_list_agents(tmp_path: Path) -> None:
     from agent_provisioning_team.shared.credential_store import CredentialStore
 

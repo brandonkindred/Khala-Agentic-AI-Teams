@@ -366,18 +366,32 @@ class ProvisioningOrchestrator:
 
         Preconditions:
             * ``tool_results`` entries are the tool results this ATTEMPT
-              itself produced — rolling those back always runs, since they
-              are always this attempt's own creation regardless of
-              ``tear_down_environment``.
+              itself produced — rolling those back always runs (except for
+              entries whose ``details.reused`` is true — see below),
+              regardless of ``tear_down_environment``.
         Postconditions:
-            * ``tear_down_environment=False`` skips the Docker / credential
-              store / environment-record teardown entirely, while tool
-              rollback above still runs unconditionally. Callers set this
-              ``False`` when ``agent_id``'s environment predates this attempt
-              (e.g. a re-run against an already-delivered agent) and must be
-              preserved — a newly-provisioned tool from THIS attempt still
-              gets rolled back, but the environment this attempt never
-              created is left untouched.
+            * A result whose ``details.reused`` is true is skipped entirely:
+              ``reused`` means the provisioner found and idempotently reused
+              an existing account rather than creating a new one, so it is
+              never this attempt's own creation — rolling it back (or
+              purging its credential entry) would destroy/invalidate a
+              resource that predates this attempt, independent of
+              ``tear_down_environment``.
+            * Every other successfully-rolled-back tool also has its
+              generated credential entry purged from the credential store
+              (``CredentialStore.delete_tool_credentials``) — the
+              credentials phase generates a fresh secret for every tool
+              upfront, so once a tool's account is torn back down that
+              secret no longer corresponds to anything live.
+            * ``tear_down_environment=False`` skips the Docker / whole-agent
+              credential-file / environment-record teardown entirely, while
+              tool rollback above still runs unconditionally (modulo the
+              ``reused`` exclusion). Callers set this ``False`` when
+              ``agent_id``'s environment predates this attempt (e.g. a re-run
+              against an already-delivered agent) and must be preserved — a
+              newly-provisioned tool from THIS attempt still gets rolled
+              back, but the environment this attempt never created is left
+              untouched.
         """
         # Look each successfully-provisioned tool back up by its registry key
         # (stamped onto the result in run_account_provisioning). Prior to #293
@@ -388,12 +402,20 @@ class ProvisioningOrchestrator:
         for r in tool_results:
             if not getattr(r, "success", False):
                 continue
+            tool_name = getattr(r, "tool_name", None)
+            if bool((getattr(r, "details", None) or {}).get("reused", False)):
+                logger.info(
+                    "Compensation: skipping rollback for %s — this attempt reused a "
+                    "pre-existing account rather than creating one",
+                    tool_name or "?",
+                )
+                continue
             key = getattr(r, "provisioner_key", None)
             if not key:
                 logger.warning(
                     "Compensation: tool_result for %s has no provisioner_key; "
                     "skipping rollback (stale result pre-#293).",
-                    getattr(r, "tool_name", "?"),
+                    tool_name or "?",
                 )
                 continue
             provisioner = self.tool_agents.get(key)
@@ -430,6 +452,12 @@ class ProvisioningOrchestrator:
                     provisioner.deprovision(agent_id)
                 except Exception:  # noqa: BLE001 — best-effort cleanup
                     logger.exception("Compensation: deprovision failed for %s", key)
+
+            if tool_name:
+                try:
+                    self.credential_store.delete_tool_credentials(agent_id, tool_name)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Compensation: credential cleanup failed for %s", tool_name)
 
         if not tear_down_environment:
             return

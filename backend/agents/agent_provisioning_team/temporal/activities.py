@@ -160,45 +160,44 @@ def list_manifest_tools_activity(manifest_path: str) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-_LIVE_ENVIRONMENT_STATUSES = frozenset({"running", "ready"})
-
-
 @activity.defn(name="agent_provisioning_check_existing_environment")
 def check_existing_environment_activity(agent_id: str) -> bool:
-    """Report whether ``agent_id`` already has a live environment (read-only).
+    """Report whether ``agent_id`` already has an environment on record (read-only).
 
     Called by the workflow right after acquiring ``agent_id``'s lock, before
     setup runs, so a later failure's compensation decision can tell "this run
     created everything at ``agent_id`` from scratch" (safe to unconditionally
-    tear down) apart from "``agent_id`` already had a live environment before
+    tear down) apart from "``agent_id`` already had an environment before
     this run touched anything" (compensating could destroy it).
 
     Preconditions:
         * ``agent_id`` is non-empty.
     Postconditions:
-        * Returns ``True`` iff ``EnvironmentStore`` currently holds a record
-          for ``agent_id`` whose status is ``"running"`` (``run_setup``'s own
-          fast-path condition) or ``"ready"`` (a fully delivered environment —
-          ``phases/deliver.py`` moves a completed environment from
-          ``"running"`` to ``"ready"``, so a delivered agent's record would
-          otherwise read as "nothing exists" here and let a later re-run's
-          failure destroy it).
+        * Returns ``True`` iff ``EnvironmentStore`` currently holds ANY record
+          for ``agent_id``, regardless of its ``status`` field. A status other
+          than ``"running"``/``"ready"`` (e.g. ``"stopped"``) still means a
+          container previously existed for this agent — ``run_setup`` only
+          fast-paths on ``"running"``, but ``docker.provision()``'s own
+          idempotency state (independent of ``EnvironmentStore``) can still
+          resolve to reusing that same underlying container regardless of
+          what status this record carries, so treating a non-running record
+          as "nothing here" would let a later phase's failure tear down a
+          container that predates this run.
         * Also returns ``True`` — conservatively, "might exist" — when the
           record location is present but genuinely unreadable (``get()``
           returns ``None`` for that case too, indistinguishable from
           confirmed absence without ``readable()``): the registry being
           unreadable is not proof nothing is there.
         * Returns ``False`` only when the registry is confirmed readable and
-          holds nothing (or a non-live-status record) for ``agent_id``.
+          holds no record at all for ``agent_id``.
         * Never raises (``EnvironmentStore.get``/``readable`` never raise).
     """
     assert agent_id, "agent_id must be non-empty"
     from agent_provisioning_team.shared.environment_store import EnvironmentStore
 
     env_store = EnvironmentStore()
-    existing = env_store.get(agent_id)
-    if existing is not None:
-        return existing.status in _LIVE_ENVIRONMENT_STATUSES
+    if env_store.get(agent_id) is not None:
+        return True
     return not env_store.readable(agent_id)
 
 
@@ -796,7 +795,12 @@ def compensate_activity(
         * ``agent_id`` identifies the agent whose tools should be rolled back.
         * ``succeeded_tools`` entries are dicts with ``tool_name`` and
           ``provisioner_key`` (registry key, e.g. ``"postgres_provisioner"``).
-          The orchestrator looks provisioners up by that registry key.
+          The orchestrator looks provisioners up by that registry key. An
+          optional ``reused`` flag (from the provisioner's own
+          ``details.reused``) marks an entry as idempotently reused rather
+          than created by this attempt — ``ProvisioningOrchestrator.compensate``
+          excludes those from rollback, since tearing one down would destroy
+          an account that predates this attempt.
         * When ``job_id`` is set, it identifies the job whose completed-phase
           checkpoints must be cleared after teardown.
         * ``tear_down_environment`` is ``False`` when ``agent_id``'s Docker
@@ -838,6 +842,10 @@ def compensate_activity(
             tool_name=t.get("tool_name", ""),
             provisioner_key=t.get("provisioner_key"),
             success=True,
+            # Mirrors ToolProvisionResult's shape (a `.details` dict) so
+            # `compensate` reads reuse the same way for both the Temporal
+            # shim path here and the in-process ToolProvisionResult path.
+            details={"reused": bool(t.get("reused", False))},
         )
         for t in succeeded_tools
     ]

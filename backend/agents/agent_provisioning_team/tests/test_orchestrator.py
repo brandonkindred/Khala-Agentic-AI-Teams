@@ -475,6 +475,67 @@ def test_compensate_environment_cleanup_failure_swallowed(tmp_path: Path, monkey
     orch.compensate("a1", [])
 
 
+def test_compensate_skips_reused_tool_result(tmp_path: Path) -> None:
+    """A reused (not this attempt's own) account must not be rolled back."""
+    fake_prov = MagicMock()
+
+    orch = ProvisioningOrchestrator(
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"x": fake_prov, "docker_provisioner": MagicMock()},
+    )
+
+    reused = ToolProvisionResult(
+        tool_name="t",
+        success=True,
+        provisioner_key="x",
+        details={"reused": True},
+    )
+    orch.compensate("a1", [reused])
+    fake_prov.list_compensations.assert_not_called()
+    fake_prov.deprovision.assert_not_called()
+
+
+def test_compensate_skips_credential_purge_for_reused_tool(tmp_path: Path) -> None:
+    """A reused tool's credential entry must survive compensation untouched."""
+    cred_store = MagicMock()
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"x": MagicMock(), "docker_provisioner": MagicMock()},
+    )
+
+    reused = ToolProvisionResult(
+        tool_name="t",
+        success=True,
+        provisioner_key="x",
+        details={"reused": True},
+    )
+    orch.compensate("a1", [reused], tear_down_environment=False)
+    cred_store.delete_tool_credentials.assert_not_called()
+
+
+def test_compensate_purges_credentials_for_rolled_back_tool(tmp_path: Path) -> None:
+    """A genuinely rolled-back tool's now-stale credential entry is purged."""
+    cred_store = MagicMock()
+    fake_prov = MagicMock()
+    fake_prov.list_compensations.return_value = []
+    fake_prov.deprovision.return_value = DeprovisionResult(tool_name="t", success=True)
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"x": fake_prov, "docker_provisioner": MagicMock()},
+    )
+
+    fresh = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
+    # tear_down_environment=False: the whole-agent credential file is NOT
+    # wiped, so the per-tool purge below must run independently of that flag.
+    orch.compensate("a1", [fresh], tear_down_environment=False)
+    fake_prov.deprovision.assert_called_once_with("a1")
+    cred_store.delete_tool_credentials.assert_called_once_with("a1", "t")
+
+
 def test_compensate_post_replay_state_cleanup_failure(tmp_path: Path) -> None:
     """If clear_compensations or _state.delete fails, swallow and move on."""
     from agent_provisioning_team.shared.provisioner_state import CompensationRecord

@@ -121,6 +121,10 @@ class AgentProvisioningWorkflow:
             * ``tool_names`` are the current manifest tool names in order.
         Postconditions:
             * Returns ``(tool_results_dump, succeeded, failures)``.
+            * ``succeeded`` entries also carry ``reused`` (from
+              ``details.reused``) so a later compensation call can tell a
+              tool this attempt idempotently reused apart from one it
+              actually created.
         """
         tool_results_dump = list(ap.get("tool_results") or [])
         prior_names = {r.get("tool_name") for r in tool_results_dump if r.get("tool_name")}
@@ -129,6 +133,7 @@ class AgentProvisioningWorkflow:
             {
                 "tool_name": r.get("tool_name"),
                 "provisioner_key": r.get("provisioner_key"),
+                "reused": bool((r.get("details") or {}).get("reused", False)),
             }
             for r in tool_results_dump
             if r.get("success")
@@ -198,7 +203,11 @@ class AgentProvisioningWorkflow:
             * ``credentials_by_tool`` is keyed by tool name.
         Postconditions:
             * Returns ``(tool_results_dump, succeeded, failures)``.
-            * ``succeeded`` entries carry ``tool_name`` + ``provisioner_key``.
+            * ``succeeded`` entries carry ``tool_name`` + ``provisioner_key`` +
+              ``reused`` (from the provisioner's ``details.reused`` — set when
+              it found and idempotently reused an existing account rather
+              than creating one, so a later compensation call knows not to
+              roll it back).
         """
         tool_names = [s["name"] for s in tool_specs]
         if "account_provisioning" in skip and prior.get("account_provisioning"):
@@ -248,6 +257,7 @@ class AgentProvisioningWorkflow:
                     {
                         "tool_name": res.get("tool_name", name),
                         "provisioner_key": res.get("provisioner_key"),
+                        "reused": bool((res.get("details") or {}).get("reused", False)),
                     }
                 )
                 tool_results_dump.append(res)
@@ -385,12 +395,15 @@ class AgentProvisioningWorkflow:
         """Roll back tools that succeeded when the account-provisioning phase fails.
 
         Preconditions:
-            * ``succeeded`` entries are ``{tool_name, provisioner_key}`` dicts.
+            * ``succeeded`` entries are ``{tool_name, provisioner_key, reused}``
+              dicts (``reused`` marks an idempotently-reused, not freshly
+              created, account).
             * ``job_id`` is non-empty (used to clear completed-phase checkpoints).
             * ``tear_down_environment`` is ``False`` when ``agent_id``'s Docker
               environment predates this run (``pre_existing_environment``) and
               must be preserved — ``succeeded`` still gets rolled back either
-              way, since those tool results are always this run's own.
+              way (except for ``reused`` entries, which are never this run's
+              own creation regardless of ``tear_down_environment``).
         Postconditions:
             * Invokes ``compensate_activity`` once for the partial success set.
         """
@@ -797,11 +810,14 @@ class AgentProvisioningWorkflow:
             # whether it runs: holding the lock only rules out a CONCURRENT
             # workflow — it says nothing about whether THIS run is the one
             # that created agent_id's environment specifically. succeeded_tools
-            # (e.g. a newly added tool on an already-delivered agent) is always
-            # this run's own creation and must still be rolled back regardless;
-            # only the Docker env / credential store / environment record —
-            # which predate this run when pre_existing_environment is True —
-            # are excluded from teardown (see compensate_activity's
+            # (e.g. a newly added tool on an already-delivered agent) still
+            # gets rolled back regardless of pre_existing_environment — except
+            # for any entry marked reused, which by definition predates this
+            # run's own tool fan-out and is excluded from rollback by
+            # compensate() itself, independent of tear_down_environment. Only
+            # the Docker env / credential store / environment record — which
+            # predate this run when pre_existing_environment is True — are
+            # excluded from teardown (see compensate_activity's
             # tear_down_environment parameter).
             if (
                 lock_acquired

@@ -1348,8 +1348,15 @@ def test_check_existing_environment_activity_false_when_absent(tmp_path: Path) -
         assert t_acts.check_existing_environment_activity("missing-agent") is False
 
 
-def test_check_existing_environment_activity_false_when_not_running(tmp_path: Path) -> None:
-    """A non-running record (e.g. stopped) does not count as "existing" for this check."""
+def test_check_existing_environment_activity_true_when_not_running(tmp_path: Path) -> None:
+    """A non-running record (e.g. stopped) still counts as "existing" for this check.
+
+    run_setup only fast-paths on status=="running", but docker.provision()'s
+    own idempotency state (independent of EnvironmentStore) can still resolve
+    to reusing that same container regardless of this record's status — so a
+    "stopped" record must still be treated as pre-existing, or a later
+    phase's failure could tear down a container that predates this run.
+    """
     from agent_provisioning_team.shared.environment_store import EnvironmentInfo, EnvironmentStore
     from agent_provisioning_team.temporal import activities as t_acts
 
@@ -1364,7 +1371,7 @@ def test_check_existing_environment_activity_false_when_not_running(tmp_path: Pa
         "agent_provisioning_team.shared.environment_store.EnvironmentStore",
         return_value=env_store,
     ):
-        assert t_acts.check_existing_environment_activity("a2") is False
+        assert t_acts.check_existing_environment_activity("a2") is True
 
 
 def test_check_existing_environment_activity_true_when_ready(tmp_path: Path) -> None:
