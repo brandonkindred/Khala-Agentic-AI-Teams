@@ -33,8 +33,11 @@ def test_record_planning_run_requires_job_id() -> None:
         )
 
 
-def test_record_planning_run_noop_without_postgres() -> None:
-    # Default test env has POSTGRES_HOST unset -> guarded no-op returns False.
+def test_record_planning_run_noop_without_postgres(monkeypatch) -> None:
+    # Explicitly disable Postgres rather than relying on the runner's ambient env:
+    # a CI job that also runs the live-Postgres tests below has POSTGRES_HOST set,
+    # which would make this assertion fail (and leak a row) if left implicit.
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
     assert (
         record_planning_run(
             "job-1",
