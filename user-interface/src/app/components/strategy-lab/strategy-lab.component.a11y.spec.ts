@@ -322,8 +322,11 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
 });
 
 /**
- * Source-level guard: every `<mat-icon>` in the template must set
- * `aria-hidden="true"` explicitly.
+ * Source-level guard: every `<mat-icon>` in the template must be explicit
+ * about `aria-hidden`, one way or the other — either `aria-hidden="true"`
+ * for a decorative icon, or `aria-hidden="false"` plus an `aria-label` for
+ * an icon that is the sole signal for some state (the
+ * `jobs-dashboard.component.html` pattern). Never silently unset.
  *
  * This can't be verified by asserting on the rendered DOM: Angular Material's
  * `MatIcon` constructor adds `aria-hidden="true"` itself at runtime whenever
@@ -335,6 +338,15 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
  * the raw template source is the only way to tell "we set it" apart from
  * "Material defaulted it".
  *
+ * The rule deliberately allows the `aria-hidden="false"` + `aria-label` form
+ * too, not just `"true"`: two icons in this template (the phase-stepper node
+ * icon and the paper-trading comparison table's "Aligned" cell icon) are the
+ * sole signal for their state today and are only marked `aria-hidden="true"`
+ * for now because no text alternative exists yet. A guard that required
+ * `"true"` unconditionally would fail the moment a future change gives either
+ * of them a real accessible name — permanently blocking that fix instead of
+ * just catching an accidentally-omitted attribute.
+ *
  * Path is resolved relative to this spec file, independent of the vitest
  * working directory.
  */
@@ -344,7 +356,7 @@ describe('StrategyLabComponent template — explicit aria-hidden on every <mat-i
     'strategy-lab.component.html',
   );
 
-  it('every <mat-icon> opening tag explicitly sets aria-hidden="true" in the source', () => {
+  it('every <mat-icon> opening tag is explicit about aria-hidden in the source', () => {
     const html = readFileSync(TEMPLATE_PATH, 'utf8');
     const openTags = html.match(/<mat-icon\b[^>]*>/g) ?? [];
 
@@ -352,10 +364,18 @@ describe('StrategyLabComponent template — explicit aria-hidden on every <mat-i
     // above stopped matching anything, rather than passing vacuously.
     expect(openTags.length).toBeGreaterThan(30);
 
-    const missing = openTags.filter((tag) => !/aria-hidden\s*=\s*"true"/.test(tag));
+    const isExplicit = (tag: string): boolean => {
+      if (/aria-hidden\s*=\s*"true"/.test(tag)) return true;
+      const explicitlyVisible = /aria-hidden\s*=\s*"false"/.test(tag);
+      const hasAccessibleName = /\baria-label\s*=/.test(tag) || /\[attr\.aria-label\]\s*=/.test(tag);
+      return explicitlyVisible && hasAccessibleName;
+    };
+
+    const notExplicit = openTags.filter((tag) => !isExplicit(tag));
     expect(
-      missing,
-      `<mat-icon> tag(s) missing an explicit aria-hidden="true":\n  ${missing.join('\n  ')}`,
+      notExplicit,
+      `<mat-icon> tag(s) not explicit about aria-hidden (need aria-hidden="true", or ` +
+        `aria-hidden="false" + an aria-label):\n  ${notExplicit.join('\n  ')}`,
     ).toHaveLength(0);
   });
 });
