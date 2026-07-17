@@ -228,8 +228,30 @@ def test_v2_extract_plan_keywords_drops_short_pronouns() -> None:
     assert "us" not in kws
     assert "my" not in kws
     assert "me" not in kws
+    assert "if" not in kws
     assert "team" in kws
     assert "help" in kws
+
+
+def test_v2_extract_plan_keywords_drops_punctuation_only_tokens() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="Migration guide -- ## legacy systems",
+        sections=[],
+    )
+    kws = _extract_plan_keywords(plan)
+    # Standalone punctuation tokens (e.g. "--", "##") have no alphanumeric
+    # content and must not be treated as keywords, since they'd otherwise
+    # cause spurious story-bank matches on formatting artifacts alone.
+    assert "--" not in kws
+    assert "##" not in kws
+    assert "migration" in kws
+    assert "legacy" in kws
 
 
 def test_v2_extract_plan_keywords_handles_empty() -> None:

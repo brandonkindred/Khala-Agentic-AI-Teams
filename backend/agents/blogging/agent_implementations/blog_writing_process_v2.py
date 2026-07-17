@@ -543,6 +543,11 @@ _PLAN_KEYWORD_STOPWORDS = frozenset(
         "him",
         "they",
         "them",
+        "if",
+        "no",
+        "now",
+        "what",
+        "while",
     }
 )
 
@@ -552,8 +557,9 @@ def _extract_plan_keywords(plan: Any) -> list[str]:
 
     Combines the overarching topic and section titles, splits on whitespace,
     and filters out stopwords (see ``_PLAN_KEYWORD_STOPWORDS``) plus any
-    single-character noise, so short but meaningful terms like "API" or "UX"
-    survive while common filler words are dropped regardless of length.
+    single-character or punctuation-only noise, so short but meaningful terms
+    like "API" or "UX" survive while common filler words and stray tokens
+    (e.g. "--", "##") are dropped regardless of length.
     """
     parts: list[str] = []
     topic = getattr(plan, "overarching_topic", "") or ""
@@ -561,12 +567,17 @@ def _extract_plan_keywords(plan: Any) -> list[str]:
     for section in getattr(plan, "sections", []) or []:
         title = getattr(section, "title", "") or ""
         parts.extend(title.lower().split())
-    # Deduplicate and filter stopwords
+    # Deduplicate and filter stopwords and punctuation-only tokens
     seen: set[str] = set()
     keywords: list[str] = []
     for word in parts:
         cleaned = word.strip(".,;:!?()[]\"'")
-        if len(cleaned) >= 2 and cleaned not in _PLAN_KEYWORD_STOPWORDS and cleaned not in seen:
+        if (
+            len(cleaned) >= 2
+            and any(ch.isalnum() for ch in cleaned)
+            and cleaned not in _PLAN_KEYWORD_STOPWORDS
+            and cleaned not in seen
+        ):
             seen.add(cleaned)
             keywords.append(cleaned)
     return keywords
