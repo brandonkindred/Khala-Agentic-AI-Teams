@@ -84,11 +84,17 @@ def list_branding_jobs(running_only: bool = False) -> BrandJobListResponse:
 
 @router.post("/branding/jobs/{job_id}/cancel")
 def cancel_branding_job(job_id: str) -> Dict[str, Any]:
+    from branding_team.api import main as _main
+
     data = get_job(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")
     if cancel_job(job_id):
-        _bg._signal_branding_cancel(job_id)
+        # Call the hub's re-exported binding (main._signal_branding_cancel),
+        # not _bg's module-local one — main re-exports this function
+        # specifically so it can be intercepted/patched at the hub; calling
+        # _bg directly would bypass that and always deliver a real signal.
+        _main._signal_branding_cancel(job_id)
         return {"job_id": job_id, "status": JOB_STATUS_CANCELLED, "success": True}
     return {
         "job_id": job_id,

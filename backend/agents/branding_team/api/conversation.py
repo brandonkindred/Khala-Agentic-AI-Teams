@@ -167,7 +167,12 @@ def _create_branding_conversation_impl(
         if not conversation_store.append_message(conversation_id, "assistant", reply):
             logger.warning("Assistant reply not persisted for conversation %s", conversation_id)
         messages.append(_local_message("assistant", reply))
-        output = _run_orchestrator_if_ready(updated_mission)
+        # Call the hub's re-exported binding, not the module-local name — main
+        # re-exports _run_orchestrator_if_ready specifically so tests/callers
+        # can intercept it (patch main._run_orchestrator_if_ready); the local
+        # name would make that patch a silent no-op, same reasoning as
+        # background._run_branding_background calling _main._run_branding_core.
+        output = _main._run_orchestrator_if_ready(updated_mission)
         if output is not None:
             conversation_store.update_output(conversation_id, output)
         mission, latest_output = updated_mission, output
@@ -314,8 +319,10 @@ def _send_branding_conversation_message_impl(
         logger.warning("Assistant reply not persisted for conversation %s", conversation_id)
     # Reuse the prior output when the mission is unchanged this turn; the
     # short-circuit returns the same object, so identity tells us whether a
-    # fresh run happened and thus whether a write is needed.
-    output = _run_orchestrator_if_ready(updated_mission, state.mission, state.latest_output)
+    # fresh run happened and thus whether a write is needed. Call the hub's
+    # re-exported binding, not the module-local name — see the comment in
+    # _create_branding_conversation_impl above.
+    output = _main._run_orchestrator_if_ready(updated_mission, state.mission, state.latest_output)
     if output is not None and output is not state.latest_output:
         conversation_store.update_output(conversation_id, output)
 
