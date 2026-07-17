@@ -503,3 +503,57 @@ def test_concurrent_mark_branch_merged_and_mark_dependents_failed_stay_consisten
     assert tg.get_task("dep").status == TaskStatus.FAILED
     assert tg.get_task("unrelated").status == TaskStatus.MERGED
     assert tg.get_task_for_agent("agent-b") is None
+
+
+def test_concurrent_update_task_does_not_serialize_on_a_slow_persist_write() -> None:
+    """N threads mutating DISTINCT tasks concurrently must not be serialized on a slow
+    persist write — the contention regression this whole fix targets. Mirrors the
+    async-enqueue pattern ``coding_team/orchestrator.py``'s ``_persist_graph_async`` uses:
+    ``persist_callback`` does cheap in-memory work only (never blocks on I/O) and hands the
+    snapshot to a ``LatestValueFlusher`` wired to a deliberately slow writer, instead of
+    writing synchronously while ``TaskGraphService``'s lock is held. A synchronous
+    persist_callback holding the lock for the full write would cost roughly
+    ``n * WRITE_DELAY`` (each worker serialized behind the others' writes); the async path
+    keeps wall-clock close to a single mutation's cost regardless of ``n``.
+    """
+    import time
+
+    from shared_concurrency import LatestValueFlusher
+
+    write_delay = 0.05
+    n = 10
+
+    def slow_writer(payload) -> None:
+        time.sleep(write_delay)
+
+    flusher = LatestValueFlusher(slow_writer, name="contention-test").start()
+    try:
+
+        def _persist_callback() -> None:
+            flusher.enqueue(tg.snapshot())
+
+        tg = TaskGraphService(job_id="j1", persist_callback=_persist_callback)
+        for i in range(n):
+            tg.add_task(f"t{i}", title=f"T{i}")
+        barrier = threading.Barrier(n)
+
+        def _update(i: int) -> None:
+            barrier.wait(timeout=10)
+            tg.update_task(f"t{i}", changes_summary=f"summary-{i}")
+
+        start = time.monotonic()
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            list(pool.map(_update, range(n)))
+        elapsed = time.monotonic() - start
+    finally:
+        flusher.stop()
+
+    # A synchronous persist_callback would cost roughly n * write_delay (serialized on the
+    # lock); the async path should stay well under half of that, regardless of worker count —
+    # the mutations themselves must never touch the writer.
+    assert elapsed < (n * write_delay) / 2, (
+        f"update_task calls scaled with worker count ({elapsed:.3f}s for n={n} at "
+        f"{write_delay}s/write) — persist_callback must not block on I/O"
+    )
+    for i in range(n):
+        assert tg.get_task(f"t{i}").changes_summary == f"summary-{i}"
