@@ -285,6 +285,26 @@ def test_finalize_activity_records_planning_run(monkeypatch, job_store) -> None:
     assert kwargs["resolved_questions"] == [{"question_id": "q1"}]
 
 
+def test_finalize_activity_audit_read_failure_does_not_fail_finalize(
+    monkeypatch, job_store
+) -> None:
+    """A live get_job failure during the audit re-read (unlike record_planning_run,
+    which never raises) must not escape _work, retry via _guarded, or turn the
+    already-completed job into a failure."""
+    job_store["jobs"]["job-1"] = {"handoff_package": {"summary": "hp"}}
+
+    def _raise_get_job(job_id):
+        raise RuntimeError("job service unreachable")
+
+    monkeypatch.setattr("planning_team.shared.job_store.get_job", _raise_get_job)
+
+    result = A.finalize_planning_activity("job-1", {"repo_path": "/x"})
+
+    assert result == {"success": True, "summary": "Planning completed; handoff package ready."}
+    assert job_store["completed"][0][0] == "job-1"
+    assert job_store["failed"] == []
+
+
 def test_legacy_run_planning_activity_delegates(monkeypatch):
     """The legacy single-activity path (kept for rollout replay) delegates to the
     same run_workflow_background the thread-mode /run endpoint uses."""
