@@ -23,12 +23,12 @@ def run_enterprise_architect(
     """Run the Enterprise Architect orchestrator and return results.
 
     Called by the software engineering team when SW_USE_ENTERPRISE_ARCHITECT=true.
-    Runs architect-agents as a subprocess to produce the full architecture package.
+    Runs architect_agents as a subprocess to produce the full architecture package.
 
     Args:
         spec_content: The product specification and planning docs.
         output_dir: Override output directory. Default: work_path/architect-outputs
-            or architect-agents/outputs.
+            or architect_agents/outputs.
         work_path: Working directory (e.g. job work path). Used to resolve output_dir.
 
     Returns:
@@ -45,7 +45,7 @@ def run_enterprise_architect(
             "success": False,
             "architecture_overview": "",
             "outputs_path": "",
-            "error": f"architect-agents main.py not found at {main_py}",
+            "error": f"architect_agents main.py not found at {main_py}",
         }
 
     out = output_dir or (Path(work_path) / "architect-outputs" if work_path else root / "outputs")

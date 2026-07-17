@@ -43,7 +43,6 @@ Research → Planning → Writer → (optional) Writer ↔ Copy Editor revision 
 - **Publication** receives the final draft: submit → human approve/reject. On approve: write to `blog_posts/`, generate platform-specific versions. On reject: optional revision loop with Writer + Copy Editor.
 
 **Example scripts:**
-- [blogging/agent_implementations/blog_writing_process.py](agent_implementations/blog_writing_process.py) – Legacy pipeline (superseded by v2 for production).
 - [blogging/agent_implementations/blog_writing_process_v2.py](agent_implementations/blog_writing_process_v2.py) – Brand-aligned pipeline with artifact persistence and gates.
 - [blogging/agent_implementations/run_publication_agent.py](agent_implementations/run_publication_agent.py) – Publication agent (submit, approve, reject, revision loop).
 
@@ -262,7 +261,6 @@ blogging/
 ├── validators/              # Deterministic checks (banned phrases, reading level, etc.)
 ├── agent_implementations/
 │   ├── run_api_server.py
-│   ├── blog_writing_process.py
 │   ├── blog_writing_process_v2.py   # Brand-aligned pipeline with gates
 │   └── ...
 ├── docs/

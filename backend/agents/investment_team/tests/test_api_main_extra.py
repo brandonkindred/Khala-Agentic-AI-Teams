@@ -935,6 +935,7 @@ def _winning_record(strategy_code: str | None = "def x(): pass"):
         strategy=strat,
         backtest=bt,
         is_winning=True,
+        is_publishable=True,
         strategy_rationale="r",
         analysis_narrative="n",
         created_at="2024-01-01T01:00:00Z",
@@ -947,6 +948,7 @@ def test_run_paper_trading_rejects_losing_strategy(api_client, monkeypatch) -> N
 
     losing = _winning_record()
     losing.is_winning = False
+    losing.is_publishable = False
     api_main._strategy_lab_records["lab-w"] = losing
 
     resp = api_client.post(
@@ -955,6 +957,24 @@ def test_run_paper_trading_rejects_losing_strategy(api_client, monkeypatch) -> N
     )
     assert resp.status_code == 400
     assert "not a winning strategy" in resp.json()["detail"]
+
+
+def test_run_paper_trading_rejects_non_publishable_strategy(api_client, monkeypatch) -> None:
+    from investment_team.api import main as api_main
+
+    record = _winning_record()
+    record.is_publishable = False
+    record.publishability_skip_reason = "realism_failed,alignment_unresolved"
+    api_main._strategy_lab_records["lab-w"] = record
+
+    resp = api_client.post(
+        "/strategy-lab/paper-trade",
+        json={"lab_record_id": "lab-w"},
+    )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "not publishable" in detail
+    assert "realism_failed" in detail
 
 
 def test_run_paper_trading_rejects_when_no_strategy_code(api_client, monkeypatch) -> None:

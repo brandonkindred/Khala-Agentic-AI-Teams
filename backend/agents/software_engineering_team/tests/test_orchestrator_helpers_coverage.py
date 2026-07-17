@@ -435,7 +435,7 @@ def test_get_spec_content_for_job_reads_via_spec_parser(tmp_path: Path):
     from software_engineering_team.api import main as api_main
 
     spec_text = "# Spec\nFeature X\n"
-    with patch("spec_parser.get_latest_spec_content", return_value=spec_text):
+    with patch("software_engineering_team.spec_parser.get_latest_spec_content", return_value=spec_text):
         out = api_main._get_spec_content_for_job({"repo_path": str(tmp_path)})
     assert out == spec_text
 
@@ -444,7 +444,7 @@ def test_get_spec_content_for_job_returns_empty_on_file_not_found(tmp_path: Path
     """Get spec content for job returns empty on file not found."""
     from software_engineering_team.api import main as api_main
 
-    with patch("spec_parser.get_latest_spec_content", side_effect=FileNotFoundError("no spec")):
+    with patch("software_engineering_team.spec_parser.get_latest_spec_content", side_effect=FileNotFoundError("no spec")):
         out = api_main._get_spec_content_for_job({"repo_path": str(tmp_path)})
     assert out == ""
 
@@ -454,7 +454,7 @@ def test_get_spec_content_for_job_truncates_to_12000_chars(tmp_path: Path):
     from software_engineering_team.api import main as api_main
 
     huge = "X" * 20000
-    with patch("spec_parser.get_latest_spec_content", return_value=huge):
+    with patch("software_engineering_team.spec_parser.get_latest_spec_content", return_value=huge):
         out = api_main._get_spec_content_for_job({"repo_path": str(tmp_path)})
     assert len(out) == 12000
 

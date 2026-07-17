@@ -122,8 +122,8 @@ def test_architect_design_success(client: TestClient) -> None:
     fake_reqs = ProductRequirements(title="Task Manager", description="Task manager API")
 
     with (
-        patch("spec_parser.parse_spec_with_llm", return_value=fake_reqs),
-        patch("architecture_expert.ArchitectureExpertAgent", return_value=mock_agent),
+        patch("software_engineering_team.spec_parser.parse_spec_with_llm", return_value=fake_reqs),
+        patch("software_engineering_team.architect_agents.architecture_expert.ArchitectureExpertAgent", return_value=mock_agent),
         patch("llm_service.get_client"),
     ):
         r = client.post("/architect/design", json={"spec": spec})

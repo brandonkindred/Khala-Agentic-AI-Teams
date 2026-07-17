@@ -1,12 +1,10 @@
-"""Unit tests for learning ingestion: post-mortems, gate outcomes, Tech Lead block."""
+"""Unit tests for learning ingestion: post-mortems and gate outcomes."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
 from software_engineering_team.shared import gate_outcomes, learnings_store, post_mortem_ingest
-from software_engineering_team.shared.learnings_store import Learning
-from software_engineering_team.tech_lead_agent.agent import TechLeadAgent, _learnings_top_n
 
 # --- post_mortem_ingest ----------------------------------------------------
 
@@ -221,61 +219,3 @@ def test_first_issue_returns_passing_only_for_plain_issue_lists() -> None:
     # All-satisfied per_criterion → None (no failing entry).
     crit = SimpleNamespace(per_criterion=[SimpleNamespace(criterion="ok", satisfied=True)])
     assert gate_outcomes._first_issue(crit) is None
-
-
-# --- Tech Lead learnings block ---------------------------------------------
-
-
-def test_learnings_top_n_parsing(monkeypatch) -> None:
-    """_learnings_top_n defaults to 5, parses overrides, and clamps garbage and the ceiling."""
-    monkeypatch.delenv("SE_LEARNINGS_TOPN", raising=False)
-    assert _learnings_top_n() == 5
-    monkeypatch.setenv("SE_LEARNINGS_TOPN", "3")
-    assert _learnings_top_n() == 3
-    monkeypatch.setenv("SE_LEARNINGS_TOPN", "garbage")
-    assert _learnings_top_n() == 5
-    monkeypatch.setenv("SE_LEARNINGS_TOPN", "999")
-    assert _learnings_top_n() == 50
-
-
-def _fake_input() -> SimpleNamespace:
-    return SimpleNamespace(
-        requirements=SimpleNamespace(title="Auth", description="Login feature"),
-        architecture=SimpleNamespace(overview="FastAPI + Angular"),
-        spec_content="users can log in",
-    )
-
-
-def test_relevant_learnings_block_empty(monkeypatch) -> None:
-    """The Tech Lead learnings block is empty when no learnings are retrieved."""
-    monkeypatch.setattr(learnings_store, "retrieve_learnings", lambda *a, **k: [])
-    block = TechLeadAgent._relevant_learnings_block(_fake_input())
-    assert block == []
-
-
-def test_relevant_learnings_block_formats(monkeypatch) -> None:
-    """The Tech Lead learnings block renders a header and each retrieved learning's text."""
-    monkeypatch.setattr(
-        learnings_store,
-        "retrieve_learnings",
-        lambda *a, **k: [
-            Learning(
-                pattern="security rejection",
-                trigger="hardcoded secret",
-                counter_measure="use env var",
-                source="gate_rejection",
-                category="security",
-                occurrences=3,
-            )
-        ],
-    )
-    block = TechLeadAgent._relevant_learnings_block(_fake_input())
-    assert any("RELEVANT LEARNINGS FROM PAST SPRINTS" in line for line in block)
-    assert any("security rejection" in line and "use env var" in line for line in block)
-
-
-def test_relevant_learnings_block_disabled(monkeypatch) -> None:
-    """Setting SE_LEARNINGS_TOPN to 0 disables the Tech Lead learnings block."""
-    monkeypatch.setenv("SE_LEARNINGS_TOPN", "0")
-    block = TechLeadAgent._relevant_learnings_block(_fake_input())
-    assert block == []
