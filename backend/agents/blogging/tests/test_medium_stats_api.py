@@ -20,14 +20,6 @@ app = _api_main.app
 
 
 @pytest.fixture(autouse=True)
-def _patched_blog_client(monkeypatch, fake_job_client):
-    from agents.blogging.shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    return fake_job_client
-
-
-@pytest.fixture(autouse=True)
 def _medium_stats_tmp_dir(monkeypatch, tmp_path):
     from agents.blogging.shared import blog_job_store as bjs
 

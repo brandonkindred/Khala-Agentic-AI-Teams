@@ -3,6 +3,8 @@
 These tests drive the critic directly via a fake Strands Agent so we can
 exercise the full parse → coerce → report path without hitting an LLM, plus
 an integration test that runs the critic inside BlogPlanningAgent.run.
+
+Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import json
 from typing import Any
 from unittest.mock import patch
 
+from _content_plan_test_utils import make_content_plan
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent, PlanCriticReport
 from agents.blogging.blog_plan_critic_agent.agent import build_refine_feedback_from_critic
 from agents.blogging.blog_planning_agent import BlogPlanningAgent
@@ -18,7 +21,6 @@ from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     PlanningInput,
-    RequirementsAnalysis,
     TitleCandidate,
 )
 from agents.blogging.shared.content_profile import (
@@ -35,7 +37,7 @@ def _policy_standard() -> LengthPolicy:
 
 
 def _minimal_plan(topic: str = "A stance about X that readers should adopt") -> ContentPlan:
-    return ContentPlan(
+    return make_content_plan(
         overarching_topic=topic,
         narrative_flow="Reader journey from skepticism to conviction.",
         sections=[
@@ -56,11 +58,6 @@ def _minimal_plan(topic: str = "A stance about X that readers should adopt") -> 
             TitleCandidate(title=f"Title candidate {i}", probability_of_success=0.7)
             for i in range(5)
         ],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True,
-            scope_feasible=True,
-            research_gaps=[],
-        ),
     )
 
 

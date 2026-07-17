@@ -1,16 +1,17 @@
 /**
  * Pure derivation helpers for the Code Review page's per-review metrics — the Severity
- * and Duration cells rendered by `PrReviewDetailComponent`, plus the live-poll completion
- * timestamp stamped by `CodeReviewDashboardComponent`.
+ * and Duration cells rendered by `PrReviewDetailComponent`, the row status badge rendered
+ * by `CodeReviewDashboardComponent`, and the live-poll completion timestamp stamped by
+ * `PrReviewRunsService`.
  *
  * Kept as standalone pure functions so the metric logic is unit-testable in isolation and
- * shared by both the parent dashboard (`terminalTimestamp`) and the detail child
- * (`severityEntries`, `reviewDuration`). Every function is pure except `reviewDuration`
- * (may `console.warn` on a clock-skew anomaly) and `terminalTimestamp` (reads the clock
- * only on its fallback path).
+ * shared across the parent dashboard, its review-runs service, and the detail child. Every
+ * function is pure except `reviewDuration` (may `console.warn` on a clock-skew anomaly)
+ * and `terminalTimestamp` (reads the clock only on its fallback path).
  */
 import type { CodeReviewSummary, CodingTeamJobStatus } from '../../models/coding-team.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
+import type { PrReviewRecord } from './pr-review-record.model';
 
 /** Fixed critical→info ordering for the per-row severity metric chips. */
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'] as const;
@@ -83,15 +84,60 @@ export function reviewDuration(record: ReviewDurationInput): string | null {
  * (`Date.now()`). `updated_at` is preferred because it is stamped on the terminal
  * transition itself — including when the stale-job monitor fails a dead worker, which
  * bumps `updated_at` but leaves `last_activity_at` frozen at the last progress event
- * (that would understate a timed-out review). Reads the clock only on the fallback path.
+ * (that would understate a timed-out review). Each candidate is tried in turn — an
+ * empty or unparseable `updated_at` falls through to `last_activity_at` rather than
+ * skipping straight to the browser clock. Reads the clock only on the final fallback.
  */
 export function terminalTimestamp(
   status: Pick<CodingTeamJobStatus, 'updated_at' | 'last_activity_at'>,
 ): number {
-  const serverTs = status.updated_at ?? status.last_activity_at;
-  if (serverTs) {
-    const parsed = Date.parse(serverTs);
+  for (const candidate of [status.updated_at, status.last_activity_at]) {
+    if (!candidate) continue;
+    const parsed = Date.parse(candidate);
     if (!Number.isNaN(parsed)) return parsed;
   }
   return Date.now();
+}
+
+/**
+ * Whether a PR's latest review is still running (drives the row spinner).
+ *
+ * Preconditions: `latest` is a PR's most recent review record, or `null` when it has none.
+ * Postconditions: returns true iff `latest` is non-null, carries no `error`, and its status
+ * is not terminal. Pure — no side effects.
+ */
+export function isLatestRunning(latest: PrReviewRecord | null): boolean {
+  return !!latest && !latest.error && !isCodingTeamTerminalStatus(latest.status);
+}
+
+/**
+ * Row status badge text derived from a PR's latest review, or null when it has none.
+ *
+ * Preconditions: `latest` is a PR's most recent review record, or `null` when it has none.
+ * Postconditions: returns null when `latest` is null; `'error'` when it carries an error;
+ * the review-summary event (falling back to the raw status) when terminal; otherwise the
+ * raw status. Pure — no side effects.
+ */
+export function badgeLabel(latest: PrReviewRecord | null): string | null {
+  if (!latest) return null;
+  if (latest.error) return 'error';
+  if (isCodingTeamTerminalStatus(latest.status)) {
+    return latest.reviewSummary?.event ?? latest.status;
+  }
+  return latest.status;
+}
+
+/**
+ * Row status badge CSS class derived from a PR's latest review.
+ *
+ * Preconditions: `latest` is a PR's most recent review record, or `null` when it has none.
+ * Postconditions: returns `''` when `latest` is null; `'cr-job-status--failed'` when it
+ * carries an error or a `'failed'` status; `'cr-job-status--completed'` when terminal
+ * (and not failed); `''` otherwise. Pure — no side effects.
+ */
+export function badgeClass(latest: PrReviewRecord | null): string {
+  if (!latest) return '';
+  if (latest.error || latest.status === 'failed') return 'cr-job-status--failed';
+  if (isCodingTeamTerminalStatus(latest.status)) return 'cr-job-status--completed';
+  return '';
 }

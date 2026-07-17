@@ -238,17 +238,16 @@ def test_run_validators_from_work_dir_missing_brand_spec(tmp_path: Path, monkeyp
 
 
 def test_content_plan_to_content_brief_markdown_all_fields() -> None:
+    from _content_plan_test_utils import make_content_plan
     from agents.blogging.shared.content_plan import (
-        ContentPlan,
         ContentPlanSection,
-        RequirementsAnalysis,
         TitleCandidate,
         TitleScoring,
         content_plan_to_content_brief_markdown,
         content_plan_to_markdown_doc,
     )
 
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="Topic",
         narrative_flow="Flow",
         target_reader="Devs",
@@ -284,9 +283,6 @@ def test_content_plan_to_content_brief_markdown_all_fields() -> None:
                 ),
             )
         ],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
 
     md = content_plan_to_content_brief_markdown(plan)

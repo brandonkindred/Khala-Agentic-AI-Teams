@@ -5,24 +5,20 @@ The helper handles a multi-round rating workflow. We exercise:
 * job cancelled mid-wait → returns None
 * title selected (user "loved" a title) → returns title
 * pending like/dislike feedback → triggers replacement title generation
+
+Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
 """
 
 from __future__ import annotations
 
 import uuid
 
-import pytest
-
 
 def _plan():
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from _content_plan_test_utils import make_content_plan
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
-    return ContentPlan(
+    return make_content_plan(
         overarching_topic="My Topic",
         narrative_flow="flow",
         sections=[
@@ -33,18 +29,7 @@ def _plan():
             TitleCandidate(title="First", probability_of_success=0.6),
             TitleCandidate(title="Second", probability_of_success=0.5),
         ],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
-
-
-@pytest.fixture
-def patched_client(monkeypatch, fake_job_client):
-    from agents.blogging.shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    return fake_job_client
 
 
 def test_run_title_selection_returns_none_without_job_id() -> None:
@@ -60,7 +45,7 @@ def test_run_title_selection_returns_none_without_job_id() -> None:
     assert out is None
 
 
-def test_run_title_selection_returns_loved_title(patched_client) -> None:
+def test_run_title_selection_returns_loved_title() -> None:
     """User submits 'love' rating → selected_title set, function returns it."""
     from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
     from agents.blogging.shared import blog_job_store as bjs
@@ -92,7 +77,7 @@ def test_run_title_selection_returns_loved_title(patched_client) -> None:
     assert out == "First"
 
 
-def test_run_title_selection_returns_none_on_cancellation(patched_client) -> None:
+def test_run_title_selection_returns_none_on_cancellation() -> None:
     """When the job is cancelled mid-wait, return None."""
     from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
     from agents.blogging.shared import blog_job_store as bjs
@@ -111,7 +96,9 @@ def test_run_title_selection_returns_none_on_cancellation(patched_client) -> Non
     assert out is None
 
 
-def test_run_title_selection_processes_pending_feedback(monkeypatch, patched_client) -> None:
+def test_run_title_selection_processes_pending_feedback(
+    monkeypatch,
+) -> None:
     """User dislikes title → LLM generates replacement → process continues until 'love'."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import blog_job_store as bjs
@@ -155,7 +142,9 @@ def test_run_title_selection_processes_pending_feedback(monkeypatch, patched_cli
     assert out == "Replacement Title"
 
 
-def test_run_title_selection_handles_llm_failure(monkeypatch, patched_client) -> None:
+def test_run_title_selection_handles_llm_failure(
+    monkeypatch,
+) -> None:
     """If LLM fails to generate replacement, just remove the rated title."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import blog_job_store as bjs
