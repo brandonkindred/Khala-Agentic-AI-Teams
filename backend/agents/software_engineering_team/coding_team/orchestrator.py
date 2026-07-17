@@ -187,16 +187,21 @@ def run_coding_team_orchestrator(
     # (see _maybe_persist's contract), so that path must never block on the job-service HTTP
     # write — it hands a write-and-commit closure to this flusher instead, which runs it
     # off-thread (the closure itself does the write and only then commits _persist_state, so a
-    # failed write is never mistaken for a delivered one — see _compute_persist_payload). _update
-    # (below) uses write_now() for every write it makes: a still-queued/in-flight background
-    # write can never land after — and clobber — a fresher one (most importantly a terminal or
-    # HITL-pause status write), and — unlike draining then writing directly — a payload enqueued
-    # by a DIFFERENT concurrently-running worker's graph mutation (e.g. during the implementation
-    # fan-out, where one worker escalates a decision while others are still mutating the graph)
-    # can't slip in between the drain and the write either: write_now() shares one write lock
-    # with the flusher's own background writes, so that race is closed too, without blocking the
-    # other worker's own graph mutation (only the eventual background write of its payload is
-    # delayed until this write finishes).
+    # failed write is never mistaken for a delivered one — see _persist_graph_async). It also
+    # reads phase/status_text LIVE, at actual-write time, rather than baking them in when
+    # enqueued — see _persist_graph_async for why a value captured at enqueue time could
+    # otherwise go stale by the time the write executes and clobber a fresher direct write.
+    # _update (below) uses write_now() for every write it makes: a still-queued/in-flight
+    # background write can never land after — and clobber — a fresher one (most importantly a
+    # terminal or HITL-pause status write), and — unlike draining then writing directly — a
+    # payload enqueued by a DIFFERENT concurrently-running worker's graph mutation (e.g. during
+    # the implementation fan-out, where one worker escalates a decision while others are still
+    # mutating the graph) can't slip in between the drain and the write either: write_now() holds
+    # the same write lock the flusher's own background writes use for its entire duration, so
+    # that race is closed too, without blocking the other worker's own graph mutation (only the
+    # eventual background write of its payload is delayed until this write finishes). It also
+    # keeps phase/status_text in sync with what it actually wrote (see _update), so a background
+    # write that lands afterward reads the fresh values instead of stale ones.
     from shared_concurrency import LatestValueFlusher  # noqa: PLC0415 - local, optional dep path
 
     flusher = LatestValueFlusher(
@@ -206,7 +211,21 @@ def run_coding_team_orchestrator(
     ).start()
 
     def _update(**kw: Any) -> None:
-        flusher.write_now(lambda: _raw_update(**kw))
+        def _do_write() -> None:
+            # Keep the outer phase/status_text in sync with whatever this call actually
+            # writes, at the same serialization point as the write itself (write_now()
+            # holds _write_lock for this whole closure) — so a concurrent background
+            # graph persist's LIVE read of phase/status_text (see _persist_graph_async)
+            # is correctly ordered relative to this call, never observing a stale value
+            # from before it, nor a torn one from mid-write.
+            nonlocal phase, status_text
+            if "phase" in kw:
+                phase = kw["phase"]
+            if "status_text" in kw:
+                status_text = kw["status_text"]
+            _raw_update(**kw)
+
+        flusher.write_now(_do_write)
 
     try:
         # Capture agents' streamed reasoning ("thinking") so the UI can show what is
@@ -226,33 +245,83 @@ def run_coding_team_orchestrator(
         # triggers for the same state) most calls are redundant; durability is preserved because
         # any real mutation bumps graph.revision and any phase / status change is part of the
         # key, so every actual state change still writes. "Confirmed" is load-bearing: this dict
-        # is only updated after a write actually succeeds (see _compute_persist_payload) — never
-        # optimistically at enqueue/compute time — so a failed write is retried by whichever
-        # persist call notices next, rather than being silently mistaken for delivered.
+        # is only updated after a write actually succeeds (see _persist_graph_async/_sync below)
+        # — never optimistically at enqueue/compute time — so a failed write is retried by
+        # whichever persist call notices next, rather than being silently mistaken for delivered.
         _persist_state: Dict[str, Any] = {"revision": -1, "phase": None, "status_text": None}
 
-        def _compute_persist_payload() -> "Optional[tuple[Dict[str, Any], Dict[str, Any]]]":
-            # Shared by both persist paths below. Persists the snapshot through the SAME store
-            # used for the resume read and cancel checks (the injected update_job_fn). On the
-            # software-engineering path that is the SE job record; the hardcoded coding_team
-            # store targets a record that is never created on that path, so the central job
-            # service's UPDATE-WHERE matches no row and the write — hence resume — is silently
-            # lost. The standalone coding_team path's default callback writes the same keys to
-            # the coding_team record exactly as before.
-            #
-            # Returns (wire_payload, commit_state) rather than committing _persist_state itself:
-            # the caller must only apply commit_state AFTER wire_payload is confirmed delivered
-            # (_raw_update did not raise). Committing eagerly — before the write is known to have
-            # succeeded — would let a failed write (e.g. the final merge/failure mutation, whose
-            # background write then fails) permanently mask itself: the next persist call would
-            # see revision/phase/status_text unchanged and skip retrying, silently leaving the
-            # terminal job's snapshot stale even though the terminal status write still succeeds.
+        # Both persist paths below write through _raw_update — the SAME store used for the
+        # resume read and cancel checks (the injected update_job_fn). On the software-
+        # engineering path that is the SE job record; the hardcoded coding_team store targets a
+        # record that is never created on that path, so the central job service's UPDATE-WHERE
+        # matches no row and the write — hence resume — is silently lost. The standalone
+        # coding_team path's default callback writes the same keys to the coding_team record
+        # exactly as before.
+        def _compute_snapshot_if_changed() -> "Optional[tuple[Dict[str, Any], int]]":
+            # Cheap in-memory work shared by _persist_graph_async: the graph-only portion of
+            # the persist payload (task_graph_snapshot/agent_task_map/progress). Deliberately
+            # excludes phase/status_text — a graph mutation always bumps graph.revision, so a
+            # revision-only check is sufficient here, and baking today's phase/status_text in
+            # at this (enqueue) point is exactly what let a stale value clobber a fresher
+            # direct write once this became a background write — see _persist_graph_async for
+            # why those fields are read live, at actual-write time, instead.
+            if graph.revision == _persist_state["revision"]:
+                return None
+            snap = graph.snapshot()
+            snap_payload = {
+                "task_graph_snapshot": snap["tasks"],
+                "agent_task_map": snap["agent_task_map"],
+                "progress": _coding_progress(snap["tasks"], progress_base, progress_span),
+            }
+            return snap_payload, graph.revision
+
+        def _persist_graph_async() -> None:
+            # persist_callback= for TaskGraphService: invoked synchronously while its RLock is
+            # held, so this must never block on I/O — cheap in-memory bookkeeping only (build
+            # the graph-only payload), then hand a write-and-commit closure to `flusher` to run
+            # off-thread. phase/status_text are read LIVE inside that closure, at actual-write
+            # time — not baked in here at enqueue time. write_now() (see _update) deliberately
+            # lets this background write land after a racing direct write (e.g. a HITL pause
+            # published via _update()) rather than blocking it; a phase/status_text value
+            # captured here at enqueue time would still describe the pre-pause state by the
+            # time the write executes, clobbering the pause's phase="paused"/status_text via
+            # the job service's shallow merge even though the pause write itself landed first.
+            # Reading live means this write always carries whatever phase/status_text is
+            # current by the time it actually reaches the wire, so it can only ever repeat or
+            # advance the authoritative state, never regress it.
+            computed = _compute_snapshot_if_changed()
+            if computed is None:
+                return
+            snap_payload, revision = computed
+
+            def _write_and_commit() -> None:
+                live_phase, live_status_text = phase, status_text
+                wire_payload = {
+                    **snap_payload,
+                    "phase": live_phase,
+                    "status_text": live_status_text,
+                }
+                _raw_update(**wire_payload)
+                _persist_state.update(
+                    {"revision": revision, "phase": live_phase, "status_text": live_status_text}
+                )
+
+            flusher.enqueue(_write_and_commit)
+
+        def _persist_graph_sync() -> None:
+            # Round-boundary / pre-loop durability checkpoint (persist_fn=). Drains first so a
+            # previously queued async write can never land after — and stomp on — this write; if
+            # that async write had failed, _persist_state was never advanced, so the check below
+            # naturally retries it here instead of silently accepting a stale snapshot. Reads
+            # phase/status_text directly (not lazily): this path writes synchronously with no
+            # enqueue-then-execute gap, so there is nothing for a live read to protect against.
+            flusher.drain()
             if (
                 graph.revision == _persist_state["revision"]
                 and phase == _persist_state["phase"]
                 and status_text == _persist_state["status_text"]
             ):
-                return None
+                return
             snap = graph.snapshot()
             wire_payload = {
                 "task_graph_snapshot": snap["tasks"],
@@ -261,38 +330,10 @@ def run_coding_team_orchestrator(
                 "status_text": status_text,
                 "progress": _coding_progress(snap["tasks"], progress_base, progress_span),
             }
-            commit_state = {"revision": graph.revision, "phase": phase, "status_text": status_text}
-            return wire_payload, commit_state
-
-        def _persist_graph_async() -> None:
-            # persist_callback= for TaskGraphService: invoked synchronously while its RLock is
-            # held, so this must never block on I/O — cheap in-memory bookkeeping only (build the
-            # payload), then hand a write-and-commit closure to `flusher` to run off-thread. The
-            # flusher's writer only calls the closure, so _persist_state advances precisely when
-            # (and only when) the write it describes actually lands.
-            computed = _compute_persist_payload()
-            if computed is None:
-                return
-            wire_payload, commit_state = computed
-
-            def _write_and_commit() -> None:
-                _raw_update(**wire_payload)
-                _persist_state.update(commit_state)
-
-            flusher.enqueue(_write_and_commit)
-
-        def _persist_graph_sync() -> None:
-            # Round-boundary / pre-loop durability checkpoint (persist_fn=). Drains first so a
-            # previously queued async write can never land after — and stomp on — this write; if
-            # that async write had failed, _persist_state was never advanced, so the check below
-            # naturally retries it here instead of silently accepting a stale snapshot.
-            flusher.drain()
-            computed = _compute_persist_payload()
-            if computed is None:
-                return
-            wire_payload, commit_state = computed
             _raw_update(**wire_payload)
-            _persist_state.update(commit_state)
+            _persist_state.update(
+                {"revision": graph.revision, "phase": phase, "status_text": status_text}
+            )
 
         graph: TaskGraphService = create_task_graph(job_id, persist_callback=_persist_graph_async)
         phase = "task_graph"

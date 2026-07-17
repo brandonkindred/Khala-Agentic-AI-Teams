@@ -443,6 +443,49 @@ def test_write_now_serializes_against_a_concurrently_enqueued_write() -> None:
     )
 
 
+def test_write_now_flushes_a_racing_enqueue_before_running_fn() -> None:
+    """A payload that is still being written when write_now(fn) is called — and a second
+    payload enqueued while that write is in flight — must both land on the wire strictly
+    before fn(), no matter which of write_now() or the background writer thread ends up
+    claiming/writing the second payload. A prior implementation drained via the ``_idle``
+    event and only then separately acquired the write lock, leaving a gap between the two
+    steps in which the background writer could win the race for the lock and write the
+    racing payload before fn() — this proves the fix folds both steps into one atomic
+    critical section instead."""
+    order: list[str] = []
+    log_lock = threading.Lock()
+    writing_first = threading.Event()
+    release_first = threading.Event()
+
+    def writer(payload: str) -> None:
+        if payload == "first":
+            writing_first.set()
+            release_first.wait(timeout=5)
+        with log_lock:
+            order.append(payload)
+
+    flusher = LatestValueFlusher(writer, name="write-now-atomic").start()
+    flusher.enqueue("first")
+    assert writing_first.wait(timeout=5), "writer must be blocked mid-write on 'first'"
+
+    def _fn() -> None:
+        with log_lock:
+            order.append("external")
+
+    t = threading.Thread(target=lambda: flusher.write_now(_fn))
+    t.start()
+    time.sleep(0.02)  # let write_now() reach (and block on) _write_lock
+    flusher.enqueue("second")  # unambiguously concurrent with the in-progress write_now() call
+    release_first.set()
+    t.join(timeout=5)
+    assert flusher.drain(timeout=5) is True
+    flusher.stop()
+
+    assert order == ["first", "second", "external"], (
+        f"expected both racing payloads to land strictly before write_now's fn, got {order}"
+    )
+
+
 def test_write_now_does_not_block_a_concurrent_enqueue() -> None:
     """enqueue() must return immediately even while a slow write_now(fn) call is in
     flight — a concurrent graph/state mutation must never be delayed by a slow direct
@@ -468,3 +511,69 @@ def test_write_now_does_not_block_a_concurrent_enqueue() -> None:
     t.join(timeout=5)
     assert flusher.drain(timeout=5) is True
     flusher.stop()
+
+
+def test_stop_waits_for_an_in_flight_write_now_call() -> None:
+    """stop()'s pre-shutdown drain() only tracks background mailbox writes (the _idle
+    event) — it must additionally wait out a write_now(fn) call already in progress, or
+    a direct write could land on the wire after the caller believes shutdown completed,
+    defeating the whole ordering guarantee that motivates stop()'s unbounded drain."""
+    started = threading.Event()
+    release = threading.Event()
+    written: list[str] = []
+
+    def _slow_fn() -> None:
+        started.set()
+        release.wait(timeout=5)
+        written.append("direct-write")
+
+    flusher = LatestValueFlusher(lambda payload: None, name="stop-vs-write-now").start()
+    t = threading.Thread(target=lambda: flusher.write_now(_slow_fn))
+    t.start()
+    assert started.wait(timeout=5), "write_now must be blocked inside fn()"
+
+    stop_thread = threading.Thread(target=flusher.stop)
+    stop_thread.start()
+    time.sleep(0.1)  # give a buggy stop() a chance to race ahead and return early
+    assert not written, "stop() must not let the caller believe shutdown finished early"
+    assert stop_thread.is_alive(), "stop() must still be waiting on the in-flight write_now()"
+
+    release.set()
+    t.join(timeout=5)
+    stop_thread.join(timeout=5)
+    assert not stop_thread.is_alive(), "stop() must return once write_now() completes"
+    assert written == ["direct-write"], "the in-flight write must complete before stop() returns"
+
+
+def test_stop_does_not_deadlock_when_writer_thread_self_enqueues() -> None:
+    """A writer callback calling enqueue() on itself (a legitimate pattern — e.g.
+    scheduling a retry after a failure) must not deadlock against a concurrent stop().
+    A prior implementation held _lifecycle_lock across stop()'s entire drain, so this
+    self-enqueue would block acquiring that same lock while stop() blocked waiting for
+    _idle, which could only be set once the (now-blocked) callback returned — an
+    unbounded shutdown deadlock."""
+    writer_started = threading.Event()
+    proceed = threading.Event()
+    reenqueue_errors: list[BaseException] = []
+
+    def writer(payload: str) -> None:
+        if payload == "first":
+            writer_started.set()
+            proceed.wait(timeout=5)
+            try:
+                flusher.enqueue("retry")
+            except RuntimeError as e:
+                reenqueue_errors.append(e)
+
+    flusher = LatestValueFlusher(writer, name="self-enqueue-stop").start()
+    flusher.enqueue("first")
+    assert writer_started.wait(timeout=5), "writer must have started processing 'first'"
+
+    stop_thread = threading.Thread(target=flusher.stop)
+    stop_thread.start()
+    time.sleep(0.1)  # let stop() commit to shutting down (_running=False) and enter drain()
+    proceed.set()  # now let the writer attempt its self-enqueue
+
+    stop_thread.join(timeout=5)
+    assert not stop_thread.is_alive(), "stop() must not deadlock against a self-enqueue"
+    assert len(reenqueue_errors) == 1, "the self-enqueue must fail fast, not hang"

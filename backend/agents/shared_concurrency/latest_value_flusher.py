@@ -65,11 +65,13 @@ class LatestValueFlusher:
           payload that was itself passed to ``writer`` — i.e. the destination
           reflects at least as fresh a state as of the ``drain()`` call once it
           returns True.
-        - ``write_now()`` calls ``writer`` and a caller-supplied ``fn`` on the same
-          serialization point, so ``fn`` can never interleave with, or be overtaken
-          on the wire by, a payload enqueued concurrently with (or racing) the
-          ``write_now()`` call — without blocking ``enqueue()`` itself, so a
-          concurrent graph/state mutation is never delayed by ``fn`` being slow.
+        - ``write_now()`` holds the same serialization point ``writer`` is called
+          under for its *entire* call — including flushing any payload already
+          sitting in the mailbox — so ``fn`` can never interleave with, or be
+          overtaken on the wire by, a payload enqueued concurrently with (or
+          racing) the ``write_now()`` call — without blocking ``enqueue()``
+          itself, so a concurrent graph/state mutation is never delayed by ``fn``
+          being slow.
         - A raising ``writer`` never kills the loop: the exception (including a
           ``BaseException`` such as ``SystemExit``/``asyncio.CancelledError`` — not
           just ``Exception``, matching ``BackgroundHeartbeat``'s ``_tick``) is
@@ -125,6 +127,14 @@ class LatestValueFlusher:
         # waiting for a slow write_now() call — only the resulting BACKGROUND WRITE of
         # that mutation's payload is delayed until write_now()'s fn releases the lock.
         self._write_lock = threading.Lock()
+        # Serializes start()/stop() against each other for their *entire* duration —
+        # deliberately separate from _lifecycle_lock, which start()/stop() now hold only
+        # briefly to flip _running (see stop()'s docstring for why the long drain/join
+        # can't happen under _lifecycle_lock). Without this, a start() racing a stop()
+        # that has already flipped _running but not yet confirmed the old thread's exit
+        # could begin creating a replacement thread while the old one is still alive —
+        # the exact dual-writer race this lock exists to prevent.
+        self._shutdown_lock = threading.Lock()
 
     def _reject_if_writer_thread(self, caller: str) -> None:
         if threading.current_thread() is self._thread:
@@ -141,14 +151,21 @@ class LatestValueFlusher:
         Postconditions:
             - Safe to call concurrently from multiple threads: exactly one daemon
               thread is created and started, no matter how many callers race here.
+            - Serialized against a concurrent stop() end-to-end (via a dedicated
+              shutdown lock distinct from the brief one guarding the ``_running``
+              flag) — this call cannot begin creating a replacement thread until a
+              racing stop() has fully confirmed the old thread's exit. See stop()'s
+              docstring for the dual-writer race this prevents.
         """
-        with self._lifecycle_lock:
-            if self._running:
-                return self
+        with self._shutdown_lock:
+            with self._lifecycle_lock:
+                if self._running:
+                    return self
             self._stop_flag.clear()
             self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
             self._thread.start()
-            self._running = True
+            with self._lifecycle_lock:
+                self._running = True
             return self
 
     def is_alive(self) -> bool:
@@ -196,25 +213,53 @@ class LatestValueFlusher:
         return self._idle.wait(timeout)
 
     def write_now(self, fn: Callable[[], None]) -> None:
-        """Run ``fn`` serialized against the flusher's own background writes: drains
-        first, then holds the same lock ``writer`` is called under while running
-        ``fn`` — so a payload enqueued concurrently with (or racing) this call can
-        never reach the wire before, or interleaved with, ``fn``. Unlike gating on
-        ``_lifecycle_lock``, this never blocks ``enqueue()`` — a concurrent
-        graph/state mutation still returns immediately; only the eventual background
-        write of that mutation's payload is delayed until ``fn`` finishes.
+        """Run ``fn`` serialized against the flusher's own background writes, holding
+        the same lock ``writer`` is called under for this call's *entire* duration —
+        including flushing any payload already sitting in the mailbox — so a payload
+        enqueued concurrently with (or racing) this call can never reach the wire
+        before, or interleaved with, ``fn``. Unlike gating on ``_lifecycle_lock``,
+        this never blocks ``enqueue()`` — a concurrent graph/state mutation still
+        returns immediately; only the eventual background write of that mutation's
+        payload is delayed until ``fn`` finishes.
+
+        Deliberately does not use ``drain()``: draining via the ``_idle`` event and
+        then separately acquiring ``_write_lock`` leaves a gap between the two steps
+        in which a payload enqueued in between could be claimed and written by the
+        background writer thread ahead of ``fn`` — a real ordering violation this
+        method exists to prevent, not merely a benign race. Holding ``_write_lock``
+        for the whole call closes that gap: while held, the background writer thread
+        can still *claim* a newly enqueued payload (claiming only needs the small
+        internal state lock), but cannot *write* it until this call releases
+        ``_write_lock`` — so a payload that races this call is always written either
+        by this call itself (before ``fn``) or by the background writer (necessarily
+        after ``fn``, once this call returns), never interleaved with or ahead of it.
 
         Preconditions:
             - Not called from the writer thread itself — see the class Preconditions.
 
         Postconditions:
+            - Any payload that was pending (enqueued but not yet written) at the
+              start of this call has been flushed before ``fn`` runs.
             - ``fn`` has returned (or raised — propagated to the caller, not
               swallowed; unlike a background write, a caller-driven ``write_now()``
               failure is the caller's to handle) before this call returns.
         """
         self._reject_if_writer_thread("write_now")
-        self.drain()
         with self._write_lock:
+            while True:
+                with self._lock:
+                    if not self._has_pending:
+                        break
+                    payload = self._pending
+                    self._pending = None
+                    self._has_pending = False
+                try:
+                    self._writer(payload)
+                except BaseException as exc:  # noqa: BLE001 - see _run()'s identical rationale
+                    self._report_error(exc)
+                with self._lock:
+                    if not self._has_pending:
+                        self._idle.set()
             fn()
 
     def _run(self) -> None:
@@ -288,29 +333,49 @@ class LatestValueFlusher:
         promptly (this should be at most theoretical: the writer has nothing left to do after
         an already-unbounded ``drain()`` but observe a flag and return).
 
+        The pre-shutdown ``drain()`` only tracks background mailbox writes, so it can return
+        while a caller-driven ``write_now()`` call is still in flight (holding ``_write_lock``
+        to run its own ``fn``) — ``stop()`` additionally waits out that lock afterward, or a
+        direct write could land on the wire after the caller believes shutdown has completed.
+
+        This call flips ``_running`` under ``_lifecycle_lock`` (briefly — the same lock
+        ``enqueue()``'s liveness check uses) but does *not* hold that lock across the drain
+        and join below: a ``writer``/``on_error`` callback running on the daemon thread is
+        permitted to call ``enqueue()`` on itself (see the class Preconditions — only
+        ``drain()``/``stop()``/``write_now()`` are forbidden there), and holding
+        ``_lifecycle_lock`` across the drain would deadlock that self-enqueue against this
+        call: it would block acquiring ``_lifecycle_lock`` while this call blocks waiting for
+        ``_idle``, which can't be set until the callback returns. Since ``_running`` is
+        already False by the time the drain begins, such a self-enqueue now fails fast with
+        ``RuntimeError`` instead (its documented precondition) rather than deadlocking either
+        side. A concurrent ``start()``/second ``stop()`` is instead serialized against this
+        call end-to-end via ``_shutdown_lock``, held for the whole method.
+
         Postconditions:
             - Safe to call when never started or already stopped (no-op).
             - Does not return until any payload enqueued before the call has been delivered
               (``writer`` returned) or raised (routed to ``on_error``) — never abandons an
               outstanding write.
+            - Does not return until a ``write_now()`` call already in progress when this was
+              invoked has completed — never returns while a direct write is still in flight.
             - Does not return until the writer thread has actually terminated — never leaves
               a live thread behind for a subsequent ``start()`` to race against.
-            - Held under the same lifecycle lock as ``start()``/``enqueue()``'s liveness
-              check, so a concurrent ``enqueue()`` either fully precedes this call (and is
-              drained by it) or fully follows it (and then correctly fails its precondition
-              instead of racing a payload past a dead writer thread), and a concurrent
-              ``start()`` cannot begin creating a replacement thread until this one has
-              confirmed the old thread is fully gone.
+            - Serialized against a concurrent ``start()``/``stop()`` end-to-end via a
+              dedicated shutdown lock, so a racing ``start()`` cannot begin creating a
+              replacement thread until this call has confirmed the old thread is fully gone.
 
         Preconditions:
             - Not called from the writer thread itself — see the class Preconditions.
         """
         self._reject_if_writer_thread("stop")
-        with self._lifecycle_lock:
-            if not self._running:
-                return
-            self._running = False
-            self.drain()  # unbounded — see docstring
+        with self._shutdown_lock:
+            with self._lifecycle_lock:
+                if not self._running:
+                    return
+                self._running = False
+            self.drain()  # unbounded — see docstring; not held under _lifecycle_lock
+            with self._write_lock:
+                pass  # wait out any in-flight write_now() call — see docstring
             self._stop_flag.set()
             self._wake.set()
             while self._thread is not None and self._thread.is_alive():
