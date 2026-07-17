@@ -6,7 +6,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { RouterLink } from '@angular/router';
-import { Subject } from 'rxjs';
+import { Subject, timer } from 'rxjs';
 import { takeUntil } from 'rxjs/operators';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
@@ -109,7 +109,18 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.checkGitHubConfig();
     this.reviewRuns.announce$.pipe(takeUntil(this.destroy$)).subscribe((message) => {
-      this.reviewAnnouncement = message;
+      // Clear first so two announcements with identical text (e.g. two reviews on the
+      // same PR both completing) still produce a real DOM text change on the next tick —
+      // Angular's interpolation is a no-op when the string is unchanged, and assistive
+      // tech only re-announces a role="status" region when its text actually mutates.
+      // The deferred write is gated on the same destroy$ (rather than a raw setTimeout)
+      // so a pending write can't land on an already-destroyed component.
+      this.reviewAnnouncement = '';
+      timer(0)
+        .pipe(takeUntil(this.destroy$))
+        .subscribe(() => {
+          this.reviewAnnouncement = message;
+        });
     });
   }
 

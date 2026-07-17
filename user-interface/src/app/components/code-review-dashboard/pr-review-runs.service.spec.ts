@@ -513,6 +513,16 @@ describe('PrReviewRunsService', () => {
     expect(messages).toEqual(['Review for pull request #1 completed.']);
   });
 
+  it('announces a cancelled review as cancelled, not completed', () => {
+    service.reset(REPO);
+    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'j1', status: 'cancelled' }));
+    const messages: string[] = [];
+    service.announce$.subscribe((m) => messages.push(m));
+    service.startReview(makePulls(1)[0]);
+    vi.advanceTimersByTime(5000);
+    expect(messages).toEqual(['Review for pull request #1 cancelled.']);
+  });
+
   // -------------------------------------------------------------------------
   // Derived helpers (row badge + status) — the derivation logic itself is
   // covered by review-metrics.spec.ts; these confirm the service wires

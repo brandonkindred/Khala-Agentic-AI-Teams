@@ -146,9 +146,11 @@ export class PrReviewRunsService implements OnDestroy {
    * call: the terminal and connection-lost callbacks are mutually exclusive and each
    * disposes its own poller immediately (see `startPolling`), so a hydrated
    * already-terminal review (loaded via `hydrate`, never live-polled) never announces.
-   * Wording mirrors the failed-vs-completed test `badgeClass` uses, so the announcement
-   * never disagrees with the row badge it is narrating. Never completed by this service —
-   * the subscribing component's own `takeUntil(destroy$)` is the sole teardown mechanism.
+   * Wording is completed/failed/cancelled, matching the outcome `badgeLabel` shows (a
+   * cancelled run is reported as cancelled, not folded into "completed"), so the
+   * announcement never disagrees with the row badge it is narrating. Never completed by
+   * this service — the subscribing component's own `takeUntil(destroy$)` is the sole
+   * teardown mechanism.
    */
   readonly announce$ = new Subject<string>();
 
@@ -432,11 +434,17 @@ export class PrReviewRunsService implements OnDestroy {
           // from a prior hydrate is never overwritten.
           record.completedAt ??= terminalTimestamp(status);
           // Same failed-vs-completed test as badgeClass (review-metrics.ts), so this
-          // sentence never disagrees with the row badge it narrates.
-          const failed = !!record.error || record.status === 'failed';
-          this.announce$.next(
-            `Review for pull request #${record.prNumber} ${failed ? 'failed' : 'completed'}.`,
-          );
+          // sentence never disagrees with the row badge it narrates. 'cancelled' is
+          // checked first and reported as-is: it's a distinct terminal outcome (see
+          // CODING_TEAM_TERMINAL_STATUSES), and folding it into "completed" would
+          // contradict badgeLabel, which already shows the raw status for it.
+          const outcome =
+            record.status === 'cancelled'
+              ? 'cancelled'
+              : record.error || record.status === 'failed'
+                ? 'failed'
+                : 'completed';
+          this.announce$.next(`Review for pull request #${record.prNumber} ${outcome}.`);
           this.disposePoller(record.jobId);
         }
         this.cdr.markForCheck();

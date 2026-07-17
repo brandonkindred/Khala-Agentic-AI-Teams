@@ -166,12 +166,16 @@
   }
 
   // `.cr-pull` (the parent) is `overflow: hidden`, which clips the global
-  // `:focus-visible` outline (see src/styles.scss). Drop the outline here and draw
-  // an inset accent ring instead — inset so it paints inside this element's own
-  // border box and is never clipped by the ancestor. Required by
-  // src/styles/scss-contrast-guard.spec.ts.
+  // `:focus-visible` outline (see src/styles.scss). Draw an inset accent ring instead —
+  // inset so it paints inside this element's own border box and is never clipped by the
+  // ancestor. Required by src/styles/scss-contrast-guard.spec.ts. The transparent
+  // outline is a no-op here but becomes visible in forced-colors/High Contrast Mode,
+  // where the box-shadow ring is dropped (WCAG 2.4.7) — negative offset keeps it inside
+  // this element's own box too, so it isn't clipped either. Same pattern as
+  // jobs-dashboard.component.scss's `tr.job-row:focus-visible`.
   &:focus-visible {
-    outline: none;
+    outline: 2px solid transparent;
+    outline-offset: -2px;
     box-shadow: inset 0 0 0 2px var(--kh-focus-ring);
   }
 
