@@ -1,31 +1,59 @@
-"""Pre-built technical indicators using only pandas and numpy.
+"""Pre-built technical indicators derived from the streaming IndicatorRegistry.
 
-This module is copied into the strategy sandbox as ``_indicators_impl.py``
-(see ``trading_service.strategy.streaming_harness.StreamingHarness``) — the
-sandbox's real ``indicators.py`` is a copy of ``strategy_indicators.py``'s
-scalar contract, which is what ``from indicators import <function_name>``
-resolves to at runtime. This module is instead consulted in-process by the
-static coverage probe (``coverage_probe/indicator_probe.py``) as the
-reference pandas/numpy implementation.
+This module is the vectorized (``pd.Series``-returning) face of the single
+canonical indicator math in :mod:`investment_team.strategy_lab.indicators.streaming`.
+Every function here builds registry-ready bar objects from the caller's price
+series and walks **one** :class:`IndicatorRegistry` over the expanding history,
+collecting the trailing scalar per bar into a ``pd.Series`` — so a value here is
+byte-identical, by construction, to the value ``StreamingHistoryView`` produces
+at the same bar. There is exactly one implementation of each indicator's math
+(the registry); this module holds none of its own.
 
-Every function accepts either a ``pd.Series`` or a sequence the strategy
-already has on hand — a ``list[float]`` or the ``list[Bar]`` that
-``ctx.history(symbol, n)`` returns — and returns ``pd.Series`` or a tuple of
-``pd.Series``.  Inputs are coerced at the boundary (see ``_coerce_series``),
-so callers do not need to wrap price data in ``pd.Series`` themselves.  NaN
-values propagate naturally through pandas rolling/ewm windows — callers should
-skip warmup rows where indicators are NaN.
+This module is copied into the strategy sandbox as ``_indicators_impl.py`` (see
+``trading_service.strategy.streaming_harness.StreamingHarness``) — the sandbox's
+real ``indicators.py`` is a copy of ``strategy_indicators.py``'s scalar contract,
+which is what ``from indicators import <function_name>`` resolves to at runtime.
+This module is instead consulted in-process by the static coverage probe
+(``coverage_probe/indicator_probe.py``) via the ``INDICATORS`` registry, and by
+``market_regime.py`` for its Series-returning ``sma``/``adx``/``atr`` inputs.
+
+Every function accepts either a ``pd.Series`` or a sequence the strategy already
+has on hand — a ``list[float]`` or the ``list[Bar]`` that ``ctx.history(symbol,
+n)`` returns — and returns ``pd.Series`` or a tuple of ``pd.Series``.  Inputs are
+coerced at the boundary (see ``_coerce_series``), so callers do not need to wrap
+price data in ``pd.Series`` themselves.  Warm-up bars — those where the registry
+has no value yet — are NaN; callers should skip them.
+
+Contract note: OHLC(V) inputs are zipped positionally and truncated to the
+shortest, so callers must pass equal-length, index-aligned series.  Every real
+caller (the coverage probe's DataFrame columns and ``market_regime``'s repeated
+``bars`` argument) satisfies this.
 """
 
 from __future__ import annotations
 
 import numbers
+from collections import deque
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Callable, Literal, Mapping, Optional, Tuple, Union
+from typing import Callable, List, Literal, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
+
+# The streaming ``IndicatorRegistry`` is the engine's authoritative indicator
+# math (``StreamingHistoryView``). Deriving these Series helpers from it makes a
+# value read here byte-identical to the engine's per-bar reads. The flat sandbox
+# harness copies ``streaming.py`` alongside as ``_streaming_indicators.py`` (see
+# ``strategy_indicators.py``'s identical fallback), so the import must resolve in
+# both the in-package and flat-sandbox layouts.
+try:  # in-package use (coverage probe, market_regime, in-process tests)
+    from ..indicators.streaming import IndicatorRegistry
+except ImportError:  # flat sandbox layout
+    from _streaming_indicators import IndicatorRegistry  # type: ignore[no-redef]
+
+
+NAN = float("nan")
 
 
 def _coerce_series(series, field: str = "close") -> pd.Series:
@@ -113,34 +141,244 @@ def _floats(series, getter: Callable, field: str) -> pd.Series:
         raise TypeError(f"indicator input element is not a valid {field!r} value: {exc}") from exc
 
 
+# ---------------------------------------------------------------------------
+# Registry-derived scaffolding.
+#
+# The Series helpers below hold no indicator math: each builds registry-ready
+# bars from its coerced inputs and walks one ``IndicatorRegistry`` over the
+# expanding history, collecting the trailing scalar per bar. Appending to a
+# single growing ``window`` list preserves object identity at index ``-2`` on
+# every step, so ``IndicatorRegistry._advance_kind`` classifies the advance as
+# ``"expand"`` and updates incrementally — the walk is O(n·window) per
+# indicator, not O(n²·window), and every value equals the runtime's per-bar
+# read by construction.
+#
+# Performance note: deriving the full Series scalar-by-scalar is O(n·window) per
+# indicator, materially slower than the old vectorised pandas O(n) (a 20k-row
+# frame is a few hundred ms per indicator vs. milliseconds). This is the accepted
+# cost of a single source of truth, and it lands on the static-analysis / probe
+# reference layer — NOT the live trading hot path, which runs the incremental
+# ``StreamingHistoryView`` directly. Daily-bar frames (the lab's dominant use, a
+# few thousand bars) stay ~seconds at full probe scale. A batch/vectorised
+# registry path for very large intraday frames is deliberately deferred to the
+# separately-tracked ``IndicatorRegistry`` performance work rather than
+# re-duplicating the formulas this module was unified to remove.
+# ---------------------------------------------------------------------------
+
+
+class _Bar:
+    """Minimal bar exposing the OHLCV attributes the registry reads.
+
+    ``symbol``/``timestamp`` are intentionally absent — the registry reads them
+    via ``_safe_getattr`` (degrading to ``None``), and a constant ``None`` keeps
+    the symbol-scoped cache keys (macd/donchian/keltner/obv/mfi/roc/cci/
+    williams_r) stable across the single-stream expanding-prefix walk.
+
+    Invariant: every field is a finite float; omitted fields default to ``0.0``.
+    """
+
+    __slots__ = ("open", "high", "low", "close", "volume")
+
+    def __init__(
+        self,
+        *,
+        open: float = 0.0,
+        high: float = 0.0,
+        low: float = 0.0,
+        close: float = 0.0,
+        volume: float = 0.0,
+    ) -> None:
+        self.open = open
+        self.high = high
+        self.low = low
+        self.close = close
+        self.volume = volume
+
+
+def _na_safe(s: pd.Series) -> np.ndarray:
+    """Coerced series → float64 ndarray with ``pd.NA`` mapped to ``NaN``.
+
+    Preconditions: ``s`` is a numeric ``pd.Series`` (``_coerce_series`` has already
+    rebuilt object-dtype input; nullable ``Float64``/``Int64`` may reach here
+    unchanged and carry ``pd.NA``).
+    Postconditions: a float64 ndarray whose missing values are ``NaN`` — so a
+    missing value propagates as ``NaN`` rather than raising ``TypeError`` in
+    ``float(pd.NA)``. Plain ``float64`` passes through unchanged.
+
+    NaN handling is deliberately **best-effort**, matching the streaming registry
+    this module is derived from (and the live engine, which validates bars upstream
+    and so never sees a NaN): a missing value flows into the registry as ``NaN``
+    and is **not** skipped. For the windowed indicators it therefore blanks the
+    windows spanning the gap; for the incremental-state indicators (obv/mfi/
+    bollinger) a NaN persists in the running total rather than recovering once the
+    gap scrolls out. This differs from the old pandas ``skipna`` rolling/cumsum
+    semantics on purpose — restoring those would re-diverge this reference from the
+    runtime it exists to model. Callers that need gap-recovery must clean their
+    inputs first, as the engine does.
+    """
+    return s.to_numpy(dtype="float64", na_value=np.nan)
+
+
+def _int_arg(value, name: str) -> int:
+    """Validate a period/window argument as an integer, rejecting non-integers.
+
+    Preconditions: ``value`` is a caller-supplied period-like argument; ``name``
+    labels it in the error message.
+    Postconditions: returns ``int(value)`` when ``value`` is a non-bool integer —
+    a Python ``int`` or a numpy integer (via ``numbers.Integral``, so callers
+    passing numpy ints still work); raises ``ValueError`` otherwise (a float such
+    as ``2.5``/``2.0``, a ``bool``, or a string). This matches the old pandas
+    helpers (``rolling(window=2.5)`` raised), the streaming registry's integer
+    contract, and the coverage probe's validator, so a non-integral period is
+    rejected rather than silently truncated to a different window (a different
+    experiment than the caller requested).
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    return int(value)
+
+
+def _close_bars(s: pd.Series) -> List[_Bar]:
+    """Project a single source series onto close-only registry bars."""
+    return [_Bar(close=float(v)) for v in _na_safe(s)]
+
+
+def _hl_bars(h: pd.Series, low: pd.Series) -> List[_Bar]:
+    """Zip high/low series into registry bars (donchian_channels)."""
+    return [_Bar(high=float(a), low=float(b)) for a, b in zip(_na_safe(h), _na_safe(low))]
+
+
+def _hlc_bars(h: pd.Series, low: pd.Series, c: pd.Series) -> List[_Bar]:
+    """Zip high/low/close series into registry bars (atr/adx/stochastic/…)."""
+    return [
+        _Bar(high=float(a), low=float(b), close=float(d))
+        for a, b, d in zip(_na_safe(h), _na_safe(low), _na_safe(c))
+    ]
+
+
+def _hlcv_bars(h: pd.Series, low: pd.Series, c: pd.Series, v: pd.Series) -> List[_Bar]:
+    """Zip high/low/close/volume series into registry bars (vwap/mfi)."""
+    return [
+        _Bar(high=float(a), low=float(b), close=float(d), volume=float(e))
+        for a, b, d, e in zip(_na_safe(h), _na_safe(low), _na_safe(c), _na_safe(v))
+    ]
+
+
+def _cv_bars(c: pd.Series, v: pd.Series) -> List[_Bar]:
+    """Zip close/volume series into registry bars (obv)."""
+    return [_Bar(close=float(a), volume=float(b)) for a, b in zip(_na_safe(c), _na_safe(v))]
+
+
+def _emit(scalars: Sequence[Optional[float]], index) -> pd.Series:
+    """Build a float Series from per-bar registry scalars, ``None`` → NaN.
+
+    Preconditions: ``len(scalars) == len(index)``.
+    Postconditions: a float ``pd.Series`` on ``index`` whose warm-up slots
+    (``None``) are NaN.
+    """
+    return pd.Series([NAN if v is None else v for v in scalars], index=index, dtype=float)
+
+
+def _run_single(
+    bars: Sequence[_Bar],
+    index,
+    fn: Callable[[IndicatorRegistry, List[_Bar]], Optional[float]],
+) -> pd.Series:
+    """Walk one registry over the expanding ``bars`` history for a scalar indicator.
+
+    Preconditions: ``len(bars) == len(index)``; ``fn`` maps ``(registry, window)``
+    to the trailing-bar scalar (or ``None`` during warm-up).
+    Postconditions: a float ``pd.Series`` on ``index`` equal, bar-for-bar, to the
+    runtime's per-bar reads.
+    """
+    reg = IndicatorRegistry()
+    window: List[_Bar] = []
+    out: List[Optional[float]] = []
+    for b in bars:
+        window.append(b)
+        out.append(fn(reg, window))
+    return _emit(out, index)
+
+
+def _run_tuple(
+    bars: Sequence[_Bar],
+    index,
+    fns: Sequence[Callable[[IndicatorRegistry, List[_Bar]], Optional[float]]],
+    max_bars: Optional[int] = None,
+) -> Tuple[pd.Series, ...]:
+    """Walk one registry for a multi-output indicator, one column per ``fns`` entry.
+
+    Preconditions: ``len(bars) == len(index)``; each ``fn`` selects one output of
+    the same underlying indicator (the registry caches the full tuple on the
+    same-bar fingerprint, so the 2nd/3rd select of a bar is a cache hit).
+    ``max_bars``, when set, bounds the history handed to the registry to the
+    trailing ``max_bars`` bars — mirroring ``StreamingHistoryView`` /
+    ``compute_indicator_series`` (``deque(maxlen=_SERIES_WINDOW)`` + ``list(...)``)
+    so a history-length-dependent indicator (MACD's signal EMA spans the whole
+    macd_line) stays bit-identical to the engine past the cap. Fixed-window
+    indicators are unaffected (they only read the trailing ``period`` bars), so
+    the default is unbounded.
+    Postconditions: a tuple of float ``pd.Series`` on ``index``, one per ``fns``
+    entry in declared order.
+    """
+    reg = IndicatorRegistry()
+    # Unbounded: reuse one growing list (object identity at index -2 lets the
+    # registry classify each step as "expand"). Bounded: a maxlen deque, and each
+    # bar hands the registry a fresh ``list(window)`` snapshot — the same shape
+    # ``compute_indicator_series`` feeds, so once the window fills the registry
+    # sees a "slide" and the two stay bit-identical.
+    window: "deque[_Bar] | List[_Bar]" = deque(maxlen=max_bars) if max_bars else []
+    cols: List[List[Optional[float]]] = [[] for _ in fns]
+    for b in bars:
+        window.append(b)
+        snapshot: List[_Bar] = list(window) if max_bars else window  # type: ignore[assignment]
+        for i, fn in enumerate(fns):
+            cols[i].append(fn(reg, snapshot))
+    return tuple(_emit(col, index) for col in cols)
+
+
+# ---------------------------------------------------------------------------
+# The 16 indicators — each a thin vectorization of an ``IndicatorRegistry``
+# method. Signatures and return shapes match the historical pandas API.
+# ---------------------------------------------------------------------------
+
+
 def sma(series: pd.Series, period: int) -> pd.Series:
-    """Simple Moving Average."""
-    series = _coerce_series(series)
-    return series.rolling(window=period).mean()
+    """Simple Moving Average.
+
+    Preconditions: ``series`` is coercible; ``period >= 1``.
+    Postconditions: a same-length Series (caller's index), NaN until ``period``
+    bars exist, then ``IndicatorRegistry.sma`` at each bar.
+    """
+    s = _coerce_series(series)
+    p = _int_arg(period, "period")
+    return _run_single(_close_bars(s), s.index, lambda r, w: r.sma(w, p, source="close"))
 
 
 def ema(series: pd.Series, period: int) -> pd.Series:
-    """Exponential Moving Average."""
-    series = _coerce_series(series)
-    return series.ewm(span=period, adjust=False).mean()
+    """Exponential Moving Average (windowed EMA — the runtime convention).
+
+    Preconditions: ``series`` is coercible; ``period >= 1``.
+    Postconditions: a same-length Series, NaN until ``period`` bars exist, then
+    ``IndicatorRegistry.ema`` (the trailing-window EMA reseeded from the oldest
+    in-window bar) at each bar.
+    """
+    s = _coerce_series(series)
+    p = _int_arg(period, "period")
+    return _run_single(_close_bars(s), s.index, lambda r, w: r.ema(w, p, source="close"))
 
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """Relative Strength Index (0–100)."""
-    series = _coerce_series(series)
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = (-delta).clip(lower=0)
-    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    result = 100 - (100 / (1 + rs))
-    # When avg_loss is zero (sustained uptrend) RS is infinite → RSI = 100.
-    # pandas 3.x requires a Series here (rejects raw ndarray), so wrap the
-    # np.where result with the same index as ``result``.
-    fill_values = pd.Series(np.where(avg_loss == 0, 100.0, np.nan), index=result.index)
-    result = result.fillna(fill_values)
-    return result
+    """Relative Strength Index (0–100), simple-mean smoothing (runtime convention).
+
+    Preconditions: ``series`` is coercible; ``period >= 1``.
+    Postconditions: a same-length Series, NaN until ``period + 1`` bars exist,
+    then ``IndicatorRegistry.rsi`` at each bar (100 on a sustained up-window with
+    no losses, 50 on a flat window).
+    """
+    s = _coerce_series(series)
+    p = _int_arg(period, "period")
+    return _run_single(_close_bars(s), s.index, lambda r, w: r.rsi(w, p, source="close"))
 
 
 def macd(
@@ -149,14 +387,50 @@ def macd(
     slow: int = 26,
     signal: int = 9,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
-    """MACD line, signal line, histogram."""
-    series = _coerce_series(series)
-    fast_ema = ema(series, fast)
-    slow_ema = ema(series, slow)
-    macd_line = fast_ema - slow_ema
-    signal_line = ema(macd_line, signal)
-    histogram = macd_line - signal_line
-    return macd_line, signal_line, histogram
+    """MACD line, signal line, histogram (windowed-EMA basis — runtime convention).
+
+    Preconditions: ``series`` is coercible; ``2 <= fast < slow``; ``signal >= 2``.
+    Postconditions: three same-length Series; the line is NaN until ``slow`` bars
+    exist, the signal and histogram until ``slow + signal - 1``.
+    Raises: ``ValueError`` when ``fast``/``slow``/``signal`` are not integers
+    (``_int_arg``, matching the other wrappers) or violate ``2 <= fast < slow`` /
+    ``signal >= 2`` (``IndicatorRegistry.macd``) — rejected rather than silently
+    truncating a float, so the reference matches the runtime and the coverage
+    probe's validator.
+
+    Unlike the fixed-window indicators, MACD's signal EMA folds over the entire
+    macd_line, so its value depends on the full history length. The walk is
+    therefore bounded to the engine's trailing-history window
+    (``STREAMING_WINDOW_BARS``) so this reference stays bit-identical to
+    ``StreamingHistoryView`` / ``compute_indicator_series`` for histories longer
+    than the cap — otherwise the coverage probe (which resolves MACD through this
+    helper) would score MACD predicates differently from the engine it models.
+    """
+    # Lazy import with the same package/flat-layout fallback as ``IndicatorRegistry``:
+    # in the normal sandbox MACD's math runs through the scalar ``strategy_indicators``
+    # API, but ``streaming_harness``'s defensive indicators-only fallback copies THIS
+    # module in as the top-level ``indicators.py`` (no parent package), where a bare
+    # ``from ..runtime_window`` would raise ImportError. The harness copies
+    # ``runtime_window.py`` at the sandbox root, so the flat import resolves there.
+    try:
+        from ..runtime_window import STREAMING_WINDOW_BARS
+    except ImportError:  # flat sandbox layout
+        from runtime_window import STREAMING_WINDOW_BARS  # type: ignore[no-redef]
+
+    s = _coerce_series(series)
+    f = _int_arg(fast, "fast")
+    sl = _int_arg(slow, "slow")
+    sg = _int_arg(signal, "signal")
+    return _run_tuple(
+        _close_bars(s),
+        s.index,
+        [
+            lambda r, w: r.macd(w, f, sl, sg, source="close", select="macd"),
+            lambda r, w: r.macd(w, f, sl, sg, source="close", select="signal"),
+            lambda r, w: r.macd(w, f, sl, sg, source="close", select="histogram"),
+        ],
+        max_bars=STREAMING_WINDOW_BARS,
+    )
 
 
 def bollinger_bands(
@@ -164,13 +438,23 @@ def bollinger_bands(
     period: int = 20,
     num_std: float = 2.0,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
-    """Upper band, middle band (SMA), lower band."""
-    series = _coerce_series(series)
-    middle = sma(series, period)
-    std = series.rolling(window=period).std()
-    upper = middle + num_std * std
-    lower = middle - num_std * std
-    return upper, middle, lower
+    """Upper band, middle band (SMA), lower band (population std — runtime convention).
+
+    Preconditions: ``series`` is coercible; ``period >= 1``; ``num_std > 0``.
+    Postconditions: three same-length Series, NaN until ``period`` bars exist,
+    then ``middle ± num_std × population_std`` around the trailing SMA.
+    """
+    s = _coerce_series(series)
+    p, k = _int_arg(period, "period"), float(num_std)
+    return _run_tuple(
+        _close_bars(s),
+        s.index,
+        [
+            lambda r, w: r.bollinger_bands(w, p, k, source="close", select="upper"),
+            lambda r, w: r.bollinger_bands(w, p, k, source="close", select="middle"),
+            lambda r, w: r.bollinger_bands(w, p, k, source="close", select="lower"),
+        ],
+    )
 
 
 def atr(
@@ -179,16 +463,19 @@ def atr(
     close: pd.Series,
     period: int = 14,
 ) -> pd.Series:
-    """Average True Range."""
-    high = _coerce_series(high, "high")
+    """Average True Range (simple average of true range).
+
+    Preconditions: ``high``/``low``/``close`` are coercible, index-aligned OHLC
+    series; ``period >= 1``.
+    Postconditions: a same-length Series, NaN until ``period + 1`` bars exist,
+    then ``IndicatorRegistry.atr`` at each bar.
+    """
+    h = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
-    close = _coerce_series(close, "close")
-    prev_close = close.shift(1)
-    tr = pd.concat(
-        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
-        axis=1,
-    ).max(axis=1)
-    return tr.rolling(window=period).mean()
+    c = _coerce_series(close, "close")
+    bars = _hlc_bars(h, low, c)
+    p = _int_arg(period, "period")
+    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.atr(w, p))
 
 
 def adx(
@@ -197,44 +484,19 @@ def adx(
     close: pd.Series,
     period: int = 14,
 ) -> pd.Series:
-    """Average Directional Index (0–100).
+    """Average Directional Index (0–100), un-smoothed single-DX (runtime convention).
 
-    Uses Wilder's smoothing (alpha = 1/period) for directional indicators.
+    Preconditions: ``high``/``low``/``close`` are coercible, index-aligned OHLC
+    series; ``period >= 1``.
+    Postconditions: a same-length Series, NaN until ``2 × period + 1`` bars exist,
+    then ``IndicatorRegistry.adx`` at each bar.
     """
-    high = _coerce_series(high, "high")
+    h = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
-    close = _coerce_series(close, "close")
-    prev_high = high.shift(1)
-    prev_low = low.shift(1)
-
-    plus_dm = (high - prev_high).clip(lower=0)
-    minus_dm = (prev_low - low).clip(lower=0)
-
-    # Zero out the smaller of the two
-    mask_plus = plus_dm < minus_dm
-    mask_minus = minus_dm <= plus_dm
-    plus_dm = plus_dm.where(~mask_plus, 0)
-    minus_dm = minus_dm.where(~mask_minus, 0)
-
-    # Wilder-smoothed True Range (same smoothing as DM to keep ADX consistent)
-    prev_close = close.shift(1)
-    tr = pd.concat(
-        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
-        axis=1,
-    ).max(axis=1)
-    atr_wilder = tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    safe_atr = atr_wilder.replace(0, np.nan)
-
-    plus_di = (
-        100 * plus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / safe_atr
-    )
-    minus_di = (
-        100 * minus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / safe_atr
-    )
-
-    di_sum = (plus_di + minus_di).replace(0, np.nan)
-    dx = 100 * (plus_di - minus_di).abs() / di_sum
-    return dx.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    c = _coerce_series(close, "close")
+    bars = _hlc_bars(h, low, c)
+    p = _int_arg(period, "period")
+    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.adx(w, p))
 
 
 def stochastic(
@@ -244,49 +506,26 @@ def stochastic(
     k_period: int = 14,
     d_period: int = 3,
 ) -> tuple[pd.Series, pd.Series]:
-    """Stochastic Oscillator (%K, %D)."""
-    high = _coerce_series(high, "high")
-    low = _coerce_series(low, "low")
-    close = _coerce_series(close, "close")
-    lowest_low = low.rolling(window=k_period).min()
-    highest_high = high.rolling(window=k_period).max()
-    denom = (highest_high - lowest_low).replace(0, np.nan)
-    pct_k = 100 * (close - lowest_low) / denom
-    pct_d = pct_k.rolling(window=d_period).mean()
-    return pct_k, pct_d
+    """Stochastic Oscillator (%K, %D).
 
-
-def _vwap_cumulatives(
-    high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series
-) -> tuple[pd.Series, pd.Series]:
-    """Cumulative typical-price·volume and cumulative volume — the VWAP building blocks.
-
-    Preconditions: ``high``/``low``/``close``/``volume`` are coercible series of
-    equal length.
-    Postconditions: ``(cum_tp_vol, cum_vol)`` — the running sums of typical price
-    (``(h+l+c)/3``) weighted by volume, and of volume. Shared by :func:`vwap` (full
-    cumulative) and :func:`_windowed_vwap` (which re-bases both to a trailing window)
-    so the typical-price definition lives in exactly one place.
+    Preconditions: ``high``/``low``/``close`` are coercible, index-aligned OHLC
+    series; ``k_period >= 1``; ``d_period >= 1``.
+    Postconditions: two same-length Series; %K is NaN until ``k_period`` bars
+    exist, %D until ``k_period + d_period - 1`` (50 neutral on a flat window).
     """
-    high = _coerce_series(high, "high")
+    h = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
-    close = _coerce_series(close, "close")
-    volume = _coerce_series(volume, "volume")
-    typical_price = (high + low + close) / 3
-    return (typical_price * volume).cumsum(), volume.cumsum()
-
-
-def _rebase_cumulative(cumulative: pd.Series, lag: int) -> pd.Series:
-    """Re-base a cumulative series to a trailing window by subtracting its lagged self.
-
-    Preconditions: ``cumulative`` is a running sum (monotone in the accumulated
-    sign); ``lag >= 1``.
-    Postconditions: ``cumulative[t] - cumulative[t - lag]`` (the pre-window prefix
-    treated as 0 during warm-up), i.e. the sum accrued over the trailing ``lag``
-    steps. Shared by the windowed cumulative wrappers (:func:`_windowed_obv`,
-    :func:`_windowed_vwap`).
-    """
-    return cumulative - cumulative.shift(lag).fillna(0.0)
+    c = _coerce_series(close, "close")
+    kp, dp = _int_arg(k_period, "k_period"), _int_arg(d_period, "d_period")
+    bars = _hlc_bars(h, low, c)
+    return _run_tuple(
+        bars,
+        h.index[: len(bars)],
+        [
+            lambda r, w: r.stochastic(w, kp, dp, select="k"),
+            lambda r, w: r.stochastic(w, kp, dp, select="d"),
+        ],
+    )
 
 
 def vwap(
@@ -295,13 +534,43 @@ def vwap(
     close: pd.Series,
     volume: pd.Series,
 ) -> pd.Series:
-    """Cumulative Volume Weighted Average Price.
+    """Cumulative Volume Weighted Average Price (no intraday reset).
 
-    Note: this is a cumulative VWAP with no intraday reset, appropriate
-    for daily OHLCV bars.
+    Preconditions: ``high``/``low``/``close``/``volume`` are coercible,
+    index-aligned series.
+    Postconditions: a same-length Series; ``Σ(typical·volume) / Σ volume`` over
+    all bars so far (``typical = (high+low+close)/3``), falling back to the
+    running mean close when cumulative volume is 0 — the runtime convention
+    (``IndicatorRegistry.vwap`` with ``period=None``).
+
+    Computed vectorised in O(n) — the sole full-history cumulative that the
+    per-bar registry cannot serve without an O(n^2) rescan of every prefix.
+    ``cumsum`` is a sequential prefix sum, so it reproduces the registry's
+    left-to-right running totals (and the same all-zero-volume-prefix fallback)
+    bit-for-bit; ``test_new_indicators`` pins that parity against the registry so
+    the two cannot drift.
     """
-    cum_tp_vol, cum_vol = _vwap_cumulatives(high, low, close, volume)
-    return cum_tp_vol / cum_vol.replace(0, np.nan)
+    h_s = _coerce_series(high, "high")
+    low_s = _coerce_series(low, "low")
+    c_s = _coerce_series(close, "close")
+    v_s = _coerce_series(volume, "volume")
+    # Positional truncation to the shortest input, matching the OHLCV bar builders.
+    n = min(len(h_s), len(low_s), len(c_s), len(v_s))
+    h = _na_safe(h_s)[:n]
+    low = _na_safe(low_s)[:n]
+    c = _na_safe(c_s)[:n]
+    v = _na_safe(v_s)[:n]
+    typical = (h + low + c) / 3.0
+    num = np.cumsum(typical * v)
+    den = np.cumsum(v)
+    # Zero-cumulative-volume prefixes fall back to the running mean close — the
+    # registry's ``period=None`` convention — so ``den == 0`` (only when every
+    # in-window bar has zero volume) uses ``Σclose / bar_count`` instead of 0/0.
+    mean_close = np.cumsum(c) / np.arange(1, n + 1, dtype="float64")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = num / den
+    result = np.where(den != 0, ratio, mean_close)
+    return pd.Series(result, index=h_s.index[:n], dtype=float)
 
 
 def donchian_channels(
@@ -311,18 +580,24 @@ def donchian_channels(
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     """Donchian channel: upper (rolling-max high), middle (midpoint), lower (rolling-min low).
 
-    Preconditions: ``high``/``low`` are coercible OHLC series of equal length;
+    Preconditions: ``high``/``low`` are coercible, index-aligned OHLC series;
     ``period >= 1``.
-    Postconditions: three same-length series; each is NaN for the first
-    ``period - 1`` rows, then ``upper`` is the trailing-``period`` highest high,
-    ``lower`` the lowest low, and ``middle`` their midpoint.
+    Postconditions: three same-length Series, NaN for the first ``period - 1``
+    rows, then the trailing-``period`` high/low extrema and their midpoint.
     """
-    high = _coerce_series(high, "high")
+    h = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
-    upper = high.rolling(window=period).max()
-    lower = low.rolling(window=period).min()
-    middle = (upper + lower) / 2
-    return upper, middle, lower
+    p = _int_arg(period, "period")
+    bars = _hl_bars(h, low)
+    return _run_tuple(
+        bars,
+        h.index[: len(bars)],
+        [
+            lambda r, w: r.donchian(w, p, select="upper"),
+            lambda r, w: r.donchian(w, p, select="middle"),
+            lambda r, w: r.donchian(w, p, select="lower"),
+        ],
+    )
 
 
 def keltner_channels(
@@ -335,55 +610,143 @@ def keltner_channels(
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     """Keltner channel: windowed-EMA(close) basis ± multiplier × ATR(atr_period).
 
-    Mirrors ``IndicatorRegistry.keltner``: the basis is a *windowed* EMA — the seed
-    slides with the trailing ``period`` window, matching ``windowed_ema``, not an
-    expanding ``ewm()`` that is finite from bar 0 — and the bands are NaN until
-    ``max(period, atr_period + 1)`` bars so the Series helper honours the same
-    warm-up contract as the runtime/compiled paths. (An expanding ``ewm`` basis with
-    no warm-up gate would let the static coverage probe / direct Series consumers see
-    Keltner values during the runtime warm-up window and mark predicates active a few
-    bars early.)
-
-    Preconditions: ``high``/``low``/``close`` are coercible OHLC series of equal
-    length; ``period >= 1``; ``atr_period >= 1``.
-    Postconditions: three same-length series, NaN until ``max(period, atr_period + 1)``
-    bars exist; thereafter ``middle`` is the windowed close-EMA and the bands are
-    ``middle ± multiplier × ATR(atr_period)``.
+    Preconditions: ``high``/``low``/``close`` are coercible, index-aligned OHLC
+    series; ``period >= 1``; ``atr_period >= 1``.
+    Postconditions: three same-length Series, NaN until ``max(period, atr_period
+    + 1)`` bars exist, then ``middle ± multiplier × ATR(atr_period)`` around the
+    windowed close-EMA — ``IndicatorRegistry.keltner`` at each bar.
     """
-    high = _coerce_series(high, "high")
+    h = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
-    close = _coerce_series(close, "close")
-    alpha = 2.0 / (period + 1.0)
-
-    def _windowed_ema(window: np.ndarray) -> float:
-        # EMA over the trailing window seeded from its oldest element, exactly like
-        # streaming.windowed_ema (the seed slides forward one bar each step).
-        val = window[0]
-        for x in window[1:]:
-            val = alpha * x + (1.0 - alpha) * val
-        return val
-
-    middle = close.rolling(window=period).apply(_windowed_ema, raw=True)
-    atr_series = atr(high, low, close, atr_period)
-    upper = middle + multiplier * atr_series
-    lower = middle - multiplier * atr_series
-    # Registry warm-up contract: no value until max(period, atr_period + 1) bars.
-    valid = np.arange(len(close)) >= (max(period, atr_period + 1) - 1)
-    return upper.where(valid), middle.where(valid), lower.where(valid)
+    c = _coerce_series(close, "close")
+    p, ap, mult = _int_arg(period, "period"), _int_arg(atr_period, "atr_period"), float(multiplier)
+    bars = _hlc_bars(h, low, c)
+    return _run_tuple(
+        bars,
+        h.index[: len(bars)],
+        [
+            lambda r, w: r.keltner(w, p, ap, mult, select="upper"),
+            lambda r, w: r.keltner(w, p, ap, mult, select="middle"),
+            lambda r, w: r.keltner(w, p, ap, mult, select="lower"),
+        ],
+    )
 
 
 def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     """On-Balance Volume: cumulative volume signed by the close-to-close direction.
 
-    Preconditions: ``close``/``volume`` are coercible series of equal length.
-    Postconditions: a same-length cumulative series; each step adds ``volume`` on
-    an up-close, subtracts it on a down-close, and is unchanged on a flat close
-    (the first bar contributes 0, having no prior close).
+    Preconditions: ``close``/``volume`` are coercible, index-aligned series.
+    Postconditions: a same-length cumulative Series; each step adds ``volume`` on
+    an up-close, subtracts it on a down-close, is unchanged on a flat close (the
+    first bar contributes 0, having no prior close).
     """
-    close = _coerce_series(close, "close")
-    volume = _coerce_series(volume, "volume")
-    direction = np.sign(close.diff()).fillna(0.0)
-    return (direction * volume).cumsum()
+    c = _coerce_series(close, "close")
+    v = _coerce_series(volume, "volume")
+    bars = _cv_bars(c, v)
+    return _run_single(bars, c.index[: len(bars)], lambda r, w: r.obv(w))
+
+
+def mfi(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
+    period: int = 14,
+) -> pd.Series:
+    """Money Flow Index (0–100): volume-weighted RSI of typical price.
+
+    Preconditions: ``high``/``low``/``close``/``volume`` are coercible,
+    index-aligned series; ``period >= 1``.
+    Postconditions: a same-length Series in ``[0, 100]``, NaN until ``period + 1``
+    bars exist; a full window with no down-flow yields 100 (50 when there is no
+    flow at all) — ``IndicatorRegistry.mfi`` at each bar.
+    """
+    h = _coerce_series(high, "high")
+    low = _coerce_series(low, "low")
+    c = _coerce_series(close, "close")
+    v = _coerce_series(volume, "volume")
+    bars = _hlcv_bars(h, low, c, v)
+    p = _int_arg(period, "period")
+    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.mfi(w, p))
+
+
+def roc(series: pd.Series, period: int = 12) -> pd.Series:
+    """Rate of Change (percent) over ``period`` bars.
+
+    Preconditions: ``series`` is coercible; ``period >= 1``.
+    Postconditions: a same-length Series, NaN until ``period + 1`` bars exist,
+    then ``100 × (price − price[−period]) / price[−period]`` (0.0 when the
+    reference price is exactly 0) — ``IndicatorRegistry.roc`` at each bar.
+    """
+    s = _coerce_series(series)
+    p = _int_arg(period, "period")
+    return _run_single(_close_bars(s), s.index, lambda r, w: r.roc(w, p, source="close"))
+
+
+def cci(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 20,
+) -> pd.Series:
+    """Commodity Channel Index: typical-price deviation scaled by 0.015 × mean deviation.
+
+    Preconditions: ``high``/``low``/``close`` are coercible, index-aligned OHLC
+    series; ``period >= 1``.
+    Postconditions: a same-length Series, NaN for the first ``period - 1`` rows,
+    then ``(tp − sma_tp) / (0.015 × mean_deviation)`` (0.0 on a flat window) —
+    ``IndicatorRegistry.cci`` at each bar.
+    """
+    h = _coerce_series(high, "high")
+    low = _coerce_series(low, "low")
+    c = _coerce_series(close, "close")
+    bars = _hlc_bars(h, low, c)
+    p = _int_arg(period, "period")
+    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.cci(w, p))
+
+
+def williams_r(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 14,
+) -> pd.Series:
+    """Williams %R (−100–0): close position within the trailing high/low range.
+
+    Preconditions: ``high``/``low``/``close`` are coercible, index-aligned OHLC
+    series; ``period >= 1``.
+    Postconditions: a same-length Series in ``[−100, 0]``, NaN for the first
+    ``period - 1`` rows, then ``−100 × (highest_high − close) / range`` (−50.0
+    neutral on a flat window) — ``IndicatorRegistry.williams_r`` at each bar.
+    """
+    h = _coerce_series(high, "high")
+    low = _coerce_series(low, "low")
+    c = _coerce_series(close, "close")
+    bars = _hlc_bars(h, low, c)
+    p = _int_arg(period, "period")
+    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.williams_r(w, p))
+
+
+# ---------------------------------------------------------------------------
+# Coverage-probe cumulative wrappers.
+#
+# ``vwap``/``obv`` are the two indicators whose full-history running total
+# diverges from what the runtime's bounded ``StreamingHistoryView`` trades on,
+# so the coverage-probe reference (``INDICATORS``) routes them through these
+# window-bounded wrappers instead of the unbounded functions above.
+# ---------------------------------------------------------------------------
+
+
+def _rebase_cumulative(cumulative: pd.Series, lag: int) -> pd.Series:
+    """Re-base a cumulative series to a trailing window by subtracting its lagged self.
+
+    Preconditions: ``cumulative`` is a running sum (monotone in the accumulated
+    sign); ``lag >= 1``.
+    Postconditions: ``cumulative[t] - cumulative[t - lag]`` (the pre-window prefix
+    treated as 0 during warm-up), i.e. the sum accrued over the trailing ``lag``
+    steps.
+    """
+    return cumulative - cumulative.shift(lag).fillna(0.0)
 
 
 def _windowed_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
@@ -417,155 +780,23 @@ def _windowed_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
 def _windowed_vwap(
     high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series, period: int = 20
 ) -> pd.Series:
-    """VWAP re-based to a trailing ``period``-bar rolling window (coverage probe only).
+    """VWAP over a trailing ``period``-bar rolling window (coverage probe only).
 
-    Preconditions/Postconditions: as :func:`_windowed_obv`, but VWAP is a ratio of
-    cumulative sums, so numerator and denominator are each re-based to the window
-    start before dividing. When the trailing window has zero total volume the
-    ratio is undefined, so — mirroring the runtime ``IndicatorRegistry.vwap`` — the
-    value falls back to the window's average close (a finite value the engine
-    evaluates predicates against; without this the probe would see NaN and miss
-    those predicates).
-
-    ``period`` defaults to 20 — the DSL's default VWAP window — rather than the
-    much larger ``STREAMING_WINDOW_BARS`` retention ceiling used before VWAP's
-    rolling-window unification: the runtime now computes a ``period``-bounded
-    VWAP (default 20), and this probe reference must track whatever ``period``
-    the strategy actually requests to stay aligned with it (the same class of
-    probe/runtime divergence this wrapper exists to prevent in the first place).
-    Also NaN until ``period`` bars exist, matching ``IndicatorRegistry.vwap``'s
-    ``len(bars) < period`` warm-up gate (the runtime returns ``None``, not an
-    early value from a partial window, now that VWAP takes a real ``period``).
+    Preconditions: ``high``/``low``/``close``/``volume`` are coercible,
+    index-aligned series; ``period >= 1``.
+    Postconditions: a same-length Series matching the runtime's rolling VWAP bar
+    for bar — this calls the very ``IndicatorRegistry.vwap(period=...)`` the
+    engine calls, so the warm-up gate (NaN until ``period`` bars) and the
+    zero-volume-window fallback (the window's mean close) are the runtime's, not
+    a re-derivation. ``period`` defaults to 20 — the DSL's default VWAP window.
     """
-    cum_tp_vol, cum_vol = _vwap_cumulatives(high, low, close, volume)
-    num = _rebase_cumulative(cum_tp_vol, period)
-    den = _rebase_cumulative(cum_vol, period)
-    # Zero-volume-window fallback = trailing-window average close, matching the
-    # runtime. ``rolling(period, min_periods=1).mean()`` is the trailing mean over
-    # the min(t + 1, period) in-window closes — identical to re-basing cumulative
-    # close by cumulative bar-count, but expressed directly. The min_periods=1
-    # convention only matters pre-warm-up, which the gate below then masks anyway.
-    avg_close = _coerce_series(close, "close").rolling(period, min_periods=1).mean()
-    result = (num / den.replace(0, np.nan)).where(den != 0, avg_close)
-    warmed_up = np.arange(len(result)) >= (period - 1)
-    return result.where(warmed_up)
-
-
-def mfi(
-    high: pd.Series,
-    low: pd.Series,
-    close: pd.Series,
-    volume: pd.Series,
-    period: int = 14,
-) -> pd.Series:
-    """Money Flow Index (0–100): volume-weighted RSI of typical price.
-
-    Preconditions: ``high``/``low``/``close``/``volume`` are coercible series of
-    equal length; ``period >= 1``.
-    Postconditions: a same-length series in ``[0, 100]``, NaN until ``period + 1``
-    bars exist; a full window with no down-flow yields 100 (or 50 when there is no
-    flow at all), mirroring ``rsi``'s zero-denominator convention.
-    """
-    high = _coerce_series(high, "high")
+    h = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
-    close = _coerce_series(close, "close")
-    volume = _coerce_series(volume, "volume")
-    tp = (high + low + close) / 3
-    raw_money_flow = tp * volume
-    tp_diff = tp.diff()
-    # The first bar has no prior typical price to compare against, so its money flow
-    # is undefined (NaN, not zero). Masking it keeps it out of the rolling window, so
-    # the first MFI value lands at index ``period`` — i.e. once ``period + 1`` bars
-    # exist — matching IndicatorRegistry.mfi (each of the ``period`` flow terms needs
-    # a prior bar). A plain ``0.0`` fill would emit one bar early, at index ``period - 1``.
-    pos_flow = raw_money_flow.where(tp_diff > 0, 0.0).mask(tp_diff.isna())
-    neg_flow = raw_money_flow.where(tp_diff < 0, 0.0).mask(tp_diff.isna())
-    pos_sum = pos_flow.rolling(window=period).sum()
-    neg_sum = neg_flow.rolling(window=period).sum()
-    ratio = pos_sum / neg_sum.replace(0, np.nan)
-    result = 100 - (100 / (1 + ratio))
-    # neg_sum == 0 over a full window: 100 when there is up-flow (no down moves),
-    # else 50 for a flat window (no flow at all) — matching IndicatorRegistry.mfi
-    # and rsi(). Built with pandas-native ``mask``/``where`` so the boolean masks
-    # stay index-aligned with ``pos_sum``/``neg_sum``. Warm-up rows (neg_sum NaN,
-    # so ``neg_sum == 0`` is False) fall through ``where`` to NaN and keep it.
-    fill_values = pd.Series(50.0, index=result.index).mask(pos_sum > 0, 100.0).where(neg_sum == 0)
-    return result.fillna(fill_values)
-
-
-def roc(series: pd.Series, period: int = 12) -> pd.Series:
-    """Rate of Change (percent) over ``period`` bars.
-
-    Preconditions: ``series`` is coercible; ``period >= 1``.
-    Postconditions: a same-length series, NaN for the first ``period`` rows;
-    thereafter ``100 × (price − price[−period]) / price[−period]``, or ``0.0``
-    when the reference price is exactly 0 (avoids division by zero).
-    """
-    series = _coerce_series(series)
-    prev = series.shift(period)
-    result = (series - prev) / prev.replace(0, np.nan) * 100
-    # Reference price exactly 0 → 0.0 (matching IndicatorRegistry.roc and the
-    # compiler inline helper); warm-up rows (prev is NaN) keep NaN.
-    return result.where(prev != 0, 0.0)
-
-
-def cci(
-    high: pd.Series,
-    low: pd.Series,
-    close: pd.Series,
-    period: int = 20,
-) -> pd.Series:
-    """Commodity Channel Index: typical-price deviation scaled by 0.015 × mean deviation.
-
-    Preconditions: ``high``/``low``/``close`` are coercible OHLC series of equal
-    length; ``period >= 1``.
-    Postconditions: a same-length series, NaN for the first ``period - 1`` rows;
-    thereafter ``(tp − sma_tp) / (0.015 × mean_deviation)`` over the trailing
-    ``period`` typical prices, or ``0.0`` on a flat window (zero mean deviation).
-    """
-    high = _coerce_series(high, "high")
-    low = _coerce_series(low, "low")
-    close = _coerce_series(close, "close")
-    tp = (high + low + close) / 3
-    sma_tp = tp.rolling(window=period).mean()
-    # Mean absolute deviation has no native pandas rolling op, so this uses a
-    # ``rolling.apply`` with a NumPy lambda (``raw=True``). It's O(n·period) and
-    # not vectorised — fine for this reference/coverage-probe layer (the engine
-    # hot path uses the streaming ``IndicatorRegistry.cci`` loop, not this); if it
-    # ever runs on large frames, replace with a vectorised MAD.
-    mean_dev = tp.rolling(window=period).apply(
-        lambda window: np.abs(window - window.mean()).mean(), raw=True
-    )
-    result = (tp - sma_tp) / (0.015 * mean_dev.replace(0, np.nan))
-    # Flat window (mean deviation 0) → 0.0 (matching IndicatorRegistry.cci);
-    # warm-up rows (mean_dev is NaN) keep NaN.
-    return result.where(mean_dev != 0, 0.0)
-
-
-def williams_r(
-    high: pd.Series,
-    low: pd.Series,
-    close: pd.Series,
-    period: int = 14,
-) -> pd.Series:
-    """Williams %R (−100–0): close position within the trailing high/low range.
-
-    Preconditions: ``high``/``low``/``close`` are coercible OHLC series of equal
-    length; ``period >= 1``.
-    Postconditions: a same-length series in ``[−100, 0]``, NaN for the first
-    ``period - 1`` rows; thereafter ``−100 × (highest_high − close) / range``, or
-    ``−50.0`` (neutral) when the high-low range is 0.
-    """
-    high = _coerce_series(high, "high")
-    low = _coerce_series(low, "low")
-    close = _coerce_series(close, "close")
-    highest_high = high.rolling(window=period).max()
-    lowest_low = low.rolling(window=period).min()
-    rng = highest_high - lowest_low
-    result = -100 * (highest_high - close) / rng.replace(0, np.nan)
-    # Flat window (zero high-low range) → −50.0 neutral (matching
-    # IndicatorRegistry.williams_r); warm-up rows (rng is NaN) keep NaN.
-    return result.where(rng != 0, -50.0)
+    c = _coerce_series(close, "close")
+    v = _coerce_series(volume, "volume")
+    p = _int_arg(period, "period")
+    bars = _hlcv_bars(h, low, c, v)
+    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.vwap(w, period=p))
 
 
 # ---------------------------------------------------------------------------

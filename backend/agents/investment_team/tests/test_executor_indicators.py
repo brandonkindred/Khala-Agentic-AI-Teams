@@ -113,14 +113,84 @@ def test_vwap_runs_on_synthetic_ohlcv() -> None:
     assert all(math.isfinite(x) for x in out)
 
 
-def test_vwap_returns_nan_for_zero_cumulative_volume() -> None:
-    """``vwap`` falls back to NaN when the cumulative volume sums to zero."""
+def test_vwap_zero_cumulative_volume_falls_back_to_mean_close() -> None:
+    """``vwap`` falls back to the running mean close when cumulative volume is zero.
+
+    The Series helper is derived from ``IndicatorRegistry.vwap(period=None)``, whose
+    zero-volume-window convention is the window's mean close (a finite value the
+    engine evaluates predicates against), not NaN.
+    """
     high = pd.Series([1.0, 2.0])
     low = pd.Series([0.5, 1.0])
     close = pd.Series([1.0, 2.0])
     volume = pd.Series([0.0, 0.0])
     out = ind.vwap(high, low, close, volume)
-    assert out.isna().all()
+    # Every bar is finite (mean of the closes seen so far): [1.0, 1.5].
+    assert out.notna().all()
+    assert out.tolist() == pytest.approx([1.0, 1.5])
+
+
+def test_indicators_accept_nullable_dtype_with_pd_na() -> None:
+    """Nullable ``Float64``/``Int64`` inputs carrying ``pd.NA`` run without raising.
+
+    ``_coerce_series`` returns a numeric nullable Series unchanged, so the bar
+    builders must normalise ``pd.NA`` to ``NaN`` (matching the prior pandas-backed
+    behaviour of propagating missing values) rather than raising ``TypeError`` from
+    ``float(pd.NA)``. The gap poisons only the windows that span it; values resume
+    once it scrolls out.
+    """
+    s = pd.Series([1.0, pd.NA, 3.0, 4.0, 5.0], dtype="Float64")
+    out = ind.sma(s, 2)
+    assert len(out) == 5
+    # SMA(2): index 3 = mean(3, 4) = 3.5, index 4 = mean(4, 5) = 4.5; earlier
+    # windows include the NA (or warm-up) and are NaN.
+    assert out.iloc[3] == pytest.approx(3.5)
+    assert out.iloc[4] == pytest.approx(4.5)
+    assert bool(out.iloc[:3].isna().all())
+
+    # A nullable Int64 column and the OHLC path likewise run without raising.
+    assert len(ind.rsi(pd.Series([1, pd.NA, 3, 4, 5, 6], dtype="Int64"), 3)) == 6
+    high = pd.Series([10.0, pd.NA, 12.0, 13.0], dtype="Float64")
+    low = pd.Series([9.0, 9.5, 11.0, 12.0], dtype="Float64")
+    close = pd.Series([9.5, 10.0, 11.5, 12.5], dtype="Float64")
+    assert len(ind.atr(high, low, close, 2)) == 4
+
+
+def test_macd_runtime_window_import_resolves_in_flat_sandbox_layout(tmp_path) -> None:
+    """``macd``'s ``STREAMING_WINDOW_BARS`` lookup must survive the harness's
+    indicators-only fallback layout, where this Series module is copied in as the
+    top-level ``indicators.py`` (no parent package) and a bare ``from ..runtime_window``
+    would raise ``ImportError``. The harness copies ``runtime_window.py`` at the sandbox
+    root, so the lazy import must fall back to the flat ``from runtime_window`` there.
+    """
+    import importlib.util
+    import shutil
+    import sys
+    from pathlib import Path
+
+    from investment_team.strategy_lab import runtime_window as _rw_mod
+    from investment_team.strategy_lab.indicators import streaming as _streaming_mod
+
+    shutil.copy2(Path(ind.__file__), tmp_path / "indicators.py")  # pandas impl AS the root module
+    shutil.copy2(Path(_streaming_mod.__file__), tmp_path / "_streaming_indicators.py")
+    shutil.copy2(Path(_rw_mod.__file__), tmp_path / "runtime_window.py")
+
+    sys.path.insert(0, str(tmp_path))
+    for name in ("indicators", "_streaming_indicators", "runtime_window"):
+        sys.modules.pop(name, None)
+    try:
+        spec = importlib.util.spec_from_file_location("indicators", tmp_path / "indicators.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["indicators"] = mod
+        spec.loader.exec_module(mod)
+        # Calling macd triggers the lazy STREAMING_WINDOW_BARS import; it must resolve
+        # flat rather than raising "attempted relative import with no known parent package".
+        line, signal, _hist = mod.macd(pd.Series([100.0 + i for i in range(40)]))
+        assert len(line) == 40 and not pd.isna(line.iloc[-1])
+    finally:
+        sys.path.remove(str(tmp_path))
+        for name in ("indicators", "_streaming_indicators", "runtime_window"):
+            sys.modules.pop(name, None)
 
 
 # ---------------------------------------------------------------------------

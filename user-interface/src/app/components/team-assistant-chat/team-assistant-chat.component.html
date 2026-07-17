@@ -86,13 +86,13 @@
               </div>
             </div>
           } @else {
-            <div class="field-value" role="button" tabindex="0" (click)="startEdit(field.key)" (keydown.enter)="startEdit(field.key)">
+            <button class="field-value" (click)="startEdit(field.key)">
               @if (isFieldFilled(field.key)) {
                 <span class="value-text">{{ fieldValue(field.key) }}</span>
               } @else {
                 <span class="value-empty">Click to fill in or chat with the assistant</span>
               }
-            </div>
+            </button>
           }
         </div>
       }

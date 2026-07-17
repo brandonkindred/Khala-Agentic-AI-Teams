@@ -347,19 +347,20 @@
   &.losing-avatar  { background: var(--kh-error); }
 }
 
-// ── Collapsible card summary ──────────────────────────────────────────────────
+// ── Card expand/collapse disclosure ───────────────────────────────────────────
 
-.card-summary {
-  cursor: pointer;
+.expand-chevron-btn {
+  display: block;
+  margin: 0.25rem auto 0;
+  color: var(--kh-text-muted);
+
+  &:hover {
+    color: var(--kh-text-primary);
+  }
 }
 
 .expand-chevron {
-  display: block;
-  text-align: center;
-  width: 100%;
-  color: var(--kh-text-muted);
   font-size: 1.4rem;
-  margin-top: 0.25rem;
 }
 
 // ── Metrics row ───────────────────────────────────────────────────────────────
