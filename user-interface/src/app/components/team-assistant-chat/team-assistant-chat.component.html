@@ -86,7 +86,7 @@
               </div>
             </div>
           } @else {
-            <button type="button" class="field-value" (click)="startEdit(field.key)">
+            <button class="field-value" (click)="startEdit(field.key)">
               @if (isFieldFilled(field.key)) {
                 <span class="value-text">{{ fieldValue(field.key) }}</span>
               } @else {

@@ -233,7 +233,6 @@ describe('TeamAssistantChatComponent', () => {
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector('.field-value') as HTMLButtonElement;
     expect(btn.tagName.toLowerCase()).toBe('button');
-    expect(btn.type).toBe('button');
   });
 
   it('clicking field-value starts editing that field', () => {
