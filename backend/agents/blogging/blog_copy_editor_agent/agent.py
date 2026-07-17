@@ -545,5 +545,7 @@ class BlogCopyEditorAgent:
             )
         output = CopyEditorOutput(approved=approved, summary=summary, feedback_items=feedback_items)
         if feedback_output_path:
-            output.feedback_file_written = self._write_feedback_to_path(output, feedback_output_path)
+            output.feedback_file_written = self._write_feedback_to_path(
+                output, feedback_output_path
+            )
         return output
