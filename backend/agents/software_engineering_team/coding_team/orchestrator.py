@@ -179,299 +179,351 @@ def run_coding_team_orchestrator(
     if engine_provider is None:
         engine_provider = get_engine_provider()
     path = Path(repo_path).resolve()
-    _update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
+    _raw_update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
     _get_job = get_job_fn or (lambda jid: get_job(jid, cache_dir=cache_dir))
 
-    # Capture agents' streamed reasoning ("thinking") so the UI can show what is
-    # happening. Tokens land in an in-memory buffer (cheap, off the DB path); a
-    # heartbeat below flushes the tail to the job record's ``thinking`` field.
-    thinking = _ThinkingBuffer()
-    llm_getter = get_llm or _make_reasoning_llm_getter(thinking.append)
+    # Background single-writer flusher for the task-graph persist snapshot. Task-graph mutators
+    # call _persist_graph_async() (below) synchronously while holding TaskGraphService's RLock
+    # (see _maybe_persist's contract), so that path must never block on the job-service HTTP
+    # write — it hands the payload off to this flusher instead, which writes it off-thread.
+    # _update (below) drains the flusher before every write it makes, so a still-queued/
+    # in-flight background write can never land after — and clobber — a fresher one (most
+    # importantly a terminal status write).
+    from shared_concurrency import LatestValueFlusher  # noqa: PLC0415 - local, optional dep path
 
-    def _check_cancel() -> bool:
-        data = _get_job(job_id)
-        return bool(data and data.get(CANCEL_KEY))
+    flusher = LatestValueFlusher(
+        lambda payload: _raw_update(**payload),
+        name=f"coding-persist-{job_id}",
+        on_error=lambda exc: logger.warning("Task graph background persist failed: %s", exc),
+    ).start()
 
-    # Create Task Graph with persist
-    # Tracks the last persisted (graph revision, phase, status_text) so a no-op
-    # call skips the snapshot + job-service write entirely. The swarm loop persists
-    # 3x per round and every graph mutation persists too, so on an idle round (or
-    # back-to-back triggers for the same state) most calls are redundant; durability
-    # is preserved because any real mutation bumps graph.revision and any phase /
-    # status change is part of the key, so every actual state change still writes.
-    _persist_state: Dict[str, Any] = {"revision": -1, "phase": None, "status_text": None}
+    def _update(**kw: Any) -> None:
+        flusher.drain()
+        _raw_update(**kw)
 
-    def _persist_graph() -> None:
-        # Persist the snapshot through the SAME store used for the resume read and cancel checks
-        # (the injected update_job_fn). On the software-engineering path that is the SE job record;
-        # the hardcoded coding_team store targets a record that is never created on that path, so
-        # the central job service's UPDATE-WHERE matches no row and the write — hence resume — is
-        # silently lost. The standalone coding_team path's default callback writes the same keys to
-        # the coding_team record exactly as before.
-        if (
-            graph.revision == _persist_state["revision"]
-            and phase == _persist_state["phase"]
-            and status_text == _persist_state["status_text"]
-        ):
-            return
-        snap = graph.snapshot()
-        _update(
-            task_graph_snapshot=snap["tasks"],
-            agent_task_map=snap["agent_task_map"],
-            phase=phase,
-            status_text=status_text,
-            progress=_coding_progress(snap["tasks"], progress_base, progress_span),
-        )
-        _persist_state["revision"] = graph.revision
-        _persist_state["phase"] = phase
-        _persist_state["status_text"] = status_text
+    try:
+        # Capture agents' streamed reasoning ("thinking") so the UI can show what is
+        # happening. Tokens land in an in-memory buffer (cheap, off the DB path); a
+        # heartbeat below flushes the tail to the job record's ``thinking`` field.
+        thinking = _ThinkingBuffer()
+        llm_getter = get_llm or _make_reasoning_llm_getter(thinking.append)
 
-    graph: TaskGraphService = create_task_graph(job_id, persist_callback=_persist_graph)
-    phase = "task_graph"
-    status_text = "Building task graph from plan"
+        def _check_cancel() -> bool:
+            data = _get_job(job_id)
+            return bool(data and data.get(CANCEL_KEY))
 
-    # The Tech Lead object is needed for the swarm coordinator (assignments/reviews) regardless of
-    # whether we plan fresh or resume, so build it unconditionally.
-    llm = llm_getter("tech_lead")
-    tech_lead = TechLeadAgent(llm)
+        # Create Task Graph with persist
+        # Tracks the last persisted (graph revision, phase, status_text) so a no-op
+        # call skips the snapshot + job-service write entirely. The swarm loop persists
+        # 3x per round and every graph mutation persists too, so on an idle round (or
+        # back-to-back triggers for the same state) most calls are redundant; durability
+        # is preserved because any real mutation bumps graph.revision and any phase /
+        # status change is part of the key, so every actual state change still writes.
+        _persist_state: Dict[str, Any] = {"revision": -1, "phase": None, "status_text": None}
 
-    def _pause_cycle(questions: List[Any], source: str) -> "tuple[List[Dict[str, Any]], bool]":
-        return _run_pause_cycle(
-            job_id,
-            questions,
-            source,
-            get_job_fn=_get_job,
-            update_fn=_update,
-            on_pause=on_pause,
-        )
-
-    # Resume from a persisted snapshot (e.g. a Temporal retry of the same job_id) instead of
-    # re-running the planning LLM and re-doing finished work. `_persist_graph` writes the task
-    # snapshot every round; the stacks are persisted alongside it on the fresh path below.
-    existing = _get_job(job_id) or {}
-    snapshot_tasks = existing.get("task_graph_snapshot") or []
-
-    # Human-in-the-loop decision gate (entry). Fold any answers persisted from a prior attempt,
-    # then if open questions handed in still have no answer, pause for the user before doing any
-    # work. Deterministic and fail-closed — the swarm is never entered while an unanswered open
-    # question exists. On a pause that ends without answers (terminal/timeout) the cycle has
-    # already set the failure status, so we just stop.
-    _hydrate_resolved_from_record(plan_input, existing)
-    entry_unanswered = hitl.unanswered_questions(
-        plan_input.open_questions, plan_input.resolved_questions
-    )
-    if entry_unanswered:
-        resolved, ok = _pause_cycle(entry_unanswered, "plan_input")
-        if not ok:
-            return
-        plan_input.resolved_questions = list(plan_input.resolved_questions or []) + resolved
-        plan_input.open_questions = []
-
-    if snapshot_tasks:
-        logger.info("Resuming job %s from snapshot (%d tasks)", job_id, len(snapshot_tasks))
-        graph.restore(
-            {
-                "tasks": snapshot_tasks,
-                "agent_task_map": existing.get("agent_task_map") or {},
+        def _compute_persist_payload() -> Optional[Dict[str, Any]]:
+            # Shared by both persist paths below. Persists the snapshot through the SAME store
+            # used for the resume read and cancel checks (the injected update_job_fn). On the
+            # software-engineering path that is the SE job record; the hardcoded coding_team
+            # store targets a record that is never created on that path, so the central job
+            # service's UPDATE-WHERE matches no row and the write — hence resume — is silently
+            # lost. The standalone coding_team path's default callback writes the same keys to
+            # the coding_team record exactly as before.
+            if (
+                graph.revision == _persist_state["revision"]
+                and phase == _persist_state["phase"]
+                and status_text == _persist_state["status_text"]
+            ):
+                return None
+            snap = graph.snapshot()
+            payload = {
+                "task_graph_snapshot": snap["tasks"],
+                "agent_task_map": snap["agent_task_map"],
+                "phase": phase,
+                "status_text": status_text,
+                "progress": _coding_progress(snap["tasks"], progress_base, progress_span),
             }
+            _persist_state["revision"] = graph.revision
+            _persist_state["phase"] = phase
+            _persist_state["status_text"] = status_text
+            return payload
+
+        def _persist_graph_async() -> None:
+            # persist_callback= for TaskGraphService: invoked synchronously while its RLock is
+            # held, so this must never block on I/O — cheap in-memory bookkeeping only, then
+            # hand the payload to `flusher` for an off-thread write.
+            payload = _compute_persist_payload()
+            if payload is not None:
+                flusher.enqueue(payload)
+
+        def _persist_graph_sync() -> None:
+            # Round-boundary / pre-loop durability checkpoint (persist_fn=). Drains first so a
+            # previously queued async write can never land after — and stomp on — this write.
+            flusher.drain()
+            payload = _compute_persist_payload()
+            if payload is not None:
+                _raw_update(**payload)
+
+        graph: TaskGraphService = create_task_graph(job_id, persist_callback=_persist_graph_async)
+        phase = "task_graph"
+        status_text = "Building task graph from plan"
+
+        # The Tech Lead object is needed for the swarm coordinator (assignments/reviews) regardless of
+        # whether we plan fresh or resume, so build it unconditionally.
+        llm = llm_getter("tech_lead")
+        tech_lead = TechLeadAgent(llm)
+
+        def _pause_cycle(questions: List[Any], source: str) -> "tuple[List[Dict[str, Any]], bool]":
+            return _run_pause_cycle(
+                job_id,
+                questions,
+                source,
+                get_job_fn=_get_job,
+                update_fn=_update,
+                on_pause=on_pause,
+            )
+
+        # Resume from a persisted snapshot (e.g. a Temporal retry of the same job_id) instead of
+        # re-running the planning LLM and re-doing finished work. `_persist_graph_async` writes the
+        # task snapshot every round; the stacks are persisted alongside it on the fresh path below.
+        existing = _get_job(job_id) or {}
+        snapshot_tasks = existing.get("task_graph_snapshot") or []
+
+        # Human-in-the-loop decision gate (entry). Fold any answers persisted from a prior attempt,
+        # then if open questions handed in still have no answer, pause for the user before doing any
+        # work. Deterministic and fail-closed — the swarm is never entered while an unanswered open
+        # question exists. On a pause that ends without answers (terminal/timeout) the cycle has
+        # already set the failure status, so we just stop.
+        _hydrate_resolved_from_record(plan_input, existing)
+        entry_unanswered = hitl.unanswered_questions(
+            plan_input.open_questions, plan_input.resolved_questions
         )
-        # In-flight tasks from the dead attempt may be half-done and their agent mapping is stale,
-        # so demote them to unassigned TO_DO; MERGED/FAILED are preserved (no re-work).
-        graph.reset_in_flight()
-        if retry_failed:
-            # Explicit "retry the failed tasks" entry (e.g. the SE retry path): also demote terminal
-            # FAILED tasks to TO_DO so the swarm re-attempts them. Default resume leaves them FAILED.
-            graph.reset_failed()
-        stacks_raw = existing.get("stack_specs") or _default_stack_specs()
-    else:
-        # Plan the task graph, pausing for the user if the Tech Lead raises a decision it must not
-        # make. None means either a pause ended without answers (the pause cycle already set the
-        # failure status) or the Tech Lead never stopped asking — fail closed in the latter case so
-        # the job does not linger in an ambiguous running state.
-        out = _plan_with_hitl(tech_lead, plan_input, _pause_cycle)
-        if out is None:
-            # Only set 'failed' when the job is not already terminal — a pause that ended because the
-            # job went terminal (failed/cancelled/completed) must keep that status, not be relabeled.
-            if not hitl.is_terminal(_get_job(job_id) or {}):
-                _update(
-                    status=JobStatus.FAILED.value,
-                    phase="completed",
-                    status_text="Design did not converge: open questions were never resolved",
-                    error="Tech Lead exceeded the open-question round cap",
+        if entry_unanswered:
+            resolved, ok = _pause_cycle(entry_unanswered, "plan_input")
+            if not ok:
+                return
+            plan_input.resolved_questions = list(plan_input.resolved_questions or []) + resolved
+            plan_input.open_questions = []
+
+        if snapshot_tasks:
+            logger.info("Resuming job %s from snapshot (%d tasks)", job_id, len(snapshot_tasks))
+            graph.restore(
+                {
+                    "tasks": snapshot_tasks,
+                    "agent_task_map": existing.get("agent_task_map") or {},
+                }
+            )
+            # In-flight tasks from the dead attempt may be half-done and their agent mapping is stale,
+            # so demote them to unassigned TO_DO; MERGED/FAILED are preserved (no re-work).
+            graph.reset_in_flight()
+            if retry_failed:
+                # Explicit "retry the failed tasks" entry (e.g. the SE retry path): also demote terminal
+                # FAILED tasks to TO_DO so the swarm re-attempts them. Default resume leaves them FAILED.
+                graph.reset_failed()
+            stacks_raw = existing.get("stack_specs") or _default_stack_specs()
+        else:
+            # Plan the task graph, pausing for the user if the Tech Lead raises a decision it must not
+            # make. None means either a pause ended without answers (the pause cycle already set the
+            # failure status) or the Tech Lead never stopped asking — fail closed in the latter case so
+            # the job does not linger in an ambiguous running state.
+            out = _plan_with_hitl(tech_lead, plan_input, _pause_cycle)
+            if out is None:
+                # Only set 'failed' when the job is not already terminal — a pause that ended because the
+                # job went terminal (failed/cancelled/completed) must keep that status, not be relabeled.
+                if not hitl.is_terminal(_get_job(job_id) or {}):
+                    _update(
+                        status=JobStatus.FAILED.value,
+                        phase="completed",
+                        status_text="Design did not converge: open questions were never resolved",
+                        error="Tech Lead exceeded the open-question round cap",
+                    )
+                return
+            if out.get("already_complete"):
+                # The Tech Lead, now seeing the already-completed work, judged the issue's work already
+                # done and returned no tasks. Short-circuit to a clean terminal outcome instead of
+                # building duplicate tasks the engineers would spin on. The GitHub publish hook turns
+                # this status into a "recommend closing" comment with the evidence and creates no PR.
+                evidence = str(out.get("completion_evidence") or "").strip()
+                logger.info(
+                    "Job %s: Tech Lead judged the work already complete: %s", job_id, evidence
                 )
+                _update(
+                    status=JobStatus.ALREADY_COMPLETE.value,
+                    phase="completed",
+                    status_text="Work already complete; no changes needed",
+                    already_complete=True,
+                    completion_evidence=evidence,
+                    progress=100,
+                    current_activity=None,
+                )
+                return
+            tasks_raw = out.get("tasks") or []
+            stacks_raw = out.get("stacks") or _default_stack_specs()
+            for idx, t in enumerate(tasks_raw, start=1):
+                if not isinstance(t, dict):
+                    logger.warning("Skipping malformed task graph entry at index %s: %r", idx, t)
+                    continue
+                task_id = str(t.get("id") or f"task_{idx}")
+                graph.add_task(
+                    task_id=task_id,
+                    title=t.get("title") or task_id,
+                    description=t.get("description", ""),
+                    dependencies=t.get("dependencies", []),
+                    target_team=t.get("target_team") or None,
+                )
+        original_stacks_raw = stacks_raw
+        stacks_raw = _ensure_target_team_stack_specs(stacks_raw, graph.get_tasks())
+        if not snapshot_tasks or stacks_raw != original_stacks_raw:
+            # Persist the stacks so a later retry can rebuild the workers without re-planning. On
+            # resume, only write when we repaired an old/incomplete roster from target_team hints.
+            _update(stack_specs=stacks_raw)
+        _persist_graph_sync()
+
+        # Build v2 implementation workers. derive_stack_roster is the single source of
+        # truth for worker-id naming, shared with the status endpoint's roster builder so the two
+        # cannot drift — a mismatch would make per-agent status lookups silently miss.
+        roster = derive_stack_roster(stacks_raw)
+        stack_specs: List[StackSpec] = [
+            StackSpec(name=name, tools_services=tools) for (_aid, name, tools) in roster
+        ]
+        agent_ids = [aid for (aid, _name, _tools) in roster]
+        # The plan's architecture overview and final spec content, when available, are forwarded
+        # into each implementation worker so its code-review gate can check the change against
+        # the established architecture and the real project spec (not just the microtask
+        # description) -- see software_engineering_team's code_review_agent for how these reach
+        # the review prompt.
+        plan_architecture = (
+            SystemArchitecture(overview=plan_input.architecture_overview)
+            if plan_input.architecture_overview
+            else None
+        )
+        plan_review_context = ReviewContext(
+            architecture=plan_architecture, spec_content=plan_input.final_spec_content or ""
+        )
+        implementation_workers: List[Any] = []
+        try:
+            for aid, spec in zip(agent_ids, stack_specs):
+                implementation_workers.append(
+                    _build_implementation_worker(
+                        aid,
+                        spec,
+                        llm_getter,
+                        engine_provider,
+                        review_context=plan_review_context,
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001 - fail the job cleanly with the unsupported stack
+            logger.error("Failed to build coding-team implementation workers: %s", exc)
+            _update(
+                status=JobStatus.FAILED.value,
+                phase="completed",
+                status_text="Could not build coding-team implementation workers",
+                error=str(exc),
+            )
             return
-        if out.get("already_complete"):
-            # The Tech Lead, now seeing the already-completed work, judged the issue's work already
-            # done and returned no tasks. Short-circuit to a clean terminal outcome instead of
-            # building duplicate tasks the engineers would spin on. The GitHub publish hook turns
-            # this status into a "recommend closing" comment with the evidence and creates no PR.
-            evidence = str(out.get("completion_evidence") or "").strip()
-            logger.info("Job %s: Tech Lead judged the work already complete: %s", job_id, evidence)
+
+        phase = "coding"
+        status_text = "Assigning and implementing tasks"
+        # No progress write here: _persist_graph_sync above already published the band value
+        # derived from the graph, which on a resume reflects previously merged tasks —
+        # an unconditional base write would regress the bar (e.g. 52 → 10 → 52).
+        _update(phase=phase, status_text=status_text, status=JobStatus.RUNNING.value)
+
+        # Run the swarm: coordinator (Tech Lead) + v2 implementation workers.
+        swarm = CodingTeamSwarm(
+            tech_lead=tech_lead,
+            workers=implementation_workers,
+            graph=graph,
+            path=path,
+            agent_ids=agent_ids,
+            llm_getter=llm_getter,
+            resolved_questions=plan_input.resolved_questions,
+            engine_provider=engine_provider,
+            spec_content=plan_input.final_spec_content or "",
+        )
+        # Flush captured "thinking" to the job record on an interval for the UI poll.
+        # beat_first surfaces any planning-phase reasoning immediately; the final flush
+        # after the block captures the tail emitted since the last tick.
+        from shared_concurrency import (
+            BackgroundHeartbeat,  # noqa: PLC0415 - local, optional dep path
+        )
+
+        thinking_hb = BackgroundHeartbeat(
+            lambda: _flush_thinking(thinking, _update),
+            _thinking_flush_interval_s(),
+            name=f"coding-thinking-{job_id}",
+            beat_first=True,
+        )
+        try:
+            with thinking_hb:
+                swarm.run(
+                    check_cancel=_check_cancel,
+                    persist_fn=_persist_graph_sync,
+                    update_fn=_update,
+                    pause_for_questions=_pause_cycle,
+                )
+        finally:
+            _flush_thinking(thinking, _update)
+
+        # A worker raising a decision that ended without answers (terminal/timeout) aborts the swarm;
+        # the pause cycle has already set the failure status, so do not overwrite it with "completed".
+        if getattr(swarm, "aborted", False):
+            return
+
+        all_tasks = graph.get_tasks()
+        merged_tasks = [t for t in all_tasks if t.status == TaskStatus.MERGED]
+        merged_count = len(merged_tasks)
+        failed_count = graph.count_with_status(TaskStatus.FAILED)
+        # Tasks the Tech Lead adjudicated as already-done (terminal MERGED but no real diff landed).
+        resolved_count = sum(1 for t in merged_tasks if t.resolved_without_changes)
+        # When nothing failed and every "merged" task was actually already-done (no real changes
+        # landed), the issue's work was already complete — report that distinct terminal status so the
+        # publish flow recommends closure instead of opening a no-op PR. A mixed result (some real
+        # merges) stays a normal completion and publishes the real work.
+        #
+        # Require EVERY task to be terminal (MERGED or FAILED) before claiming already-complete: the
+        # swarm loop can exit at max_rounds with a task still TO_DO/IN_PROGRESS/IN_REVIEW, and reporting
+        # already_complete there (recommend-closing, no PR) would abandon genuinely unfinished work.
+        # Since this branch also requires failed_count == 0, "all terminal" means all MERGED.
+        all_terminal = (merged_count + failed_count) == len(all_tasks)
+        already_complete = (
+            all_terminal
+            and failed_count == 0
+            and merged_count > 0
+            and resolved_count == merged_count
+        )
+        # A job with failed tasks must not be presented as a clean success — surface a distinct
+        # terminal status so downstream consumers (and the GitHub publish flow) can flag the gap.
+        # current_activity=None travels in the terminal write itself so a transient
+        # failure of an earlier best-effort clear cannot leave a terminal job serving
+        # a stale mid-review activity entry.
+        if already_complete:
             _update(
                 status=JobStatus.ALREADY_COMPLETE.value,
                 phase="completed",
                 status_text="Work already complete; no changes needed",
                 already_complete=True,
-                completion_evidence=evidence,
+                completion_evidence="The requested work was already present; no changes were needed.",
                 progress=100,
                 current_activity=None,
             )
             return
-        tasks_raw = out.get("tasks") or []
-        stacks_raw = out.get("stacks") or _default_stack_specs()
-        for idx, t in enumerate(tasks_raw, start=1):
-            if not isinstance(t, dict):
-                logger.warning("Skipping malformed task graph entry at index %s: %r", idx, t)
-                continue
-            task_id = str(t.get("id") or f"task_{idx}")
-            graph.add_task(
-                task_id=task_id,
-                title=t.get("title") or task_id,
-                description=t.get("description", ""),
-                dependencies=t.get("dependencies", []),
-                target_team=t.get("target_team") or None,
-            )
-    original_stacks_raw = stacks_raw
-    stacks_raw = _ensure_target_team_stack_specs(stacks_raw, graph.get_tasks())
-    if not snapshot_tasks or stacks_raw != original_stacks_raw:
-        # Persist the stacks so a later retry can rebuild the workers without re-planning. On
-        # resume, only write when we repaired an old/incomplete roster from target_team hints.
-        _update(stack_specs=stacks_raw)
-    _persist_graph()
-
-    # Build v2 implementation workers. derive_stack_roster is the single source of
-    # truth for worker-id naming, shared with the status endpoint's roster builder so the two
-    # cannot drift — a mismatch would make per-agent status lookups silently miss.
-    roster = derive_stack_roster(stacks_raw)
-    stack_specs: List[StackSpec] = [
-        StackSpec(name=name, tools_services=tools) for (_aid, name, tools) in roster
-    ]
-    agent_ids = [aid for (aid, _name, _tools) in roster]
-    # The plan's architecture overview and final spec content, when available, are forwarded
-    # into each implementation worker so its code-review gate can check the change against
-    # the established architecture and the real project spec (not just the microtask
-    # description) -- see software_engineering_team's code_review_agent for how these reach
-    # the review prompt.
-    plan_architecture = (
-        SystemArchitecture(overview=plan_input.architecture_overview)
-        if plan_input.architecture_overview
-        else None
-    )
-    plan_review_context = ReviewContext(
-        architecture=plan_architecture, spec_content=plan_input.final_spec_content or ""
-    )
-    implementation_workers: List[Any] = []
-    try:
-        for aid, spec in zip(agent_ids, stack_specs):
-            implementation_workers.append(
-                _build_implementation_worker(
-                    aid,
-                    spec,
-                    llm_getter,
-                    engine_provider,
-                    review_context=plan_review_context,
-                )
-            )
-    except Exception as exc:  # noqa: BLE001 - fail the job cleanly with the unsupported stack
-        logger.error("Failed to build coding-team implementation workers: %s", exc)
         _update(
-            status=JobStatus.FAILED.value,
+            status=(
+                JobStatus.COMPLETED_WITH_FAILURES.value
+                if failed_count
+                else JobStatus.COMPLETED.value
+            ),
             phase="completed",
-            status_text="Could not build coding-team implementation workers",
-            error=str(exc),
-        )
-        return
-
-    phase = "coding"
-    status_text = "Assigning and implementing tasks"
-    # No progress write here: _persist_graph above already published the band value
-    # derived from the graph, which on a resume reflects previously merged tasks —
-    # an unconditional base write would regress the bar (e.g. 52 → 10 → 52).
-    _update(phase=phase, status_text=status_text, status=JobStatus.RUNNING.value)
-
-    # Run the swarm: coordinator (Tech Lead) + v2 implementation workers.
-    swarm = CodingTeamSwarm(
-        tech_lead=tech_lead,
-        workers=implementation_workers,
-        graph=graph,
-        path=path,
-        agent_ids=agent_ids,
-        llm_getter=llm_getter,
-        resolved_questions=plan_input.resolved_questions,
-        engine_provider=engine_provider,
-        spec_content=plan_input.final_spec_content or "",
-    )
-    # Flush captured "thinking" to the job record on an interval for the UI poll.
-    # beat_first surfaces any planning-phase reasoning immediately; the final flush
-    # after the block captures the tail emitted since the last tick.
-    from shared_concurrency import BackgroundHeartbeat  # noqa: PLC0415 - local, optional dep path
-
-    thinking_hb = BackgroundHeartbeat(
-        lambda: _flush_thinking(thinking, _update),
-        _thinking_flush_interval_s(),
-        name=f"coding-thinking-{job_id}",
-        beat_first=True,
-    )
-    try:
-        with thinking_hb:
-            swarm.run(
-                check_cancel=_check_cancel,
-                persist_fn=_persist_graph,
-                update_fn=_update,
-                pause_for_questions=_pause_cycle,
-            )
-    finally:
-        _flush_thinking(thinking, _update)
-
-    # A worker raising a decision that ended without answers (terminal/timeout) aborts the swarm;
-    # the pause cycle has already set the failure status, so do not overwrite it with "completed".
-    if getattr(swarm, "aborted", False):
-        return
-
-    all_tasks = graph.get_tasks()
-    merged_tasks = [t for t in all_tasks if t.status == TaskStatus.MERGED]
-    merged_count = len(merged_tasks)
-    failed_count = graph.count_with_status(TaskStatus.FAILED)
-    # Tasks the Tech Lead adjudicated as already-done (terminal MERGED but no real diff landed).
-    resolved_count = sum(1 for t in merged_tasks if t.resolved_without_changes)
-    # When nothing failed and every "merged" task was actually already-done (no real changes
-    # landed), the issue's work was already complete — report that distinct terminal status so the
-    # publish flow recommends closure instead of opening a no-op PR. A mixed result (some real
-    # merges) stays a normal completion and publishes the real work.
-    #
-    # Require EVERY task to be terminal (MERGED or FAILED) before claiming already-complete: the
-    # swarm loop can exit at max_rounds with a task still TO_DO/IN_PROGRESS/IN_REVIEW, and reporting
-    # already_complete there (recommend-closing, no PR) would abandon genuinely unfinished work.
-    # Since this branch also requires failed_count == 0, "all terminal" means all MERGED.
-    all_terminal = (merged_count + failed_count) == len(all_tasks)
-    already_complete = (
-        all_terminal and failed_count == 0 and merged_count > 0 and resolved_count == merged_count
-    )
-    # A job with failed tasks must not be presented as a clean success — surface a distinct
-    # terminal status so downstream consumers (and the GitHub publish flow) can flag the gap.
-    # current_activity=None travels in the terminal write itself so a transient
-    # failure of an earlier best-effort clear cannot leave a terminal job serving
-    # a stale mid-review activity entry.
-    if already_complete:
-        _update(
-            status=JobStatus.ALREADY_COMPLETE.value,
-            phase="completed",
-            status_text="Work already complete; no changes needed",
-            already_complete=True,
-            completion_evidence="The requested work was already present; no changes were needed.",
+            status_text=f"Completed: {merged_count} merged, {failed_count} failed",
             progress=100,
             current_activity=None,
         )
-        return
-    _update(
-        status=(
-            JobStatus.COMPLETED_WITH_FAILURES.value if failed_count else JobStatus.COMPLETED.value
-        ),
-        phase="completed",
-        status_text=f"Completed: {merged_count} merged, {failed_count} failed",
-        progress=100,
-        current_activity=None,
-    )
+    finally:
+        # Guaranteed on every exit path (normal completion, every early return above, or an
+        # unexpected exception): drains any pending write, then tears down the daemon thread so
+        # a long-running process handling many jobs over its lifetime never leaks one per job.
+        flusher.stop()
 
 
 class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):

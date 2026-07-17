@@ -657,6 +657,76 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
     assert "1 merged, 1 failed" in final["status_text"]
 
 
+def test_terminal_status_write_survives_slow_pending_graph_persist(tmp_path, monkeypatch):
+    """A graph mutation's background persist write must never land AFTER — and clobber —
+    the terminal status write. Task-graph mutators (e.g. mark_branch_merged) enqueue their
+    job-service write into a background flusher (see _persist_graph_async) rather than
+    writing synchronously while TaskGraphService's lock is held; every _update() call —
+    including the final terminal status write — must drain that flusher first, so a
+    still-in-flight write can never complete after and overwrite fresher phase/status_text/
+    progress with stale data. Simulates a slow job-service write for any call carrying a
+    task_graph_snapshot (the background-persist payload) and asserts the terminal write is
+    always the last one recorded."""
+    import threading
+    import time
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+
+        def run(self, **kw):
+            # Triggers the async persist_callback path (invoked while TaskGraphService's
+            # lock is held) — enqueues a slow-to-write payload in the background and
+            # returns immediately, well before the terminal write below.
+            self.graph.mark_branch_merged("t1")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    updates: List[Dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def _update_job_fn(**kw: Any) -> None:
+        if "task_graph_snapshot" in kw:
+            time.sleep(0.1)  # simulate a slow background job-service write
+        with lock:
+            updates.append(kw)
+
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=_update_job_fn,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    assert updates, "orchestrator must write at least the terminal status"
+    final = updates[-1]
+    assert final.get("status") == "completed"
+    assert final.get("progress") == 100
+    # No write after the terminal one may carry a task_graph_snapshot: that would mean a
+    # stale background write landed after — and could have clobbered — the terminal fields.
+    assert "task_graph_snapshot" not in final
+
+
 # ----------------------------------------------------- real quality-gate path
 
 
