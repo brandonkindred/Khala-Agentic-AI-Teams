@@ -27,8 +27,8 @@ import { MatSortModule } from '@angular/material/sort';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatDialog } from '@angular/material/dialog';
 import { RouterLink } from '@angular/router';
-import { Subscription, timer, switchMap, takeWhile } from 'rxjs';
-import { map } from 'rxjs/operators';
+import { Subscription, of, timer, switchMap, takeWhile } from 'rxjs';
+import { finalize, map } from 'rxjs/operators';
 
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
@@ -158,6 +158,9 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   private readonly destroyRef = inject(DestroyRef);
   private readonly dialog = inject(MatDialog);
   private readonly notify = inject(NotificationService);
+
+  /** True while a destructive confirm dialog is open — blocks re-entrant opens. */
+  private confirmingDestructive = false;
 
   /**
    * TradingView data-source status, used to show/hide the "using free public
@@ -985,12 +988,32 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return 'gate-' + gate.severity;
   }
 
-  /** Opens the shared Material confirm dialog and emits `true` only when confirmed. */
+  /**
+   * Open the shared Material confirm dialog for a destructive action.
+   *
+   * Preconditions: `data.title` and `data.message` are non-empty; the caller
+   *   treats a `false` emission as "do not proceed".
+   * Postconditions: emits exactly once — `true` only when the user confirms,
+   *   `false` on cancel, backdrop/ESC dismissal, or when a confirmation is
+   *   already pending. The re-entrancy guard is released when the dialog closes.
+   *
+   * The native `confirm()` this replaced blocked synchronously; the async
+   * dialog does not, so a rapid double-activation (e.g. Enter pressed twice
+   * before the dialog traps focus) could otherwise stack dialogs and fire
+   * duplicate destructive requests. The guard collapses that window.
+   */
   private confirmDestructive(data: ConfirmDialogData) {
+    if (this.confirmingDestructive) return of(false);
+    this.confirmingDestructive = true;
     return this.dialog
       .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, { data })
       .afterClosed()
-      .pipe(map((result) => result === true));
+      .pipe(
+        map((result) => result === true),
+        finalize(() => {
+          this.confirmingDestructive = false;
+        }),
+      );
   }
 
   deleteRecord(record: StrategyLabRecord): void {

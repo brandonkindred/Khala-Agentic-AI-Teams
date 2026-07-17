@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { NEVER, of, throwError } from 'rxjs';
+import { NEVER, Subject, of, throwError } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialog } from '@angular/material/dialog';
@@ -469,5 +469,24 @@ describe('StrategyLabComponent — destructive confirmations', () => {
     expect(component.error).toBe('kaboom');
     expect(component.clearingAll).toBe(false);
     expect(notifySpy.saved).not.toHaveBeenCalled();
+  });
+
+  it('does not open a second confirmation while one dialog is still pending', () => {
+    // A dialog that has not resolved yet (afterClosed has not emitted), so the
+    // re-entrancy guard should stay engaged across a rapid second activation.
+    const closed$ = new Subject<boolean>();
+    dialogSpy.open.mockReturnValue({ afterClosed: () => closed$.asObservable() });
+
+    component.deleteRecord(record);
+    component.deleteRecord(record); // rapid second activation before the first closes
+
+    expect(dialogSpy.open).toHaveBeenCalledTimes(1);
+    expect(apiSpy.deleteStrategyLabRecord).not.toHaveBeenCalled();
+
+    // Closing the first dialog releases the guard so later actions work again.
+    closed$.next(false);
+    closed$.complete();
+    component.clearAllLabData();
+    expect(dialogSpy.open).toHaveBeenCalledTimes(2);
   });
 });

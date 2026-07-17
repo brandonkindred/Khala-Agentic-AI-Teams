@@ -24,6 +24,10 @@
 
   p {
     margin: 0;
+    // Honor newlines in `data.message` so multi-line prompts (e.g. a warning
+    // separated from the question) keep their intended line breaks instead of
+    // collapsing into one paragraph.
+    white-space: pre-line;
   }
 }
 
