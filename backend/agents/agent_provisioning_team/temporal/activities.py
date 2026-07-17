@@ -176,12 +176,13 @@ def acquire_agent_lock_activity(job_id: str, agent_id: str) -> None:
           activity's ``schedule_to_close_timeout`` is exhausted.
     """
     from agent_provisioning_team.shared.agent_lock import AgentLockBusyError, AgentLockStore
+    from agent_provisioning_team.temporal.constants import LOCK_TTL_S
 
     assert job_id, "job_id must be non-empty"
     assert agent_id, "agent_id must be non-empty"
     activity.heartbeat("acquire-lock")
     try:
-        AgentLockStore().acquire(agent_id, owner=job_id)
+        AgentLockStore(ttl_seconds=LOCK_TTL_S).acquire(agent_id, owner=job_id)
     except AgentLockBusyError as e:
         raise RuntimeError(str(e)) from e
 
@@ -202,10 +203,11 @@ def release_agent_lock_activity(job_id: str, agent_id: str) -> None:
           after.
     """
     from agent_provisioning_team.shared.agent_lock import AgentLockStore
+    from agent_provisioning_team.temporal.constants import LOCK_TTL_S
 
     assert job_id, "job_id must be non-empty"
     assert agent_id, "agent_id must be non-empty"
-    AgentLockStore().release(agent_id, owner=job_id)
+    AgentLockStore(ttl_seconds=LOCK_TTL_S).release(agent_id, owner=job_id)
 
 
 @activity.defn(name="agent_provisioning_setup")

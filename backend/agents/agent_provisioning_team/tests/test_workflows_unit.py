@@ -129,6 +129,19 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
     assert fn_names[-1] == "release_agent_lock_activity"
     assert _call(stub, "acquire_agent_lock_activity")["args"] == ["job-1", "agent-1"]
     assert _call(stub, "release_agent_lock_activity")["args"] == ["job-1", "agent-1"]
+    # The lease is renewed after every phase (P1 regression: a long-running
+    # job must never lose its own lock to LOCK_TTL_S expiry) — one initial
+    # acquire plus one renewal after each of setup/credentials/tools+checkpoint
+    # /audit/documentation = 6 total acquire_agent_lock_activity calls, each
+    # renewing for the same owner.
+    acquire_calls = [c for c in stub.calls if c["name"] == "acquire_agent_lock_activity"]
+    assert len(acquire_calls) == 6
+    assert all(c["args"] == ["job-1", "agent-1"] for c in acquire_calls)
+    # A renewal lands between credentials and the tool fan-out — the single
+    # riskiest gap (a stuck tool can retry up to TOOL_RETRY_POLICY's ceiling).
+    creds_idx = fn_names.index("credentials_activity")
+    first_provision_idx = fn_names.index("provision_tool_activity")
+    assert "acquire_agent_lock_activity" in fn_names[creds_idx + 1 : first_provision_idx]
 
 
 @pytest.mark.asyncio

@@ -247,6 +247,24 @@ class AgentProvisioningWorkflow:
             retry_policy=LOCK_ACQUIRE_RETRY_POLICY,
         )
 
+    async def _renew_agent_lock(self, job_id: str, agent_id: str) -> None:
+        """Refresh this workflow's lease on ``agent_id`` at a phase boundary.
+
+        Preconditions:
+            * ``job_id`` / ``agent_id`` are non-empty; this workflow already
+              holds ``agent_id``'s lock (acquired via ``_acquire_agent_lock``
+              earlier in this same run).
+        Postconditions:
+            * ``agent_id``'s lock record's lease is extended ``LOCK_TTL_S``
+              seconds from now — ``acquire()`` renews rather than raising for
+              the current owner. Called after each phase so no single gap
+              between renewals exceeds one phase's worst-case duration,
+              keeping a legitimately slow (but still active) multi-hour run
+              from ever losing its own lock to ``AGENT_PROVISIONING_LOCK_TTL_S``
+              expiry.
+        """
+        await self._acquire_agent_lock(job_id, agent_id)
+
     async def _release_agent_lock(self, job_id: str, agent_id: str) -> None:
         """Release this workflow's ownership of ``agent_id`` (best-effort).
 
@@ -465,7 +483,9 @@ class AgentProvisioningWorkflow:
             * At most one workflow (provision or deprovision) actively
               processes a given ``agent_id`` at a time: this run holds
               ``agent_id``'s ownership lock (``shared/agent_lock.py``) for its
-              entire duration — acquired before setup, released in a
+              entire duration — acquired before setup, renewed after every
+              phase so a legitimately slow run never loses its own lease to
+              ``AGENT_PROVISIONING_LOCK_TTL_S`` expiry, released in a
               ``finally`` regardless of outcome — so every agent_id-keyed
               teardown call this run makes (``compensate_activity``,
               ``cleanup_setup``) is race-free against any other job.
@@ -489,6 +509,7 @@ class AgentProvisioningWorkflow:
                 job_id, agent_id, manifest_path, skip, prior
             )
             setup_completed = True
+            await self._renew_agent_lock(job_id, agent_id)
 
             # Freeze manifest tools once for credential + provision phases so a
             # mid-run file edit cannot change the tool set under us.
@@ -503,6 +524,9 @@ class AgentProvisioningWorkflow:
             credentials_by_tool = await self._execute_credentials_phase(
                 job_id, agent_id, manifest_path, skip, prior, tool_specs
             )
+            # Renew before the fan-out phase — the single riskiest gap, since a
+            # stuck tool can retry up to TOOL_RETRY_POLICY's ceiling.
+            await self._renew_agent_lock(job_id, agent_id)
 
             tool_results_dump, succeeded, failures = await self._run_tool_provisioning_phase(
                 job_id,
@@ -526,10 +550,12 @@ class AgentProvisioningWorkflow:
             if "account_provisioning" not in skip:
                 await self._record_account_provisioning(job_id, agent_id, tool_results_dump)
             account_provisioning_done = True
+            await self._renew_agent_lock(job_id, agent_id)
 
             audit_dump = await self._execute_audit_phase(
                 job_id, agent_id, manifest_path, tool_results_dump, skip, prior
             )
+            await self._renew_agent_lock(job_id, agent_id)
 
             workspace_path = DEFAULT_WORKSPACE_PATH
             if environment_dump:
@@ -545,6 +571,7 @@ class AgentProvisioningWorkflow:
                 prior,
             )
             onboarding_dump = doc_result.get("onboarding") if doc_result else None
+            await self._renew_agent_lock(job_id, agent_id)
 
             await self._execute_deliver_phase(
                 job_id,
