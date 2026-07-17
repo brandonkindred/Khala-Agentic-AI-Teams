@@ -127,6 +127,49 @@ def test_shared_registry_does_not_consume_a_generator() -> None:
     assert si.ema(_gen(), 5) == pytest.approx(si.ema([100.0 + i for i in range(20)], 5))
 
 
+def test_regbar_helpers_propagate_timestamp_from_bar_like_input() -> None:
+    """Deterministic proof of the mechanism behind ``_shared_registry``'s
+    safety: once a registry is shared across calls, IndicatorRegistry's own
+    fingerprinting needs a real per-bar timestamp to tell a genuinely new bar
+    window apart from a coincidentally-similar one (same length, same
+    trailing close, possibly-reused ``id()``) — this asserts each ``_RegBar``
+    built from real ``Bar`` objects carries that bar's actual timestamp
+    rather than the ``None`` it used to hard-code."""
+    bars = _bars(10)
+    value_bars = si._value_bars(bars)
+    assert [b.timestamp for b in value_bars] == [b.timestamp for b in bars]
+    ohlc_bars = si._ohlc_bars(bars, bars, bars)
+    assert [b.timestamp for b in ohlc_bars] == [b.timestamp for b in bars]
+    from_history = si._ohlc_bars_from_history(bars)
+    assert [b.timestamp for b in from_history] == [b.timestamp for b in bars]
+
+
+def test_shared_registry_skips_cache_when_no_timestamp_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The escape hatch: with no timestamp derivable (plain floats), sharing
+    would let IndicatorRegistry's coincidental close-value fallback (see
+    ``_shared_registry``'s docstring) merge two unrelated calls. Rather than
+    risk that, ``_shared_registry`` falls back to a fresh, uncached instance
+    every call — proven here by asserting the constructor runs once per call,
+    not once total, for plain-number input with no stable per-bar signal."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    constructed: list[object] = []
+    real_init = IndicatorRegistry.__init__
+
+    def _counting_init(self) -> None:
+        constructed.append(self)
+        real_init(self)
+
+    monkeypatch.setattr(IndicatorRegistry, "__init__", _counting_init)
+
+    closes = [100.0 + i for i in range(20)]
+    si.ema(closes, 5)
+    si.ema(closes, 5)
+    assert len(constructed) == 2
+
+
 # ---------------------------------------------------------------------------
 # Flat sandbox layout: the module imports the impl as ``_indicators_impl``
 # ---------------------------------------------------------------------------

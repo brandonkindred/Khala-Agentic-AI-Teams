@@ -66,6 +66,28 @@ except ImportError:  # flat sandbox layout
 _thread_local = threading.local()
 
 
+def _trailing_element(reference):
+    """Return ``reference``'s trailing element, or ``None`` if unavailable.
+
+    Preconditions: none — ``reference`` may be any shape ``_coerce_series``
+    accepts, ``None``, or a generator/iterator.
+    Postconditions: never raises and never consumes an iterator. Returns the
+    last element for a non-empty pandas ``Series`` (via ``.iloc``, always
+    positional) or a non-empty list/tuple/deque (via ``[-1]``); returns
+    ``None`` for ``None``, an empty sequence, or anything without stable
+    positional access (e.g. a generator) — that source is left untouched for
+    the caller's own ``_coerce_series``/materialisation to consume exactly
+    once.
+    """
+    if reference is None:
+        return None
+    if hasattr(reference, "iloc"):  # pandas Series: .iloc is always positional
+        return reference.iloc[-1] if len(reference) else None
+    if hasattr(reference, "__len__") and hasattr(reference, "__getitem__"):
+        return reference[-1] if len(reference) else None
+    return None
+
+
 def _shared_registry(reference) -> IndicatorRegistry:
     """Return this thread's cached IndicatorRegistry for ``reference``'s symbol.
 
@@ -74,39 +96,48 @@ def _shared_registry(reference) -> IndicatorRegistry:
     production paths) but only best-effort for the 16 wrapper functions below:
     a caller that pre-slices bars into separate plain-number arrays (e.g.
     ``highs = [b.high for b in bars]``) before calling loses the symbol before
-    it ever reaches this helper, and falls back to one shared default bucket —
-    identical to today's per-call-fresh-registry behavior for that call shape,
-    just cached instead of rebuilt.
+    it ever reaches this helper.
+
+    Sharing is gated on the trailing element carrying a ``timestamp``, not
+    just a ``symbol``. IndicatorRegistry's own bar-fingerprint keys off
+    ``(id(last_bar), len(bars), timestamp, close)``, with ``close`` a
+    *conditional fallback that only fires when timestamp is absent on both
+    sides* (see ``streaming.py``'s ``_advance_kind`` docstring). The
+    ``_RegBar`` objects these helpers build are fresh, ephemeral, and
+    discarded every call — CPython commonly reuses a just-freed object's
+    ``id()`` for the next same-sized allocation — so without a real
+    timestamp, two calls for genuinely different data that happen to share a
+    length and a trailing close value could be misread as the same bar (or
+    the same stream advancing by one), returning a stale cached value instead
+    of recomputing. When no timestamp is derivable, this returns a fresh,
+    uncached ``IndicatorRegistry`` instead — identical to today's per-call
+    behavior for that call shape, just without the caching benefit, which
+    requires a stable per-bar signal to be safe.
 
     Preconditions:
         ``reference`` is whatever pre-projection argument the caller already
         has in scope (``data``/``high``/``low``/``close``/``history``) — any
-        shape ``_coerce_series`` accepts, or ``None``. Never raises: a
-        Bar-like or dict trailing element exposing ``symbol`` yields a
-        per-symbol bucket; anything else (plain numbers, an empty or
-        non-indexable sequence such as a generator) falls back to one shared
-        default bucket.
+        shape ``_coerce_series`` accepts, or ``None``. Never raises.
     Postconditions:
-        Returns an ``IndicatorRegistry``, constructing and caching one the
-        first time this thread sees ``reference``'s symbol (or the default
-        bucket), and returning that same instance on every subsequent call
-        for that symbol from this thread. Never mutates ``reference``.
+        Returns an ``IndicatorRegistry``. When the trailing element exposes a
+        non-``None`` ``timestamp``, constructs and caches one per (thread,
+        symbol) the first time it's seen and returns that same instance on
+        every subsequent call for that symbol from this thread; otherwise
+        returns a fresh, never-cached instance. Never mutates ``reference``.
     """
+    last = _trailing_element(reference)
+    if last is None:
+        return IndicatorRegistry()
+    timestamp = (
+        last.get("timestamp") if isinstance(last, dict) else getattr(last, "timestamp", None)
+    )
+    if timestamp is None:
+        return IndicatorRegistry()
+    symbol = last.get("symbol") if isinstance(last, dict) else getattr(last, "symbol", None)
     by_symbol = getattr(_thread_local, "by_symbol", None)
     if by_symbol is None:
         by_symbol = {}
         _thread_local.by_symbol = by_symbol
-    symbol = None
-    if hasattr(reference, "iloc"):  # pandas Series: .iloc is always positional
-        if len(reference):
-            last = reference.iloc[-1]
-            symbol = last.get("symbol") if isinstance(last, dict) else getattr(last, "symbol", None)
-    elif hasattr(reference, "__len__") and hasattr(reference, "__getitem__"):
-        if len(reference):
-            last = reference[-1]
-            symbol = last.get("symbol") if isinstance(last, dict) else getattr(last, "symbol", None)
-    # else: generator/iterator/None/scalar — left un-peeked so it is never
-    # consumed or crashed on before the caller's own _coerce_series call reads it.
     reg = by_symbol.get(symbol)
     if reg is None:
         reg = IndicatorRegistry()
@@ -124,18 +155,56 @@ def _reset_shared_registries() -> None:
     _thread_local.by_symbol = {}
 
 
+def _extract_timestamps(source) -> list:
+    """Best-effort per-element ``timestamp``, aligned with ``source``.
+
+    Mirrors the shapes ``_coerce_series`` accepts, reading each element's
+    ``timestamp`` instead of a numeric field, so the ``_RegBar`` objects built
+    from ``source`` carry the same stable per-bar signal :func:`_shared_registry`
+    keys sharing on — without it, IndicatorRegistry's fingerprint has nothing
+    but a coincidental close-value (and possibly-reused ``id()``) to tell two
+    genuinely different bar windows apart (see :func:`_shared_registry`).
+
+    Preconditions:
+        ``source`` is any shape ``_coerce_series`` accepts, or ``None``.
+    Postconditions:
+        Returns a list the same length as ``source`` when it is a
+        list/tuple/deque/``pd.Series``, each entry the element's
+        ``timestamp`` (attribute or dict key) or ``None`` when absent. Never
+        raises and never consumes a generator/iterator — returns ``[]`` for
+        ``None`` or anything without stable positional access, leaving it
+        untouched for the caller's own ``_coerce_series`` to consume exactly
+        once.
+    """
+    if source is None:
+        return []
+    if not (
+        hasattr(source, "iloc") or (hasattr(source, "__len__") and hasattr(source, "__getitem__"))
+    ):
+        return []
+    return [
+        (elem.get("timestamp") if isinstance(elem, dict) else getattr(elem, "timestamp", None))
+        for elem in source
+    ]
+
+
 class _RegBar:
     """Minimal bar exposing the OHLCV attributes the registry reads.
 
     The registry computes against bar objects (``bar.close``/``bar.high``/…); we
     project the caller's price sequence(s) onto these so the scalar API and the
-    accessor reuse the exact recurrence the engine view uses. ``timestamp`` /
-    ``symbol`` are intentionally absent — the registry reads them via
-    ``_safe_getattr`` (degrading to ``None``), and a single cold call per
-    invocation needs no same-bar fingerprint.
+    accessor reuse the exact recurrence the engine view uses. ``symbol`` is not
+    tracked here — :func:`_shared_registry` buckets by symbol at the registry
+    level instead, so the registry never needs to see it on the bar. But
+    ``timestamp`` matters: these ``_RegBar`` objects are freshly built and
+    discarded every call, so once a registry is shared across calls (see
+    :func:`_shared_registry`), a real per-bar timestamp is what lets the
+    registry's own fingerprinting (``_safe_getattr``-based) tell a genuinely
+    new bar window apart from a coincidentally-similar one, rather than
+    relying on a fresh call never having a prior fingerprint to collide with.
     """
 
-    __slots__ = ("open", "high", "low", "close", "volume")
+    __slots__ = ("open", "high", "low", "close", "volume", "timestamp")
 
     def __init__(
         self,
@@ -145,48 +214,65 @@ class _RegBar:
         low: float = 0.0,
         close: float = 0.0,
         volume: float = 0.0,
+        timestamp: Optional[str] = None,
     ) -> None:
         self.open = open
         self.high = high
         self.low = low
         self.close = close
         self.volume = volume
+        self.timestamp = timestamp
 
 
-def _project_bars(**fields) -> list:
+def _project_bars(_timestamps=None, **fields) -> list:
     """Build registry bars from named OHLCV field sequences; omitted fields default to 0.0.
 
     Single source of truth for the call shapes the scalar wrappers need: an indicator
     that reads only a subset (Donchian: high/low; OBV: close/volume) passes just those
     fields and gets no placeholder in the slots it never reads.
 
-    Preconditions: each keyword is a ``_RegBar`` field name (``open``/``high``/``low``/
-    ``close``/``volume``) mapped to a sequence ``_coerce_series`` accepts; a non-field
-    keyword raises ``TypeError`` from the ``_RegBar(**…)`` construction.
+    Preconditions: each keyword in ``fields`` is a ``_RegBar`` field name (``open``/
+    ``high``/``low``/``close``/``volume``) mapped to a sequence ``_coerce_series``
+    accepts; a non-field keyword raises ``TypeError`` from the ``_RegBar(**…)``
+    construction. ``_timestamps``, when given, is any sequence (typically from
+    :func:`_extract_timestamps`).
     Postconditions: returns one ``_RegBar`` per position, with each provided series
     coerced to floats and zipped positionally (stopping at the shortest, matching the
-    prior per-shape builders); an omitted field keeps ``_RegBar``'s ``0.0`` default on
-    every bar. Empty ``fields`` yields ``[]``.
+    prior per-shape builders — ``_timestamps`` included in that alignment when given);
+    an omitted field keeps ``_RegBar``'s ``0.0`` default on every bar, and a missing/
+    exhausted ``_timestamps`` entry keeps its ``None`` default. Empty ``fields`` yields
+    ``[]``.
     """
     names = list(fields)
     columns = [[float(v) for v in _impl._coerce_series(fields[name], name)] for name in names]
-    return [_RegBar(**dict(zip(names, row))) for row in zip(*columns)]
+    if not _timestamps:
+        return [_RegBar(**dict(zip(names, row))) for row in zip(*columns)]
+    return [
+        _RegBar(timestamp=ts, **dict(zip(names, row)))
+        for row, ts in zip(zip(*columns), _timestamps)
+    ]
 
 
-def _value_bars(values) -> list:
+def _value_bars(values, timestamps=None) -> list:
     """Project a single source series onto close-only registry bars.
 
     ``values`` is any shape ``_coerce_series`` accepts; the projected scalar lands in
     ``close`` so a registry call with ``source="close"`` reads exactly that series.
+    ``timestamps``, when given, overrides the timestamps extracted from ``values``
+    itself — needed by callers (``indicator_value``) whose ``values`` argument has
+    already been stripped down to plain numbers by an intermediate projection step,
+    so the original bars' timestamps must be threaded through explicitly instead.
     """
-    return _project_bars(close=values)
+    ts = timestamps if timestamps is not None else _extract_timestamps(values)
+    return _project_bars(close=values, _timestamps=ts)
 
 
 def _ohlc_bars(high, low, close, volume=None) -> list:
     """Zip separate OHLC(V) sequences into registry bars (atr/adx/stochastic/vwap/…)."""
+    ts = _extract_timestamps(close)
     if volume is None:
-        return _project_bars(high=high, low=low, close=close)
-    return _project_bars(high=high, low=low, close=close, volume=volume)
+        return _project_bars(high=high, low=low, close=close, _timestamps=ts)
+    return _project_bars(high=high, low=low, close=close, volume=volume, _timestamps=ts)
 
 
 def _ohlc_bars_from_history(history) -> list:
@@ -195,7 +281,8 @@ def _ohlc_bars_from_history(history) -> list:
     Bar-like elements expose ``high``/``low``/``close``/``volume``; a plain
     number is treated as ``high == low == close == volume == value`` (matching
     the previous accessor, which fed the same numeric sequence to every OHLC
-    slot).
+    slot). Bar-like elements' ``timestamp`` is propagated onto each ``_RegBar``
+    (see :func:`_shared_registry`); a plain number has none to propagate.
     """
     out: list = []
     for b in history:
@@ -210,6 +297,7 @@ def _ohlc_bars_from_history(history) -> list:
                     low=float(b.low),
                     close=float(b.close),
                     volume=float(getattr(b, "volume", 0.0)),
+                    timestamp=getattr(b, "timestamp", None),
                 )
             )
     return out
@@ -296,7 +384,7 @@ def vwap(high, low, close, volume, period=20) -> float:
 
 def donchian_channels(high, low, period=20) -> tuple[float, float, float]:
     """Latest (upper, middle, lower) Donchian channel values. See module contract."""
-    bars = _project_bars(high=high, low=low)
+    bars = _project_bars(high=high, low=low, _timestamps=_extract_timestamps(high))
     reg = _shared_registry(high)  # no close/volume arg here to key off instead
     p = int(period)
     return (
@@ -322,7 +410,8 @@ def keltner_channels(
 
 def obv(close, volume) -> float:
     """Latest On-Balance Volume value. See module contract."""
-    return _scalar(_shared_registry(close).obv(_project_bars(close=close, volume=volume)))
+    bars = _project_bars(close=close, volume=volume, _timestamps=_extract_timestamps(close))
+    return _scalar(_shared_registry(close).obv(bars))
 
 
 def mfi(high, low, close, volume, period=14) -> float:
@@ -570,20 +659,26 @@ def indicator_value(
     # ``predicate_evaluator._registry_indicator``, which previously carried a
     # second, structurally-parallel 16-way if/elif reaching the same methods).
 
+    # ``_source_values`` strips ``history``'s bar objects down to a flat list
+    # of floats, so ``_value_bars`` can no longer read their ``timestamp`` off
+    # the (now-numeric) values — extract it from the original ``history``
+    # here and thread it through explicitly (see ``_shared_registry``).
+    history_timestamps = _extract_timestamps(history)
+
     if name in ("sma", "ema"):
         if "period" not in params:
             raise ValueError(f"indicator {name!r} requires a 'period' param")
-        bars = _value_bars(_source_values(history, source))
+        bars = _value_bars(_source_values(history, source), timestamps=history_timestamps)
         return resolve_indicator(reg, name, bars, source="close", period=int(params["period"]))
 
     if name == "rsi":
-        bars = _value_bars(_source_values(history, source))
+        bars = _value_bars(_source_values(history, source), timestamps=history_timestamps)
         return resolve_indicator(
             reg, name, bars, source="close", period=int(params.get("period", 14))
         )
 
     if name == "macd":
-        bars = _value_bars(_source_values(history, source))
+        bars = _value_bars(_source_values(history, source), timestamps=history_timestamps)
         # Selector value already validated against the allowed set above.
         return resolve_indicator(
             reg,
@@ -597,7 +692,7 @@ def indicator_value(
         )
 
     if name == "bollinger":
-        bars = _value_bars(_source_values(history, source))
+        bars = _value_bars(_source_values(history, source), timestamps=history_timestamps)
         return resolve_indicator(
             reg,
             name,
@@ -614,7 +709,7 @@ def indicator_value(
         # registry must read ``source="close"`` here to consume exactly that
         # projected series. This mirrors the sma/ema/rsi/macd/bollinger branches
         # above; the bars carry only a ``close`` field, not the original OHLC.
-        bars = _value_bars(_source_values(history, source))
+        bars = _value_bars(_source_values(history, source), timestamps=history_timestamps)
         return resolve_indicator(
             reg, name, bars, source="close", period=int(params.get("period", 12))
         )

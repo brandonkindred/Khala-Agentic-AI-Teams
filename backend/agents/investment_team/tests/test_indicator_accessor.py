@@ -246,6 +246,65 @@ def test_indicator_value_registry_count_scales_with_distinct_symbols(
     assert len(constructed) == 2
 
 
+def test_indicator_value_recomputes_when_trailing_close_coincidentally_matches() -> None:
+    """Regression test for a real bug caught in code review: two calls for
+    the same symbol whose windows have the same length and the same final
+    close value, but genuinely different earlier bars and a different final
+    timestamp, must not let the shared registry return the first call's
+    cached value for the second.
+
+    Guards against IndicatorRegistry's ``(id(last), len, timestamp, close)``
+    fingerprint colliding: ``_RegBar`` objects are freshly built and
+    discarded every call, and CPython commonly reuses a just-freed object's
+    ``id()`` for the next same-sized object — without a real, distinct
+    timestamp on each row, that coincidence alone could make a genuinely
+    different window look like a cache hit (or, for a deque-stateful
+    indicator, look like the same stream advancing by one bar).
+    """
+    period = 10
+    # 20 bars each; the trailing `period` window differs in every earlier
+    # value but both sequences share the same final close (150.0) and the
+    # same length — the exact ambiguity flagged in review.
+    seq_a = [
+        Bar(
+            symbol="TEST",
+            timestamp=f"2024-01-{i + 1:02d}T00:00:00Z",
+            timeframe="1d",
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=(100.0 + i if i < 19 else 150.0),
+            volume=1000.0,
+        )
+        for i in range(20)
+    ]
+    seq_b = [
+        Bar(
+            symbol="TEST",
+            timestamp=f"2024-06-{i + 1:02d}T00:00:00Z",
+            timeframe="1d",
+            open=200.0,
+            high=201.0,
+            low=199.0,
+            close=(200.0 - i if i < 19 else 150.0),
+            volume=1000.0,
+        )
+        for i in range(20)
+    ]
+    assert len(seq_a) == len(seq_b)
+    assert seq_a[-1].close == seq_b[-1].close == 150.0
+    assert seq_a[-1].timestamp != seq_b[-1].timestamp
+
+    got_a = indicator_value("sma", seq_a, period=period)
+    got_b = indicator_value("sma", seq_b, period=period)
+
+    expected_a = sum(b.close for b in seq_a[-period:]) / period
+    expected_b = sum(b.close for b in seq_b[-period:]) / period
+    assert expected_a != expected_b  # the two windows must genuinely differ
+    assert got_a == pytest.approx(expected_a)
+    assert got_b == pytest.approx(expected_b)
+
+
 # ---------------------------------------------------------------------------
 # indicator_value — contract violations raise (DbC)
 # ---------------------------------------------------------------------------
