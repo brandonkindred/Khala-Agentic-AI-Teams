@@ -150,12 +150,13 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
     # The lease is renewed between every scheduled activity (P1 regression:
     # a long-running job must never lose its own lock to LOCK_TTL_S expiry,
     # and no un-renewed gap may exceed the tool fan-out's own worst case) —
-    # one initial acquire plus one renewal after each of setup /
-    # list_manifest_tools / credentials / tool fan-out / account_provisioning
-    # checkpoint / audit / documentation = 8 total acquire_agent_lock_activity
-    # calls, each renewing for the same owner.
+    # one initial acquire plus one renewal after each of the pre-existing-
+    # environment check / setup / list_manifest_tools / credentials / tool
+    # fan-out / account_provisioning checkpoint / audit / documentation = 9
+    # total acquire_agent_lock_activity calls, each renewing for the same
+    # owner.
     acquire_calls = [c for c in stub.calls if c["name"] == "acquire_agent_lock_activity"]
-    assert len(acquire_calls) == 8
+    assert len(acquire_calls) == 9
     assert all(c["args"] == ["job-1", "agent-1"] for c in acquire_calls)
     # No two consecutive non-lock activities ever run back-to-back without a
     # renewal between them (P1 regression: a gap spanning two un-renewed
@@ -845,17 +846,20 @@ async def test_workflow_setup_failure_compensates_and_marks_failed(tmp_path) -> 
     ``run_setup`` already ran its own local best-effort rollback (scoped to
     resources that attempt created) before this exception ever reached the
     workflow. This run holds ``agent_id``'s exclusive lock for its entire
-    duration, so workflow-level ``compensate([])`` is safe to run here too, as
-    a second, independently-retried backstop for when the local rollback
-    itself fails (e.g. a transient ``docker rm`` error) — it cannot tear down
-    a healthy environment another job owns, since no other job can be running
-    against this ``agent_id`` while the lock is held.
+    duration and ``agent_id`` had no environment before this run started, so
+    workflow-level ``compensate([])`` is safe to run here too, as a second,
+    independently-retried backstop for when the local rollback itself fails
+    (e.g. a transient ``docker rm`` error) — it cannot tear down a healthy
+    environment another job owns, since no other job can be running against
+    this ``agent_id`` while the lock is held, and there was nothing
+    pre-existing for it to destroy either.
     """
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
     stub = _ExecActivityStub(
         {
+            "check_existing_environment_activity": False,
             "setup_activity": RuntimeError("setup boom"),
             "compensate_activity": None,
             "mark_job_failed_activity": None,
@@ -871,6 +875,81 @@ async def test_workflow_setup_failure_compensates_and_marks_failed(tmp_path) -> 
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
     assert "setup boom" in fail_call["args"][1]
+
+
+@pytest.mark.asyncio
+async def test_workflow_skips_compensation_when_environment_pre_existed(tmp_path) -> None:
+    """A setup failure must NOT compensate when agent_id already had an environment.
+
+    Holding the lock only rules out a CONCURRENT workflow — it says nothing
+    about whether THIS run created what's currently at agent_id. If
+    check_existing_environment_activity reports agent_id already had a
+    running environment before this run touched anything (e.g. setup's
+    already-running fast path reused it and created nothing, then a later
+    checkpoint write failed), compensating would destroy that pre-existing
+    environment rather than something this run made.
+    """
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "check_existing_environment_activity": True,
+            "setup_activity": RuntimeError("checkpoint boom"),
+            "mark_job_failed_activity": None,
+        }
+    )
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "logger", new=MagicMock()),
+    ):
+        with pytest.raises(RuntimeError, match="checkpoint boom"):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    fn_names = [c["name"] for c in stub.calls]
+    assert "compensate_activity" not in fn_names
+    fail_call = _call(stub, "mark_job_failed_activity")
+    assert fail_call["args"][0] == "job-1"
+    assert "checkpoint boom" in fail_call["args"][1]
+
+
+@pytest.mark.asyncio
+async def test_workflow_unpatched_replay_skips_compensation_on_setup_failure(
+    tmp_path, monkeypatch
+) -> None:
+    """A pre-lock-deploy replay must never compensate on a setup failure.
+
+    ``_acquire_agent_lock`` returns False (a no-op) when replaying a history
+    from before the lock existed — this run never actually held agent_id's
+    lock, so compensating on a later failure could tear down whatever job is
+    running lock-free against the same agent_id (the exact race the lock was
+    introduced to prevent). This is a regression test for a bug where
+    lock_acquired was set True unconditionally after calling
+    _acquire_agent_lock, even on this no-op replay branch.
+    """
+    from agent_provisioning_team.temporal import workflows as wf
+
+    monkeypatch.setattr(wf.workflow, "patched", lambda *a, **k: False)
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "setup_activity": RuntimeError("setup boom"),
+            "mark_job_failed_activity": None,
+        }
+    )
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "logger", new=MagicMock()),
+    ):
+        with pytest.raises(RuntimeError, match="setup boom"):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    fn_names = [c["name"] for c in stub.calls]
+    assert "acquire_agent_lock_activity" not in fn_names
+    assert "compensate_activity" not in fn_names
+    assert "check_existing_environment_activity" not in fn_names
 
 
 @pytest.mark.asyncio

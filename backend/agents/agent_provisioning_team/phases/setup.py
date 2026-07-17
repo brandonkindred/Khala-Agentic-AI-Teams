@@ -219,7 +219,11 @@ def _rollback_failed_setup(
         * When ``registered_by_this_call`` is ``False``: the environment store
           is not modified (nothing this attempt wrote survived, and other
           owners' records are not touched). When ``True``: this attempt's own
-          record is removed.
+          record is removed, and the container is deprovisioned only if that
+          removal succeeded — if removal itself raises, the container is left
+          alone too, so the (now-stale) surviving record and the surviving
+          container stay consistent with each other rather than the record
+          claiming ``running`` for a container that's actually gone.
 
     Concurrent same-agent provisioning is not serialized, so a job that adopts
     this attempt's container and registers between the ownership read below and
@@ -231,14 +235,21 @@ def _rollback_failed_setup(
             env_store.remove(agent_id)
         except Exception:
             # Never let a record-removal failure (e.g. a now-read-only registry
-            # directory) escape and mask the original setup error, or skip the
-            # container teardown below — both matter regardless of whether the
-            # record itself could be removed.
+            # directory) escape and mask the original setup error — but also
+            # do NOT fall through to deprovision the container below: doing so
+            # would leave the still-present record (status="running") pointing
+            # at a container that no longer exists, which a later run_setup's
+            # fast path would trust as healthy. Same ordering rule as
+            # cleanup_setup: skip teardown when the record can't be removed
+            # first, so record and container stay consistent (both survive)
+            # rather than silently lying about what's still there.
             logger.exception(
                 "Setup rollback: failed to remove this attempt's own environment "
-                "record for agent_id=%s; record may be stale",
+                "record for agent_id=%s; preserving the container so record and "
+                "container stay consistent",
                 agent_id,
             )
+            return
     else:
         reused = bool(result.details.get("reused", False))
         if reused and existing is not None:

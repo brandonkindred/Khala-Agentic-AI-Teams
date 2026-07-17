@@ -160,6 +160,31 @@ def list_manifest_tools_activity(manifest_path: str) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+@activity.defn(name="agent_provisioning_check_existing_environment")
+def check_existing_environment_activity(agent_id: str) -> bool:
+    """Report whether ``agent_id`` already has a running environment (read-only).
+
+    Called by the workflow right after acquiring ``agent_id``'s lock, before
+    setup runs, so a later failure's compensation decision can tell "this run
+    created everything at ``agent_id`` from scratch" (safe to unconditionally
+    tear down) apart from "``agent_id`` already had a live environment before
+    this run touched anything" (compensating could destroy it).
+
+    Preconditions:
+        * ``agent_id`` is non-empty.
+    Postconditions:
+        * Returns ``True`` iff ``EnvironmentStore`` currently holds a
+          ``status == "running"`` record for ``agent_id`` — the identical
+          condition ``run_setup``'s own fast path checks. Never raises
+          (``EnvironmentStore.get`` never raises).
+    """
+    assert agent_id, "agent_id must be non-empty"
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+
+    existing = EnvironmentStore().get(agent_id)
+    return bool(existing and existing.status == "running")
+
+
 @activity.defn(name="agent_provisioning_acquire_lock")
 def acquire_agent_lock_activity(job_id: str, agent_id: str) -> None:
     """Claim exclusive ownership of ``agent_id`` for this workflow run.

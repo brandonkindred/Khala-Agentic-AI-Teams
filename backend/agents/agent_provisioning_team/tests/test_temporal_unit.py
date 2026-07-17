@@ -118,9 +118,9 @@ def test_activities_includes_every_activity_a_workflow_schedules() -> None:
 
     activity_names = {getattr(a, "__name__", str(a)) for a in temporal_pkg.ACTIVITIES}
     missing = scheduled - activity_names
-    assert (
-        not missing
-    ), f"activities scheduled by workflows.py but missing from ACTIVITIES: {missing}"
+    assert not missing, (
+        f"activities scheduled by workflows.py but missing from ACTIVITIES: {missing}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1267,6 +1267,66 @@ def test_list_manifest_tools_activity_rejects_empty_path() -> None:
 
     with pytest.raises(AssertionError):
         activities.list_manifest_tools_activity("")
+
+
+# ---------------------------------------------------------------------------
+# check_existing_environment_activity
+# ---------------------------------------------------------------------------
+
+
+def test_check_existing_environment_activity_true_when_running(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.environment_store import EnvironmentInfo, EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(
+        EnvironmentInfo(
+            agent_id="a1", container_id="c1", container_name="agent-a1", status="running"
+        )
+    )
+
+    with patch(
+        "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+        return_value=env_store,
+    ):
+        assert t_acts.check_existing_environment_activity("a1") is True
+
+
+def test_check_existing_environment_activity_false_when_absent(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    with patch(
+        "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+        return_value=EnvironmentStore(storage_dir=tmp_path),
+    ):
+        assert t_acts.check_existing_environment_activity("missing-agent") is False
+
+
+def test_check_existing_environment_activity_false_when_not_running(tmp_path: Path) -> None:
+    """A non-running record (e.g. stopped) does not count as "existing" for this check."""
+    from agent_provisioning_team.shared.environment_store import EnvironmentInfo, EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(
+        EnvironmentInfo(
+            agent_id="a2", container_id="c2", container_name="agent-a2", status="stopped"
+        )
+    )
+
+    with patch(
+        "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+        return_value=env_store,
+    ):
+        assert t_acts.check_existing_environment_activity("a2") is False
+
+
+def test_check_existing_environment_activity_rejects_empty_agent_id() -> None:
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    with pytest.raises(AssertionError):
+        t_acts.check_existing_environment_activity("")
 
 
 # ---------------------------------------------------------------------------

@@ -244,7 +244,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
 
         try:
             result = subprocess.run(
-                ["docker", "inspect", container_info["container_name"]],
+                ["docker", "inspect", "--type=container", container_info["container_name"]],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -276,16 +276,21 @@ class DockerProvisionerTool(BaseToolProvisioner):
         Preconditions:
             * ``container_name`` is non-empty.
         Postconditions:
-            * Returns ``True`` when the daemon reports the container, ``False``
-              when the daemon reports it absent, and ``None`` when the probe
-              itself failed (daemon unreachable, timeout) — callers must treat
-              ``None`` as unknown and act conservatively.
+            * Returns ``True`` when the daemon reports a *container* with this
+              name, ``False`` when the daemon reports it absent, and ``None``
+              when the probe itself failed (daemon unreachable, timeout) —
+              callers must treat ``None`` as unknown and act conservatively.
             * Never raises.
+
+        ``--type=container`` restricts the probe to the container namespace:
+        without it, ``docker inspect NAME`` also matches images, networks, or
+        volumes sharing that name, which would report ``True`` (an object
+        exists) for a name no *container* actually holds.
         """
         assert container_name, "container_name must be non-empty"
         try:
             probe = subprocess.run(
-                ["docker", "inspect", "--format", "{{.Id}}", container_name],
+                ["docker", "inspect", "--type=container", "--format", "{{.Id}}", container_name],
                 capture_output=True,
                 text=True,
                 timeout=15,

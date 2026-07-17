@@ -249,28 +249,62 @@ class AgentProvisioningWorkflow:
                 )
         return tool_results_dump, succeeded, failures
 
-    async def _acquire_agent_lock(self, job_id: str, agent_id: str) -> None:
+    async def _acquire_agent_lock(self, job_id: str, agent_id: str) -> bool:
         """Claim exclusive ownership of ``agent_id`` for this workflow run.
 
         Preconditions:
             * ``job_id`` / ``agent_id`` are non-empty.
         Postconditions:
-            * A replay of a history recorded before the lock existed
-              (``workflow.patched(_PROVISIONING_LOCK_PATCH)`` is ``False``)
-              schedules nothing, reproducing that history's original
-              (lock-free) command sequence exactly. Otherwise blocks (with
-              backoff, via ``LOCK_ACQUIRE_RETRY_POLICY``) until ``agent_id``
-              is free or ``LOCK_ACQUIRE_TIMEOUT`` is exhausted, in which case
-              the activity's exception propagates.
+            * Returns ``False`` and schedules nothing when replaying a history
+              recorded before the lock existed
+              (``workflow.patched(_PROVISIONING_LOCK_PATCH)`` is ``False``),
+              reproducing that history's original (lock-free) command sequence
+              exactly — such a replay never actually held the lock, so callers
+              must not treat its return as proof of exclusive ownership.
+              Otherwise blocks (with backoff, via
+              ``LOCK_ACQUIRE_RETRY_POLICY``) until ``agent_id`` is free or
+              ``LOCK_ACQUIRE_TIMEOUT`` is exhausted (in which case the
+              activity's exception propagates), and returns ``True``.
         """
         if not workflow.patched(_PROVISIONING_LOCK_PATCH):
-            return
+            return False
         await workflow.execute_activity(
             _activities.acquire_agent_lock_activity,
             args=[job_id, agent_id],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=LOCK_ACQUIRE_TIMEOUT,
             retry_policy=LOCK_ACQUIRE_RETRY_POLICY,
+        )
+        return True
+
+    async def _check_existing_environment(self, agent_id: str) -> bool:
+        """Report whether ``agent_id`` already had a running environment
+        before this run touched anything.
+
+        Preconditions:
+            * ``agent_id`` is non-empty; this workflow already holds
+              ``agent_id``'s lock (called right after acquiring it, before
+              setup runs, so nothing else can register an environment in the
+              gap between this check and setup starting).
+        Postconditions:
+            * Gated by the same ``_PROVISIONING_LOCK_PATCH`` marker as the
+              lock itself: an unpatched (pre-lock) replay returns ``True``
+              without scheduling anything, reproducing that history's
+              original command sequence — this is moot for compensation
+              safety there, since ``lock_acquired`` is already ``False`` on
+              that branch, which alone disables compensation regardless of
+              this value.
+            * Otherwise returns ``check_existing_environment_activity``'s
+              result.
+        """
+        if not workflow.patched(_PROVISIONING_LOCK_PATCH):
+            return True
+        return await workflow.execute_activity(
+            _activities.check_existing_environment_activity,
+            args=[agent_id],
+            task_queue=TASK_QUEUE,
+            schedule_to_close_timeout=PHASE_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
         )
 
     async def _renew_agent_lock(self, job_id: str, agent_id: str) -> None:
@@ -506,7 +540,8 @@ class AgentProvisioningWorkflow:
               ``deliver_activity`` has written a terminal completed/failed job
               status.
             * On any unhandled phase failure (setup, credentials, tools, audit,
-              docs, deliver) while this run still holds ``agent_id``'s lock:
+              docs, deliver) while this run holds ``agent_id``'s lock AND
+              ``agent_id`` had no running environment before this run started:
               ``mark_job_failed_activity`` records terminal failure before the
               exception propagates, and ``compensate_activity`` runs (tool
               failures compensate the succeeded set; any other failure
@@ -517,16 +552,24 @@ class AgentProvisioningWorkflow:
               workflow-level ``compensate_activity`` is a second, independently
               retried backstop for when that local rollback itself fails (e.g.
               a transient ``docker rm`` error), not a replacement for it. This
-              is safe unconditionally (including before setup ever runs, e.g. a
-              manifest-load failure) because ``compensate_activity`` is fully
-              idempotent — a no-op wherever nothing was created — and this run
-              holds ``agent_id``'s exclusive lock throughout, so there is no
-              other job's environment it could tear down instead. If this run
-              never acquired the lock at all (exhausted retries against a live
-              holder), or acquired it but later lost it (a renewal failure
-              might indicate a replacement job now owns ``agent_id``),
-              compensation is skipped entirely to avoid tearing down that
-              other job's resources.
+              is safe (including before setup ever runs, e.g. a manifest-load
+              failure) because ``compensate_activity`` is fully idempotent — a
+              no-op wherever nothing was created — and this run holds
+              ``agent_id``'s exclusive lock throughout, so there is no other
+              job's environment it could tear down instead — PROVIDED nothing
+              already existed at ``agent_id`` when this run started, which is
+              what the ``pre_existing_environment`` check (right after
+              acquiring the lock) rules out: the lock alone only excludes a
+              *concurrent* workflow, it says nothing about whether THIS run is
+              the one that created ``agent_id``'s current resources (e.g.
+              setup's already-running fast path creates nothing, so a later
+              failure there must not destroy what it merely reused).
+              Compensation is skipped entirely — logging which reason applied
+              — when this run never acquired the lock at all (exhausted
+              retries against a live holder), acquired it but later lost it (a
+              renewal failure might indicate a replacement job now owns
+              ``agent_id``), or ``agent_id`` already had a running environment
+              before this run touched anything.
             * After a successful tool fan-out (not a restored skip),
               ``account_provisioning`` is written to ``completed_phases`` /
               ``phase_results`` before later phases run.
@@ -559,6 +602,11 @@ class AgentProvisioningWorkflow:
         succeeded_tools: list[dict] = []
         lock_acquired = False
         lock_lost = False
+        # Conservative default: until _check_existing_environment proves
+        # otherwise, assume agent_id might already have a live environment
+        # this run didn't create, so a failure before that check completes
+        # can't trigger destructive compensation.
+        pre_existing_environment = True
 
         async def _renew_or_mark_lost() -> None:
             # A renewal failure (AgentLockBusyError from a genuine steal, or
@@ -575,14 +623,26 @@ class AgentProvisioningWorkflow:
                 raise
 
         try:
-            await self._acquire_agent_lock(job_id, agent_id)
-            # Only set once acquire itself has actually succeeded — if it
-            # raises (exhausted retries against a live holder), this run never
-            # held agent_id's lock at all, and the except block below must
-            # treat that exactly like losing it: compensating without ever
-            # having held exclusive ownership could tear down whatever job
-            # currently does hold the lock.
-            lock_acquired = True
+            # Only True when acquire actually held the lock — a pre-lock
+            # replay's no-op return, or an acquire that raises (exhausted
+            # retries against a live holder), both mean this run never held
+            # agent_id's lock at all, and the except block below must treat
+            # that exactly like losing it: compensating without ever having
+            # held exclusive ownership could tear down whatever job currently
+            # does hold the lock (or, for a pre-lock replay, whatever job is
+            # running lock-free against the same agent_id).
+            lock_acquired = await self._acquire_agent_lock(job_id, agent_id)
+
+            try:
+                # Best-effort: this check exists only to make compensation
+                # ownership-safe, not as a pipeline gate — an infra hiccup
+                # here must not abort provisioning outright. Falls back to
+                # the conservative pre_existing_environment=True default set
+                # above, which alone is enough to keep compensation disabled.
+                pre_existing_environment = await self._check_existing_environment(agent_id)
+            except Exception:
+                pass
+            await _renew_or_mark_lost()
 
             environment_dump = await self._execute_setup_phase(
                 job_id, agent_id, manifest_path, skip, prior
@@ -687,14 +747,24 @@ class AgentProvisioningWorkflow:
             # down instead of being left as an untracked orphan.
             # Nested try/except: compensation / terminal writes must not mask
             # the original failure if Temporal activity retries are exhausted.
-            # lock_acquired / lock_lost gate this: if acquire itself failed, this
-            # run never held the lock at all; if a renewal failed, it no longer
-            # can prove it still does (a replacement job may already own
-            # agent_id's resources) — either way, compensating here — keyed on
-            # agent_id alone, like every teardown path — would recreate the
-            # exact cross-job teardown race this lock exists to prevent.
-            currently_locked = lock_acquired and not lock_lost
-            if currently_locked and not account_provisioning_done and not tools_phase_compensated:
+            # Three independent gates, each ruling out a distinct way this
+            # run could destroy resources it doesn't own:
+            #   - lock_acquired / lock_lost: if acquire itself failed, this run
+            #     never held the lock at all; if a renewal failed, it no longer
+            #     can prove it still does (a replacement job may already own
+            #     agent_id's resources) — compensating here, keyed on agent_id
+            #     alone like every teardown path, would recreate the exact
+            #     cross-job teardown race this lock exists to prevent.
+            #   - pre_existing_environment: holding the lock only rules out a
+            #     CONCURRENT workflow — it says nothing about whether THIS run
+            #     is the one that created what's currently at agent_id. If
+            #     agent_id already had a running environment before this run
+            #     touched anything (e.g. setup took its already-running fast
+            #     path and created nothing, or the failure struck before setup
+            #     ever ran), compensating would destroy that pre-existing
+            #     environment rather than something this run made.
+            safe_to_compensate = lock_acquired and not lock_lost and not pre_existing_environment
+            if safe_to_compensate and not account_provisioning_done and not tools_phase_compensated:
                 try:
                     await self._compensate_failed_tools(agent_id, succeeded_tools, job_id)
                 except Exception as comp_exc:
@@ -705,14 +775,24 @@ class AgentProvisioningWorkflow:
                         exc,
                     )
             elif not account_provisioning_done and not tools_phase_compensated:
-                workflow.logger.error(
-                    "Skipped unfenced compensation for job=%s agent=%s: this run %s "
-                    "the agent_id lock (a different job may now own its resources): %s",
-                    job_id,
-                    agent_id,
-                    "never acquired" if not lock_acquired else "lost",
-                    exc,
-                )
+                if not lock_acquired or lock_lost:
+                    workflow.logger.error(
+                        "Skipped unfenced compensation for job=%s agent=%s: this run %s "
+                        "the agent_id lock (a different job may now own its resources): %s",
+                        job_id,
+                        agent_id,
+                        "never acquired" if not lock_acquired else "lost",
+                        exc,
+                    )
+                else:
+                    workflow.logger.error(
+                        "Skipped compensation for job=%s agent=%s: agent_id already had a "
+                        "running environment before this run started, so tearing it down "
+                        "could destroy resources this run never created: %s",
+                        job_id,
+                        agent_id,
+                        exc,
+                    )
             if not terminal_failure_recorded:
                 try:
                     await self._mark_job_failed(job_id, f"Provisioning failed: {exc}")

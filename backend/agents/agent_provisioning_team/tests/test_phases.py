@@ -490,6 +490,30 @@ def test_run_setup_removes_overwritten_prior_record_when_on_registered_raises(
     assert env_store.get("a19") is None
 
 
+def test_run_setup_preserves_container_when_record_removal_fails() -> None:
+    """A record-removal failure during rollback must not fall through to teardown.
+
+    If env_store.remove() itself raises (e.g. a now-read-only registry
+    directory) after on_registered failed, the record this attempt just wrote
+    survives (status="running") — deprovisioning the container anyway would
+    leave that surviving record pointing at a container that's actually gone,
+    which a later run_setup's fast path would trust as healthy. Skipping
+    teardown here keeps record and container consistent with each other,
+    matching cleanup_setup's own record-then-container ordering rule.
+    """
+    env_store = _rollback_env_store(get=None, register_error=lambda *a, **kw: None)
+    env_store.remove.side_effect = OSError("registry directory is read-only")
+    docker = _docker_stub(container_id="c-new", container_name="agent-a20")
+
+    def on_registered(env_info):
+        raise RuntimeError("checkpoint boom")
+
+    _run_setup_expecting("checkpoint boom", "a20", env_store, docker, on_registered=on_registered)
+
+    env_store.remove.assert_called_once_with("a20")
+    docker.deprovision.assert_not_called()
+
+
 def test_run_setup_calls_on_registered_with_fresh_environment(tmp_path: Path) -> None:
     """on_registered fires with the freshly registered EnvironmentInfo on success."""
     from agent_provisioning_team.phases.setup import run_setup
