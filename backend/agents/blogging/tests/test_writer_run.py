@@ -4,34 +4,21 @@ from __future__ import annotations
 
 
 def _agent():
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from conftest import make_writer_agent
 
-    from llm_service import DummyLLMClient
-
-    return BlogWriterAgent(
-        llm_client=DummyLLMClient(),
-        writing_style_guide_content="Style",
-        brand_spec_content="Brand",
-    )
+    return make_writer_agent()
 
 
 def _writer_input(**overrides):
+    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_writer_agent.models import WriterInput
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="Topic",
         narrative_flow="flow",
         sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     kwargs = {
         "content_plan": plan,
@@ -69,23 +56,16 @@ def test_writer_run_happy_with_all_options(monkeypatch, tmp_path) -> None:
 
 
 def test_writer_run_empty_outline_returns_placeholder(monkeypatch) -> None:
+    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_writer_agent.models import WriterInput
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     a = _agent()
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="Topic",
         narrative_flow="flow",
         sections=[ContentPlanSection(title="A", coverage_description="x", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     # Mock outline_for_prompt to return empty string
     monkeypatch.setattr(WriterInput, "outline_for_prompt", lambda self: "")
@@ -165,15 +145,11 @@ def test_writer_run_default_length_guidance(monkeypatch) -> None:
 
 
 def test_writer_revise_single_item_happy(monkeypatch) -> None:
+    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     a = _agent()
     monkeypatch.setattr(
@@ -182,14 +158,11 @@ def test_writer_revise_single_item_happy(monkeypatch) -> None:
         lambda self, p, system_prompt="": '{"draft": 0}\n---DRAFT---\n# Single Item Revised\nBody.',
     )
     item = FeedbackItem(category="x", severity="minor", issue="i")
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="x",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     ri = ReviseWriterInput(
         draft="# Orig", feedback_items=[item], feedback_summary="s", content_plan=plan
@@ -207,18 +180,15 @@ def test_writer_revise_single_item_happy(monkeypatch) -> None:
 
 def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
     """All 2 attempts at _call_agent fail; _call_agent_json succeeds."""
+    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     a = _agent()
     import agents.blogging.blog_writer_agent.agent as wa_mod
+
     monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
 
     def boom(self, p, system_prompt=""):
@@ -231,14 +201,11 @@ def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
         lambda self, p, **kw: {"draft": "# Recovered"},
     )
     item = FeedbackItem(category="x", severity="minor", issue="i")
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="x",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     ri = ReviseWriterInput(
         draft="# Orig", feedback_items=[item], feedback_summary="s", content_plan=plan
@@ -256,18 +223,15 @@ def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
 
 def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -> None:
     """All retries + fallback fail → original draft returned."""
+    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     a = _agent()
     import agents.blogging.blog_writer_agent.agent as wa_mod
+
     monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
 
     def boom(self, p, system_prompt=""):
@@ -280,14 +244,11 @@ def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -
 
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom_json)
     item = FeedbackItem(category="x", severity="minor", issue="i")
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="x",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     ri = ReviseWriterInput(
         draft="# Orig", feedback_items=[item], feedback_summary="s", content_plan=plan
@@ -305,25 +266,18 @@ def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -
 
 def test_writer_build_revise_single_item_prompt(monkeypatch) -> None:
     """Smoke test the prompt building helper with title + stories + length_guidance."""
+    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     a = _agent()
     item = FeedbackItem(category="x", severity="minor", issue="i")
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="x",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     ri = ReviseWriterInput(
         draft="# d",
@@ -349,25 +303,18 @@ def test_writer_build_revise_single_item_prompt(monkeypatch) -> None:
 
 
 def test_writer_build_revise_single_item_prompt_default_length() -> None:
+    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     a = _agent()
     item = FeedbackItem(category="x", severity="minor", issue="i")
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="x",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     ri = ReviseWriterInput(
         draft="# d",

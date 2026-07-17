@@ -14,7 +14,6 @@ backend/agents/
 ├── agentic_team_provisioning/         # Conversational team/process creation (see README.md)
 ├── ai_systems_team/
 ├── analytics/                         # Analytics utilities
-├── api/                               # Legacy blog research-and-review API package
 ├── blogging/
 ├── branding_team/
 ├── coding_team/

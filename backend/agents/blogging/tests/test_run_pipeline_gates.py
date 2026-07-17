@@ -4,78 +4,21 @@ Tests:
 * All gates PASS → status=PASS
 * Gates FAIL on iter 1, PASS on iter 2 → status=PASS
 * Gates never pass → status=NEEDS_HUMAN_REVIEW
+
+Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from conftest import make_stub_editor_class, make_stub_writer_class
+
 
 def _make_plan():
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        PlanningPhaseResult,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from _content_plan_test_utils import make_minimal_planning_phase_result
 
-    plan = ContentPlan(
-        overarching_topic="Topic",
-        narrative_flow="Flow",
-        sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
-        title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
-    )
-    return PlanningPhaseResult(
-        content_plan=plan,
-        planning_iterations_used=1,
-        parse_retry_count=0,
-        planning_wall_ms_total=10.0,
-    )
-
-
-def _stub_writer_class():
-    from agents.blogging.blog_writer_agent.models import WriterOutput
-
-    class _StubWriter:
-        def __init__(self, *a, **kw):
-            pass
-
-        def run(self, *a, **kw):
-            return WriterOutput(draft="# Draft\nBody.")
-
-        def revise(self, *a, **kw):
-            return WriterOutput(draft="# Revised\nBody.")
-
-        def revise_from_user_feedback(self, *a, **kw):
-            return WriterOutput(draft="# Revised\nBody.")
-
-        def identify_uncertainty_questions(self, *a, **kw):
-            return []
-
-        def analyze_user_feedback_for_guideline_updates(self, *a, **kw):
-            return []
-
-        def generate_escalation_summary(self, *a, **kw):
-            return ""
-
-    return _StubWriter
-
-
-def _stub_editor_class():
-    from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput
-
-    class _StubEditor:
-        def __init__(self, *a, **kw):
-            pass
-
-        def run(self, *a, **kw):
-            return CopyEditorOutput(approved=True, summary="ok", feedback_items=[])
-
-    return _StubEditor
+    return make_minimal_planning_phase_result()
 
 
 def _stub_compliance(status: str = "PASS"):
@@ -123,11 +66,12 @@ class _ValidatorStub:
 def _common_v2_setup(monkeypatch, validator_status: str = "PASS"):
     """Apply the standard set of monkeypatches to v2 for gate tests."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda *a, **kw: "brand")
-    monkeypatch.setattr(v2, "BlogWriterAgent", _stub_writer_class())
-    monkeypatch.setattr(v2, "BlogCopyEditorAgent", _stub_editor_class())
+    monkeypatch.setattr(v2, "BlogWriterAgent", make_stub_writer_class())
+    monkeypatch.setattr(v2, "BlogCopyEditorAgent", make_stub_editor_class())
     monkeypatch.setattr(
         v2,
         "run_validators_from_work_dir",
@@ -177,11 +121,12 @@ def test_run_pipeline_with_gates_exhausts_iterations(monkeypatch, tmp_path: Path
 def test_run_pipeline_with_gates_pass_after_one_rewrite(monkeypatch, tmp_path: Path) -> None:
     """Gates fail on iter 1, pass on iter 2."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda *a, **kw: "brand")
-    monkeypatch.setattr(v2, "BlogWriterAgent", _stub_writer_class())
-    monkeypatch.setattr(v2, "BlogCopyEditorAgent", _stub_editor_class())
+    monkeypatch.setattr(v2, "BlogWriterAgent", make_stub_writer_class())
+    monkeypatch.setattr(v2, "BlogCopyEditorAgent", make_stub_editor_class())
 
     # Validator: FAIL first, PASS second
     state = {"i": 0}

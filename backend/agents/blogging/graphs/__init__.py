@@ -1,1 +1,0 @@
-"""Blogging team graphs."""
