@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import pytest
-from acceptance_verifier_agent import AcceptanceVerifierAgent
-from acceptance_verifier_agent.agent import derive_per_criterion
-from acceptance_verifier_agent.models import (
+
+from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.acceptance_verifier_agent import AcceptanceVerifierAgent
+from software_engineering_team.acceptance_verifier_agent.agent import derive_per_criterion
+from software_engineering_team.acceptance_verifier_agent.models import (
     AcceptanceVerifierInput,
     AcceptanceVerifierOutput,
 )
-from code_review_agent import CodeReviewUnavailableError
-from code_review_agent.models import CodeReviewIssue
-
-from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.code_review_agent import CodeReviewUnavailableError
+from software_engineering_team.code_review_agent.models import CodeReviewIssue
 
 
 def _input(**overrides: object) -> AcceptanceVerifierInput:
@@ -197,7 +197,7 @@ class _RaisingEngine:
 def test_acceptance_verifier_unavailable_returns_fallback(monkeypatch) -> None:
     """A CodeReviewUnavailableError degrades to all_satisfied=False, never raises."""
     monkeypatch.setattr(
-        "acceptance_verifier_agent.agent.CodeReviewAgent",
+        "software_engineering_team.acceptance_verifier_agent.agent.CodeReviewAgent",
         _RaisingEngine(CodeReviewUnavailableError("engine down")),
     )
     agent = AcceptanceVerifierAgent(DummyLLMClient())
@@ -210,7 +210,7 @@ def test_acceptance_verifier_unavailable_returns_fallback(monkeypatch) -> None:
 def test_acceptance_verifier_propagates_unexpected_error(monkeypatch) -> None:
     """A non-engine defect (e.g. TypeError) is not masked — it propagates."""
     monkeypatch.setattr(
-        "acceptance_verifier_agent.agent.CodeReviewAgent",
+        "software_engineering_team.acceptance_verifier_agent.agent.CodeReviewAgent",
         _RaisingEngine(TypeError("boom")),
     )
     agent = AcceptanceVerifierAgent(DummyLLMClient())

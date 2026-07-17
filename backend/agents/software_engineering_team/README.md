@@ -8,7 +8,7 @@ A multi-agent system that simulates a real software engineering team with a mix 
 |-------|-------|------|------------|
 | **Planning** | Discovery/Design | Product planning | 6-phase workflow: intake → discovery → requirements → synthesis → document_production → sub_agent_provisioning; output adapted for Tech Lead and Architecture |
 | **Architecture Expert** | Design | System designer | Designs system architecture from requirements; output used by all other agents |
-| **Tech Lead** | Design | Staff-level orchestrator | Uses initial_spec to generate full build plan; distributes work by dependency; tracks progress; triggers documentation (uses Spec Chunk Analyzer, Spec Analysis Merger, Task Generator for large specs) |
+| **Tech Lead** (in `coding_team/`) | Implementation | Staff-level orchestrator | Generates the Task Graph build plan from the adapted planning handoff; distributes work by dependency; tracks progress; reviews and merges (see § Coding Team) |
 | **Git Setup Agent** | Setup | Repo setup | Creates `work_path/backend` and `work_path/frontend` clones/branches; ensures `development` branch |
 | **Backend Expert** | Implementation | Backend engineer | Implements solutions in Python or Java; runs autonomous workflow with quality gates |
 | **Frontend Expert** (via Frontend Engineering Team) | Implementation | Frontend sub-orchestration | UX Designer, UI Designer, Design System, Frontend Architect, Feature Implementation, UX Engineer, Accessibility, Security, Performance Engineer, QA, Build/Release, Code Review – full pipeline per task |
@@ -46,7 +46,7 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 | Phase | Sub-team | Agents |
 |-------|----------|--------|
 | **Discovery / Design (planning)** | planning_team | Planning workflow (intake → discovery → requirements → synthesis → document production); planning_adapter maps handoff to ProductRequirements and project_overview for Tech Lead and Architecture |
-| **Design (post-planning)** | top-level | Architecture Expert, Tech Lead, planning consolidation |
+| **Design (post-planning)** | top-level | Architecture Expert, planning consolidation (task planning itself is owned by coding_team's Tech Lead) |
 | **Setup** | top-level | Git Setup |
 | **Implementation** | **coding_team** (sub-team; `software_engineering_team/coding_team/`) | Tech Lead, frontend_v2/backend_v2 workers, Task Graph — **default SE execution path** after Planning + adapter |
 | **Implementation** | backend_code_v2_team | Backend v2 worker (Java/Python/Node, DBs, APIs, infra-adjacent); phase pipeline: planning → setup → execution → review → problem-solving → documentation → deliver. Driven by coding_team's Tech Lead |
@@ -60,6 +60,8 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 **Planning:** The main pipeline uses the standalone `planning_team` (`backend/agents/planning_team/`) for discovery and planning; its handoff is adapted by `planning_adapter` into ProductRequirements and project_overview for Tech Lead and Architecture Expert. The SE orchestrator invokes it via `planning_team.orchestrator.run_workflow` (thread and Temporal paths).
 
 **Accessibility:** The top-level `accessibility_agent/` package is conceptually part of the **Quality** phase—it reviews frontend code for WCAG 2.2 compliance and is invoked per frontend task.
+
+**Sub-team shapes (deliberate, not drift):** the implementation sub-teams follow three different layouts on purpose. The **v2 phase-pipeline teams** (`backend_code_v2_team`, `frontend_code_v2_team`) are thin per-team wrappers over the shared phase implementations in `shared/phases/` — their byte-identical `phases/deliver.py`/`documentation.py` copies are each team's monkeypatch boundary and are guarded against one-sided edits by a byte-identity test. The **coding_team** is a flat execution engine with its own `api/`, `temporal/`, and `github_source/` because it is independently routable (`/api/coding-team`). The **devops_team** uses one directory per role agent plus LangGraph graphs, matching its contract-first gate pipeline. `ai_agent_development_team` is a complete but currently dormant v2-style team with no production consumer; it is intentionally left in its own shape rather than being force-fitted onto `BaseTeamLead`.
 
 ### SDLC Flow Diagram
 
@@ -287,8 +289,6 @@ Agents log progress at INFO level so you can see what’s happening at each step
 15:57:33 | INFO    | spec_parser | Parsing spec with LLM (1234 chars)
 15:57:33 | INFO    | architecture_expert.agent | Architecture Expert: starting design for Task Manager API
 15:57:33 | INFO    | architecture_expert.agent | Architecture Expert: done, 2 components
-15:57:33 | INFO    | tech_lead_agent.agent | Tech Lead: planning tasks for Task Manager API
-15:57:33 | INFO    | tech_lead_agent.agent | Tech Lead: assigned 2 tasks in order ['t1', 't2']
 15:57:33 | INFO    | api.main | Pipeline: Task t1 (backend) -> backend
 15:57:33 | INFO    | backend_agent.agent | Backend: implementing task 'Implement API'
 15:57:33 | INFO    | backend_agent.agent | Backend: done, code=0 chars, summary=0 chars
@@ -355,8 +355,7 @@ software_engineering_team/
 │
 │  # --- Design / setup ---
 ├── product_requirements_analysis_agent/  # Spec review, constraint analysis, Q&A, PRD writing
-├── architect-agents/      # ArchitectureExpertAgent + Enterprise Orchestrator
-├── tech_lead_agent/       # Tech Lead: build plan, task distribution, progress tracking
+├── architect_agents/      # ArchitectureExpertAgent + Enterprise Orchestrator
 ├── git_setup_agent/       # Repo setup (clones/branches; ensures development branch)
 │
 │  # --- Implementation sub-teams ---

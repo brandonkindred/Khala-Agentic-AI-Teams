@@ -38,6 +38,43 @@ from .quality_gates.models import QualityGateResult
 
 logger = logging.getLogger(__name__)
 
+
+def publishability_skip_reason(
+    *,
+    exit_rule_conformance_passed: bool,
+    realism_passed: bool,
+    trades_aligned: bool,
+    runtime_lookahead_violation: bool,
+) -> Optional[str]:
+    """Join failing publishability gate codes in veto order.
+
+    Preconditions:
+      - Each argument is the boolean verdict from the verification-phase
+        gate of the same name (``runtime_lookahead_violation`` is True when
+        the harness trapped a forward-field access).
+    Postconditions:
+      - Returns ``None`` when every gate passes (conformance, realism,
+        alignment all True and no runtime look-ahead violation).
+      - Otherwise returns a comma-joined string of failing codes in the
+        fixed order matching ``_apply_publication_vetoes``:
+        ``exit_rule_conformance_failed``, ``realism_failed``,
+        ``alignment_unresolved``, ``lookahead_violation``.
+    Invariants:
+      - Pure: no I/O, no mutation of inputs.
+      - Deterministic for the same four booleans.
+    """
+    parts: List[str] = []
+    if not exit_rule_conformance_passed:
+        parts.append("exit_rule_conformance_failed")
+    if not realism_passed:
+        parts.append("realism_failed")
+    if not trades_aligned:
+        parts.append("alignment_unresolved")
+    if runtime_lookahead_violation:
+        parts.append("lookahead_violation")
+    return ",".join(parts) if parts else None
+
+
 # Cap on how many ``last_order_events`` entries the diagnostics block
 # carries through to the refinement prompt. The diagnostics model already
 # trims to 20; 10 is enough signal for the LLM to spot the failure pattern
@@ -78,18 +115,20 @@ class _VerificationOutcome:
     """Bundle of state mutated by ``_run_verification_phase``.
 
     The verification phase runs walk-forward (or its fallback anomaly
-    recheck), exit-rule conformance, resolves ``is_winning``, and
-    augments ``metrics.acceptance_reason`` with any veto causes.
-    Returning a dataclass keeps the boundary explicit without forcing
-    ``_run_design_attempt`` to learn the internal branches.
+    recheck), exit-rule conformance, resolves ``is_winning`` and
+    ``is_publishable``, and augments ``metrics.acceptance_reason`` with
+    any veto causes. Returning a dataclass keeps the boundary explicit
+    without forcing ``_run_design_attempt`` to learn the internal branches.
     """
 
     metrics: BacktestResult
     is_winning: bool
+    is_publishable: bool
     upstream_admitted: bool
     acceptance_results: List[QualityGateResult]
     walk_forward_failed: bool
     exit_rule_conformance_passed: bool
+    publishability_skip_reason: Optional[str] = None
 
 
 @dataclass
@@ -773,31 +812,41 @@ def _attach_execution_diagnostics(
     metrics: BacktestResult,
     exec_result: StrategyRunResult,
 ) -> None:
-    """Stamp the engine's execution diagnostics onto ``metrics``.
+    """Stamp engine-only fields onto ledger-derived ``metrics``.
 
     ``compute_metrics`` derives ``BacktestResult`` from the closed-trade
-    ledger alone and leaves ``execution_diagnostics`` at its ``None``
-    default. The structured exit-rule firing counters
-    (``exit_rule_firings`` / ``exit_rule_firings_by_symbol``) the engine
-    records live only on the ``StrategyRunResult``. Without this hand-off
-    the ``ExitRuleConformanceGate`` — which reads
-    ``metrics.execution_diagnostics`` — would see ``None`` and treat every
-    engine-attributed below-floor stop-loss trade as an unaccounted leak,
-    failing conformance on runs the engine actually enforced correctly.
+    ledger alone and leaves ``execution_diagnostics`` /
+    ``cost_stress_results`` at their ``None`` defaults. Those fields live
+    only on the ``StrategyRunResult`` (forwarded from ``run_backtest``).
+    Without this hand-off:
+
+    * ``ExitRuleConformanceGate`` would see ``None`` diagnostics and treat
+      every engine-attributed below-floor stop-loss trade as an unaccounted
+      leak.
+    * ``CostStressRealismGate`` would see missing cost-stress rows on every
+      production run (``cost_stress=True``) and emit a critical finding —
+      which publishability gating then treats as a paper-trading veto.
 
     Preconditions:
         * ``metrics`` and ``exec_result`` are the paired output of the SAME
           backtest execution (same closed-trade ledger). Attaching
-          diagnostics from a different run would let the gate reconcile one
-          ledger's trades against another run's firing counts.
+          fields from a different run would reconcile one ledger against
+          another run's diagnostics / stress rows.
     Postconditions:
         * ``metrics.execution_diagnostics`` is set to
           ``exec_result.execution_diagnostics`` when the exec result carries
-          diagnostics; otherwise ``metrics`` is left unchanged (a populated
-          value is never overwritten with ``None``).
+          diagnostics; otherwise left unchanged (a populated value is never
+          overwritten with ``None``).
+        * ``metrics.cost_stress_results`` is set to
+          ``exec_result.cost_stress_results`` when present; otherwise left
+          unchanged.
     """
     if exec_result.execution_diagnostics is not None:
         metrics.execution_diagnostics = exec_result.execution_diagnostics
+    # Duck-typed stubs in tests may omit the field; treat missing as None.
+    cost_stress_results = getattr(exec_result, "cost_stress_results", None)
+    if cost_stress_results is not None:
+        metrics.cost_stress_results = cost_stress_results
 
 
 def _format_execution_diagnostics(

@@ -331,7 +331,9 @@ def run_code_review_phase(
         if detail_callback:
             detail_callback("Running linter...")
         try:
-            from linting_tool_agent.models import LintToolInput as _LintInput
+            from software_engineering_team.linting_tool_agent.models import (
+                LintToolInput as _LintInput,
+            )
 
             lint_result = linting_tool_agent.run(
                 _LintInput(

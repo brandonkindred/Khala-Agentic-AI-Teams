@@ -862,27 +862,31 @@ def run_verification_and_analysis_activity(
     orch = StrategyLabOrchestrator()
     orch.convergence_tracker = convergence_tracker_from_wire(convergence_tracker_state)
     try:
-        new_metrics, is_winning, narrative = orch._orchestrate_verification_and_analysis(
-            spec=spec_obj,
-            trades=trade_objs,
-            metrics=metrics_obj,
-            market_data=market_data_bars,
-            config=config_obj,
-            execution_succeeded=execution_succeeded,
-            trades_aligned=trades_aligned,
-            alignment_reports=alignment_report_objs,
-            all_gate_results=gate_result_objs,
-            runtime_lookahead_violation=runtime_lookahead_violation,
-            open_position_entry_reasons=open_position_entry_reasons,
-            refinement_attempts=refinement_attempts,
-            rationale=rationale,
-            emit=lambda *_a, **_kw: None,
+        new_metrics, is_winning, is_publishable, publishability_skip, narrative = (
+            orch._orchestrate_verification_and_analysis(
+                spec=spec_obj,
+                trades=trade_objs,
+                metrics=metrics_obj,
+                market_data=market_data_bars,
+                config=config_obj,
+                execution_succeeded=execution_succeeded,
+                trades_aligned=trades_aligned,
+                alignment_reports=alignment_report_objs,
+                all_gate_results=gate_result_objs,
+                runtime_lookahead_violation=runtime_lookahead_violation,
+                open_position_entry_reasons=open_position_entry_reasons,
+                refinement_attempts=refinement_attempts,
+                rationale=rationale,
+                emit=lambda *_a, **_kw: None,
+            )
         )
     except Exception as exc:  # noqa: BLE001
         raise _map_exception_to_application_error(exc) from exc
     return {
         "metrics": new_metrics.model_dump(mode="json"),
         "is_winning": is_winning,
+        "is_publishable": is_publishable,
+        "publishability_skip_reason": publishability_skip,
         "narrative": narrative,
         "all_gate_results": [g.model_dump(mode="json") for g in gate_result_objs],
         "convergence_tracker_state": convergence_tracker_to_wire(orch.convergence_tracker),
@@ -971,6 +975,8 @@ def assemble_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             max_rounds_exhausted=params["max_rounds_exhausted"],
             execution_succeeded=params["execution_succeeded"],
             is_winning=params["is_winning"],
+            is_publishable=params.get("is_publishable", False),
+            publishability_skip_reason=params.get("publishability_skip_reason"),
             trades_aligned=params["trades_aligned"],
             refinement_rounds=params["refinement_rounds"],
             alignment_rounds=params["alignment_rounds"],

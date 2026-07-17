@@ -1,75 +1,38 @@
 """
-Tech Lead orchestrator: runs the full pipeline with feature branches.
+Software Engineering orchestrator: runs the full pipeline with feature branches.
 
-Planning flow:
-1. Review initial_spec and document features and functionalities (high level) via Project Planning.
-2. Tech Lead produces Initiative/Epic/Story hierarchy from spec + features.
-3. Architecture Expert produces architecture from spec + features.
-
-Execution:
-- Prefix tasks (devops, git_setup) run sequentially on work path.
-- Backend and frontend tasks run in parallel (one task per agent type at a time),
-  each in its own repo (work_path/backend, work_path/frontend) initialized by Git Setup Agent.
+Pipeline:
+1. Discovery — resolve the spec source and run Product Requirements Analysis.
+2. Planning — the standalone ``planning_team`` workflow produces the handoff,
+   adapted by ``planning_adapter``; the Architecture Expert produces the
+   architecture (injected into planning as a callback).
+3. HITL gate — open planning questions pause the job for answers.
+4. Execution — the adapted plan is handed to ``coding_team``
+   (``run_coding_team_orchestrator``), whose Tech Lead owns task planning,
+   the Task Graph, and the per-task backend/frontend v2 workers.
+5. Finalize — reconcile the coding-team snapshot into the job's terminal
+   status and emit delivery metrics.
 """
 
 from __future__ import annotations
 
 import logging
-import sys
 import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# These two sys.path insertions are still required by this module itself:
-# below (and further down), it does *bare* (non-dotted) imports of its own
-# sibling sub-packages -- `from qa_agent import ...`, `from tech_lead_agent
-# import ...`, `from architecture_expert import ...` -- rather than
-# `from software_engineering_team.qa_agent import ...`. The app launcher
-# putting `backend/agents` on sys.path (run_unified_api.py /
-# unified_api/main.py) only resolves *dotted* imports like
-# `software_engineering_team.shared`; it doesn't reach these bare names,
-# which need `software_engineering_team/` (and, for `architecture_expert`,
-# the hyphenated `architect-agents/` beneath it, which can't itself be a
-# dotted import segment) directly on sys.path.
-#
-# This differs from coding_team's old `_paths.py` bootstrap (deleted when
-# coding_team merged into this package): that one was safe to remove because
-# coding_team's own modules were converted to fully-qualified dotted imports
-# for their siblings, so `backend/agents` alone sufficed. orchestrator.py
-# (and quality_gates/__init__.py, devops_team/test_validation_agent/agent.py,
-# discovery.py, temporal/activities.py -- none of which bootstrap their own
-# sys.path) were not converted, so they still need this.
-#
-# `api/_paths.py` (run via `api/__init__`) and pytest's `pythonpath` ini
-# option cover the FastAPI-app and test-collection entry points respectively,
-# but not every path: Temporal activities import `orchestrator` directly
-# without going through `api/__init__` first, and
-# `test_orchestrator_sprint_path.py` loads this file directly from disk via
-# `importlib`. This module keeps its own bootstrap so its bare imports
-# resolve regardless of which entry point got there first.
-_team_dir = Path(__file__).resolve().parent
-if str(_team_dir) not in sys.path:
-    sys.path.insert(0, str(_team_dir))
-# `_arch_dir` (architect-agents/) has a hyphen and can't itself be a dotted
-# import segment; its `architecture_expert` sub-package is imported bare
-# below (`from architecture_expert import ...`), so this directory must be on
-# sys.path directly rather than reachable via `_team_dir`.
-_arch_dir = _team_dir / "architect-agents"
-if _arch_dir.exists() and str(_arch_dir) not in sys.path:
-    sys.path.insert(0, str(_arch_dir))
-
-from llm_service import (  # noqa: E402
+from llm_service import (
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
     get_client,
     llm_attribution,
 )
-from shared_repo_context.repo_utils import (  # noqa: E402
+from shared_repo_context.repo_utils import (
     read_repo_code,
     truncate_for_context,
 )
-from software_engineering_team.discovery import (  # noqa: E402
+from software_engineering_team.discovery import (
     # Re-exported (F401) for ``tests/test_orchestrator_sprint_path.py``, which
     # imports it off the orchestrator module (``_orchestrator._load_requirements_
     # from_sprint``) at six call sites. The sprint path itself calls it via
@@ -80,12 +43,12 @@ from software_engineering_team.discovery import (  # noqa: E402
     resolve_spec_source,
     run_product_requirements_analysis,
 )
-from software_engineering_team.shared import (  # noqa: E402
+from software_engineering_team.shared import (
     cost_tracker,
     se_events,
 )
-from software_engineering_team.shared.execution_tracker import execution_tracker  # noqa: E402
-from software_engineering_team.shared.job_store import (  # noqa: E402
+from software_engineering_team.shared.execution_tracker import execution_tracker
+from software_engineering_team.shared.job_store import (
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
@@ -100,7 +63,7 @@ from software_engineering_team.shared.job_store import (  # noqa: E402
     is_waiting_for_answers,
     update_job,
 )
-from software_engineering_team.shared.plan_dir import ensure_plan_dir  # noqa: E402
+from software_engineering_team.shared.plan_dir import ensure_plan_dir
 
 try:
     from unified_api.slack_notifier import notify_open_questions as slack_notify_open_questions
@@ -452,8 +415,9 @@ def _run_architecture_for_planning(
     Invariants:
         - Never propagates an exception into the Planning workflow.
     """
-    from architecture_expert.models import ArchitectureInput
-
+    from software_engineering_team.architect_agents.architecture_expert.models import (
+        ArchitectureInput,
+    )
     from software_engineering_team.shared.models import ProductRequirements
 
     req_desc = (spec_content or "").strip()
@@ -657,22 +621,24 @@ def _get_agents() -> Mapping[str, Any]:
         - Returns a ``Mapping[str, Any]`` over the SE role names; ``result[key]``
           lazily builds and caches the corresponding agent.
     """
-    from acceptance_verifier_agent import AcceptanceVerifierAgent
-    from accessibility_agent import AccessibilityExpertAgent
-    from architecture_expert import ArchitectureExpertAgent
-    from build_fix_specialist import BuildFixSpecialistAgent
-    from code_review_agent import CodeReviewAgent
-    from devops_team import DevOpsTeamLeadAgent
-    from git_setup_agent import GitSetupAgent
-    from integration_team import IntegrationAgent
-    from linting_tool_agent import LintingToolAgent
-    from qa_agent import QAExpertAgent
-    from security_agent import CybersecurityExpertAgent
-    from tech_lead_agent import TechLeadAgent
-    from technical_writers.dbc_comments_agent import DbcCommentsAgent
-    from technical_writers.documentation_agent import DocumentationAgent
-
     from agent_repair_team import RepairExpertAgent
+    from software_engineering_team.acceptance_verifier_agent import AcceptanceVerifierAgent
+    from software_engineering_team.accessibility_agent import AccessibilityExpertAgent
+    from software_engineering_team.architect_agents.architecture_expert import (
+        ArchitectureExpertAgent,
+    )
+    from software_engineering_team.build_fix_specialist import BuildFixSpecialistAgent
+    from software_engineering_team.code_review_agent import CodeReviewAgent
+    from software_engineering_team.devops_team import DevOpsTeamLeadAgent
+    from software_engineering_team.git_setup_agent import GitSetupAgent
+    from software_engineering_team.integration_team import IntegrationAgent
+    from software_engineering_team.linting_tool_agent import LintingToolAgent
+    from software_engineering_team.qa_agent import QAExpertAgent
+    from software_engineering_team.security_agent import CybersecurityExpertAgent
+    from software_engineering_team.technical_writers.dbc_comments_agent import DbcCommentsAgent
+    from software_engineering_team.technical_writers.documentation_agent import (
+        DocumentationAgent,
+    )
 
     return _LazyAgentRegistry(
         {
@@ -681,7 +647,6 @@ def _get_agents() -> Mapping[str, Any]:
             "acceptance_verifier": lambda: AcceptanceVerifierAgent(
                 get_client("acceptance_verifier")
             ),
-            "tech_lead": lambda: TechLeadAgent(get_client("tech_lead")),
             "devops": lambda: DevOpsTeamLeadAgent(get_client("devops")),
             "backend": _lazy_init_backend_code_v2_team,
             "frontend_code_v2": _lazy_init_frontend_code_v2_team,
@@ -703,14 +668,14 @@ def _get_agents() -> Mapping[str, Any]:
 
 def _lazy_init_backend_code_v2_team():
     """Instantiate the backend team lead (backend_code_v2_team; lazy import)."""
-    from backend_code_v2_team import BackendCodeV2TeamLead
+    from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
 
     return BackendCodeV2TeamLead(get_client("backend"))
 
 
 def _lazy_init_frontend_code_v2_team():
     """Instantiate the frontend team lead (frontend_code_v2_team; lazy import)."""
-    from frontend_code_v2_team import FrontendCodeV2TeamLead
+    from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
 
     return FrontendCodeV2TeamLead(get_client("frontend"))
 
@@ -967,9 +932,11 @@ def run_orchestrator(
         )
         logger.info("Next step -> Running Planning team to generate handoff and context")
 
-        from planning_adapter import PlanningAdapterResult, adapt_planning_result
-
         from planning_team.orchestrator import run_workflow as run_planning_workflow
+        from software_engineering_team.planning_adapter import (
+            PlanningAdapterResult,
+            adapt_planning_result,
+        )
 
         _planning_job_updater = _make_planning_job_updater(job_id)
 

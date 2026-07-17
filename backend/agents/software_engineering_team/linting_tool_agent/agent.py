@@ -6,10 +6,9 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
-from build_fix_specialist.models import CodeEdit, parse_code_edits
-
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.build_fix_specialist.models import CodeEdit, parse_code_edits
 from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .linter_runner import detect_linter, execute_linter

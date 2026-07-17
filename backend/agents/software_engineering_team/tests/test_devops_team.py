@@ -9,8 +9,14 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
 import pytest
-from devops_team import DevOpsTaskSpec, DevOpsTeamLeadAgent, DevOpsTeamResult
-from devops_team.models import (
+
+from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.devops_team import (
+    DevOpsTaskSpec,
+    DevOpsTeamLeadAgent,
+    DevOpsTeamResult,
+)
+from software_engineering_team.devops_team.models import (
     DevOpsCompletionPackage,
     DevOpsConstraints,
     PlatformScope,
@@ -18,10 +24,14 @@ from devops_team.models import (
     ReviewFinding,
     SubtaskContract,
 )
-from devops_team.orchestrator import DEVOPS_REQUIRED_GATE_NAMES, ENV_POLICY
-from devops_team.task_clarifier import DevOpsTaskClarifierAgent, DevOpsTaskClarifierInput
-
-from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.devops_team.orchestrator import (
+    DEVOPS_REQUIRED_GATE_NAMES,
+    ENV_POLICY,
+)
+from software_engineering_team.devops_team.task_clarifier import (
+    DevOpsTaskClarifierAgent,
+    DevOpsTaskClarifierInput,
+)
 from software_engineering_team.shared.git_utils import initialize_new_repo
 
 
@@ -450,7 +460,10 @@ class TestTaskClarifier:
 
 class TestRepoNavigatorToolAgent:
     def test_detects_terraform_files(self) -> None:
-        from devops_team.tool_agents import RepoNavigatorInput, RepoNavigatorToolAgent
+        from software_engineering_team.devops_team.tool_agents import (
+            RepoNavigatorInput,
+            RepoNavigatorToolAgent,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "infra").mkdir()
@@ -459,7 +472,10 @@ class TestRepoNavigatorToolAgent:
             assert any("main.tf" in p for p in out.detected_iac_paths)
 
     def test_detects_github_workflows(self) -> None:
-        from devops_team.tool_agents import RepoNavigatorInput, RepoNavigatorToolAgent
+        from software_engineering_team.devops_team.tool_agents import (
+            RepoNavigatorInput,
+            RepoNavigatorToolAgent,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
@@ -469,7 +485,10 @@ class TestRepoNavigatorToolAgent:
             assert any("ci.yml" in p for p in out.detected_pipeline_paths)
 
     def test_detects_helm_charts(self) -> None:
-        from devops_team.tool_agents import RepoNavigatorInput, RepoNavigatorToolAgent
+        from software_engineering_team.devops_team.tool_agents import (
+            RepoNavigatorInput,
+            RepoNavigatorToolAgent,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             helm_dir = Path(tmp) / "deploy" / "helm" / "myapp"
@@ -479,7 +498,10 @@ class TestRepoNavigatorToolAgent:
             assert any("helm" in p.lower() for p in out.detected_deploy_paths)
 
     def test_empty_repo(self) -> None:
-        from devops_team.tool_agents import RepoNavigatorInput, RepoNavigatorToolAgent
+        from software_engineering_team.devops_team.tool_agents import (
+            RepoNavigatorInput,
+            RepoNavigatorToolAgent,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             out = RepoNavigatorToolAgent().run(RepoNavigatorInput(repo_path=tmp))
@@ -490,7 +512,10 @@ class TestRepoNavigatorToolAgent:
 
 class TestIaCValidationToolAgent:
     def test_skipped_when_no_tf_files(self) -> None:
-        from devops_team.tool_agents import IaCValidationInput, IaCValidationToolAgent
+        from software_engineering_team.devops_team.tool_agents import (
+            IaCValidationInput,
+            IaCValidationToolAgent,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             out = IaCValidationToolAgent().run(IaCValidationInput(repo_path=tmp))
@@ -501,7 +526,10 @@ class TestIaCValidationToolAgent:
 
 class TestPolicyAsCodeToolAgent:
     def test_skipped_when_checkov_missing(self) -> None:
-        from devops_team.tool_agents import PolicyAsCodeInput, PolicyAsCodeToolAgent
+        from software_engineering_team.devops_team.tool_agents import (
+            PolicyAsCodeInput,
+            PolicyAsCodeToolAgent,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             out = PolicyAsCodeToolAgent().run(PolicyAsCodeInput(repo_path=tmp))
@@ -511,7 +539,10 @@ class TestPolicyAsCodeToolAgent:
 
 class TestCICDLintToolAgent:
     def test_pass_valid_workflow(self) -> None:
-        from devops_team.tool_agents import CICDLintInput, CICDLintPipelineValidationToolAgent
+        from software_engineering_team.devops_team.tool_agents import (
+            CICDLintInput,
+            CICDLintPipelineValidationToolAgent,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
@@ -524,7 +555,10 @@ class TestCICDLintToolAgent:
             assert out.success is True
 
     def test_fail_missing_jobs(self) -> None:
-        from devops_team.tool_agents import CICDLintInput, CICDLintPipelineValidationToolAgent
+        from software_engineering_team.devops_team.tool_agents import (
+            CICDLintInput,
+            CICDLintPipelineValidationToolAgent,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
@@ -535,7 +569,10 @@ class TestCICDLintToolAgent:
             assert out.success is False
 
     def test_fail_prod_deploy_without_approval(self) -> None:
-        from devops_team.tool_agents import CICDLintInput, CICDLintPipelineValidationToolAgent
+        from software_engineering_team.devops_team.tool_agents import (
+            CICDLintInput,
+            CICDLintPipelineValidationToolAgent,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
@@ -547,7 +584,10 @@ class TestCICDLintToolAgent:
             assert out.checks["pipeline_gate_check"] == "fail"
 
     def test_skipped_no_workflows(self) -> None:
-        from devops_team.tool_agents import CICDLintInput, CICDLintPipelineValidationToolAgent
+        from software_engineering_team.devops_team.tool_agents import (
+            CICDLintInput,
+            CICDLintPipelineValidationToolAgent,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             out = CICDLintPipelineValidationToolAgent().run(CICDLintInput(repo_path=tmp))
@@ -557,7 +597,10 @@ class TestCICDLintToolAgent:
 
 class TestDeploymentDryRunToolAgent:
     def test_skipped_no_chart(self) -> None:
-        from devops_team.tool_agents import DeploymentDryRunInput, DeploymentDryRunPlanToolAgent
+        from software_engineering_team.devops_team.tool_agents import (
+            DeploymentDryRunInput,
+            DeploymentDryRunPlanToolAgent,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             out = DeploymentDryRunPlanToolAgent().run(DeploymentDryRunInput(repo_path=tmp))
@@ -572,7 +615,10 @@ class TestDeploymentDryRunToolAgent:
 
 class TestInfrastructureAsCodeAgent:
     def test_run_returns_artifacts(self) -> None:
-        from devops_team.iac_agent import IaCAgentInput, InfrastructureAsCodeAgent
+        from software_engineering_team.devops_team.iac_agent import (
+            IaCAgentInput,
+            InfrastructureAsCodeAgent,
+        )
 
         client = _StubClient(
             {
@@ -588,7 +634,10 @@ class TestInfrastructureAsCodeAgent:
         assert not out.destructive_changes_detected
 
     def test_handles_destructive_flag(self) -> None:
-        from devops_team.iac_agent import IaCAgentInput, InfrastructureAsCodeAgent
+        from software_engineering_team.devops_team.iac_agent import (
+            IaCAgentInput,
+            InfrastructureAsCodeAgent,
+        )
 
         client = _StubClient(
             {
@@ -606,7 +655,10 @@ class TestInfrastructureAsCodeAgent:
 
 class TestCICDPipelineAgent:
     def test_run_returns_artifacts(self) -> None:
-        from devops_team.cicd_pipeline_agent import CICDPipelineAgent, CICDPipelineAgentInput
+        from software_engineering_team.devops_team.cicd_pipeline_agent import (
+            CICDPipelineAgent,
+            CICDPipelineAgentInput,
+        )
 
         client = _StubClient(
             {
@@ -623,7 +675,10 @@ class TestCICDPipelineAgent:
 
     def test_run_surfaces_frontend_pipeline_artifact(self) -> None:
         """As the single CI/CD owner, the agent carries frontend workflow artifacts too."""
-        from devops_team.cicd_pipeline_agent import CICDPipelineAgent, CICDPipelineAgentInput
+        from software_engineering_team.devops_team.cicd_pipeline_agent import (
+            CICDPipelineAgent,
+            CICDPipelineAgentInput,
+        )
 
         client = _StubClient(
             {
@@ -639,7 +694,9 @@ class TestCICDPipelineAgent:
 
     def test_prompt_covers_frontend_concerns(self) -> None:
         """The merged prompt owns frontend CI/CD (preview env, bundle, source maps)."""
-        from devops_team.cicd_pipeline_agent.prompts import CICD_PIPELINE_PROMPT
+        from software_engineering_team.devops_team.cicd_pipeline_agent.prompts import (
+            CICD_PIPELINE_PROMPT,
+        )
 
         lowered = CICD_PIPELINE_PROMPT.lower()
         assert "preview environment" in lowered
@@ -650,7 +707,7 @@ class TestCICDPipelineAgent:
 
 class TestDeploymentStrategyAgent:
     def test_run_returns_strategy(self) -> None:
-        from devops_team.deployment_strategy_agent import (
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
             DeploymentStrategyAgent,
             DeploymentStrategyAgentInput,
         )
@@ -674,7 +731,10 @@ class TestDeploymentStrategyAgent:
 
 class TestDevSecOpsReviewAgent:
     def test_blocks_on_high_severity(self) -> None:
-        from devops_team.devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
+        )
 
         client = _StubClient(
             {
@@ -698,7 +758,10 @@ class TestDevSecOpsReviewAgent:
         assert out.findings[0].severity == "high"
 
     def test_approves_clean_artifacts(self) -> None:
-        from devops_team.devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
+        )
 
         client = _StubClient({"approved": True, "findings": [], "summary": "all good"})
         agent = DevSecOpsReviewAgent(client)
@@ -708,7 +771,10 @@ class TestDevSecOpsReviewAgent:
     def test_explicit_null_approved_fails_closed(self) -> None:
         """A present-but-null ``approved`` is an explicit non-approval (fail
         closed), even with no blocking findings — matching legacy semantics."""
-        from devops_team.devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
+        )
 
         client = _StubClient({"approved": None, "findings": [], "summary": "unsure"})
         agent = DevSecOpsReviewAgent(client)
@@ -718,7 +784,10 @@ class TestDevSecOpsReviewAgent:
     def test_absent_approved_defers_to_findings(self) -> None:
         """An absent ``approved`` key defers to the finding-derived default:
         no blocking findings -> approved."""
-        from devops_team.devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
+        )
 
         client = _StubClient({"findings": [], "summary": "no opinion"})
         agent = DevSecOpsReviewAgent(client)
@@ -728,7 +797,7 @@ class TestDevSecOpsReviewAgent:
 
 class TestDevOpsTestValidationAgent:
     def test_aggregates_gates(self) -> None:
-        from devops_team.test_validation_agent import (
+        from software_engineering_team.devops_team.test_validation_agent import (
             DevOpsTestValidationAgent,
             DevOpsTestValidationInput,
         )
@@ -752,7 +821,7 @@ class TestDevOpsTestValidationAgent:
         assert out.quality_gates["iac_validate"] == "pass"
 
     def test_rejects_on_fail_gate(self) -> None:
-        from devops_team.test_validation_agent import (
+        from software_engineering_team.devops_team.test_validation_agent import (
             DevOpsTestValidationAgent,
             DevOpsTestValidationInput,
         )
@@ -769,8 +838,10 @@ class TestDevOpsTestValidationAgent:
         assert not out.approved
 
     def test_delegates_to_unified_qa_agent(self) -> None:
-        from devops_team.test_validation_agent import DevOpsTestValidationAgent
-        from qa_agent import QAExpertAgent
+        from software_engineering_team.devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+        )
+        from software_engineering_team.qa_agent import QAExpertAgent
 
         agent = DevOpsTestValidationAgent(_StubClient({"approved": True}))
         assert isinstance(agent._qa, QAExpertAgent)
@@ -778,8 +849,10 @@ class TestDevOpsTestValidationAgent:
     def test_preserves_devops_model_routing_key(self, monkeypatch) -> None:
         """A non-Strands client resolves the model under the 'devops' routing
         key (the pre-refactor key), not the QA agent's default 'qa'."""
-        from devops_team.test_validation_agent import DevOpsTestValidationAgent
-        from devops_team.test_validation_agent import agent as agent_mod
+        from software_engineering_team.devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+        )
+        from software_engineering_team.devops_team.test_validation_agent import agent as agent_mod
 
         captured: Dict[str, Any] = {}
 
@@ -794,7 +867,7 @@ class TestDevOpsTestValidationAgent:
     def test_qa_delegation_exception_fails_closed(self) -> None:
         """If the delegated QA agent raises, the shim returns a fail-closed
         result instead of propagating the exception to the orchestrator."""
-        from devops_team.test_validation_agent import (
+        from software_engineering_team.devops_team.test_validation_agent import (
             DevOpsTestValidationAgent,
             DevOpsTestValidationInput,
         )
@@ -811,7 +884,7 @@ class TestDevOpsTestValidationAgent:
         assert "LLM unavailable" in out.summary
 
     def test_maps_evidence_and_trace_through(self) -> None:
-        from devops_team.test_validation_agent import (
+        from software_engineering_team.devops_team.test_validation_agent import (
             DevOpsTestValidationAgent,
             DevOpsTestValidationInput,
         )
@@ -837,7 +910,7 @@ class TestDevOpsTestValidationAgent:
         assert out.evidence[0].status == "pass"
 
     def test_unknown_gate_status_coerced_to_not_run(self) -> None:
-        from devops_team.test_validation_agent import (
+        from software_engineering_team.devops_team.test_validation_agent import (
             DevOpsTestValidationAgent,
             DevOpsTestValidationInput,
         )
@@ -857,7 +930,7 @@ class TestDevOpsTestValidationAgent:
     def test_unapproved_without_fail_gate_fails_closed(self) -> None:
         """An unapproved validation with no failing gate must synthesize one so
         the gate-only DevOps pipeline still blocks (fail closed)."""
-        from devops_team.test_validation_agent import (
+        from software_engineering_team.devops_team.test_validation_agent import (
             DevOpsTestValidationAgent,
             DevOpsTestValidationInput,
         )
@@ -876,7 +949,7 @@ class TestDevOpsTestValidationAgent:
         assert any(v == "fail" for v in out.quality_gates.values())
 
     def test_approved_does_not_synthesize_fail_gate(self) -> None:
-        from devops_team.test_validation_agent import (
+        from software_engineering_team.devops_team.test_validation_agent import (
             DevOpsTestValidationAgent,
             DevOpsTestValidationInput,
         )
@@ -903,7 +976,7 @@ class TestChangeReviewAgent:
 
     def test_requires_client(self) -> None:
         """Constructing with a None client fails fast via an explicit ValueError."""
-        from devops_team.change_review_agent import ChangeReviewAgent
+        from software_engineering_team.devops_team.change_review_agent import ChangeReviewAgent
 
         with pytest.raises(ValueError):
             ChangeReviewAgent(None)
@@ -914,7 +987,10 @@ class TestChangeReviewAgent:
         Uses a tripwire client that raises if the engine touches it, so the
         short-circuit is verified rather than merely tolerated.
         """
-        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+        from software_engineering_team.devops_team.change_review_agent import (
+            ChangeReviewAgent,
+            ChangeReviewInput,
+        )
 
         class _TripWireClient(DummyLLMClient):
             def complete_json(self, *a, **kw):  # type: ignore[override]
@@ -930,7 +1006,10 @@ class TestChangeReviewAgent:
 
     def test_approves_when_engine_finds_nothing(self) -> None:
         """A clean engine result yields approval with no findings."""
-        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+        from software_engineering_team.devops_team.change_review_agent import (
+            ChangeReviewAgent,
+            ChangeReviewInput,
+        )
 
         client = _StubClient({"approved": True, "issues": [], "summary": "ok"})
         agent = ChangeReviewAgent(client)
@@ -943,7 +1022,10 @@ class TestChangeReviewAgent:
     def test_blocks_on_high_severity_finding(self) -> None:
         """A high-severity engine issue maps to a blocking ReviewFinding and the
         blocking rule overrides the engine's approved flag."""
-        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+        from software_engineering_team.devops_team.change_review_agent import (
+            ChangeReviewAgent,
+            ChangeReviewInput,
+        )
 
         client = _StubClient(
             {
@@ -972,8 +1054,11 @@ class TestChangeReviewAgent:
     def test_engine_unavailable_degrades_to_approved(self, monkeypatch) -> None:
         """A CodeReviewUnavailableError degrades the gate to approved (no findings)
         rather than crashing the DevOps pipeline."""
-        from code_review_agent import CodeReviewUnavailableError
-        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+        from software_engineering_team.code_review_agent import CodeReviewUnavailableError
+        from software_engineering_team.devops_team.change_review_agent import (
+            ChangeReviewAgent,
+            ChangeReviewInput,
+        )
 
         class _RaisingEngine:
             def __init__(self, exc):
@@ -986,7 +1071,7 @@ class TestChangeReviewAgent:
                 raise self._exc
 
         monkeypatch.setattr(
-            "devops_team.change_review_agent.agent.CodeReviewAgent",
+            "software_engineering_team.devops_team.change_review_agent.agent.CodeReviewAgent",
             _RaisingEngine(CodeReviewUnavailableError("engine down")),
         )
         agent = ChangeReviewAgent(_StubClient({}))
@@ -999,7 +1084,10 @@ class TestChangeReviewAgent:
 
     def test_engine_programming_error_propagates(self, monkeypatch) -> None:
         """An unexpected engine error (e.g. TypeError) is not masked — it propagates."""
-        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+        from software_engineering_team.devops_team.change_review_agent import (
+            ChangeReviewAgent,
+            ChangeReviewInput,
+        )
 
         class _RaisingEngine:
             def __call__(self, _llm):
@@ -1009,7 +1097,7 @@ class TestChangeReviewAgent:
                 raise TypeError("boom")
 
         monkeypatch.setattr(
-            "devops_team.change_review_agent.agent.CodeReviewAgent", _RaisingEngine()
+            "software_engineering_team.devops_team.change_review_agent.agent.CodeReviewAgent", _RaisingEngine()
         )
         agent = ChangeReviewAgent(_StubClient({}))
         with pytest.raises(TypeError):
@@ -1024,7 +1112,9 @@ class TestChangeReviewAgent:
         branch is exercised at the helper level rather than through ``run``.)"""
         import logging
 
-        from devops_team.change_review_agent.agent import _normalize_severity
+        from software_engineering_team.devops_team.change_review_agent.agent import (
+            _normalize_severity,
+        )
 
         with caplog.at_level(logging.WARNING):
             assert _normalize_severity("catastrophic") == "low"
@@ -1032,7 +1122,10 @@ class TestChangeReviewAgent:
 
     def test_info_severity_maps_to_low_and_does_not_block(self) -> None:
         """An engine 'info' severity maps to ReviewFinding 'low' and does not block."""
-        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+        from software_engineering_team.devops_team.change_review_agent import (
+            ChangeReviewAgent,
+            ChangeReviewInput,
+        )
 
         client = _StubClient(
             {
@@ -1060,7 +1153,7 @@ class TestChangeReviewAgent:
 
 class TestDocumentationRunbookAgent:
     def test_produces_completion_package(self) -> None:
-        from devops_team.doc_runbook_agent import (
+        from software_engineering_team.devops_team.doc_runbook_agent import (
             DocumentationRunbookAgent,
             DocumentationRunbookInput,
         )
@@ -1372,7 +1465,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         """When the real merge fails, the pipeline reports failure and a blocked
         completion package with an honest ``merge.status == "failed"`` — it does
         not claim success on a merge that never landed."""
-        import devops_team.orchestrator as orch
+        import software_engineering_team.devops_team.orchestrator as orch
 
         monkeypatch.setattr(orch, "merge_branch", lambda *a, **k: (False, "merge conflict"))
         mock_llm = _scripted_llm_for_happy_path()
@@ -1397,7 +1490,7 @@ class TestDevOpsTeamLeadAgentIntegration:
     def test_delivery_development_branch_failure(self, monkeypatch) -> None:
         """A failure preparing the development branch aborts the run with an
         honest failure reason rather than committing to the wrong branch."""
-        import devops_team.orchestrator as orch
+        import software_engineering_team.devops_team.orchestrator as orch
 
         monkeypatch.setattr(orch, "ensure_development_branch", lambda *a, **k: (False, "no base"))
         mock_llm = _scripted_llm_for_happy_path()
@@ -1418,7 +1511,7 @@ class TestDevOpsTeamLeadAgentIntegration:
     def test_delivery_feature_branch_failure(self, monkeypatch) -> None:
         """A failure creating the feature branch aborts the run rather than
         writing changes onto whatever branch happens to be checked out."""
-        import devops_team.orchestrator as orch
+        import software_engineering_team.devops_team.orchestrator as orch
 
         monkeypatch.setattr(orch, "create_feature_branch", lambda *a, **k: (False, "boom"))
         mock_llm = _scripted_llm_for_happy_path()
@@ -1574,7 +1667,10 @@ from software_engineering_team.tests.conftest import (  # noqa: E402
 
 class TestDevOpsAgentsRecoverFencedJson:
     def test_iac_agent_recovers_fenced_response(self, monkeypatch) -> None:
-        from devops_team.iac_agent import IaCAgentInput, InfrastructureAsCodeAgent
+        from software_engineering_team.devops_team.iac_agent import (
+            IaCAgentInput,
+            InfrastructureAsCodeAgent,
+        )
 
         _patch_fenced_response(
             monkeypatch,
@@ -1591,7 +1687,10 @@ class TestDevOpsAgentsRecoverFencedJson:
         assert out.summary == "fenced iac ok"
 
     def test_cicd_pipeline_agent_recovers_fenced_response(self, monkeypatch) -> None:
-        from devops_team.cicd_pipeline_agent import CICDPipelineAgent, CICDPipelineAgentInput
+        from software_engineering_team.devops_team.cicd_pipeline_agent import (
+            CICDPipelineAgent,
+            CICDPipelineAgentInput,
+        )
 
         _patch_fenced_response(
             monkeypatch,
@@ -1607,7 +1706,7 @@ class TestDevOpsAgentsRecoverFencedJson:
         assert ".github/workflows/ci.yml" in out.artifacts
 
     def test_deployment_strategy_agent_recovers_fenced_response(self, monkeypatch) -> None:
-        from devops_team.deployment_strategy_agent import (
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
             DeploymentStrategyAgent,
             DeploymentStrategyAgentInput,
         )
@@ -1628,7 +1727,10 @@ class TestDevOpsAgentsRecoverFencedJson:
         assert out.strategy == "rolling"
 
     def test_infra_debug_agent_recovers_fenced_response(self, monkeypatch) -> None:
-        from devops_team.infra_debug_agent import IaCDebugInput, InfraDebugAgent
+        from software_engineering_team.devops_team.infra_debug_agent import (
+            IaCDebugInput,
+            InfraDebugAgent,
+        )
 
         _patch_fenced_response(
             monkeypatch,
@@ -1651,7 +1753,7 @@ class TestDevOpsAgentsRecoverFencedJson:
         assert out.fixable is True
 
     def test_doc_runbook_agent_recovers_fenced_response(self, monkeypatch) -> None:
-        from devops_team.doc_runbook_agent import (
+        from software_engineering_team.devops_team.doc_runbook_agent import (
             DocumentationRunbookAgent,
             DocumentationRunbookInput,
         )
@@ -1675,8 +1777,14 @@ class TestDevOpsAgentsRecoverFencedJson:
         assert "docs/runbook.md" in out.files
 
     def test_infra_patch_agent_recovers_fenced_response(self, monkeypatch) -> None:
-        from devops_team.infra_debug_agent.models import IaCDebugOutput, IaCExecutionError
-        from devops_team.infra_patch_agent import IaCPatchInput, InfraPatchAgent
+        from software_engineering_team.devops_team.infra_debug_agent.models import (
+            IaCDebugOutput,
+            IaCExecutionError,
+        )
+        from software_engineering_team.devops_team.infra_patch_agent import (
+            IaCPatchInput,
+            InfraPatchAgent,
+        )
 
         _patch_fenced_response(
             monkeypatch,
@@ -1701,7 +1809,10 @@ class TestDevOpsAgentsRecoverFencedJson:
         assert "main.tf" in out.patched_artifacts
 
     def test_devsecops_review_agent_recovers_fenced_response(self, monkeypatch) -> None:
-        from devops_team.devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
+        )
 
         _patch_fenced_response(
             monkeypatch,
@@ -1712,7 +1823,10 @@ class TestDevOpsAgentsRecoverFencedJson:
         assert out.approved
 
     def test_task_clarifier_recovers_fenced_response(self, monkeypatch) -> None:
-        from devops_team.task_clarifier import DevOpsTaskClarifierAgent, DevOpsTaskClarifierInput
+        from software_engineering_team.devops_team.task_clarifier import (
+            DevOpsTaskClarifierAgent,
+            DevOpsTaskClarifierInput,
+        )
 
         _patch_fenced_response(
             monkeypatch,

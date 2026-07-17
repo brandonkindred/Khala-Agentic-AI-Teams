@@ -152,7 +152,7 @@ def run_qa_agent(
     Postconditions: see ``run_chunked_agent_review``; QA bugs become issues with
     ``source="qa"``.
     """
-    from qa_agent.models import QAInput as _QAInput
+    from software_engineering_team.qa_agent.models import QAInput as _QAInput
 
     def _run_chunk(code: str) -> Any:
         result = qa_agent.run(
@@ -195,7 +195,7 @@ def run_security_agent(
     Postconditions: see ``run_chunked_agent_review``; vulnerabilities become
     issues with ``source="security"``.
     """
-    from security_agent.models import SecurityInput as _SecInput
+    from software_engineering_team.security_agent.models import SecurityInput as _SecInput
 
     def _run_chunk(code: str) -> Any:
         result = security_agent.run(

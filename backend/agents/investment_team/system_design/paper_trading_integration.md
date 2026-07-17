@@ -1,15 +1,14 @@
 # Paper Trading Integration
 
 Paper trading is an automatic step in the Strategy Lab cycle: every
-**winning** strategy is paper-traded against recent market data before the
-cycle marks `complete`. Losing strategies never reach this step, so
-paper-trade LLM budget is only spent on candidates that already cleared
-the backtest quality bar.
+**publishable** strategy is paper-traded against recent market data before the
+cycle marks `complete`. Losing and winning-but-not-publishable strategies
+never reach this step, so paper-trade LLM budget is only spent on candidates
+that already cleared the backtest return bar **and** robustness gates.
 
-## Winner gate
+## Winner label vs publishable gate
 
-Paper trading only runs when the backtest flags the strategy as
-winning. The verdict is deterministic — a valid run is winning iff its
+`is_winning` is a reporting label only — a valid run is winning iff its
 annualized return meets or beats the 8% S&P-500 benchmark; robustness gates
 record caveats but never change it:
 
@@ -17,14 +16,33 @@ record caveats but never change it:
 is_winning = execution_succeeded and trades and result.annualized_return_pct >= 8.0
 ```
 
+Paper trading gates on `is_publishable`:
+
+```python
+is_publishable = (
+    is_winning
+    and realism_passed
+    and trades_aligned
+    and exit_rule_conformance_passed
+    and not runtime_lookahead_violation
+)
+```
+
 If `is_winning` is False, the cycle records:
 
 - `paper_trading_status = "skipped"`
 - `paper_trading_skipped_reason = "not_winning"`
 
-and proceeds directly to `complete`. This is the explicit contract the
-user requested: a strategy that fails backtesting must not proceed to
-paper trading.
+If `is_winning` is True but `is_publishable` is False, the cycle records:
+
+- `paper_trading_status = "skipped"`
+- `paper_trading_skipped_reason` = comma-joined failing gate codes
+  (`exit_rule_conformance_failed`, `realism_failed`, `alignment_unresolved`,
+  `lookahead_violation` in that order)
+
+and proceeds directly to `complete`. This is the explicit contract: a
+strategy that fails the return bar or the robustness gates must not proceed
+to paper trading.
 
 ## Configuration
 
@@ -33,7 +51,7 @@ paper-trading-specific fields:
 
 | Field | Default | Meaning |
 |---|---|---|
-| `paper_trading_enabled` | `true` | Opt-out flag. When `false`, every winning strategy records `paper_trading_status="skipped"` with reason `"disabled"`. |
+| `paper_trading_enabled` | `true` | Opt-out flag. When `false`, every publishable strategy records `paper_trading_status="skipped"` with reason `"disabled"`. |
 | `paper_trading_lookback_days` | `365` | Days of recent OHLCV data fetched for paper trading. |
 
 `initial_capital`, `transaction_cost_bps`, and `slippage_bps` are
@@ -73,9 +91,11 @@ every exception raised by the step and records it:
 | Orchestrator produced no strategy code | `paper_trading_status = "skipped"`, `paper_trading_skipped_reason = "no_strategy_code"` |
 | Any other exception (e.g. sandbox crash) | `paper_trading_status = "failed"`, `paper_trading_error = "<exception text, truncated>"` |
 
-Either way, the `StrategyLabRecord` persists with `is_winning=True` so
-the user can re-run paper trading manually via
-`POST /strategy-lab/paper-trade` once the underlying issue is resolved.
+Either way, the `StrategyLabRecord` persists with `is_winning=True` (and
+`is_publishable=True` when gates cleared) so the user can re-run paper
+trading manually via `POST /strategy-lab/paper-trade` once the underlying
+issue is resolved. Legacy rows missing `is_publishable` deserialize as
+`False` and are rejected by the standalone endpoint until re-run.
 
 ## SSE phase events
 
@@ -95,7 +115,7 @@ list):
 - Retry paper trading on a record that originally recorded
   `paper_trading_status="skipped"` (reason `"no_market_data"` or
   `"no_strategy_code"`) or `paper_trading_status="failed"`.
-- Run a second paper-trading session against a winning record with
+- Run a second paper-trading session against a publishable record with
   different parameters (e.g. a longer `lookback_days`).
 
 The cycle-level `paper_trading_session_id` continues to point at the

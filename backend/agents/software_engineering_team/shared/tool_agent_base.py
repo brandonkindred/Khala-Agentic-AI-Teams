@@ -35,8 +35,7 @@ import json
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from code_review_agent.profiles import ReviewProfile
-
+from software_engineering_team.code_review_agent.profiles import ReviewProfile
 from software_engineering_team.shared.v2_models import (
     ReviewIssue,
     ToolAgentOutput,
@@ -287,7 +286,7 @@ class BaseReviewToolAgent:
         issues; any other exception is a defect and propagates. Each engine
         ``CodeReviewIssue.suggestion`` becomes the ``ReviewIssue.recommendation``.
         """
-        from code_review_agent import (
+        from software_engineering_team.code_review_agent import (
             CodeReviewAgent,
             CodeReviewInput,
             CodeReviewUnavailableError,

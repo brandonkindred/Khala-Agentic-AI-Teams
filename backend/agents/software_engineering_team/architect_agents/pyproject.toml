@@ -1,5 +1,5 @@
 [project]
-name = "architect-agents"
+name = "architect_agents"
 version = "0.1.0"
 description = "Enterprise Architect Agent System — Lead Orchestrator + Specialist Agents"
 requires-python = ">=3.10"

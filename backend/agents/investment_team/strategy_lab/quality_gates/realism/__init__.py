@@ -11,8 +11,10 @@ This package collects the verification-phase gates that enforce
 * :mod:`.trade_clustering` — trade arrivals must be spread across the
   backtest window, not concentrated in a single quarter or fold.
 
-Critical findings veto ``is_winning`` via the standard
-:func:`_apply_veto_to_acceptance_reason` path in the orchestrator.
+Critical findings contribute to ``is_publishable`` (and stamp
+``acceptance_reason``) via the standard
+:func:`_apply_veto_to_acceptance_reason` path in the orchestrator. They
+do **not** flip ``is_winning``.
 """
 
 from __future__ import annotations
