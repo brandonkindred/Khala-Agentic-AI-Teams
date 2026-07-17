@@ -47,9 +47,8 @@ max-statements = 130
 "agents/**/api/main.py" = ["E402"]
 "agents/**/api/*.py" = ["E402"]
 "agents/blogging/blog_research_agent/agent.py" = ["E402"]
-"agents/software_engineering_team/orchestrator.py" = ["E402"]
 "agents/software_engineering_team/devops_team/orchestrator.py" = ["E402"]
-"agents/software_engineering_team/architect-agents/**" = ["E402"]
+"agents/software_engineering_team/architect_agents/**" = ["E402"]
 "unified_api/main.py" = ["E402"]
 "unified_api/tests/**" = ["E402"]
 

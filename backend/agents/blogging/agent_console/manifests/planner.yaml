@@ -14,10 +14,6 @@ inputs:
 outputs:
   schema_ref: blogging.shared.content_plan:ContentPlan
   description: Structured plan consumed by the writer agent.
-invoke:
-  kind: http
-  method: POST
-  path: /api/blogging/research-and-review
 sandbox:
   manifest_path: default.yaml
   access_tier: standard

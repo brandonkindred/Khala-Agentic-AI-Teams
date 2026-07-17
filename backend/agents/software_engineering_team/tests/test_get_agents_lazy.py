@@ -22,13 +22,12 @@ if str(_team_dir) not in sys.path:
 import orchestrator  # noqa: E402
 import pytest  # noqa: E402
 
-# The 17 roles the fleet factory exposes. Kept explicit so a drift in the
+# The 16 roles the fleet factory exposes. Kept explicit so a drift in the
 # registry's key set is a visible test failure, not a silent behavior change.
 _EXPECTED_ROLES = {
     "architecture",
     "integration",
     "acceptance_verifier",
-    "tech_lead",
     "devops",
     "backend",
     "frontend_code_v2",
@@ -83,7 +82,9 @@ def test_building_and_probing_the_fleet_constructs_nothing(get_client_spy):
 
 def test_subscript_builds_and_caches_the_agent(get_client_spy):
     """First subscript builds via ``get_client``; repeat access is cached."""
-    from architecture_expert import ArchitectureExpertAgent
+    from software_engineering_team.architect_agents.architecture_expert import (
+        ArchitectureExpertAgent,
+    )
 
     agents = orchestrator._get_agents()
 
@@ -98,7 +99,7 @@ def test_subscript_builds_and_caches_the_agent(get_client_spy):
 
 def test_git_setup_entry_resolves_without_get_client(get_client_spy):
     """``git_setup`` uses a zero-arg class factory — no ``get_client`` cost."""
-    from git_setup_agent import GitSetupAgent
+    from software_engineering_team.git_setup_agent import GitSetupAgent
 
     agents = orchestrator._get_agents()
 

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from devops_team.models import GateStatus
 from pydantic import BaseModel, Field
+
+from software_engineering_team.devops_team.models import GateStatus
 
 
 class ValidationEvidence(BaseModel):

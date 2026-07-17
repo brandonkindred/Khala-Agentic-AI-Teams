@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from spec_parser import SPEC_FILENAME
 
 from software_engineering_team.api import main as _main
 from software_engineering_team.api.models import (
@@ -39,6 +38,7 @@ from software_engineering_team.shared.job_store import (
     update_job,
 )
 from software_engineering_team.shared.job_store import submit_answers as store_submit_answers
+from software_engineering_team.spec_parser import SPEC_FILENAME
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -66,7 +66,10 @@ def run_product_analysis(request: ProductAnalysisRunRequest) -> ProductAnalysisR
     initial_spec_path = None
     if not spec_content:
         try:
-            from spec_parser import get_newest_spec_content, get_newest_spec_path
+            from software_engineering_team.spec_parser import (
+                get_newest_spec_content,
+                get_newest_spec_path,
+            )
 
             initial_spec_path = get_newest_spec_path(repo)
             spec_content = get_newest_spec_content(repo)
@@ -339,9 +342,10 @@ def auto_answer_product_analysis_question(
     additional_context = request.spec_context if request else None
 
     try:  # pragma: no cover  # integration-only: runs PRA's LLM auto-answer pipeline
-        from product_requirements_analysis_agent import get_auto_answer_for_job
-
         from llm_service import get_client
+        from software_engineering_team.product_requirements_analysis_agent import (
+            get_auto_answer_for_job,
+        )
 
         llm = get_client("backend")
         result = get_auto_answer_for_job(
