@@ -4,9 +4,15 @@ Holds the bounded-executor + Temporal-dispatch machinery that drives brand runs
 off the request thread, plus the job lifecycle transitions. The collaborators
 tests monkeypatch (``orchestrator``, ``branding_store``, ``_run_executor``,
 ``_job_manager``, ``_job_heartbeat``) are owned by ``main`` and dereferenced
-through it at call time via ``_main`` — this module is imported at the bottom of
-``main`` (after those globals + ``app`` are defined), so ``_main`` binds a
-fully-populated hub and ``monkeypatch.setattr(main, …)`` keeps working.
+through it at call time.
+
+The ``import main as _main`` is done **inside** each function that needs it,
+not at module scope. ``main`` re-exports names from this module at its own bottom
+(``_run_branding_core`` et al. for the test surface), so a module-scope
+``from branding_team.api import main`` here would form a load-time cycle:
+importing ``background`` first would trigger ``main``, which re-imports names
+from a still-partially-initialised ``background``. Keeping the hub import
+function-local lets ``background`` (and its consumers) be imported independently.
 """
 
 from __future__ import annotations
@@ -18,7 +24,6 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
-from branding_team.api import main as _main
 from branding_team.api.models import RunBrandJobResponse, RunBrandRequest
 from branding_team.models import BrandCheckRequest, BrandingMission, BrandPhase, HumanReview
 from branding_team.shared.job_store import (
@@ -53,6 +58,8 @@ async def _run_in_pipeline_executor(func, *args):
         async-offloaded work elsewhere in the app; keeping pipeline work on its
         own bounded pool avoids that.
     """
+    from branding_team.api import main as _main
+
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_main._run_executor, func, *args)
 
@@ -88,6 +95,8 @@ def _run_branding_core(
           original exception** so callers (the Temporal activity) can surface it
           as a failed workflow rather than a silently-"completed" one.
     """
+    from branding_team.api import main as _main
+
     try:
         if not begin_job(job_id):
             return
@@ -158,6 +167,8 @@ def _submit_brand_run(
     payload: RunBrandRequest,
     target_phase: Optional[BrandPhase],
 ) -> RunBrandJobResponse:
+    from branding_team.api import main as _main
+
     brand = _main.branding_store.get_brand(client_id, brand_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")

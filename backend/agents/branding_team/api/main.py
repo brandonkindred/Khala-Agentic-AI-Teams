@@ -13,11 +13,16 @@ the actual logic:
 This module remains the single owning namespace for the collaborators the test
 suite monkeypatches (``orchestrator``, ``assistant_agent``, ``branding_store``,
 ``_run_executor``, ``_job_manager``, ``_stale_monitor_stop``,
-``_job_heartbeat_interval_s`` and the run/conversation helpers). Every moved
-public symbol is re-imported here so ``from …api.main import X`` and
-``monkeypatch.setattr(main, "X", …)`` keep working unchanged; the route,
-background, and conversation modules dereference these through ``main`` at call
-time.
+``_job_heartbeat_interval_s``) and re-exports the moved helpers, session store,
+and request/response DTOs, so ``from …api.main import X`` and
+``monkeypatch.setattr(main, "X", …)`` keep working unchanged for those names; the
+route, background, and conversation modules dereference the collaborators through
+``main`` at call time.
+
+The route *handler* functions are the exception: they live on their ``APIRouter``
+in ``api.routes.*`` (reached via the mounted app, never imported by name) and are
+not re-bound here — matching the split-router convention in
+``software_engineering_team/api``.
 """
 
 from __future__ import annotations

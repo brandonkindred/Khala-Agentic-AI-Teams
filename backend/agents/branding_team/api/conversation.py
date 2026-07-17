@@ -7,8 +7,10 @@ bounded pipeline executor.
 
 Collaborators tests monkeypatch (``orchestrator``, ``branding_store``,
 ``conversation_store``, ``assistant_agent`` via ``_get_assistant_agent``) are
-owned by ``main`` and dereferenced through ``_main`` at call time; this module is
-imported at the bottom of ``main`` so ``_main`` binds a fully-populated hub.
+owned by ``main`` and dereferenced through it at call time. The ``import main``
+is function-local (not at module scope): ``main`` re-exports names from this
+module at its own bottom, so a module-scope hub import would form a load-time
+cycle and stop ``conversation`` from being imported independently.
 """
 
 from __future__ import annotations
@@ -20,7 +22,6 @@ from typing import List, Optional
 
 from fastapi import HTTPException
 
-from branding_team.api import main as _main
 from branding_team.api.models import (
     ConversationMessage,
     ConversationStateResponse,
@@ -48,6 +49,8 @@ def _run_orchestrator_if_ready(
     don't change the mission. Equality is a structural Pydantic compare; no
     serialization needed.
     """
+    from branding_team.api import main as _main
+
     if not _mission_has_minimal_required_fields(mission):
         return None
     # NOTE: the short-circuit relies on BrandingMission being treated as
@@ -64,6 +67,8 @@ def _run_orchestrator_if_ready(
 
 
 def _brand_exists(brand_id: str) -> bool:
+    from branding_team.api import main as _main
+
     return _main.branding_store.brand_exists(brand_id)
 
 
@@ -128,6 +133,8 @@ def _create_branding_conversation_impl(
         Same as the endpoint; runs entirely with blocking calls and is meant to
         be dispatched via ``asyncio.to_thread``.
     """
+    from branding_team.api import main as _main
+
     conversation_store = _main.conversation_store
     brand_id = (req.brand_id or "").strip() or None
     if brand_id:
@@ -203,6 +210,8 @@ def _ensure_default_client() -> str:
         several clients), so a unique constraint isn't the right fix. A
         dedicated default-workspace flag or app-level lock is a follow-up.
     """
+    from branding_team.api import main as _main
+
     branding_store = _main.branding_store
     clients = branding_store.list_clients(limit=1)
     if clients:
@@ -236,6 +245,8 @@ def _auto_create_brand_from_conversation(
         assistant flow today; making it transactional requires cross-store
         connection sharing and is tracked as a follow-up.
     """
+    from branding_team.api import main as _main
+
     branding_store = _main.branding_store
     conversation_store = _main.conversation_store
     client_id = _ensure_default_client()
@@ -280,6 +291,8 @@ def _send_branding_conversation_message_impl(
         Same as the endpoint; runs entirely with blocking calls and is meant to
         be dispatched via ``asyncio.to_thread``.
     """
+    from branding_team.api import main as _main
+
     conversation_store = _main.conversation_store
     state = conversation_store.get_state(conversation_id)
     if state is None:
