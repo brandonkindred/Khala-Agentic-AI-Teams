@@ -68,6 +68,7 @@ from agents.blogging.shared.planning_config import (
     plan_critic_model_override,
     planning_model_override,
 )
+from agents.blogging.shared.run_pipeline_job import _is_external_cancellation
 from agents.blogging.shared.style_loader import append_guidelines, load_style_file
 from agents.blogging.validators.runner import run_validators_from_work_dir
 from temporalio.exceptions import CancelledError
@@ -115,25 +116,6 @@ PipelineStatus = Literal["PASS", "FAIL", "NEEDS_HUMAN_REVIEW"]
 
 # Type alias for job updater callback
 JobUpdater = Callable[..., None]
-
-
-def _is_external_cancellation(exc: BaseException) -> bool:
-    """True when the exception chain indicates a Temporal runtime cancellation.
-
-    Walks the ``__cause__``/``__context__`` chain (bounded by a ``seen`` id-set so a
-    self-referential chain can't loop forever) and tests each link with ``isinstance``
-    against ``temporalio.exceptions.CancelledError`` — robust to subclasses and free
-    of the class-name/module string matching that a Temporal exception-hierarchy
-    change could silently break.
-    """
-    cur: Optional[BaseException] = exc
-    seen: set[int] = set()
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        if isinstance(cur, CancelledError):
-            return True
-        cur = cur.__cause__ or cur.__context__
-    return False
 
 
 def _wait_for_hitl(
