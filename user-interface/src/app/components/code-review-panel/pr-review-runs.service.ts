@@ -51,7 +51,14 @@ export class PrReviewRunsService implements OnDestroy {
   // load and updated live by the per-job pollers below.
   private _reviews = new Map<number, PrReviewRecord[]>();
 
-  /** Read-only view so external code cannot bypass reset/hydrate/startReview to mutate state directly. */
+  /**
+   * Read-only view so external code cannot bypass reset/hydrate/startReview to mutate state directly.
+   *
+   * Preconditions: none.
+   * Postconditions: returns the live per-PR review map typed read-only (the same reference
+   * the pollers/hydrate mutate, so bound views stay current); callers must not mutate it.
+   * Pure — no side effects.
+   */
   get reviews(): ReadonlyMap<number, PrReviewRecord[]> {
     return this._reviews;
   }
@@ -73,7 +80,14 @@ export class PrReviewRunsService implements OnDestroy {
   // and only `createIssuesFor` mutates it.
   private readonly _creatingIssues = new Set<string>();
 
-  /** Read-only view of the in-flight "create issues" job ids (template/child binding). */
+  /**
+   * Read-only view of the in-flight "create issues" job ids (template/child binding).
+   *
+   * Preconditions: none.
+   * Postconditions: returns the live set of job ids with a "create issues" request in
+   * flight, typed read-only (same reference `createIssuesFor` mutates); callers must not
+   * mutate it. Pure — no side effects.
+   */
   get creatingIssues(): ReadonlySet<string> {
     return this._creatingIssues;
   }
@@ -83,7 +97,14 @@ export class PrReviewRunsService implements OnDestroy {
   // `createIssuesFor` mutates it.
   private readonly _createIssueErrors = new Map<string, string>();
 
-  /** Read-only view of per-job "create issues" failures (template/child binding). */
+  /**
+   * Read-only view of per-job "create issues" failures (template/child binding).
+   *
+   * Preconditions: none.
+   * Postconditions: returns the live map of job id → last "create issues" error message,
+   * typed read-only (same reference `createIssuesFor` mutates); callers must not mutate it.
+   * Pure — no side effects.
+   */
   get createIssueErrors(): ReadonlyMap<string, string> {
     return this._createIssueErrors;
   }
