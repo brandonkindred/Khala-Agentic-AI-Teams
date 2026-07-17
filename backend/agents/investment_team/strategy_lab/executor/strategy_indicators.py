@@ -53,18 +53,20 @@ except ImportError:  # flat sandbox layout
     )
 
 
-# One IndicatorRegistry per (thread, symbol, source) instead of one per call,
-# so its bar-fingerprint memoization actually takes effect across a
-# backtest's repeated indicator reads (see module docstring and
-# _shared_registry's docstring for the full reasoning). Thread-local because
-# api.main's _strategy_lab_worker runs multiple backtest cycles concurrently
-# via ThreadPoolExecutor, and the in-process predicate-conformance shadow gate
-# reaches these same functions from those worker threads — thread-local
-# storage isolates each without needing a lock. Bucketed by inferred symbol
-# and requested source because 8 of IndicatorRegistry's 16 methods (3 of them
-# with incremental deque state) don't include symbol in their own cache key,
-# and none of them see the caller's true requested source (indicator_value
-# always dispatches with the literal source="close" after pre-projecting).
+# Fallback cache for _shared_registry calls with no owning execution context
+# (the 16 wrapper functions below, and any direct indicator_value call with
+# no `registries` argument). StrategyContext/_ShadowContext each own their
+# own dict instead (see contract.py/predicate_conformance.py) — a thread-local
+# dict can't distinguish two different execution contexts that happen to run
+# on the same thread (sequentially or interleaved), so it isn't safe as the
+# *only* mechanism, but it's fine as a fallback for callers with no context
+# object to own one, since those callers have no notion of "a different
+# execution" to interleave with in the first place. Bucketed by inferred
+# symbol and requested source because 8 of IndicatorRegistry's 16 methods (3
+# of them with incremental deque state) don't include symbol in their own
+# cache key, and none of them see the caller's true requested source
+# (indicator_value always dispatches with the literal source="close" after
+# pre-projecting) — see _shared_registry's docstring for the full reasoning.
 _thread_local = threading.local()
 
 
@@ -90,9 +92,10 @@ def _trailing_element(reference):
     return None
 
 
-def _shared_registry(reference, *, source: str = "close") -> IndicatorRegistry:
-    """Return this thread's cached IndicatorRegistry for ``reference``'s
-    ``(symbol, source)``.
+def _shared_registry(
+    reference, *, source: str = "close", registries: Optional[dict] = None
+) -> IndicatorRegistry:
+    """Return a cached IndicatorRegistry for ``reference``'s ``(symbol, source)``.
 
     Symbol/timestamp inference is reliable for ``indicator_value`` (its
     ``history`` argument is always a real ``Bar``-like sequence keyed by
@@ -129,23 +132,40 @@ def _shared_registry(reference, *, source: str = "close") -> IndicatorRegistry:
     sees it — see ``_source_values``), so the registry's own cache key can't
     tell "sma of high" apart from "sma of close" for the same bars. If a
     bar's high happens to equal its close, the two projections' fingerprints
-    can coincide entirely. Bucketing by ``(symbol, source)`` here — one level
+    can coincide entirely. Bucketing by ``(symbol, source)`` — one level
     above the registry — keeps those reads in separate registries. The 16
     wrapper functions have no ``source`` concept (they always read whatever
     field the caller passed as "the" series) and all share the default.
+
+    ``registries`` is the dict this call reads/writes into: pass the owning
+    execution context's own dict (``StrategyContext``/``_ShadowContext`` each
+    hold one, see ``contract.py``/``predicate_conformance.py``) so that
+    instance's cache is never visible to any other context — including two
+    contexts for the *same* symbol constructed on the same thread whose bar
+    ingestion happens to interleave rather than one running to completion
+    before the next starts. A thread-local dict is a poor substitute for
+    this: it's shared by *whichever* contexts happen to run on that thread,
+    and nothing about "same thread" implies "same execution" once more than
+    one context can be live at a time. Omit ``registries`` (the 16 wrapper
+    functions below, and any direct call with no owning context) to fall
+    back to a thread-local dict — safe for those callers because they have
+    no context object to interleave through in the first place.
 
     Preconditions:
         ``reference`` is whatever pre-projection argument the caller already
         has in scope (``data``/``high``/``low``/``close``/``history``) — any
         shape ``_coerce_series`` accepts, or ``None``. ``source`` is the
         caller's requested source string (or the default ``"close"`` for
-        callers with no source concept). Never raises.
+        callers with no source concept). ``registries``, when given, is a
+        dict this call may read and write (typically an execution context's
+        own, initially-empty dict). Never raises.
     Postconditions:
         Returns an ``IndicatorRegistry``. When the trailing element exposes
         both a non-``None`` ``timestamp`` and a non-``None`` ``symbol``,
-        constructs and caches one per (thread, symbol, source) the first
+        constructs and caches one per ``(symbol, source)`` in ``registries``
+        (or this thread's dict, if ``registries`` is ``None``) the first
         time it's seen and returns that same instance on every subsequent
-        call for that key from this thread; otherwise returns a fresh,
+        call for that key against that same dict; otherwise returns a fresh,
         never-cached instance. Never mutates ``reference``.
     """
     last = _trailing_element(reference)
@@ -164,10 +184,11 @@ def _shared_registry(reference, *, source: str = "close") -> IndicatorRegistry:
     symbol = last.get("symbol") if isinstance(last, dict) else _safe_getattr(last, "symbol")
     if symbol is None:
         return IndicatorRegistry()
-    registries = getattr(_thread_local, "registries", None)
     if registries is None:
-        registries = {}
-        _thread_local.registries = registries
+        registries = getattr(_thread_local, "registries", None)
+        if registries is None:
+            registries = {}
+            _thread_local.registries = registries
     key = (symbol, source)
     reg = registries.get(key)
     if reg is None:
@@ -177,25 +198,16 @@ def _shared_registry(reference, *, source: str = "close") -> IndicatorRegistry:
 
 
 def _reset_shared_registries() -> None:
-    """Clear this thread's cached registries.
+    """Clear this thread's fallback registry cache (see :func:`_shared_registry`).
 
-    Called at the start of every ``StrategyContext``/``_ShadowContext``
-    execution (see ``contract.py``/``predicate_conformance.py``) — these are
-    the only two classes that hold per-execution ``_history`` state and call
-    into this module's indicator functions. Without a reset at construction,
-    a long-lived, in-process worker thread that constructs many of either
-    over its lifetime (e.g. ``_ShadowContext``, which runs in-process on
-    shared thread pools; ``StrategyContext``, mostly subprocess-isolated but
-    also constructible in-process) would never clear deque-stateful indicator
-    state from one execution's query pattern before the next's — even when
-    two executions' queries happen to align on length and boundary timestamp
-    for the same symbol, which :func:`_shared_registry`'s per-(symbol,
-    source) bucketing alone can't distinguish, since it has no notion of
-    "which execution" a call belongs to. Also the only thing bounding this
-    thread-local cache's memory: without it, a worker thread would retain one
-    ``IndicatorRegistry`` (and all its accumulated per-indicator deque state)
-    per distinct symbol it has ever seen, for the life of the thread. Also
-    called directly by tests that need a clean slate between cases.
+    Only affects calls with no ``registries`` argument — i.e. the 16 wrapper
+    functions below and any direct call with no owning execution context.
+    ``StrategyContext``/``_ShadowContext`` own their indicator registries as
+    an instance attribute instead (see ``contract.py``/
+    ``predicate_conformance.py``), so a new instance never depends on this
+    being called: its dict starts empty because it's a new dict, the same as
+    any other freshly-initialised attribute. Called directly by tests that
+    need a clean slate for the thread-local fallback between cases.
 
     Preconditions: none.
     Postconditions: the next :func:`_shared_registry` call on this thread
@@ -653,6 +665,7 @@ def indicator_value(
     history: Sequence,
     *,
     source: str = "close",
+    registries: Optional[dict] = None,
     **params,
 ) -> Optional[float]:
     """Latest scalar value of DSL indicator ``name`` over ``history``.
@@ -668,8 +681,8 @@ def indicator_value(
     Cost note: ``history`` is still projected fresh each call (O(len(history)),
     bounded by the caller's retention window — see
     ``StrategyContext._ingest_bar``), but the ``IndicatorRegistry`` itself is
-    no longer rebuilt per call: :func:`_shared_registry` returns one
-    thread-local, per-symbol instance reused across calls, so its bar-
+    no longer rebuilt per call: :func:`_shared_registry` returns one instance
+    reused across calls for the same ``(symbol, source)``, so its bar-
     fingerprint memoization actually takes effect. Repeated reads for the same
     symbol get the same incremental recurrences :class:`StreamingHistoryView`
     runs per bar, instead of a cold recompute every time.
@@ -680,6 +693,11 @@ def indicator_value(
         (``macd.output``, ``bollinger.band``, ``stochastic.output``) and
         ``source`` are valid for the indicator. Contract violations raise
         ``ValueError`` (a caller bug) — they are never silently coerced.
+        ``registries``, when given, should be the caller's own dict (see
+        :func:`_shared_registry`) — ``StrategyContext``/``_ShadowContext``
+        each pass their own instance attribute so their indicator state can
+        never be visible to any other context, however its calls interleave
+        with another context's on the same thread.
     Postconditions:
         Returns the latest indicator value as ``float``, or ``None`` when
         ``history`` is empty or the indicator is still in warm-up.
@@ -702,7 +720,7 @@ def indicator_value(
     if not history:
         return None
 
-    reg = _shared_registry(history, source=source)
+    reg = _shared_registry(history, source=source, registries=registries)
 
     # Every branch below only extracts/defaults this call's params and picks
     # the right bars projection — the actual name -> IndicatorRegistry method

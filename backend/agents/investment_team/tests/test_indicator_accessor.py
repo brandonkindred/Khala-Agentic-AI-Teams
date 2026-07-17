@@ -343,44 +343,78 @@ def test_indicator_value_source_bucket_isolates_high_and_close_projections() -> 
     assert got_close == pytest.approx(expected_close)
 
 
-def test_shadow_context_init_resets_shared_registry_cache() -> None:
+def test_shadow_context_owns_isolated_indicator_registries() -> None:
     """Regression test for a third bug caught in code review: ``_ShadowContext``
     runs in-process on worker threads (e.g. ``api.main``'s
     ``_strategy_lab_worker`` ``ThreadPoolExecutor``) that can process many
-    unrelated shadow-conformance executions over their lifetime. Each new
-    execution must start with a clean indicator-registry cache so one
-    execution's deque state (e.g. Bollinger) never bleeds into another's, and
-    so the cache doesn't grow unboundedly across executions on a long-lived
-    thread.
+    unrelated shadow-conformance executions over their lifetime. Each
+    instance owns its own indicator-registry cache as an instance attribute
+    (not shared thread-local state), so constructing a second context can
+    neither read nor clear the first's — a stronger guarantee than "reset at
+    construction" (see ``test_interleaved_contexts_do_not_corrupt_each_others_
+    indicator_state`` for why construction-time-only resets aren't enough).
     """
-    from investment_team.strategy_lab.executor import strategy_indicators as si
-
     first = _ShadowContext()
     for i, b in enumerate(_shadow_bars(30)):
         first._ingest_bar(b, i)
     first.indicator("bollinger", period=20, band="upper")  # warms the cache for "QQQ"
-    assert si._thread_local.registries  # sanity: something got cached
+    assert first._indicator_registries  # sanity: something got cached
 
-    _ShadowContext()  # a new, unrelated execution on the same thread
-    assert si._thread_local.registries == {}
+    second = _ShadowContext()
+    assert second._indicator_registries == {}  # a fresh, independent dict
+    assert first._indicator_registries  # constructing `second` didn't touch `first`
 
 
-def test_strategy_context_init_resets_shared_registry_cache() -> None:
+def test_strategy_context_owns_isolated_indicator_registries() -> None:
     """``StrategyContext`` can be constructed in-process (not just inside the
-    sandboxed subprocess — e.g. by tests), where a thread can persist across
-    instances; each new instance must start with a clean indicator-registry
-    cache for the same reason ``_ShadowContext`` does (see
-    ``test_shadow_context_init_resets_shared_registry_cache``)."""
-    from investment_team.strategy_lab.executor import strategy_indicators as si
-
+    sandboxed subprocess — e.g. by tests); it gets the same per-instance
+    isolation guarantee as ``_ShadowContext`` (see
+    ``test_shadow_context_owns_isolated_indicator_registries``)."""
     first = StrategyContext(emit=lambda _d: None)
     for b in _make_bars(30, symbol="QQQ"):
         first._ingest_bar(b)
-    first.indicator("bollinger", period=20, band="upper")  # warms the cache for "QQQ"
-    assert si._thread_local.registries  # sanity: something got cached
+    first.indicator("bollinger", period=20, band="upper")
+    assert first._indicator_registries
 
-    StrategyContext(emit=lambda _d: None)  # a new, unrelated execution on the same thread
-    assert si._thread_local.registries == {}
+    second = StrategyContext(emit=lambda _d: None)
+    assert second._indicator_registries == {}
+    assert first._indicator_registries
+
+
+def test_interleaved_contexts_do_not_corrupt_each_others_indicator_state() -> None:
+    """Regression test for a fourth bug caught in code review: two contexts
+    for the *same* symbol, constructed before either runs, with their bar
+    ingestion and indicator reads interleaved bar-by-bar — not one context
+    fully driven to completion before the next is even constructed. A
+    thread-local cache keyed only by ``(symbol, source)`` cannot tell these
+    two apart (both are "the same thread, the same symbol"), so an earlier
+    "reset the cache at construction" fix does not help once interleaving
+    begins — each context owning its own registries dict does not need to
+    tell them apart at all. Uses ``bollinger`` (deque-stateful, so a
+    corrupted read would visibly diverge from an independent computation)
+    over two genuinely different series for the same symbol.
+    """
+    a = _make_diverging_bars(60, symbol="X", seed=1)
+    b = _make_diverging_bars(60, symbol="X", seed=99)
+    ctx_a = StrategyContext(emit=lambda _d: None)
+    ctx_b = StrategyContext(emit=lambda _d: None)  # constructed before either runs
+    for ba, bb in zip(a, b):
+        ctx_a._ingest_bar(ba)
+        ctx_a.indicator("bollinger", period=20, band="upper")
+        ctx_b._ingest_bar(bb)
+        ctx_b.indicator("bollinger", period=20, band="upper")
+
+    got_a = ctx_a.indicator("bollinger", period=20, band="upper")
+    got_b = ctx_b.indicator("bollinger", period=20, band="upper")
+    exp_a = _engine_latest(
+        _engine_view(a), IndicatorRef(name="bollinger", params={"period": 20, "band": "upper"})
+    )
+    exp_b = _engine_latest(
+        _engine_view(b), IndicatorRef(name="bollinger", params={"period": 20, "band": "upper"})
+    )
+    assert got_a == pytest.approx(exp_a)
+    assert got_b == pytest.approx(exp_b)
+    assert got_a != pytest.approx(got_b)  # fixtures must actually differ
 
 
 # ---------------------------------------------------------------------------
