@@ -62,6 +62,44 @@ def test_run_workflow_with_llm_no_pra(tmp_path):
     assert handoff["client_context"]["problem_summary"] == "Need X"
 
 
+def test_run_workflow_open_questions_separate_from_empty_handoff_copy(tmp_path):
+    """result['open_questions'] carries the actual discovery questions, even though
+    handoff_package['open_questions'] is deliberately left empty (see the inline
+    comment in run_workflow) so downstream SE gating on a non-empty handoff isn't
+    tripped by every run."""
+    from planning_team.orchestrator import run_workflow
+
+    repo = str(tmp_path)
+    mock_llm = MagicMock()
+    mock_llm.get_max_context_tokens.return_value = 16384
+    mock_llm.complete.return_value = "CONDENSED"
+    mock_llm.complete_text.return_value = (
+        '{"problem_summary": "Need X", "opportunity_statement": "Y", '
+        '"target_users": ["u1"], "success_criteria": ["c1"], "assumptions": [], '
+        '"questions": [{"id": "q1", "question_text": "Scope?", '
+        '"options": [{"id": "o1", "label": "A", "is_default": true}]}]}'
+    )
+
+    result = run_workflow(
+        repo_path=repo,
+        initial_brief="App",
+        use_product_analysis=False,
+        llm=mock_llm,
+        job_updater=None,
+    )
+
+    assert result.get("success") is True
+    assert result["handoff_package"]["open_questions"] == []
+    assert result["handoff_package"]["resolved_questions"] == []
+    # The actual question must be recoverable from the top-level result key,
+    # as a plain JSON-safe dict (not an OpenQuestion model instance) — even
+    # though the handoff's own copy stays empty on purpose.
+    assert result["resolved_questions"] == []
+    assert len(result["open_questions"]) == 1
+    assert result["open_questions"][0]["question_text"] == "Scope?"
+    assert isinstance(result["open_questions"][0], dict)
+
+
 def test_get_llm_returns_llm_client(monkeypatch):
     """_get_llm must return whatever get_client yields (a real LLMClient), not a Strands Agent."""
     from planning_team.api import main as api_main
