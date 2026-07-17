@@ -73,7 +73,9 @@ export const routes: Routes = [
       {
         path: 'software-engineering/code-review',
         loadComponent: () =>
-          import('./components/code-review-panel/code-review-panel.component').then((m) => m.CodeReviewPanelComponent),
+          import('./components/code-review-dashboard/code-review-dashboard.component').then(
+            (m) => m.CodeReviewDashboardComponent,
+          ),
         title: 'Code Review',
         data: { breadcrumb: 'Code Review' },
       },

@@ -695,3 +695,37 @@ async def test_workflow_marks_failed_on_deliver_error(tmp_path) -> None:
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
     assert "deliver boom" in fail_call["args"][1]
+
+
+# ---------------------------------------------------------------------------
+# AgentDeprovisioningWorkflow — direct .run() invocation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_deprovisioning_workflow_calls_deprovision_activity() -> None:
+    """run() dispatches deprovision_activity with (agent_id, force) and returns its result."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    stub = _ExecActivityStub(
+        {
+            "deprovision_activity": {
+                "agent_id": "agent-1",
+                "success": True,
+                "details": {"tools": {"postgresql": True}},
+                "error": None,
+            },
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        result = await wf.AgentDeprovisioningWorkflow().run("agent-1", True)
+
+    assert result == {
+        "agent_id": "agent-1",
+        "success": True,
+        "details": {"tools": {"postgresql": True}},
+        "error": None,
+    }
+    call = _call(stub, "deprovision_activity")
+    assert call["args"] == ["agent-1", True]
