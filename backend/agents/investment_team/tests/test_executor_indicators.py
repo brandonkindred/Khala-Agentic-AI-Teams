@@ -130,6 +130,32 @@ def test_vwap_zero_cumulative_volume_falls_back_to_mean_close() -> None:
     assert out.tolist() == pytest.approx([1.0, 1.5])
 
 
+def test_indicators_accept_nullable_dtype_with_pd_na() -> None:
+    """Nullable ``Float64``/``Int64`` inputs carrying ``pd.NA`` run without raising.
+
+    ``_coerce_series`` returns a numeric nullable Series unchanged, so the bar
+    builders must normalise ``pd.NA`` to ``NaN`` (matching the prior pandas-backed
+    behaviour of propagating missing values) rather than raising ``TypeError`` from
+    ``float(pd.NA)``. The gap poisons only the windows that span it; values resume
+    once it scrolls out.
+    """
+    s = pd.Series([1.0, pd.NA, 3.0, 4.0, 5.0], dtype="Float64")
+    out = ind.sma(s, 2)
+    assert len(out) == 5
+    # SMA(2): index 3 = mean(3, 4) = 3.5, index 4 = mean(4, 5) = 4.5; earlier
+    # windows include the NA (or warm-up) and are NaN.
+    assert out.iloc[3] == pytest.approx(3.5)
+    assert out.iloc[4] == pytest.approx(4.5)
+    assert bool(out.iloc[:3].isna().all())
+
+    # A nullable Int64 column and the OHLC path likewise run without raising.
+    assert len(ind.rsi(pd.Series([1, pd.NA, 3, 4, 5, 6], dtype="Int64"), 3)) == 6
+    high = pd.Series([10.0, pd.NA, 12.0, 13.0], dtype="Float64")
+    low = pd.Series([9.0, 9.5, 11.0, 12.0], dtype="Float64")
+    close = pd.Series([9.5, 10.0, 11.5, 12.5], dtype="Float64")
+    assert len(ind.atr(high, low, close, 2)) == 4
+
+
 # ---------------------------------------------------------------------------
 # Indicator registry
 # ---------------------------------------------------------------------------

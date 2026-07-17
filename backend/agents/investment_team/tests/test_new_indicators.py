@@ -952,6 +952,31 @@ def test_pandas_macd_bounded_to_runtime_window_matches_engine() -> None:
     )
 
 
+def test_pandas_cumulative_vwap_matches_registry_period_none() -> None:
+    """The vectorised cumulative ``vwap`` is bit-identical to ``reg.vwap(period=None)``.
+
+    The plain cumulative helper is computed vectorised (O(n) ``cumsum``) rather than
+    by walking the registry over every expanding prefix (which would be O(n^2)).
+    ``cumsum`` is a sequential prefix sum, so it must reproduce the registry's
+    left-to-right running totals — and the same all-zero-volume-prefix mean-close
+    fallback — exactly. This pins the two together so the vectorised computation can
+    never silently drift from the registry definition it stands in for.
+    """
+    bars = _series(600, seed=21)
+    # Zero the first few volumes so the cumulative fallback (Σclose / bar_count on
+    # an all-zero-volume prefix) is exercised alongside the num/den path.
+    for b in bars[:5]:
+        b.volume = 0.0
+    high = pd.Series([b.high for b in bars])
+    low = pd.Series([b.low for b in bars])
+    close = pd.Series([b.close for b in bars])
+    vol = pd.Series([b.volume for b in bars])
+    series = pdi.vwap(high, low, close, vol)
+    for i in (0, 4, 5, 6, 50, 300, 599):
+        expected = IndicatorRegistry().vwap(bars[: i + 1], period=None)
+        assert float(series.iloc[i]) == pytest.approx(expected, rel=0, abs=1e-12), i
+
+
 def test_pandas_mfi_bounded_and_matches_registry_tail() -> None:
     """Pandas MFI stays in [0, 100] (modulo running-sum FP drift) and matches the registry.
 

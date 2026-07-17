@@ -184,32 +184,49 @@ class _Bar:
         self.volume = volume
 
 
+def _na_safe(s: pd.Series) -> np.ndarray:
+    """Coerced series → float64 ndarray with ``pd.NA`` mapped to ``NaN``.
+
+    Preconditions: ``s`` is a numeric ``pd.Series`` (``_coerce_series`` has already
+    rebuilt object-dtype input; nullable ``Float64``/``Int64`` may reach here
+    unchanged and carry ``pd.NA``).
+    Postconditions: a float64 ndarray whose missing values are ``NaN`` — so a
+    missing price propagates as ``NaN`` through the registry (matching the prior
+    pandas behaviour) rather than raising ``TypeError`` in ``float(pd.NA)``. Plain
+    ``float64`` passes through unchanged.
+    """
+    return s.to_numpy(dtype="float64", na_value=np.nan)
+
+
 def _close_bars(s: pd.Series) -> List[_Bar]:
     """Project a single source series onto close-only registry bars."""
-    return [_Bar(close=float(v)) for v in s]
+    return [_Bar(close=float(v)) for v in _na_safe(s)]
 
 
 def _hl_bars(h: pd.Series, low: pd.Series) -> List[_Bar]:
     """Zip high/low series into registry bars (donchian_channels)."""
-    return [_Bar(high=float(a), low=float(b)) for a, b in zip(h, low)]
+    return [_Bar(high=float(a), low=float(b)) for a, b in zip(_na_safe(h), _na_safe(low))]
 
 
 def _hlc_bars(h: pd.Series, low: pd.Series, c: pd.Series) -> List[_Bar]:
     """Zip high/low/close series into registry bars (atr/adx/stochastic/…)."""
-    return [_Bar(high=float(a), low=float(b), close=float(d)) for a, b, d in zip(h, low, c)]
+    return [
+        _Bar(high=float(a), low=float(b), close=float(d))
+        for a, b, d in zip(_na_safe(h), _na_safe(low), _na_safe(c))
+    ]
 
 
 def _hlcv_bars(h: pd.Series, low: pd.Series, c: pd.Series, v: pd.Series) -> List[_Bar]:
     """Zip high/low/close/volume series into registry bars (vwap/mfi)."""
     return [
         _Bar(high=float(a), low=float(b), close=float(d), volume=float(e))
-        for a, b, d, e in zip(h, low, c, v)
+        for a, b, d, e in zip(_na_safe(h), _na_safe(low), _na_safe(c), _na_safe(v))
     ]
 
 
 def _cv_bars(c: pd.Series, v: pd.Series) -> List[_Bar]:
     """Zip close/volume series into registry bars (obv)."""
-    return [_Bar(close=float(a), volume=float(b)) for a, b in zip(c, v)]
+    return [_Bar(close=float(a), volume=float(b)) for a, b in zip(_na_safe(c), _na_safe(v))]
 
 
 def _emit(scalars: Sequence[Optional[float]], index) -> pd.Series:
@@ -467,13 +484,35 @@ def vwap(
     all bars so far (``typical = (high+low+close)/3``), falling back to the
     running mean close when cumulative volume is 0 — the runtime convention
     (``IndicatorRegistry.vwap`` with ``period=None``).
+
+    Computed vectorised in O(n) — the sole full-history cumulative that the
+    per-bar registry cannot serve without an O(n^2) rescan of every prefix.
+    ``cumsum`` is a sequential prefix sum, so it reproduces the registry's
+    left-to-right running totals (and the same all-zero-volume-prefix fallback)
+    bit-for-bit; ``test_new_indicators`` pins that parity against the registry so
+    the two cannot drift.
     """
-    h = _coerce_series(high, "high")
-    low = _coerce_series(low, "low")
-    c = _coerce_series(close, "close")
-    v = _coerce_series(volume, "volume")
-    bars = _hlcv_bars(h, low, c, v)
-    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.vwap(w, period=None))
+    h_s = _coerce_series(high, "high")
+    low_s = _coerce_series(low, "low")
+    c_s = _coerce_series(close, "close")
+    v_s = _coerce_series(volume, "volume")
+    # Positional truncation to the shortest input, matching the OHLCV bar builders.
+    n = min(len(h_s), len(low_s), len(c_s), len(v_s))
+    h = _na_safe(h_s)[:n]
+    low = _na_safe(low_s)[:n]
+    c = _na_safe(c_s)[:n]
+    v = _na_safe(v_s)[:n]
+    typical = (h + low + c) / 3.0
+    num = np.cumsum(typical * v)
+    den = np.cumsum(v)
+    # Zero-cumulative-volume prefixes fall back to the running mean close — the
+    # registry's ``period=None`` convention — so ``den == 0`` (only when every
+    # in-window bar has zero volume) uses ``Σclose / bar_count`` instead of 0/0.
+    mean_close = np.cumsum(c) / np.arange(1, n + 1, dtype="float64")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = num / den
+    result = np.where(den != 0, ratio, mean_close)
+    return pd.Series(result, index=h_s.index[:n], dtype=float)
 
 
 def donchian_channels(
