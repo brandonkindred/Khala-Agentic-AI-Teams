@@ -500,6 +500,66 @@ def test_docker_deprovision_reports_failure_and_keeps_state_on_rm_error(
     assert prov._state.get("a1") is not None
 
 
+def test_docker_deprovision_confirms_removal_after_ambiguous_rm_failure(
+    tmp_path: Path,
+) -> None:
+    """An ambiguous `rm` failure whose follow-up probe confirms absence still clears state.
+
+    The daemon can remove the container but the CLI still reports failure (the
+    response or connection was lost afterward). Treating that as a genuine
+    failure would strand the state row pointing at a container that is
+    actually gone, which the next provision() would blindly reuse and register
+    as a running environment. A follow-up existence probe disambiguates.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put("a1", {"container_name": "c1"})
+
+    def _respond(cmd, *a, **kw):
+        if cmd[:2] == ["docker", "rm"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="connection reset by peer")
+        if cmd[:2] == ["docker", "inspect"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="Error: No such object: c1")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=_respond):
+        out = prov.deprovision("a1")
+
+    assert out.success is True
+    assert prov._state.get("a1") is None
+
+
+def test_docker_deprovision_ambiguous_rm_failure_with_unknown_followup_preserves_state(
+    tmp_path: Path,
+) -> None:
+    """An ambiguous `rm` failure whose follow-up probe is ALSO ambiguous preserves state.
+
+    Only a CONFIRMED absence (the daemon's specific missing-container response)
+    justifies clearing state; an unknown result from the follow-up probe (e.g.
+    the daemon is unreachable) must not be treated as proof of removal.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put("a1", {"container_name": "c1"})
+
+    def _respond(cmd, *a, **kw):
+        if cmd[:2] == ["docker", "rm"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="connection reset by peer")
+        if cmd[:2] == ["docker", "inspect"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="daemon unavailable")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=_respond):
+        out = prov.deprovision("a1")
+
+    assert out.success is False
+    assert prov._state.get("a1") is not None
+
+
 def test_docker_deprovision_infrastructure_error_is_not_absence(tmp_path: Path) -> None:
     """'no such file or directory' (daemon/storage error) must not pass as absence.
 

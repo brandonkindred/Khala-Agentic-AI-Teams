@@ -302,10 +302,23 @@ class DockerProvisionerTool(BaseToolProvisioner):
             )
             stderr = removal.stderr or ""
             if removal.returncode != 0 and not _reports_container_absent(stderr):
-                # Removal genuinely failed and the container may still exist.
-                # Keep the state row — deleting it would leave the live container
-                # untracked, unreachable by any later deprovision-by-agent-id, and
-                # its name would block every future provision.
+                # An ambiguous CLI failure (e.g. the daemon removed the
+                # container but the response/connection was then lost) does not
+                # by itself prove the container survived — a follow-up existence
+                # probe disambiguates. Only when the container is CONFIRMED gone
+                # do we clear state; an unknown or confirmed-alive result keeps
+                # the state row, since deleting it while the container survives
+                # would leave it untracked and its name blocking reprovisioning.
+                if self._container_exists(container_name) is False:
+                    self._state.delete(agent_id)
+                    return DeprovisionResult(
+                        tool_name=self.tool_name,
+                        success=True,
+                        details={
+                            "container_removed": container_name,
+                            "message": "rm reported failure but daemon confirms removed",
+                        },
+                    )
                 return DeprovisionResult(
                     tool_name=self.tool_name,
                     success=False,

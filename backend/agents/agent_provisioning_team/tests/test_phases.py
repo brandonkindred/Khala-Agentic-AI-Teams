@@ -376,6 +376,28 @@ def test_run_setup_preserves_container_adopted_by_concurrent_job() -> None:
     env_store.remove.assert_not_called()
 
 
+def test_run_setup_reclaims_fresh_container_despite_unrelated_record_update() -> None:
+    """An unrelated concurrent update to the OLD record must not fake adoption.
+
+    Ownership must be decided by container identity, not by whether ANY field
+    of the record changed: a concurrent add_tool/update_status touching the
+    OLD (non-running) container's record — e.g. bumping updated_at — makes the
+    whole-record comparison differ even though nobody adopted the container
+    THIS attempt just created. That must still be reclaimed, not leaked.
+    """
+    prior = _stored_env("a14", status="stopped", container_id="c-old")
+    updated_prior = _stored_env("a14", status="stopped", container_id="c-old")
+    updated_prior.updated_at = "2030-01-01T00:00:00+00:00"  # unrelated field bump
+    assert updated_prior.to_dict() != prior.to_dict()  # sanity: whole-dict differs
+
+    env_store = _rollback_env_store(get=[prior, updated_prior])
+    docker = _docker_stub(container_id="c-new", container_name="agent-a14")
+
+    _run_setup_expecting("register boom", "a14", env_store, docker)
+
+    docker.deprovision.assert_called_once_with("a14")
+
+
 def test_run_setup_keeps_prior_record_when_fresh_create_rolls_back() -> None:
     """Reclaiming a fresh container leaves an untouched prior record in place.
 

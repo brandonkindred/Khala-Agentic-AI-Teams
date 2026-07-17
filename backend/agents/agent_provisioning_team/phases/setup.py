@@ -213,9 +213,13 @@ def _rollback_failed_setup(
             )
             return
         # Reused orphan (no record anywhere): reclaim it.
-    elif current is not None and (existing is None or current.to_dict() != existing.to_dict()):
-        # We created the container, but a concurrent job has since registered a
-        # record of its own — it adopted the container; it is theirs now.
+    elif current is not None and current.container_id == result.details.get("container_id", ""):
+        # We created the container, and the current record identifies THAT
+        # container — a concurrent job registered it; it is theirs now. Compare
+        # container identity, not the whole record: an unrelated field bump on
+        # a record for a DIFFERENT (e.g. the old, non-running) container — say
+        # a concurrent add_tool/update_status touching `updated_at` — must not
+        # be mistaken for adoption of the container this attempt just created.
         return
     # Remaining created-path cases: no record at all, or the untouched prior
     # non-running record (kept for continuity) — either way the fresh container

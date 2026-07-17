@@ -321,28 +321,38 @@ class EnvironmentStore:
             * ``agent_id`` is non-empty.
         Postconditions:
             * Returns ``True`` iff every existing candidate path for
-              ``agent_id`` (primary store, then legacy locations) could be
-              stat'd and, when present, its content read; never raises.
-            * A path that does not exist is not a readability failure — only an
-              ``OSError`` while probing or reading an existing path is.
+              ``agent_id`` (primary store, then legacy locations) is either
+              genuinely absent, or present and parses as a well-formed record
+              (valid JSON object with the required keys); never raises.
+            * A path that does not exist is not a readability failure. A path
+              that exists but cannot be stat'd/read (``OSError``), or whose
+              content is not a well-formed record (malformed JSON, or valid
+              JSON missing a required key), IS a readability failure — such a
+              file is evidence *something* was written there, which must not
+              be conflated with confirmed absence.
 
         A listable directory is not sufficient: the specific record file can be
         individually unreadable (bad mode, transient I/O error) while sibling
         files list fine, and a legacy-location record is invisible to a
-        primary-only directory listing. ``get`` maps any such failure to
-        "record absent", which is safe for lookups but not for destructive
-        decisions — callers about to act destructively on a ``get() is None``
-        result combine it with this probe to distinguish genuine absence from a
-        record that exists but cannot be read right now.
+        primary-only directory listing. Nor is "the bytes could be read"
+        sufficient: ``get`` maps a malformed/incomplete record to ``None`` —
+        correct for lookups, since callers don't care why a record is
+        unusable — but a destructive rollback caller needs to know the
+        difference between "confirmed nothing was ever registered here" and
+        "something is here but we can't trust it" before treating ``get() is
+        None`` as proof an orphan is safe to reclaim.
         """
         assert agent_id, "agent_id must be non-empty"
+        required = ("agent_id", "container_id", "container_name")
         with _lock:
             for path in self._env_file_candidates(agent_id):
                 try:
                     if not path.exists():
                         continue
-                    path.read_text(encoding="utf-8")
-                except OSError:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    return False
+                if not isinstance(data, dict) or any(k not in data for k in required):
                     return False
         return True
 

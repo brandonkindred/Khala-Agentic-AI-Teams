@@ -188,6 +188,23 @@ def test_environment_store_readable_false_on_unreadable_legacy_copy(tmp_path: Pa
         assert store.readable("a1") is False
 
 
+def test_environment_store_readable_false_on_malformed_record(tmp_path: Path) -> None:
+    """A record that IS readable but malformed/incomplete also probes False.
+
+    ``get`` maps malformed JSON or a JSON object missing a required key to
+    ``None`` — correct for lookups, but a destructive caller must not conflate
+    that with confirmed absence: the file's mere existence is evidence
+    *something* was written there by an unknown prior process.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+
+    (tmp_path / "a1.json").write_text("not valid json{{{", encoding="utf-8")
+    assert store.readable("a1") is False
+
+    (tmp_path / "a2.json").write_text('{"agent_id": "a2"}', encoding="utf-8")
+    assert store.readable("a2") is False
+
+
 def test_environment_store_get_never_raises_on_unreadable_path(tmp_path: Path) -> None:
     """``get`` honors its never-raises contract even when Path.exists raises.
 
