@@ -1,4 +1,12 @@
-"""Branding API — direct synchronous run + interactive review-session endpoints."""
+"""Branding API — direct synchronous run + interactive review-session endpoints.
+
+``main`` is imported inside each handler, not at module scope: ``main`` mounts
+this router at the bottom of its own import (after ``app`` and its globals are
+defined), so a module-scope ``from branding_team.api import main`` here would
+form a load-time cycle — this module would be re-entered by main before
+``router`` (line below) is even defined. The function-local import keeps this
+router importable in any order.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +14,6 @@ from typing import List
 
 from fastapi import APIRouter, HTTPException
 
-from branding_team.api import main as _main
 from branding_team.api.models import (
     AnswerBrandingQuestionRequest,
     BrandingQuestion,
@@ -27,6 +34,8 @@ router = APIRouter()
 
 @router.post("/run", response_model=TeamOutput)
 def run_branding_team(payload: RunBrandingTeamRequest) -> TeamOutput:
+    from branding_team.api import main as _main
+
     mission = _mission_from_payload(payload)
     human_review = HumanReview(approved=payload.human_approved, feedback=payload.human_feedback)
     store = _main.branding_store if (payload.client_id and payload.brand_id) else None
@@ -44,6 +53,8 @@ def run_branding_team(payload: RunBrandingTeamRequest) -> TeamOutput:
 
 @router.post("/sessions", response_model=BrandingSessionResponse)
 def create_branding_session(payload: RunBrandingTeamRequest) -> BrandingSessionResponse:
+    from branding_team.api import main as _main
+
     mission = _mission_from_payload(payload)
     target_phase = _parse_target_phase(payload.target_phase)
     output = _main.orchestrator.run(
@@ -80,6 +91,8 @@ def answer_branding_question(
     question_id: str,
     payload: AnswerBrandingQuestionRequest,
 ) -> BrandingSessionResponse:
+    from branding_team.api import main as _main
+
     session = session_store.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")

@@ -3,6 +3,15 @@
 The async wrappers here dispatch the blocking conversation bodies
 (``api.conversation._*_impl``) onto the bounded pipeline executor so a
 multi-minute pipeline run never holds an event-loop worker.
+
+``main`` is imported inside each handler, not at module scope: ``main`` mounts
+this router at the bottom of its own import (after ``app`` and its globals are
+defined), so a module-scope ``from branding_team.api import main`` here would
+form a load-time cycle — this module would be re-entered by main before
+``router`` (line below) is even defined. The function-local import keeps this
+router importable in any order. ``background``/``conversation`` have no such
+restriction — neither imports ``main`` at module scope — so they stay imported
+at module scope here.
 """
 
 from __future__ import annotations
@@ -13,7 +22,6 @@ from typing import List, Optional
 from fastapi import APIRouter, Body, HTTPException
 
 from branding_team.api import background as _bg
-from branding_team.api import main as _main
 from branding_team.api.conversation import (
     _brand_exists,
     _conversation_to_response,
@@ -74,6 +82,8 @@ async def send_branding_conversation_message(
 def get_branding_conversation(conversation_id: str) -> ConversationStateResponse:
     """Return the full stored state (messages, mission, output, brand) for a
     conversation in a single query; 404 if it does not exist."""
+    from branding_team.api import main as _main
+
     state = _main.conversation_store.get_state(conversation_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -93,6 +103,8 @@ def list_branding_conversations(
 ) -> List[ConversationSummaryResponse]:
     """List conversation summaries (optionally filtered by ``brand_id``),
     resolving each attached brand's name in a single batched lookup."""
+    from branding_team.api import main as _main
+
     summaries = _main.conversation_store.list_conversations(brand_id=brand_id)
     # Resolve only the brand names referenced by these conversations instead
     # of loading every brand of every client into memory.
@@ -118,6 +130,8 @@ def attach_conversation_to_brand(
 ) -> ConversationStateResponse:
     """Attach an existing conversation to an existing brand and return the
     updated state. 404 if either the brand or the conversation is unknown."""
+    from branding_team.api import main as _main
+
     brand_id = payload.brand_id.strip()
     if not _brand_exists(brand_id):
         raise HTTPException(status_code=404, detail="Brand not found")

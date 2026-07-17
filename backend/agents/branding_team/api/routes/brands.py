@@ -1,4 +1,12 @@
-"""Branding API — brand CRUD endpoints and the brand's conversation lookup."""
+"""Branding API — brand CRUD endpoints and the brand's conversation lookup.
+
+``main`` is imported inside each handler, not at module scope: ``main`` mounts
+this router at the bottom of its own import (after ``app`` and its globals are
+defined), so a module-scope ``from branding_team.api import main`` here would
+form a load-time cycle — this module would be re-entered by main before
+``router`` (line below) is even defined. The function-local import keeps this
+router importable in any order.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +14,6 @@ from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from branding_team.api import main as _main
 from branding_team.api.conversation import _conversation_to_response
 from branding_team.api.models import (
     ConversationStateResponse,
@@ -30,6 +37,8 @@ def list_brands(
     ``limit``/``offset`` are validated by FastAPI (``gt=0`` / ``ge=0``) so bad
     input is a 422, not a 500 from the store's pagination guard.
     """
+    from branding_team.api import main as _main
+
     if not _main.branding_store.get_client(client_id):
         raise HTTPException(status_code=404, detail="Client not found")
     return _main.branding_store.list_brands_for_client(client_id, limit=limit, offset=offset)
@@ -37,6 +46,8 @@ def list_brands(
 
 @router.post("/clients/{client_id}/brands", response_model=Brand, status_code=201)
 def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
+    from branding_team.api import main as _main
+
     mission = _mission_from_payload(payload)
 
     brand = _main.branding_store.create_brand(
@@ -67,6 +78,8 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
 
 @router.get("/clients/{client_id}/brands/{brand_id}", response_model=Brand)
 def get_brand(client_id: str, brand_id: str) -> Brand:
+    from branding_team.api import main as _main
+
     brand = _main.branding_store.get_brand(client_id, brand_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
@@ -75,45 +88,24 @@ def get_brand(client_id: str, brand_id: str) -> Brand:
 
 @router.put("/clients/{client_id}/brands/{brand_id}", response_model=Brand)
 def update_brand(client_id: str, brand_id: str, payload: UpdateBrandRequest) -> Brand:
+    from branding_team.api import main as _main
+
     brand = _main.branding_store.get_brand(client_id, brand_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
-    mission = None
-    if any(
-        [
-            payload.company_name is not None,
-            payload.company_description is not None,
-            payload.target_audience is not None,
-            payload.values is not None,
-            payload.differentiators is not None,
-            payload.desired_voice is not None,
-            payload.existing_brand_material is not None,
-            payload.wiki_path is not None,
-        ]
-    ):
-        mission = brand.mission.model_copy(
-            update={
-                k: v
-                for k, v in {
-                    "company_name": payload.company_name,
-                    "company_description": payload.company_description,
-                    "target_audience": payload.target_audience,
-                    "values": payload.values,
-                    "differentiators": payload.differentiators,
-                    "desired_voice": payload.desired_voice,
-                    "existing_brand_material": payload.existing_brand_material,
-                    "wiki_path": payload.wiki_path,
-                }.items()
-                if v is not None
-            }
-        )
-        # A full-form PUT may resend unchanged mission fields alongside a
-        # status/name edit. Only forward a mission to the store when its content
-        # actually differs — passing an (unchanged) mission would needlessly
-        # invalidate the generated output there (see update_brand), making an
-        # otherwise idempotent update discard cached brand artifacts.
-        if mission == brand.mission:
-            mission = None
+
+    # Derive the mission patch from the payload's own field set (excluding the
+    # two non-mission fields) instead of a hand-maintained list of mission
+    # field names — keeps this in sync with UpdateBrandRequest automatically.
+    mission_patch = payload.model_dump(exclude_none=True, exclude={"status", "name"})
+    mission = brand.mission.model_copy(update=mission_patch) if mission_patch else None
+    # A full-form PUT may resend unchanged mission fields alongside a
+    # status/name edit. Only forward a mission to the store when its content
+    # actually differs — passing an (unchanged) mission would needlessly
+    # invalidate the generated output there (see update_brand), making an
+    # otherwise idempotent update discard cached brand artifacts.
+    if mission is not None and mission == brand.mission:
+        mission = None
 
     status = None
     if payload.status is not None:
@@ -138,6 +130,8 @@ def update_brand(client_id: str, brand_id: str, payload: UpdateBrandRequest) -> 
 )
 def get_brand_conversation(client_id: str, brand_id: str) -> ConversationStateResponse:
     """Return the single conversation for a brand."""
+    from branding_team.api import main as _main
+
     brand = _main.branding_store.get_brand(client_id, brand_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")

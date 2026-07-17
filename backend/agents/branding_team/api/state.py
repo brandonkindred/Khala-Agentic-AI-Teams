@@ -22,7 +22,7 @@ from branding_team.api.models import (
     BrandingSession,
     BrandingSessionResponse,
 )
-from branding_team.models import BrandingMission, BrandPhase
+from branding_team.models import BrandingMission, BrandPhase, TeamOutput
 from shared_postgres import get_conn
 from shared_postgres.metrics import timed_query
 
@@ -35,7 +35,9 @@ class BrandingSessionStore:
     """Postgres-backed session store — shared across worker processes."""
 
     @timed_query(store="branding_sessions", op="create")
-    def create(self, mission: BrandingMission, latest_output) -> tuple[str, BrandingSession]:
+    def create(
+        self, mission: BrandingMission, latest_output: TeamOutput
+    ) -> tuple[str, BrandingSession]:
         questions = _build_open_questions(mission)
         session_id = str(uuid4())
         session = BrandingSession(mission=mission, questions=questions, latest_output=latest_output)

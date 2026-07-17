@@ -142,9 +142,18 @@ def _run_branding_background(
 
     Postconditions:
         - Never raises. Job status is written by ``_run_branding_core``.
+
+    Note:
+        Calls ``_main._run_branding_core`` (the re-exported binding on the hub),
+        not the module-local ``_run_branding_core`` — ``main`` re-exports this
+        function specifically so tests can intercept it
+        (``patch.object(main_mod, "_run_branding_core", ...)``); calling the
+        local name here would make that patch a silent no-op.
     """
+    from branding_team.api import main as _main
+
     try:
-        _run_branding_core(
+        _main._run_branding_core(
             job_id,
             mission,
             human_review,
@@ -219,8 +228,12 @@ def _submit_brand_run(
         return RunBrandJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 
     try:
+        # Submit the hub's re-exported binding (not the module-local name) so a
+        # test that patches main._run_branding_background to intercept a
+        # thread-path submission actually observes it — same reasoning as
+        # _run_branding_background calling _main._run_branding_core above.
         _main._run_executor.submit(
-            _run_branding_background,
+            _main._run_branding_background,
             job_id,
             brand.mission,
             human_review,

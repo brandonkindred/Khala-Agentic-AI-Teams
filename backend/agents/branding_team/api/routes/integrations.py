@@ -1,4 +1,14 @@
-"""Branding API — outsourcing endpoints (market research + design assets)."""
+"""Branding API — outsourcing endpoints (market research + design assets).
+
+``main`` is imported inside each handler, not at module scope: ``main`` mounts
+this router at the bottom of its own import (after ``app`` and its globals are
+defined), so a module-scope ``from branding_team.api import main`` here would
+form a load-time cycle — this module would be re-entered by main before
+``router`` (line below) is even defined. The function-local import keeps this
+router importable in any order. ``background`` (``_bg``) has no such
+restriction — it never imports ``main`` at module scope — so it stays imported
+at module scope here.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +18,6 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from branding_team.api import background as _bg
-from branding_team.api import main as _main
 from branding_team.models import (
     BrandPhase,
     CompetitiveSnapshot,
@@ -31,6 +40,8 @@ async def request_market_research_for_brand(client_id: str, brand_id: str) -> Co
     loop instead of holding a worker thread. 404 if the brand is unknown; 503
     if the market-research service is unconfigured or fails.
     """
+    from branding_team.api import main as _main
+
     # get_brand is a synchronous (blocking) DB call — run it off the event loop.
     brand = await asyncio.to_thread(_main.branding_store.get_brand, client_id, brand_id)
     if not brand:
@@ -65,6 +76,8 @@ async def request_design_assets_for_brand(
     Phase 1 fallback run off the event loop instead of holding a worker thread.
     404 if the brand is unknown.
     """
+    from branding_team.api import main as _main
+
     brand = await asyncio.to_thread(_main.branding_store.get_brand, client_id, brand_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")

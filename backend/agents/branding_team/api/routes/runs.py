@@ -53,31 +53,29 @@ def get_branding_job_status(job_id: str) -> BrandJobStatusResponse:
     data = get_job(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    return BrandJobStatusResponse(
-        job_id=data.get("job_id", job_id),
-        status=data.get("status", JOB_STATUS_PENDING),
-        client_id=data.get("client_id"),
-        brand_id=data.get("brand_id"),
-        current_phase=data.get("current_phase"),
-        progress=data.get("progress"),
-        result=data.get("result"),
-        error=data.get("error"),
-        created_at=data.get("created_at"),
-        updated_at=data.get("updated_at"),
+    # model_validate picks up any response field the job store carries (extra
+    # keys are ignored — pydantic's default), so a new BrandJobStatusResponse
+    # field is populated automatically instead of needing a matching
+    # data.get(...) added here. job_id/status are computed explicitly first:
+    # both are required (non-Optional) fields, and the job store doesn't always
+    # set them, so model_validate(data) alone would raise on a missing key
+    # where the old hand-mapping defaulted instead.
+    return BrandJobStatusResponse.model_validate(
+        {
+            **data,
+            "job_id": data.get("job_id", job_id),
+            "status": data.get("status", JOB_STATUS_PENDING),
+        }
     )
 
 
 @router.get("/branding/jobs", response_model=BrandJobListResponse)
 def list_branding_jobs(running_only: bool = False) -> BrandJobListResponse:
     statuses = [JOB_STATUS_PENDING, JOB_STATUS_RUNNING] if running_only else None
+    # Same model_validate + explicit-default pattern as get_branding_job_status.
     items = [
-        BrandJobListItem(
-            job_id=j.get("job_id", ""),
-            status=j.get("status", JOB_STATUS_PENDING),
-            client_id=j.get("client_id"),
-            brand_id=j.get("brand_id"),
-            created_at=j.get("created_at"),
-            updated_at=j.get("updated_at"),
+        BrandJobListItem.model_validate(
+            {**j, "job_id": j.get("job_id", ""), "status": j.get("status", JOB_STATUS_PENDING)}
         )
         for j in list_jobs(statuses=statuses)
     ]

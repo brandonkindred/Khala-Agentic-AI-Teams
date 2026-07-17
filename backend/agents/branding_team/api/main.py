@@ -13,15 +13,22 @@ the actual logic:
 This module remains the single owning namespace for the collaborators the test
 suite monkeypatches (``orchestrator``, ``assistant_agent``, ``branding_store``,
 ``_run_executor``, ``_job_manager``, ``_stale_monitor_stop``,
-``_job_heartbeat_interval_s``) and re-exports the moved helpers, session store,
-and request/response DTOs, so ``from …api.main import X`` and
+``_job_heartbeat_interval_s``), so ``from …api.main import X`` and
 ``monkeypatch.setattr(main, "X", …)`` keep working unchanged for those names; the
 route, background, and conversation modules dereference the collaborators through
 ``main`` at call time.
 
-The route *handler* functions are the exception: they live on their ``APIRouter``
-in ``api.routes.*`` (reached via the mounted app, never imported by name) and are
-not re-bound here — matching the split-router convention in
+Beyond those globals, this module re-exports only the handful of names a test or
+another module actually reaches *through* ``main``: ``orchestrator``,
+``JOB_STATUS_RUNNING``/``JOB_STATUS_FAILED``, and — because tests intercept the
+run/conversation flow at the hub — ``_run_branding_core``,
+``_run_branding_background``, ``_signal_branding_cancel``, and
+``_run_orchestrator_if_ready``. Everything else moved out of the old monolith
+(DTOs, the session store, mission helpers, the remaining conversation/background
+helpers, and the route *handler* functions themselves) is imported directly from
+its owning module by the code that needs it — ``api.models``, ``api.state``,
+``api.conversation``, ``api.background``, or the mounted ``api.routes.*``
+``APIRouter`` — never re-bound here, matching the split-router convention in
 ``software_engineering_team/api``.
 """
 
@@ -37,27 +44,6 @@ from fastapi import HTTPException
 
 # --- Public contract / re-exports (keep import + monkeypatch surface stable) ---
 from branding_team.api.lifecycle import _branding_service_shutdown
-from branding_team.api.models import (  # noqa: F401
-    AnswerBrandingQuestionRequest,
-    AttachConversationBrandRequest,
-    BrandingQuestion,
-    BrandingSession,
-    BrandingSessionResponse,
-    BrandJobListItem,
-    BrandJobListResponse,
-    BrandJobStatusResponse,
-    ConversationMessage,
-    ConversationStateResponse,
-    ConversationSummaryResponse,
-    CreateBrandRequest,
-    CreateClientRequest,
-    CreateConversationRequest,
-    RunBrandingTeamRequest,
-    RunBrandJobResponse,
-    RunBrandRequest,
-    SendMessageRequest,
-    UpdateBrandRequest,
-)
 from branding_team.assistant import get_conversation_store
 from branding_team.assistant.agent import BrandingAssistantAgent
 from branding_team.orchestrator import (
@@ -183,26 +169,18 @@ def _get_assistant_agent() -> BrandingAssistantAgent:
     return assistant_agent
 
 
-# --- Re-export the moved helpers (import + monkeypatch surface). Imported after
-# the globals + app above so each module's ``from …api import main as _main``
-# binds a fully-populated hub. ---
+# --- Re-export the load-bearing subset (import + monkeypatch surface). Imported
+# after the globals + app above so each module's ``from …api import main as
+# _main`` binds a fully-populated hub. Only names actually reached *through*
+# main (by a test or another module) are re-exported here — everything else
+# moved out of the old monolith is imported directly from its owning module by
+# the code that needs it. ---
 from branding_team.api.background import (  # noqa: E402,F401
     _run_branding_background,
     _run_branding_core,
-    _run_in_pipeline_executor,
     _signal_branding_cancel,
-    _submit_brand_run,
 )
-from branding_team.api.conversation import (  # noqa: E402,F401
-    _auto_create_brand_from_conversation,
-    _brand_exists,
-    _conversation_to_response,
-    _create_branding_conversation_impl,
-    _ensure_default_client,
-    _local_message,
-    _run_orchestrator_if_ready,
-    _send_branding_conversation_message_impl,
-)
+from branding_team.api.conversation import _run_orchestrator_if_ready  # noqa: E402,F401
 
 # Mount the concern-grouped routers last, so the route modules'
 # ``from …api import main as _main`` binds a fully-populated hub.
@@ -214,19 +192,6 @@ from branding_team.api.routes import (  # noqa: E402
     integrations,
     runs,
     sessions,
-)
-from branding_team.api.state import (  # noqa: E402,F401
-    _MISSION_PLACEHOLDERS,
-    BrandingSessionStore,
-    _apply_answer,
-    _build_open_questions,
-    _is_real_value,
-    _mission_from_payload,
-    _mission_has_brand_name,
-    _mission_has_minimal_required_fields,
-    _parse_target_phase,
-    _session_response,
-    session_store,
 )
 
 app.include_router(clients.router)
