@@ -1,1 +1,0 @@
-"""Coding team graphs."""
