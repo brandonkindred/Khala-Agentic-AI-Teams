@@ -145,6 +145,9 @@ write of the latest state, not N sequential writes.
   after it.
 - `on_error` — invoked on any writer exception; default logs and swallows. A
   raising writer never kills the loop.
-- `start()`/`stop()`/`is_alive()`/context-manager use mirror
-  `BackgroundHeartbeat` exactly; `stop()` drains first (bounded by
-  `join_timeout`) so a payload enqueued just before shutdown still lands.
+- `start()`/`is_alive()`/context-manager use mirror `BackgroundHeartbeat`.
+  `stop()` drains first — **unbounded**, not bounded by `join_timeout` — so a
+  payload enqueued just before shutdown is guaranteed to land rather than
+  possibly being abandoned mid-write by a writer slower than `join_timeout`
+  (e.g. an HTTP client with its own longer timeout/retry budget);
+  `join_timeout` only bounds the final thread join once draining is done.

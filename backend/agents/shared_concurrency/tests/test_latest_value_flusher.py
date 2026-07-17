@@ -144,6 +144,29 @@ def test_stop_flushes_a_payload_enqueued_just_before_it() -> None:
     assert written == [99]
 
 
+def test_stop_waits_for_a_writer_slower_than_join_timeout() -> None:
+    """stop() must not abandon an outstanding write just because it outlasts join_timeout —
+    a writer whose own client has a longer timeout (e.g. an HTTP call) must still be allowed
+    to finish, or a stale write could land after the caller considers the flusher stopped."""
+    write_delay = 0.2
+    written: list[int] = []
+
+    def slow_writer(payload: int) -> None:
+        time.sleep(write_delay)
+        written.append(payload)
+
+    # join_timeout far shorter than the write itself: a bounded pre-stop drain would return
+    # (and stop() would proceed to signal shutdown) while the write is still in flight.
+    flusher = LatestValueFlusher(slow_writer, name="slow-stop", join_timeout=0.01).start()
+    flusher.enqueue(1)
+    start = time.monotonic()
+    flusher.stop()
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= write_delay, "stop() must wait for the in-flight write, not just join_timeout"
+    assert written == [1], "the write must complete before stop() returns"
+
+
 def test_stop_joins_thread_promptly() -> None:
     """stop() joins the writer thread; it is no longer alive afterwards."""
     flusher = LatestValueFlusher(lambda payload: None, name="join-test").start()

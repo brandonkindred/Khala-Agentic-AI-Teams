@@ -149,13 +149,27 @@ class LatestValueFlusher:
                         return
 
     def stop(self) -> None:
-        """Drain any pending payload, then signal the loop to exit and join it.
+        """Drain any pending payload — waiting as long as it takes — then signal the loop
+        to exit and join it.
+
+        The pre-shutdown drain is deliberately unbounded: the whole point of this primitive
+        is that the caller depends on the latest enqueued state actually reaching the
+        destination, so ``stop()`` must never abandon an outstanding write just because it
+        outlasts ``join_timeout`` — a writer whose own client has a longer timeout than
+        ``join_timeout`` (e.g. an HTTP call with a multi-second timeout/retry budget) would
+        otherwise be left running after the caller considers the flusher stopped, free to
+        land a stale write at an arbitrary later time. ``join_timeout`` still bounds the
+        final ``Thread.join()`` below, but by then the writer loop has nothing left to do
+        but observe the stop flag and exit, so that bound is not load-bearing for delivery.
 
         Postconditions:
             - Safe to call when never started or already stopped (no-op).
-            - The thread is joined for at most ``join_timeout`` seconds.
+            - Does not return until any payload enqueued before the call has been delivered
+              (``writer`` returned) or raised (routed to ``on_error``) — never abandons an
+              outstanding write.
+            - The thread is then joined for at most ``join_timeout`` seconds.
         """
-        self.drain(self._join_timeout)
+        self.drain()  # unbounded — see docstring
         self._stop_flag.set()
         self._wake.set()
         if self._thread is not None:

@@ -727,6 +727,82 @@ def test_terminal_status_write_survives_slow_pending_graph_persist(tmp_path, mon
     assert "task_graph_snapshot" not in final
 
 
+def test_failed_background_persist_write_is_retried_at_round_boundary(tmp_path, monkeypatch):
+    """If the background write for a graph mutation fails, _persist_state must NOT have
+    already been marked as delivered — otherwise the round-boundary sync checkpoint
+    (_persist_graph_sync) sees no change and skips retrying, permanently leaving the
+    terminal job's snapshot stale even though later status writes succeed. Fails the first
+    job-service write that carries a task_graph_snapshot and asserts the retried write
+    still lands with the correct (merged) state."""
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    class StubSwarm:
+        aborted = False
+
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+
+        def run(self, **kw):
+            # Triggers the async persist_callback path, then simulates the round-boundary
+            # durability checkpoint the real swarm loop performs every round.
+            self.graph.mark_branch_merged("t1")
+            kw["persist_fn"]()
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    updates: List[Dict[str, Any]] = []
+    failed_once = {"done": False}
+
+    def _update_job_fn(**kw: Any) -> None:
+        snap = kw.get("task_graph_snapshot")
+        # Target specifically the write for the merge mutation (not the earlier add_task /
+        # pre-loop writes, whose snapshot has no merged task yet) — this is what the review
+        # comment described: a failure on the FINAL mutation's write, with no later mutation
+        # around to incidentally paper over it.
+        if snap and any(t.get("status") == "merged" for t in snap) and not failed_once["done"]:
+            failed_once["done"] = True
+            raise RuntimeError("job service unavailable")
+        updates.append(kw)
+
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=_update_job_fn,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    assert failed_once["done"], "the merge write must have been attempted and failed once"
+    snapshot_writes = [kw for kw in updates if "task_graph_snapshot" in kw]
+    merged_writes = [
+        kw
+        for kw in snapshot_writes
+        if any(t["status"] == "merged" for t in kw["task_graph_snapshot"])
+    ]
+    assert merged_writes, (
+        "the merged state must have been retried and successfully delivered — a failed "
+        "write must not be silently mistaken for a delivered one"
+    )
+
+
 # ----------------------------------------------------- real quality-gate path
 
 

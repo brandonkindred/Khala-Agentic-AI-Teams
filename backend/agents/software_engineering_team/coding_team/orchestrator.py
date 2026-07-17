@@ -185,14 +185,16 @@ def run_coding_team_orchestrator(
     # Background single-writer flusher for the task-graph persist snapshot. Task-graph mutators
     # call _persist_graph_async() (below) synchronously while holding TaskGraphService's RLock
     # (see _maybe_persist's contract), so that path must never block on the job-service HTTP
-    # write — it hands the payload off to this flusher instead, which writes it off-thread.
-    # _update (below) drains the flusher before every write it makes, so a still-queued/
-    # in-flight background write can never land after — and clobber — a fresher one (most
-    # importantly a terminal status write).
+    # write — it hands a write-and-commit closure to this flusher instead, which runs it
+    # off-thread (the closure itself does the write and only then commits _persist_state, so a
+    # failed write is never mistaken for a delivered one — see _compute_persist_payload). _update
+    # (below) drains the flusher before every write it makes, so a still-queued/in-flight
+    # background write can never land after — and clobber — a fresher one (most importantly a
+    # terminal status write).
     from shared_concurrency import LatestValueFlusher  # noqa: PLC0415 - local, optional dep path
 
     flusher = LatestValueFlusher(
-        lambda payload: _raw_update(**payload),
+        lambda write: write(),
         name=f"coding-persist-{job_id}",
         on_error=lambda exc: logger.warning("Task graph background persist failed: %s", exc),
     ).start()
@@ -213,15 +215,18 @@ def run_coding_team_orchestrator(
             return bool(data and data.get(CANCEL_KEY))
 
         # Create Task Graph with persist
-        # Tracks the last persisted (graph revision, phase, status_text) so a no-op
-        # call skips the snapshot + job-service write entirely. The swarm loop persists
-        # 3x per round and every graph mutation persists too, so on an idle round (or
-        # back-to-back triggers for the same state) most calls are redundant; durability
-        # is preserved because any real mutation bumps graph.revision and any phase /
-        # status change is part of the key, so every actual state change still writes.
+        # Tracks the last CONFIRMED-persisted (graph revision, phase, status_text) so a no-op
+        # call skips the snapshot + job-service write entirely. The swarm loop persists 3x per
+        # round and every graph mutation persists too, so on an idle round (or back-to-back
+        # triggers for the same state) most calls are redundant; durability is preserved because
+        # any real mutation bumps graph.revision and any phase / status change is part of the
+        # key, so every actual state change still writes. "Confirmed" is load-bearing: this dict
+        # is only updated after a write actually succeeds (see _compute_persist_payload) — never
+        # optimistically at enqueue/compute time — so a failed write is retried by whichever
+        # persist call notices next, rather than being silently mistaken for delivered.
         _persist_state: Dict[str, Any] = {"revision": -1, "phase": None, "status_text": None}
 
-        def _compute_persist_payload() -> Optional[Dict[str, Any]]:
+        def _compute_persist_payload() -> "Optional[tuple[Dict[str, Any], Dict[str, Any]]]":
             # Shared by both persist paths below. Persists the snapshot through the SAME store
             # used for the resume read and cancel checks (the injected update_job_fn). On the
             # software-engineering path that is the SE job record; the hardcoded coding_team
@@ -229,6 +234,14 @@ def run_coding_team_orchestrator(
             # service's UPDATE-WHERE matches no row and the write — hence resume — is silently
             # lost. The standalone coding_team path's default callback writes the same keys to
             # the coding_team record exactly as before.
+            #
+            # Returns (wire_payload, commit_state) rather than committing _persist_state itself:
+            # the caller must only apply commit_state AFTER wire_payload is confirmed delivered
+            # (_raw_update did not raise). Committing eagerly — before the write is known to have
+            # succeeded — would let a failed write (e.g. the final merge/failure mutation, whose
+            # background write then fails) permanently mask itself: the next persist call would
+            # see revision/phase/status_text unchanged and skip retrying, silently leaving the
+            # terminal job's snapshot stale even though the terminal status write still succeeds.
             if (
                 graph.revision == _persist_state["revision"]
                 and phase == _persist_state["phase"]
@@ -236,33 +249,45 @@ def run_coding_team_orchestrator(
             ):
                 return None
             snap = graph.snapshot()
-            payload = {
+            wire_payload = {
                 "task_graph_snapshot": snap["tasks"],
                 "agent_task_map": snap["agent_task_map"],
                 "phase": phase,
                 "status_text": status_text,
                 "progress": _coding_progress(snap["tasks"], progress_base, progress_span),
             }
-            _persist_state["revision"] = graph.revision
-            _persist_state["phase"] = phase
-            _persist_state["status_text"] = status_text
-            return payload
+            commit_state = {"revision": graph.revision, "phase": phase, "status_text": status_text}
+            return wire_payload, commit_state
 
         def _persist_graph_async() -> None:
             # persist_callback= for TaskGraphService: invoked synchronously while its RLock is
-            # held, so this must never block on I/O — cheap in-memory bookkeeping only, then
-            # hand the payload to `flusher` for an off-thread write.
-            payload = _compute_persist_payload()
-            if payload is not None:
-                flusher.enqueue(payload)
+            # held, so this must never block on I/O — cheap in-memory bookkeeping only (build the
+            # payload), then hand a write-and-commit closure to `flusher` to run off-thread. The
+            # flusher's writer only calls the closure, so _persist_state advances precisely when
+            # (and only when) the write it describes actually lands.
+            computed = _compute_persist_payload()
+            if computed is None:
+                return
+            wire_payload, commit_state = computed
+
+            def _write_and_commit() -> None:
+                _raw_update(**wire_payload)
+                _persist_state.update(commit_state)
+
+            flusher.enqueue(_write_and_commit)
 
         def _persist_graph_sync() -> None:
             # Round-boundary / pre-loop durability checkpoint (persist_fn=). Drains first so a
-            # previously queued async write can never land after — and stomp on — this write.
+            # previously queued async write can never land after — and stomp on — this write; if
+            # that async write had failed, _persist_state was never advanced, so the check below
+            # naturally retries it here instead of silently accepting a stale snapshot.
             flusher.drain()
-            payload = _compute_persist_payload()
-            if payload is not None:
-                _raw_update(**payload)
+            computed = _compute_persist_payload()
+            if computed is None:
+                return
+            wire_payload, commit_state = computed
+            _raw_update(**wire_payload)
+            _persist_state.update(commit_state)
 
         graph: TaskGraphService = create_task_graph(job_id, persist_callback=_persist_graph_async)
         phase = "task_graph"
