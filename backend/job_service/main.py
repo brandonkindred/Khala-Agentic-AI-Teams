@@ -172,9 +172,17 @@ def update_job(team: str, job_id: str, req: UpdateJobRequest):
 def update_job_if_not_cancelled(team: str, job_id: str, req: UpdateJobRequest):
     """Atomically write ``req.fields`` unless the job is already cancelled.
 
-    The status guard lives in the SQL ``WHERE`` clause (see
-    ``db.update_job_if_not_cancelled``), so a cancel that lands between a
-    caller's read and this write is never overwritten.
+    Preconditions:
+        - ``req.fields`` values are JSON-serializable; ``req.fields["status"]``
+          (if present) must not be ``'cancelled'`` — this route is not a
+          cancellation mechanism (see ``db.update_job_if_not_cancelled``).
+    Postconditions:
+        - Returns ``updated=True`` and performs the write when the job exists
+          and is not cancelled. Returns ``updated=False`` with no write when the
+          job is missing or already cancelled.
+        - The status guard lives in the SQL ``WHERE`` clause (see
+          ``db.update_job_if_not_cancelled``), so a cancel that lands between a
+          caller's read and this write is never overwritten.
     """
     updated = db_update_job_if_not_cancelled(team, job_id, heartbeat=req.heartbeat, **req.fields)
     return UpdateIfNotCancelledResponse(updated=updated)

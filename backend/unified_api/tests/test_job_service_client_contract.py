@@ -159,6 +159,23 @@ def test_real_client_update_job_if_not_cancelled_false_when_cancelled(
     assert client.update_job_if_not_cancelled("j1", status="running") is False
 
 
+def test_real_client_update_job_if_not_cancelled_rejects_cancelled_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """This primitive is not a cancellation mechanism (unlike cancel_active_job, it
+    doesn't exclude other terminal statuses) — writing status='cancelled' through
+    it is a caller precondition violation, rejected before any HTTP call is made."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    made_request = {"called": False}
+    _route_through_mock_transport(
+        monkeypatch, lambda _req: made_request.update(called=True) or httpx.Response(200, json={})
+    )
+    client = JobServiceClient(team="t")
+    with pytest.raises(AssertionError):
+        client.update_job_if_not_cancelled("j1", status="cancelled")
+    assert made_request["called"] is False
+
+
 def test_real_client_retries_on_remote_protocol_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A stale pooled keep-alive connection raises ``RemoteProtocolError`` ("server
     disconnected without sending a response"). ``_request`` must treat it as transient
@@ -515,6 +532,18 @@ def test_fake_update_job_if_not_cancelled_does_not_block_on_other_terminal_statu
         fake_job_client.create_job(terminal, status=terminal)
         assert fake_job_client.update_job_if_not_cancelled(terminal, note="x") is True
         assert fake_job_client.get_job(terminal)["note"] == "x"
+
+
+def test_fake_update_job_if_not_cancelled_rejects_cancelled_status(
+    fake_job_client: FakeJobServiceClient,
+) -> None:
+    """This primitive is not a cancellation mechanism — writing status='cancelled'
+    through it would silently overwrite a completed/failed job (unlike
+    cancel_active_job's narrower pending/running-only guard), so it's rejected."""
+    fake_job_client.create_job("j1", status="completed")
+    with pytest.raises(AssertionError):
+        fake_job_client.update_job_if_not_cancelled("j1", status="cancelled")
+    assert fake_job_client.get_job("j1")["status"] == "completed"
 
 
 # ---------------------------------------------------------------------------

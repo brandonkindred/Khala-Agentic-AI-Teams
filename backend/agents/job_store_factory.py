@@ -87,11 +87,15 @@ def make_status_job_store(client_getter: ClientGetter) -> StatusJobStore:
     def update_job_if_not_cancelled(job_id: str, **fields: Any) -> bool:
         """Merge ``fields`` into ``job_id`` unless it is already cancelled.
 
-        Postconditions: returns True iff the write happened (the job existed and
-        was not cancelled); returns False (no write) otherwise. Atomic — the
-        cancelled-check and the write happen in one server-side conditional
-        update, so a cancel landing between a caller's decision and this call
-        can never be silently overwritten.
+        Preconditions:
+            ``fields["status"]``, if present, must not be ``JOB_STATUS_CANCELLED``
+            — this is not a cancellation mechanism (use ``cancel_job``).
+        Postconditions:
+            Returns True iff the write happened (the job existed and was not
+            cancelled); returns False (no write) otherwise. Atomic — the
+            cancelled-check and the write happen in one server-side conditional
+            update, so a cancel landing between a caller's decision and this call
+            can never be silently overwritten.
         """
         return client_getter().update_job_if_not_cancelled(job_id, **fields)
 

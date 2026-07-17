@@ -197,6 +197,86 @@ def list_jobs(team: str, statuses: list[str] | None = None) -> list[dict[str, An
         return [_row_to_dict(row, cur) for row in rows]
 
 
+def _prepare_update_fields(fields: dict[str, Any]) -> tuple[str | None, str]:
+    """Pop top-level columns out of ``fields`` and stamp ``last_activity_at``.
+
+    Shared preamble for :func:`update_job` and :func:`update_job_if_not_cancelled`
+    — both merge arbitrary caller fields into the ``data`` JSONB column and
+    promote ``status`` to its own column, so both need the same top-level-column
+    scrubbing and activity stamping.
+
+    Preconditions:
+        - ``fields`` values are JSON-serializable; this function mutates ``fields``
+          in place (pops keys, may add ``last_activity_at``).
+    Postconditions:
+        - Returns ``(new_status, now)`` where ``new_status`` is the popped
+          ``status`` value (or ``None`` if absent) and ``now`` is the server's
+          UTC timestamp used for stamping.
+        - ``fields`` no longer contains ``status``/``job_id``/``team``/
+          ``created_at``/``updated_at``/``last_heartbeat_at`` (those are
+          top-level columns, not ``data`` payload).
+        - ``fields["last_activity_at"]`` is set to ``now`` unless the caller
+          supplied a real (non-``None``) value — every real update counts as
+          orchestrator activity, which is what stall detection reads. Pure
+          liveness pings must use :func:`heartbeat`, which deliberately does NOT
+          touch ``last_activity_at``.
+    """
+    now = _now_iso()
+    new_status = fields.pop("status", None)
+    fields.pop("job_id", None)
+    fields.pop("team", None)
+    fields.pop("created_at", None)
+    fields.pop("updated_at", None)
+    fields.pop("last_heartbeat_at", None)
+    if fields.get("last_activity_at") is None:
+        fields["last_activity_at"] = now
+    return new_status, now
+
+
+def _execute_status_update(
+    cur: Any,
+    team: str,
+    job_id: str,
+    fields: dict[str, Any],
+    new_status: str | None,
+    now: str,
+    heartbeat: bool,
+    guard_cancelled: bool,
+) -> bool:
+    """Build and run the ``UPDATE jobs SET ...`` statement shared by
+    :func:`update_job` and :func:`update_job_if_not_cancelled`.
+
+    Preconditions:
+        - ``fields`` has already been prepared by :func:`_prepare_update_fields`
+          (no top-level columns left in it).
+    Postconditions:
+        - Executes exactly one ``UPDATE`` merging ``fields`` into ``data``,
+          optionally setting ``status``/``last_heartbeat_at``, and — when
+          ``guard_cancelled`` is True — restricting the write to rows where
+          ``status != 'cancelled'`` via ``RETURNING job_id``.
+        - Returns True when ``guard_cancelled`` is False (a bare UPDATE always
+          "succeeds" from the caller's perspective — no row-matched signal is
+          available without ``RETURNING``). Returns whether a row was matched
+          when ``guard_cancelled`` is True.
+    """
+    set_clauses = ["data = data || %s::jsonb"]
+    params: list[Any] = [json.dumps(fields)]
+    if new_status is not None:
+        set_clauses.append("status = %s")
+        params.append(new_status)
+    set_clauses.append("updated_at = %s")
+    params.append(now)
+    if heartbeat:
+        set_clauses.append("last_heartbeat_at = %s")
+        params.append(now)
+    sql = f"UPDATE jobs SET {', '.join(set_clauses)} WHERE team = %s AND job_id = %s"
+    params.extend([team, job_id])
+    if guard_cancelled:
+        sql += " AND status != 'cancelled' RETURNING job_id"
+    cur.execute(sql, tuple(params))
+    return cur.fetchone() is not None if guard_cancelled else True
+
+
 def update_job(team: str, job_id: str, heartbeat: bool = True, **fields: Any) -> None:
     """Merge ``fields`` into the job's data and refresh its timestamps.
 
@@ -210,68 +290,9 @@ def update_job(team: str, job_id: str, heartbeat: bool = True, **fields: Any) ->
           deliberately does NOT touch ``last_activity_at`` (it keeps ticking even
           when the orchestrator thread is hung, so it cannot signal a stall).
     """
-    now = _now_iso()
-    # If status is being updated, update the top-level column too
-    new_status = fields.pop("status", None)
-    # Remove other top-level columns from fields if present
-    fields.pop("job_id", None)
-    fields.pop("team", None)
-    fields.pop("created_at", None)
-    fields.pop("updated_at", None)
-    fields.pop("last_heartbeat_at", None)
-    # Stamp unless the caller supplied a real value. An explicit None is replaced
-    # too: a job that has ever been updated must always carry a valid activity
-    # timestamp, or the UI's stall detection silently loses its signal.
-    if fields.get("last_activity_at") is None:
-        fields["last_activity_at"] = now
-
+    new_status, now = _prepare_update_fields(fields)
     with get_conn() as conn, conn.cursor() as cur:
-        if new_status is not None:
-            if heartbeat:
-                cur.execute(
-                    """
-                        UPDATE jobs
-                        SET data = data || %s::jsonb,
-                            status = %s,
-                            updated_at = %s,
-                            last_heartbeat_at = %s
-                        WHERE team = %s AND job_id = %s
-                        """,
-                    (json.dumps(fields), new_status, now, now, team, job_id),
-                )
-            else:
-                cur.execute(
-                    """
-                        UPDATE jobs
-                        SET data = data || %s::jsonb,
-                            status = %s,
-                            updated_at = %s
-                        WHERE team = %s AND job_id = %s
-                        """,
-                    (json.dumps(fields), new_status, now, team, job_id),
-                )
-        else:
-            if heartbeat:
-                cur.execute(
-                    """
-                        UPDATE jobs
-                        SET data = data || %s::jsonb,
-                            updated_at = %s,
-                            last_heartbeat_at = %s
-                        WHERE team = %s AND job_id = %s
-                        """,
-                    (json.dumps(fields), now, now, team, job_id),
-                )
-            else:
-                cur.execute(
-                    """
-                        UPDATE jobs
-                        SET data = data || %s::jsonb,
-                            updated_at = %s
-                        WHERE team = %s AND job_id = %s
-                        """,
-                    (json.dumps(fields), now, team, job_id),
-                )
+        _execute_status_update(cur, team, job_id, fields, new_status, now, heartbeat, guard_cancelled=False)
 
 
 def update_job_if_not_cancelled(team: str, job_id: str, heartbeat: bool = True, **fields: Any) -> bool:
@@ -288,6 +309,11 @@ def update_job_if_not_cancelled(team: str, job_id: str, heartbeat: bool = True, 
         - ``fields`` MAY include ``status``; when present it is written to the
           top-level column (mirrors :func:`update_job`) as long as the job is not
           already cancelled.
+        - ``fields["status"]`` must not be ``'cancelled'`` — this primitive only
+          guards against overwriting an *existing* cancellation, it does not
+          exclude other terminal statuses the way ``cancel_active_job`` does, so
+          using it to cancel would silently clobber a completed/failed job.
+          Enforced with an assertion (a caller bug, not a runtime condition).
     Postconditions:
         - Returns True and performs the write when the job exists and its status
           is not ``'cancelled'``.
@@ -298,72 +324,13 @@ def update_job_if_not_cancelled(team: str, job_id: str, heartbeat: bool = True, 
           NOT block on other terminal statuses (completed/failed/interrupted),
           matching :func:`is_job_cancelled`'s existing (narrower) check exactly.
     """
-    now = _now_iso()
-    new_status = fields.pop("status", None)
-    fields.pop("job_id", None)
-    fields.pop("team", None)
-    fields.pop("created_at", None)
-    fields.pop("updated_at", None)
-    fields.pop("last_heartbeat_at", None)
-    if fields.get("last_activity_at") is None:
-        fields["last_activity_at"] = now
-
+    assert fields.get("status") != "cancelled", (
+        "update_job_if_not_cancelled must not be used to cancel a job "
+        "(it would overwrite a completed/failed job too) — use cancel_active_job"
+    )
+    new_status, now = _prepare_update_fields(fields)
     with get_conn() as conn, conn.cursor() as cur:
-        if new_status is not None:
-            if heartbeat:
-                cur.execute(
-                    """
-                        UPDATE jobs
-                        SET data = data || %s::jsonb,
-                            status = %s,
-                            updated_at = %s,
-                            last_heartbeat_at = %s
-                        WHERE team = %s AND job_id = %s
-                          AND status != 'cancelled'
-                        RETURNING job_id
-                        """,
-                    (json.dumps(fields), new_status, now, now, team, job_id),
-                )
-            else:
-                cur.execute(
-                    """
-                        UPDATE jobs
-                        SET data = data || %s::jsonb,
-                            status = %s,
-                            updated_at = %s
-                        WHERE team = %s AND job_id = %s
-                          AND status != 'cancelled'
-                        RETURNING job_id
-                        """,
-                    (json.dumps(fields), new_status, now, team, job_id),
-                )
-        else:
-            if heartbeat:
-                cur.execute(
-                    """
-                        UPDATE jobs
-                        SET data = data || %s::jsonb,
-                            updated_at = %s,
-                            last_heartbeat_at = %s
-                        WHERE team = %s AND job_id = %s
-                          AND status != 'cancelled'
-                        RETURNING job_id
-                        """,
-                    (json.dumps(fields), now, now, team, job_id),
-                )
-            else:
-                cur.execute(
-                    """
-                        UPDATE jobs
-                        SET data = data || %s::jsonb,
-                            updated_at = %s
-                        WHERE team = %s AND job_id = %s
-                          AND status != 'cancelled'
-                        RETURNING job_id
-                        """,
-                    (json.dumps(fields), now, team, job_id),
-                )
-        return cur.fetchone() is not None
+        return _execute_status_update(cur, team, job_id, fields, new_status, now, heartbeat, guard_cancelled=True)
 
 
 def apply_patch(

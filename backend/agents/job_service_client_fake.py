@@ -118,19 +118,32 @@ class FakeJobServiceClient:
     def update_job_if_not_cancelled(
         self, job_id: str, *, heartbeat: bool = True, **fields: Any
     ) -> bool:
-        # Mirror production (``backend/job_service/db.py`` update_job_if_not_cancelled):
-        # the cancelled-check and the write are one conditional UPDATE — a missing or
-        # already-cancelled job is left untouched and False is returned. Guards ONLY on
-        # 'cancelled' (not any terminal status), matching ``is_job_cancelled``'s existing
-        # narrower check. This fake is single-threaded, so the check-then-set below is
-        # atomic from the test's perspective, matching the row-locked SQL.
+        """Mirror production's ``update_job_if_not_cancelled`` conditional update.
+
+        Preconditions:
+            - ``fields`` values must not set ``status`` to ``'cancelled'`` (use
+              ``cancel_active_job`` to cancel — enforced by assertion).
+        Postconditions:
+            - Returns False and makes no write if ``job_id`` is missing or already
+              cancelled. Guards ONLY on 'cancelled' (not any terminal status),
+              matching ``is_job_cancelled``'s existing narrower check.
+            - Otherwise merges ``fields`` (delegating to ``update_job`` rather than
+              duplicating its merge/stamp logic — so it also inherits
+              ``update_job``'s separately-tracked, currently-production-unreachable
+              lack of ``last_heartbeat_at``/``job_id``/``team`` stripping) and
+              returns True.
+            - This fake is single-threaded, so the check-then-set below is atomic
+              from the test's perspective, matching the row-locked SQL in
+              ``backend/job_service/db.py``.
+        """
+        assert fields.get("status") != "cancelled", (
+            "update_job_if_not_cancelled must not be used to cancel a job "
+            "(it would overwrite a completed/failed job too) — use cancel_active_job"
+        )
         job = self._jobs.get(job_id)
         if job is None or job.get("status") == "cancelled":
             return False
-        if fields.get("last_activity_at") is None:
-            fields["last_activity_at"] = _now_iso()
-        job.update(fields)
-        self._stamp(job, heartbeat=heartbeat)
+        self.update_job(job_id, heartbeat=heartbeat, **fields)
         return True
 
     # -- events / heartbeat -------------------------------------------------

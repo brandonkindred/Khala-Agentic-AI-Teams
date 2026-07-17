@@ -74,3 +74,35 @@ def test_mark_failed_noop_when_cancelled(fake_client: FakeJobServiceClient) -> N
 
     assert job_store.mark_failed("job-1", "boom") is False
     assert fake_client.get_job("job-1")["status"] == job_store.JOB_STATUS_CANCELLED
+
+
+def test_begin_job_raises_for_missing_job(fake_client: FakeJobServiceClient) -> None:
+    """A missing job_id is a broken precondition, not a legitimate cancellation —
+    it must not be silently mislabeled as 'already cancelled' (regression: the
+    atomic primitive can't distinguish missing from cancelled by itself, since
+    both match zero rows; _guarded_transition disambiguates with a supplementary
+    read and raises instead)."""
+    with pytest.raises(ValueError, match="does not exist"):
+        job_store.begin_job("missing-job")
+
+
+def test_mark_completed_raises_for_missing_job(fake_client: FakeJobServiceClient) -> None:
+    with pytest.raises(ValueError, match="does not exist"):
+        job_store.mark_completed("missing-job", {"ok": True})
+
+
+def test_mark_failed_raises_for_missing_job(fake_client: FakeJobServiceClient) -> None:
+    with pytest.raises(ValueError, match="does not exist"):
+        job_store.mark_failed("missing-job", "boom")
+
+
+def test_guarded_transition_rejects_writing_cancelled_status(
+    fake_client: FakeJobServiceClient,
+) -> None:
+    """update_job_if_not_cancelled must not be usable to cancel a job (it would
+    overwrite a completed/failed job too, unlike cancel_active_job's narrower
+    guard) — enforced as a precondition, not silently allowed."""
+    fake_client.create_job("job-1", status=job_store.JOB_STATUS_COMPLETED)
+
+    with pytest.raises(AssertionError):
+        job_store.update_job_if_not_cancelled("job-1", status=job_store.JOB_STATUS_CANCELLED)

@@ -277,7 +277,11 @@ class JobServiceClient:
     ) -> bool:
         """Atomically merge ``fields`` into ``job_id`` unless it is already cancelled.
 
-        Preconditions: ``job_id`` is non-empty (the caller validates).
+        Preconditions: ``job_id`` is non-empty (the caller validates); ``fields``
+            must not set ``status`` to ``JOB_STATUS_CANCELLED`` — this primitive
+            only guards against writing over an *existing* cancellation, it is
+            not a cancellation mechanism itself (use ``cancel_active_job``, whose
+            guard additionally excludes jobs already in a terminal state).
         Postconditions: returns True only when the server performed the write
             because the job existed and was not cancelled. The cancelled-check is
             evaluated in the same conditional UPDATE that performs the write, so a
@@ -286,6 +290,10 @@ class JobServiceClient:
             ``cancel_active_job`` provides for cancellation itself, mirrored here
             for RUNNING/COMPLETED/FAILED transitions.
         """
+        assert fields.get("status") != JOB_STATUS_CANCELLED, (
+            "update_job_if_not_cancelled must not be used to cancel a job "
+            "(it would overwrite a completed/failed job too) — use cancel_active_job"
+        )
         resp = self._request(
             "POST",
             self._url(f"/jobs/{self.team}/{job_id}/update-if-not-cancelled"),

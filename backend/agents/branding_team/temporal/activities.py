@@ -275,7 +275,7 @@ def finalize_branding_activity(
 
 
 @activity.defn(name="branding_mark_failed")
-def mark_branding_failed_activity(job_id: str, error: str) -> None:
+def mark_branding_failed_activity(job_id: str, error: str) -> bool:
     """Record a FAILED job row for a pipeline failure.
 
     Preconditions:
@@ -284,10 +284,15 @@ def mark_branding_failed_activity(job_id: str, error: str) -> None:
         - Sets the row to FAILED with ``error`` unless the job was cancelled (a
           cancelled run is terminal, not a failure), via the shared
           ``job_store.mark_failed`` guard.
+        - Returns ``mark_failed``'s bool (True if the FAILED write happened,
+          False if the job was already cancelled) so a caller can observe the
+          outcome without a separate cancellation-check round trip; the current
+          workflow caller ignores it (it only needs the write attempted), but
+          the information is no longer silently discarded.
     """
     from branding_team.shared.job_store import mark_failed
 
-    mark_failed(job_id, error)
+    return mark_failed(job_id, error)
 
 
 @activity.defn(name="branding_check_cancelled")

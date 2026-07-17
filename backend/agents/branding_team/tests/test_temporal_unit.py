@@ -233,7 +233,13 @@ def test_begin_activity_runs_then_returns_true() -> None:
 def test_begin_activity_returns_false_when_cancelled() -> None:
     from branding_team.temporal import activities
 
-    with patch("branding_team.shared.job_store.update_job_if_not_cancelled", return_value=False):
+    with (
+        patch("branding_team.shared.job_store.update_job_if_not_cancelled", return_value=False),
+        patch(
+            "branding_team.shared.job_store.get_job",
+            return_value={"job_id": "job-1", "status": "cancelled"},
+        ),
+    ):
         assert activities.begin_branding_job_activity("job-1") is False
 
 
@@ -449,6 +455,10 @@ def test_finalize_activity_skips_completion_when_cancelled(monkeypatch) -> None:
         patch(
             "branding_team.shared.job_store.update_job_if_not_cancelled", return_value=False
         ) as mock_update,
+        patch(
+            "branding_team.shared.job_store.get_job",
+            return_value={"job_id": "job-abc", "status": "cancelled"},
+        ),
         patch.object(main_mod.branding_store, "append_brand_version"),
     ):
         activities.finalize_branding_activity(_phase_payload(), {}, None, None)
@@ -465,7 +475,7 @@ def test_mark_failed_activity_writes_failed_row() -> None:
     with patch(
         "branding_team.shared.job_store.update_job_if_not_cancelled", return_value=True
     ) as mock_update:
-        activities.mark_branding_failed_activity("job-1", "boom")
+        assert activities.mark_branding_failed_activity("job-1", "boom") is True
 
     _, kwargs = mock_update.call_args
     assert kwargs["status"] == main_mod.JOB_STATUS_FAILED
@@ -475,10 +485,16 @@ def test_mark_failed_activity_writes_failed_row() -> None:
 def test_mark_failed_activity_skips_when_cancelled() -> None:
     from branding_team.temporal import activities
 
-    with patch(
-        "branding_team.shared.job_store.update_job_if_not_cancelled", return_value=False
-    ) as mock_update:
-        activities.mark_branding_failed_activity("job-1", "boom")
+    with (
+        patch(
+            "branding_team.shared.job_store.update_job_if_not_cancelled", return_value=False
+        ) as mock_update,
+        patch(
+            "branding_team.shared.job_store.get_job",
+            return_value={"job_id": "job-1", "status": "cancelled"},
+        ),
+    ):
+        assert activities.mark_branding_failed_activity("job-1", "boom") is False
         mock_update.assert_called_once()
 
 
