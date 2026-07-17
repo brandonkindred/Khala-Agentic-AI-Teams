@@ -20,6 +20,22 @@ class FakeClient:
     def update_job(self, job_id, **fields):
         self.jobs.setdefault(job_id, {}).update(fields)
 
+    def update_job_if_not_cancelled(self, job_id, **fields):
+        job = self.jobs.get(job_id)
+        if job is None:
+            return None
+        if job.get("status") == "cancelled":
+            return False
+        job.update(fields)
+        return True
+
+    def cancel_active_job(self, job_id):
+        job = self.jobs.get(job_id)
+        if job is None or job.get("status") not in ("pending", "running"):
+            return False
+        job["status"] = "cancelled"
+        return True
+
     def list_jobs(self, statuses=None):
         vals = list(self.jobs.values())
         return [j for j in vals if j.get("status") in statuses] if statuses else vals

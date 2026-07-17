@@ -1,6 +1,6 @@
 @use '../chip';
 
-// Chip look shared via the code-review-panel chip partial: the `--draft` chip in
+// Chip look shared via the code-review-dashboard chip partial: the `--draft` chip in
 // the PR header and the `--event` chip in the reviews-table outcome cell.
 .cr-chip {
   @include chip.look;
