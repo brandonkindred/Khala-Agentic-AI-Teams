@@ -24,6 +24,24 @@ PHASE_ORDER = [
 ]
 
 
+def _as_json_list(items: Any) -> list:
+    """Return ``items`` as a list of JSON-native dicts, dumping any pydantic models.
+
+    Preconditions:
+        - ``items`` is ``None`` or an iterable of dicts and/or pydantic models
+          (e.g. ``context["open_questions"]``, a mix depending on which phase
+          produced each entry).
+    Postconditions:
+        - Returns a new list, same order, every pydantic model replaced by its
+          ``model_dump(mode="json")``; non-model items (already dicts) pass
+          through unchanged. Never mutates ``items``.
+    """
+    return [
+        item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+        for item in items or []
+    ]
+
+
 def resolve_pra_answers(
     questions: list,
     answer_callback: Optional[Callable[[list], list]],
@@ -94,6 +112,10 @@ def run_workflow(
           being auto-decided, because decisions must be made by the user.
 
     Returns a result dict with success, handoff_package, summary, failure_reason, current_phase.
+    On success, also carries open_questions/resolved_questions as their own top-level
+    keys — the actual discovery questions, distinct from handoff_package's own copies
+    of those fields (which are deliberately left empty; see the inline comment where
+    they're set, a few lines below where document production populates the handoff).
     """
     from planning_team.adapters import (
         market_research_to_evidence,
@@ -194,6 +216,13 @@ def run_workflow(
             result["handoff_package"].setdefault(
                 "resolved_questions", list(context.get("resolved_questions") or [])
             )
+        # Separate from the handoff (which deliberately stays empty above): the
+        # planning_runs audit write needs the *actual* discovery questions, so
+        # carry them as their own top-level result keys. JSON-dumped: unlike the
+        # handoff (already model_dump()'d as a whole), context still holds raw
+        # OpenQuestion/AnsweredQuestion model instances here.
+        result["open_questions"] = _as_json_list(context.get("open_questions"))
+        result["resolved_questions"] = _as_json_list(context.get("resolved_questions"))
 
         _update(Phase.SUB_AGENT_PROVISIONING.value, 90, "Sub-agent provisioning (optional)")
         ctx_update, _ = run_sub_agent_provisioning(

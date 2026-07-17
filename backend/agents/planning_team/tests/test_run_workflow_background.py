@@ -50,8 +50,10 @@ def test_success_records_planning_run(monkeypatch, job_store_calls, recorded_run
     handoff = {
         "client_context": {"client_name": "Acme"},
         "summary": "Handoff package produced by Planning.",
-        "open_questions": [{"id": "q1"}],
-        "resolved_questions": [{"question_id": "q1"}],
+        # Deliberately empty, mirroring orchestrator.py's real (load-bearing)
+        # behavior — the audit call must NOT source questions from here.
+        "open_questions": [],
+        "resolved_questions": [],
     }
     monkeypatch.setattr(
         main_module,
@@ -60,6 +62,8 @@ def test_success_records_planning_run(monkeypatch, job_store_calls, recorded_run
             "success": True,
             "handoff_package": handoff,
             "summary": "Planning completed; handoff package ready.",
+            "open_questions": [{"id": "q1"}],
+            "resolved_questions": [{"question_id": "q1"}],
         },
     )
     monkeypatch.setattr(main_module, "_get_llm", lambda: object())
@@ -72,6 +76,7 @@ def test_success_records_planning_run(monkeypatch, job_store_calls, recorded_run
     assert kwargs["client_name"] == "Acme"
     assert kwargs["summary"] == "Planning completed; handoff package ready."
     assert kwargs["handoff_summary"] == "Handoff package produced by Planning."
+    # Sourced from result's top-level keys, not the handoff's empty copies.
     assert kwargs["open_questions"] == [{"id": "q1"}]
     assert kwargs["resolved_questions"] == [{"question_id": "q1"}]
     assert job_store_calls["completed"][0][0] == "job-1"

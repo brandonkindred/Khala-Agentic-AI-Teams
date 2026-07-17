@@ -206,6 +206,25 @@ def test_document_production_activity_with_pra(tmp_path, monkeypatch, job_store)
     assert answered["result"] == [{"question_id": "q1", "selected_option_id": "o1"}]
 
 
+def test_document_production_activity_persists_questions_as_job_fields(
+    tmp_path, job_store, dummy_llm
+):
+    """The actual open_questions/resolved_questions are persisted as their own
+    top-level job fields, separate from the handoff's deliberately-empty copies —
+    the source finalize_planning_activity's audit write reads from."""
+    ctx = A.intake_activity("job-1", str(tmp_path), "Acme", "brief", None)
+    ctx = A.discovery_activity("job-1", ctx)
+    ctx = A.requirements_activity("job-1", ctx)
+    A.document_production_activity("job-1", ctx, False)
+
+    job = job_store["jobs"]["job-1"]
+    assert job["open_questions"], "expected the requirements phase's question to be persisted"
+    assert job["open_questions"][0]["question_text"] == "Scope?"
+    assert job["resolved_questions"] == []
+    # The handoff's own copies stay empty on purpose.
+    assert job["handoff_package"]["open_questions"] == []
+
+
 def test_sub_agent_provisioning_activity_noop_without_gap(tmp_path, job_store):
     ctx = A.intake_activity("job-1", str(tmp_path), "Acme", "brief", None)
     ctx = A.document_production_activity("job-1", ctx, False)
@@ -257,15 +276,19 @@ def test_finalize_activity_marks_completed(job_store):
 
 
 def test_finalize_activity_records_planning_run(monkeypatch, job_store) -> None:
-    """finalize re-reads the persisted handoff and calls record_planning_run
-    with the audit columns derived from it."""
+    """finalize re-reads the persisted job record and calls record_planning_run
+    with the audit columns derived from it — open_questions/resolved_questions
+    from the job's own top-level fields (persisted by document_production_activity),
+    not from the handoff's deliberately-empty copies of those same-named fields."""
     job_store["jobs"]["job-1"] = {
         "handoff_package": {
             "client_context": {"client_name": "Acme"},
             "summary": "Handoff package produced by Planning.",
-            "open_questions": [{"id": "q1"}],
-            "resolved_questions": [{"question_id": "q1"}],
-        }
+            "open_questions": [],
+            "resolved_questions": [],
+        },
+        "open_questions": [{"id": "q1"}],
+        "resolved_questions": [{"question_id": "q1"}],
     }
     captured = {}
     monkeypatch.setattr(
@@ -435,6 +458,16 @@ def test_activity_sequence_matches_orchestrator_handoff(tmp_path, monkeypatch, j
     # open_questions, so this empty handoff is deliberately preserved).
     assert act_handoff["open_questions"] == orch_result["handoff_package"]["open_questions"]
     assert act_handoff["resolved_questions"] == orch_result["handoff_package"]["resolved_questions"]
+    # The *actual* questions — sourced separately from the deliberately-empty
+    # handoff copies above — must also stay identical across both paths: the
+    # job record's top-level fields (Temporal) vs result's top-level keys
+    # (thread), both non-empty here since the fake LLM always emits a question.
+    act_job = job_store["jobs"]["job-1"]
+    assert act_job["open_questions"] == orch_result["open_questions"]
+    assert act_job["resolved_questions"] == orch_result["resolved_questions"]
+    assert act_job["open_questions"], (
+        "expected the fake LLM's question to survive to the job record"
+    )
 
 
 def test_activity_sequence_matches_orchestrator_handoff_with_pra_and_mr(
