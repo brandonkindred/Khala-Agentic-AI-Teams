@@ -1,22 +1,24 @@
 """API tests for Medium stats endpoints (agent mocked — no browser).
 
 Backed by an in-memory FakeJobServiceClient — no Postgres or live job service
-required.  The async tests still poll a real background thread for completion.
+required. The async tests still poll a real background thread for completion.
+
+Uses the same shared ``_api_test_utils.api_main``/``app``/``client`` as the other
+API test modules. Since the router split, route handlers are singleton dotted-path
+functions that always dereference ``agents.blogging.api.main`` (never a private
+per-test copy) at call time, so an isolated ``importlib``-reloaded module no longer
+observes any HTTP traffic — monkeypatches on it would silently do nothing. The real
+async-job queue these tests exercise is shared with ``test_api_unit.py``; the tests
+there that drive the queue directly substitute a fresh, test-local queue via
+monkeypatch to avoid racing a live worker (see that module for details).
 """
 
 import time
 
 import pytest
-from _api_test_utils import load_isolated_api_main
+from _api_test_utils import api_main as _api_main
+from _api_test_utils import app
 from fastapi.testclient import TestClient
-
-# A private module instance (not the shared `_api_test_utils.api_main`): these
-# tests submit real jobs through the un-mocked async route, spinning up
-# api/main.py's real daemon worker pool. Sharing the module with test_api_unit
-# (which pokes the same queue directly, assuming no worker is draining it)
-# would race the two and hang — see _api_test_utils.py's module docstring.
-_api_main = load_isolated_api_main("blogging_api_main_medium")
-app = _api_main.app
 
 
 @pytest.fixture(autouse=True)

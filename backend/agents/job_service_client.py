@@ -70,6 +70,27 @@ _RETRY_IDEMPOTENT_ONLY_ERRORS = (
 )
 
 
+class _RetryAmbiguityTracker:
+    """Records whether a _RETRY_IDEMPOTENT_ONLY_ERRORS-class transport error was
+    observed during a _request call -- i.e. whether an earlier attempt may
+    already have reached the server before its response was lost.
+
+    Preconditions:
+        - None; construct a fresh instance per _request call to be tracked.
+    Postconditions:
+        - maybe_reached_server starts False.
+    Invariants:
+        - Monotonic: only ever set True by _request, never reset to False.
+        - Only set from the _RETRY_IDEMPOTENT_ONLY_ERRORS except-branch, never
+          for _RETRY_ANY_METHOD_ERRORS (those prove the request never reached
+          the server at all, so there is no ambiguity to record).
+        - Scoped to a single _request call -- not reused across calls/threads.
+    """
+
+    def __init__(self) -> None:
+        self.maybe_reached_server: bool = False
+
+
 def _default_base_url() -> str:
     return os.environ.get("JOB_SERVICE_URL", "")
 
@@ -154,6 +175,7 @@ class JobServiceClient:
         *,
         timeout: float = 30.0,
         max_retries: int = 3,
+        retry_tracker: _RetryAmbiguityTracker | None = None,
         **kwargs: Any,
     ) -> httpx.Response:
         """Execute an HTTP request with idempotency-aware retry on transient errors.
@@ -181,6 +203,13 @@ class JobServiceClient:
                   duplicate the operation, and the caller must decide how to
                   recover.
                 * ``HTTPStatusError`` is never retried.
+            - When ``retry_tracker`` is not None, its ``maybe_reached_server``
+              attribute is set True iff at least one
+              ``_RETRY_IDEMPOTENT_ONLY_ERRORS`` exception was observed during
+              this call — regardless of whether that attempt was subsequently
+              retried or the exception ultimately propagated. It is never set
+              for ``_RETRY_ANY_METHOD_ERRORS``. When ``retry_tracker`` is None
+              (every pre-existing call site), behavior is unchanged.
         """
         delays = [0.5, 1.0, 2.0]
         last_exc: Exception | None = None
@@ -211,6 +240,8 @@ class JobServiceClient:
                 # non-idempotent method could duplicate the operation, so only
                 # idempotent methods are retried.
                 last_exc = exc
+                if retry_tracker is not None:
+                    retry_tracker.maybe_reached_server = True
                 if idempotent and attempt < max_retries:
                     _backoff(attempt)
                     continue
@@ -242,8 +273,40 @@ class JobServiceClient:
         return resp.json().get("job")
 
     def delete_job(self, job_id: str) -> bool:
-        resp = self._request("DELETE", self._url(f"/jobs/{self.team}/{job_id}"))
-        return resp.json().get("deleted", False)
+        """Delete a job, tolerating a lost response to an earlier retried attempt.
+
+        Preconditions:
+            - ``job_id`` is non-empty (caller-validated; not enforced here).
+        Postconditions:
+            - Returns True when the server deleted a row on this call, OR when
+              it reports ``deleted: false`` but an earlier attempt in this
+              call hit a ``_RETRY_IDEMPOTENT_ONLY_ERRORS``-class error
+              (``maybe_reached_server``) — that error class means an earlier
+              DELETE may have already reached the server and removed the row
+              before its own response was lost, which is exactly what
+              produced this call's ``deleted: false``. Reported as success
+              rather than a spurious not-found.
+            - Returns False only when the server reports ``deleted: false``
+              and no such ambiguous error occurred (the common
+              genuinely-nonexistent-job case), including when only
+              ``_RETRY_ANY_METHOD_ERRORS``-class errors occurred (those prove
+              no earlier attempt ever reached the server).
+            - Known, accepted limitation: if the job never existed AND the
+              server's "not found" response is itself lost to the same error
+              class (rather than a successful deletion's response), this
+              cannot be distinguished from the case above and will also
+              report True. The job service has no soft-delete/audit trail (a
+              hard SQL DELETE), so once a retry-eligible transport error has
+              occurred, "never existed" and "already deleted by an earlier
+              attempt" are server-side indistinguishable — informationally
+              unavoidable for a client-only fix.
+        """
+        tracker = _RetryAmbiguityTracker()
+        resp = self._request(
+            "DELETE", self._url(f"/jobs/{self.team}/{job_id}"), retry_tracker=tracker
+        )
+        deleted = resp.json().get("deleted", False)
+        return deleted or tracker.maybe_reached_server
 
     def cancel_active_job(self, job_id: str) -> bool:
         """Atomically cancel a job server-side only if it is still pending/running.
