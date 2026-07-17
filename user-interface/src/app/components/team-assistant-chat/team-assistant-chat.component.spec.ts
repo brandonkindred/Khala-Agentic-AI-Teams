@@ -228,6 +228,24 @@ describe('TeamAssistantChatComponent', () => {
     expect(component.editingValue).toBe('');
   });
 
+  it('field-value renders as a native button so Enter/Space activate it natively', () => {
+    component.fields = [{ key: 'foo', label: 'Foo' }];
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('.field-value') as HTMLButtonElement;
+    expect(btn.tagName.toLowerCase()).toBe('button');
+    expect(btn.type).toBe('button');
+  });
+
+  it('clicking field-value starts editing that field', () => {
+    component.fields = [{ key: 'foo', label: 'Foo' }];
+    fixture.detectChanges();
+    component.context = { foo: 'bar' };
+    const btn = fixture.nativeElement.querySelector('.field-value') as HTMLButtonElement;
+    btn.click();
+    expect(component.editingField).toBe('foo');
+    expect(component.editingValue).toBe('bar');
+  });
+
   it('fieldValue/isFieldFilled', () => {
     fixture.detectChanges();
     component.context = { a: 'x', b: null };

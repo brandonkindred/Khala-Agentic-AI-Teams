@@ -208,6 +208,13 @@
 }
 
 .field-value {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   min-height: 24px;
   padding: 4px 0;
