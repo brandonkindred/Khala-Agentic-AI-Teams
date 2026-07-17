@@ -282,6 +282,122 @@ def test_architecture_activity_returns_empty_with_no_architecture() -> None:
     assert out == []
 
 
+# ---------------------------------------------------------------------------
+# 3b. repo_root reconstructs a whole-repo reader across the Temporal boundary
+# ---------------------------------------------------------------------------
+
+
+def test_repo_reader_from_input_builds_disk_reader(tmp_path: Any) -> None:
+    """A non-blank ``repo_root`` yields a live ``DiskRepoReader`` that can read the
+    checkout — the channel that survives ``model_dump(mode='json')``."""
+    from code_review_agent.repo_reader import DiskRepoReader
+    from code_review_agent.temporal import activities as A
+
+    (tmp_path / "off_diff.py").write_text("EXISTS = True\n")
+    reader = A._repo_reader_from_input(_input(repo_root=str(tmp_path)))
+    assert isinstance(reader, DiskRepoReader)
+    assert reader.read_file("off_diff.py") == "EXISTS = True\n"
+
+
+def test_repo_reader_from_input_none_without_repo_root() -> None:
+    """No ``repo_root`` -> ``None`` reader (pre-existing keep-more behavior)."""
+    from code_review_agent.temporal import activities as A
+
+    assert A._repo_reader_from_input(_input()) is None
+
+
+def test_repo_reader_from_input_none_for_blank_repo_root() -> None:
+    """A blank ``repo_root`` is treated as "no reader", never a reader rooted at cwd."""
+    from code_review_agent.temporal import activities as A
+
+    assert A._repo_reader_from_input(_input(repo_root="   ")) is None
+
+
+def test_filter_activity_reconstructs_reader_from_repo_root(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The false-positive activity rebuilds a reader from ``repo_root`` and threads
+    it into ``filter_false_positives`` (instead of the old hardcoded ``None``)."""
+    import code_review_agent.false_positive_filter as fpf
+    from code_review_agent.repo_reader import DiskRepoReader
+    from code_review_agent.temporal import activities as A
+
+    captured: Dict[str, Any] = {}
+
+    def _capture(llm: Any, input_data: Any, issues: Any, repo_reader: Any = None) -> Any:
+        captured["repo_reader"] = repo_reader
+        return issues
+
+    monkeypatch.setattr(fpf, "filter_false_positives", _capture)
+
+    issue = {
+        "severity": "high",
+        "category": "logic",
+        "file_path": "a.py",
+        "line": 3,
+        "description": "x",
+        "suggestion": "",
+    }
+    A.filter_false_positives_activity(
+        _input(repo_root=str(tmp_path)).model_dump(mode="json"), [issue], False
+    )
+    assert isinstance(captured["repo_reader"], DiskRepoReader)
+
+
+def test_filter_activity_passes_none_reader_without_repo_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``repo_root`` -> the false-positive activity still passes ``repo_reader=None``."""
+    import code_review_agent.false_positive_filter as fpf
+    from code_review_agent.temporal import activities as A
+
+    captured: Dict[str, Any] = {}
+
+    def _capture(llm: Any, input_data: Any, issues: Any, repo_reader: Any = None) -> Any:
+        captured["repo_reader"] = repo_reader
+        return issues
+
+    monkeypatch.setattr(fpf, "filter_false_positives", _capture)
+
+    issue = {
+        "severity": "high",
+        "category": "logic",
+        "file_path": "a.py",
+        "line": 3,
+        "description": "x",
+        "suggestion": "",
+    }
+    A.filter_false_positives_activity(_input().model_dump(mode="json"), [issue], False)
+    assert captured["repo_reader"] is None
+
+
+def test_architecture_activity_reconstructs_reader_from_repo_root(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The architecture/redundancy activity rebuilds a reader from ``repo_root`` and
+    threads it into ``find_architecture_and_redundancy_issues``."""
+    import code_review_agent.architecture_consistency_pass as acp
+    from code_review_agent.repo_reader import DiskRepoReader
+    from code_review_agent.temporal import activities as A
+
+    captured: Dict[str, Any] = {}
+
+    def _capture(llm: Any, input_data: Any, repo_reader: Any = None) -> Any:
+        captured["repo_reader"] = repo_reader
+        return []
+
+    monkeypatch.setattr(acp, "find_architecture_and_redundancy_issues", _capture)
+
+    A.find_architecture_and_redundancy_activity(
+        _input(repo_root=str(tmp_path)).model_dump(mode="json")
+    )
+    assert isinstance(captured["repo_reader"], DiskRepoReader)
+
+    captured.clear()
+    A.find_architecture_and_redundancy_activity(_input().model_dump(mode="json"))
+    assert captured["repo_reader"] is None
+
+
 def test_finalize_activity_reconciles_minor_only_to_approved() -> None:
     from code_review_agent.temporal import activities as A
 
@@ -358,6 +474,57 @@ def test_run_uses_coordinator_when_temporal_disabled() -> None:
     out = CodeReviewAgent(llm_client=DummyLLMClient()).run(_input())
     assert isinstance(out, CodeReviewOutput)
     assert out.approved is True
+
+
+def test_run_rebuilds_reader_from_repo_root_when_no_live_reader(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In the in-process path, ``run()`` reconstructs a ``DiskRepoReader`` from
+    ``input_data.repo_root`` so a serialized path grants the same off-diff read
+    access as a live reader would."""
+    from code_review_agent.repo_reader import DiskRepoReader
+
+    captured: Dict[str, Any] = {}
+
+    def _capture(llm, input_data, progress_callback=None, repo_reader=None):  # noqa: ANN001
+        captured["repo_reader"] = repo_reader
+        return CodeReviewOutput(approved=True)
+
+    monkeypatch.setattr("code_review_agent.agent.run_coordinator", _capture)
+    CodeReviewAgent(llm_client=DummyLLMClient()).run(_input(repo_root=str(tmp_path)))
+    assert isinstance(captured["repo_reader"], DiskRepoReader)
+
+
+def test_run_prefers_live_reader_over_repo_root(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit live reader wins over ``repo_root`` reconstruction."""
+    captured: Dict[str, Any] = {}
+    sentinel = object()
+
+    def _capture(llm, input_data, progress_callback=None, repo_reader=None):  # noqa: ANN001
+        captured["repo_reader"] = repo_reader
+        return CodeReviewOutput(approved=True)
+
+    monkeypatch.setattr("code_review_agent.agent.run_coordinator", _capture)
+    CodeReviewAgent(llm_client=DummyLLMClient()).run(
+        _input(repo_root=str(tmp_path)),
+        repo_reader=sentinel,  # type: ignore[arg-type]
+    )
+    assert captured["repo_reader"] is sentinel
+
+
+def test_run_passes_none_reader_without_repo_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No live reader and no ``repo_root`` -> coordinator gets ``repo_reader=None``."""
+    captured: Dict[str, Any] = {}
+
+    def _capture(llm, input_data, progress_callback=None, repo_reader=None):  # noqa: ANN001
+        captured["repo_reader"] = repo_reader
+        return CodeReviewOutput(approved=True)
+
+    monkeypatch.setattr("code_review_agent.agent.run_coordinator", _capture)
+    CodeReviewAgent(llm_client=DummyLLMClient()).run(_input())
+    assert captured["repo_reader"] is None
 
 
 def test_run_dispatches_to_temporal_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:

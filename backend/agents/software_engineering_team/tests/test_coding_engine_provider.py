@@ -74,8 +74,16 @@ def test_run_pr_code_review_legacy_code_mode(monkeypatch) -> None:
     import software_engineering_team.code_review_agent as cra
 
     class _FakeAgent:
+        def __init__(self, llm_client=None, *, force_in_process=False):
+            self.force_in_process = force_in_process
+
         def run(self, review_input, **kwargs):
-            return types.SimpleNamespace(issues=[], review_input=review_input, kwargs=kwargs)
+            return types.SimpleNamespace(
+                issues=[],
+                review_input=review_input,
+                kwargs=kwargs,
+                force_in_process=self.force_in_process,
+            )
 
     monkeypatch.setattr(cra, "CodeReviewAgent", _FakeAgent)
 
@@ -89,8 +97,10 @@ def test_run_pr_code_review_legacy_code_mode(monkeypatch) -> None:
     )
     assert out.issues == []
     assert out.kwargs["progress_callback"] == "cb"
-    # No repo_reader supplied -> not forwarded (keeps duck-typed stubs working).
+    # No repo_reader supplied -> not forwarded (keeps duck-typed stubs working)
+    # and durable Temporal dispatch is retained (force_in_process stays False).
     assert "repo_reader" not in out.kwargs
+    assert out.force_in_process is False
     assert out.review_input.code == "c"
     assert out.review_input.files is None
     assert out.review_input.pre_numbered is True
@@ -98,12 +108,21 @@ def test_run_pr_code_review_legacy_code_mode(monkeypatch) -> None:
 
 
 def test_run_pr_code_review_whole_file_mode_forwards_reader(monkeypatch) -> None:
-    """Whole-file (``files=``) mode: builds a files-backed input and forwards the reader."""
+    """Whole-file (``files=``) mode: builds a files-backed input, forwards the reader,
+    and forces the in-process coordinator so the live reader is actually used."""
     import software_engineering_team.code_review_agent as cra
 
     class _FakeAgent:
+        def __init__(self, llm_client=None, *, force_in_process=False):
+            self.force_in_process = force_in_process
+
         def run(self, review_input, **kwargs):
-            return types.SimpleNamespace(issues=[], review_input=review_input, kwargs=kwargs)
+            return types.SimpleNamespace(
+                issues=[],
+                review_input=review_input,
+                kwargs=kwargs,
+                force_in_process=self.force_in_process,
+            )
 
     monkeypatch.setattr(cra, "CodeReviewAgent", _FakeAgent)
 
@@ -122,3 +141,6 @@ def test_run_pr_code_review_whole_file_mode_forwards_reader(monkeypatch) -> None
     assert out.review_input.code == ""
     assert out.review_input.pre_numbered is False
     assert out.kwargs["repo_reader"] is reader
+    # A live GitHub reader cannot cross the Temporal boundary, so the provider
+    # forces the in-process path whenever a reader is supplied.
+    assert out.force_in_process is True
