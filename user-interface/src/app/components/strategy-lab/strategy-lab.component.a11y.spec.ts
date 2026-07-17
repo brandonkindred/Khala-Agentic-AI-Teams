@@ -3,6 +3,9 @@ import { of, NEVER } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { StrategyLabComponent } from './strategy-lab.component';
@@ -316,6 +319,45 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
 
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
+});
+
+/**
+ * Source-level guard: every `<mat-icon>` in the template must set
+ * `aria-hidden="true"` explicitly.
+ *
+ * This can't be verified by asserting on the rendered DOM: Angular Material's
+ * `MatIcon` constructor adds `aria-hidden="true"` itself at runtime whenever
+ * the host element doesn't already have the attribute, so a rendered icon
+ * reads as hidden whether or not the template actually sets it. A DOM-only
+ * assertion (`el.getAttribute('aria-hidden')).toBe('true')`) would therefore
+ * keep passing even if every explicit attribute were stripped from the
+ * template, silently losing the guard this file exists to provide. Reading
+ * the raw template source is the only way to tell "we set it" apart from
+ * "Material defaulted it".
+ *
+ * Path is resolved relative to this spec file, independent of the vitest
+ * working directory.
+ */
+describe('StrategyLabComponent template — explicit aria-hidden on every <mat-icon>', () => {
+  const TEMPLATE_PATH = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    'strategy-lab.component.html',
+  );
+
+  it('every <mat-icon> opening tag explicitly sets aria-hidden="true" in the source', () => {
+    const html = readFileSync(TEMPLATE_PATH, 'utf8');
+    const openTags = html.match(/<mat-icon\b[^>]*>/g) ?? [];
+
+    // Sanity check: fails loudly if the template moved/renamed and the regex
+    // above stopped matching anything, rather than passing vacuously.
+    expect(openTags.length).toBeGreaterThan(30);
+
+    const missing = openTags.filter((tag) => !/aria-hidden\s*=\s*"true"/.test(tag));
+    expect(
+      missing,
+      `<mat-icon> tag(s) missing an explicit aria-hidden="true":\n  ${missing.join('\n  ')}`,
+    ).toHaveLength(0);
+  });
 });
 
 describe('StrategyLabComponent a11y — decorative icons hidden from assistive tech', () => {
