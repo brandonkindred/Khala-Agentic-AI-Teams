@@ -33,6 +33,7 @@ from ..models import (
 )
 from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
 from .coverage_probe import run_coverage_stage, should_run_probes
+from .exceptions import OrchestratorContractError
 from .quality_gates.models import QualityGateResult
 
 logger = logging.getLogger(__name__)
@@ -264,7 +265,8 @@ class _DriftCollector:
             of ``child``'s, preserving order.
           - ``child`` is left unmodified.
         """
-        assert isinstance(child, _DriftCollector), "merge() requires a _DriftCollector"
+        if not isinstance(child, _DriftCollector):
+            raise OrchestratorContractError("merge() requires a _DriftCollector")
         self.spec_history.extend(child.spec_history)
         self.code_history.extend(child.code_history)
         self.gate_timeline.extend(child.gate_timeline)
