@@ -2349,9 +2349,10 @@ class StrategyLabOrchestrator:
             trades, config.initial_capital, config.start_date, config.end_date
         )
         # ``compute_metrics`` builds from the trade ledger alone; carry the
-        # engine's exit-rule firing counters from this run onto ``metrics``
-        # so the downstream ``ExitRuleConformanceGate`` can reconcile
-        # engine-attributed closes against recorded firings.
+        # engine's exit-rule firing counters and cost-stress sweep rows from
+        # this run onto ``metrics`` so the downstream
+        # ``ExitRuleConformanceGate`` / ``CostStressRealismGate`` see the
+        # payloads ``run_backtest`` produced.
         _attach_execution_diagnostics(metrics=metrics, exec_result=exec_result)
 
         _maybe_attach_coverage_report(

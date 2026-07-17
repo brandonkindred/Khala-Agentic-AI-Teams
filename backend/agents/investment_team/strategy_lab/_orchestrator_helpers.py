@@ -812,31 +812,39 @@ def _attach_execution_diagnostics(
     metrics: BacktestResult,
     exec_result: StrategyRunResult,
 ) -> None:
-    """Stamp the engine's execution diagnostics onto ``metrics``.
+    """Stamp engine-only fields onto ledger-derived ``metrics``.
 
     ``compute_metrics`` derives ``BacktestResult`` from the closed-trade
-    ledger alone and leaves ``execution_diagnostics`` at its ``None``
-    default. The structured exit-rule firing counters
-    (``exit_rule_firings`` / ``exit_rule_firings_by_symbol``) the engine
-    records live only on the ``StrategyRunResult``. Without this hand-off
-    the ``ExitRuleConformanceGate`` — which reads
-    ``metrics.execution_diagnostics`` — would see ``None`` and treat every
-    engine-attributed below-floor stop-loss trade as an unaccounted leak,
-    failing conformance on runs the engine actually enforced correctly.
+    ledger alone and leaves ``execution_diagnostics`` /
+    ``cost_stress_results`` at their ``None`` defaults. Those fields live
+    only on the ``StrategyRunResult`` (forwarded from ``run_backtest``).
+    Without this hand-off:
+
+    * ``ExitRuleConformanceGate`` would see ``None`` diagnostics and treat
+      every engine-attributed below-floor stop-loss trade as an unaccounted
+      leak.
+    * ``CostStressRealismGate`` would see missing cost-stress rows on every
+      production run (``cost_stress=True``) and emit a critical finding —
+      which publishability gating then treats as a paper-trading veto.
 
     Preconditions:
         * ``metrics`` and ``exec_result`` are the paired output of the SAME
           backtest execution (same closed-trade ledger). Attaching
-          diagnostics from a different run would let the gate reconcile one
-          ledger's trades against another run's firing counts.
+          fields from a different run would reconcile one ledger against
+          another run's diagnostics / stress rows.
     Postconditions:
         * ``metrics.execution_diagnostics`` is set to
           ``exec_result.execution_diagnostics`` when the exec result carries
-          diagnostics; otherwise ``metrics`` is left unchanged (a populated
-          value is never overwritten with ``None``).
+          diagnostics; otherwise left unchanged (a populated value is never
+          overwritten with ``None``).
+        * ``metrics.cost_stress_results`` is set to
+          ``exec_result.cost_stress_results`` when present; otherwise left
+          unchanged.
     """
     if exec_result.execution_diagnostics is not None:
         metrics.execution_diagnostics = exec_result.execution_diagnostics
+    if exec_result.cost_stress_results is not None:
+        metrics.cost_stress_results = exec_result.cost_stress_results
 
 
 def _format_execution_diagnostics(
