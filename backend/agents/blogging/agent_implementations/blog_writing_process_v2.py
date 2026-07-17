@@ -111,9 +111,6 @@ HITL_POLL_INTERVAL_S = int(os.getenv("BLOGGING_HITL_POLL_INTERVAL_S", "10"))
 # error propagate — a persistent outage still surfaces, a momentary one is ridden out.
 HITL_MAX_CONSECUTIVE_READ_ERRORS = 5
 
-# Default model - use environment variable or this default
-DEFAULT_MODEL = "deepseek-v4-pro:cloud"
-
 PipelineStatus = Literal["PASS", "FAIL", "NEEDS_HUMAN_REVIEW"]
 
 # Type alias for job updater callback
@@ -978,7 +975,8 @@ def run_pipeline(
     Args:
         brief: The research brief input describing the blog topic.
         work_dir: Optional directory for artifact persistence.
-        llm_client: Optional LLM client (defaults to deepseek-v4-pro:cloud).
+        llm_client: Optional LLM client (defaults to the resolved "blog" model
+            via get_strands_model("blog")).
         draft_editor_iterations: Number of draft/copy-edit iterations.
         max_rewrite_iterations: Max compliance rewrite attempts.
         run_gates: Whether to run validators/compliance gates.
