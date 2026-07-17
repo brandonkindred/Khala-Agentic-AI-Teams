@@ -120,6 +120,30 @@ def _temporal_dispatch_inline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _signal_paper_trading_stop)
 
 
+@pytest.fixture(autouse=True)
+def _reset_indicator_registries() -> None:
+    """Clear strategy_indicators' thread-local shared-registry cache per test.
+
+    ``strategy_indicators._shared_registry`` reuses one ``IndicatorRegistry``
+    per (thread, symbol) across calls instead of constructing fresh each time.
+    pytest runs a worker's tests sequentially on one thread and this suite
+    reuses a small, overlapping symbol vocabulary (``"QQQ"``, ``"TEST"``, the
+    no-symbol default bucket) across many test files, so without a reset a
+    registry warmed by one test would still be cached when an unrelated later
+    test queries the same symbol — silently mutating state left over from a
+    different bar sequence rather than starting cold.
+
+    Preconditions:
+        None (import is lazy so tests that never touch strategy_indicators
+        are unaffected).
+    Postconditions:
+        Every test starts with an empty shared-registry cache on this thread.
+    """
+    from investment_team.strategy_lab.executor import strategy_indicators as si
+
+    si._reset_shared_registries()
+
+
 @pytest.fixture
 def stub_readiness_market_data_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     """Return a single synthetic OHLCV bar for any ``fetch_ohlcv`` call.

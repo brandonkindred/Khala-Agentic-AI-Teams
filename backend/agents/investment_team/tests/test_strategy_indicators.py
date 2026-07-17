@@ -102,6 +102,32 @@ def test_helpers_accept_list_float_and_deque() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shared registry (issue: backtest hot loop caching) — input-shape handling
+# ---------------------------------------------------------------------------
+
+
+def test_shared_registry_accepts_raw_pandas_series() -> None:
+    """The shared-registry symbol-peek must use ``.iloc[-1]`` (positional) for
+    a pandas ``Series``, not ``[-1]`` (label lookup, which can raise/misbehave
+    on a non-default index). A raw ``Series`` is a shape ``_coerce_series``
+    documents accepting but no other test passes directly into this module."""
+    s = pd.Series([100.0 + i for i in range(20)])
+    assert si.ema(s, 5) == pytest.approx(si.ema(list(s), 5))
+
+
+def test_shared_registry_does_not_consume_a_generator() -> None:
+    """Regression test: a naive symbol-peek (``bars[-1]``/``len(bars)`` on an
+    arbitrary object) would crash on, or silently exhaust, a one-shot
+    generator before the wrapper's own ``_coerce_series`` call gets to consume
+    it. The shared registry must leave non-indexable input un-peeked."""
+
+    def _gen():
+        yield from (100.0 + i for i in range(20))
+
+    assert si.ema(_gen(), 5) == pytest.approx(si.ema([100.0 + i for i in range(20)], 5))
+
+
+# ---------------------------------------------------------------------------
 # Flat sandbox layout: the module imports the impl as ``_indicators_impl``
 # ---------------------------------------------------------------------------
 

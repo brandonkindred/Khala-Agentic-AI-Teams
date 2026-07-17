@@ -72,6 +72,39 @@ def _make_bars(n: int = 60, *, symbol: str = "QQQ") -> list[Bar]:
     return bars
 
 
+def _make_diverging_bars(n: int, *, symbol: str, seed: int) -> list[Bar]:
+    """Like :func:`_make_bars`, but with a caller-chosen ``seed`` so two
+    symbols' fixtures are genuinely different series.
+
+    ``_make_bars`` reseeds ``random.Random(7)`` identically regardless of its
+    ``symbol`` argument, so two calls with different symbols produce
+    bit-identical OHLCV — fine for testing dispatch-by-symbol, but unable to
+    distinguish real cross-symbol cache isolation from lucky coincidence
+    (see ``test_ctx_indicator_isolates_deque_state_across_genuinely_different_symbols``).
+    """
+    rng = random.Random(seed)
+    bars: list[Bar] = []
+    px = 100.0
+    for i in range(n):
+        px *= 1 + rng.uniform(-0.02, 0.025)
+        high = px * (1 + rng.uniform(0.0, 0.012))
+        low = px * (1 - rng.uniform(0.0, 0.012))
+        opn = low + (high - low) * rng.random()
+        bars.append(
+            Bar(
+                symbol=symbol,
+                timestamp=f"2026-02-{(i % 28) + 1:02d}T00:00:00Z",
+                timeframe="1d",
+                open=opn,
+                high=high,
+                low=low,
+                close=px,
+                volume=1000.0 + i,
+            )
+        )
+    return bars
+
+
 def _engine_view(bars: list[Bar]) -> StreamingHistoryView:
     view = StreamingHistoryView()
     for b in bars:
@@ -156,6 +189,61 @@ def test_indicator_value_warmup_and_empty_return_none() -> None:
 def test_indicator_value_accepts_plain_number_sequence() -> None:
     closes = [float(x) for x in range(1, 41)]
     assert indicator_value("sma", closes, period=5) == pytest.approx(38.0)
+
+
+# ---------------------------------------------------------------------------
+# indicator_value — shared registry (issue: backtest hot loop caching)
+# ---------------------------------------------------------------------------
+
+
+def test_indicator_value_shares_one_registry_per_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Acceptance criterion: the registry is instantiated once per backtest
+    (per symbol), not once per indicator call — checked across many calls and
+    two different indicators (one always-recompute, one deque-stateful)."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    constructed: list[object] = []
+    real_init = IndicatorRegistry.__init__
+
+    def _counting_init(self) -> None:
+        constructed.append(self)
+        real_init(self)
+
+    monkeypatch.setattr(IndicatorRegistry, "__init__", _counting_init)
+
+    bars = _make_bars(n=40, symbol="QQQ")
+    for i in range(20, len(bars) + 1):
+        indicator_value("sma", bars[:i], period=10)
+        indicator_value("macd", bars[:i])
+
+    assert len(constructed) == 1
+
+
+def test_indicator_value_registry_count_scales_with_distinct_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'Once per backtest' means once per symbol-stream within a backtest, not
+    a single flat instance: a multi-symbol backtest constructs one registry
+    per symbol it actually reads — still far below one-per-call, but not a
+    literal singleton either."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    constructed: list[object] = []
+    real_init = IndicatorRegistry.__init__
+
+    def _counting_init(self) -> None:
+        constructed.append(self)
+        real_init(self)
+
+    monkeypatch.setattr(IndicatorRegistry, "__init__", _counting_init)
+
+    aaa = _make_bars(n=30, symbol="AAA")
+    bbb = _make_bars(n=30, symbol="BBB")
+    for i in range(20, 31):
+        indicator_value("sma", aaa[:i], period=10)
+        indicator_value("sma", bbb[:i], period=10)
+
+    assert len(constructed) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +363,38 @@ def test_strategy_context_indicator_multi_symbol_isolation() -> None:
     assert explicit_aaa == pytest.approx(
         _engine_latest(_engine_view(a), IndicatorRef(name="sma", params={"period": 10}))
     )
+
+
+def test_ctx_indicator_isolates_deque_state_across_genuinely_different_symbols() -> None:
+    """Regression guard for cross-symbol cache collisions in the shared
+    IndicatorRegistry.
+
+    Unlike ``test_strategy_context_indicator_multi_symbol_isolation`` (whose
+    two symbols' fixtures are numerically identical, so it can't distinguish
+    real isolation from lucky coincidence), this uses genuinely divergent
+    series for ``bollinger`` — one of ``IndicatorRegistry``'s deque-stateful
+    methods with no ``symbol`` component in its own cache key — so a shared,
+    unbucketed registry would produce a visibly wrong value for at least one
+    symbol once its state gets interleaved with the other's.
+    """
+    a = _make_diverging_bars(60, symbol="AAA", seed=1)
+    b = _make_diverging_bars(60, symbol="BBB", seed=99)
+    ctx = StrategyContext(emit=lambda _d: None)
+    for ba, bb in zip(a, b):
+        ctx._ingest_bar(ba)
+        ctx._ingest_bar(bb)
+
+    got_aaa = ctx.indicator("bollinger", period=20, band="upper", symbol="AAA")
+    got_bbb = ctx.indicator("bollinger", period=20, band="upper", symbol="BBB")
+    exp_aaa = _engine_latest(
+        _engine_view(a), IndicatorRef(name="bollinger", params={"period": 20, "band": "upper"})
+    )
+    exp_bbb = _engine_latest(
+        _engine_view(b), IndicatorRef(name="bollinger", params={"period": 20, "band": "upper"})
+    )
+    assert got_aaa == pytest.approx(exp_aaa)
+    assert got_bbb == pytest.approx(exp_bbb)
+    assert got_aaa != pytest.approx(got_bbb)  # fixtures must actually differ
 
 
 def test_strategy_context_indicator_no_bar_yet_raises() -> None:

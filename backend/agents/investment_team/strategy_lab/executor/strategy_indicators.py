@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import math
 import numbers
+import threading
 from typing import Optional, Sequence
 
 try:  # in-package use (predicate-conformance gate, in-process tests)
@@ -49,6 +50,78 @@ except ImportError:  # flat sandbox layout
         IndicatorRegistry,
         resolve_indicator,
     )
+
+
+# One IndicatorRegistry per (thread, symbol) instead of one per call, so its
+# bar-fingerprint memoization actually takes effect across a backtest's
+# repeated indicator reads (see module docstring). Thread-local because
+# api.main's _strategy_lab_worker runs multiple backtest cycles concurrently
+# via ThreadPoolExecutor, and the in-process predicate-conformance shadow gate
+# reaches these same functions from those worker threads — thread-local
+# storage isolates each without needing a lock. Bucketed by inferred symbol
+# because 8 of IndicatorRegistry's 16 methods (3 of them with incremental
+# deque state) don't include symbol in their own cache key; sharing one
+# unbucketed instance across interleaved symbols would let them corrupt each
+# other's cached state.
+_thread_local = threading.local()
+
+
+def _shared_registry(reference) -> IndicatorRegistry:
+    """Return this thread's cached IndicatorRegistry for ``reference``'s symbol.
+
+    Symbol inference is reliable for ``indicator_value`` (its ``history``
+    argument is always a real ``Bar``-like sequence keyed by symbol on both
+    production paths) but only best-effort for the 16 wrapper functions below:
+    a caller that pre-slices bars into separate plain-number arrays (e.g.
+    ``highs = [b.high for b in bars]``) before calling loses the symbol before
+    it ever reaches this helper, and falls back to one shared default bucket —
+    identical to today's per-call-fresh-registry behavior for that call shape,
+    just cached instead of rebuilt.
+
+    Preconditions:
+        ``reference`` is whatever pre-projection argument the caller already
+        has in scope (``data``/``high``/``low``/``close``/``history``) — any
+        shape ``_coerce_series`` accepts, or ``None``. Never raises: a
+        Bar-like or dict trailing element exposing ``symbol`` yields a
+        per-symbol bucket; anything else (plain numbers, an empty or
+        non-indexable sequence such as a generator) falls back to one shared
+        default bucket.
+    Postconditions:
+        Returns an ``IndicatorRegistry``, constructing and caching one the
+        first time this thread sees ``reference``'s symbol (or the default
+        bucket), and returning that same instance on every subsequent call
+        for that symbol from this thread. Never mutates ``reference``.
+    """
+    by_symbol = getattr(_thread_local, "by_symbol", None)
+    if by_symbol is None:
+        by_symbol = {}
+        _thread_local.by_symbol = by_symbol
+    symbol = None
+    if hasattr(reference, "iloc"):  # pandas Series: .iloc is always positional
+        if len(reference):
+            last = reference.iloc[-1]
+            symbol = last.get("symbol") if isinstance(last, dict) else getattr(last, "symbol", None)
+    elif hasattr(reference, "__len__") and hasattr(reference, "__getitem__"):
+        if len(reference):
+            last = reference[-1]
+            symbol = last.get("symbol") if isinstance(last, dict) else getattr(last, "symbol", None)
+    # else: generator/iterator/None/scalar — left un-peeked so it is never
+    # consumed or crashed on before the caller's own _coerce_series call reads it.
+    reg = by_symbol.get(symbol)
+    if reg is None:
+        reg = IndicatorRegistry()
+        by_symbol[symbol] = reg
+    return reg
+
+
+def _reset_shared_registries() -> None:
+    """Test-only: clear this thread's cached registries.
+
+    Preconditions: none.
+    Postconditions: the next :func:`_shared_registry` call on this thread
+    starts cold for every symbol, as if no indicator had been read yet.
+    """
+    _thread_local.by_symbol = {}
 
 
 class _RegBar:
@@ -149,23 +222,23 @@ def _scalar(value: Optional[float]) -> float:
 
 def sma(data, period) -> float:
     """Latest Simple Moving Average value. See module contract."""
-    return _scalar(IndicatorRegistry().sma(_value_bars(data), int(period), source="close"))
+    return _scalar(_shared_registry(data).sma(_value_bars(data), int(period), source="close"))
 
 
 def ema(data, period) -> float:
     """Latest Exponential Moving Average value. See module contract."""
-    return _scalar(IndicatorRegistry().ema(_value_bars(data), int(period), source="close"))
+    return _scalar(_shared_registry(data).ema(_value_bars(data), int(period), source="close"))
 
 
 def rsi(data, period=14) -> float:
     """Latest Relative Strength Index value. See module contract."""
-    return _scalar(IndicatorRegistry().rsi(_value_bars(data), int(period), source="close"))
+    return _scalar(_shared_registry(data).rsi(_value_bars(data), int(period), source="close"))
 
 
 def macd(data, fast=12, slow=26, signal=9) -> tuple[float, float, float]:
     """Latest (MACD line, signal line, histogram) values. See module contract."""
     bars = _value_bars(data)
-    reg = IndicatorRegistry()
+    reg = _shared_registry(data)
     f, s, g = int(fast), int(slow), int(signal)
     return (
         _scalar(reg.macd(bars, fast=f, slow=s, signal=g, source="close", select="macd")),
@@ -177,7 +250,7 @@ def macd(data, fast=12, slow=26, signal=9) -> tuple[float, float, float]:
 def bollinger_bands(data, period=20, num_std=2.0) -> tuple[float, float, float]:
     """Latest (upper, middle, lower) Bollinger Band values. See module contract."""
     bars = _value_bars(data)
-    reg = IndicatorRegistry()
+    reg = _shared_registry(data)
     p, n = int(period), float(num_std)
     return (
         _scalar(reg.bollinger_bands(bars, period=p, num_std=n, source="close", select="upper")),
@@ -188,18 +261,18 @@ def bollinger_bands(data, period=20, num_std=2.0) -> tuple[float, float, float]:
 
 def atr(high, low, close, period=14) -> float:
     """Latest Average True Range value. See module contract."""
-    return _scalar(IndicatorRegistry().atr(_ohlc_bars(high, low, close), period=int(period)))
+    return _scalar(_shared_registry(close).atr(_ohlc_bars(high, low, close), period=int(period)))
 
 
 def adx(high, low, close, period=14) -> float:
     """Latest Average Directional Index value. See module contract."""
-    return _scalar(IndicatorRegistry().adx(_ohlc_bars(high, low, close), period=int(period)))
+    return _scalar(_shared_registry(close).adx(_ohlc_bars(high, low, close), period=int(period)))
 
 
 def stochastic(high, low, close, k_period=14, d_period=3) -> tuple[float, float]:
     """Latest (%K, %D) Stochastic Oscillator values. See module contract."""
     bars = _ohlc_bars(high, low, close)
-    reg = IndicatorRegistry()
+    reg = _shared_registry(close)
     k, d = int(k_period), int(d_period)
     return (
         _scalar(reg.stochastic(bars, k_period=k, d_period=d, select="k")),
@@ -217,14 +290,14 @@ def vwap(high, low, close, volume, period=20) -> float:
     rolling-window unification; it now matches every other VWAP surface.)
     """
     return _scalar(
-        IndicatorRegistry().vwap(_ohlc_bars(high, low, close, volume), period=int(period))
+        _shared_registry(close).vwap(_ohlc_bars(high, low, close, volume), period=int(period))
     )
 
 
 def donchian_channels(high, low, period=20) -> tuple[float, float, float]:
     """Latest (upper, middle, lower) Donchian channel values. See module contract."""
     bars = _project_bars(high=high, low=low)
-    reg = IndicatorRegistry()
+    reg = _shared_registry(high)  # no close/volume arg here to key off instead
     p = int(period)
     return (
         _scalar(reg.donchian(bars, period=p, select="upper")),
@@ -238,7 +311,7 @@ def keltner_channels(
 ) -> tuple[float, float, float]:
     """Latest (upper, middle, lower) Keltner channel values. See module contract."""
     bars = _ohlc_bars(high, low, close)
-    reg = IndicatorRegistry()
+    reg = _shared_registry(close)
     p, ap, m = int(period), int(atr_period), float(multiplier)
     return (
         _scalar(reg.keltner(bars, period=p, atr_period=ap, multiplier=m, select="upper")),
@@ -249,13 +322,13 @@ def keltner_channels(
 
 def obv(close, volume) -> float:
     """Latest On-Balance Volume value. See module contract."""
-    return _scalar(IndicatorRegistry().obv(_project_bars(close=close, volume=volume)))
+    return _scalar(_shared_registry(close).obv(_project_bars(close=close, volume=volume)))
 
 
 def mfi(high, low, close, volume, period=14) -> float:
     """Latest Money Flow Index value. See module contract."""
     return _scalar(
-        IndicatorRegistry().mfi(_ohlc_bars(high, low, close, volume), period=int(period))
+        _shared_registry(close).mfi(_ohlc_bars(high, low, close, volume), period=int(period))
     )
 
 
@@ -269,17 +342,19 @@ def roc(data, period=12) -> float:
     ``indicator_value("roc", history, source=...)`` / ``ctx.indicator(...)`` to
     compute ROC over a non-close source.
     """
-    return _scalar(IndicatorRegistry().roc(_value_bars(data), int(period), source="close"))
+    return _scalar(_shared_registry(data).roc(_value_bars(data), int(period), source="close"))
 
 
 def cci(high, low, close, period=20) -> float:
     """Latest Commodity Channel Index value. See module contract."""
-    return _scalar(IndicatorRegistry().cci(_ohlc_bars(high, low, close), period=int(period)))
+    return _scalar(_shared_registry(close).cci(_ohlc_bars(high, low, close), period=int(period)))
 
 
 def williams_r(high, low, close, period=14) -> float:
     """Latest Williams %R value. See module contract."""
-    return _scalar(IndicatorRegistry().williams_r(_ohlc_bars(high, low, close), period=int(period)))
+    return _scalar(
+        _shared_registry(close).williams_r(_ohlc_bars(high, low, close), period=int(period))
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -450,14 +525,14 @@ def indicator_value(
     value for the same bars (a fresh registry's cold value equals the streamed
     value; see ``tests/test_streaming_indicators.py``).
 
-    Cost note: this is a stateless accessor — it cold-starts a fresh registry
-    and projects ``history`` each call, so cost is O(len(history)) per call.
-    That matches the prior pandas accessor and is fine for ad-hoc and shadow
-    use, but it is NOT the engine's per-bar path: the engine reads indicators
-    through :class:`StreamingHistoryView`, which retains the registry and is
-    O(window) per bar. A ``StrategyContext`` that wants O(window) per-bar reads
-    from ``ctx.indicator`` should retain a registry/view rather than call this
-    repeatedly (a possible follow-up, out of scope here).
+    Cost note: ``history`` is still projected fresh each call (O(len(history)),
+    bounded by the caller's retention window — see
+    ``StrategyContext._ingest_bar``), but the ``IndicatorRegistry`` itself is
+    no longer rebuilt per call: :func:`_shared_registry` returns one
+    thread-local, per-symbol instance reused across calls, so its bar-
+    fingerprint memoization actually takes effect. Repeated reads for the same
+    symbol get the same incremental recurrences :class:`StreamingHistoryView`
+    runs per bar, instead of a cold recompute every time.
 
     Preconditions:
         ``name`` is a known DSL indicator (:data:`_VALID_INDICATORS`);
@@ -487,7 +562,7 @@ def indicator_value(
     if not history:
         return None
 
-    reg = IndicatorRegistry()
+    reg = _shared_registry(history)
 
     # Every branch below only extracts/defaults this call's params and picks
     # the right bars projection — the actual name -> IndicatorRegistry method
