@@ -365,6 +365,24 @@ def test_shadow_context_init_resets_shared_registry_cache() -> None:
     assert si._thread_local.registries == {}
 
 
+def test_strategy_context_init_resets_shared_registry_cache() -> None:
+    """``StrategyContext`` can be constructed in-process (not just inside the
+    sandboxed subprocess — e.g. by tests), where a thread can persist across
+    instances; each new instance must start with a clean indicator-registry
+    cache for the same reason ``_ShadowContext`` does (see
+    ``test_shadow_context_init_resets_shared_registry_cache``)."""
+    from investment_team.strategy_lab.executor import strategy_indicators as si
+
+    first = StrategyContext(emit=lambda _d: None)
+    for b in _make_bars(30, symbol="QQQ"):
+        first._ingest_bar(b)
+    first.indicator("bollinger", period=20, band="upper")  # warms the cache for "QQQ"
+    assert si._thread_local.registries  # sanity: something got cached
+
+    StrategyContext(emit=lambda _d: None)  # a new, unrelated execution on the same thread
+    assert si._thread_local.registries == {}
+
+
 # ---------------------------------------------------------------------------
 # indicator_value — contract violations raise (DbC)
 # ---------------------------------------------------------------------------

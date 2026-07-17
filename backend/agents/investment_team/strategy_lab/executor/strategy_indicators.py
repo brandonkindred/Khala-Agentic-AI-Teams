@@ -44,10 +44,11 @@ except ImportError:  # flat sandbox layout: harness copies the impl as _indicato
 # return byte-identical values to the engine's per-bar reads. The flat sandbox
 # harness copies ``streaming.py`` alongside as ``_streaming_indicators.py``.
 try:  # in-package use
-    from ..indicators.streaming import IndicatorRegistry, resolve_indicator
+    from ..indicators.streaming import IndicatorRegistry, _safe_getattr, resolve_indicator
 except ImportError:  # flat sandbox layout
     from _streaming_indicators import (  # type: ignore[no-redef]
         IndicatorRegistry,
+        _safe_getattr,
         resolve_indicator,
     )
 
@@ -150,12 +151,17 @@ def _shared_registry(reference, *, source: str = "close") -> IndicatorRegistry:
     last = _trailing_element(reference)
     if last is None:
         return IndicatorRegistry()
+    # _safe_getattr (not plain getattr) because this metadata was never read
+    # at all before sharing existed — a lazily-loaded timestamp/symbol
+    # descriptor that raises on access must degrade to "unavailable", the
+    # same as IndicatorRegistry's own bar reads, not crash a call that
+    # worked fine when every call got a disposable, cold registry.
     timestamp = (
-        last.get("timestamp") if isinstance(last, dict) else getattr(last, "timestamp", None)
+        last.get("timestamp") if isinstance(last, dict) else _safe_getattr(last, "timestamp")
     )
     if timestamp is None:
         return IndicatorRegistry()
-    symbol = last.get("symbol") if isinstance(last, dict) else getattr(last, "symbol", None)
+    symbol = last.get("symbol") if isinstance(last, dict) else _safe_getattr(last, "symbol")
     if symbol is None:
         return IndicatorRegistry()
     registries = getattr(_thread_local, "registries", None)
@@ -173,19 +179,23 @@ def _shared_registry(reference, *, source: str = "close") -> IndicatorRegistry:
 def _reset_shared_registries() -> None:
     """Clear this thread's cached registries.
 
-    Called at the start of every ``_ShadowContext`` execution (see
-    ``predicate_conformance.py``) so a long-lived, in-process worker thread
-    that runs many unrelated shadow-conformance executions over its lifetime
-    never carries deque-stateful indicator state from one execution's query
-    pattern into the next's — even when both execution's queries happen to
-    align on length and boundary timestamp for the same symbol, which
-    :func:`_shared_registry`'s per-(symbol, source) bucketing alone can't
-    distinguish, since it has no notion of "which execution" a call belongs
-    to. Also the only thing bounding this thread-local cache's memory: without
-    it, a worker thread would retain one ``IndicatorRegistry`` (and all its
-    accumulated per-indicator deque state) per distinct symbol it has ever
-    seen, for the life of the thread. Also called directly by tests that need
-    a clean slate between cases.
+    Called at the start of every ``StrategyContext``/``_ShadowContext``
+    execution (see ``contract.py``/``predicate_conformance.py``) — these are
+    the only two classes that hold per-execution ``_history`` state and call
+    into this module's indicator functions. Without a reset at construction,
+    a long-lived, in-process worker thread that constructs many of either
+    over its lifetime (e.g. ``_ShadowContext``, which runs in-process on
+    shared thread pools; ``StrategyContext``, mostly subprocess-isolated but
+    also constructible in-process) would never clear deque-stateful indicator
+    state from one execution's query pattern before the next's — even when
+    two executions' queries happen to align on length and boundary timestamp
+    for the same symbol, which :func:`_shared_registry`'s per-(symbol,
+    source) bucketing alone can't distinguish, since it has no notion of
+    "which execution" a call belongs to. Also the only thing bounding this
+    thread-local cache's memory: without it, a worker thread would retain one
+    ``IndicatorRegistry`` (and all its accumulated per-indicator deque state)
+    per distinct symbol it has ever seen, for the life of the thread. Also
+    called directly by tests that need a clean slate between cases.
 
     Preconditions: none.
     Postconditions: the next :func:`_shared_registry` call on this thread
@@ -209,11 +219,13 @@ def _extract_timestamps(source) -> list:
     Postconditions:
         Returns a list the same length as ``source`` when it is a
         list/tuple/deque/``pd.Series``, each entry the element's
-        ``timestamp`` (attribute or dict key) or ``None`` when absent. Never
-        raises and never consumes a generator/iterator — returns ``[]`` for
-        ``None`` or anything without stable positional access, leaving it
-        untouched for the caller's own ``_coerce_series`` to consume exactly
-        once.
+        ``timestamp`` (attribute or dict key) or ``None`` when absent or
+        when reading it raises (via :func:`_safe_getattr` — a lazily-loaded
+        descriptor that misbehaves degrades to "no timestamp" here, not a
+        crash). Never raises and never consumes a generator/iterator —
+        returns ``[]`` for ``None`` or anything without stable positional
+        access, leaving it untouched for the caller's own ``_coerce_series``
+        to consume exactly once.
     """
     if source is None:
         return []
@@ -222,7 +234,7 @@ def _extract_timestamps(source) -> list:
     ):
         return []
     return [
-        (elem.get("timestamp") if isinstance(elem, dict) else getattr(elem, "timestamp", None))
+        (elem.get("timestamp") if isinstance(elem, dict) else _safe_getattr(elem, "timestamp"))
         for elem in source
     ]
 
@@ -336,7 +348,7 @@ def _ohlc_bars_from_history(history) -> list:
                     low=float(b.low),
                     close=float(b.close),
                     volume=float(getattr(b, "volume", 0.0)),
-                    timestamp=getattr(b, "timestamp", None),
+                    timestamp=_safe_getattr(b, "timestamp"),
                 )
             )
     return out

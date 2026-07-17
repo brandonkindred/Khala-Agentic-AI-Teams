@@ -205,6 +205,36 @@ def test_shared_registry_skips_cache_when_symbol_not_available(
     assert len(constructed) == 2
 
 
+def test_shared_registry_tolerates_raising_timestamp_descriptor() -> None:
+    """A bar-like object's ``timestamp``/``symbol`` can be a lazily-loaded
+    descriptor that raises when accessed (e.g. a lazy DB session, per
+    ``streaming.py``'s ``_safe_getattr`` docstring) — these were previously
+    valid inputs to the standalone scalar helpers because ``_coerce_series``
+    only requires the requested numeric field, and this metadata was never
+    read at all before the shared registry existed. ``_shared_registry`` must
+    treat a raising descriptor as "unavailable" (matching
+    ``IndicatorRegistry``'s own bar reads) and fall back to a fresh registry,
+    not crash a call that worked before."""
+
+    class _RaisingMetadata:
+        __slots__ = ("close",)
+
+        def __init__(self, close: float) -> None:
+            self.close = close
+
+        @property
+        def timestamp(self):
+            raise RuntimeError("lazy timestamp descriptor misbehaved")
+
+        @property
+        def symbol(self):
+            raise RuntimeError("lazy symbol descriptor misbehaved")
+
+    bars = [_RaisingMetadata(close=100.0 + i) for i in range(20)]
+    plain = [100.0 + i for i in range(20)]
+    assert si.ema(bars, 5) == pytest.approx(si.ema(plain, 5))
+
+
 # ---------------------------------------------------------------------------
 # Flat sandbox layout: the module imports the impl as ``_indicators_impl``
 # ---------------------------------------------------------------------------

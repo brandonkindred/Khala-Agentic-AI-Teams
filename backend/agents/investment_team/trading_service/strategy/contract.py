@@ -408,6 +408,19 @@ class StrategyContext:
         self._now: str = ""
         self._is_warmup: bool = False
         self._next_client_order_id: int = 0
+        # indicator() shares one IndicatorRegistry per (thread, symbol, source)
+        # across a single execution's calls for performance (see
+        # strategy_indicators._shared_registry). Most StrategyContext instances
+        # already get a fresh interpreter per execution via subprocess
+        # isolation, but the class can also be constructed in-process (e.g.
+        # tests) where a thread persists across instances — reset here so a
+        # new execution never inherits another's indicator state, regardless
+        # of how it was constructed.
+        try:
+            from indicators import _reset_shared_registries  # type: ignore[import-not-found]
+        except ImportError:
+            from ...strategy_lab.executor.strategy_indicators import _reset_shared_registries
+        _reset_shared_registries()
 
     # ------------------------------------------------------------------
     # Read-only accessors
