@@ -1382,11 +1382,12 @@ def _run_one_strategy_lab_cycle(
     internally, including up to 10 refinement rounds.
 
     After the orchestrator returns a complete ``StrategyLabRecord``, the paper-trading
-    step runs only when the record is flagged as winning
-    (``record.is_winning``). Losing strategies record
-    ``paper_trading_status = "skipped"`` with reason ``"not_winning"`` and never
-    consume paper-trade budget. Paper-trading failures are non-fatal: the cycle
-    still persists the winning record with ``paper_trading_status = "failed"``
+    step runs only when the record is flagged as publishable
+    (``record.is_publishable``). Losing strategies record
+    ``paper_trading_status = "skipped"`` with reason ``"not_winning"``; winning
+    but non-publishable strategies skip with the joined gate codes from
+    ``publishability_skip_reason``. Paper-trading failures are non-fatal: the
+    cycle still persists the record with ``paper_trading_status = "failed"``
     and the error message.
 
     Args:
@@ -1475,11 +1476,11 @@ def _finalize_strategy_lab_cycle_record(
         Returns the same ``record`` with its ``signal_intelligence_brief`` set
         (when ``signal_brief_storage`` is given and it was empty) and its
         ``paper_trading_*`` fields resolved — ``skipped`` for non-winning /
-        disabled / no-code / no-data cases, ``completed`` on success,
-        ``failed`` (non-fatal) on a paper-trading error. The record is durably
-        persisted via :func:`_persist_strategy_lab_record` before returning. Any
-        ``on_phase`` callback fires as a side effect only; it never affects the
-        returned record.
+        non-publishable / disabled / no-code / no-data cases, ``completed`` on
+        success, ``failed`` (non-fatal) on a paper-trading error. The record is
+        durably persisted via :func:`_persist_strategy_lab_record` before
+        returning. Any ``on_phase`` callback fires as a side effect only; it
+        never affects the returned record.
     """
 
     def _emit(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
@@ -1490,10 +1491,10 @@ def _finalize_strategy_lab_cycle_record(
     if signal_brief_storage and not record.signal_intelligence_brief:
         record.signal_intelligence_brief = signal_brief_storage
 
-    # --- Paper-trading step (gated on winning backtest) -------------------
-    # Only winners proceed to paper trading; failures are non-fatal so the
-    # valid backtest record is still persisted. The standalone
-    # /strategy-lab/paper-trade endpoint can be used to retry later.
+    # --- Paper-trading step (gated on publishable backtest) ---------------
+    # Only publishable winners proceed to paper trading; failures are
+    # non-fatal so the valid backtest record is still persisted. The
+    # standalone /strategy-lab/paper-trade endpoint can be used to retry later.
     strategy_preview = {
         "asset_class": record.strategy.asset_class,
         "hypothesis": record.strategy.hypothesis,
@@ -1502,6 +1503,11 @@ def _finalize_strategy_lab_cycle_record(
         record.paper_trading_status = "skipped"
         record.paper_trading_skipped_reason = "not_winning"
         _emit("paper_trading_skipped", {"reason": "not_winning"})
+    elif not record.is_publishable:
+        reason = record.publishability_skip_reason or "not_publishable"
+        record.paper_trading_status = "skipped"
+        record.paper_trading_skipped_reason = reason
+        _emit("paper_trading_skipped", {"reason": reason})
     elif not paper_trading_enabled:
         record.paper_trading_status = "skipped"
         record.paper_trading_skipped_reason = "disabled"
@@ -3373,6 +3379,17 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             detail=f"Strategy '{request.lab_record_id}' is not a winning strategy. "
             f"Only winning strategies (annualized return >= {WINNING_THRESHOLD:g}%, the "
             "S&P-500 benchmark) can be paper traded.",
+        )
+
+    if not lab_record.is_publishable:
+        reason = lab_record.publishability_skip_reason or "not_publishable"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Strategy '{request.lab_record_id}' is not publishable "
+                f"({reason}). Only strategies that clear realism, alignment, "
+                "exit-rule conformance, and look-ahead gates can be paper traded."
+            ),
         )
 
     strategy = lab_record.strategy

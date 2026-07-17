@@ -391,6 +391,8 @@ def test_verification_phase_records_realism_critical_as_caveat(monkeypatch):
     # Caveats-only: the 10% return is at/above the 8% benchmark, so the
     # deterministic verdict is winning; realism does not flip the label.
     assert outcome.is_winning is True
+    assert outcome.is_publishable is False
+    assert outcome.publishability_skip_reason == "realism_failed"
     reason = outcome.metrics.acceptance_reason or ""
     assert "realism_failed:" in reason
     assert "liquidity_realism" not in reason  # detail string, not gate name
@@ -453,6 +455,8 @@ def test_verification_phase_does_not_veto_on_realism_warning(monkeypatch):
     )
 
     assert outcome.is_winning is True
+    assert outcome.is_publishable is True
+    assert outcome.publishability_skip_reason is None
     breadth_gates = [g for g in all_gate_results if g.gate_name == "target_symbol_coverage"]
     assert len(breadth_gates) == 1
     assert breadth_gates[0].severity == "warning"

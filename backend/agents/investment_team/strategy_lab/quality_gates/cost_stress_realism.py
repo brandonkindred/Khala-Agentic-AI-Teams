@@ -20,8 +20,10 @@ This gate consumes ``BacktestResult.cost_stress_results`` (populated by
 
 The gate is wired from
 :meth:`StrategyLabOrchestrator._run_realism_gates`. Critical findings
-veto ``is_winning`` via the standard
-:func:`_apply_veto_to_acceptance_reason` path.
+contribute to ``is_publishable`` (and stamp ``acceptance_reason``) via
+the standard :func:`_apply_veto_to_acceptance_reason` path. They do
+**not** flip ``is_winning``, which remains the return-threshold
+reporting label.
 """
 
 from __future__ import annotations

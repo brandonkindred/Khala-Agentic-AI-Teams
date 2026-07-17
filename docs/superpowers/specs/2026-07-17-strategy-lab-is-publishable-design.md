@@ -1,6 +1,6 @@
 # Strategy Lab: Gate Paper-Trading on `is_publishable`
 
-**Status:** Draft pending user review  
+**Status:** Approved 2026-07-17  
 **Date:** 2026-07-17  
 **Type:** Contract / decision-gate fix for Strategy Lab publication  
 **Issue:** GitHub #1564 (PR body only; do not cite in code)

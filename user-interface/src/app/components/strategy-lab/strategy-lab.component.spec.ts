@@ -251,3 +251,85 @@ describe('StrategyLabComponent — asset categories', () => {
     clearSpy.mockRestore();
   });
 });
+
+describe('StrategyLabComponent — publishability gating', () => {
+  let component: StrategyLabComponent;
+  let apiSpy: { runPaperTrading: ReturnType<typeof vi.fn> };
+
+  beforeEach(async () => {
+    apiSpy = {
+      runPaperTrading: vi.fn().mockReturnValue(of({ session: { session_id: 'pt-1', status: 'running' } })),
+    };
+    await TestBed.configureTestingModule({
+      imports: [StrategyLabComponent, NoopAnimationsModule],
+      providers: [
+        provideRouter([]),
+        {
+          provide: InvestmentApiService,
+          useValue: {
+            runStrategyLab: vi.fn(),
+            streamRunStatus: vi.fn().mockReturnValue(NEVER),
+            getStrategyLabConfig: vi.fn().mockReturnValue(
+              of({ batch_count_min: 1, batch_count_max: 100, asset_categories: [] }),
+            ),
+            getStrategyLabResults: vi.fn().mockReturnValue(
+              of({ items: [], count: 0, winning_count: 0, losing_count: 0 }),
+            ),
+            getPaperTradingResults: vi.fn().mockReturnValue(of({ items: [] })),
+            getActiveRuns: vi.fn().mockReturnValue(of({ runs: [] })),
+            runPaperTrading: apiSpy.runPaperTrading,
+          },
+        },
+        {
+          provide: IntegrationsApiService,
+          useValue: {
+            getTradingViewConfig: vi.fn().mockReturnValue(
+              of({
+                enabled: false,
+                mcp_server_url: '',
+                tool_name: 'get_ohlcv',
+                auth_token_configured: false,
+              }),
+            ),
+          },
+        },
+      ],
+    }).compileComponents();
+
+    component = TestBed.createComponent(StrategyLabComponent).componentInstance;
+  });
+
+  it('publishabilitySkipLabel prefers publishability_skip_reason', () => {
+    expect(
+      component.publishabilitySkipLabel({
+        lab_record_id: 'lab-1',
+        is_winning: true,
+        is_publishable: false,
+        publishability_skip_reason: 'realism_failed',
+        paper_trading_skipped_reason: 'realism_failed,alignment_unresolved',
+        strategy_rationale: '',
+        analysis_narrative: '',
+        created_at: '',
+        strategy: {} as never,
+        backtest: {} as never,
+      }),
+    ).toBe('realism_failed');
+  });
+
+  it('runPaperTrading no-ops and sets error when not publishable', () => {
+    component.runPaperTrading({
+      lab_record_id: 'lab-legacy',
+      is_winning: true,
+      is_publishable: false,
+      publishability_skip_reason: 'realism_failed',
+      strategy_rationale: '',
+      analysis_narrative: '',
+      created_at: '',
+      strategy: {} as never,
+      backtest: {} as never,
+    });
+    expect(apiSpy.runPaperTrading).not.toHaveBeenCalled();
+    expect(component.error).toContain('not publishable');
+    expect(component.error).toContain('realism_failed');
+  });
+});
