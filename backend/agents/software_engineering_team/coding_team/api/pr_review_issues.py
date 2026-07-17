@@ -21,7 +21,6 @@ import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, NamedTuple, Optional
 
-from software_engineering_team.coding_team.api import main as _main
 from software_engineering_team.coding_team.github_source import (
     GitHubAPIError,
     build_issue_from_proposal,
@@ -29,6 +28,28 @@ from software_engineering_team.coding_team.github_source import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _api_main():
+    """Return the coding-team API hub module, imported on first use.
+
+    The hub (``api.main``) imports ``pr_review``, so importing it at this
+    module's import time would close a cycle that crashes any process whose
+    first import of the trio is this module. Resolving it lazily keeps this
+    module importable in isolation while still routing every job-store and
+    GitHub call through the hub's live attributes (so test monkeypatching of
+    ``api.main`` attributes keeps intercepting calls made here).
+
+    Preconditions:
+        - None.
+
+    Postconditions:
+        - Returns the fully initialized
+          ``software_engineering_team.coding_team.api.main`` module object.
+    """
+    from software_engineering_team.coding_team.api import main as _m
+
+    return _m
 
 
 class ReviewNotFoundError(LookupError):
@@ -214,8 +235,8 @@ def _load_review_issue_context(job_id: str) -> Optional[_ReviewIssueContext]:
           can make an already-filed proposal look unfiled; or None when neither
           store knows the job.
     """
-    job = _main.get_job(job_id)
-    row = _main.get_review(job_id)
+    job = _api_main().get_job(job_id)
+    row = _api_main().get_review(job_id)
 
     if job:
         ctx = job.get("github_context") or {}
@@ -268,13 +289,13 @@ def _persist_review_proposals(job_id: str, status: str, summary: Dict[str, Any])
           as a failed request. Never raises.
     """
     try:
-        _main.update_job(job_id, review_summary=summary)
+        _api_main().update_job(job_id, review_summary=summary)
     except Exception:  # noqa: BLE001 - job may have aged out; the review row is the durable copy
         logger.warning(
             "could not update job %s review_summary after issue creation", job_id, exc_info=True
         )
     try:
-        _main.update_review(job_id, status=status, review_summary=summary)
+        _api_main().update_review(job_id, status=status, review_summary=summary)
     except Exception:  # noqa: BLE001 - persistence is best-effort; the issues already exist
         logger.warning("could not update review row %s after issue creation", job_id, exc_info=True)
 
@@ -375,7 +396,7 @@ def create_review_issues(
             # requested proposal that has not already been filed), so a redundant
             # or all-unknown request makes no GitHub call.
             if needed:
-                with _main.GitHubClient(token=token) as client:
+                with _api_main().GitHubClient(token=token) as client:
 
                     def _file_one(pid: str) -> Optional[Dict[str, Any]]:
                         proposal = by_id[pid]

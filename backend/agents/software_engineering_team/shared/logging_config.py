@@ -40,26 +40,20 @@ AGENT_LOGGERS = [
     # child of this one entry and inherits its level through the logging
     # hierarchy (child loggers default to NOTSET).
     "software_engineering_team",
-    # Bare aliases kept for bare-import contexts (tests via the pytest
-    # ``pythonpath`` entries, and ``cd software_engineering_team && python``
-    # style local runs), where module __name__ has no package prefix.
-    "orchestrator",
     # git ops moved to the neutral shared_git package; its modules log as
     # shared_git.git_utils / shared_git.branch_utils under EVERY import path
     # (the compatibility shims alias to the same module objects).
     "shared_git",
-    "shared.repo_writer",
-    "shared.job_store",
     "shared_command_runner",
-    # Agent loggers
+    # Bare aliases for the identities tests still import via the pytest
+    # ``pythonpath`` entries, where module __name__ has no package prefix.
+    # Only names that actually match a bare import somewhere belong here.
+    "orchestrator",
     "architecture_expert.agent",
     "security_agent.agent",
     "qa_agent.agent",
     "code_review_agent.agent",
-    "dbc_comments_agent.agent",
-    "documentation_agent.agent",
     "spec_parser",
-    "api.main",
 ]
 
 
@@ -120,9 +114,12 @@ def setup_logging(
     httpx_logger.addFilter(HttpxErrorLevelFilter())
     httpx_logger.setLevel(logging.WARNING)
 
-    # Suppress verbose LLM request INFO logs (only show warnings/errors)
-    llm_logger = logging.getLogger("shared.llm")
-    llm_logger.setLevel(logging.WARNING)
+    # Suppress verbose LLM request INFO logs (only show warnings/errors).
+    # Both identities: the dotted name production binds (which would otherwise
+    # inherit agent_level from the "software_engineering_team" parent entry)
+    # and the bare name used under the tests' pythonpath imports.
+    for llm_logger_name in ("software_engineering_team.shared.llm", "shared.llm"):
+        logging.getLogger(llm_logger_name).setLevel(logging.WARNING)
 
     # Suppress uvicorn access logs (HTTP request logs) - only show warnings/errors
     uvicorn_access = logging.getLogger("uvicorn.access")

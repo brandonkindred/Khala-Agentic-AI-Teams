@@ -1486,13 +1486,3 @@ def _format_questions_comment(questions: List[Dict[str, Any]], job_id: str) -> s
             opt_str = ", ".join(f"`{o.get('id')}` ({o.get('label')})" for o in opts)
             lines.append(f"   - Options: {opt_str} (or `other` with free text)")
     return "\n".join(lines)
-
-# --- Compatibility re-exports -------------------------------------------------
-# The issue-filing flow moved to ``pr_review_issues``; these names are
-# re-exported so existing importers of this module keep working unchanged.
-from software_engineering_team.coding_team.api.pr_review_issues import (  # noqa: E402, F401
-    MultipleIssueCreationErrors,
-    RepoMismatchError,
-    ReviewNotFoundError,
-    create_review_issues,
-)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from typing import Any, Dict
 
 import pytest
@@ -42,39 +43,39 @@ os.environ.setdefault("LLM_PROVIDER", "dummy")
 # overrides pytest's rootdir, which means ``backend/conftest.py`` is not
 # auto-discovered here, so we pull the fixture in explicitly (and re-register
 # the ``integration`` marker / default-skip behaviour for the same reason).
+from job_service_client_fake import fake_job_client  # noqa: F401, E402
+from llm_service import DummyLLMClient, clear_compaction_cache  # noqa: E402
+
 # The coordinator's caches exist once per module identity: production code
 # imports the dotted ``software_engineering_team.code_review_agent`` package,
 # while some tests still drive the bare ``code_review_agent`` name (resolved
-# via the pytest ``pythonpath`` entry). Both identities carry their own cache
-# dicts, so the reset fixture below must clear both or one side's cached
-# outcome leaks into the next test.
-from code_review_agent.coordinator import (  # noqa: E402
-    clear_chunk_outcome_cache as _clear_chunk_outcome_cache_bare,
-)
-from code_review_agent.coordinator import (  # noqa: E402
-    clear_submission_outcome_cache as _clear_submission_outcome_cache_bare,
-)
-
-from job_service_client_fake import fake_job_client  # noqa: F401, E402
-from llm_service import DummyLLMClient, clear_compaction_cache  # noqa: E402
-from software_engineering_team.code_review_agent.coordinator import (  # noqa: E402
-    clear_chunk_outcome_cache as _clear_chunk_outcome_cache_dotted,
-)
-from software_engineering_team.code_review_agent.coordinator import (  # noqa: E402
-    clear_submission_outcome_cache as _clear_submission_outcome_cache_dotted,
+# via the pytest ``pythonpath`` entry). Each identity carries its own cache
+# dicts, so the reset fixture below must clear every LOADED identity or one
+# side's cached outcome leaks into the next test. Identities are resolved
+# lazily through ``sys.modules`` so a targeted test run that never touches
+# code review does not pay a second full import of the package.
+_COORDINATOR_IDENTITIES = (
+    "code_review_agent.coordinator",
+    "software_engineering_team.code_review_agent.coordinator",
 )
 
 
-def clear_chunk_outcome_cache() -> None:
-    """Clear the map-phase chunk cache under BOTH package identities."""
-    _clear_chunk_outcome_cache_bare()
-    _clear_chunk_outcome_cache_dotted()
+def _clear_coordinator_caches() -> None:
+    """Clear the code-review coordinator caches on every loaded module identity.
 
+    Preconditions:
+        - None. Identities that are not present in ``sys.modules`` are skipped
+          (an unimported module cannot have populated its caches).
 
-def clear_submission_outcome_cache() -> None:
-    """Clear the submission short-circuit cache under BOTH package identities."""
-    _clear_submission_outcome_cache_bare()
-    _clear_submission_outcome_cache_dotted()
+    Postconditions:
+        - For each loaded identity in ``_COORDINATOR_IDENTITIES``, the chunk
+          and submission outcome caches are empty.
+    """
+    for name in _COORDINATOR_IDENTITIES:
+        mod = sys.modules.get(name)
+        if mod is not None:
+            mod.clear_chunk_outcome_cache()
+            mod.clear_submission_outcome_cache()
 
 
 @pytest.fixture
@@ -106,12 +107,10 @@ def _reset_code_review_chunk_cache():
     content and context hash the same. Clearing empty caches is trivially cheap,
     so this runs for every SE test unconditionally.
     """
-    clear_chunk_outcome_cache()
-    clear_submission_outcome_cache()
+    _clear_coordinator_caches()
     clear_compaction_cache()
     yield
-    clear_chunk_outcome_cache()
-    clear_submission_outcome_cache()
+    _clear_coordinator_caches()
     clear_compaction_cache()
 
 

@@ -1,15 +1,17 @@
 """
-Tech Lead orchestrator: runs the full pipeline with feature branches.
+Software Engineering orchestrator: runs the full pipeline with feature branches.
 
-Planning flow:
-1. Review initial_spec and document features and functionalities (high level) via Project Planning.
-2. Tech Lead produces Initiative/Epic/Story hierarchy from spec + features.
-3. Architecture Expert produces architecture from spec + features.
-
-Execution:
-- Prefix tasks (devops, git_setup) run sequentially on work path.
-- Backend and frontend tasks run in parallel (one task per agent type at a time),
-  each in its own repo (work_path/backend, work_path/frontend) initialized by Git Setup Agent.
+Pipeline:
+1. Discovery — resolve the spec source and run Product Requirements Analysis.
+2. Planning — the standalone ``planning_team`` workflow produces the handoff,
+   adapted by ``planning_adapter``; the Architecture Expert produces the
+   architecture (injected into planning as a callback).
+3. HITL gate — open planning questions pause the job for answers.
+4. Execution — the adapted plan is handed to ``coding_team``
+   (``run_coding_team_orchestrator``), whose Tech Lead owns task planning,
+   the Task Graph, and the per-task backend/frontend v2 workers.
+5. Finalize — reconcile the coding-team snapshot into the job's terminal
+   status and emit delivery metrics.
 """
 
 from __future__ import annotations
