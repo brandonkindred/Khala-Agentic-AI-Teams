@@ -1967,6 +1967,22 @@ def test_unrecognized_category_is_clamped_to_general() -> None:
     assert issues[0].category == "general"
 
 
+def test_side_effects_category_survives_chunk_output_validation() -> None:
+    """Regression test: the "side-effects" category (advertised to the chunk
+    reviewer by profiles.py's checklist item 12 / output contract) must be
+    accepted by the same validator as every other documented category -- it
+    was previously missing from _VALID_CATEGORIES, silently clamping every
+    chunk-level side-effects finding to "general" and losing its
+    classification for rendering/grouping/dedup."""
+    seg = FileSegment(path="a.py", content="x = 1", total_lines=1)
+    chunk = ReviewChunk(segments=[seg])
+    issues = _issues_from_chunk_output(
+        chunk,
+        [{"description": "d", "category": "side-effects", "severity": "high"}],
+    )
+    assert issues[0].category == "side-effects"
+
+
 def test_pre_existing_tag_is_carried_through_and_defaults_false() -> None:
     """The optional ``pre_existing`` tag (used by the PR-review path to route a
     finding to an issue proposal instead of a PR comment) survives conversion,

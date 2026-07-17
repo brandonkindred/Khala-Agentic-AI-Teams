@@ -346,6 +346,30 @@ def test_coerce_finding_accepts_side_effects_category() -> None:
     assert finding.severity == "high"
 
 
+def test_coerce_finding_carries_through_pre_existing_tag() -> None:
+    """The model's optional pre_existing tag (used by the PR-review whole-file
+    path to route a doc/impl-mismatch finding in untouched code to a
+    human-review proposal instead of a blocking PR comment) survives
+    conversion, tolerates string encodings, and defaults False when absent --
+    mirrors chunking._issues_from_chunk_output's identical convention."""
+    tagged_true = _coerce_finding(
+        {"category": "side-effects", "description": "d1", "pre_existing": True}
+    )
+    tagged_str = _coerce_finding(
+        {"category": "side-effects", "description": "d2", "pre_existing": "true"}
+    )
+    tagged_false_str = _coerce_finding(
+        {"category": "side-effects", "description": "d3", "pre_existing": "false"}
+    )
+    untagged = _coerce_finding({"category": "side-effects", "description": "d4"})
+    assert [f.pre_existing for f in (tagged_true, tagged_str, tagged_false_str, untagged)] == [
+        True,
+        True,
+        False,
+        False,
+    ]
+
+
 @pytest.mark.parametrize(
     "item",
     [

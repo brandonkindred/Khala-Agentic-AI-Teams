@@ -271,12 +271,13 @@ _CODE_REVIEW_CRITERIA = (
     "effects such as writes/network calls/mutation of shared or passed-in state, ordering/timing "
     "guarantees)?\n"
     "   - Does that CURRENT behavior match what its OWN docstring/comments claim it does? A "
-    "mismatch between documented and actual behavior is itself a finding, regardless of whether "
-    "this diff introduced it.\n"
-    "   - You cannot see this function's callers from this chunk alone -- do NOT guess whether "
-    "its current behavior is safe for them. Flag the behavior itself (what it currently does) so "
-    "the whole-repository pass can check it against real callers; do not suppress it merely "
-    "because you cannot see who calls it."
+    "mismatch between documented and actual behavior IS a finding, regardless of whether this "
+    "diff introduced it -- this is the one actionable trigger for this criterion.\n"
+    "   - You cannot see this function's callers from this chunk alone, and this is the only "
+    "check in this criterion -- do NOT flag a finding merely because a caller's safety is "
+    "unknown or because the behavior seems notable (an ordinary return value, mutation, or "
+    "network call is not itself a finding). Stay silent here unless you found the documented-vs-"
+    "actual mismatch above."
 )
 
 _SPEC_CONFORMANCE_CRITERIA = (

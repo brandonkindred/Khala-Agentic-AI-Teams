@@ -60,6 +60,7 @@ from llm_service import LLMClient
 from shared_env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
+from .chunking import _coerce_bool
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_suggestion
@@ -292,6 +293,13 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
           -- see ``is_no_op_suggestion``. An unrecognized ``severity``
           defaults to ``"medium"`` rather than being dropped. Never raises on
           malformed input.
+        - ``pre_existing`` reflects the model's optional per-finding tag
+          (coerced via ``chunking._coerce_bool``, tolerating string
+          encodings), defaulting to ``False`` when absent -- mirrors
+          ``chunking._issues_from_chunk_output``'s identical convention, used
+          by the PR-review whole-file path to route a finding about code this
+          submission did NOT add or modify to a human-review proposal instead
+          of a blocking PR comment (see ``CodeReviewIssue.pre_existing``).
     """
     if not isinstance(item, dict):
         return None
@@ -314,6 +322,7 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
         line=coerce_line(item.get("line")),
         description=description,
         suggestion=suggestion,
+        pre_existing=_coerce_bool(item.get("pre_existing")),
     )
 
 
