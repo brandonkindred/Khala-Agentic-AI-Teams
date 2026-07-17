@@ -36,6 +36,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pytest
 
+from investment_team.models import BacktestConfig
+from investment_team.strategy_lab.spec_dsl import EntryRule, IndicatorRef, Predicate, SignalExitRule
+
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
@@ -327,3 +330,61 @@ def failing_sandbox(
         )
 
     return _run
+
+
+def default_rsi_spec_dict() -> Dict[str, Any]:
+    """Build the canonical RSI-mean-reversion spec dict used across
+    orchestrator/design-loop tests that need *a* valid spec but don't care
+    about its specific rules.
+
+    Preconditions: none.
+    Postconditions: returns a fresh dict (safe for the caller to mutate)
+    that ``build_spec_from_dict`` / ``StrategySpec.model_validate`` accepts
+    as-is.
+    """
+    return {
+        "asset_class": "stocks",
+        "hypothesis": "RSI mean reversion on a small universe",
+        "signal_definition": "RSI(14) crossings",
+        "timeframe": "1d",
+        "entry_rules": [
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="rsi", params={"period": 14}),
+                    op="<",
+                    rhs=30,
+                ),
+            ).model_dump()
+        ],
+        "exit_rules": [
+            SignalExitRule(
+                when=Predicate(
+                    lhs=IndicatorRef(name="rsi", params={"period": 14}),
+                    op=">",
+                    rhs=70,
+                )
+            ).model_dump()
+        ],
+        "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10},
+        "target_symbols": ["QQQ"],
+        "speculative": False,
+    }
+
+
+def default_backtest_config() -> BacktestConfig:
+    """Build the canonical one-year ``BacktestConfig`` used across
+    orchestrator/design-loop tests that need *a* valid config but don't
+    care about its specific dates/costs.
+
+    Preconditions: none.
+    Postconditions: returns a fresh ``BacktestConfig`` instance.
+    """
+    return BacktestConfig(
+        start_date="2023-01-01",
+        end_date="2023-12-31",
+        initial_capital=100_000.0,
+        benchmark_symbol="SPY",
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )

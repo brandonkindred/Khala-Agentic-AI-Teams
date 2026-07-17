@@ -2,90 +2,44 @@
 ``StrategyLabOrchestrator._orchestrate_design_and_review``.
 
 The invariant check was previously a bare ``assert``, silently disabled
-under ``python -O``. It is now an explicit ``if``/``raise`` guard that must
-always fire, regardless of interpreter optimization flags.
+under ``python -O``. It is now an explicit ``if``/``raise`` guard
+(``OrchestratorContractError``) that must always fire, regardless of
+interpreter optimization flags.
+
+Preconditions:
+    None — this module defines one self-contained test and imports its
+    fixtures from ``investment_team.tests.conftest``.
+Postconditions:
+    Importing this module registers
+    ``test_orchestrate_design_and_review_raises_when_ready_flips_false``.
+
+Note on approach: unlike sibling tests (e.g.
+``test_strategy_lab_phase_transitions.py``), this test does not drive
+``_run_design_loop`` through stubbed ``design_agent``/``design_review_agent``
+collaborators (see ``conftest.stub_design_loop``) — it can't. The guard
+under test only fires if ``design_outcome.ready`` differs across two reads
+of the *same* returned object, and ``_DesignLoopOutcome.ready`` is a plain
+dataclass field that a real design-loop run never mutates in place; no
+real ``_run_design_loop`` execution can produce that inconsistency. The
+guard is therefore defensive against a future bug in ``_run_design_loop``
+itself, not anything reachable via today's code, and this test
+intentionally patches ``_run_design_loop`` and ``_DesignLoopOutcome.ready``
+directly to exercise it.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from unittest.mock import PropertyMock, patch
 
 import pytest
 
-from investment_team.models import BacktestConfig
 from investment_team.strategy_lab.exceptions import OrchestratorContractError
 from investment_team.strategy_lab.orchestrator import (
     StrategyLabOrchestrator,
     _DesignLoopOutcome,
     _DriftCollector,
 )
-from investment_team.strategy_lab.spec_dsl import EntryRule, IndicatorRef, Predicate, SignalExitRule
-
-
-def _spec_dict() -> Dict[str, Any]:
-    return {
-        "asset_class": "stocks",
-        "hypothesis": "RSI mean reversion on a small universe",
-        "signal_definition": "RSI(14) crossings",
-        "timeframe": "1d",
-        "entry_rules": [
-            EntryRule(
-                side="long",
-                when=Predicate(
-                    lhs=IndicatorRef(name="rsi", params={"period": 14}),
-                    op="<",
-                    rhs=30,
-                ),
-            ).model_dump()
-        ],
-        "exit_rules": [
-            SignalExitRule(
-                when=Predicate(
-                    lhs=IndicatorRef(name="rsi", params={"period": 14}),
-                    op=">",
-                    rhs=70,
-                )
-            ).model_dump()
-        ],
-        "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10},
-        "target_symbols": ["QQQ"],
-        "speculative": False,
-    }
-
-
-def _config() -> BacktestConfig:
-    return BacktestConfig(
-        start_date="2023-01-01",
-        end_date="2023-12-31",
-        initial_capital=100_000.0,
-        benchmark_symbol="SPY",
-        transaction_cost_bps=5.0,
-        slippage_bps=2.0,
-    )
-
-
-class _ReadyFlipsToNotReadyOutcome:
-    """Proxy over a real ``_DesignLoopOutcome`` whose ``ready`` reads ``True``
-    once, then ``False`` forever after.
-
-    ``_orchestrate_design_and_review`` reads ``design_outcome.ready`` exactly
-    twice: once to decide whether to take the short-circuit (not-ready)
-    branch, and once at the boundary-invariant guard just before emitting the
-    DESIGN_REVIEW -> CODE_SYNTHESIS transition. A plain bool can't simulate
-    the invariant being violated between those two reads — this proxy can.
-    """
-
-    def __init__(self, base: _DesignLoopOutcome) -> None:
-        self._base = base
-        self._reads = 0
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._base, name)
-
-    @property
-    def ready(self) -> bool:
-        self._reads += 1
-        return self._reads == 1
+from investment_team.tests.conftest import default_backtest_config, default_rsi_spec_dict
 
 
 def test_orchestrate_design_and_review_raises_when_ready_flips_false() -> None:
@@ -93,30 +47,49 @@ def test_orchestrate_design_and_review_raises_when_ready_flips_false() -> None:
     boundary guard runs, the guard must raise ``OrchestratorContractError``
     — not silently proceed to emit the phase transition and return a
     ``record=None`` result, which is what a stripped-under--O bare
-    ``assert`` would have allowed."""
+    ``assert`` would have allowed.
+
+    Preconditions:
+        None beyond a fresh ``StrategyLabOrchestrator``.
+    Postconditions:
+        ``_orchestrate_design_and_review`` raises
+        ``OrchestratorContractError`` with a message containing "boundary
+        invariant violated"; no ``_DesignPhaseResult`` is returned.
+    """
     orch = StrategyLabOrchestrator()
-    spec = orch._build_spec_from_dict(_spec_dict(), strategy_id="strat-boundary-test")
-    base_outcome = _DesignLoopOutcome(
+    spec = orch._build_spec_from_dict(default_rsi_spec_dict(), strategy_id="strat-boundary-test")
+    outcome = _DesignLoopOutcome(
         spec=spec,
         rationale="scripted rationale",
-        ready=True,
+        ready=False,  # inert: `.ready` is patched at the class level below
         rounds=1,
         critique_history=[],
     )
-    flaky_outcome = _ReadyFlipsToNotReadyOutcome(base_outcome)
+    orch._run_design_loop = lambda **_kw: outcome
 
-    orch._run_design_loop = lambda **_kw: flaky_outcome
-
-    with pytest.raises(OrchestratorContractError, match="boundary invariant violated"):
-        orch._orchestrate_design_and_review(
-            prior_records=[],
-            signal_brief=None,
-            directives=[],
-            exclude_asset_classes=None,
-            config=_config(),
-            all_gate_results=[],
-            emit=lambda *a, **k: None,
-            design_attempt=0,
-            phase_back_count=0,
-            drift_collector=_DriftCollector(),
-        )
+    # `_orchestrate_design_and_review` reads `design_outcome.ready` exactly
+    # twice: once at the short-circuit check, once at the boundary guard.
+    # Patching `ready` as a class-level PropertyMock lets the first read
+    # return True (bypassing the short-circuit) and the second return
+    # False (tripping the guard) on the *same* `outcome` instance — a
+    # transition no real, un-mutated `_DesignLoopOutcome` could produce.
+    with patch.object(
+        _DesignLoopOutcome,
+        "ready",
+        new_callable=PropertyMock,
+        side_effect=[True, False],
+        create=True,
+    ):
+        with pytest.raises(OrchestratorContractError, match="boundary invariant violated"):
+            orch._orchestrate_design_and_review(
+                prior_records=[],
+                signal_brief=None,
+                directives=[],
+                exclude_asset_classes=None,
+                config=default_backtest_config(),
+                all_gate_results=[],
+                emit=lambda *a, **k: None,
+                design_attempt=0,
+                phase_back_count=0,
+                drift_collector=_DriftCollector(),
+            )
