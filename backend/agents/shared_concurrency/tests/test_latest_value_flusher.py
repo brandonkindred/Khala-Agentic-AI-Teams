@@ -237,9 +237,10 @@ def test_writer_raising_base_exception_does_not_hang_the_loop() -> None:
 def test_enqueue_before_start_raises_instead_of_hanging() -> None:
     """enqueue() on a never-started flusher must fail fast (precondition violation) rather
     than clear _idle with no thread ever able to set it back — which would hang every
-    later drain()/stop() call forever."""
+    later drain()/stop() call forever. Raises RuntimeError (not assert) since this check
+    must survive -O/PYTHONOPTIMIZE, where asserts are stripped."""
     flusher = LatestValueFlusher(lambda payload: None, name="not-started")
-    with pytest.raises(AssertionError):
+    with pytest.raises(RuntimeError):
         flusher.enqueue(1)
     assert flusher.drain(timeout=1) is True, "idle flag must be untouched by the rejected enqueue"
 
@@ -248,7 +249,7 @@ def test_enqueue_after_stop_raises_instead_of_hanging() -> None:
     """enqueue() after stop() must also fail fast, not silently hang a later drain()."""
     flusher = LatestValueFlusher(lambda payload: None, name="post-stop").start()
     flusher.stop()
-    with pytest.raises(AssertionError):
+    with pytest.raises(RuntimeError):
         flusher.enqueue(1)
 
 
@@ -298,23 +299,41 @@ def test_on_error_raising_does_not_hang_the_loop() -> None:
 
 
 def test_stop_with_zero_join_timeout_still_rejects_a_racing_enqueue() -> None:
-    """A join(timeout=0) can return before the OS thread has actually finished exiting —
-    stop() must not let a concurrent enqueue() slip through during that window just
-    because is_alive() might still (briefly) read True. join_timeout=0 makes this
-    deterministic: join() always returns immediately, whether or not the thread is
-    truly done, so any correct implementation must reject the racing enqueue anyway."""
+    """join_timeout=0 makes stop() poll join() as aggressively as possible instead of
+    waiting a full interval — stop() must still not return until the writer thread is
+    truly dead, so a racing enqueue() right after stop() returns must be rejected."""
     flusher = LatestValueFlusher(lambda payload: None, name="zero-timeout", join_timeout=0.0)
     flusher.start()
     flusher.stop()
-    with pytest.raises(AssertionError):
+    with pytest.raises(RuntimeError):
         flusher.enqueue(1)
 
 
+def test_stop_with_zero_join_timeout_never_leaves_two_live_writers() -> None:
+    """stop() must not return until the OLD writer thread has actually terminated — not
+    merely until a (possibly instantly-timed-out) join() call returns. Otherwise an
+    immediate start() clears the shared stop flag before the old thread observes it, the
+    old thread loops back to wait for more work instead of exiting, and two threads end
+    up alive simultaneously, both able to pull from the single-slot mailbox and invoke
+    the writer concurrently — breaking the one-writer-at-a-time guarantee this whole
+    "latest value wins" design depends on. join_timeout=0.0 makes the old race window as
+    wide as possible (join() always returns instantly, real or not)."""
+    flusher = LatestValueFlusher(lambda payload: None, name="dual-writer-check", join_timeout=0.0)
+    for _ in range(20):  # repeat to make a narrow race window practically certain to show up
+        flusher.start()
+        flusher.stop()
+        named = [t for t in threading.enumerate() if t.name == "dual-writer-check"]
+        assert len(named) == 0, f"stop() returned with {len(named)} writer thread(s) still alive"
+
+    flusher.start()
+    named = [t for t in threading.enumerate() if t.name == "dual-writer-check"]
+    assert len(named) == 1, f"expected exactly one writer thread, found {len(named)}"
+    flusher.stop()
+
+
 def test_start_after_stop_with_zero_join_timeout_still_works() -> None:
-    """Restarting immediately after a stop() whose bounded join may not have observed the
-    old thread's actual exit must still create a genuinely live, working flusher — not
-    silently no-op against the (possibly still-finishing) old thread and leave the
-    caller believing a new flusher is running when nothing is."""
+    """Restarting immediately after a stop() with an aggressive join-polling interval must
+    still create a genuinely live, working flusher that delivers new payloads."""
     written: list[int] = []
     flusher = LatestValueFlusher(written.append, name="restart", join_timeout=0.0)
     flusher.start()

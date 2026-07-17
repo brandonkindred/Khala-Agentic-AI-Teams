@@ -137,14 +137,19 @@ class LatestValueFlusher:
               to ever set it again, permanently hanging every later ``drain()``/
               ``stop()`` call. This is a caller bug (a race with a concurrent
               ``stop()``, or enqueuing before ``start()``), not something this
-              method silently tolerates or coerces around.
+              method silently tolerates or coerces around. Enforced with an explicit
+              raise rather than ``assert``: ``-O``/``PYTHONOPTIMIZE`` strips asserts,
+              and silently skipping this specific check reintroduces the permanent
+              hang it exists to prevent — this is a liveness invariant, not a
+              debug-only sanity check.
 
         Postconditions:
             - Never blocks on the writer; a payload not yet picked up by the writer
               thread is overwritten, not queued alongside.
         """
         with self._lifecycle_lock:
-            assert self._running, "enqueue() requires a started, not-yet-stopped flusher"
+            if not self._running:
+                raise RuntimeError("enqueue() requires a started, not-yet-stopped flusher")
             with self._lock:
                 self._pending = payload
                 self._has_pending = True
@@ -206,7 +211,7 @@ class LatestValueFlusher:
 
     def stop(self) -> None:
         """Drain any pending payload — waiting as long as it takes — then signal the loop
-        to exit and join it.
+        to exit and join it, waiting until it has actually terminated.
 
         The pre-shutdown drain is deliberately unbounded: the whole point of this primitive
         is that the caller depends on the latest enqueued state actually reaching the
@@ -214,28 +219,34 @@ class LatestValueFlusher:
         outlasts ``join_timeout`` — a writer whose own client has a longer timeout than
         ``join_timeout`` (e.g. an HTTP call with a multi-second timeout/retry budget) would
         otherwise be left running after the caller considers the flusher stopped, free to
-        land a stale write at an arbitrary later time. ``join_timeout`` still bounds the
-        final ``Thread.join()`` below, but by then the writer loop has nothing left to do
-        but observe the stop flag and exit, so that bound is not load-bearing for delivery.
+        land a stale write at an arbitrary later time.
+
+        The final join is equally load-bearing, for a sharper reason than "clean shutdown":
+        a bounded ``join(timeout=join_timeout)`` can return while the OS thread is still
+        finishing its exit, and if ``start()`` were then called immediately, it would clear
+        the shared ``_stop_flag`` before the old thread reaches its own check of that flag —
+        so the old thread would loop back to wait for more work instead of exiting, and two
+        writer threads would now be alive, both able to pull from the single-slot mailbox and
+        call ``writer`` concurrently. That breaks the one-writer-at-a-time guarantee the whole
+        "latest value wins" design depends on and can reorder writes on the wire. So ``stop()``
+        loops on ``join(timeout=join_timeout)`` — a polling granularity, not a hard cutoff —
+        until ``is_alive()`` is actually False, logging a warning each time it doesn't exit
+        promptly (this should be at most theoretical: the writer has nothing left to do after
+        an already-unbounded ``drain()`` but observe a flag and return).
 
         Postconditions:
             - Safe to call when never started or already stopped (no-op).
             - Does not return until any payload enqueued before the call has been delivered
               (``writer`` returned) or raised (routed to ``on_error``) — never abandons an
               outstanding write.
-            - The thread is then joined for at most ``join_timeout`` seconds.
+            - Does not return until the writer thread has actually terminated — never leaves
+              a live thread behind for a subsequent ``start()`` to race against.
             - Held under the same lifecycle lock as ``start()``/``enqueue()``'s liveness
               check, so a concurrent ``enqueue()`` either fully precedes this call (and is
               drained by it) or fully follows it (and then correctly fails its precondition
-              instead of racing a payload past a dead writer thread).
-            - ``_running`` is cleared before the (possibly timed-out) ``Thread.join()``
-              below, not inferred from it afterward — ``join(timeout=join_timeout)`` can
-              return while the OS thread is still finishing its exit, so relying on
-              ``is_alive()`` post-join would let a concurrent ``enqueue()`` or ``start()``
-              observe a stale "still running" answer during that window (enqueuing a
-              payload nothing will ever deliver, or no-op'ing against a thread that's
-              already committed to dying). The explicit flag makes shutdown a single
-              atomic decision instead of a racy inference from thread scheduling.
+              instead of racing a payload past a dead writer thread), and a concurrent
+              ``start()`` cannot begin creating a replacement thread until this one has
+              confirmed the old thread is fully gone.
         """
         with self._lifecycle_lock:
             if not self._running:
@@ -244,8 +255,14 @@ class LatestValueFlusher:
             self.drain()  # unbounded — see docstring
             self._stop_flag.set()
             self._wake.set()
-            if self._thread is not None:
+            while self._thread is not None and self._thread.is_alive():
                 self._thread.join(timeout=self._join_timeout)
+                if self._thread.is_alive():
+                    logger.warning(
+                        "LatestValueFlusher %s: writer thread still exiting after %.1fs",
+                        self._name,
+                        self._join_timeout,
+                    )
 
     def __enter__(self) -> "LatestValueFlusher":
         return self.start()
