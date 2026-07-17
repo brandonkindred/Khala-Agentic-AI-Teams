@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -206,3 +207,64 @@ def test_invalid_writer_rejected() -> None:
     """Precondition: a non-callable writer is rejected."""
     with pytest.raises(AssertionError):
         LatestValueFlusher(None)  # type: ignore[arg-type]
+
+
+def test_writer_raising_base_exception_does_not_hang_the_loop() -> None:
+    """A writer raising a BaseException that is not an Exception (e.g. the shape of
+    SystemExit/asyncio.CancelledError) must not kill the daemon thread — otherwise _idle
+    is never set again and every later drain()/stop() call hangs forever."""
+    errors: list[BaseException] = []
+    written: list[int] = []
+
+    def flaky_writer(payload: int) -> None:
+        if payload == 1:
+            raise SystemExit("simulated non-Exception failure")
+        written.append(payload)
+
+    flusher = LatestValueFlusher(flaky_writer, name="base-exc", on_error=errors.append).start()
+    flusher.enqueue(1)
+    assert flusher.drain(timeout=5) is True, "drain() must not hang after a BaseException"
+    assert flusher.is_alive(), "the writer thread must survive a BaseException"
+    assert len(errors) == 1
+    assert isinstance(errors[0], SystemExit)
+
+    flusher.enqueue(2)
+    assert flusher.drain(timeout=5) is True
+    flusher.stop()
+    assert written == [2]
+
+
+def test_enqueue_before_start_raises_instead_of_hanging() -> None:
+    """enqueue() on a never-started flusher must fail fast (precondition violation) rather
+    than clear _idle with no thread ever able to set it back — which would hang every
+    later drain()/stop() call forever."""
+    flusher = LatestValueFlusher(lambda payload: None, name="not-started")
+    with pytest.raises(AssertionError):
+        flusher.enqueue(1)
+    assert flusher.drain(timeout=1) is True, "idle flag must be untouched by the rejected enqueue"
+
+
+def test_enqueue_after_stop_raises_instead_of_hanging() -> None:
+    """enqueue() after stop() must also fail fast, not silently hang a later drain()."""
+    flusher = LatestValueFlusher(lambda payload: None, name="post-stop").start()
+    flusher.stop()
+    with pytest.raises(AssertionError):
+        flusher.enqueue(1)
+
+
+def test_concurrent_start_creates_exactly_one_thread() -> None:
+    """N threads calling start() concurrently on the same flusher must create and run
+    exactly one daemon thread, never two racing on the same single-slot mailbox."""
+    flusher = LatestValueFlusher(lambda payload: None, name="concurrent-start")
+    barrier = threading.Barrier(10)
+
+    def _start() -> None:
+        barrier.wait(timeout=5)
+        flusher.start()
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        list(pool.map(lambda _: _start(), range(10)))
+
+    named = [t for t in threading.enumerate() if t.name == "concurrent-start"]
+    assert len(named) == 1, f"expected exactly one daemon thread, found {len(named)}"
+    flusher.stop()

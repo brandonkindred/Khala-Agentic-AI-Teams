@@ -46,6 +46,9 @@ class LatestValueFlusher:
         - ``writer`` is callable with exactly one positional argument (the payload)
           and is safe to invoke repeatedly, from a single daemon thread, with no
           concurrent invocation of itself.
+        - ``enqueue()`` is only called while the flusher is started and not yet
+          stopped (between a ``start()``/``__enter__`` and the matching
+          ``stop()``/``__exit__``) — see ``enqueue()``'s own precondition for why.
 
     Postconditions:
         - Between ``start()`` and ``stop()`` exactly one daemon thread is running.
@@ -57,12 +60,18 @@ class LatestValueFlusher:
           payload that was itself passed to ``writer`` — i.e. the destination
           reflects at least as fresh a state as of the ``drain()`` call once it
           returns True.
-        - A raising ``writer`` never kills the loop: the exception is routed to
-          ``on_error`` (default: logged and swallowed) and the loop continues with
-          the next payload.
+        - A raising ``writer`` never kills the loop: the exception (including a
+          ``BaseException`` such as ``SystemExit``/``asyncio.CancelledError`` — not
+          just ``Exception``, matching ``BackgroundHeartbeat``'s ``_tick``) is
+          routed to ``on_error`` (default: logged and swallowed) and the loop
+          continues with the next payload. A dead loop would leave every future
+          ``drain()``/``stop()`` call blocked forever, since nothing would be left
+          to ever mark the mailbox idle again.
 
     Invariants:
-        - ``start()`` is idempotent — calling it again while running is a no-op.
+        - ``start()`` is idempotent and safe to call concurrently — calling it
+          again (from any thread) while already running is a no-op; at most one
+          daemon thread is ever created.
         - At most one payload is ever pending: the mailbox holds zero or one items.
     """
 
@@ -87,15 +96,25 @@ class LatestValueFlusher:
         self._idle.set()
         self._stop_flag = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Guards the check-create-assign-start sequence in start() (and stop()'s
+        # matching teardown) so concurrent callers can never race into creating two
+        # daemon threads sharing one mailbox — see the class Invariants.
+        self._lifecycle_lock = threading.Lock()
 
     def start(self) -> "LatestValueFlusher":
-        """Start the daemon writer thread (idempotent — a no-op while already running)."""
-        if self._thread is not None and self._thread.is_alive():
+        """Start the daemon writer thread (idempotent — a no-op while already running).
+
+        Postconditions:
+            - Safe to call concurrently from multiple threads: exactly one daemon
+              thread is created and started, no matter how many callers race here.
+        """
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return self
+            self._stop_flag.clear()
+            self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
+            self._thread.start()
             return self
-        self._stop_flag.clear()
-        self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
-        self._thread.start()
-        return self
 
     def is_alive(self) -> bool:
         """True iff the writer thread has been started and has not yet exited."""
@@ -104,14 +123,24 @@ class LatestValueFlusher:
     def enqueue(self, payload: Any) -> None:
         """Replace the pending payload (if any) with ``payload`` and wake the writer.
 
+        Preconditions:
+            - The flusher is currently started (``is_alive()``) — enqueuing with no
+              live writer thread would clear the idle flag with nothing left able to
+              ever set it again, permanently hanging every later ``drain()``/
+              ``stop()`` call. This is a caller bug (a race with a concurrent
+              ``stop()``, or enqueuing before ``start()``), not something this
+              method silently tolerates or coerces around.
+
         Postconditions:
             - Never blocks on the writer; a payload not yet picked up by the writer
               thread is overwritten, not queued alongside.
         """
-        with self._lock:
-            self._pending = payload
-            self._has_pending = True
-            self._idle.clear()
+        with self._lifecycle_lock:
+            assert self.is_alive(), "enqueue() requires a started, not-yet-stopped flusher"
+            with self._lock:
+                self._pending = payload
+                self._has_pending = True
+                self._idle.clear()
         self._wake.set()
 
     def drain(self, timeout: Optional[float] = None) -> bool:
@@ -134,7 +163,11 @@ class LatestValueFlusher:
             if has_pending:
                 try:
                     self._writer(payload)
-                except Exception as exc:  # noqa: BLE001 - a failing write must not kill the loop
+                except BaseException as exc:  # noqa: BLE001 - the loop (and every future
+                    # drain()/stop()) must survive any writer error, including a
+                    # BaseException like SystemExit/asyncio.CancelledError — matching
+                    # BackgroundHeartbeat._tick's identical rationale: a dead loop would
+                    # leave _idle cleared forever, hanging every subsequent caller.
                     if self._on_error is not None:
                         self._on_error(exc)
                     else:
@@ -168,12 +201,17 @@ class LatestValueFlusher:
               (``writer`` returned) or raised (routed to ``on_error``) — never abandons an
               outstanding write.
             - The thread is then joined for at most ``join_timeout`` seconds.
+            - Held under the same lifecycle lock as ``start()``/``enqueue()``'s liveness
+              check, so a concurrent ``enqueue()`` either fully precedes this call (and is
+              drained by it) or fully follows it (and then correctly fails its precondition
+              instead of racing a payload past a dead writer thread).
         """
-        self.drain()  # unbounded — see docstring
-        self._stop_flag.set()
-        self._wake.set()
-        if self._thread is not None:
-            self._thread.join(timeout=self._join_timeout)
+        with self._lifecycle_lock:
+            self.drain()  # unbounded — see docstring
+            self._stop_flag.set()
+            self._wake.set()
+            if self._thread is not None:
+                self._thread.join(timeout=self._join_timeout)
 
     def __enter__(self) -> "LatestValueFlusher":
         return self.start()
