@@ -11,16 +11,6 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-import pytest
-
-
-@pytest.fixture(autouse=True)
-def _patched_blog_client(monkeypatch, fake_job_client):
-    from agents.blogging.shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    return fake_job_client
-
 
 def _make_job(cache_dir: Path) -> str:
     from agents.blogging.shared.blog_job_store import create_blog_job

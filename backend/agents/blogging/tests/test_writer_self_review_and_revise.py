@@ -13,14 +13,10 @@ import json
 
 
 def _make_agent_with_guidelines():
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from conftest import make_writer_agent
 
-    from llm_service import DummyLLMClient
-
-    return BlogWriterAgent(
-        llm_client=DummyLLMClient(),
-        writing_style_guide_content="Style Guide",
-        brand_spec_content="Brand Spec",
+    return make_writer_agent(
+        writing_style_guide_content="Style Guide", brand_spec_content="Brand Spec"
     )
 
 
@@ -156,23 +152,16 @@ def test_writer_format_feedback_item_line() -> None:
 
 def test_writer_revise_empty_draft() -> None:
     """revise() returns empty draft unchanged."""
+    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     a = _make_agent_with_guidelines()
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="X",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     out = a.revise(
         ReviseWriterInput(
@@ -188,23 +177,16 @@ def test_writer_revise_empty_draft() -> None:
 
 
 def test_writer_revise_no_feedback_items() -> None:
+    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     a = _make_agent_with_guidelines()
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="X",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     out = a.revise(
         ReviseWriterInput(
