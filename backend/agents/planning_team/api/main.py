@@ -30,6 +30,7 @@ from planning_team.models import (  # noqa: E402
     PlanningStatusResponse,
 )
 from planning_team.orchestrator import run_workflow  # noqa: E402
+from planning_team.postgres import SCHEMA as PLANNING_POSTGRES_SCHEMA  # noqa: E402
 from planning_team.shared.job_store import (  # noqa: E402
     JOB_STATUS_COMPLETED,
     JOB_STATUS_PENDING,
@@ -55,6 +56,7 @@ app = create_team_app(
     title="Planning API",
     description="Client-facing discovery and requirements; PRD and handoff for dev/UI/UX",
     version="1.0.0",
+    postgres_schema=PLANNING_POSTGRES_SCHEMA,
 )
 
 app.add_middleware(
