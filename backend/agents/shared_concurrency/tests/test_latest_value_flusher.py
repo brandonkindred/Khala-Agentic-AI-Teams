@@ -268,3 +268,61 @@ def test_concurrent_start_creates_exactly_one_thread() -> None:
     named = [t for t in threading.enumerate() if t.name == "concurrent-start"]
     assert len(named) == 1, f"expected exactly one daemon thread, found {len(named)}"
     flusher.stop()
+
+
+def test_on_error_raising_does_not_hang_the_loop() -> None:
+    """A broken on_error callback that itself raises must not kill the writer thread —
+    otherwise _idle is never set again and every later drain()/stop() call hangs forever,
+    exactly like an unguarded writer failure would."""
+    written: list[int] = []
+
+    def flaky_writer(payload: int) -> None:
+        if payload == 1:
+            raise RuntimeError("write failed")
+        written.append(payload)
+
+    def flaky_on_error(exc: BaseException) -> None:
+        raise ValueError("on_error itself is broken")
+
+    flusher = LatestValueFlusher(
+        flaky_writer, name="flaky-on-error", on_error=flaky_on_error
+    ).start()
+    flusher.enqueue(1)
+    assert flusher.drain(timeout=5) is True, "drain() must not hang after on_error raises"
+    assert flusher.is_alive(), "the writer thread must survive a broken on_error callback"
+
+    flusher.enqueue(2)
+    assert flusher.drain(timeout=5) is True
+    flusher.stop()
+    assert written == [2]
+
+
+def test_stop_with_zero_join_timeout_still_rejects_a_racing_enqueue() -> None:
+    """A join(timeout=0) can return before the OS thread has actually finished exiting —
+    stop() must not let a concurrent enqueue() slip through during that window just
+    because is_alive() might still (briefly) read True. join_timeout=0 makes this
+    deterministic: join() always returns immediately, whether or not the thread is
+    truly done, so any correct implementation must reject the racing enqueue anyway."""
+    flusher = LatestValueFlusher(lambda payload: None, name="zero-timeout", join_timeout=0.0)
+    flusher.start()
+    flusher.stop()
+    with pytest.raises(AssertionError):
+        flusher.enqueue(1)
+
+
+def test_start_after_stop_with_zero_join_timeout_still_works() -> None:
+    """Restarting immediately after a stop() whose bounded join may not have observed the
+    old thread's actual exit must still create a genuinely live, working flusher — not
+    silently no-op against the (possibly still-finishing) old thread and leave the
+    caller believing a new flusher is running when nothing is."""
+    written: list[int] = []
+    flusher = LatestValueFlusher(written.append, name="restart", join_timeout=0.0)
+    flusher.start()
+    flusher.stop()
+
+    flusher.start()
+    flusher.enqueue(1)
+    assert flusher.drain(timeout=5) is True
+    assert written == [1], "the restarted flusher must actually deliver new payloads"
+    flusher.stop()
+    flusher.stop()

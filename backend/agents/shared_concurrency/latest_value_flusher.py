@@ -100,6 +100,13 @@ class LatestValueFlusher:
         # matching teardown) so concurrent callers can never race into creating two
         # daemon threads sharing one mailbox — see the class Invariants.
         self._lifecycle_lock = threading.Lock()
+        # Explicit logical lifecycle state, distinct from thread.is_alive(): a bounded
+        # Thread.join() in stop() can time out and return before the OS thread has
+        # actually finished exiting, so is_alive() can still read True for a brief
+        # window after stop() has committed to shutting down. Only ever read/written
+        # under _lifecycle_lock, so start()/enqueue() always see the state stop()
+        # (or start()) last committed, never a stale thread-scheduling artifact.
+        self._running = False
 
     def start(self) -> "LatestValueFlusher":
         """Start the daemon writer thread (idempotent — a no-op while already running).
@@ -109,11 +116,12 @@ class LatestValueFlusher:
               thread is created and started, no matter how many callers race here.
         """
         with self._lifecycle_lock:
-            if self._thread is not None and self._thread.is_alive():
+            if self._running:
                 return self
             self._stop_flag.clear()
             self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
             self._thread.start()
+            self._running = True
             return self
 
     def is_alive(self) -> bool:
@@ -124,9 +132,9 @@ class LatestValueFlusher:
         """Replace the pending payload (if any) with ``payload`` and wake the writer.
 
         Preconditions:
-            - The flusher is currently started (``is_alive()``) — enqueuing with no
-              live writer thread would clear the idle flag with nothing left able to
-              ever set it again, permanently hanging every later ``drain()``/
+            - The flusher is currently started and not yet stopped — enqueuing with
+              no live writer thread would clear the idle flag with nothing left able
+              to ever set it again, permanently hanging every later ``drain()``/
               ``stop()`` call. This is a caller bug (a race with a concurrent
               ``stop()``, or enqueuing before ``start()``), not something this
               method silently tolerates or coerces around.
@@ -136,7 +144,7 @@ class LatestValueFlusher:
               thread is overwritten, not queued alongside.
         """
         with self._lifecycle_lock:
-            assert self.is_alive(), "enqueue() requires a started, not-yet-stopped flusher"
+            assert self._running, "enqueue() requires a started, not-yet-stopped flusher"
             with self._lock:
                 self._pending = payload
                 self._has_pending = True
@@ -168,10 +176,7 @@ class LatestValueFlusher:
                     # BaseException like SystemExit/asyncio.CancelledError — matching
                     # BackgroundHeartbeat._tick's identical rationale: a dead loop would
                     # leave _idle cleared forever, hanging every subsequent caller.
-                    if self._on_error is not None:
-                        self._on_error(exc)
-                    else:
-                        logger.warning("LatestValueFlusher %s: writer failed: %s", self._name, exc)
+                    self._report_error(exc)
             with self._lock:
                 # A fresh enqueue() may have landed while writer() ran above (it does not
                 # hold self._lock) — only declare idle/exit when nothing new arrived,
@@ -180,6 +185,24 @@ class LatestValueFlusher:
                     self._idle.set()
                     if self._stop_flag.is_set():
                         return
+
+    def _report_error(self, exc: BaseException) -> None:
+        """Route a writer failure to ``on_error``, isolated from the rest of ``_run``.
+
+        A broken ``on_error`` callback raising in turn must not be able to kill the
+        writer loop either — the same "liveness first" requirement ``_run`` applies to
+        the writer itself applies one level deeper here, since an exception escaping
+        this method would propagate out of ``_run`` before the idle-flag bookkeeping
+        runs, permanently hanging every later ``drain()``/``stop()`` call exactly like
+        an unguarded writer failure would.
+        """
+        try:
+            if self._on_error is not None:
+                self._on_error(exc)
+            else:
+                logger.warning("LatestValueFlusher %s: writer failed: %s", self._name, exc)
+        except BaseException:  # noqa: BLE001 - on_error itself must never kill the loop
+            logger.exception("LatestValueFlusher %s: on_error callback raised", self._name)
 
     def stop(self) -> None:
         """Drain any pending payload — waiting as long as it takes — then signal the loop
@@ -205,8 +228,19 @@ class LatestValueFlusher:
               check, so a concurrent ``enqueue()`` either fully precedes this call (and is
               drained by it) or fully follows it (and then correctly fails its precondition
               instead of racing a payload past a dead writer thread).
+            - ``_running`` is cleared before the (possibly timed-out) ``Thread.join()``
+              below, not inferred from it afterward — ``join(timeout=join_timeout)`` can
+              return while the OS thread is still finishing its exit, so relying on
+              ``is_alive()`` post-join would let a concurrent ``enqueue()`` or ``start()``
+              observe a stale "still running" answer during that window (enqueuing a
+              payload nothing will ever deliver, or no-op'ing against a thread that's
+              already committed to dying). The explicit flag makes shutdown a single
+              atomic decision instead of a racy inference from thread scheduling.
         """
         with self._lifecycle_lock:
+            if not self._running:
+                return
+            self._running = False
             self.drain()  # unbounded — see docstring
             self._stop_flag.set()
             self._wake.set()
