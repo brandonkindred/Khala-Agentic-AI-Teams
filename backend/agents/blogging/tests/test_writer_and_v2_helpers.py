@@ -254,7 +254,7 @@ def test_v2_extract_plan_keywords_drops_punctuation_only_tokens() -> None:
     assert "legacy" in kws
 
 
-def test_v2_extract_plan_keywords_preserves_uppercase_acronyms_over_pronouns() -> None:
+def test_v2_extract_plan_keywords_ambiguous_short_words_filtered_regardless_of_case() -> None:
     from types import SimpleNamespace
 
     from agents.blogging.agent_implementations.blog_writing_process_v2 import (
@@ -268,11 +268,14 @@ def test_v2_extract_plan_keywords_preserves_uppercase_acronyms_over_pronouns() -
         ],
     )
     kws = _extract_plan_keywords(plan)
-    # "IT" and "US" are domain acronyms (Information Technology / United
-    # States) written in caps in the original text, and must survive even
-    # though they'd collide with the pronouns "it"/"us" once lowercased.
-    assert "it" in kws
-    assert "us" in kws
+    # "it"/"us" are genuinely ambiguous between a domain acronym and the
+    # pronouns "it"/"us"; casing can't reliably disambiguate them (an
+    # all-caps heading doesn't mean every word is an acronym -- see
+    # test_v2_extract_plan_keywords_all_caps_heading_does_not_admit_stopwords),
+    # so they're filtered like any other stopword regardless of case, and
+    # they aren't in the ``_PLAN_KEYWORD_SHORT_TERMS`` allowlist.
+    assert "it" not in kws
+    assert "us" not in kws
     assert "in" not in kws
     assert "the" not in kws
     assert "notes" in kws
@@ -291,12 +294,52 @@ def test_v2_extract_plan_keywords_lowercase_pronouns_still_filtered() -> None:
         sections=[],
     )
     kws = _extract_plan_keywords(plan)
-    # Same words as the acronym case above, but written in ordinary
-    # lowercase/title case here -- they must still be filtered as pronouns,
-    # confirming the acronym exception only fires on genuine all-caps tokens.
     assert "it" not in kws
     assert "us" not in kws
     assert "we" not in kws
+
+
+def test_v2_extract_plan_keywords_short_terms_admitted_regardless_of_casing() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="A guide to the Api and sql basics",
+        sections=[SimpleNamespace(title="UX vs ai tradeoffs", order=0)],
+    )
+    kws = _extract_plan_keywords(plan)
+    # Short domain terms are admitted via a fixed allowlist rather than by
+    # inferring "acronym" from casing -- the planning LLM doesn't reliably
+    # capitalize acronyms, so "Api" (title case) and "sql" (lowercase) must
+    # be recognized exactly like "UX" (all caps).
+    assert "api" in kws
+    assert "sql" in kws
+    assert "ux" in kws
+    assert "ai" in kws
+
+
+def test_v2_extract_plan_keywords_all_caps_heading_does_not_admit_stopwords() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="HOW TO USE AI",
+        sections=[],
+    )
+    kws = _extract_plan_keywords(plan)
+    # An all-caps heading must not be treated as "every word is an acronym";
+    # ordinary stopwords ("how", "to", "use") stay filtered even in caps.
+    # Only "ai" is admitted, via the allowlist.
+    assert "how" not in kws
+    assert "to" not in kws
+    assert "use" not in kws
+    assert "ai" in kws
 
 
 def test_v2_extract_plan_keywords_drops_ordinary_short_words_below_length_floor() -> None:

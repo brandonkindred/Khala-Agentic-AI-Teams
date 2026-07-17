@@ -552,49 +552,94 @@ _PLAN_KEYWORD_STOPWORDS = frozenset(
 )
 
 
+# Short (< 4 char) technical/domain terms admitted regardless of the general
+# length floor below. This is an explicit, bounded allowlist rather than a
+# casing-based heuristic ("all uppercase => acronym") on purpose: LLM-generated
+# plan text doesn't reliably capitalize real acronyms ("api" or "Api" are as
+# likely as "API"), and conversely an all-caps heading doesn't mean every word
+# in it is an acronym (a heading like "HOW TO USE AI" is not three acronyms
+# and a stopword) -- casing is wrong as a signal in both directions.
+_PLAN_KEYWORD_SHORT_TERMS = frozenset(
+    {
+        "ai",
+        "ml",
+        "ux",
+        "ui",
+        "os",
+        "io",
+        "db",
+        "ip",
+        "vr",
+        "ar",
+        "api",
+        "sql",
+        "css",
+        "xml",
+        "url",
+        "uri",
+        "aws",
+        "gcp",
+        "ci",
+        "cd",
+        "qa",
+        "cli",
+        "sdk",
+        "llm",
+        "nlp",
+        "seo",
+        "roi",
+        "kpi",
+        "crm",
+        "erp",
+        "iot",
+        "b2b",
+        "b2c",
+        "saas",
+        "html",
+        "http",
+        "https",
+        "json",
+    }
+)
+
+
 def _extract_plan_keywords(plan: Any) -> list[str]:
     """Extract searchable keywords from a content plan for story bank queries.
 
-    Combines the overarching topic and section titles and splits on
-    whitespace *before* lowercasing, so each token's original casing is
-    still available to classify it. A token is admitted as a keyword if
-    either:
+    Combines the overarching topic and section titles, lowercases, and
+    splits on whitespace. A token is admitted as a keyword if either:
 
-    - it is acronym-shaped (all uppercase in the original text, e.g. "API",
-      "UX", "IT", "US") -- these bypass both the length floor and the
-      stopword list, since capitalization is the caller's explicit signal
-      that a short token is a meaningful domain term rather than an
-      ordinary word that happens to collide with one (e.g. "IT"/"US" vs.
-      the pronouns "it"/"us"); or
+    - it's in ``_PLAN_KEYWORD_SHORT_TERMS``, a bounded allowlist of short
+      technical/domain terms (e.g. "api", "sql", "ux") that would otherwise
+      be dropped by the length floor below; or
     - it is at least 4 characters and not in ``_PLAN_KEYWORD_STOPWORDS``
       (the original length heuristic, still needed to drop long stopwords
       like "with"/"your"/"about" and ordinary short words like "new" that
       would otherwise cause spurious keyword-overlap matches in the story
       bank).
 
-    Returned keywords are lowercased for matching against stored story
-    keywords, and punctuation-only tokens (e.g. "--", "##") are dropped.
+    Punctuation-only tokens (e.g. "--", "##") are dropped regardless.
     """
     parts: list[str] = []
     topic = getattr(plan, "overarching_topic", "") or ""
-    parts.extend(topic.split())
+    parts.extend(topic.lower().split())
     for section in getattr(plan, "sections", []) or []:
         title = getattr(section, "title", "") or ""
-        parts.extend(title.split())
+        parts.extend(title.lower().split())
     seen: set[str] = set()
     keywords: list[str] = []
     for word in parts:
         cleaned = word.strip(".,;:!?()[]\"'")
         if not any(ch.isalnum() for ch in cleaned):
             continue
-        lowered = cleaned.lower()
-        if lowered in seen:
+        if cleaned in seen:
             continue
-        is_acronym = len(cleaned) >= 2 and cleaned.isupper()
-        admitted = is_acronym or (len(cleaned) >= 4 and lowered not in _PLAN_KEYWORD_STOPWORDS)
+        admitted = cleaned in _PLAN_KEYWORD_SHORT_TERMS or (
+            len(cleaned) >= 4 and cleaned not in _PLAN_KEYWORD_STOPWORDS
+        )
         if admitted:
-            seen.add(lowered)
-            keywords.append(lowered)
+            seen.add(cleaned)
+            keywords.append(cleaned)
     return keywords
 
 
