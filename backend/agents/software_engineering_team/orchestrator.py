@@ -31,8 +31,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # unified_api/main.py) only resolves *dotted* imports like
 # `software_engineering_team.shared`; it doesn't reach these bare names,
 # which need `software_engineering_team/` (and, for `architecture_expert`,
-# the hyphenated `architect-agents/` beneath it, which can't itself be a
-# dotted import segment) directly on sys.path.
+# the `architect_agents/` dir beneath it, whose sub-packages are imported
+# bare) directly on sys.path.
 #
 # This differs from coding_team's old `_paths.py` bootstrap (deleted when
 # coding_team merged into this package): that one was safe to remove because
@@ -52,11 +52,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 _team_dir = Path(__file__).resolve().parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
-# `_arch_dir` (architect-agents/) has a hyphen and can't itself be a dotted
-# import segment; its `architecture_expert` sub-package is imported bare
-# below (`from architecture_expert import ...`), so this directory must be on
-# sys.path directly rather than reachable via `_team_dir`.
-_arch_dir = _team_dir / "architect-agents"
+# `_arch_dir` (architect_agents/) hosts the `architecture_expert` sub-package
+# that is imported bare below (`from architecture_expert import ...`), so this
+# directory must be on sys.path directly rather than reachable via `_team_dir`.
+_arch_dir = _team_dir / "architect_agents"
 if _arch_dir.exists() and str(_arch_dir) not in sys.path:
     sys.path.insert(0, str(_arch_dir))
 

@@ -22,7 +22,7 @@ dev = ["pytest", "pytest-cov"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = [".", "architect-agents"]
+pythonpath = [".", "architect_agents"]
 # Show logs during tests: -v shows INFO, or use: pytest --log-cli-level=INFO
 addopts = "-v"
 
@@ -110,7 +110,7 @@ exclude_also = [
 where = ["."]
 include = [
     "software_engineering_team*",
-    "architect-agents*",
+    "architect_agents*",
     "security_agent*",
     "qa_agent*",
 ]

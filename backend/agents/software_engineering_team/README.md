@@ -353,7 +353,7 @@ software_engineering_team/
 │
 │  # --- Design / setup ---
 ├── product_requirements_analysis_agent/  # Spec review, constraint analysis, Q&A, PRD writing
-├── architect-agents/      # ArchitectureExpertAgent + Enterprise Orchestrator
+├── architect_agents/      # ArchitectureExpertAgent + Enterprise Orchestrator
 ├── git_setup_agent/       # Repo setup (clones/branches; ensures development branch)
 │
 │  # --- Implementation sub-teams ---
