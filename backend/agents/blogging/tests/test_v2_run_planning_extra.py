@@ -8,15 +8,10 @@ import pytest
 
 
 def _make_planning_result(iterations: int = 1, critic_report: dict | None = None):
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        PlanningPhaseResult,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from _content_plan_test_utils import make_content_plan, make_planning_phase_result
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="Topic",
         narrative_flow="flow",
         sections=[
@@ -25,14 +20,10 @@ def _make_planning_result(iterations: int = 1, critic_report: dict | None = None
             ContentPlanSection(title="Conclusion", coverage_description="wrap", order=2),
         ],
         title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
-    return PlanningPhaseResult(
-        content_plan=plan,
+    return make_planning_phase_result(
+        plan,
         planning_iterations_used=iterations,
-        parse_retry_count=0,
         planning_wall_ms_total=10.0,
         plan_critic_report=critic_report,
     )
@@ -199,14 +190,10 @@ def test_run_planning_wraps_unknown_exception(monkeypatch) -> None:
 
 def test_extract_plan_keywords_returns_filtered_unique() -> None:
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from _content_plan_test_utils import make_content_plan
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="observability essentials",
         narrative_flow="x",
         sections=[
@@ -214,9 +201,6 @@ def test_extract_plan_keywords_returns_filtered_unique() -> None:
             ContentPlanSection(title="Cost Attribution", coverage_description="x", order=1),
         ],
         title_candidates=[TitleCandidate(title="t", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
     )
     kws = v2._extract_plan_keywords(plan)
     assert "and" not in kws
@@ -245,6 +229,7 @@ def test_planning_llm_client_overrides_when_model_set(monkeypatch) -> None:
 
 def test_planning_llm_client_no_override_returns_base(monkeypatch) -> None:
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+
     monkeypatch.setattr(v2, "planning_model_override", lambda: "")
     sentinel = object()
     assert v2.planning_llm_client(sentinel) is sentinel
@@ -267,6 +252,7 @@ def test_plan_critic_llm_client_overrides_when_model_set(monkeypatch) -> None:
 
 def test_plan_critic_llm_client_no_override_returns_base(monkeypatch) -> None:
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+
     monkeypatch.setattr(v2, "plan_critic_model_override", lambda: "")
     sentinel = object()
     assert v2.plan_critic_llm_client(sentinel) is sentinel
@@ -319,12 +305,14 @@ def test_planning_llm_client_strands_dummy_backing_unchanged(monkeypatch) -> Non
 
 def test_build_plan_critic_agent_disabled_returns_none(monkeypatch) -> None:
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+
     monkeypatch.setattr(v2, "plan_critic_enabled", lambda: False)
     assert v2.build_plan_critic_agent(object()) is None
 
 
 def test_build_plan_critic_agent_enabled_returns_instance(monkeypatch) -> None:
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+
     monkeypatch.setattr(v2, "plan_critic_enabled", lambda: True)
     monkeypatch.setattr(v2, "plan_critic_llm_client", lambda b: b)
     agent = v2.build_plan_critic_agent(object())

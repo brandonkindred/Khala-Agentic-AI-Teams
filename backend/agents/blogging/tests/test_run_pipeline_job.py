@@ -13,21 +13,16 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-import pytest
-from conftest import make_pipeline_doubles as _make_pipeline_doubles
 from conftest import setup_artifacts_root as _setup_artifacts_root
 
 
-@pytest.fixture
-def patched_client(monkeypatch, fake_job_client):
-    """Make `shared.blog_job_store._client` return the in-memory fake."""
-    from agents.blogging.shared import blog_job_store as bjs
+def _make_pipeline_doubles():
+    from _content_plan_test_utils import make_pipeline_doubles
 
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    return fake_job_client
+    return make_pipeline_doubles()
 
 
-def test_run_blog_full_pipeline_job_completes(monkeypatch, tmp_path: Path, patched_client) -> None:
+def test_run_blog_full_pipeline_job_completes(monkeypatch, tmp_path: Path) -> None:
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
 
@@ -51,9 +46,7 @@ def test_run_blog_full_pipeline_job_completes(monkeypatch, tmp_path: Path, patch
     assert job["status"] == "completed"
 
 
-def test_run_blog_full_pipeline_job_completes_needs_review(
-    monkeypatch, tmp_path: Path, patched_client
-) -> None:
+def test_run_blog_full_pipeline_job_completes_needs_review(monkeypatch, tmp_path: Path) -> None:
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
 
@@ -86,9 +79,7 @@ def _import_errors_used_by_run_pipeline_job():
     return BloggingError, PlanningError, DraftError
 
 
-def test_run_blog_full_pipeline_job_planning_error(
-    monkeypatch, tmp_path: Path, patched_client
-) -> None:
+def test_run_blog_full_pipeline_job_planning_error(monkeypatch, tmp_path: Path) -> None:
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
 
@@ -98,7 +89,9 @@ def test_run_blog_full_pipeline_job_planning_error(
     def boom(*a, **kw):
         raise PlanningError("nope", failure_reason="MAX_ITER")
 
-    monkeypatch.setattr("agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", boom)
+    monkeypatch.setattr(
+        "agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", boom
+    )
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -111,9 +104,7 @@ def test_run_blog_full_pipeline_job_planning_error(
     assert job["planning_failure_reason"] == "MAX_ITER"
 
 
-def test_run_blog_full_pipeline_job_blogging_error(
-    monkeypatch, tmp_path: Path, patched_client
-) -> None:
+def test_run_blog_full_pipeline_job_blogging_error(monkeypatch, tmp_path: Path) -> None:
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
 
@@ -123,7 +114,9 @@ def test_run_blog_full_pipeline_job_blogging_error(
     def boom(*a, **kw):
         raise DraftError("draft failed", iteration=1)
 
-    monkeypatch.setattr("agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", boom)
+    monkeypatch.setattr(
+        "agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", boom
+    )
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
@@ -133,9 +126,7 @@ def test_run_blog_full_pipeline_job_blogging_error(
     assert job["failed_phase"] == "draft"
 
 
-def test_run_blog_full_pipeline_job_unknown_error(
-    monkeypatch, tmp_path: Path, patched_client
-) -> None:
+def test_run_blog_full_pipeline_job_unknown_error(monkeypatch, tmp_path: Path) -> None:
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
 
@@ -154,7 +145,7 @@ def test_run_blog_full_pipeline_job_unknown_error(
 
 
 def test_run_blog_full_pipeline_job_job_updater_failure_swallowed(
-    monkeypatch, tmp_path: Path, patched_client
+    monkeypatch, tmp_path: Path
 ) -> None:
     """A failing update_blog_job inside the job_updater is swallowed; the run still completes.
 
@@ -185,7 +176,9 @@ def test_run_blog_full_pipeline_job_job_updater_failure_swallowed(
         kw["job_updater"](status_text="boom")
         return (ppr, draft, "PASS")
 
-    monkeypatch.setattr("agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", fake_run)
+    monkeypatch.setattr(
+        "agents.blogging.agent_implementations.blog_writing_process_v2.run_pipeline", fake_run
+    )
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
