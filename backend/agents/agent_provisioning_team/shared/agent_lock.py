@@ -126,13 +126,32 @@ class AgentLockStore:
 
     # ---- I/O ----
     def _read_record(self, agent_id: str) -> Optional[dict]:
+        """Return ``agent_id``'s record, or ``None`` only if none exists.
+
+        Preconditions:
+            * None.
+        Postconditions:
+            * Returns ``None`` when no record file exists for ``agent_id``
+              (the safe, unlocked case).
+            * Raises :class:`AgentLockError` when a record file exists but
+              cannot be read or parsed — this store exists to guarantee
+              mutual exclusion, so a present-but-unreadable record must fail
+              closed (deny/retry) rather than be silently treated as absent,
+              which would let a second caller steal a lock a live owner
+              still holds. ``_write_record``'s atomic publish makes this
+              exceedingly rare in practice; recovering from it (if the file
+              is genuinely corrupt, not just a transient read glitch) is an
+              operator action — inspect and remove the record file.
+        """
         path = self._record_path(agent_id)
         if not path.exists():
             return None
         try:
             return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
+        except (OSError, json.JSONDecodeError) as e:
+            raise AgentLockError(
+                f"lock record for {agent_id!r} exists but could not be read: {e}"
+            ) from e
 
     def _write_record(self, agent_id: str, record: dict) -> None:
         path = self._record_path(agent_id)
@@ -229,6 +248,10 @@ class AgentLockStore:
               owned by a different token (release is best-effort cleanup,
               matching ``cleanup_setup``/``ProvisioningOrchestrator.compensate``'s
               existing idiom elsewhere in this package).
+            * Raises :class:`AgentLockError` (same fail-closed contract as
+              :meth:`acquire`) when a record exists but cannot be read — we
+              cannot verify it is safe to delete, so it is left untouched
+              rather than guessed at.
         """
         assert agent_id, "agent_id must be non-empty"
         assert owner, "owner must be non-empty"
@@ -244,7 +267,9 @@ class AgentLockStore:
 
         Lock-free read (mirrors ``ProvisionerStateStore.get``): the record is
         published atomically, so this always observes a whole committed
-        snapshot, pre- or post- a concurrent write.
+        snapshot, pre- or post- a concurrent write. Raises
+        :class:`AgentLockError` when a record exists but cannot be read
+        (same fail-closed contract as :meth:`acquire`/:meth:`release`).
         """
         assert agent_id, "agent_id must be non-empty"
         now = time.time() if now is None else now

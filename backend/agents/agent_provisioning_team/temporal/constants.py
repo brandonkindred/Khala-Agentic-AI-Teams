@@ -54,9 +54,18 @@ SANDBOX_REAPER_WORKFLOW_ID = "agent-provisioning-sandbox-idle-reaper"
 # busy lock before giving up; LOCK_TTL_S is AgentLockStore's own staleness
 # backstop for a lock orphaned by a hard-terminated workflow (bypassing its
 # `finally` release) — normal paths always release explicitly and never rely
-# on it.
+# on it, since AgentProvisioningWorkflow renews after every phase.
+#
+# The floor exists because a TTL shorter than the worst gap between two
+# renewals defeats the lock: a second workflow could reclaim the "expired"
+# record while the first is still legitimately running. The worst such gap
+# is the tool fan-out phase in temporal/workflows.py — TOOL_ACTIVITY_TIMEOUT
+# (15 min, start_to_close per attempt) x TOOL_RETRY_POLICY.maximum_attempts
+# (4) = 60 min of activity time, plus inter-attempt backoff (~2 min) = ~62
+# min worst case. The 90-minute floor keeps a healthy margin above that;
+# raise it if either constant above grows.
 LOCK_ACQUIRE_TIMEOUT_S = env_int("AGENT_PROVISIONING_LOCK_ACQUIRE_TIMEOUT_S", 1800, floor=1)
-LOCK_TTL_S = env_int("AGENT_PROVISIONING_LOCK_TTL_S", 7200, floor=60)
+LOCK_TTL_S = env_int("AGENT_PROVISIONING_LOCK_TTL_S", 7200, floor=5400)
 
 # --- Execute-and-wait client-side ceilings -----------------------------------
 # These must each exceed the corresponding workflow's own worst-case runtime
@@ -84,13 +93,16 @@ SANDBOX_TEARDOWN_CLIENT_TIMEOUT_S = env_int(
 )
 # AgentDeprovisioningWorkflow: schedule_to_close_timeout (PHASE_TIMEOUT, 20
 # minutes in temporal/workflows.py) already caps the total time across
-# DEFAULT_RETRY_POLICY's retries. The workflow also acquires the per-agent_id
-# lock (LOCK_ACQUIRE_TIMEOUT_S) before that activity runs, so the client-side
-# ceiling must budget for both or it can time out while the workflow is still
-# validly waiting for a busy lock to free, plus margin.
+# DEFAULT_RETRY_POLICY's retries — once for deprovision_activity itself, and
+# again for the release_agent_lock_activity that runs after it (also
+# PHASE_TIMEOUT-bounded). The workflow also acquires the per-agent_id lock
+# (LOCK_ACQUIRE_TIMEOUT_S) before deprovision_activity runs, so the
+# client-side ceiling must budget for all three legs — acquire wait +
+# deprovision + release — or it can time out and report a false failure while
+# the workflow is still validly finishing up, plus margin.
 DEPROVISION_CLIENT_TIMEOUT_S = env_int(
     "AGENT_PROVISIONING_DEPROVISION_CLIENT_TIMEOUT_S",
-    LOCK_ACQUIRE_TIMEOUT_S + 20 * 60 + CLIENT_TIMEOUT_MARGIN_S,
+    LOCK_ACQUIRE_TIMEOUT_S + 20 * 60 + 20 * 60 + CLIENT_TIMEOUT_MARGIN_S,
     floor=1,
 )
 

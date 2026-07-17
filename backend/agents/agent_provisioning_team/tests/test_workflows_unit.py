@@ -11,6 +11,24 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _patched_true(monkeypatch):
+    """Default every test to the post-lock-deploy replay branch.
+
+    ``workflow.patched(...)`` needs a real workflow event loop; direct
+    ``.run()`` calls here have none, so it must be stubbed like
+    ``execute_activity``/``info``. ``True`` matches a fresh (non-replayed)
+    execution — what nearly every test in this module wants — mirroring
+    ``market_research_team``'s ``test_temporal_workflow.py`` idiom. Tests
+    exercising the pre-lock replay path override this locally via the same
+    ``monkeypatch`` fixture (last ``setattr`` wins).
+    """
+    from agent_provisioning_team.temporal import workflows as wf
+
+    monkeypatch.setattr(wf.workflow, "patched", lambda *a, **k: True)
+
+
 # ---------------------------------------------------------------------------
 # AgentProvisioningWorkflow — direct .run() invocation
 #
@@ -129,19 +147,80 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
     assert fn_names[-1] == "release_agent_lock_activity"
     assert _call(stub, "acquire_agent_lock_activity")["args"] == ["job-1", "agent-1"]
     assert _call(stub, "release_agent_lock_activity")["args"] == ["job-1", "agent-1"]
-    # The lease is renewed after every phase (P1 regression: a long-running
-    # job must never lose its own lock to LOCK_TTL_S expiry) — one initial
-    # acquire plus one renewal after each of setup/credentials/tools+checkpoint
-    # /audit/documentation = 6 total acquire_agent_lock_activity calls, each
-    # renewing for the same owner.
+    # The lease is renewed between every scheduled activity (P1 regression:
+    # a long-running job must never lose its own lock to LOCK_TTL_S expiry,
+    # and no un-renewed gap may exceed the tool fan-out's own worst case) —
+    # one initial acquire plus one renewal after each of setup /
+    # list_manifest_tools / credentials / tool fan-out / account_provisioning
+    # checkpoint / audit / documentation = 8 total acquire_agent_lock_activity
+    # calls, each renewing for the same owner.
     acquire_calls = [c for c in stub.calls if c["name"] == "acquire_agent_lock_activity"]
-    assert len(acquire_calls) == 6
+    assert len(acquire_calls) == 8
     assert all(c["args"] == ["job-1", "agent-1"] for c in acquire_calls)
-    # A renewal lands between credentials and the tool fan-out — the single
-    # riskiest gap (a stuck tool can retry up to TOOL_RETRY_POLICY's ceiling).
-    creds_idx = fn_names.index("credentials_activity")
-    first_provision_idx = fn_names.index("provision_tool_activity")
-    assert "acquire_agent_lock_activity" in fn_names[creds_idx + 1 : first_provision_idx]
+    # No two consecutive non-lock activities ever run back-to-back without a
+    # renewal between them (P1 regression: a gap spanning two un-renewed
+    # activities — e.g. list_manifest_tools + credentials — can exceed even
+    # a generously configured TTL). provision_tool_activity's own parallel
+    # fan-out (several calls with no renewal *between* them, by design —
+    # asyncio.gather) is collapsed to one slot before checking.
+    lock_names = {"acquire_agent_lock_activity", "release_agent_lock_activity"}
+    collapsed = []
+    for name in fn_names:
+        if (
+            name == "provision_tool_activity"
+            and collapsed
+            and collapsed[-1] == "provision_tool_activity"
+        ):
+            continue
+        collapsed.append(name)
+    for prev, nxt in zip(collapsed, collapsed[1:]):
+        assert (
+            prev in lock_names or nxt in lock_names
+        ), f"no lock renewal between consecutive activities {prev!r} -> {nxt!r}: {fn_names}"
+
+
+@pytest.mark.asyncio
+async def test_workflow_unpatched_replay_skips_lock_activities(tmp_path, monkeypatch) -> None:
+    """P1 regression: a history recorded before the lock existed
+    (workflow.patched -> False) must replay its original lock-free command
+    sequence exactly, or Temporal reports nondeterminism and strands the
+    in-flight execution. No acquire/renew/release activity is scheduled."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    monkeypatch.setattr(wf.workflow, "patched", lambda *a, **k: False)
+    manifest_path = _build_manifest_yaml(tmp_path)
+
+    stub = _ExecActivityStub(
+        {
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": _TOOL_SPECS,
+            "credentials_activity": {
+                "success": True,
+                "credentials": {
+                    "postgresql": {"tool_name": "postgresql", "username": "u", "password": "p"},
+                    "redis": {"tool_name": "redis", "username": "u", "password": "p"},
+                },
+            },
+            "provision_tool_activity": lambda call: {
+                "tool_name": call["args"][2],
+                "success": True,
+                "provisioner_key": "x",
+            },
+            "record_account_provisioning_activity": {"success": True, "tool_results": []},
+            "audit_activity": {"passed": True, "verifications": []},
+            "documentation_activity": {"success": True, "onboarding": {"summary": "s"}},
+            "deliver_activity": {"success": True, "error": None},
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    fn_names = [c["name"] for c in stub.calls]
+    assert "acquire_agent_lock_activity" not in fn_names
+    assert "release_agent_lock_activity" not in fn_names
+    assert fn_names[0] == "setup_activity"
+    assert fn_names[-1] == "deliver_activity"
 
 
 @pytest.mark.asyncio
@@ -861,6 +940,39 @@ async def test_deprovisioning_workflow_calls_deprovision_activity() -> None:
     assert _call(stub, "acquire_agent_lock_activity")["args"] == [owner, "agent-1"]
     assert _call(stub, "release_agent_lock_activity")["args"] == [owner, "agent-1"]
     assert _call(stub, "deprovision_activity")["args"] == ["agent-1", True]
+
+
+@pytest.mark.asyncio
+async def test_deprovisioning_workflow_unpatched_replay_skips_lock_activities(monkeypatch) -> None:
+    """P1 regression: same replay-safety requirement as
+    test_workflow_unpatched_replay_skips_lock_activities, for the
+    deprovisioning workflow."""
+    from types import SimpleNamespace
+
+    from agent_provisioning_team.temporal import workflows as wf
+
+    monkeypatch.setattr(wf.workflow, "patched", lambda *a, **k: False)
+    stub = _ExecActivityStub(
+        {
+            "deprovision_activity": {
+                "agent_id": "agent-1",
+                "success": True,
+                "details": {},
+                "error": None,
+            },
+        }
+    )
+    fake_info = SimpleNamespace(workflow_id="agent-provisioning-deprovision-agent-1-legacy")
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "info", return_value=fake_info),
+    ):
+        result = await wf.AgentDeprovisioningWorkflow().run("agent-1", False)
+
+    fn_names = [c["name"] for c in stub.calls]
+    assert fn_names == ["deprovision_activity"]
+    assert result["success"] is True
 
 
 @pytest.mark.asyncio

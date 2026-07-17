@@ -131,18 +131,26 @@ def test_default_locks_dir_uses_agent_cache_env(tmp_path: Path, monkeypatch) -> 
     assert store.storage_dir == tmp_path / "agent_provisioning" / "locks"
 
 
-def test_read_record_tolerates_corrupted_json(tmp_path: Path) -> None:
-    """A torn/corrupted record file (can't happen post-atomic-write in
-    practice, but is a cheap defensive check) is treated as absent, not a
-    crash — mirrors ProvisionerStateStore._load's same tolerance."""
+def test_acquire_fails_closed_on_corrupted_record(tmp_path: Path) -> None:
+    """P2 regression: a torn/corrupted record file must NOT be treated as
+    absent — that would let a second caller silently steal a lock a live
+    owner still holds. acquire()/release()/get_owner() all fail closed
+    (raise) rather than guessing, unlike ProvisionerStateStore._load's
+    tolerance (that store isn't a mutual-exclusion primitive)."""
+    from agent_provisioning_team.shared.agent_lock import AgentLockError
+
     store = _store(tmp_path)
     record_path = store._record_path("agent-1")
     record_path.write_text("not valid json {{{", encoding="utf-8")
 
-    assert store.get_owner("agent-1") is None
-    # acquire() must still succeed by treating the corrupt record as absent.
-    store.acquire("agent-1", owner="job-1")
-    assert store.get_owner("agent-1") == "job-1"
+    with pytest.raises(AgentLockError):
+        store.get_owner("agent-1")
+    with pytest.raises(AgentLockError):
+        store.acquire("agent-1", owner="job-1")
+    with pytest.raises(AgentLockError):
+        store.release("agent-1", owner="job-1")
+    # None of the failed calls above touched the corrupt file.
+    assert record_path.read_text(encoding="utf-8") == "not valid json {{{"
 
 
 def test_write_record_cleans_up_tmp_file_on_replace_failure(tmp_path: Path, monkeypatch) -> None:

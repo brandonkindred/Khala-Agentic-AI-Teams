@@ -16,6 +16,24 @@ from fastapi.testclient import TestClient
 
 from agent_provisioning_team.models import DeprovisionResponse
 
+
+@pytest.fixture(autouse=True)
+def _patched_true(monkeypatch):
+    """Default every test to the post-lock-deploy replay branch.
+
+    ``workflow.patched(...)`` needs a real workflow event loop; direct
+    ``.run()`` calls here have none, so it must be stubbed like
+    ``execute_activity``/``info``. ``True`` matches a fresh (non-replayed)
+    execution — what nearly every test in this module wants — mirroring
+    ``test_workflows_unit.py``'s identical fixture. Only tests that call
+    ``AgentDeprovisioningWorkflow.run()`` directly touch ``workflow.patched``
+    at all; this is a harmless no-op for the rest.
+    """
+    from agent_provisioning_team.temporal import workflows as wf
+
+    monkeypatch.setattr(wf.workflow, "patched", lambda *a, **k: True)
+
+
 # ---------------------------------------------------------------------------
 # deprovision_activity
 # ---------------------------------------------------------------------------
