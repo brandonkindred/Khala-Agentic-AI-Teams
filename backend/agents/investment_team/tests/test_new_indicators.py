@@ -952,6 +952,24 @@ def test_pandas_macd_bounded_to_runtime_window_matches_engine() -> None:
     )
 
 
+def test_pandas_macd_rejects_non_integer_periods() -> None:
+    """``macd`` rejects non-integer fast/slow/signal instead of silently truncating.
+
+    The params are passed straight to ``IndicatorRegistry.macd``, whose integer
+    contract is the single source of validation — so ``fast=12.9`` raises
+    ``ValueError`` (matching the runtime and the coverage probe's validator) rather
+    than being truncated to 12 and modelling a strategy the runtime would reject.
+    """
+    close = pd.Series([100.0 + i for i in range(40)])
+    with pytest.raises(ValueError):
+        pdi.macd(close, fast=12.9, slow=26, signal=9)
+    with pytest.raises(ValueError):
+        pdi.macd(close, fast=12, slow=26.5, signal=9)
+    # Integer configs still compute normally.
+    line, _signal, _hist = pdi.macd(close, fast=12, slow=26, signal=9)
+    assert len(line) == 40
+
+
 def test_pandas_cumulative_vwap_matches_registry_period_none() -> None:
     """The vectorised cumulative ``vwap`` is bit-identical to ``reg.vwap(period=None)``.
 

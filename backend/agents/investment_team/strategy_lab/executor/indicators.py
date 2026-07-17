@@ -152,6 +152,17 @@ def _floats(series, getter: Callable, field: str) -> pd.Series:
 # ``"expand"`` and updates incrementally — the walk is O(n·window) per
 # indicator, not O(n²·window), and every value equals the runtime's per-bar
 # read by construction.
+#
+# Performance note: deriving the full Series scalar-by-scalar is O(n·window) per
+# indicator, materially slower than the old vectorised pandas O(n) (a 20k-row
+# frame is a few hundred ms per indicator vs. milliseconds). This is the accepted
+# cost of a single source of truth, and it lands on the static-analysis / probe
+# reference layer — NOT the live trading hot path, which runs the incremental
+# ``StreamingHistoryView`` directly. Daily-bar frames (the lab's dominant use, a
+# few thousand bars) stay ~seconds at full probe scale. A batch/vectorised
+# registry path for very large intraday frames is deliberately deferred to the
+# separately-tracked ``IndicatorRegistry`` performance work rather than
+# re-duplicating the formulas this module was unified to remove.
 # ---------------------------------------------------------------------------
 
 
@@ -359,6 +370,11 @@ def macd(
     Preconditions: ``series`` is coercible; ``2 <= fast < slow``; ``signal >= 2``.
     Postconditions: three same-length Series; the line is NaN until ``slow`` bars
     exist, the signal and histogram until ``slow + signal - 1``.
+    Raises: ``ValueError`` (from ``IndicatorRegistry.macd``) when ``fast``/``slow``/
+    ``signal`` are not integers, or violate ``2 <= fast < slow`` / ``signal >= 2`` —
+    ``fast``/``slow``/``signal`` are passed through unconverted so the registry's
+    integer contract is the single source of validation, matching the runtime and
+    the coverage probe's validator rather than silently truncating a float.
 
     Unlike the fixed-window indicators, MACD's signal EMA folds over the entire
     macd_line, so its value depends on the full history length. The walk is
@@ -380,14 +396,13 @@ def macd(
         from runtime_window import STREAMING_WINDOW_BARS  # type: ignore[no-redef]
 
     s = _coerce_series(series)
-    f, sl, sg = int(fast), int(slow), int(signal)
     return _run_tuple(
         _close_bars(s),
         s.index,
         [
-            lambda r, w: r.macd(w, f, sl, sg, source="close", select="macd"),
-            lambda r, w: r.macd(w, f, sl, sg, source="close", select="signal"),
-            lambda r, w: r.macd(w, f, sl, sg, source="close", select="histogram"),
+            lambda r, w: r.macd(w, fast, slow, signal, source="close", select="macd"),
+            lambda r, w: r.macd(w, fast, slow, signal, source="close", select="signal"),
+            lambda r, w: r.macd(w, fast, slow, signal, source="close", select="histogram"),
         ],
         max_bars=STREAMING_WINDOW_BARS,
     )
