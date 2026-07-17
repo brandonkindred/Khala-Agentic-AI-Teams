@@ -843,8 +843,10 @@ def _attach_execution_diagnostics(
     """
     if exec_result.execution_diagnostics is not None:
         metrics.execution_diagnostics = exec_result.execution_diagnostics
-    if exec_result.cost_stress_results is not None:
-        metrics.cost_stress_results = exec_result.cost_stress_results
+    # Duck-typed stubs in tests may omit the field; treat missing as None.
+    cost_stress_results = getattr(exec_result, "cost_stress_results", None)
+    if cost_stress_results is not None:
+        metrics.cost_stress_results = cost_stress_results
 
 
 def _format_execution_diagnostics(
