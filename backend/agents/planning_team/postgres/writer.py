@@ -3,11 +3,10 @@
 One row per completed planning run — client name, run summary, handoff
 summary, and the open/resolved discovery questions — written from the
 finalize step of both the thread-mode and Temporal-mode pipelines. Every
-write is guarded by ``pg_cursor`` (which itself gates on
-``is_postgres_enabled()``) and wrapped so an operational failure never
-breaks the caller: this is instrumentation, not part of the finalize
-contract. See ``planning_team.postgres`` for the ``planning_runs`` DDL this
-module writes to.
+write is guarded by ``is_postgres_enabled()`` and wrapped so an operational
+failure never breaks the caller: this is instrumentation, not part of the
+finalize contract. See ``planning_team.postgres`` for the ``planning_runs``
+DDL this module writes to.
 """
 
 from __future__ import annotations
@@ -15,9 +14,21 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from shared_postgres import pg_cursor
+from shared_postgres import get_conn, is_postgres_enabled, probe_cursor
 
 logger = logging.getLogger(__name__)
+
+# shared_postgres.get_conn()/pg_cursor() apply no statement_timeout by design (it
+# would cap legitimate long-running team queries), so this INSERT is bounded via
+# probe_cursor instead — otherwise a post-connect Postgres stall, or a lock wait on
+# the ON CONFLICT target row, could block the caller indefinitely: in thread mode
+# that pins a background worker forever, and in Temporal mode it can exhaust
+# finalize_planning_activity's retries even though mark_job_completed already
+# succeeded. A fixed, modest bound rather than shared_postgres.statement_timeout_ms():
+# that accessor's "0 disables it" default would otherwise combine with
+# probe_cursor's 1ms floor clamp to time this write out on effectively every call
+# once an operator disables the shared default.
+_AUDIT_WRITE_TIMEOUT_S = 5.0
 
 
 def record_planning_run(
@@ -43,19 +54,22 @@ def record_planning_run(
           including the ``ON CONFLICT (job_id) DO NOTHING`` case where a row for
           ``job_id`` already exists (a Temporal activity retry calling this twice
           for the same job is a silent idempotent no-op on the second call).
-        - Returns ``False`` — never raises — when Postgres is disabled
-          (``POSTGRES_HOST`` unset) or the write fails for any operational reason;
-          such a failure is logged at DEBUG, never raised.
+        - Returns ``False`` — never raises, and never blocks past
+          ``_AUDIT_WRITE_TIMEOUT_S`` — when Postgres is disabled (``POSTGRES_HOST``
+          unset), the write fails for any operational reason, or the INSERT is
+          server-cancelled after exceeding its transaction-local
+          ``statement_timeout`` (see ``shared_postgres.probe_cursor``); such a
+          failure is logged at DEBUG, never raised.
     Raises:
         - ``ValueError`` if ``job_id`` is blank — a caller contract violation, distinct
           from the operational failures above which are swallowed.
     """
     if not job_id:
         raise ValueError("job_id must be a non-empty string")
+    if not is_postgres_enabled():
+        return False
     try:
-        with pg_cursor() as cur:
-            if cur is None:
-                return False
+        with get_conn() as conn, probe_cursor(conn, timeout_s=_AUDIT_WRITE_TIMEOUT_S) as cur:
             from shared_postgres import Json
 
             cur.execute(

@@ -14,6 +14,7 @@ from contextlib import contextmanager
 
 import pytest
 
+import planning_team.postgres.writer as writer
 from planning_team.postgres.writer import record_planning_run
 
 # ---------------------------------------------------------------------------
@@ -52,17 +53,25 @@ def test_record_planning_run_noop_without_postgres(monkeypatch) -> None:
 
 
 def test_record_planning_run_swallows_write_errors(monkeypatch) -> None:
-    """A transient DB failure mid-write is swallowed, not raised."""
+    """An operational failure mid-write (e.g. a cancelled/stalled statement) is
+    swallowed, not raised — with Postgres reported enabled so the failure comes
+    from the write path itself, not the disabled-Postgres no-op."""
+    monkeypatch.setattr(writer, "is_postgres_enabled", lambda: True)
+
+    @contextmanager
+    def _fake_get_conn(*args, **kwargs):
+        yield object()
 
     class _BoomCursor:
         def execute(self, *args, **kwargs):
             raise RuntimeError("connection lost")
 
     @contextmanager
-    def _fake_pg_cursor(*args, **kwargs):
+    def _fake_probe_cursor(*args, **kwargs):
         yield _BoomCursor()
 
-    monkeypatch.setattr("planning_team.postgres.writer.pg_cursor", _fake_pg_cursor)
+    monkeypatch.setattr(writer, "get_conn", _fake_get_conn)
+    monkeypatch.setattr(writer, "probe_cursor", _fake_probe_cursor)
 
     assert (
         record_planning_run(
@@ -75,6 +84,44 @@ def test_record_planning_run_swallows_write_errors(monkeypatch) -> None:
         )
         is False
     )
+
+
+def test_record_planning_run_bounds_the_insert_with_a_statement_timeout(monkeypatch) -> None:
+    """The audit INSERT runs under probe_cursor's transaction-local
+    statement_timeout, so a post-connect stall or an ON CONFLICT lock wait can't
+    block the caller indefinitely."""
+    monkeypatch.setattr(writer, "is_postgres_enabled", lambda: True)
+    captured = {}
+
+    @contextmanager
+    def _fake_get_conn(*args, **kwargs):
+        yield object()
+
+    @contextmanager
+    def _fake_probe_cursor(conn, *, timeout_s):
+        captured["timeout_s"] = timeout_s
+
+        class _NoOpCursor:
+            def execute(self, *args, **kwargs):
+                pass
+
+        yield _NoOpCursor()
+
+    monkeypatch.setattr(writer, "get_conn", _fake_get_conn)
+    monkeypatch.setattr(writer, "probe_cursor", _fake_probe_cursor)
+
+    assert (
+        record_planning_run(
+            "job-1",
+            client_name=None,
+            summary="s",
+            handoff_summary="hs",
+            open_questions=[],
+            resolved_questions=[],
+        )
+        is True
+    )
+    assert captured["timeout_s"] == writer._AUDIT_WRITE_TIMEOUT_S
 
 
 # ---------------------------------------------------------------------------
