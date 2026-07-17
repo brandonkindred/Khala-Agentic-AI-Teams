@@ -233,7 +233,7 @@
 
         <!-- Activity log -->
         @if (activityLog.length > 0) {
-          <div class="activity-log" #logContainer>
+          <div class="activity-log" #logContainer tabindex="0" role="group" aria-label="Strategy run activity log, scrollable">
             @for (entry of activityLog; track $index) {
               <div class="log-entry" [class]="'log-' + entry.status">
                 <span class="log-time">{{ entry.time }}</span>
@@ -501,7 +501,12 @@
                   </div>
 
                   <!-- Trade table -->
-                  <div class="trade-table-wrap">
+                  <div
+                    class="trade-table-wrap"
+                    tabindex="0"
+                    role="group"
+                    [attr.aria-label]="tradeTableRegionLabel(record)"
+                  >
                     <table mat-table [dataSource]="pagedTrades(record)" class="trade-table">
 
                       <!-- # -->
@@ -750,7 +755,12 @@
 
                     <!-- Comparison table -->
                     @if (session.comparison) {
-                      <div class="comparison-table-wrap">
+                      <div
+                        class="comparison-table-wrap"
+                        tabindex="0"
+                        role="group"
+                        [attr.aria-label]="comparisonTableRegionLabel(record)"
+                      >
                         <table class="comparison-table">
                           <thead>
                             <tr>
