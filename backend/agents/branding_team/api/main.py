@@ -51,7 +51,7 @@ from branding_team.orchestrator import (
 )
 from branding_team.postgres import SCHEMA as BRANDING_POSTGRES_SCHEMA
 from branding_team.shared.job_store import (  # noqa: F401
-    JOB_STATUS_FAILED,
+    JOB_STATUS_FAILED,  # re-exported; tests reference main_mod.JOB_STATUS_FAILED
     JOB_STATUS_RUNNING,
 )
 from branding_team.store import get_default_store
