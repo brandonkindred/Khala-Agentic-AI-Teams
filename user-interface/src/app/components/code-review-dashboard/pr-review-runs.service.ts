@@ -138,6 +138,20 @@ export class PrReviewRunsService implements OnDestroy {
   // Live status pollers keyed by job id, so `reset`/`ngOnDestroy` can tear them all down.
   private pollers = new Map<string, Subscription>();
 
+  /**
+   * Emits a human-readable sentence each time a live-polled review reaches a terminal
+   * state or its poller loses the connection — consumed by `CodeReviewDashboardComponent`
+   * to drive a visually-hidden `role="status"` live region so screen-reader users hear a
+   * review finish without watching the row badge. Fires at most once per `startPolling`
+   * call: the terminal and connection-lost callbacks are mutually exclusive and each
+   * disposes its own poller immediately (see `startPolling`), so a hydrated
+   * already-terminal review (loaded via `hydrate`, never live-polled) never announces.
+   * Wording mirrors the failed-vs-completed test `badgeClass` uses, so the announcement
+   * never disagrees with the row badge it is narrating. Never completed by this service —
+   * the subscribing component's own `takeUntil(destroy$)` is the sole teardown mechanism.
+   */
+  readonly announce$ = new Subject<string>();
+
   // Completes on destroy; every HTTP subscription is gated on it so a late
   // response can't update a torn-down component.
   private readonly destroy$ = new Subject<void>();
@@ -395,6 +409,8 @@ export class PrReviewRunsService implements OnDestroy {
    * Postconditions: no-op if `record.jobId` is already in `pollers`. Otherwise registers
    * a poller subscription under `record.jobId` that mutates `record` in place on each
    * status update and removes itself from `pollers` once terminal or connection-lost.
+   * Exactly one of a terminal status or a connection-lost error causes `announce$` to
+   * emit once for this `record`, since both paths dispose the poller immediately.
    */
   private startPolling(record: PrReviewRecord): void {
     if (this.pollers.has(record.jobId)) return;
@@ -415,12 +431,21 @@ export class PrReviewRunsService implements OnDestroy {
           // (see terminalTimestamp) rather than the browser clock. `??=` so a value
           // from a prior hydrate is never overwritten.
           record.completedAt ??= terminalTimestamp(status);
+          // Same failed-vs-completed test as badgeClass (review-metrics.ts), so this
+          // sentence never disagrees with the row badge it narrates.
+          const failed = !!record.error || record.status === 'failed';
+          this.announce$.next(
+            `Review for pull request #${record.prNumber} ${failed ? 'failed' : 'completed'}.`,
+          );
           this.disposePoller(record.jobId);
         }
         this.cdr.markForCheck();
       },
       () => {
         record.error = 'Lost connection to the coding team — status polling failed.';
+        // Reuse the same error text shown on the row (pr-review-detail.component.html)
+        // rather than a second hand-written copy of the sentence.
+        this.announce$.next(`Review for pull request #${record.prNumber}: ${record.error}`);
         this.disposePoller(record.jobId);
         this.cdr.markForCheck();
       },

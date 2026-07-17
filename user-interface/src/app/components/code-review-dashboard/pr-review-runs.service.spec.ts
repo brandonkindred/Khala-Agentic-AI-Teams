@@ -460,6 +460,60 @@ describe('PrReviewRunsService', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Completion/failure announcements (Group B2 live region)
+  // -------------------------------------------------------------------------
+
+  it('announces a completed review with wording consistent with the badge', () => {
+    service.reset(REPO);
+    apiSpy.getJobStatus.mockReturnValue(
+      of({
+        job_id: 'j1',
+        status: 'completed',
+        review_summary: { total_issues: 0, inline_comments: 0, comment_findings: 0, event: 'APPROVE' },
+      }),
+    );
+    const messages: string[] = [];
+    service.announce$.subscribe((m) => messages.push(m));
+    service.startReview(makePulls(1)[0]);
+    vi.advanceTimersByTime(5000);
+    expect(messages).toEqual(['Review for pull request #1 completed.']);
+  });
+
+  it('announces a failed review with wording consistent with the badge', () => {
+    service.reset(REPO);
+    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'j1', status: 'failed' }));
+    const messages: string[] = [];
+    service.announce$.subscribe((m) => messages.push(m));
+    service.startReview(makePulls(1)[0]);
+    vi.advanceTimersByTime(5000);
+    expect(messages).toEqual(['Review for pull request #1 failed.']);
+  });
+
+  it('announces connection loss, reusing the same error text shown on the row', () => {
+    service.reset(REPO);
+    apiSpy.getJobStatus.mockReturnValue(throwError(() => new Error('down')));
+    const messages: string[] = [];
+    service.announce$.subscribe((m) => messages.push(m));
+    service.startReview(makePulls(1)[0]);
+    // Three consecutive failed polls trip the connection-lost handler.
+    vi.advanceTimersByTime(15001);
+    expect(messages).toEqual([
+      'Review for pull request #1: Lost connection to the coding team — status polling failed.',
+    ]);
+  });
+
+  it('does not announce again for a run that already went terminal', () => {
+    service.reset(REPO);
+    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'j1', status: 'completed' }));
+    const messages: string[] = [];
+    service.announce$.subscribe((m) => messages.push(m));
+    service.startReview(makePulls(1)[0]);
+    // Several more interval ticks after the run already went terminal.
+    vi.advanceTimersByTime(20000);
+    expect(messages).toEqual(['Review for pull request #1 completed.']);
+  });
+
+  // -------------------------------------------------------------------------
   // Derived helpers (row badge + status) — the derivation logic itself is
   // covered by review-metrics.spec.ts; these confirm the service wires
   // `latestReview` into it correctly.

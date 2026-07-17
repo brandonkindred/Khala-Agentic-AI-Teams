@@ -29,7 +29,10 @@ import { LatestOnly } from '../../shared/latest-only';
  * (hydration, live polling, starting reviews, filing issues from proposals, and the row
  * status badge derivation) is owned by the injected `PrReviewRunsService`, and the
  * template binds directly to `reviewRuns` for all of it — this class holds no
- * review-run wrapper methods. See `PrReviewRunsService` for that contract.
+ * review-run wrapper methods, with one exception: `reviewAnnouncement` mirrors
+ * `reviewRuns.announce$` into a plain field purely because a template can bind to a
+ * field but cannot subscribe to an Observable directly. See `PrReviewRunsService` for
+ * that contract.
  */
 @Component({
   selector: 'app-code-review-dashboard',
@@ -55,6 +58,15 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
   private readonly integrationsApi = inject(IntegrationsApiService);
   /** Exposed (not private) so the template can bind to it directly, e.g. `reviewRuns.badgeLabel(...)`. */
   protected readonly reviewRuns = inject(PrReviewRunsService);
+
+  /**
+   * Latest review completion/failure/connection-lost sentence for the visually-hidden
+   * `role="status"` live region in the template, mirrored from `reviewRuns.announce$`
+   * (see `ngOnInit`) since a template can bind a plain field but not subscribe to an
+   * Observable directly. Empty until the first announcement of this component instance;
+   * stops updating once `destroy$` fires (the subscription below is gated on it).
+   */
+  reviewAnnouncement = '';
 
   healthCheck = (): ReturnType<CodingTeamApiService['health']> => this.api.health();
 
@@ -96,6 +108,9 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.checkGitHubConfig();
+    this.reviewRuns.announce$.pipe(takeUntil(this.destroy$)).subscribe((message) => {
+      this.reviewAnnouncement = message;
+    });
   }
 
   /**

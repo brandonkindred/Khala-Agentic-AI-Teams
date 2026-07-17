@@ -272,6 +272,24 @@ describe('CodeReviewDashboardComponent', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Review-completion live region (Group B2)
+  // -------------------------------------------------------------------------
+
+  it('mirrors reviewRuns.announce$ into reviewAnnouncement for the live-region binding', async () => {
+    await setup();
+    expect(component.reviewAnnouncement).toBe('');
+    component['reviewRuns'].announce$.next('Review for pull request #1 completed.');
+    expect(component.reviewAnnouncement).toBe('Review for pull request #1 completed.');
+  });
+
+  it('stops mirroring announce$ into reviewAnnouncement once the component is destroyed', async () => {
+    await setup();
+    fixture.destroy();
+    component['reviewRuns'].announce$.next('Review for pull request #1 completed.');
+    expect(component.reviewAnnouncement).toBe('');
+  });
+
+  // -------------------------------------------------------------------------
   // Full-stack DOM integration (component + real PrReviewRunsService + child)
   // -------------------------------------------------------------------------
 
@@ -298,6 +316,14 @@ describe('CodeReviewDashboardComponent', () => {
     component.togglePull(component.pulls[0]);
     fixture.detectChanges();
     expect(el.querySelector('.cr-pull-detail')).toBeNull();
+  });
+
+  it('renders a review-runs announcement in the visually-hidden status live region', async () => {
+    await setup();
+    component['reviewRuns'].announce$.next('Review for pull request #1 completed.');
+    fixture.detectChanges();
+    const region = fixture.nativeElement.querySelector('[role="status"]');
+    expect(region?.textContent?.trim()).toBe('Review for pull request #1 completed.');
   });
 
   it('updates the rendered row badge + table as a live poll completes', async () => {
