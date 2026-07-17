@@ -25,7 +25,11 @@ from temporalio.common import RetryPolicy
 # string — must stay inside the pass-through block with the other package imports.
 with workflow.unsafe.imports_passed_through():
     from agent_provisioning_team.temporal import activities as _activities
-    from agent_provisioning_team.temporal.constants import DEFAULT_WORKSPACE_PATH, TASK_QUEUE
+    from agent_provisioning_team.temporal.constants import (
+        DEFAULT_WORKSPACE_PATH,
+        LOCK_ACQUIRE_TIMEOUT_S,
+        TASK_QUEUE,
+    )
 
 PHASE_TIMEOUT = timedelta(minutes=20)
 TOOL_ACTIVITY_TIMEOUT = timedelta(minutes=15)
@@ -38,6 +42,18 @@ DEFAULT_RETRY_POLICY = RetryPolicy(
     backoff_coefficient=2.0,
 )
 
+# Bounds how long a workflow keeps retrying a busy per-agent_id lock
+# (shared/agent_lock.py) before giving up. Unbounded attempts — the ceiling
+# is schedule_to_close_timeout, not a retry count — so a busy lock is polled
+# with backoff until it frees or this budget is exhausted.
+LOCK_ACQUIRE_TIMEOUT = timedelta(seconds=LOCK_ACQUIRE_TIMEOUT_S)
+LOCK_ACQUIRE_RETRY_POLICY = RetryPolicy(
+    maximum_attempts=0,
+    initial_interval=timedelta(seconds=5),
+    maximum_interval=timedelta(minutes=1),
+    backoff_coefficient=2.0,
+)
+
 TOOL_RETRY_POLICY = RetryPolicy(
     maximum_attempts=4,
     initial_interval=timedelta(seconds=15),
@@ -45,6 +61,24 @@ TOOL_RETRY_POLICY = RetryPolicy(
     backoff_coefficient=2.0,
     non_retryable_error_types=["ValueError"],
 )
+
+# Replay-compatibility gates for the per-agent_id ownership lock
+# (shared/agent_lock.py). A history recorded before this deploy has no
+# acquire/renew/release commands; replaying it with code that unconditionally
+# schedules those activities would report nondeterminism and strand the
+# in-flight execution. ``workflow.patched`` returns False on such a replay,
+# so ``_acquire_agent_lock``/``_release_agent_lock`` skip scheduling anything
+# and the original (lock-free) sequence reproduces exactly; a new execution
+# records the marker and always takes the locking path. Distinct ids per
+# workflow type since each has its own independent history population.
+# Mirrors ``code_review_agent.temporal.workflows._ARCHITECTURE_PASS_PATCH``'s
+# identical rationale for an additive mid-sequence step.
+# TODO: Remove these gates (and always lock unconditionally) once no
+# pre-lock AgentProvisioningWorkflow/AgentDeprovisioningWorkflow histories
+# remain open (confirm via the Temporal UI), then deprecate each marker with
+# ``workflow.deprecate_patch(...)`` for one release before deleting it.
+_PROVISIONING_LOCK_PATCH = "agent-provisioning-lock"
+_DEPROVISIONING_LOCK_PATCH = "agent-deprovisioning-lock"
 
 
 @workflow.defn(name="AgentProvisioningWorkflow")
@@ -212,6 +246,84 @@ class AgentProvisioningWorkflow:
                     res if isinstance(res, dict) else {"tool_name": name, "success": False, "error": err}
                 )
         return tool_results_dump, succeeded, failures
+
+    async def _acquire_agent_lock(self, job_id: str, agent_id: str) -> None:
+        """Claim exclusive ownership of ``agent_id`` for this workflow run.
+
+        Preconditions:
+            * ``job_id`` / ``agent_id`` are non-empty.
+        Postconditions:
+            * A replay of a history recorded before the lock existed
+              (``workflow.patched(_PROVISIONING_LOCK_PATCH)`` is ``False``)
+              schedules nothing, reproducing that history's original
+              (lock-free) command sequence exactly. Otherwise blocks (with
+              backoff, via ``LOCK_ACQUIRE_RETRY_POLICY``) until ``agent_id``
+              is free or ``LOCK_ACQUIRE_TIMEOUT`` is exhausted, in which case
+              the activity's exception propagates.
+        """
+        if not workflow.patched(_PROVISIONING_LOCK_PATCH):
+            return
+        await workflow.execute_activity(
+            _activities.acquire_agent_lock_activity,
+            args=[job_id, agent_id],
+            task_queue=TASK_QUEUE,
+            schedule_to_close_timeout=LOCK_ACQUIRE_TIMEOUT,
+            retry_policy=LOCK_ACQUIRE_RETRY_POLICY,
+        )
+
+    async def _renew_agent_lock(self, job_id: str, agent_id: str) -> None:
+        """Refresh this workflow's lease on ``agent_id`` at an activity boundary.
+
+        Preconditions:
+            * ``job_id`` / ``agent_id`` are non-empty; this workflow already
+              holds ``agent_id``'s lock (acquired via ``_acquire_agent_lock``
+              earlier in this same run).
+        Postconditions:
+            * ``agent_id``'s lock record's lease is extended ``LOCK_TTL_S``
+              seconds from now — ``acquire()`` renews rather than raising for
+              the current owner. ``run()`` calls this between every single
+              ``workflow.execute_activity`` call, not just at phase
+              boundaries, so no gap between renewals ever exceeds one
+              activity's own worst-case duration (the tool fan-out's
+              ``TOOL_RETRY_POLICY`` ceiling is the largest — see
+              ``LOCK_TTL_S``'s floor, sized to exceed exactly that). A
+              legitimately slow (but still active) multi-hour run therefore
+              never loses its own lock to ``AGENT_PROVISIONING_LOCK_TTL_S``
+              expiry.
+        """
+        await self._acquire_agent_lock(job_id, agent_id)
+
+    async def _release_agent_lock(self, job_id: str, agent_id: str) -> None:
+        """Release this workflow's ownership of ``agent_id`` (best-effort).
+
+        Preconditions:
+            * ``job_id`` / ``agent_id`` are non-empty.
+        Postconditions:
+            * A replay of a pre-lock history schedules nothing (same
+              ``workflow.patched(_PROVISIONING_LOCK_PATCH)`` gate as
+              ``_acquire_agent_lock`` — nothing was acquired on that history,
+              so there is nothing to release either).
+            * Logs and swallows any exception rather than raising, so a
+              release failure can never mask whatever exception (if any)
+              is already propagating out of ``run()``.
+        """
+        if not workflow.patched(_PROVISIONING_LOCK_PATCH):
+            return
+        try:
+            await workflow.execute_activity(
+                _activities.release_agent_lock_activity,
+                args=[job_id, agent_id],
+                task_queue=TASK_QUEUE,
+                schedule_to_close_timeout=PHASE_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+        except Exception as release_exc:
+            workflow.logger.error(
+                "release_agent_lock_activity failed for job=%s agent=%s: %s",
+                job_id,
+                agent_id,
+                release_exc,
+            )
 
     async def _compensate_failed_tools(
         self, agent_id: str, succeeded: list[dict], job_id: str
@@ -402,6 +514,18 @@ class AgentProvisioningWorkflow:
             * One Temporal workflow id per ``job_id`` (starter uses a stable
               prefix); resume/restart mint a new run with skip/prior args rather
               than relying on history drain.
+            * At most one workflow (provision or deprovision) actively
+              processes a given ``agent_id`` at a time: this run holds
+              ``agent_id``'s ownership lock (``shared/agent_lock.py``) for its
+              entire duration — acquired before setup, renewed between every
+              scheduled activity so a legitimately slow run never loses its
+              own lease to ``AGENT_PROVISIONING_LOCK_TTL_S`` expiry, released
+              in a ``finally`` regardless of outcome — so every agent_id-keyed
+              teardown call this run makes (``compensate_activity``,
+              ``cleanup_setup``) is race-free against any other job. Gated by
+              ``workflow.patched(_PROVISIONING_LOCK_PATCH)`` so a history
+              recorded before the lock existed replays its original
+              (lock-free) sequence.
         """
         assert job_id, "job_id must be non-empty"
         assert agent_id, "agent_id must be non-empty"
@@ -414,12 +538,30 @@ class AgentProvisioningWorkflow:
         tools_phase_compensated = False
         account_provisioning_done = False
         succeeded_tools: list[dict] = []
+        lock_lost = False
+
+        async def _renew_or_mark_lost() -> None:
+            # A renewal failure (AgentLockBusyError from a genuine steal, or
+            # any other error we can't disambiguate from one — see
+            # _renew_agent_lock) means we can no longer prove we still own
+            # agent_id's resources. Record that before re-raising so the
+            # except block below never runs unfenced compensation against
+            # resources a replacement job may now own.
+            nonlocal lock_lost
+            try:
+                await self._renew_agent_lock(job_id, agent_id)
+            except Exception:
+                lock_lost = True
+                raise
 
         try:
+            await self._acquire_agent_lock(job_id, agent_id)
+
             environment_dump = await self._execute_setup_phase(
                 job_id, agent_id, manifest_path, skip, prior
             )
             setup_completed = True
+            await _renew_or_mark_lost()
 
             # Freeze manifest tools once for credential + provision phases so a
             # mid-run file edit cannot change the tool set under us.
@@ -430,10 +572,17 @@ class AgentProvisioningWorkflow:
                 schedule_to_close_timeout=PHASE_TIMEOUT,
                 retry_policy=DEFAULT_RETRY_POLICY,
             )
+            await _renew_or_mark_lost()
 
             credentials_by_tool = await self._execute_credentials_phase(
                 job_id, agent_id, manifest_path, skip, prior, tool_specs
             )
+            # Renew immediately before the fan-out phase (and again right
+            # after it, below) so that phase's own worst-case duration — a
+            # stuck tool retrying up to TOOL_RETRY_POLICY's ceiling, this
+            # workflow's single largest un-renewed gap — is isolated rather
+            # than compounded with any other activity's timeout.
+            await _renew_or_mark_lost()
 
             tool_results_dump, succeeded, failures = await self._run_tool_provisioning_phase(
                 job_id,
@@ -445,6 +594,11 @@ class AgentProvisioningWorkflow:
             )
             succeeded_tools = list(succeeded)
             credentials_by_tool = self._merge_enriched_credentials(credentials_by_tool, tool_results_dump)
+            # Renew immediately after the fan-out — its own worst-case
+            # duration (TOOL_RETRY_POLICY's ceiling) is this workflow's
+            # single largest un-renewed gap; keep the checkpoint below out
+            # of that same gap rather than compounding it.
+            await _renew_or_mark_lost()
 
             if failures:
                 await self._compensate_failed_tools(agent_id, succeeded, job_id)
@@ -457,10 +611,12 @@ class AgentProvisioningWorkflow:
             if "account_provisioning" not in skip:
                 await self._record_account_provisioning(job_id, agent_id, tool_results_dump)
             account_provisioning_done = True
+            await _renew_or_mark_lost()
 
             audit_dump = await self._execute_audit_phase(
                 job_id, agent_id, manifest_path, tool_results_dump, skip, prior
             )
+            await _renew_or_mark_lost()
 
             workspace_path = DEFAULT_WORKSPACE_PATH
             if environment_dump:
@@ -476,6 +632,7 @@ class AgentProvisioningWorkflow:
                 prior,
             )
             onboarding_dump = doc_result.get("onboarding") if doc_result else None
+            await _renew_or_mark_lost()
 
             await self._execute_deliver_phase(
                 job_id,
@@ -492,7 +649,17 @@ class AgentProvisioningWorkflow:
             # compensate the tools that already succeeded.
             # Nested try/except: compensation / terminal writes must not mask
             # the original failure if Temporal activity retries are exhausted.
-            if setup_completed and not account_provisioning_done and not tools_phase_compensated:
+            # lock_lost gates this: a renewal failure means we can no longer
+            # prove we still own agent_id's resources (a replacement job may
+            # already own them), so compensating here — keyed on agent_id
+            # alone, like every teardown path — would recreate the exact
+            # cross-job teardown race this lock exists to prevent.
+            if (
+                setup_completed
+                and not account_provisioning_done
+                and not tools_phase_compensated
+                and not lock_lost
+            ):
                 try:
                     await self._compensate_failed_tools(agent_id, succeeded_tools, job_id)
                 except Exception as comp_exc:
@@ -502,6 +669,14 @@ class AgentProvisioningWorkflow:
                         comp_exc,
                         exc,
                     )
+            elif setup_completed and not account_provisioning_done and not tools_phase_compensated:
+                workflow.logger.error(
+                    "Skipped unfenced compensation for job=%s agent=%s after losing the "
+                    "agent_id lock (a replacement job may now own its resources): %s",
+                    job_id,
+                    agent_id,
+                    exc,
+                )
             if not terminal_failure_recorded:
                 try:
                     await self._mark_job_failed(job_id, f"Provisioning failed: {exc}")
@@ -513,6 +688,8 @@ class AgentProvisioningWorkflow:
                         exc,
                     )
             raise
+        finally:
+            await self._release_agent_lock(job_id, agent_id)
 
 
 @workflow.defn(name="AgentDeprovisioningWorkflow")
@@ -527,6 +704,13 @@ class AgentDeprovisioningWorkflow:
         * Runs exactly one activity — the orchestrator's existing best-effort
           deprovision — so the whole teardown is retried atomically on
           infrastructure failure.
+        * Holds ``agent_id``'s ownership lock (``shared/agent_lock.py``) for
+          the run's entire duration — acquired before ``deprovision_activity``,
+          released in a ``finally`` regardless of outcome — so this teardown
+          can never interleave with a concurrent ``AgentProvisioningWorkflow``
+          run (or another deprovision) for the same ``agent_id``. Gated by
+          ``workflow.patched(_DEPROVISIONING_LOCK_PATCH)`` so a history
+          recorded before the lock existed replays its original sequence.
     """
 
     @workflow.run
@@ -538,12 +722,56 @@ class AgentDeprovisioningWorkflow:
         Postconditions:
             * Returns the ``DeprovisionResponse.model_dump()`` produced by
               ``deprovision_activity``.
+            * A replay of a history recorded before the lock existed
+              (``workflow.patched(_DEPROVISIONING_LOCK_PATCH)`` is ``False``)
+              schedules neither the acquire nor the release activity,
+              reproducing that history's original (lock-free) command
+              sequence exactly.
         """
         assert agent_id, "agent_id must be non-empty"
-        return await workflow.execute_activity(
-            _activities.deprovision_activity,
-            args=[agent_id, force],
-            task_queue=TASK_QUEUE,
-            schedule_to_close_timeout=PHASE_TIMEOUT,
-            retry_policy=DEFAULT_RETRY_POLICY,
-        )
+        # Deprovision workflow ids are randomized per-call (repeated/concurrent
+        # deprovisions of the same agent must never collide on Temporal's own
+        # workflow-id uniqueness), so workflow_id doubles as this run's unique
+        # lock-owner token — stable across replay (WorkflowInfo fields are
+        # fixed from workflow start).
+        owner = workflow.info().workflow_id
+        locked = workflow.patched(_DEPROVISIONING_LOCK_PATCH)
+        try:
+            if locked:
+                # Inside the try (not before it): Temporal activities are
+                # at-least-once — an acquire's side effect can persist
+                # server-side even if its completion is never observed here
+                # (e.g. exhausted LOCK_ACQUIRE_TIMEOUT after a lost ack). The
+                # finally below must always get a chance to release, or that
+                # successful acquire orphans the lock until LOCK_TTL_S.
+                await workflow.execute_activity(
+                    _activities.acquire_agent_lock_activity,
+                    args=[owner, agent_id],
+                    task_queue=TASK_QUEUE,
+                    schedule_to_close_timeout=LOCK_ACQUIRE_TIMEOUT,
+                    retry_policy=LOCK_ACQUIRE_RETRY_POLICY,
+                )
+            return await workflow.execute_activity(
+                _activities.deprovision_activity,
+                args=[agent_id, force],
+                task_queue=TASK_QUEUE,
+                schedule_to_close_timeout=PHASE_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+        finally:
+            if locked:
+                try:
+                    await workflow.execute_activity(
+                        _activities.release_agent_lock_activity,
+                        args=[owner, agent_id],
+                        task_queue=TASK_QUEUE,
+                        schedule_to_close_timeout=PHASE_TIMEOUT,
+                        retry_policy=DEFAULT_RETRY_POLICY,
+                    )
+                except Exception as release_exc:
+                    workflow.logger.error(
+                        "release_agent_lock_activity failed for owner=%s agent=%s: %s",
+                        owner,
+                        agent_id,
+                        release_exc,
+                    )
