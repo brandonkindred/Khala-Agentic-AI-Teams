@@ -68,6 +68,7 @@ from agents.blogging.shared.planning_config import (
     plan_critic_model_override,
     planning_model_override,
 )
+from agents.blogging.shared.run_pipeline_job import _is_external_cancellation
 from agents.blogging.shared.style_loader import append_guidelines, load_style_file
 from agents.blogging.validators.runner import run_validators_from_work_dir
 from temporalio.exceptions import CancelledError
@@ -111,32 +112,10 @@ HITL_POLL_INTERVAL_S = int(os.getenv("BLOGGING_HITL_POLL_INTERVAL_S", "10"))
 # error propagate — a persistent outage still surfaces, a momentary one is ridden out.
 HITL_MAX_CONSECUTIVE_READ_ERRORS = 5
 
-# Default model - use environment variable or this default
-DEFAULT_MODEL = "deepseek-v4-pro:cloud"
-
 PipelineStatus = Literal["PASS", "FAIL", "NEEDS_HUMAN_REVIEW"]
 
 # Type alias for job updater callback
 JobUpdater = Callable[..., None]
-
-
-def _is_external_cancellation(exc: BaseException) -> bool:
-    """True when the exception chain indicates a Temporal runtime cancellation.
-
-    Walks the ``__cause__``/``__context__`` chain (bounded by a ``seen`` id-set so a
-    self-referential chain can't loop forever) and tests each link with ``isinstance``
-    against ``temporalio.exceptions.CancelledError`` — robust to subclasses and free
-    of the class-name/module string matching that a Temporal exception-hierarchy
-    change could silently break.
-    """
-    cur: Optional[BaseException] = exc
-    seen: set[int] = set()
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        if isinstance(cur, CancelledError):
-            return True
-        cur = cur.__cause__ or cur.__context__
-    return False
 
 
 def _wait_for_hitl(
@@ -978,7 +957,8 @@ def run_pipeline(
     Args:
         brief: The research brief input describing the blog topic.
         work_dir: Optional directory for artifact persistence.
-        llm_client: Optional LLM client (defaults to deepseek-v4-pro:cloud).
+        llm_client: Optional LLM client (defaults to the resolved "blog" model
+            via get_strands_model("blog")).
         draft_editor_iterations: Number of draft/copy-edit iterations.
         max_rewrite_iterations: Max compliance rewrite attempts.
         run_gates: Whether to run validators/compliance gates.
@@ -1824,6 +1804,12 @@ def run_draft_stage(
                     copy_editor_result.approved,
                     len(copy_editor_result.feedback_items),
                 )
+                if copy_editor_result.feedback_file_written is False:
+                    logger.warning(
+                        "Copy editor feedback file failed to write for iteration %s (path=%s)",
+                        copy_edit_num,
+                        feedback_path,
+                    )
 
                 # Track feedback for staleness detection and persistent issue escalation
                 feedback_tracker.record_iteration(
