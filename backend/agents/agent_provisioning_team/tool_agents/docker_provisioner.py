@@ -338,6 +338,36 @@ class DockerProvisionerTool(BaseToolProvisioner):
                 container_name,
             )
 
+    def verify_and_remove_orphan(self, agent_id: str) -> bool:
+        """Best-effort verify-and-remove by deterministic name, ignoring state.
+
+        A container can exist with no corresponding ``self._state`` row (e.g.
+        ``docker run`` succeeded but persisting provisioner state then failed,
+        and the best-effort removal that follows that specific failure also
+        failed) — ``deprovision``'s state-lookup-based teardown can never find
+        such a container, since there is no row to look up. This probes and
+        removes by the deterministic ``agent-{agent_id}`` name directly,
+        independent of whatever ``self._state`` currently holds (or doesn't).
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+        Postconditions:
+            * Returns ``True`` iff the daemon confirms no container by this
+              name exists after this call — already absent, or successfully
+              removed just now.
+            * Returns ``False`` when the daemon confirms the container is
+              still alive after a removal attempt, or when either probe is
+              inconclusive (daemon unreachable/timeout) — conservative, since
+              "unknown" must not be reported as confirmed teardown.
+            * Never raises.
+        """
+        assert agent_id, "agent_id must be non-empty"
+        container_name = f"agent-{agent_id}"
+        if self._container_exists(container_name) is False:
+            return True
+        self._best_effort_remove_container(container_name)
+        return self._container_exists(container_name) is False
+
     def deprovision(self, agent_id: str) -> DeprovisionResult:
         """Stop and remove the Docker container."""
         container_info = self._state.get(agent_id)

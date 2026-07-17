@@ -355,6 +355,7 @@ class ProvisioningOrchestrator:
         self,
         agent_id: str,
         tool_results: List[Any],
+        tear_down_environment: bool = True,
     ) -> None:
         """Roll back partial provisioning after a phase failure.
 
@@ -362,6 +363,21 @@ class ProvisioningOrchestrator:
         shutdown compensation. Best-effort: deprovisions any tools that did
         succeed, tears down the Docker environment, and removes encrypted
         credentials so a failed run doesn't leak resources or secrets to disk.
+
+        Preconditions:
+            * ``tool_results`` entries are the tool results this ATTEMPT
+              itself produced — rolling those back always runs, since they
+              are always this attempt's own creation regardless of
+              ``tear_down_environment``.
+        Postconditions:
+            * ``tear_down_environment=False`` skips the Docker / credential
+              store / environment-record teardown entirely, while tool
+              rollback above still runs unconditionally. Callers set this
+              ``False`` when ``agent_id``'s environment predates this attempt
+              (e.g. a re-run against an already-delivered agent) and must be
+              preserved — a newly-provisioned tool from THIS attempt still
+              gets rolled back, but the environment this attempt never
+              created is left untouched.
         """
         # Look each successfully-provisioned tool back up by its registry key
         # (stamped onto the result in run_account_provisioning). Prior to #293
@@ -414,6 +430,9 @@ class ProvisioningOrchestrator:
                     provisioner.deprovision(agent_id)
                 except Exception:  # noqa: BLE001 — best-effort cleanup
                     logger.exception("Compensation: deprovision failed for %s", key)
+
+        if not tear_down_environment:
+            return
 
         docker = self.tool_agents.get("docker_provisioner")
         if docker is not None:

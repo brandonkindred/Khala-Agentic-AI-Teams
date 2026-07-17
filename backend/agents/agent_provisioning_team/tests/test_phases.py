@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -523,7 +523,10 @@ def test_run_setup_preserves_reused_container_when_checkpoint_fails_after_reregi
     doesn't mean THIS attempt's own docker.provision call created a fresh
     container. If on_registered then fails, the container must be preserved
     even though registered_by_this_call is True: only a genuinely fresh
-    (non-reused) container is this attempt's own to tear down.
+    (non-reused) container is this attempt's own to tear down. The prior
+    "ready" record this attempt overwrote must be restored verbatim, not
+    merely deleted — deleting it would erase a delivered agent's record from
+    the registry with nothing left to re-register it.
     """
     ready = _stored_env("a21", container_id="c-existing")  # status="ready" by default
     env_store = _rollback_env_store(get=ready, register_error=lambda *a, **kw: None)
@@ -534,7 +537,8 @@ def test_run_setup_preserves_reused_container_when_checkpoint_fails_after_reregi
 
     _run_setup_expecting("checkpoint boom", "a21", env_store, docker, on_registered=on_registered)
 
-    env_store.remove.assert_called_once_with("a21")
+    assert env_store.register.call_args_list[-1] == call(ready)
+    env_store.remove.assert_not_called()
     docker.deprovision.assert_not_called()
 
 

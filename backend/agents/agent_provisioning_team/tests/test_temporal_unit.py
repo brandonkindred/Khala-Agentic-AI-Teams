@@ -985,7 +985,7 @@ def test_compensate_activity_invokes_orchestrator() -> None:
     from agent_provisioning_team.temporal import activities
 
     fake_orch = MagicMock()
-    fake_orch.tool_agents.get.return_value.get_container_info.return_value = None
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.return_value = True
     with (
         patch(
             "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
@@ -1003,13 +1003,14 @@ def test_compensate_activity_invokes_orchestrator() -> None:
         )
 
     fake_orch.compensate.assert_called_once()
-    args, _ = fake_orch.compensate.call_args
+    args, kwargs = fake_orch.compensate.call_args
     assert args[0] == "agent-1"
     shims = args[1]
     assert len(shims) == 2
     assert shims[0].tool_name == "pg"
     assert shims[0].provisioner_key == "postgres_provisioner"
     assert shims[0].success is True
+    assert kwargs["tear_down_environment"] is True
     mock_clear.assert_called_once_with("job-1")
 
 
@@ -1022,7 +1023,7 @@ def test_compensate_activity_clears_phases_so_resume_reruns_credentials() -> Non
         patch.object(activities._js, "clear_completed_phases") as mock_clear,
     ):
         Orch.return_value.compensate = MagicMock()
-        Orch.return_value.tool_agents.get.return_value.get_container_info.return_value = None
+        Orch.return_value.tool_agents.get.return_value.verify_and_remove_orphan.return_value = True
         activities.compensate_activity("a1", [], job_id="j-comp")
 
     mock_clear.assert_called_once_with("j-comp")
@@ -1035,9 +1036,7 @@ def test_compensate_activity_raises_when_docker_state_survives() -> None:
     from agent_provisioning_team.temporal import activities
 
     fake_orch = MagicMock()
-    fake_orch.tool_agents.get.return_value.get_container_info.return_value = {
-        "container_name": "agent-a1"
-    }
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.return_value = False
     with (
         patch(
             "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",

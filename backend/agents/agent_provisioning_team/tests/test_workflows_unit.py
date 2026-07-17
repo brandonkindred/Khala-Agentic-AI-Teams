@@ -851,7 +851,7 @@ async def test_workflow_compensates_setup_on_credentials_failure(tmp_path) -> No
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     compensate_call = _call(stub, "compensate_activity")
-    assert compensate_call["args"] == ["agent-1", [], "job-1"]
+    assert compensate_call["args"] == ["agent-1", [], "job-1", True]
     assert "mark_job_failed_activity" in [c["name"] for c in stub.calls]
 
 
@@ -925,23 +925,25 @@ async def test_workflow_setup_failure_compensates_and_marks_failed(tmp_path) -> 
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     compensate_call = _call(stub, "compensate_activity")
-    assert compensate_call["args"] == ["agent-1", [], "job-1"]
+    assert compensate_call["args"] == ["agent-1", [], "job-1", True]
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
     assert "setup boom" in fail_call["args"][1]
 
 
 @pytest.mark.asyncio
-async def test_workflow_skips_compensation_when_environment_pre_existed(tmp_path) -> None:
-    """A setup failure must NOT compensate when agent_id already had an environment.
+async def test_workflow_skips_environment_teardown_when_environment_pre_existed(tmp_path) -> None:
+    """A setup failure must not tear down an environment that pre-dated this run.
 
     Holding the lock only rules out a CONCURRENT workflow — it says nothing
     about whether THIS run created what's currently at agent_id. If
     check_existing_environment_activity reports agent_id already had a
     running environment before this run touched anything (e.g. setup's
     already-running fast path reused it and created nothing, then a later
-    checkpoint write failed), compensating would destroy that pre-existing
-    environment rather than something this run made.
+    checkpoint write failed), compensation must still run — to roll back any
+    tool-level side effects this run created — but must pass
+    ``tear_down_environment=False`` so it does not destroy the Docker
+    env/credential store/environment record that predates this run.
     """
     from agent_provisioning_team.temporal import workflows as wf
 
@@ -950,6 +952,7 @@ async def test_workflow_skips_compensation_when_environment_pre_existed(tmp_path
         {
             "check_existing_environment_activity": True,
             "setup_activity": RuntimeError("checkpoint boom"),
+            "compensate_activity": None,
             "mark_job_failed_activity": None,
         }
     )
@@ -961,8 +964,8 @@ async def test_workflow_skips_compensation_when_environment_pre_existed(tmp_path
         with pytest.raises(RuntimeError, match="checkpoint boom"):
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
-    fn_names = [c["name"] for c in stub.calls]
-    assert "compensate_activity" not in fn_names
+    compensate_call = _call(stub, "compensate_activity")
+    assert compensate_call["args"] == ["agent-1", [], "job-1", False]
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
     assert "checkpoint boom" in fail_call["args"][1]
@@ -1040,7 +1043,7 @@ async def test_workflow_credentials_failure_compensation_raises(tmp_path) -> Non
 
     # Compensation was attempted (and raised), the failure was logged, and the
     # job was still marked failed despite the compensation error.
-    assert _call(stub, "compensate_activity")["args"] == ["agent-1", [], "job-1"]
+    assert _call(stub, "compensate_activity")["args"] == ["agent-1", [], "job-1", True]
     mock_logger.error.assert_called_once()
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"

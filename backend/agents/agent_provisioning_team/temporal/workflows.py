@@ -376,19 +376,27 @@ class AgentProvisioningWorkflow:
             )
 
     async def _compensate_failed_tools(
-        self, agent_id: str, succeeded: list[dict], job_id: str
+        self,
+        agent_id: str,
+        succeeded: list[dict],
+        job_id: str,
+        tear_down_environment: bool = True,
     ) -> None:
         """Roll back tools that succeeded when the account-provisioning phase fails.
 
         Preconditions:
             * ``succeeded`` entries are ``{tool_name, provisioner_key}`` dicts.
             * ``job_id`` is non-empty (used to clear completed-phase checkpoints).
+            * ``tear_down_environment`` is ``False`` when ``agent_id``'s Docker
+              environment predates this run (``pre_existing_environment``) and
+              must be preserved — ``succeeded`` still gets rolled back either
+              way, since those tool results are always this run's own.
         Postconditions:
             * Invokes ``compensate_activity`` once for the partial success set.
         """
         await workflow.execute_activity(
             _activities.compensate_activity,
-            args=[agent_id, succeeded, job_id],
+            args=[agent_id, succeeded, job_id, tear_down_environment],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -554,36 +562,42 @@ class AgentProvisioningWorkflow:
               ``deliver_activity`` has written a terminal completed/failed job
               status.
             * On any unhandled phase failure (setup, credentials, tools, audit,
-              docs, deliver) while this run holds ``agent_id``'s lock AND
-              ``agent_id`` had no running environment before this run started:
+              docs, deliver) while this run holds ``agent_id``'s lock:
               ``mark_job_failed_activity`` records terminal failure before the
               exception propagates, and ``compensate_activity`` runs (tool
               failures compensate the succeeded set; any other failure
-              compensates an empty set) to tear down the Docker env and
-              credentials, unconditionally including a setup-phase failure. A
-              setup failure ALSO triggers ``run_setup``'s own local best-effort
-              rollback first (scoped to resources that attempt created) — the
-              workflow-level ``compensate_activity`` is a second, independently
-              retried backstop for when that local rollback itself fails (e.g.
-              a transient ``docker rm`` error), not a replacement for it. This
-              is safe (including before setup ever runs, e.g. a manifest-load
-              failure) because ``compensate_activity`` is fully idempotent — a
-              no-op wherever nothing was created — and this run holds
-              ``agent_id``'s exclusive lock throughout, so there is no other
-              job's environment it could tear down instead — PROVIDED nothing
-              already existed at ``agent_id`` when this run started, which is
-              what the ``pre_existing_environment`` check (right after
-              acquiring the lock) rules out: the lock alone only excludes a
-              *concurrent* workflow, it says nothing about whether THIS run is
-              the one that created ``agent_id``'s current resources (e.g.
-              setup's already-running fast path creates nothing, so a later
-              failure there must not destroy what it merely reused).
+              compensates an empty set) to roll back tool-level side effects
+              this run created, unconditionally including a setup-phase
+              failure. A setup failure ALSO triggers ``run_setup``'s own local
+              best-effort rollback first (scoped to resources that attempt
+              created) — the workflow-level ``compensate_activity`` is a
+              second, independently retried backstop for when that local
+              rollback itself fails (e.g. a transient ``docker rm`` error),
+              not a replacement for it. Calling it is safe (including before
+              setup ever runs, e.g. a manifest-load failure) because
+              ``compensate_activity`` is fully idempotent — a no-op wherever
+              nothing was created — and this run holds ``agent_id``'s
+              exclusive lock throughout, so there is no other job's resources
+              it could tear down instead.
+              WHAT it tears down is separately gated by
+              ``pre_existing_environment`` (checked right after acquiring the
+              lock): holding the lock only excludes a *concurrent* workflow —
+              it says nothing about whether THIS run is the one that created
+              ``agent_id``'s Docker environment specifically (e.g. setup's
+              already-running fast path reuses one and creates nothing). When
+              ``pre_existing_environment`` is ``True``, ``compensate_activity``
+              still rolls back any tool results this run itself produced
+              (``succeeded_tools``/``succeeded``, e.g. a newly added tool on an
+              already-delivered agent), but is told (via
+              ``tear_down_environment=False``) to leave the Docker env,
+              credential store, and environment record alone, since those
+              predate this run.
               Compensation is skipped entirely — logging which reason applied
               — when this run never acquired the lock at all (exhausted
-              retries against a live holder), acquired it but later lost it (a
-              renewal failure might indicate a replacement job now owns
-              ``agent_id``), or ``agent_id`` already had a running environment
-              before this run touched anything.
+              retries against a live holder) or acquired it but later lost it
+              (a renewal failure might indicate a replacement job now owns
+              ``agent_id``); a pre-existing environment no longer disables
+              compensation outright, only the environment-teardown portion of it.
             * After a successful tool fan-out (not a restored skip),
               ``account_provisioning`` is written to ``completed_phases`` /
               ``phase_results`` before later phases run.
@@ -712,7 +726,9 @@ class AgentProvisioningWorkflow:
             await _renew_or_mark_lost()
 
             if failures:
-                await self._compensate_failed_tools(agent_id, succeeded, job_id)
+                await self._compensate_failed_tools(
+                    agent_id, succeeded, job_id, tear_down_environment=not pre_existing_environment
+                )
                 tools_phase_compensated = True
                 err = f"Tool provisioning failed for agent {agent_id}: {'; '.join(failures)}"
                 await self._mark_job_failed(job_id, err)
@@ -770,26 +786,36 @@ class AgentProvisioningWorkflow:
             # down instead of being left as an untracked orphan.
             # Nested try/except: compensation / terminal writes must not mask
             # the original failure if Temporal activity retries are exhausted.
-            # Three independent gates, each ruling out a distinct way this
-            # run could destroy resources it doesn't own:
-            #   - lock_acquired / lock_lost: if acquire itself failed, this run
-            #     never held the lock at all; if a renewal failed, it no longer
-            #     can prove it still does (a replacement job may already own
-            #     agent_id's resources) — compensating here, keyed on agent_id
-            #     alone like every teardown path, would recreate the exact
-            #     cross-job teardown race this lock exists to prevent.
-            #   - pre_existing_environment: holding the lock only rules out a
-            #     CONCURRENT workflow — it says nothing about whether THIS run
-            #     is the one that created what's currently at agent_id. If
-            #     agent_id already had a running environment before this run
-            #     touched anything (e.g. setup took its already-running fast
-            #     path and created nothing, or the failure struck before setup
-            #     ever ran), compensating would destroy that pre-existing
-            #     environment rather than something this run made.
-            safe_to_compensate = lock_acquired and not lock_lost and not pre_existing_environment
-            if safe_to_compensate and not account_provisioning_done and not tools_phase_compensated:
+            # lock_acquired / lock_lost gate whether to call compensate AT ALL:
+            # if acquire itself failed, this run never held the lock at all; if
+            # a renewal failed, it no longer can prove it still does (a
+            # replacement job may already own agent_id's resources) —
+            # compensating here, keyed on agent_id alone like every teardown
+            # path, would recreate the exact cross-job teardown race this lock
+            # exists to prevent.
+            # pre_existing_environment gates WHAT compensate tears down, not
+            # whether it runs: holding the lock only rules out a CONCURRENT
+            # workflow — it says nothing about whether THIS run is the one
+            # that created agent_id's environment specifically. succeeded_tools
+            # (e.g. a newly added tool on an already-delivered agent) is always
+            # this run's own creation and must still be rolled back regardless;
+            # only the Docker env / credential store / environment record —
+            # which predate this run when pre_existing_environment is True —
+            # are excluded from teardown (see compensate_activity's
+            # tear_down_environment parameter).
+            if (
+                lock_acquired
+                and not lock_lost
+                and not account_provisioning_done
+                and not tools_phase_compensated
+            ):
                 try:
-                    await self._compensate_failed_tools(agent_id, succeeded_tools, job_id)
+                    await self._compensate_failed_tools(
+                        agent_id,
+                        succeeded_tools,
+                        job_id,
+                        tear_down_environment=not pre_existing_environment,
+                    )
                 except Exception as comp_exc:
                     workflow.logger.error(
                         "Compensation failed after provisioning error for job=%s: %s (original=%s)",
@@ -798,24 +824,19 @@ class AgentProvisioningWorkflow:
                         exc,
                     )
             elif not account_provisioning_done and not tools_phase_compensated:
-                if not lock_acquired or lock_lost:
-                    workflow.logger.error(
-                        "Skipped unfenced compensation for job=%s agent=%s: this run %s "
-                        "the agent_id lock (a different job may now own its resources): %s",
-                        job_id,
-                        agent_id,
-                        "never acquired" if not lock_acquired else "lost",
-                        exc,
-                    )
-                else:
-                    workflow.logger.error(
-                        "Skipped compensation for job=%s agent=%s: agent_id already had a "
-                        "running environment before this run started, so tearing it down "
-                        "could destroy resources this run never created: %s",
-                        job_id,
-                        agent_id,
-                        exc,
-                    )
+                # lock_acquired/lock_lost is the only remaining reason to land
+                # here now: pre_existing_environment no longer disables
+                # compensation outright (it's threaded into the call as
+                # tear_down_environment instead), so the first branch's
+                # condition can only have failed on the lock.
+                workflow.logger.error(
+                    "Skipped unfenced compensation for job=%s agent=%s: this run %s "
+                    "the agent_id lock (a different job may now own its resources): %s",
+                    job_id,
+                    agent_id,
+                    "never acquired" if not lock_acquired else "lost",
+                    exc,
+                )
             if not terminal_failure_recorded:
                 try:
                     await self._mark_job_failed(job_id, f"Provisioning failed: {exc}")
