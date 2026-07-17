@@ -345,14 +345,13 @@ def parse_spec_activity(
             status_text="Starting pipeline",
         )
 
-        from spec_parser import (
+        from llm_service import get_client
+        from software_engineering_team.spec_parser import (
             gather_context_files,
             get_newest_spec_content,
             get_newest_spec_path,
             parse_spec_with_llm,
         )
-
-        from llm_service import get_client
 
         initial_spec_path = None
         if spec_content_override is not None:
@@ -371,9 +370,10 @@ def parse_spec_activity(
         plan_dir = ensure_plan_dir(path)
 
         # Run PRA
-        from product_requirements_analysis_agent import ProductRequirementsAnalysisAgent
-
         from software_engineering_team.orchestrator import _make_pra_job_updater
+        from software_engineering_team.product_requirements_analysis_agent import (
+            ProductRequirementsAnalysisAgent,
+        )
 
         # Shared with the thread path: rewrites current_phase into the analysis_*
         # fields AND rescales the agent's own 0-100 progress onto the product-analysis
@@ -434,11 +434,10 @@ def plan_project_activity(
 
         update_job(job_id, phase="planning", status_text="Starting planning workflow")
 
-        from planning_adapter import adapt_planning_result
-        from spec_parser import parse_spec_with_llm
-
         from llm_service import get_client
         from planning_team.orchestrator import run_workflow as run_planning_workflow
+        from software_engineering_team.planning_adapter import adapt_planning_result
+        from software_engineering_team.spec_parser import parse_spec_with_llm
 
         # Re-parse requirements for the adapter (lightweight)
         requirements = parse_spec_with_llm(spec_data.spec_content, get_client("spec_intake"))
@@ -553,7 +552,7 @@ def execute_coding_team_activity(
         path = Path(repo_path).resolve()
 
         # Reconstruct adapter_result from dict
-        from planning_adapter import PlanningAdapterResult
+        from software_engineering_team.planning_adapter import PlanningAdapterResult
 
         adapter_result = PlanningAdapterResult.from_dict(plan_data.adapter_result_dict)
 

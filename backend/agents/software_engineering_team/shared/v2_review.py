@@ -291,7 +291,9 @@ def _code_review_step(
                 ),
             )
         try:
-            from code_review_agent.models import CodeReviewInput as _CRInput
+            from software_engineering_team.code_review_agent.models import (
+                CodeReviewInput as _CRInput,
+            )
 
             ctx = review_context or ReviewContext()
             # files= keeps per-file attribution and lets the coordinator bound
@@ -610,7 +612,9 @@ def run_review(
     lint_ok = True
     if linting_tool_agent is not None:
         try:
-            from linting_tool_agent.models import LintToolInput as _LintInput
+            from software_engineering_team.linting_tool_agent.models import (
+                LintToolInput as _LintInput,
+            )
 
             lint_result = linting_tool_agent.run(
                 _LintInput(
@@ -770,7 +774,9 @@ def run_microtask_review(
         if detail_callback:
             detail_callback("Running linter...")
         try:
-            from linting_tool_agent.models import LintToolInput as _LintInput
+            from software_engineering_team.linting_tool_agent.models import (
+                LintToolInput as _LintInput,
+            )
 
             lint_result = linting_tool_agent.run(
                 _LintInput(

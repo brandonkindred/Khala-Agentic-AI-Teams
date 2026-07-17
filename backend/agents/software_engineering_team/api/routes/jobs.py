@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from spec_parser import validate_work_path, validate_workspace_path_no_spec
 
 from shared_hitl.status import pending_questions_from_raw
 from software_engineering_team.api import main as _main
@@ -49,6 +48,10 @@ from software_engineering_team.shared.job_store import (
     reset_job,
     start_job_heartbeat_thread,
     update_job,
+)
+from software_engineering_team.spec_parser import (
+    validate_work_path,
+    validate_workspace_path_no_spec,
 )
 
 logger = logging.getLogger(__name__)

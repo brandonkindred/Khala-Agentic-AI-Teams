@@ -112,10 +112,7 @@ from software_engineering_team.coding_team.api.pr_review import (  # noqa: F401
     _REVIEW_ADMISSION_LOCK,
     _REVIEW_GUARD_HEARTBEAT_STALE_S,
     _REVIEW_HEARTBEAT_INTERVAL_S,
-    MultipleIssueCreationErrors,
-    RepoMismatchError,
     ReviewCode,
-    ReviewNotFoundError,
     _bisect_submit,
     _build_review_code,
     _format_questions_comment,
@@ -130,6 +127,11 @@ from software_engineering_team.coding_team.api.pr_review import (  # noqa: F401
     _safe_comment,
     _start_pr_review_thread,
     _submit_review,
+)
+from software_engineering_team.coding_team.api.pr_review_issues import (  # noqa: F401
+    MultipleIssueCreationErrors,
+    RepoMismatchError,
+    ReviewNotFoundError,
     create_review_issues,
 )
 from software_engineering_team.coding_team.api.state import (  # noqa: F401
