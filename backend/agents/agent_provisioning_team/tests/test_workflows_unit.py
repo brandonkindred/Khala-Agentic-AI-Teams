@@ -294,6 +294,47 @@ async def test_workflow_releases_lock_when_acquire_itself_fails(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_workflow_skips_compensation_when_renewal_loses_the_lock(tmp_path) -> None:
+    """P1 regression: if a lock renewal fails after setup (the agent_id lock
+    was reclaimed by a replacement job, or any other renewal error), the
+    except block must NOT run unfenced by-agent_id compensation — that would
+    tear down the replacement job's live resources, recreating the exact
+    cross-job teardown race this lock exists to prevent. A lost lock still
+    marks the job failed and (harmlessly, since we no longer own it) attempts
+    release."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    acquire_calls = {"n": 0}
+
+    def _acquire_side_effect(call):
+        acquire_calls["n"] += 1
+        if acquire_calls["n"] >= 3:  # 1=initial acquire, 2=renewal after setup
+            raise RuntimeError("agent 'agent-1' is currently locked by owner 'job-2'")
+        return None
+
+    stub = _ExecActivityStub(
+        {
+            "acquire_agent_lock_activity": _acquire_side_effect,
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": _TOOL_SPECS,
+        }
+    )
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "logger", new=MagicMock()),
+    ):
+        with pytest.raises(RuntimeError, match="currently locked"):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    fn_names = [c["name"] for c in stub.calls]
+    assert "compensate_activity" not in fn_names
+    assert "mark_job_failed_activity" in fn_names
+    assert fn_names[-1] == "release_agent_lock_activity"
+
+
+@pytest.mark.asyncio
 async def test_workflow_original_error_survives_a_failed_release(tmp_path) -> None:
     """A release_agent_lock_activity failure is logged, not raised — the
     original failure it's cleaning up after must still propagate unmasked."""
@@ -1026,3 +1067,38 @@ async def test_deprovisioning_workflow_original_error_survives_a_failed_release(
 
     fn_names = [c["name"] for c in stub.calls]
     assert fn_names[-1] == "release_agent_lock_activity"
+
+
+@pytest.mark.asyncio
+async def test_deprovisioning_workflow_releases_when_acquire_itself_fails() -> None:
+    """P2 regression: acquire lives inside the try/finally, so even when the
+    acquire activity call fails/times out client-side, release is still
+    attempted — Temporal activities are at-least-once, so the acquire's side
+    effect may have persisted server-side despite the client-visible failure;
+    without this, that successful-but-unobserved acquire would orphan the
+    lock until LOCK_TTL_S. release() itself is a safe no-op if the acquire
+    genuinely never wrote a record."""
+    from types import SimpleNamespace
+
+    from agent_provisioning_team.temporal import workflows as wf
+
+    stub = _ExecActivityStub(
+        {
+            "acquire_agent_lock_activity": RuntimeError("acquire timed out"),
+        }
+    )
+    fake_info = SimpleNamespace(workflow_id="agent-provisioning-deprovision-agent-1-jkl012")
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "info", return_value=fake_info),
+    ):
+        with pytest.raises(RuntimeError, match="acquire timed out"):
+            await wf.AgentDeprovisioningWorkflow().run("agent-1", False)
+
+    fn_names = [c["name"] for c in stub.calls]
+    assert fn_names == [
+        "acquire_agent_lock_activity",
+        "release_agent_lock_activity",
+    ]
+    assert "deprovision_activity" not in fn_names

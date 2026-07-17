@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from agentic_team_provisioning.agent_env_provisioning import (
+    _acquire_lock_blocking,
+    _provision_one,
     make_provisioning_agent_id,
     schedule_provision_step_agents,
 )
@@ -101,6 +105,138 @@ def test_try_begin_and_list(monkeypatch, fake_pg: dict):
     )
     rows2 = store.list_agent_env_provisions(team.team_id)
     assert rows2[0]["status"] == "completed"
+
+
+class _FakeResult:
+    def __init__(self, success: bool, error: str | None = None):
+        self.success = success
+        self.error = error
+
+
+def test_provision_one_success_acquires_and_releases_lock(fake_pg: dict):
+    store = MagicMock()
+    fake_orch = MagicMock()
+    fake_orch.run_workflow.return_value = _FakeResult(success=True)
+    fake_lock_store = MagicMock()
+
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch(
+            "agent_provisioning_team.shared.agent_lock.AgentLockStore",
+            return_value=fake_lock_store,
+        ),
+    ):
+        _provision_one(
+            team_id="t1",
+            stable_key="p1:s1:A1",
+            provisioning_agent_id="at-test-id",
+            store=store,
+        )
+
+    fake_lock_store.acquire.assert_called_once()
+    assert fake_lock_store.acquire.call_args.args[0] == "at-test-id"
+    fake_lock_store.release.assert_called_once()
+    assert fake_lock_store.release.call_args.args[0] == "at-test-id"
+    # The release owner must match the owner acquire claimed with.
+    assert fake_lock_store.release.call_args.args[1] == fake_lock_store.acquire.call_args.args[1]
+    store.mark_agent_env_provision_finished.assert_called_once_with(
+        "t1", "p1:s1:A1", success=True, error_message=None
+    )
+
+
+def test_provision_one_releases_lock_when_orchestrator_raises(fake_pg: dict):
+    store = MagicMock()
+    fake_orch = MagicMock()
+    fake_orch.run_workflow.side_effect = RuntimeError("boom")
+    fake_lock_store = MagicMock()
+
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch(
+            "agent_provisioning_team.shared.agent_lock.AgentLockStore",
+            return_value=fake_lock_store,
+        ),
+    ):
+        _provision_one(
+            team_id="t1",
+            stable_key="p1:s1:A1",
+            provisioning_agent_id="at-test-id",
+            store=store,
+        )
+
+    fake_lock_store.release.assert_called_once()
+    store.mark_agent_env_provision_finished.assert_called_once_with(
+        "t1", "p1:s1:A1", success=False, error_message="boom"
+    )
+
+
+def test_provision_one_skips_orchestrator_when_lock_busy(fake_pg: dict):
+    from agent_provisioning_team.shared.agent_lock import AgentLockBusyError
+
+    store = MagicMock()
+    fake_orch = MagicMock()
+    fake_lock_store = MagicMock()
+    fake_lock_store.acquire.side_effect = AgentLockBusyError("at-test-id", "other-owner")
+
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch(
+            "agent_provisioning_team.shared.agent_lock.AgentLockStore",
+            return_value=fake_lock_store,
+        ),
+        patch("agentic_team_provisioning.agent_env_provisioning.time.sleep"),
+        patch("agent_provisioning_team.temporal.constants.LOCK_ACQUIRE_TIMEOUT_S", 0.01),
+    ):
+        _provision_one(
+            team_id="t1",
+            stable_key="p1:s1:A1",
+            provisioning_agent_id="at-test-id",
+            store=store,
+        )
+
+    fake_orch.run_workflow.assert_not_called()
+    fake_lock_store.release.assert_not_called()
+    args, kwargs = store.mark_agent_env_provision_finished.call_args
+    assert args[:2] == ("t1", "p1:s1:A1")
+    assert kwargs["success"] is False
+    assert "at-test-id" in kwargs["error_message"]
+
+
+def test_acquire_lock_blocking_returns_once_acquired():
+    lock_store = MagicMock()
+    lock_store.acquire.return_value = None
+
+    _acquire_lock_blocking(lock_store, "agent-1", "owner-1", timeout_s=5)
+
+    lock_store.acquire.assert_called_once_with("agent-1", "owner-1")
+
+
+def test_acquire_lock_blocking_raises_after_timeout():
+    from agent_provisioning_team.shared.agent_lock import AgentLockBusyError
+
+    lock_store = MagicMock()
+    lock_store.acquire.side_effect = AgentLockBusyError("agent-1", "other-owner")
+
+    with patch("agentic_team_provisioning.agent_env_provisioning.time.sleep"):
+        with pytest.raises(AgentLockBusyError):
+            _acquire_lock_blocking(lock_store, "agent-1", "owner-1", timeout_s=0.01)
+
+    assert lock_store.acquire.call_count >= 1
+
+
+def test_acquire_lock_blocking_rejects_non_positive_timeout():
+    lock_store = MagicMock()
+    with pytest.raises(AssertionError):
+        _acquire_lock_blocking(lock_store, "agent-1", "owner-1", timeout_s=0)
 
 
 def test_try_begin_retries_after_failure(fake_pg: dict):

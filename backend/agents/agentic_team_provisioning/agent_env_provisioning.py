@@ -5,6 +5,15 @@ Each (team, process, step, named agent) maps to a stable ``agent_id`` passed to
 ``agent_provisioning_team.ProvisioningOrchestrator.run_workflow`` so individual
 step agents receive sandboxed environments (see manifests).
 
+This path calls ``ProvisioningOrchestrator`` directly from a background thread,
+bypassing Temporal entirely (unlike the HTTP ``/provision``/``/environments``
+routes, which always go through ``AgentProvisioningWorkflow`` — see that
+workflow's module docstring). It therefore takes the same
+``agent_provisioning_team.shared.agent_lock.AgentLockStore`` ownership lock the
+Temporal workflow takes, keyed by the same ``provisioning_agent_id``, so this
+thread and a concurrent Temporal-driven run for the same agent id can never
+interleave and corrupt each other's Docker/credential state.
+
 Disable with env ``AGENTIC_TEAM_AGENT_PROVISIONING_ENABLED=false``.
 """
 
@@ -14,6 +23,8 @@ import logging
 import os
 import re
 import threading
+import time
+import uuid
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -28,6 +39,13 @@ _ENABLED = os.getenv("AGENTIC_TEAM_AGENT_PROVISIONING_ENABLED", "true").lower() 
     "yes",
 )
 _MANIFEST = os.getenv("AGENTIC_TEAM_AGENT_PROVISIONING_MANIFEST", "minimal.yaml")
+
+# Backoff for the blocking lock-acquire retry loop below. This background
+# thread has no Temporal retry policy to lean on, so it mirrors
+# AgentProvisioningWorkflow's own acquire semantics (bounded overall wait,
+# capped exponential backoff) with a plain sleep loop instead.
+_LOCK_RETRY_INITIAL_S = 5.0
+_LOCK_RETRY_MAX_S = 60.0
 
 
 def _slug(s: str, max_len: int = 40) -> str:
@@ -92,39 +110,127 @@ def _spawn_provision_thread(
     provisioning_agent_id: str,
     store: AgenticTeamStore,
 ) -> None:
-    def _run() -> None:
-        try:
-            from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
+    threading.Thread(
+        target=_provision_one,
+        kwargs=dict(
+            team_id=team_id,
+            stable_key=stable_key,
+            provisioning_agent_id=provisioning_agent_id,
+            store=store,
+        ),
+        daemon=True,
+        name=f"prov-{provisioning_agent_id[:24]}",
+    ).start()
 
-            orch = ProvisioningOrchestrator()
-            result = orch.run_workflow(
-                agent_id=provisioning_agent_id,
-                manifest_path=_MANIFEST,
-                job_updater=None,
+
+def _acquire_lock_blocking(lock_store, agent_id: str, owner: str, timeout_s: float) -> None:
+    """Retry ``lock_store.acquire`` with capped backoff until ``timeout_s`` elapses.
+
+    Preconditions:
+        * ``timeout_s`` is positive.
+    Postconditions:
+        * Returns once ``owner`` holds ``agent_id``'s lock.
+        * Raises the last ``AgentLockBusyError`` once ``timeout_s`` elapses
+          without acquiring it.
+    """
+    from agent_provisioning_team.shared.agent_lock import AgentLockBusyError
+
+    assert timeout_s > 0, "timeout_s must be positive"
+    deadline = time.monotonic() + timeout_s
+    delay = _LOCK_RETRY_INITIAL_S
+    while True:
+        try:
+            lock_store.acquire(agent_id, owner)
+            return
+        except AgentLockBusyError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, _LOCK_RETRY_MAX_S)
+
+
+def _provision_one(
+    *,
+    team_id: str,
+    stable_key: str,
+    provisioning_agent_id: str,
+    store: AgenticTeamStore,
+) -> None:
+    """Acquire ``provisioning_agent_id``'s ownership lock, provision, then release.
+
+    Runs on its own background thread (see ``_spawn_provision_thread``); the
+    caller has already claimed ``stable_key`` via
+    ``store.try_begin_agent_env_provision``, so this always ends by marking
+    that row finished (success or failure) — never leaving it stuck ``running``.
+
+    Preconditions:
+        * ``store.try_begin_agent_env_provision`` returned ``True`` for
+          ``(team_id, stable_key)`` — this call owns marking it finished.
+    Postconditions:
+        * ``store.mark_agent_env_provision_finished`` is called exactly once
+          for ``(team_id, stable_key)``.
+        * The ``AgentLockStore`` record for ``provisioning_agent_id`` is not
+          held by this run's owner token when this function returns.
+    """
+    from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
+    from agent_provisioning_team.shared.agent_lock import AgentLockBusyError, AgentLockStore
+    from agent_provisioning_team.temporal.constants import LOCK_ACQUIRE_TIMEOUT_S, LOCK_TTL_S
+
+    owner = f"agentic-team-provision-{uuid.uuid4().hex}"
+    lock_store = AgentLockStore(ttl_seconds=LOCK_TTL_S)
+    try:
+        _acquire_lock_blocking(lock_store, provisioning_agent_id, owner, LOCK_ACQUIRE_TIMEOUT_S)
+    except AgentLockBusyError as e:
+        logger.error(
+            "Agent lock busy for team=%s key=%s agent_id=%s: %s",
+            team_id,
+            stable_key,
+            provisioning_agent_id,
+            e,
+        )
+        store.mark_agent_env_provision_finished(
+            team_id, stable_key, success=False, error_message=str(e)
+        )
+        return
+
+    try:
+        orch = ProvisioningOrchestrator()
+        result = orch.run_workflow(
+            agent_id=provisioning_agent_id,
+            manifest_path=_MANIFEST,
+            job_updater=None,
+        )
+        if result.success:
+            store.mark_agent_env_provision_finished(
+                team_id, stable_key, success=True, error_message=None
             )
-            if result.success:
-                store.mark_agent_env_provision_finished(
-                    team_id, stable_key, success=True, error_message=None
-                )
-            else:
-                store.mark_agent_env_provision_finished(
-                    team_id,
-                    stable_key,
-                    success=False,
-                    error_message=result.error or "Provisioning failed",
-                )
-        except Exception as e:
-            logger.exception(
-                "Agent provisioning failed for team=%s key=%s agent_id=%s",
+        else:
+            store.mark_agent_env_provision_finished(
                 team_id,
                 stable_key,
+                success=False,
+                error_message=result.error or "Provisioning failed",
+            )
+    except Exception as e:
+        logger.exception(
+            "Agent provisioning failed for team=%s key=%s agent_id=%s",
+            team_id,
+            stable_key,
+            provisioning_agent_id,
+        )
+        store.mark_agent_env_provision_finished(
+            team_id, stable_key, success=False, error_message=str(e)
+        )
+    finally:
+        try:
+            lock_store.release(provisioning_agent_id, owner)
+        except Exception:
+            logger.exception(
+                "Failed to release agent lock for agent_id=%s owner=%s",
                 provisioning_agent_id,
+                owner,
             )
-            store.mark_agent_env_provision_finished(
-                team_id, stable_key, success=False, error_message=str(e)
-            )
-
-    threading.Thread(target=_run, daemon=True, name=f"prov-{provisioning_agent_id[:24]}").start()
 
 
 def is_agent_env_provisioning_enabled() -> bool:
