@@ -15,6 +15,8 @@ import { PrReviewDetailComponent } from './pr-review-detail/pr-review-detail.com
 import { PrReviewRunsService } from './pr-review-runs.service';
 import type { GitHubPullRequestItem, GitHubRepoItem } from '../../models/integrations.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
+import { EmptyStateComponent } from '../../shared/empty-state/empty-state.component';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
 
@@ -47,6 +49,8 @@ import { LatestOnly } from '../../shared/latest-only';
     RouterLink,
     HealthIndicatorComponent,
     InlineBannerComponent,
+    LoadingSpinnerComponent,
+    EmptyStateComponent,
     PrReviewDetailComponent,
   ],
   providers: [PrReviewRunsService],

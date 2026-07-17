@@ -147,6 +147,22 @@ describe('CodeReviewDashboardComponent', () => {
     expect(component.loadingConfig).toBe(false);
   });
 
+  it('renders the no-repo-access empty state with an h3 heading (Group C)', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([]));
+    await setup();
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('app-empty-state h3')?.textContent).toContain('No repository access');
+  });
+
+  it('renders the unconfigured state with a working "Set up GitHub" CTA (Group C)', async () => {
+    integrationsSpy.getGitHubConfig.mockReturnValue(of(UNCONFIGURED));
+    await setup();
+    fixture.detectChanges();
+    const link = fixture.nativeElement.querySelector('app-empty-state a[routerLink="/integrations"]');
+    expect(link?.textContent).toContain('Set up GitHub');
+  });
+
   it('surfaces a load error from the PR list', async () => {
     integrationsSpy.getGitHubPullRequests.mockReturnValue(
       throwError(() => ({ error: { detail: 'rate limited' } })),
