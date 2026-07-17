@@ -79,21 +79,27 @@ def test_mark_failed_noop_when_cancelled(fake_client: FakeJobServiceClient) -> N
 def test_begin_job_raises_for_missing_job(fake_client: FakeJobServiceClient) -> None:
     """A missing job_id is a broken precondition, not a legitimate cancellation —
     it must not be silently mislabeled as 'already cancelled' (regression: the
-    atomic primitive can't distinguish missing from cancelled by itself, since
-    both match zero rows; _guarded_transition disambiguates with a supplementary
-    read and raises instead)."""
-    with pytest.raises(ValueError, match="does not exist"):
+    atomic primitive's tri-state return (True/False/None) tells missing (None)
+    apart from cancelled (False) in the very same call, no supplementary read
+    needed; _guarded_transition raises JobNotFoundError for the missing case)."""
+    with pytest.raises(job_store.JobNotFoundError, match="does not exist"):
         job_store.begin_job("missing-job")
 
 
 def test_mark_completed_raises_for_missing_job(fake_client: FakeJobServiceClient) -> None:
-    with pytest.raises(ValueError, match="does not exist"):
+    with pytest.raises(job_store.JobNotFoundError, match="does not exist"):
         job_store.mark_completed("missing-job", {"ok": True})
 
 
 def test_mark_failed_raises_for_missing_job(fake_client: FakeJobServiceClient) -> None:
-    with pytest.raises(ValueError, match="does not exist"):
+    with pytest.raises(job_store.JobNotFoundError, match="does not exist"):
         job_store.mark_failed("missing-job", "boom")
+
+
+def test_job_not_found_error_is_a_value_error(fake_client: FakeJobServiceClient) -> None:
+    """JobNotFoundError subclasses ValueError so generic ``except ValueError``
+    callers keep working unchanged."""
+    assert issubclass(job_store.JobNotFoundError, ValueError)
 
 
 def test_guarded_transition_rejects_writing_cancelled_status(
@@ -101,8 +107,9 @@ def test_guarded_transition_rejects_writing_cancelled_status(
 ) -> None:
     """update_job_if_not_cancelled must not be usable to cancel a job (it would
     overwrite a completed/failed job too, unlike cancel_active_job's narrower
-    guard) — enforced as a precondition, not silently allowed."""
+    guard) — enforced as an explicit raise (never an assert, which is stripped
+    under ``python -O``), not silently allowed."""
     fake_client.create_job("job-1", status=job_store.JOB_STATUS_COMPLETED)
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="must not be used to cancel"):
         job_store.update_job_if_not_cancelled("job-1", status=job_store.JOB_STATUS_CANCELLED)

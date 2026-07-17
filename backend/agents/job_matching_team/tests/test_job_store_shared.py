@@ -22,7 +22,9 @@ class FakeClient:
 
     def update_job_if_not_cancelled(self, job_id, **fields):
         job = self.jobs.get(job_id)
-        if job is None or job.get("status") == "cancelled":
+        if job is None:
+            return None
+        if job.get("status") == "cancelled":
             return False
         job.update(fields)
         return True

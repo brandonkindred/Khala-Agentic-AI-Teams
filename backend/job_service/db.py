@@ -295,7 +295,7 @@ def update_job(team: str, job_id: str, heartbeat: bool = True, **fields: Any) ->
         _execute_status_update(cur, team, job_id, fields, new_status, now, heartbeat, guard_cancelled=False)
 
 
-def update_job_if_not_cancelled(team: str, job_id: str, heartbeat: bool = True, **fields: Any) -> bool:
+def update_job_if_not_cancelled(team: str, job_id: str, heartbeat: bool = True, **fields: Any) -> bool | None:
     """Merge ``fields`` into the job's data and refresh timestamps, unless cancelled.
 
     The cancelled-check and the write happen in one conditional ``UPDATE`` (status
@@ -313,24 +313,39 @@ def update_job_if_not_cancelled(team: str, job_id: str, heartbeat: bool = True, 
           guards against overwriting an *existing* cancellation, it does not
           exclude other terminal statuses the way ``cancel_active_job`` does, so
           using it to cancel would silently clobber a completed/failed job.
-          Enforced with an assertion (a caller bug, not a runtime condition).
+          Enforced by an explicit raise (a caller bug, not a runtime condition,
+          but this guards against silent data corruption so it is not an
+          assertion — those are stripped under ``python -O``).
     Postconditions:
         - Returns True and performs the write when the job exists and its status
           is not ``'cancelled'``.
-        - Returns False and makes NO write when the job is missing OR already
+        - Returns False and makes NO write when the job exists but is already
           cancelled — a cancelled job is terminal; the caller's queued status
           transition is silently dropped rather than overwriting the cancellation.
+        - Returns None and makes NO write when the job does not exist at all —
+          distinct from False so a caller can tell a broken precondition (missing
+          row) apart from a legitimate business outcome (cancelled), without a
+          second round trip: the disambiguating read below only runs when the
+          guarded UPDATE matched zero rows, and stays inside this one call.
         - Guards ONLY on ``'cancelled'`` — unlike :func:`cancel_active_job` this does
           NOT block on other terminal statuses (completed/failed/interrupted),
           matching :func:`is_job_cancelled`'s existing (narrower) check exactly.
     """
-    assert fields.get("status") != "cancelled", (
-        "update_job_if_not_cancelled must not be used to cancel a job "
-        "(it would overwrite a completed/failed job too) — use cancel_active_job"
-    )
+    if fields.get("status") == "cancelled":
+        raise ValueError(
+            "update_job_if_not_cancelled must not be used to cancel a job "
+            "(it would overwrite a completed/failed job too) — use cancel_active_job"
+        )
     new_status, now = _prepare_update_fields(fields)
     with get_conn() as conn, conn.cursor() as cur:
-        return _execute_status_update(cur, team, job_id, fields, new_status, now, heartbeat, guard_cancelled=True)
+        updated = _execute_status_update(cur, team, job_id, fields, new_status, now, heartbeat, guard_cancelled=True)
+        if updated:
+            return True
+        # The guarded UPDATE matched zero rows because the job is either missing
+        # or already cancelled. One more (cheap, same-connection) query settles
+        # which, without a second HTTP round trip for the caller.
+        cur.execute("SELECT 1 FROM jobs WHERE team = %s AND job_id = %s", (team, job_id))
+        return False if cur.fetchone() is not None else None
 
 
 def apply_patch(

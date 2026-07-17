@@ -159,19 +159,32 @@ def test_real_client_update_job_if_not_cancelled_false_when_cancelled(
     assert client.update_job_if_not_cancelled("j1", status="running") is False
 
 
+def test_real_client_update_job_if_not_cancelled_none_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing job yields ``updated: null`` server-side -> None — distinct from
+    the cancelled case (False) so the caller can tell a broken precondition
+    (missing row) apart from a legitimate cancellation."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    _route_through_mock_transport(monkeypatch, lambda _req: httpx.Response(200, json={"updated": None}))
+    client = JobServiceClient(team="t")
+    assert client.update_job_if_not_cancelled("j1", status="running") is None
+
+
 def test_real_client_update_job_if_not_cancelled_rejects_cancelled_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """This primitive is not a cancellation mechanism (unlike cancel_active_job, it
     doesn't exclude other terminal statuses) — writing status='cancelled' through
-    it is a caller precondition violation, rejected before any HTTP call is made."""
+    it is a caller precondition violation, rejected before any HTTP call is made.
+    Enforced with an explicit raise, never an assert (stripped under python -O)."""
     monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
     made_request = {"called": False}
     _route_through_mock_transport(
         monkeypatch, lambda _req: made_request.update(called=True) or httpx.Response(200, json={})
     )
     client = JobServiceClient(team="t")
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="must not be used to cancel"):
         client.update_job_if_not_cancelled("j1", status="cancelled")
     assert made_request["called"] is False
 
@@ -518,7 +531,9 @@ def test_fake_update_job_if_not_cancelled_noop_on_cancelled(
 def test_fake_update_job_if_not_cancelled_noop_on_missing(
     fake_job_client: FakeJobServiceClient,
 ) -> None:
-    assert fake_job_client.update_job_if_not_cancelled("nope", status="running") is False
+    """None, not False — distinct from the cancelled case so a caller can tell
+    a broken precondition (missing row) apart from a legitimate cancellation."""
+    assert fake_job_client.update_job_if_not_cancelled("nope", status="running") is None
     assert fake_job_client.get_job("nope") is None
 
 
@@ -541,7 +556,7 @@ def test_fake_update_job_if_not_cancelled_rejects_cancelled_status(
     through it would silently overwrite a completed/failed job (unlike
     cancel_active_job's narrower pending/running-only guard), so it's rejected."""
     fake_job_client.create_job("j1", status="completed")
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="must not be used to cancel"):
         fake_job_client.update_job_if_not_cancelled("j1", status="cancelled")
     assert fake_job_client.get_job("j1")["status"] == "completed"
 

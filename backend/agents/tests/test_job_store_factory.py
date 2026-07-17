@@ -84,8 +84,11 @@ def test_update_job_if_not_cancelled_noop_when_cancelled(store) -> None:
     assert store.get_job("j1")["status"] == "cancelled"
 
 
-def test_update_job_if_not_cancelled_missing_job_returns_false(store) -> None:
-    assert store.update_job_if_not_cancelled("missing", status="running") is False
+def test_update_job_if_not_cancelled_missing_job_returns_none(store) -> None:
+    """Distinct from the cancelled case (False) — a missing row can't be
+    distinguished from a cancelled one by the caller unless the tri-state
+    (True/False/None) is preserved end-to-end through the factory."""
+    assert store.update_job_if_not_cancelled("missing", status="running") is None
 
 
 def test_delete_reports_whether_removed(store) -> None:

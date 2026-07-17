@@ -179,7 +179,10 @@ def update_job_if_not_cancelled(team: str, job_id: str, req: UpdateJobRequest):
     Postconditions:
         - Returns ``updated=True`` and performs the write when the job exists
           and is not cancelled. Returns ``updated=False`` with no write when the
-          job is missing or already cancelled.
+          job exists but is already cancelled. Returns ``updated=None`` with no
+          write when the job does not exist at all — distinct from False so the
+          caller can tell a broken precondition apart from a legitimate
+          cancellation.
         - The status guard lives in the SQL ``WHERE`` clause (see
           ``db.update_job_if_not_cancelled``), so a cancel that lands between a
           caller's read and this write is never overwritten.

@@ -49,7 +49,7 @@ class StatusJobStore:
     create_job: Callable[..., None]
     get_job: Callable[[str], Optional[Dict[str, Any]]]
     update_job: Callable[..., None]
-    update_job_if_not_cancelled: Callable[..., bool]
+    update_job_if_not_cancelled: Callable[..., Optional[bool]]
     list_jobs: Callable[..., List[Dict[str, Any]]]
     cancel_job: Callable[[str], bool]
     is_job_cancelled: Callable[[str], bool]
@@ -84,7 +84,7 @@ def make_status_job_store(client_getter: ClientGetter) -> StatusJobStore:
         """Merge ``fields`` into the job record for ``job_id``."""
         client_getter().update_job(job_id, **fields)
 
-    def update_job_if_not_cancelled(job_id: str, **fields: Any) -> bool:
+    def update_job_if_not_cancelled(job_id: str, **fields: Any) -> Optional[bool]:
         """Merge ``fields`` into ``job_id`` unless it is already cancelled.
 
         Preconditions:
@@ -92,10 +92,12 @@ def make_status_job_store(client_getter: ClientGetter) -> StatusJobStore:
             — this is not a cancellation mechanism (use ``cancel_job``).
         Postconditions:
             Returns True iff the write happened (the job existed and was not
-            cancelled); returns False (no write) otherwise. Atomic — the
-            cancelled-check and the write happen in one server-side conditional
-            update, so a cancel landing between a caller's decision and this call
-            can never be silently overwritten.
+            cancelled). Returns False if the job exists but is cancelled. Returns
+            None if the job does not exist at all — distinct from False so a
+            caller can tell a broken precondition apart from a legitimate
+            cancellation. Atomic — the cancelled-check and the write happen in
+            one server-side conditional update, so a cancel landing between a
+            caller's decision and this call can never be silently overwritten.
         """
         return client_getter().update_job_if_not_cancelled(job_id, **fields)
 

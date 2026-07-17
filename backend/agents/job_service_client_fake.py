@@ -117,16 +117,20 @@ class FakeJobServiceClient:
 
     def update_job_if_not_cancelled(
         self, job_id: str, *, heartbeat: bool = True, **fields: Any
-    ) -> bool:
+    ) -> bool | None:
         """Mirror production's ``update_job_if_not_cancelled`` conditional update.
 
         Preconditions:
             - ``fields`` values must not set ``status`` to ``'cancelled'`` (use
-              ``cancel_active_job`` to cancel — enforced by assertion).
+              ``cancel_active_job`` to cancel). Enforced by an explicit raise,
+              never an ``assert`` (stripped under ``python -O``).
         Postconditions:
-            - Returns False and makes no write if ``job_id`` is missing or already
+            - Returns False and makes no write if ``job_id`` exists but is already
               cancelled. Guards ONLY on 'cancelled' (not any terminal status),
               matching ``is_job_cancelled``'s existing narrower check.
+            - Returns None and makes no write if ``job_id`` does not exist at all —
+              distinct from False so a caller can tell a missing row apart from a
+              legitimate cancellation, matching production's tri-state contract.
             - Otherwise merges ``fields`` (delegating to ``update_job`` rather than
               duplicating its merge/stamp logic — so it also inherits
               ``update_job``'s separately-tracked, currently-production-unreachable
@@ -136,12 +140,15 @@ class FakeJobServiceClient:
               from the test's perspective, matching the row-locked SQL in
               ``backend/job_service/db.py``.
         """
-        assert fields.get("status") != "cancelled", (
-            "update_job_if_not_cancelled must not be used to cancel a job "
-            "(it would overwrite a completed/failed job too) — use cancel_active_job"
-        )
+        if fields.get("status") == "cancelled":
+            raise ValueError(
+                "update_job_if_not_cancelled must not be used to cancel a job "
+                "(it would overwrite a completed/failed job too) — use cancel_active_job"
+            )
         job = self._jobs.get(job_id)
-        if job is None or job.get("status") == "cancelled":
+        if job is None:
+            return None
+        if job.get("status") == "cancelled":
             return False
         self.update_job(job_id, heartbeat=heartbeat, **fields)
         return True

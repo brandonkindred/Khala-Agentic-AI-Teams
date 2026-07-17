@@ -819,7 +819,15 @@ def _run_branding_core(
         mark_completed(job_id, result.model_dump())
     except Exception as e:
         logger.exception("Branding job %s failed", job_id)
-        if not mark_failed(job_id, str(e)):
+        try:
+            marked_failed = mark_failed(job_id, str(e))
+        except Exception:
+            # mark_failed's own failure (e.g. JobNotFoundError) must never
+            # replace the original pipeline exception — that would mask the
+            # real cause behind an unrelated bookkeeping error.
+            logger.exception("Branding job %s: mark_failed itself failed", job_id)
+            raise e from None
+        if not marked_failed:
             return
         raise
 

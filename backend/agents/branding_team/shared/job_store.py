@@ -37,6 +37,7 @@ __all__ = [
     "JOB_STATUS_FAILED",
     "JOB_STATUS_PENDING",
     "JOB_STATUS_RUNNING",
+    "JobNotFoundError",
     "begin_job",
     "cancel_job",
     "create_job",
@@ -50,6 +51,19 @@ __all__ = [
     "update_job",
     "update_job_if_not_cancelled",
 ]
+
+
+class JobNotFoundError(ValueError):
+    """Raised by ``_guarded_transition`` when ``job_id`` does not exist.
+
+    A distinct type (rather than a bare ``ValueError``) so callers — notably
+    the Temporal workflow — can single it out as non-retryable: a missing job
+    is a broken precondition that will not resolve itself on retry, unlike a
+    transient network/service error. Subclasses ``ValueError`` so existing
+    generic ``except ValueError``/``pytest.raises(ValueError, ...)`` callers
+    keep working unchanged.
+    """
+
 
 _client_instance: Optional[JobServiceClient] = None
 
@@ -95,31 +109,23 @@ def _guarded_transition(job_id: str, status: str, **extra_fields) -> bool:
           server-side conditional update (``update_job_if_not_cancelled``), so a
           cancel landing between a caller's decision and this write can never be
           silently overwritten.
-        - Raises ``ValueError`` if ``job_id`` does not exist — the primitive's
-          conditional UPDATE can't distinguish "missing" from "cancelled" (both
-          match zero rows), so a missing job is diagnosed with a supplementary
-          read and surfaced as a precondition violation rather than silently
-          treated as a legitimate cancellation.
+        - Raises ``JobNotFoundError`` if ``job_id`` does not exist — the
+          primitive's tri-state return (True/False/None) tells "missing" apart
+          from "cancelled" in the very same call, so this needs no supplementary
+          read: a missing job is a broken precondition, not a legitimate
+          cancellation, and is surfaced as such.
     """
-    if not update_job_if_not_cancelled(job_id, status=status, **extra_fields):
-        # The conditional write matched zero rows because the job is either
-        # cancelled (expected, a real business outcome) or missing entirely
-        # (a broken precondition — begin_job/mark_completed/mark_failed all
-        # require an existing row). Disambiguate with a plain read: this does
-        # not reopen the write-side race, it only decides which of the two to
-        # report, and worst case (a status change lands in this narrow window)
-        # just means a diagnostic message names the wrong reason on the rare
-        # in-between job.
-        if get_job(job_id) is None:
-            logger.warning(
-                "_guarded_transition: job %s does not exist — cannot transition to %s",
-                job_id,
-                status,
-            )
-            raise ValueError(
-                f"_guarded_transition: job {job_id!r} does not exist "
-                f"(cannot transition to {status!r})"
-            )
+    result = update_job_if_not_cancelled(job_id, status=status, **extra_fields)
+    if result is None:
+        logger.warning(
+            "_guarded_transition: job %s does not exist — cannot transition to %s",
+            job_id,
+            status,
+        )
+        raise JobNotFoundError(
+            f"_guarded_transition: job {job_id!r} does not exist (cannot transition to {status!r})"
+        )
+    if not result:
         logger.debug("Skipping transition to %s for job %s — already cancelled", status, job_id)
         return False
     return True
@@ -139,7 +145,7 @@ def begin_job(job_id: str) -> bool:
         - Returns False and makes no write if the job is already cancelled.
         - Otherwise writes status=RUNNING and returns True. Atomic — see
           ``_guarded_transition``.
-        - Raises ``ValueError`` if ``job_id`` does not exist (precondition
+        - Raises ``JobNotFoundError`` if ``job_id`` does not exist (precondition
           violation) — see ``_guarded_transition``.
     """
     return _guarded_transition(job_id, JOB_STATUS_RUNNING)
@@ -156,7 +162,7 @@ def mark_completed(job_id: str, result: dict) -> bool:
           cancelled run is terminal, not a completion).
         - Otherwise writes status=COMPLETED with ``result`` and returns True.
           Atomic — see ``_guarded_transition``.
-        - Raises ``ValueError`` if ``job_id`` does not exist (precondition
+        - Raises ``JobNotFoundError`` if ``job_id`` does not exist (precondition
           violation) — see ``_guarded_transition``.
     """
     return _guarded_transition(job_id, JOB_STATUS_COMPLETED, result=result)
@@ -172,7 +178,7 @@ def mark_failed(job_id: str, error: str) -> bool:
           cancelled run is terminal, not a failure).
         - Otherwise writes status=FAILED with ``error`` and returns True. Atomic
           — see ``_guarded_transition``.
-        - Raises ``ValueError`` if ``job_id`` does not exist (precondition
+        - Raises ``JobNotFoundError`` if ``job_id`` does not exist (precondition
           violation) — see ``_guarded_transition``.
     """
     return _guarded_transition(job_id, JOB_STATUS_FAILED, error=error)
