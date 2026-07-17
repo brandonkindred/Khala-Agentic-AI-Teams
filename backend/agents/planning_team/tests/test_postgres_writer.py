@@ -315,3 +315,67 @@ def test_record_planning_run_upserts_on_retry() -> None:
 
     assert len(rows) == 1
     assert rows[0][0] == "second attempt"
+
+
+def test_record_planning_run_is_bounded_by_statement_timeout(monkeypatch) -> None:
+    """A lock-contended write must be cancelled by the local statement_timeout, not
+    hang indefinitely — pg_cursor's shared pool sets no default timeout, so without
+    this bound a stalled/contended write could pin a worker forever (and never raise,
+    so the except guard below would never even get a chance to help)."""
+    import threading
+    import time
+
+    import planning_team.postgres.writer as writer_module
+    from shared_postgres import get_conn, is_postgres_enabled, register_team_schemas
+    from shared_postgres.testing import truncate_team_tables
+
+    if not is_postgres_enabled():
+        pytest.skip("POSTGRES_HOST not set; skipping live-Postgres writer test")
+
+    register_team_schemas(SCHEMA)
+    truncate_team_tables(SCHEMA)
+
+    # A short bound so the test doesn't have to wait out the real default (5s).
+    monkeypatch.setattr(writer_module, "statement_timeout_ms", lambda: 200)
+
+    record_planning_run(
+        "job-lock",
+        client_name=None,
+        summary="first",
+        handoff_summary="",
+        open_questions=[],
+        resolved_questions=[],
+    )
+
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+
+    def _hold_row_lock() -> None:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT * FROM planning_runs WHERE job_id = %s FOR UPDATE", ("job-lock",))
+            lock_acquired.set()
+            release_lock.wait(timeout=5)
+
+    holder = threading.Thread(target=_hold_row_lock, daemon=True)
+    holder.start()
+    try:
+        assert lock_acquired.wait(timeout=2), "lock-holder thread failed to acquire the row lock"
+
+        start = time.monotonic()
+        # ON CONFLICT DO UPDATE contends on the row FOR UPDATE holds; without the
+        # statement_timeout this call would block until release_lock fires (~5s).
+        result = record_planning_run(
+            "job-lock",
+            client_name=None,
+            summary="second",
+            handoff_summary="",
+            open_questions=[],
+            resolved_questions=[],
+        )
+        elapsed = time.monotonic() - start
+    finally:
+        release_lock.set()
+        holder.join(timeout=5)
+
+    assert result is False
+    assert elapsed < 2.0, f"write should have been cancelled by statement_timeout, took {elapsed}s"

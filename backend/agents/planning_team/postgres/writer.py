@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from shared_postgres import pg_cursor
+from shared_postgres import pg_cursor, statement_timeout_ms
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +31,12 @@ def record_planning_run(
         - ``job_id`` is a non-empty string (a caller bug otherwise).
     Postconditions:
         - Returns ``True`` when a row was written, ``False`` when Postgres is
-          disabled or the write failed. Never raises for operational failures
-          (Postgres down/unreachable/misconfigured) — those are logged at
-          DEBUG and swallowed so callers can call this unconditionally from a
-          finalize path without risking the run's completion result.
+          disabled, the write failed, or it was cancelled by the transaction-
+          local ``statement_timeout`` set below. Never raises for operational
+          failures (Postgres down/unreachable/misconfigured, or a stalled/
+          lock-contended write) — those are logged at DEBUG and swallowed so
+          callers can call this unconditionally from a finalize path without
+          risking the run's completion result.
     """
     if not job_id:
         raise ValueError("job_id must be a non-empty string")
@@ -44,6 +46,14 @@ def record_planning_run(
                 return False
             from shared_postgres import Json
 
+            # pg_cursor's shared pool deliberately sets no statement_timeout (it
+            # would cap legitimate long-running team queries), so without a local
+            # bound a stalled server or row-lock contention could hold this
+            # "best-effort" write open indefinitely — worse than a fast failure,
+            # since no exception would ever reach the except below. SET LOCAL
+            # scopes the bound to this transaction only, so it can never leak onto
+            # the next reuse of this pooled connection.
+            cur.execute(f"SET LOCAL statement_timeout = {statement_timeout_ms()}")
             cur.execute(
                 """
                 INSERT INTO planning_runs
