@@ -172,7 +172,7 @@ def test_blog_copy_editor_agent_feedback_file_roundtrip(tmp_path: Path) -> None:
         feedback_output_path=str(feedback_file),
     )
 
-    data = result.model_dump() if hasattr(result, "model_dump") else result.dict()
+    data = result.model_dump()
     written = json.loads(feedback_file.read_text(encoding="utf-8"))
     assert written["summary"] == data["summary"]
     assert len(written["feedback_items"]) == len(data["feedback_items"])
