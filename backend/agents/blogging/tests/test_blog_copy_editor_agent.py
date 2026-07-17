@@ -155,6 +155,9 @@ def test_blog_copy_editor_agent_writes_feedback_file(tmp_path: Path) -> None:
     assert isinstance(content["feedback_items"], list)
     assert content["summary"] == result.summary
     assert len(content["feedback_items"]) == len(result.feedback_items)
+    assert result.feedback_file_written is True
+    # Set after serialization, so it never appears in the file the agent just wrote.
+    assert "feedback_file_written" not in content
 
 
 def test_blog_copy_editor_agent_feedback_file_roundtrip(tmp_path: Path) -> None:
@@ -200,6 +203,7 @@ def test_blog_copy_editor_agent_no_path_no_file(monkeypatch) -> None:
 
     assert result.summary is not None
     assert write_calls == []
+    assert result.feedback_file_written is None
 
 
 def test_blog_copy_editor_agent_empty_draft_writes_file(tmp_path: Path) -> None:
@@ -218,6 +222,29 @@ def test_blog_copy_editor_agent_empty_draft_writes_file(tmp_path: Path) -> None:
     assert content["feedback_items"] == []
     assert result.summary
     assert len(result.feedback_items) == 0
+    assert result.feedback_file_written is True
+
+
+def test_blog_copy_editor_agent_reports_write_failure(tmp_path: Path) -> None:
+    """run() reports a failed feedback-file write via feedback_file_written=False, without raising."""
+    llm = DummyLLMClient()
+    agent = BlogCopyEditorAgent(
+        llm_client=llm,
+        writing_style_guide_content=_TEST_STYLE_GUIDE,
+        brand_spec_content="",
+    )
+    # A regular file cannot double as a parent directory, so mkdir(parents=True) fails.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+    feedback_file = blocker / "editor_feedback.json"
+
+    result = agent.run(
+        CopyEditorInput(draft="# Test\n\nShort draft."),
+        feedback_output_path=str(feedback_file),
+    )
+
+    assert result.feedback_file_written is False
+    assert not feedback_file.exists()
 
 
 @pytest.mark.parametrize("kind", ["rate_limit", "temporary"])

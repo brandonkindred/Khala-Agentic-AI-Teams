@@ -1824,6 +1824,12 @@ def run_draft_stage(
                     copy_editor_result.approved,
                     len(copy_editor_result.feedback_items),
                 )
+                if copy_editor_result.feedback_file_written is False:
+                    logger.warning(
+                        "Copy editor feedback file failed to write for iteration %s (path=%s)",
+                        copy_edit_num,
+                        feedback_path,
+                    )
 
                 # Track feedback for staleness detection and persistent issue escalation
                 feedback_tracker.record_iteration(
