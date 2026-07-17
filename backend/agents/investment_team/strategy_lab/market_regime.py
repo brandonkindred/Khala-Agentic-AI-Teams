@@ -173,7 +173,16 @@ def _classify_benchmark(asset_class: str, symbol: str, bars: List[OHLCVBar]) -> 
     atr_series = atr(bars, bars, bars, period=14).reset_index(drop=True)
     close_series = pd.Series([float(b.close) for b in bars], dtype=float)
     atr_pct = (atr_series / close_series).replace([np.inf, -np.inf], np.nan).dropna()
-    if atr_pct.empty or any(v != v for v in (sma50, sma200, adx_value, close)):
+    # A perfectly flat benchmark has zero true range on every bar, so its ATR% is
+    # all zeros — a degenerate series with no meaningful volatility distribution to
+    # rank against. The indicator engine returns a finite 0.0 (not NaN) for such a
+    # series, so this is treated as unclassifiable and skipped, preserving the
+    # fail-open-skip contract that the earlier warmup-NaN guard provided.
+    if (
+        atr_pct.empty
+        or (atr_pct == 0).all()
+        or any(v != v for v in (sma50, sma200, adx_value, close))
+    ):
         raise ValueError(f"{symbol}: indicators did not warm up on supplied bars")
 
     latest_atr_pct = float(atr_pct.iloc[-1])

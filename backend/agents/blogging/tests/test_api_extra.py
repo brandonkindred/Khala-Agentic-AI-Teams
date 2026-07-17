@@ -340,17 +340,18 @@ def test_rebuild_api_models_idempotent() -> None:
 
 
 def test_all_local_models_rebuilt() -> None:
-    """Every BaseModel defined in api/main has resolved annotations after import.
+    """Every BaseModel defined in api/models has resolved annotations after import.
 
     Guards against the auto-scan regressing to a hand-maintained list: if a new
-    model were added to api/main and left unresolved, it would show up here.
+    model were added to api/models and left unresolved, it would show up here.
     """
+    import agents.blogging.api.models as _api_models
     from pydantic import BaseModel as _BM
 
     local_models = [
         obj
-        for obj in vars(_api_main).values()
-        if isinstance(obj, type) and issubclass(obj, _BM) and obj.__module__ == _api_main.__name__
+        for obj in vars(_api_models).values()
+        if isinstance(obj, type) and issubclass(obj, _BM) and obj.__module__ == _api_models.__name__
     ]
     # Sanity: the module defines multiple request/response DTOs.
     assert len(local_models) > 1, "expected multiple locally-defined models"

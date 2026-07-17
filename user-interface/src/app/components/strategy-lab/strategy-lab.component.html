@@ -329,7 +329,7 @@
         <mat-card class="strategy-card" [class.is-winning]="record.is_winning" [class.is-losing]="!record.is_winning">
 
           <!-- Card header -->
-          <mat-card-header class="strategy-card-header-row card-summary" (click)="toggleCard(record.lab_record_id)">
+          <mat-card-header class="strategy-card-header-row">
             <div mat-card-avatar class="strategy-avatar" [class.winning-avatar]="record.is_winning" [class.losing-avatar]="!record.is_winning">
               <mat-icon>{{ record.is_winning ? 'trending_up' : 'trending_down' }}</mat-icon>
             </div>
@@ -361,10 +361,7 @@
           <mat-card-content>
 
             <!-- Win/lose badge + key metrics -->
-            <div class="metrics-row card-summary" role="button" tabindex="0"
-                 (click)="toggleCard(record.lab_record_id)"
-                 (keydown.enter)="toggleCard(record.lab_record_id)"
-                 (keydown.space)="toggleCard(record.lab_record_id); $event.preventDefault()">
+            <div class="metrics-row">
               <div class="outcome-badge" [class.winning-badge]="record.is_winning" [class.losing-badge]="!record.is_winning">
                 <mat-icon>{{ record.is_winning ? 'emoji_events' : 'close' }}</mat-icon>
                 {{ record.is_winning ? 'WINNING' : 'LOSING' }}
@@ -398,11 +395,27 @@
               </div>
             </div>
 
-            <mat-icon class="expand-chevron card-summary" (click)="toggleCard(record.lab_record_id)">
-              {{ isCardExpanded(record.lab_record_id) ? 'expand_less' : 'expand_more' }}
-            </mat-icon>
+            <button
+              mat-icon-button
+              type="button"
+              class="expand-chevron-btn"
+              [attr.aria-expanded]="isCardExpanded(record.lab_record_id)"
+              [attr.aria-controls]="cardBodyId(record.lab_record_id)"
+              [attr.aria-label]="cardToggleLabel(record)"
+              (click)="toggleCard(record.lab_record_id)"
+            >
+              <mat-icon class="expand-chevron">
+                {{ isCardExpanded(record.lab_record_id) ? 'expand_less' : 'expand_more' }}
+              </mat-icon>
+            </button>
 
             @if (isCardExpanded(record.lab_record_id)) {
+            <div
+              class="card-expanded-region"
+              [id]="cardBodyId(record.lab_record_id)"
+              role="region"
+              [attr.aria-label]="cardRegionLabel(record)"
+            >
             <mat-divider class="card-divider"></mat-divider>
 
             <!-- Hypothesis -->
@@ -682,6 +695,7 @@
               }
 
             </mat-accordion>
+            </div>
             }
 
             <!-- Paper trading: always show existing sessions; gate Run/Re-run on publishable -->
