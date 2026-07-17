@@ -437,6 +437,76 @@ def test_review_verdict_cache_is_scoped_per_task(tmp_path, monkeypatch):
     assert len(tech_lead.review_calls) == 2  # each task's own first review, not shared
 
 
+def test_new_user_decision_invalidates_cache_even_with_unchanged_diff(tmp_path, monkeypatch):
+    """A HITL decision answered mid-loop must reach the reviewer even when the branch
+    diff hasn't changed since the last cached verdict.
+
+    Regression test: the verdict cache previously keyed on the branch digest alone, so
+    a newly answered decision (which _escalate_decision appends to revision_feedback
+    without necessarily changing the branch) was silently invisible to a cache hit.
+    """
+    _patch_git(monkeypatch, diff="same diff")
+    tech_lead = StubTechLead(approved=False)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+    task = graph.get_task("t1")
+
+    swarm._compute_review(task)
+    assert len(tech_lead.review_calls) == 1
+    assert tech_lead.decision_calls[-1] == []  # no decisions yet
+
+    # Simulate a HITL decision answered mid-loop, in the same shape _escalate_decision
+    # (swarm_implementation.py) appends — without driving the full pause machinery.
+    graph.update_task(
+        "t1",
+        revision_feedback=list(task.revision_feedback or [])
+        + [
+            {
+                "source": "user_decision",
+                "reason": "Q? → A",
+                "requested_changes": [],
+                "decisions": [{"question": "Q?", "answer": "A"}],
+            }
+        ],
+    )
+
+    swarm._compute_review(graph.get_task("t1"))
+
+    assert len(tech_lead.review_calls) == 2  # new decision -> cache correctly missed
+    assert tech_lead.decision_calls[-1] == ["Q? → A"]
+
+
+def test_changed_summary_invalidates_cache_even_with_unchanged_diff(tmp_path, monkeypatch):
+    """A new changes_summary must reach the reviewer even when the branch diff hasn't
+    changed since the last cached verdict.
+
+    Regression test: _implement_and_verify unconditionally overwrites task.changes_summary
+    on every run_implement call, whether or not the resulting diff actually changed — so an
+    ordinary revision round can change the reviewer's evidence text without moving the
+    branch digest at all.
+    """
+    _patch_git(monkeypatch, diff="same diff")
+    tech_lead = StubTechLead(approved=False)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.update_task("t1", changes_summary="first summary")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+
+    swarm._compute_review(graph.get_task("t1"))
+    assert len(tech_lead.review_calls) == 1
+    assert "first summary" in tech_lead.review_calls[-1]
+
+    graph.update_task("t1", changes_summary="second summary")
+    swarm._compute_review(graph.get_task("t1"))
+
+    assert len(tech_lead.review_calls) == 2  # changed summary -> cache correctly missed
+    assert "second summary" in tech_lead.review_calls[-1]
+    assert "first summary" not in tech_lead.review_calls[-1]
+
+
 # ----------------------------------------------------- review retry / failure handling
 
 

@@ -18,6 +18,7 @@ monkeypatchability of ``MAX_TASK_REVISIONS``/``ActivityBridge`` in tests).
 from __future__ import annotations
 
 import copy
+import hashlib
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -25,6 +26,24 @@ from software_engineering_team.coding_team import hitl
 from software_engineering_team.coding_team.models import Task, TaskStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _review_verdict_cache_key(evidence: str, user_decisions: List[str]) -> str:
+    """Hash of every input that determines one task's Tech Lead review verdict.
+
+    Postconditions:
+        - Two calls collide only when ``evidence`` (the changes-summary + diff
+          text actually sent to ``run_code_review``) and ``user_decisions``
+          (every rendered decision line the reviewer is shown) are both
+          identical — mirroring ``code_review_agent.mapping._chunk_cache_key``'s
+          "exact LLM input" key design. ``evidence`` already embeds the branch
+          diff verbatim whenever it is non-empty (see
+          ``orchestrator._build_review_evidence``), so this key alone also
+          captures every diff change — a separate branch-digest component is
+          not needed.
+    """
+    body = "\x00".join([evidence, *user_decisions])
+    return hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()
 
 
 class _ReviewMixin:
@@ -149,13 +168,14 @@ class _ReviewMixin:
         concurrently across tasks. The merge/revision decision is applied separately and serially by
         ``_apply_review_decision``; the caller owns any progress-bar lifecycle.
 
-        A branch whose digest matches ``task.id``'s last-cached digest (``_review_verdict_cache``)
-        reuses that verdict instead of calling ``run_code_review`` again — the complementary,
-        branch-level counterpart to ``AgentReviewCache``'s per-file cache in the code-v2 execution
-        loop. This only removes the redundant LLM call: the no-change bookkeeping downstream
-        (``_escalate_if_no_change``/``_note_revision_progress``, driven by the same ``_branch_digest``)
-        still sees the same rejected verdict every round on an unchanged branch and escalates to Tech
-        Lead adjudication at the same cap as before caching.
+        A task whose review inputs are byte-identical to its last-cached call (``_review_verdict_cache``,
+        keyed by ``_review_verdict_cache_key`` over the exact ``changes_summary``/``user_decisions``
+        ``run_code_review`` sees — not the branch diff alone) reuses that verdict instead of calling
+        ``run_code_review`` again — the complementary, per-task counterpart to ``AgentReviewCache``'s
+        per-file cache in the code-v2 execution loop. This only removes the redundant LLM call: the
+        no-change bookkeeping downstream (``_escalate_if_no_change``/``_note_revision_progress``, driven
+        by the separate, diff-only ``_branch_digest``) still sees the same rejected verdict every round
+        on an unchanged branch and escalates to Tech Lead adjudication at the same cap as before caching.
 
         Preconditions:
             - ``task`` is IN_REVIEW with a recorded feature branch (or the default ``feature/{id}``).
@@ -170,7 +190,7 @@ class _ReviewMixin:
               never aborts the round; no graph or git state is changed here.
             - A cache hit returns an independent deep copy of the stored verdict, never the shared
               instance, so the caller may mutate it freely. A fresh, non-``error`` verdict is stored
-              under ``task.id`` keyed by this round's digest, overwriting any prior entry for that
+              under ``task.id`` keyed by this round's cache key, overwriting any prior entry for that
               task — an ``error`` verdict is never cached (mirrors
               ``code_review_agent.mapping``'s chunk cache: a review that could not run must be
               retried for real, not frozen).
@@ -183,28 +203,36 @@ class _ReviewMixin:
             branch = _orch._feature_branch_name(task)
             summary = task.changes_summary or "(no summary recorded)"
             diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
-            digest = self._branch_digest(task, diff=diff)
+            # Computed unconditionally (cheap: pure string/list ops, no I/O) because both feed the
+            # cache key below — a byte-identical branch with a changed changes_summary (every
+            # run_implement call overwrites it, whether or not the diff moved) or a newly answered
+            # HITL decision (_escalate_decision appends to revision_feedback without necessarily
+            # changing the branch) must still miss the cache, since either can change what the
+            # reviewer is shown and thus the verdict.
+            evidence = _orch._build_review_evidence(summary, diff)
+            user_decisions = self._user_decisions_for(task)
+            cache_key = _review_verdict_cache_key(evidence, user_decisions)
             with self._review_verdict_cache_lock:
                 cached = self._review_verdict_cache.get(task.id)
-            if cached is not None and cached[0] == digest:
+            if cached is not None and cached[0] == cache_key:
                 logger.info(
-                    "Task %s: branch unchanged since last review; reusing cached verdict", task.id
+                    "Task %s: review inputs unchanged since last review; reusing cached verdict",
+                    task.id,
                 )
                 return diff, copy.deepcopy(cached[1])
 
-            evidence = _orch._build_review_evidence(summary, diff)
             review = self.tech_lead.run_code_review(
                 task_title=task.title,
                 task_description=task.description,
                 acceptance_criteria=task.acceptance_criteria,
                 changes_summary=evidence,
-                user_decisions=self._user_decisions_for(task),
+                user_decisions=user_decisions,
                 progress_callback=progress_callback,
                 spec_content=self.spec_content,
             )
             if not review.get("error"):
                 with self._review_verdict_cache_lock:
-                    self._review_verdict_cache[task.id] = (digest, copy.deepcopy(review))
+                    self._review_verdict_cache[task.id] = (cache_key, copy.deepcopy(review))
             return diff, review
         except Exception as e:  # noqa: BLE001 — a failed review must never abort the swarm
             logger.warning("Tech Lead review preparation failed for %s: %s", task.id, e)
