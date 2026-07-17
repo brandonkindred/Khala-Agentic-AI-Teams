@@ -50,8 +50,9 @@ def run_setup(
           ``EnvironmentStore.register``).
         * On Docker provisioning failure: returns
           ``SetupResult(success=False, error=...)``; no environment record is
-          written, and the docker provisioner best-effort-removes a container a
-          failed ``docker run`` may have left behind.
+          written, and the docker provisioner best-effort-removes a container its
+          own failed ``docker run`` left behind (never a pre-existing same-named
+          container, which may be a healthy agent).
         * On a failure after provisioning (progress callback or registration):
           a best-effort rollback runs before the exception propagates. Because
           registration is atomic, a failed register leaves no record from this

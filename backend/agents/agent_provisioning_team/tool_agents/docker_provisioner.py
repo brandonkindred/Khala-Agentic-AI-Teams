@@ -99,6 +99,11 @@ class DockerProvisionerTool(BaseToolProvisioner):
         # (created/exited state, or running when the timeout fired). No state row
         # is written on failure, so deprovision-by-state could never find it —
         # best-effort remove it here, or the name blocks every future provision.
+        # Only when the name verifiably did NOT exist before this attempt,
+        # though: a run that failed against a pre-existing same-named container
+        # (e.g. the state row was lost while the container lives on) must not
+        # destroy that container — it may be a healthy agent.
+        existed_before = self._container_exists(container_name)
         try:
             result = subprocess.run(
                 build_cmd,
@@ -107,11 +112,13 @@ class DockerProvisionerTool(BaseToolProvisioner):
                 timeout=120,
             )
         except subprocess.TimeoutExpired:
-            self._best_effort_remove_container(container_name)
+            if existed_before is False:
+                self._best_effort_remove_container(container_name)
             raise
 
         if result.returncode != 0:
-            self._best_effort_remove_container(container_name)
+            if existed_before is False:
+                self._best_effort_remove_container(container_name)
             raise RuntimeError(f"Docker run failed: {result.stderr}")
 
         container_id = result.stdout.strip()[:12]
@@ -179,23 +186,63 @@ class DockerProvisionerTool(BaseToolProvisioner):
             )
 
     @staticmethod
+    def _container_exists(container_name: str) -> Optional[bool]:
+        """Probe whether a container named ``container_name`` currently exists.
+
+        Preconditions:
+            * ``container_name`` is non-empty.
+        Postconditions:
+            * Returns ``True`` when the daemon reports the container, ``False``
+              when the daemon reports it absent, and ``None`` when the probe
+              itself failed (daemon unreachable, timeout) — callers must treat
+              ``None`` as unknown and act conservatively.
+            * Never raises.
+        """
+        assert container_name, "container_name must be non-empty"
+        try:
+            probe = subprocess.run(
+                ["docker", "inspect", "--format", "{{.Id}}", container_name],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except Exception:  # noqa: BLE001 — probe is advisory only
+            return None
+        if probe.returncode == 0:
+            return True
+        if "no such" in (probe.stderr or "").lower():
+            return False
+        return None
+
+    @staticmethod
     def _best_effort_remove_container(container_name: str) -> None:
         """Remove a container left behind by a failed ``docker run``, by name.
 
         Preconditions:
             * ``container_name`` is non-empty.
         Postconditions:
-            * ``docker rm -f`` was attempted; failures (container absent, daemon
-              down, timeout) are logged and swallowed — this cleanup must never
-              mask the provisioning error that triggered it.
+            * ``docker rm -f`` was attempted; failures — a nonzero exit as well
+              as a raising call (daemon down, timeout) — are logged and
+              swallowed, so this cleanup can never mask the provisioning error
+              that triggered it. A container the daemon already reports absent
+              counts as removed.
         """
         assert container_name, "container_name must be non-empty"
         try:
-            subprocess.run(
+            removal = subprocess.run(
                 ["docker", "rm", "-f", container_name],
                 capture_output=True,
+                text=True,
                 timeout=30,
             )
+            stderr = removal.stderr or ""
+            if removal.returncode != 0 and "no such" not in stderr.lower():
+                logger.error(
+                    "Best-effort removal of partially created container %s exited "
+                    "nonzero; container may survive and block reprovisioning: %s",
+                    container_name,
+                    stderr.strip() or removal.returncode,
+                )
         except Exception:  # noqa: BLE001 — best-effort cleanup
             logger.exception(
                 "Best-effort removal of partially created container %s failed",
@@ -216,17 +263,30 @@ class DockerProvisionerTool(BaseToolProvisioner):
         try:
             container_name = container_info["container_name"]
 
+            # Best-effort stop; `rm -f` below removes a running container anyway.
             subprocess.run(
                 ["docker", "stop", container_name],
                 capture_output=True,
                 timeout=60,
             )
 
-            subprocess.run(
+            removal = subprocess.run(
                 ["docker", "rm", "-f", container_name],
                 capture_output=True,
+                text=True,
                 timeout=30,
             )
+            stderr = removal.stderr or ""
+            if removal.returncode != 0 and "no such" not in stderr.lower():
+                # Removal genuinely failed and the container may still exist.
+                # Keep the state row — deleting it would leave the live container
+                # untracked, unreachable by any later deprovision-by-agent-id, and
+                # its name would block every future provision.
+                return DeprovisionResult(
+                    tool_name=self.tool_name,
+                    success=False,
+                    error=f"docker rm failed: {stderr.strip() or removal.returncode}",
+                )
 
             self._state.delete(agent_id)
 

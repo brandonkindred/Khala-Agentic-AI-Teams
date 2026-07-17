@@ -6,6 +6,7 @@ subprocess / library boundary — no real services are touched.
 
 from __future__ import annotations
 
+import logging
 import subprocess as _subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -224,12 +225,34 @@ def test_docker_provisioner_provision_returns_error_on_nonzero(tmp_path: Path) -
     assert "Docker run failed" in result.error or "something bad" in result.error
 
 
+def _docker_cmd_stub(record, run=None, inspect=None, rm=None):
+    """subprocess.run stub keyed on the docker subcommand; records every cmd."""
+
+    def _respond(cmd, *a, **kw):
+        record.append(cmd)
+        if cmd[:2] == ["docker", "inspect"]:
+            return inspect or SimpleNamespace(
+                returncode=1, stdout="", stderr="Error: No such object"
+            )
+        if cmd[:2] == ["docker", "run"]:
+            outcome = run or SimpleNamespace(returncode=125, stdout="", stderr="run failed")
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+        if cmd[:3] == ["docker", "rm", "-f"]:
+            return rm or SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    return _respond
+
+
 def test_docker_provisioner_removes_partial_container_on_failed_run(tmp_path: Path) -> None:
     """A failed/timed-out `docker run` triggers best-effort removal by name.
 
     No state row is written on failure, so deprovision-by-state could never find
     such a container; without this cleanup the leftover name would block every
-    future provision for the agent.
+    future provision for the agent. The pre-run probe reported the name absent,
+    so the removal is provably scoped to this attempt's container.
     """
     from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
 
@@ -237,32 +260,72 @@ def test_docker_provisioner_removes_partial_container_on_failed_run(tmp_path: Pa
     prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
 
     calls = []
-
-    def _fail_then_record(cmd, *a, **kw):
-        calls.append(cmd)
-        if cmd[:2] == ["docker", "run"]:
-            return SimpleNamespace(returncode=125, stdout="", stderr="name in use")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    with patch("subprocess.run", side_effect=_fail_then_record):
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls)):
         result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
 
     assert result.success is False
     assert ["docker", "rm", "-f", "agent-agent-1"] in calls
 
     calls.clear()
-
-    def _timeout_then_record(cmd, *a, **kw):
-        calls.append(cmd)
-        if cmd[:2] == ["docker", "run"]:
-            raise _subprocess.TimeoutExpired(cmd=cmd, timeout=120)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    with patch("subprocess.run", side_effect=_timeout_then_record):
+    timeout = _subprocess.TimeoutExpired(cmd=["docker", "run"], timeout=120)
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=timeout)):
         result = prov.provision("agent-2", {}, GeneratedCredentials(tool_name="docker"))
 
     assert result.success is False
     assert ["docker", "rm", "-f", "agent-agent-2"] in calls
+
+
+def test_docker_provisioner_preserves_preexisting_container_on_failed_run(
+    tmp_path: Path,
+) -> None:
+    """A run failing against a PRE-EXISTING same-named container must not remove it.
+
+    When the state row is lost but the container lives on, `docker run` fails on
+    the name conflict; deleting the container by name would destroy a healthy
+    agent, so the cleanup only fires when the pre-run probe reported the name
+    absent. An unknown probe result (daemon error) is also conservative: no rm.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    exists = SimpleNamespace(returncode=0, stdout="abc\n", stderr="")
+    conflict = SimpleNamespace(returncode=125, stdout="", stderr="name is already in use")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, inspect=exists, run=conflict)):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert not any(cmd[:3] == ["docker", "rm", "-f"] for cmd in calls)
+
+    calls.clear()
+    probe_error = SimpleNamespace(returncode=1, stdout="", stderr="daemon unavailable")
+    with patch(
+        "subprocess.run", side_effect=_docker_cmd_stub(calls, inspect=probe_error, run=conflict)
+    ):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert not any(cmd[:3] == ["docker", "rm", "-f"] for cmd in calls)
+
+
+def test_docker_provisioner_logs_failed_best_effort_removal(tmp_path: Path, caplog) -> None:
+    """A best-effort `docker rm -f` that exits nonzero must be logged, not silent."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    rm_fail = SimpleNamespace(returncode=1, stdout="", stderr="cannot remove: device busy")
+    with caplog.at_level(logging.ERROR):
+        with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, rm=rm_fail)):
+            result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert ["docker", "rm", "-f", "agent-agent-1"] in calls
+    assert "device busy" in caplog.text
 
 
 def test_docker_provisioner_is_idempotent_on_existing_state(tmp_path: Path) -> None:
@@ -364,6 +427,48 @@ def test_docker_deprovision_with_state(tmp_path: Path) -> None:
 
     assert out.success is True
     assert out.details["container_removed"] == "c1"
+
+
+def test_docker_deprovision_reports_failure_and_keeps_state_on_rm_error(
+    tmp_path: Path,
+) -> None:
+    """A `docker rm -f` that exits nonzero must report failure and preserve state.
+
+    Deleting the state row while the container survives would leave it
+    untracked — unreachable by any later deprovision-by-agent-id — and its name
+    would block every future provision.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put("a1", {"container_name": "c1"})
+
+    rm_fail = SimpleNamespace(returncode=1, stdout="", stderr="cannot remove: device busy")
+    with patch("subprocess.run", return_value=rm_fail):
+        out = prov.deprovision("a1")
+
+    assert out.success is False
+    assert "device busy" in out.error
+    assert prov._state.get("a1") is not None
+
+
+def test_docker_deprovision_treats_already_absent_container_as_removed(
+    tmp_path: Path,
+) -> None:
+    """`docker rm -f` reporting 'No such container' counts as a completed removal."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put("a1", {"container_name": "c1"})
+
+    gone = SimpleNamespace(returncode=1, stdout="", stderr="Error: No such container: c1")
+    with patch("subprocess.run", return_value=gone):
+        out = prov.deprovision("a1")
+
+    assert out.success is True
+    assert prov._state.get("a1") is None
 
 
 def test_docker_deprovision_handles_exception(tmp_path: Path) -> None:
