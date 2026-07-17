@@ -1,4 +1,4 @@
-"""Tests for the zero-arg ``make_blog_planning_agent`` factory (issue #263).
+"""Tests for the zero-arg ``make_blog_planning_agent`` factory.
 
 The Agent Console sandbox dispatcher (``shared_agent_invoke.dispatch``) calls
 ``make_*`` entrypoints with no arguments and then binds ``.run`` on the

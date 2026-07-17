@@ -303,7 +303,9 @@ def _job_already_terminal(job_id: str) -> bool:
     )
 
 
-def _run_blogging_service_shutdown() -> None:  # pragma: no cover - process-lifecycle shutdown hook driven by uvicorn; meaningful exercise needs a live server and real Temporal/job-service clients. All branches are defensive try/except around external subsystems.
+def _run_blogging_service_shutdown() -> (
+    None
+):  # pragma: no cover - process-lifecycle shutdown hook driven by uvicorn; meaningful exercise needs a live server and real Temporal/job-service clients. All branches are defensive try/except around external subsystems.
     """Runs while Uvicorn still has the event loop; before process exit (replaces atexit hook)."""
     try:
         from agents.blogging.shared.blog_job_store import stop_blog_stale_monitor

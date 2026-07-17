@@ -1,22 +1,21 @@
-"""Tests for the blog writer agent."""
+"""Tests for the blog writer agent.
+
+Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
+"""
 
 import re
 
 import pytest
+from _content_plan_test_utils import make_content_plan
 from agents.blogging.blog_research_agent.models import ResearchReference
 from agents.blogging.blog_writer_agent import BlogWriterAgent, WriterInput, WriterOutput
-from agents.blogging.shared.content_plan import (
-    ContentPlan,
-    ContentPlanSection,
-    RequirementsAnalysis,
-    TitleCandidate,
-)
+from agents.blogging.shared.content_plan import ContentPlan, ContentPlanSection, TitleCandidate
 
 from llm_service import DummyLLMClient
 
 
 def _minimal_plan() -> ContentPlan:
-    return ContentPlan(
+    return make_content_plan(
         overarching_topic="Test topic",
         narrative_flow="Intro, main, wrap.",
         sections=[
@@ -24,11 +23,6 @@ def _minimal_plan() -> ContentPlan:
             ContentPlanSection(title="Main", coverage_description="Body", order=1),
         ],
         title_candidates=[TitleCandidate(title="T1", probability_of_success=0.5)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True,
-            scope_feasible=True,
-            research_gaps=[],
-        ),
     )
 
 
@@ -42,14 +36,10 @@ class _PromptCapturingLLM(DummyLLMClient):
 
     def __init__(self) -> None:
         super().__init__()
-        self.last_prompt: str = ""
         self.all_prompts: list[str] = []
-        self.last_complete_json_prompt: str = ""
 
     def complete_json(self, prompt: str, **kwargs: object) -> dict:
-        self.last_prompt = prompt
         self.all_prompts.append(prompt)
-        self.last_complete_json_prompt = prompt
         lowered = prompt.lower() if isinstance(prompt, str) else ""
         # Self-review prompt: return empty issues list
         if "review this draft" in lowered:

@@ -12,16 +12,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
-
-
-@pytest.fixture
-def patched_client(monkeypatch, fake_job_client):
-    """Make ``shared.blog_job_store._client`` return the in-memory fake (both layouts)."""
-    from agents.blogging.shared import blog_job_store as bjs
-
-    monkeypatch.setattr(bjs, "_client", lambda *a, **kw: fake_job_client)
-    return fake_job_client
-
+from conftest import patch_job_event_bus_publish
 
 # ---------------------------------------------------------------------------
 # build_brief_input
@@ -61,7 +52,7 @@ def test_build_brief_input_appends_title_concept_and_normalizes_audience() -> No
 # ---------------------------------------------------------------------------
 
 
-def test_start_blog_job_is_idempotent_across_retries(patched_client) -> None:
+def test_start_blog_job_is_idempotent_across_retries() -> None:
     """Calling start_blog_job twice (as a Temporal retry would) never raises and
     preserves the original started_at — it merges status=running onto the existing
     row rather than re-creating it or resetting the start time."""
@@ -87,7 +78,9 @@ def test_start_blog_job_is_idempotent_across_retries(patched_client) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_make_job_updater_writes_store_and_publishes(monkeypatch, patched_client) -> None:
+def test_make_job_updater_writes_store_and_publishes(
+    monkeypatch,
+) -> None:
     """The updater writes kwargs to the store and broadcasts an ``update`` SSE event."""
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
@@ -100,16 +93,7 @@ def test_make_job_updater_writes_store_and_publishes(monkeypatch, patched_client
     def fake_publish(jid, payload, event_type="update"):
         published.append((event_type, dict(payload)))
 
-    # Patch both module objects (distinct in this layout), like the other bus tests.
-    try:
-        from agents.blogging.shared import job_event_bus as bus_b
-
-        monkeypatch.setattr(bus_b, "publish", fake_publish)
-    except ImportError:
-        pass
-    from agents.blogging.shared import job_event_bus as bus_s
-
-    monkeypatch.setattr(bus_s, "publish", fake_publish)
+    patch_job_event_bus_publish(monkeypatch, fake_publish)
 
     updater = rpj.make_job_updater(job_id)
     updater(status_text="working", progress=0.5)
@@ -177,7 +161,9 @@ def test_start_pipeline_heartbeat_starts_and_stops(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_mark_job_cancelled_sets_status_and_returns_true(monkeypatch, patched_client) -> None:
+def test_mark_job_cancelled_sets_status_and_returns_true(
+    monkeypatch,
+) -> None:
     """The job is marked cancelled, a terminal event is published, and True is returned."""
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
@@ -199,37 +185,13 @@ def test_mark_job_cancelled_sets_status_and_returns_true(monkeypatch, patched_cl
 
 
 def _pipeline_doubles():
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        PlanningPhaseResult,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from _content_plan_test_utils import make_pipeline_doubles
 
-    plan = ContentPlan(
-        overarching_topic="Topic",
-        narrative_flow="Flow",
-        sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
-        title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
-    )
-    ppr = PlanningPhaseResult(
-        content_plan=plan,
-        planning_iterations_used=1,
-        parse_retry_count=0,
-        planning_wall_ms_total=5.0,
-    )
-
-    class _Draft:
-        draft = "# Draft\n\nBody."
-
-    return ppr, _Draft()
+    ppr, draft, _ = make_pipeline_doubles()
+    return ppr, draft
 
 
-def test_finalize_blog_job_pass_completes(monkeypatch, patched_client) -> None:
+def test_finalize_blog_job_pass_completes(monkeypatch) -> None:
     """status PASS completes the job (COMPLETED) and returns the completed status."""
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
@@ -245,7 +207,9 @@ def test_finalize_blog_job_pass_completes(monkeypatch, patched_client) -> None:
     assert bjs.get_blog_job(job_id)["status"] == bjs.JOB_STATUS_COMPLETED
 
 
-def test_finalize_blog_job_non_pass_needs_review(monkeypatch, patched_client) -> None:
+def test_finalize_blog_job_non_pass_needs_review(
+    monkeypatch,
+) -> None:
     """A non-PASS status finalizes as NEEDS_REVIEW rather than COMPLETED."""
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
