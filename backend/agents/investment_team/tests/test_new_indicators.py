@@ -970,6 +970,39 @@ def test_pandas_macd_rejects_non_integer_periods() -> None:
     assert len(line) == 40
 
 
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda s: pdi.sma(s, 2.5),
+        lambda s: pdi.ema(s, 2.5),
+        lambda s: pdi.rsi(s, 2.5),
+        lambda s: pdi.roc(s, 2.5),
+        lambda s: pdi.bollinger_bands(s, 2.5),
+        lambda s: pdi.atr(s, s, s, 2.5),
+        lambda s: pdi.adx(s, s, s, 2.5),
+        lambda s: pdi.stochastic(s, s, s, 2.5),  # k_period
+        lambda s: pdi.stochastic(s, s, s, 14, 2.5),  # d_period
+        lambda s: pdi.donchian_channels(s, s, 2.5),
+        lambda s: pdi.keltner_channels(s, s, s, 2.5),  # period
+        lambda s: pdi.keltner_channels(s, s, s, 20, 2.5),  # atr_period
+        lambda s: pdi.mfi(s, s, s, s, 2.5),
+        lambda s: pdi.cci(s, s, s, 2.5),
+        lambda s: pdi.williams_r(s, s, s, 2.5),
+    ],
+)
+def test_pandas_indicators_reject_non_integer_period(call) -> None:
+    """Non-integer periods raise ``ValueError`` instead of silently truncating.
+
+    Every Series wrapper validates its period/window args as integers at the call
+    boundary (matching the old pandas ``rolling(window=2.5)`` rejection and the
+    registry/probe integer contract), so a non-integral window can never quietly
+    run a different experiment (e.g. ``sma(series, 2.5)`` computing SMA(2)).
+    """
+    s = pd.Series([100.0 + i for i in range(30)])
+    with pytest.raises(ValueError):
+        call(s)
+
+
 def test_pandas_cumulative_vwap_matches_registry_period_none() -> None:
     """The vectorised cumulative ``vwap`` is bit-identical to ``reg.vwap(period=None)``.
 

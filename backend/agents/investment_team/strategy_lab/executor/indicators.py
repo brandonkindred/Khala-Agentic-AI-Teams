@@ -219,6 +219,25 @@ def _na_safe(s: pd.Series) -> np.ndarray:
     return s.to_numpy(dtype="float64", na_value=np.nan)
 
 
+def _int_arg(value, name: str) -> int:
+    """Validate a period/window argument as an integer, rejecting non-integers.
+
+    Preconditions: ``value`` is a caller-supplied period-like argument; ``name``
+    labels it in the error message.
+    Postconditions: returns ``int(value)`` when ``value`` is a non-bool integer —
+    a Python ``int`` or a numpy integer (via ``numbers.Integral``, so callers
+    passing numpy ints still work); raises ``ValueError`` otherwise (a float such
+    as ``2.5``/``2.0``, a ``bool``, or a string). This matches the old pandas
+    helpers (``rolling(window=2.5)`` raised), the streaming registry's integer
+    contract, and the coverage probe's validator, so a non-integral period is
+    rejected rather than silently truncated to a different window (a different
+    experiment than the caller requested).
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    return int(value)
+
+
 def _close_bars(s: pd.Series) -> List[_Bar]:
     """Project a single source series onto close-only registry bars."""
     return [_Bar(close=float(v)) for v in _na_safe(s)]
@@ -332,7 +351,8 @@ def sma(series: pd.Series, period: int) -> pd.Series:
     bars exist, then ``IndicatorRegistry.sma`` at each bar.
     """
     s = _coerce_series(series)
-    return _run_single(_close_bars(s), s.index, lambda r, w: r.sma(w, int(period), source="close"))
+    p = _int_arg(period, "period")
+    return _run_single(_close_bars(s), s.index, lambda r, w: r.sma(w, p, source="close"))
 
 
 def ema(series: pd.Series, period: int) -> pd.Series:
@@ -344,7 +364,8 @@ def ema(series: pd.Series, period: int) -> pd.Series:
     in-window bar) at each bar.
     """
     s = _coerce_series(series)
-    return _run_single(_close_bars(s), s.index, lambda r, w: r.ema(w, int(period), source="close"))
+    p = _int_arg(period, "period")
+    return _run_single(_close_bars(s), s.index, lambda r, w: r.ema(w, p, source="close"))
 
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -356,7 +377,8 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     no losses, 50 on a flat window).
     """
     s = _coerce_series(series)
-    return _run_single(_close_bars(s), s.index, lambda r, w: r.rsi(w, int(period), source="close"))
+    p = _int_arg(period, "period")
+    return _run_single(_close_bars(s), s.index, lambda r, w: r.rsi(w, p, source="close"))
 
 
 def macd(
@@ -370,11 +392,11 @@ def macd(
     Preconditions: ``series`` is coercible; ``2 <= fast < slow``; ``signal >= 2``.
     Postconditions: three same-length Series; the line is NaN until ``slow`` bars
     exist, the signal and histogram until ``slow + signal - 1``.
-    Raises: ``ValueError`` (from ``IndicatorRegistry.macd``) when ``fast``/``slow``/
-    ``signal`` are not integers, or violate ``2 <= fast < slow`` / ``signal >= 2`` —
-    ``fast``/``slow``/``signal`` are passed through unconverted so the registry's
-    integer contract is the single source of validation, matching the runtime and
-    the coverage probe's validator rather than silently truncating a float.
+    Raises: ``ValueError`` when ``fast``/``slow``/``signal`` are not integers
+    (``_int_arg``, matching the other wrappers) or violate ``2 <= fast < slow`` /
+    ``signal >= 2`` (``IndicatorRegistry.macd``) — rejected rather than silently
+    truncating a float, so the reference matches the runtime and the coverage
+    probe's validator.
 
     Unlike the fixed-window indicators, MACD's signal EMA folds over the entire
     macd_line, so its value depends on the full history length. The walk is
@@ -396,13 +418,16 @@ def macd(
         from runtime_window import STREAMING_WINDOW_BARS  # type: ignore[no-redef]
 
     s = _coerce_series(series)
+    f = _int_arg(fast, "fast")
+    sl = _int_arg(slow, "slow")
+    sg = _int_arg(signal, "signal")
     return _run_tuple(
         _close_bars(s),
         s.index,
         [
-            lambda r, w: r.macd(w, fast, slow, signal, source="close", select="macd"),
-            lambda r, w: r.macd(w, fast, slow, signal, source="close", select="signal"),
-            lambda r, w: r.macd(w, fast, slow, signal, source="close", select="histogram"),
+            lambda r, w: r.macd(w, f, sl, sg, source="close", select="macd"),
+            lambda r, w: r.macd(w, f, sl, sg, source="close", select="signal"),
+            lambda r, w: r.macd(w, f, sl, sg, source="close", select="histogram"),
         ],
         max_bars=STREAMING_WINDOW_BARS,
     )
@@ -420,7 +445,7 @@ def bollinger_bands(
     then ``middle ± num_std × population_std`` around the trailing SMA.
     """
     s = _coerce_series(series)
-    p, k = int(period), float(num_std)
+    p, k = _int_arg(period, "period"), float(num_std)
     return _run_tuple(
         _close_bars(s),
         s.index,
@@ -449,7 +474,8 @@ def atr(
     low = _coerce_series(low, "low")
     c = _coerce_series(close, "close")
     bars = _hlc_bars(h, low, c)
-    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.atr(w, int(period)))
+    p = _int_arg(period, "period")
+    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.atr(w, p))
 
 
 def adx(
@@ -469,7 +495,8 @@ def adx(
     low = _coerce_series(low, "low")
     c = _coerce_series(close, "close")
     bars = _hlc_bars(h, low, c)
-    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.adx(w, int(period)))
+    p = _int_arg(period, "period")
+    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.adx(w, p))
 
 
 def stochastic(
@@ -489,7 +516,7 @@ def stochastic(
     h = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
     c = _coerce_series(close, "close")
-    kp, dp = int(k_period), int(d_period)
+    kp, dp = _int_arg(k_period, "k_period"), _int_arg(d_period, "d_period")
     bars = _hlc_bars(h, low, c)
     return _run_tuple(
         bars,
@@ -560,7 +587,7 @@ def donchian_channels(
     """
     h = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
-    p = int(period)
+    p = _int_arg(period, "period")
     bars = _hl_bars(h, low)
     return _run_tuple(
         bars,
@@ -592,7 +619,7 @@ def keltner_channels(
     h = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
     c = _coerce_series(close, "close")
-    p, ap, mult = int(period), int(atr_period), float(multiplier)
+    p, ap, mult = _int_arg(period, "period"), _int_arg(atr_period, "atr_period"), float(multiplier)
     bars = _hlc_bars(h, low, c)
     return _run_tuple(
         bars,
@@ -639,7 +666,8 @@ def mfi(
     c = _coerce_series(close, "close")
     v = _coerce_series(volume, "volume")
     bars = _hlcv_bars(h, low, c, v)
-    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.mfi(w, int(period)))
+    p = _int_arg(period, "period")
+    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.mfi(w, p))
 
 
 def roc(series: pd.Series, period: int = 12) -> pd.Series:
@@ -651,7 +679,8 @@ def roc(series: pd.Series, period: int = 12) -> pd.Series:
     reference price is exactly 0) — ``IndicatorRegistry.roc`` at each bar.
     """
     s = _coerce_series(series)
-    return _run_single(_close_bars(s), s.index, lambda r, w: r.roc(w, int(period), source="close"))
+    p = _int_arg(period, "period")
+    return _run_single(_close_bars(s), s.index, lambda r, w: r.roc(w, p, source="close"))
 
 
 def cci(
@@ -672,7 +701,8 @@ def cci(
     low = _coerce_series(low, "low")
     c = _coerce_series(close, "close")
     bars = _hlc_bars(h, low, c)
-    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.cci(w, int(period)))
+    p = _int_arg(period, "period")
+    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.cci(w, p))
 
 
 def williams_r(
@@ -693,7 +723,8 @@ def williams_r(
     low = _coerce_series(low, "low")
     c = _coerce_series(close, "close")
     bars = _hlc_bars(h, low, c)
-    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.williams_r(w, int(period)))
+    p = _int_arg(period, "period")
+    return _run_single(bars, h.index[: len(bars)], lambda r, w: r.williams_r(w, p))
 
 
 # ---------------------------------------------------------------------------
@@ -763,7 +794,7 @@ def _windowed_vwap(
     low = _coerce_series(low, "low")
     c = _coerce_series(close, "close")
     v = _coerce_series(volume, "volume")
-    p = int(period)
+    p = _int_arg(period, "period")
     bars = _hlcv_bars(h, low, c, v)
     return _run_single(bars, h.index[: len(bars)], lambda r, w: r.vwap(w, period=p))
 
