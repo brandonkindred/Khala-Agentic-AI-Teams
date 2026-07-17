@@ -35,7 +35,7 @@ from branding_team.orchestrator import orchestrator
 from branding_team.postgres import SCHEMA as BRANDING_POSTGRES_SCHEMA
 from branding_team.shared.job_store import (
     JOB_STATUS_CANCELLED,
-    JOB_STATUS_FAILED,
+    JOB_STATUS_FAILED,  # noqa: F401 — re-exported; tests reference main_mod.JOB_STATUS_FAILED
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     begin_job,
@@ -46,7 +46,6 @@ from branding_team.shared.job_store import (
     list_jobs,
     mark_completed,
     mark_failed,
-    update_job,
 )
 from branding_team.store import get_default_store
 from job_service_client import JobServiceClient, start_stale_job_monitor
@@ -820,7 +819,15 @@ def _run_branding_core(
         mark_completed(job_id, result.model_dump())
     except Exception as e:
         logger.exception("Branding job %s failed", job_id)
-        if not mark_failed(job_id, str(e)):
+        try:
+            marked_failed = mark_failed(job_id, str(e))
+        except Exception:
+            # mark_failed's own failure (e.g. JobNotFoundError) must never
+            # replace the original pipeline exception — that would mask the
+            # real cause behind an unrelated bookkeeping error.
+            logger.exception("Branding job %s: mark_failed itself failed", job_id)
+            raise e from None
+        if not marked_failed:
             return
         raise
 
@@ -914,7 +921,7 @@ def _submit_brand_run(
             # Temporal client/worker not ready — fail the job row and return 503
             # rather than surfacing the dispatch error as a 500.
             logger.exception("Branding job %s Temporal dispatch failed", job_id)
-            update_job(job_id, status=JOB_STATUS_FAILED, error="temporal dispatch failed")
+            mark_failed(job_id, "temporal dispatch failed")
             raise HTTPException(status_code=503, detail="Service temporarily unavailable")
         return RunBrandJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 
@@ -934,7 +941,7 @@ def _submit_brand_run(
     except RuntimeError:
         # Executor was shut down (e.g. app teardown) — fail the job row and
         # return 503 rather than letting the RuntimeError surface as a 500.
-        update_job(job_id, status=JOB_STATUS_FAILED, error="run executor unavailable")
+        mark_failed(job_id, "run executor unavailable")
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
     return RunBrandJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 

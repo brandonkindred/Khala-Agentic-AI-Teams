@@ -28,19 +28,19 @@ import type { PrReviewRecord } from './pr-review-record.model';
 import { terminalTimestamp } from './review-metrics';
 
 // Re-exported so existing importers of `PrReviewRecord` from this module keep working;
-// the interface now lives in ./pr-review-record.model so both this panel and its
+// the interface now lives in ./pr-review-record.model so both this dashboard and its
 // extracted detail child can depend on it without a component-to-component import cycle.
 export type { PrReviewRecord } from './pr-review-record.model';
 
 /**
- * Code Review panel: lists every repository the configured PAT can access and, per
+ * Code Review dashboard: lists every repository the configured PAT can access and, per
  * expanded repo, its open pull requests, letting the user start AI code reviews on
  * them. Each PR row expands inline to show the PR detail, a Start Review action, and
  * a table of every review run on that PR (status + outcome). A live status badge on
  * each row reflects the latest review.
  */
 @Component({
-  selector: 'app-code-review-panel',
+  selector: 'app-code-review-dashboard',
   standalone: true,
   imports: [
     CommonModule,
@@ -54,10 +54,10 @@ export type { PrReviewRecord } from './pr-review-record.model';
     InlineBannerComponent,
     PrReviewDetailComponent,
   ],
-  templateUrl: './code-review-panel.component.html',
-  styleUrl: './code-review-panel.component.scss',
+  templateUrl: './code-review-dashboard.component.html',
+  styleUrl: './code-review-dashboard.component.scss',
 })
-export class CodeReviewPanelComponent implements OnInit, OnDestroy {
+export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
   private readonly api = inject(CodingTeamApiService);
   private readonly integrationsApi = inject(IntegrationsApiService);
   private readonly cdr = inject(ChangeDetectorRef);

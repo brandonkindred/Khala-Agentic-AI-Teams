@@ -118,8 +118,90 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
     assert "audit_activity" in fn_names
     assert "documentation_activity" in fn_names
     assert "deliver_activity" in fn_names
-    assert _call(stub, "documentation_activity")["args"][3]["postgresql"]["connection_string"] == "conn-postgresql"
+    assert (
+        _call(stub, "documentation_activity")["args"][3]["postgresql"]["connection_string"]
+        == "conn-postgresql"
+    )
     assert _call(stub, "deliver_activity")["args"][3]["redis"]["connection_string"] == "conn-redis"
+
+
+def test_merge_enriched_credentials_no_credentials_key() -> None:
+    """A successful tool result without a `credentials` key leaves the base entry unchanged."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    credentials_by_tool = {
+        "postgresql": {"tool_name": "postgresql", "username": "u", "password": "p"}
+    }
+    tool_results_dump = [{"tool_name": "postgresql", "success": True, "provisioner_key": "x"}]
+
+    merged = wf.AgentProvisioningWorkflow._merge_enriched_credentials(
+        credentials_by_tool, tool_results_dump
+    )
+
+    assert merged == {"postgresql": {"tool_name": "postgresql", "username": "u", "password": "p"}}
+
+
+def test_merge_enriched_credentials_tool_not_in_base_map() -> None:
+    """A successful result for a tool absent from the base map adds a new entry, leaving others untouched."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    credentials_by_tool = {
+        "postgresql": {"tool_name": "postgresql", "username": "u", "password": "p"}
+    }
+    tool_results_dump = [
+        {
+            "tool_name": "redis",
+            "success": True,
+            "credentials": {"tool_name": "redis", "connection_string": "conn-redis"},
+        }
+    ]
+
+    merged = wf.AgentProvisioningWorkflow._merge_enriched_credentials(
+        credentials_by_tool, tool_results_dump
+    )
+
+    assert merged["postgresql"] == {"tool_name": "postgresql", "username": "u", "password": "p"}
+    assert merged["redis"] == {"tool_name": "redis", "connection_string": "conn-redis"}
+
+
+def test_merge_enriched_credentials_non_dict_tool_result() -> None:
+    """Non-dict entries in tool_results_dump are skipped without raising."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    credentials_by_tool = {
+        "postgresql": {"tool_name": "postgresql", "username": "u", "password": "p"}
+    }
+    tool_results_dump = ["not-a-dict", None, 42]
+
+    merged = wf.AgentProvisioningWorkflow._merge_enriched_credentials(
+        credentials_by_tool, tool_results_dump
+    )
+
+    assert merged == {"postgresql": {"tool_name": "postgresql", "username": "u", "password": "p"}}
+
+
+def test_merge_enriched_credentials_does_not_mutate_input() -> None:
+    """The method returns a new mapping and leaves the caller's dicts untouched."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    original_entry = {"tool_name": "postgresql", "username": "u", "password": "p"}
+    credentials_by_tool = {"postgresql": original_entry}
+    tool_results_dump = [
+        {
+            "tool_name": "postgresql",
+            "success": True,
+            "credentials": {"connection_string": "conn-postgresql"},
+        }
+    ]
+
+    merged = wf.AgentProvisioningWorkflow._merge_enriched_credentials(
+        credentials_by_tool, tool_results_dump
+    )
+
+    assert credentials_by_tool == {"postgresql": original_entry}
+    assert "connection_string" not in original_entry
+    assert merged["postgresql"]["connection_string"] == "conn-postgresql"
+    assert merged is not credentials_by_tool
 
 
 @pytest.mark.asyncio
@@ -694,3 +776,37 @@ async def test_workflow_marks_failed_on_deliver_error(tmp_path) -> None:
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
     assert "deliver boom" in fail_call["args"][1]
+
+
+# ---------------------------------------------------------------------------
+# AgentDeprovisioningWorkflow — direct .run() invocation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_deprovisioning_workflow_calls_deprovision_activity() -> None:
+    """run() dispatches deprovision_activity with (agent_id, force) and returns its result."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    stub = _ExecActivityStub(
+        {
+            "deprovision_activity": {
+                "agent_id": "agent-1",
+                "success": True,
+                "details": {"tools": {"postgresql": True}},
+                "error": None,
+            },
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        result = await wf.AgentDeprovisioningWorkflow().run("agent-1", True)
+
+    assert result == {
+        "agent_id": "agent-1",
+        "success": True,
+        "details": {"tools": {"postgresql": True}},
+        "error": None,
+    }
+    call = _call(stub, "deprovision_activity")
+    assert call["args"] == ["agent-1", True]
