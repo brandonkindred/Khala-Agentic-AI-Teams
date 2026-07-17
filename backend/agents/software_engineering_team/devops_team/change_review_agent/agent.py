@@ -13,16 +13,15 @@ from __future__ import annotations
 
 import logging
 
-from code_review_agent import (
+from llm_service import LLMClient
+from software_engineering_team.code_review_agent import (
     CodeReviewAgent,
     CodeReviewInput,
     CodeReviewUnavailableError,
     ReviewProfile,
 )
-from code_review_agent.models import CodeReviewIssue
-from devops_team.models import ReviewFinding
-
-from llm_service import LLMClient
+from software_engineering_team.code_review_agent.models import CodeReviewIssue
+from software_engineering_team.devops_team.models import ReviewFinding
 from software_engineering_team.shared.security_service import derive_approved, is_blocking
 
 from .models import ChangeReviewInput, ChangeReviewOutput

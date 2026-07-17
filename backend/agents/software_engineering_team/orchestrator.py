@@ -15,38 +15,22 @@ Execution:
 from __future__ import annotations
 
 import logging
-import sys
 import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# These two sys.path insertions no longer serve this module (its team-local
-# imports are fully dotted now); they remain only for the *other* production
-# modules that still import team sub-packages bare (the shared/ review
-# helpers, devops_team internals, and the leaf agents) and reach this module
-# first — e.g. Temporal activities import `software_engineering_team.
-# orchestrator` without going through `api/__init__`, whose `_paths.py`
-# bootstrap would otherwise cover them. Once those remaining bare imports are
-# converted to dotted form, this block can be deleted outright.
-_team_dir = Path(__file__).resolve().parent
-if str(_team_dir) not in sys.path:
-    sys.path.insert(0, str(_team_dir))
-_arch_dir = _team_dir / "architect_agents"
-if _arch_dir.exists() and str(_arch_dir) not in sys.path:
-    sys.path.insert(0, str(_arch_dir))
-
-from llm_service import (  # noqa: E402
+from llm_service import (
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
     get_client,
     llm_attribution,
 )
-from shared_repo_context.repo_utils import (  # noqa: E402
+from shared_repo_context.repo_utils import (
     read_repo_code,
     truncate_for_context,
 )
-from software_engineering_team.discovery import (  # noqa: E402
+from software_engineering_team.discovery import (
     # Re-exported (F401) for ``tests/test_orchestrator_sprint_path.py``, which
     # imports it off the orchestrator module (``_orchestrator._load_requirements_
     # from_sprint``) at six call sites. The sprint path itself calls it via
@@ -57,12 +41,12 @@ from software_engineering_team.discovery import (  # noqa: E402
     resolve_spec_source,
     run_product_requirements_analysis,
 )
-from software_engineering_team.shared import (  # noqa: E402
+from software_engineering_team.shared import (
     cost_tracker,
     se_events,
 )
-from software_engineering_team.shared.execution_tracker import execution_tracker  # noqa: E402
-from software_engineering_team.shared.job_store import (  # noqa: E402
+from software_engineering_team.shared.execution_tracker import execution_tracker
+from software_engineering_team.shared.job_store import (
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
@@ -77,7 +61,7 @@ from software_engineering_team.shared.job_store import (  # noqa: E402
     is_waiting_for_answers,
     update_job,
 )
-from software_engineering_team.shared.plan_dir import ensure_plan_dir  # noqa: E402
+from software_engineering_team.shared.plan_dir import ensure_plan_dir
 
 try:
     from unified_api.slack_notifier import notify_open_questions as slack_notify_open_questions

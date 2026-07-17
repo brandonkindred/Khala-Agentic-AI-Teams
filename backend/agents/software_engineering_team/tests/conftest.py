@@ -42,13 +42,39 @@ os.environ.setdefault("LLM_PROVIDER", "dummy")
 # overrides pytest's rootdir, which means ``backend/conftest.py`` is not
 # auto-discovered here, so we pull the fixture in explicitly (and re-register
 # the ``integration`` marker / default-skip behaviour for the same reason).
+# The coordinator's caches exist once per module identity: production code
+# imports the dotted ``software_engineering_team.code_review_agent`` package,
+# while some tests still drive the bare ``code_review_agent`` name (resolved
+# via the pytest ``pythonpath`` entry). Both identities carry their own cache
+# dicts, so the reset fixture below must clear both or one side's cached
+# outcome leaks into the next test.
 from code_review_agent.coordinator import (  # noqa: E402
-    clear_chunk_outcome_cache,
-    clear_submission_outcome_cache,
+    clear_chunk_outcome_cache as _clear_chunk_outcome_cache_bare,
+)
+from code_review_agent.coordinator import (  # noqa: E402
+    clear_submission_outcome_cache as _clear_submission_outcome_cache_bare,
 )
 
 from job_service_client_fake import fake_job_client  # noqa: F401, E402
 from llm_service import DummyLLMClient, clear_compaction_cache  # noqa: E402
+from software_engineering_team.code_review_agent.coordinator import (  # noqa: E402
+    clear_chunk_outcome_cache as _clear_chunk_outcome_cache_dotted,
+)
+from software_engineering_team.code_review_agent.coordinator import (  # noqa: E402
+    clear_submission_outcome_cache as _clear_submission_outcome_cache_dotted,
+)
+
+
+def clear_chunk_outcome_cache() -> None:
+    """Clear the map-phase chunk cache under BOTH package identities."""
+    _clear_chunk_outcome_cache_bare()
+    _clear_chunk_outcome_cache_dotted()
+
+
+def clear_submission_outcome_cache() -> None:
+    """Clear the submission short-circuit cache under BOTH package identities."""
+    _clear_submission_outcome_cache_bare()
+    _clear_submission_outcome_cache_dotted()
 
 
 @pytest.fixture

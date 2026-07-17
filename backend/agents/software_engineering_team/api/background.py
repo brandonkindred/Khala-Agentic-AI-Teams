@@ -79,9 +79,8 @@ def _run_frontend_code_v2_background(
         import uuid as _uuid
         from pathlib import Path as _Path
 
-        from frontend_code_v2_team import FrontendCodeV2TeamLead
-
         from llm_service import get_client
+        from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
         from software_engineering_team.shared.models import (
             SystemArchitecture,
             Task,
@@ -158,9 +157,8 @@ def _run_backend_code_v2_background(
         import uuid as _uuid
         from pathlib import Path as _Path
 
-        from backend_code_v2_team import BackendCodeV2TeamLead
-
         from llm_service import get_client
+        from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
         from software_engineering_team.shared.models import (
             SystemArchitecture,
             Task,
