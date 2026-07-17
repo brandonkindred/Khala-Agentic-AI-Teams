@@ -22,6 +22,44 @@ Client-facing **product owner / pre-sales discovery** team: first leg of the sof
 | **Document production** | Write context doc and spec; call PRA; run the architecture step; persist artifacts. |
 | **Sub-agent provisioning** | Optional: when capability gap identified, draft agent spec, call AI Systems, store blueprint. |
 
+## Agent anatomy
+
+Each phase's real logic lives in an anatomy-conformant persona-agent package under
+`agents/<phase>/` (see [`AGENT_ANATOMY.md`](../agent_provisioning_team/AGENT_ANATOMY.md)),
+and the matching `phases/<phase>.py::run_*` is a **thin adapter** that maps the workflow
+`context` dict to the agent's typed Input and maps the typed Output back to the
+`(context_update, artifacts)` tuple. The `orchestrator.run_workflow` coordinator (§2) and
+the per-phase Temporal activities call the same `run_*` seam, so both drivers stay in sync.
+
+Each `agents/<phase>/` package holds:
+
+- **`models.py`** — typed `*Input`/`*Output` boundary contracts (§1). Shared domain models
+  (`ClientContext`, `OpenQuestion`, `HandoffPackage`) are reused from `models.py`, not redefined.
+- **`agent.py`** — a stateless agent class with a `run(...)` method. Injected callables
+  (`llm`, `run_pra`/`wait_pra`, `answer_callback`, `run_architecture_fn`,
+  `start_build_fn`/`wait_build_fn`) are the agent's declared **tools** (§3), passed as method
+  params. Guardrails are enforced in code, not prompt text (§6).
+- **`prompts.py`** — *discovery* and *requirements* only. The LLM runtime
+  (`LLMClient.complete_text`) accepts a single prompt string with **no** `system_prompt`
+  parameter, so `AGENT_ANATOMY.md` §5's System/User split lives in code: a `SYSTEM_PROMPT`
+  constant + `build_user_prompt(...)`, re-joined by `build_prompt(...)` into the exact string
+  the runtime consumes. `tests/test_prompts.py` pins that join byte-identical to the
+  pre-split literal.
+
+Per-phase Input→Agent→Output diagrams: [`system_design/agent_anatomy.md`](system_design/agent_anatomy.md).
+
+| Agent package | LLM? | Declared tools (§3) |
+|---------------|------|---------------------|
+| `agents/intake` | no | — |
+| `agents/discovery` | yes | `llm` |
+| `agents/requirements` | yes | `llm` |
+| `agents/synthesis` | no | — |
+| `agents/document_production` | no* | `run_pra`, `wait_pra`, `answer_callback`, `run_architecture_fn` |
+| `agents/sub_agent_provisioning` | no | `start_build_fn`, `wait_build_fn` |
+
+\* Document production does not call the LLM directly; the architecture overview is compacted
+via `compact_text` inside the phase-module helper it reuses.
+
 ## Adapters
 
 The Planning team calls other teams via HTTP:
@@ -105,18 +143,26 @@ planning_team/
 ├── README.md
 ├── models.py           # Request/response, Phase, ClientContext, HandoffPackage, OpenQuestion
 ├── orchestrator.py     # run_workflow: phase order, adapters, LLM
+├── agents/             # Anatomy-conformant persona agents (typed Input/Output, prompts)
+│   ├── __init__.py
+│   ├── intake/                {__init__,agent,models}.py
+│   ├── discovery/             {__init__,agent,prompts,models}.py
+│   ├── requirements/          {__init__,agent,prompts,models}.py
+│   ├── synthesis/             {__init__,agent,models}.py
+│   ├── document_production/   {__init__,agent,models}.py
+│   └── sub_agent_provisioning/{__init__,agent,models}.py
 ├── adapters/
 │   ├── __init__.py
 │   ├── product_analysis.py
 │   ├── market_research.py
 │   └── ai_systems.py
-├── phases/
+├── phases/             # Thin adapters over agents/ (stable run_* seam for orchestrator/Temporal)
 │   ├── __init__.py
 │   ├── intake.py
 │   ├── discovery.py
 │   ├── requirements.py
 │   ├── synthesis.py
-│   ├── document_production.py
+│   ├── document_production.py  # + pinned leaf helpers (_compact_architecture_overview, writers)
 │   └── sub_agent_provisioning.py
 ├── shared/
 │   ├── __init__.py

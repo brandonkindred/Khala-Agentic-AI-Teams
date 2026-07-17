@@ -1,14 +1,14 @@
 """
 Intake phase: client identity, initial brief/spec, existing artifacts.
 
-Builds initial ClientContext from request inputs.
+Thin backward-compatible adapter over ``planning_team.agents.intake.IntakeAgent``:
+maps the request fields to the agent's typed Input and maps the typed Output back to
+the ``(context_update, artifacts)`` tuple the orchestrator/Temporal callers expect.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List
-
-from planning_team.models import ClientContext
 
 
 def run_intake(
@@ -24,19 +24,24 @@ def run_intake(
     Returns (context_update, artifacts). context_update should be merged into the main
     workflow context; artifacts is a dict of phase outputs (e.g. client_context).
     """
-    client_context = ClientContext(
-        client_name=client_name,
-        raw_brief=initial_brief,
-        raw_spec=spec_content,
-        existing_artifacts=existing_artifacts or [],
+    from planning_team.agents.intake import IntakeAgent, IntakeInput
+
+    out = IntakeAgent().run(
+        IntakeInput(
+            repo_path=repo_path,
+            client_name=client_name,
+            initial_brief=initial_brief,
+            spec_content=spec_content,
+            existing_artifacts=existing_artifacts,
+        )
     )
     context_update: Dict[str, Any] = {
-        "client_context": client_context,
-        "repo_path": repo_path,
-        "initial_brief": initial_brief or "",
-        "spec_content": spec_content or "",
+        "client_context": out.client_context,
+        "repo_path": out.repo_path,
+        "initial_brief": out.initial_brief,
+        "spec_content": out.spec_content,
     }
     artifacts: Dict[str, Any] = {
-        "client_context": client_context.model_dump(),
+        "client_context": out.client_context.model_dump(),
     }
     return context_update, artifacts

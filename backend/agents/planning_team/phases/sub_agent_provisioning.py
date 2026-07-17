@@ -1,38 +1,15 @@
 """
 Sub-agent provisioning phase: when capability gap identified, draft agent spec and call AI Systems.
 
-Writes minimal spec to disk, calls AI Systems build, stores blueprint in context.
+Thin backward-compatible adapter over
+``planning_team.agents.sub_agent_provisioning.SubAgentProvisioningAgent``: maps the
+``context`` + ``capability_gap`` to the agent's typed Input, injects the AI-Systems build
+tools, and reconstructs the exact ``(context_update, artifacts)`` tuple from the typed Output.
 """
 
 from __future__ import annotations
 
-import logging
-from pathlib import Path
 from typing import Any, Callable, Dict, Optional
-
-logger = logging.getLogger(__name__)
-
-SUB_AGENT_SPEC_FILENAME = "sub_agent_spec.md"
-
-
-def _default_agent_spec_for_gap(capability_gap: str) -> str:
-    """Generate a minimal agent spec for the AI Systems Team."""
-    return f"""# Sub-agent specification (Planning)
-
-## Problem statement
-{capability_gap}
-
-## Desired outcome
-A single-purpose agent or tool that can perform this capability as part of the Planning workflow.
-
-## Constraints
-- Must be invocable from Python or via HTTP.
-- Inputs and outputs should be clearly defined.
-- No human-in-the-loop required unless the capability inherently needs approval.
-
-## Non-goals
-- Full multi-agent system; only this capability is in scope.
-"""
 
 
 def run_sub_agent_provisioning(
@@ -51,45 +28,24 @@ def run_sub_agent_provisioning(
     wait_build_fn(job_id) -> status dict with optional blueprint.
     Returns (context_update, artifacts).
     """
+    from planning_team.agents.sub_agent_provisioning import (
+        SubAgentProvisioningAgent,
+        SubAgentProvisioningInput,
+    )
+
+    out = SubAgentProvisioningAgent().run(
+        SubAgentProvisioningInput(
+            repo_path=context.get("repo_path", ""),
+            capability_gap=capability_gap,
+        ),
+        start_build_fn=start_build_fn,
+        wait_build_fn=wait_build_fn,
+    )
     context_update: Dict[str, Any] = {}
     artifacts: Dict[str, Any] = {}
-
-    if not capability_gap or not capability_gap.strip():
-        return context_update, artifacts
-
-    repo_path = context.get("repo_path", "")
-    if not repo_path or not start_build_fn or not wait_build_fn:
-        logger.debug("Sub-agent provisioning skipped: missing repo_path or adapter.")
-        return context_update, artifacts
-
-    path = Path(repo_path)
-    path.mkdir(parents=True, exist_ok=True)
-    (path / "plan").mkdir(parents=True, exist_ok=True)
-    spec_path = path / "plan" / SUB_AGENT_SPEC_FILENAME
-    spec_content = _default_agent_spec_for_gap(capability_gap)
-    spec_path.write_text(spec_content, encoding="utf-8")
-    project_name = "planning_sub_agent"
-
-    job_id = start_build_fn(
-        project_name=project_name,
-        spec_path=str(spec_path),
-        constraints={"source": "planning", "capability_gap": capability_gap},
-        output_dir=str(path / "plan" / "sub_agent_output"),
-    )
-    if not job_id:
-        artifacts["sub_agent_provisioning_error"] = "AI Systems build start failed"
-        return context_update, artifacts
-
-    result = wait_build_fn(job_id=job_id)
-    if result.get("status") == "completed" and result.get("blueprint"):
-        blueprint = result.get("blueprint")
-        if hasattr(blueprint, "model_dump"):
-            blueprint = blueprint.model_dump()
-        context_update["sub_agent_blueprint"] = blueprint
-        artifacts["sub_agent_blueprint"] = blueprint
-    else:
-        artifacts["sub_agent_provisioning_error"] = result.get(
-            "error", "Build failed or no blueprint"
-        )
-
+    if out.sub_agent_blueprint is not None:
+        context_update["sub_agent_blueprint"] = out.sub_agent_blueprint
+        artifacts["sub_agent_blueprint"] = out.sub_agent_blueprint
+    elif out.error is not None:
+        artifacts["sub_agent_provisioning_error"] = out.error
     return context_update, artifacts
