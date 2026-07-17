@@ -185,10 +185,14 @@ def test_wrapper_registers_schema_before_temporal_worker() -> None:
     assert "app, 'state'" in body
     assert "postgres_schema" in body
     assert "register_team_schemas" in body
-    # Ordering: registration must precede the worker-start block so the worker never
-    # picks up an activity before its tables exist.
+    # DDL is gated on TEMPORAL_ADDRESS (only runs when the worker will actually
+    # start), so thread/local mode stays side-effect-free at import time.
+    addr_idx = body.index("_os.environ.get('TEMPORAL_ADDRESS', '').strip()")
     reg_idx = body.index("register_team_schemas")
     worker_idx = body.index("_il.import_module('planning_team.temporal.worker')")
+    assert addr_idx < reg_idx
+    # Ordering: registration must precede the worker-start block so the worker never
+    # picks up an activity before its tables exist.
     assert reg_idx < worker_idx
 
 

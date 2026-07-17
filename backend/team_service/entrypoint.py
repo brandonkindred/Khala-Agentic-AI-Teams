@@ -285,29 +285,34 @@ def build_wrapper_body(
     # idempotent and self-disables when Temporal is off. Names are embedded via
     # repr() (injection-safe) and resolved with importlib at runtime.
     if temporal_module and temporal_func:
-        # Register the team's Postgres schema BEFORE starting the Temporal worker.
-        # The worker begins picking up (possibly replayed) activities as soon as it
-        # starts, and a best-effort Postgres write from an activity would hit an
-        # undefined-table error — silently dropping the row — if the worker outran
-        # schema creation on a fresh database (the lifespan's registration doesn't
-        # run until uvicorn starts serving, after this import-time block). The app
+        # Register the team's Postgres schema BEFORE starting the Temporal worker,
+        # but only when TEMPORAL_ADDRESS is set — i.e. only when the worker will
+        # actually start. The worker begins picking up (possibly replayed)
+        # activities as soon as it starts, and a best-effort Postgres write from an
+        # activity would hit an undefined-table error — silently dropping the row —
+        # if the worker outran schema creation on a fresh database (the lifespan's
+        # registration doesn't run until uvicorn starts serving, after this
+        # import-time block). Gating on TEMPORAL_ADDRESS keeps thread/local mode
+        # side-effect-free: no worker start ⇒ no race ⇒ leave DDL to the lifespan,
+        # honoring shared_postgres's "DDL only from the lifespan" contract. The app
         # was imported above, so its schema is on app.state. register_team_schemas
         # is a no-op when POSTGRES_HOST is unset, and CREATE TABLE IF NOT EXISTS is
-        # idempotent, so re-running it in the lifespan later is harmless.
-        body += (
-            "try:\n"
-            "    _schema = getattr(getattr(app, 'state', None), 'postgres_schema', None)\n"
-            "    if _schema is not None:\n"
-            "        from shared_postgres import register_team_schemas as _rts\n"
-            "        _rts(_schema)\n"
-            f"        _log.info('Postgres schema registered before Temporal worker for %s', {team_name!r})\n"
-            "except Exception:\n"
-            "    _log.warning('pre-Temporal Postgres schema registration failed', exc_info=True)\n"
-        )
+        # idempotent, so re-running it in the lifespan later is harmless. Schema
+        # registration is in its own try so a failure is logged but still lets the
+        # worker start. Names are embedded via repr() (injection-safe) and resolved
+        # with importlib at runtime.
         body += (
             "try:\n"
             "    import os as _os\n"
             "    if _os.environ.get('TEMPORAL_ADDRESS', '').strip():\n"
+            "        try:\n"
+            "            _schema = getattr(getattr(app, 'state', None), 'postgres_schema', None)\n"
+            "            if _schema is not None:\n"
+            "                from shared_postgres import register_team_schemas as _rts\n"
+            "                _rts(_schema)\n"
+            f"                _log.info('Postgres schema registered before Temporal worker for %s', {team_name!r})\n"
+            "        except Exception:\n"
+            "            _log.warning('pre-Temporal Postgres schema registration failed', exc_info=True)\n"
             "        import importlib as _il\n"
             f"        _twfn = getattr(_il.import_module({temporal_module!r}), {temporal_func!r})\n"
             "        if _twfn():\n"
