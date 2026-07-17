@@ -9,6 +9,6 @@ from pathlib import Path
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
-_arch_dir = _team_dir / "architect-agents"
+_arch_dir = _team_dir / "architect_agents"
 if _arch_dir.exists() and str(_arch_dir) not in sys.path:
     sys.path.insert(0, str(_arch_dir))

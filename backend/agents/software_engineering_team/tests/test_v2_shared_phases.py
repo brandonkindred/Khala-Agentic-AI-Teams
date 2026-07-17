@@ -901,3 +901,37 @@ def test_write_files_and_commit_reports_unsafe_path_as_failure(tmp_path: Path):
     assert ok is False
     assert "unsafe" in msg.lower()
     assert not (tmp_path / "good.py").exists()
+
+
+# --- deliberate wrapper duplication drift guard ------------------------------
+
+
+@pytest.mark.parametrize("phase_module", ["deliver.py", "documentation.py"])
+def test_v2_team_phase_wrappers_stay_byte_identical(phase_module: str) -> None:
+    """The backend and frontend copies of a v2 phase wrapper are byte-identical.
+
+    The two teams deliberately keep separate copies of ``phases/deliver.py``
+    and ``phases/documentation.py``: each copy is the per-team monkeypatch
+    boundary that wires that team's models into the shared implementations in
+    ``shared/phases/``. They must stay separate — but they must also stay
+    identical, so a one-sided edit (a fix applied to one team only) fails
+    loudly here instead of silently forking the behavior.
+
+    Preconditions:
+        - Both team packages are importable (their ``__init__`` resolves).
+
+    Postconditions:
+        - Asserts the two wrapper files' raw bytes are equal; on failure the
+          fix is to apply the same edit to both copies (or move the shared
+          part into ``shared/phases/``).
+    """
+    import software_engineering_team.backend_code_v2_team as be_pkg
+    import software_engineering_team.frontend_code_v2_team as fe_pkg
+
+    be_file = Path(be_pkg.__file__).parent / "phases" / phase_module
+    fe_file = Path(fe_pkg.__file__).parent / "phases" / phase_module
+    assert be_file.read_bytes() == fe_file.read_bytes(), (
+        f"{phase_module} has drifted between backend_code_v2_team and "
+        "frontend_code_v2_team; these wrappers are deliberate duplicates and "
+        "every edit must be applied to both copies"
+    )

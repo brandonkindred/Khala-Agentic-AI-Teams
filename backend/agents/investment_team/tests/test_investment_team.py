@@ -1875,6 +1875,7 @@ def _make_lab_record(
         strategy=strategy,
         backtest=backtest,
         is_winning=winning,
+        is_publishable=winning,
         strategy_rationale="rationale",
         analysis_narrative="narrative",
         created_at="2024-01-01T00:01:00Z",
@@ -1959,6 +1960,41 @@ def test_cycle_skips_paper_trading_when_disabled(monkeypatch) -> None:
     assert record.paper_trading_status == "skipped"
     assert record.paper_trading_skipped_reason == "disabled"
     assert record.paper_trading_session_id is None
+
+
+def test_cycle_skips_paper_trading_when_not_publishable(monkeypatch) -> None:
+    """Winning but non-publishable: skip with gate codes; never call the helper."""
+    from investment_team.api import main as api_main
+
+    _install_inmemory_stores(monkeypatch)
+
+    def _should_not_be_called(**kwargs):
+        raise AssertionError("Paper trading must not run for non-publishable strategies")
+
+    monkeypatch.setattr(api_main, "_run_paper_trading_step", _should_not_be_called)
+
+    phases: list[str] = []
+
+    def capture_phase(phase: str, data=None) -> None:
+        phases.append(phase)
+
+    record_in = _make_lab_record(winning=True)
+    record_in.is_publishable = False
+    record_in.publishability_skip_reason = "realism_failed"
+
+    record = api_main._run_one_strategy_lab_cycle(
+        _cycle_backtest_config(),
+        _FakeOrchestrator(record_in),
+        on_phase=capture_phase,
+        paper_trading_enabled=True,
+    )
+
+    assert record.is_winning is True
+    assert record.is_publishable is False
+    assert record.paper_trading_status == "skipped"
+    assert record.paper_trading_skipped_reason == "realism_failed"
+    assert "paper_trading_skipped" in phases
+    assert "paper_trading" not in phases
 
 
 def test_cycle_skips_paper_trading_when_strategy_code_missing(monkeypatch) -> None:

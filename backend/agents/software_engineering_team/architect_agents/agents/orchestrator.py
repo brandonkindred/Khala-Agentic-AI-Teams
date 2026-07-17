@@ -10,14 +10,6 @@ _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from strands import Agent  # noqa: E402
-from tools import (  # noqa: E402
-    aws_pricing_tool,
-    document_writer_tool,
-    file_read_tool,
-    web_search_tool,
-)
-
 from agents.api_design import api_design_architect  # noqa: E402
 from agents.application import application_architect  # noqa: E402
 from agents.architecture_scrutineer import architecture_scrutineer  # noqa: E402
@@ -27,6 +19,13 @@ from agents.data_streaming import data_streaming_architect  # noqa: E402
 from agents.devops import devops_architect  # noqa: E402
 from agents.observability import observability_architect  # noqa: E402
 from agents.security import security_architect  # noqa: E402
+from strands import Agent  # noqa: E402
+from tools import (  # noqa: E402
+    aws_pricing_tool,
+    document_writer_tool,
+    file_read_tool,
+    web_search_tool,
+)
 
 _PROMPT_PATH = _root / "prompts" / "orchestrator.md"
 

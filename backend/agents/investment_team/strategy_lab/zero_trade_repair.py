@@ -576,6 +576,9 @@ class ZeroTradeRepairer:
         new_metrics = compute_metrics(
             new_trades, ctx.config.initial_capital, ctx.config.start_date, ctx.config.end_date
         )
+        from ._orchestrator_helpers import _attach_execution_diagnostics
+
+        _attach_execution_diagnostics(metrics=new_metrics, exec_result=repair_exec)
 
         # Repair re-execution path also attaches a CoverageReport when the
         # proposed fix produces zero/low trades.

@@ -697,6 +697,21 @@ export interface StrategyLabRecord {
   strategy: StrategySpec;
   backtest: BacktestRecord;
   is_winning: boolean;
+  /**
+   * True when the record clears return threshold + realism/alignment/
+   * conformance/lookahead gates. Paper-trading is gated on this flag.
+   * Missing on legacy rows — treat as false.
+   */
+  is_publishable?: boolean;
+  /**
+   * Comma-joined failing publishability gate codes when winning but not
+   * publishable. Null/undefined when publishable or on legacy rows.
+   */
+  publishability_skip_reason?: string | null;
+  /** Integrated paper-trade step status: skipped | completed | failed. */
+  paper_trading_status?: string | null;
+  /** Skip reason when paper_trading_status === 'skipped'. */
+  paper_trading_skipped_reason?: string | null;
   strategy_rationale: string;
   analysis_narrative: string;
   created_at: string;

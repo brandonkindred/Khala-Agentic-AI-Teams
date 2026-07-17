@@ -657,7 +657,7 @@ def test_run_verification_and_analysis_activity_round_trips_convergence_tracker(
     def _fake_orchestrate(self, **kwargs):
         captured["trial_count_in"] = self.convergence_tracker.trial_count
         self.convergence_tracker.increment_trials(1)
-        return kwargs["metrics"], True, "narrative text"
+        return kwargs["metrics"], True, True, None, "narrative text"
 
     monkeypatch.setattr(
         StrategyLabOrchestrator, "_orchestrate_verification_and_analysis", _fake_orchestrate

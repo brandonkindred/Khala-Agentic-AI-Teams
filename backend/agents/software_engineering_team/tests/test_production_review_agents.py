@@ -374,7 +374,7 @@ class TestFrontendBackgroundPassesReviewAgents:
         # ``_build_production_review_kwargs`` is bound at module-level in background.py
         # as an alias for ``build_production_review_kwargs`` — patch the bound name directly.
         with (
-            patch("frontend_code_v2_team.FrontendCodeV2TeamLead", return_value=fake_team_lead),
+            patch("software_engineering_team.frontend_code_v2_team.FrontendCodeV2TeamLead", return_value=fake_team_lead),
             patch.object(bg, "_build_production_review_kwargs", return_value=review_kwargs),
         ):
             bg._run_frontend_code_v2_background(
@@ -425,7 +425,7 @@ class TestBackendBackgroundPassesReviewAgents:
 
         monkeypatch.setenv("LLM_PROVIDER", "dummy")
         with (
-            patch("backend_code_v2_team.BackendCodeV2TeamLead", return_value=fake_team_lead),
+            patch("software_engineering_team.backend_code_v2_team.BackendCodeV2TeamLead", return_value=fake_team_lead),
             patch.object(bg, "_build_production_review_kwargs", return_value=review_kwargs),
         ):
             bg._run_backend_code_v2_background(
@@ -469,9 +469,14 @@ class TestValidateFindingsNullsOutOfRangeLines:
     """
 
     def test_out_of_range_line_is_nulled(self) -> None:
-        from code_review_agent.architecture_consistency_pass import _validate_findings
-        from code_review_agent.false_positive_filter import CodebaseIndex
-        from code_review_agent.models import CodeReviewInput, CodeReviewIssue
+        from software_engineering_team.code_review_agent.architecture_consistency_pass import (
+            _validate_findings,
+        )
+        from software_engineering_team.code_review_agent.false_positive_filter import CodebaseIndex
+        from software_engineering_team.code_review_agent.models import (
+            CodeReviewInput,
+            CodeReviewIssue,
+        )
 
         # 2-line file
         files = {"main.py": "def hello():\n    return 'hi'\n"}
@@ -491,9 +496,14 @@ class TestValidateFindingsNullsOutOfRangeLines:
         assert validated[1].line is None, "out-of-range line must be nulled"
 
     def test_in_range_line_is_preserved(self) -> None:
-        from code_review_agent.architecture_consistency_pass import _validate_findings
-        from code_review_agent.false_positive_filter import CodebaseIndex
-        from code_review_agent.models import CodeReviewInput, CodeReviewIssue
+        from software_engineering_team.code_review_agent.architecture_consistency_pass import (
+            _validate_findings,
+        )
+        from software_engineering_team.code_review_agent.false_positive_filter import CodebaseIndex
+        from software_engineering_team.code_review_agent.models import (
+            CodeReviewInput,
+            CodeReviewIssue,
+        )
 
         files = {"utils.py": "x = 1\ny = 2\nz = 3\n"}
         index = CodebaseIndex.from_input(CodeReviewInput(files=files))
@@ -506,9 +516,14 @@ class TestValidateFindingsNullsOutOfRangeLines:
 
     def test_no_file_path_finding_passes_through(self) -> None:
         """A finding with no file_path (structural / cross-file issue) is not dropped."""
-        from code_review_agent.architecture_consistency_pass import _validate_findings
-        from code_review_agent.false_positive_filter import CodebaseIndex
-        from code_review_agent.models import CodeReviewInput, CodeReviewIssue
+        from software_engineering_team.code_review_agent.architecture_consistency_pass import (
+            _validate_findings,
+        )
+        from software_engineering_team.code_review_agent.false_positive_filter import CodebaseIndex
+        from software_engineering_team.code_review_agent.models import (
+            CodeReviewInput,
+            CodeReviewIssue,
+        )
 
         files = {"a.py": "pass\n"}
         index = CodebaseIndex.from_input(CodeReviewInput(files=files))

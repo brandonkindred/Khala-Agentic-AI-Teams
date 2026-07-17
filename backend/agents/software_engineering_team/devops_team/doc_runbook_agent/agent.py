@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from devops_team.models import (
+from llm_service import LLMClient, get_strands_model
+from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.devops_team.models import (
     DevOpsCompletionPackage,
     GitOperationsMetadata,
     HandoffInfo,
     ReleaseReadiness,
 )
-
-from llm_service import LLMClient, get_strands_model
-from llm_service.strands_model import resolve_strands_model
 from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import DocumentationRunbookInput, DocumentationRunbookOutput

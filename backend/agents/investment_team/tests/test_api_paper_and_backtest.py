@@ -115,6 +115,7 @@ def _winning_record():
         strategy=strat,
         backtest=bt,
         is_winning=True,
+        is_publishable=True,
         strategy_rationale="r",
         analysis_narrative="n",
         created_at="2024-01-01T01:00:00Z",

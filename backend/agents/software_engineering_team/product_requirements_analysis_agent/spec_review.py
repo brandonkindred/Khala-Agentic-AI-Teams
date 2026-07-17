@@ -38,7 +38,7 @@ def format_context_for_review(context_files: Dict[str, str]) -> str:
     if not context_files:
         return ""
 
-    from spec_parser import format_context_for_prompt
+    from software_engineering_team.spec_parser import format_context_for_prompt
 
     formatted = format_context_for_prompt(context_files)
 

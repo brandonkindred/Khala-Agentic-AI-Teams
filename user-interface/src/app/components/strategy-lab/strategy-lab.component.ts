@@ -1007,6 +1007,13 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   runPaperTrading(record: StrategyLabRecord): void {
+    if (!record.is_publishable) {
+      const reason = this.publishabilitySkipLabel(record);
+      this.error =
+        'This strategy is not publishable and cannot be paper traded' +
+        (reason ? ` (${reason})` : '.');
+      return;
+    }
     this.error = null;
     this.paperTradingLabRecordId = record.lab_record_id;
     this.api
@@ -1024,6 +1031,23 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         this.error = err?.error?.detail || err?.message || 'Paper trading failed.';
       },
     });
+  }
+
+  /**
+   * Human-readable publishability skip reason for a winning-but-blocked record.
+   *
+   * Preconditions: ``record`` is a loaded lab row.
+   * Postconditions: returns the persisted skip reason when present, else null.
+   */
+  publishabilitySkipLabel(record: StrategyLabRecord): string | null {
+    const reason =
+      record.publishability_skip_reason ||
+      (record.paper_trading_skipped_reason &&
+      record.paper_trading_skipped_reason !== 'not_winning' &&
+      record.paper_trading_skipped_reason !== 'disabled'
+        ? record.paper_trading_skipped_reason
+        : null);
+    return reason || null;
   }
 
   /** Poll GET /strategy-lab/paper-trade/{session_id} until status is terminal. */

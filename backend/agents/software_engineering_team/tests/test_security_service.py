@@ -155,11 +155,13 @@ def test_build_review_prompt_rejects_unknown_profile() -> None:
 def test_migrated_constants_match_service_output() -> None:
     """Equivalence guard: the team prompt constants are exactly what the
     service builds, so the legacy text the existing tests parse is unchanged."""
-    from backend_code_v2_team.prompts import (
+    from software_engineering_team.backend_code_v2_team.prompts import (
         SECURITY_TOOL_AGENT_REVIEW_PROMPT as backend_prompt,
     )
-    from devops_team.devsecops_review_agent.prompts import DEVSECOPS_REVIEW_PROMPT
-    from frontend_code_v2_team.prompts import (
+    from software_engineering_team.devops_team.devsecops_review_agent.prompts import (
+        DEVSECOPS_REVIEW_PROMPT,
+    )
+    from software_engineering_team.frontend_code_v2_team.prompts import (
         SECURITY_TOOL_AGENT_REVIEW_PROMPT as frontend_prompt,
     )
 
@@ -189,7 +191,7 @@ class _StubPolicyRunner:
 
 
 def test_run_policy_scan_uses_injected_runner() -> None:
-    from devops_team.tool_agents.policy_as_code import PolicyAsCodeOutput
+    from software_engineering_team.devops_team.tool_agents.policy_as_code import PolicyAsCodeOutput
 
     canned = PolicyAsCodeOutput(success=True, checks={"policy_checks": "skipped"})
     runner = _StubPolicyRunner(canned)
@@ -204,7 +206,7 @@ def test_run_policy_scan_requires_repo_path() -> None:
 
 
 def test_run_policy_scan_default_runner_constructed_lazily(monkeypatch) -> None:
-    import devops_team.tool_agents.policy_as_code as pac
+    import software_engineering_team.devops_team.tool_agents.policy_as_code as pac
 
     sentinel = pac.PolicyAsCodeOutput(success=False, checks={"policy_checks": "fail"})
 

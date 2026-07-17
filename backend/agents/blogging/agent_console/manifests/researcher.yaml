@@ -11,10 +11,6 @@ inputs:
   schema_ref: blogging.blog_research_agent.models:ResearchBriefInput
 outputs:
   schema_ref: blogging.blog_research_agent.models:ResearchAgentOutput
-invoke:
-  kind: http
-  method: POST
-  path: /api/blogging/research
 sandbox:
   manifest_path: default.yaml
   access_tier: standard

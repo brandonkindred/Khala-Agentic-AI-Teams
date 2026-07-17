@@ -215,7 +215,7 @@ class ProductRequirementsAnalysisAgent:
 
         logger.info("Product Requirements Analysis Agent: WORKFLOW START")
 
-        from spec_parser import get_next_updated_spec_version
+        from software_engineering_team.spec_parser import get_next_updated_spec_version
 
         base_version = get_next_updated_spec_version(repo_path)
         product_analysis_dir = repo_path / "plan" / "product_analysis"
