@@ -204,6 +204,29 @@ def test_cleanup_setup_removes_record_before_deprovisioning(tmp_path: Path) -> N
     )
 
 
+def test_cleanup_setup_reports_failed_teardown(tmp_path: Path, caplog) -> None:
+    """A teardown that reports failure must surface as False, not silent success.
+
+    The provisioner keeps its state row on a failed removal, so the surviving
+    container stays reachable by agent id — but the caller must know cleanup
+    was partial.
+    """
+    from agent_provisioning_team.models import DeprovisionResult
+    from agent_provisioning_team.phases.setup import cleanup_setup
+
+    docker = MagicMock()
+    docker.deprovision.return_value = DeprovisionResult(
+        tool_name="docker", success=False, error="docker rm failed: device busy"
+    )
+    env_store = MagicMock()
+
+    with caplog.at_level(logging.ERROR):
+        result = cleanup_setup("a1", environment_store=env_store, docker_provisioner=docker)
+
+    assert result is False
+    assert "device busy" in caplog.text
+
+
 # Rollback-scenario helpers: every case arranges the same shape — a provision
 # result, a (possibly failing) register, and an ownership state — so the
 # factories keep each test down to its meaningful delta.
@@ -317,6 +340,22 @@ def test_run_setup_reclaims_reused_orphan_with_no_env_record() -> None:
     _run_setup_expecting("register boom", "a7", env_store, docker)
 
     docker.deprovision.assert_called_once_with("a7")
+
+
+def test_run_setup_preserves_reused_container_when_registry_unreadable() -> None:
+    """A missing record is only proof of an orphan when the registry is readable.
+
+    get() maps unreadable-store errors (e.g. EACCES) to None, so with the
+    registry unreadable a healthy reused container would look like an orphan;
+    the rollback must preserve it when ownership cannot be established.
+    """
+    env_store = _rollback_env_store(get=None)
+    env_store.readable.return_value = False
+    docker = _docker_stub(container_id="c-live", container_name="agent-a9", reused=True)
+
+    _run_setup_expecting("register boom", "a9", env_store, docker)
+
+    docker.deprovision.assert_not_called()
 
 
 def test_run_setup_preserves_container_adopted_by_concurrent_job() -> None:

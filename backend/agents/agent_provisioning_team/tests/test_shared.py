@@ -135,6 +135,20 @@ def test_environment_store_register_is_atomic_on_write_failure(tmp_path: Path) -
     assert [p for p in tmp_path.iterdir() if p.name.startswith(".")] == []
 
 
+def test_environment_store_readable_probe(tmp_path: Path) -> None:
+    """readable() is True for a listable store and False when listing fails.
+
+    Preconditions: ``tmp_path`` is an empty, writable directory.
+    Postconditions: a healthy store probes True; an OSError from the directory
+    listing (e.g. EACCES) probes False without raising.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+    assert store.readable() is True
+
+    with patch.object(Path, "iterdir", side_effect=OSError("permission denied")):
+        assert store.readable() is False
+
+
 def test_environment_store_get_never_raises_on_unreadable_path(tmp_path: Path) -> None:
     """``get`` honors its never-raises contract even when Path.exists raises.
 
@@ -377,7 +391,9 @@ def test_environment_store_list_all_dedupes_by_agent_id_not_stem(tmp_path: Path)
     """A legacy file whose stem differs from its agent_id must not produce a duplicate."""
     store = EnvironmentStore(storage_dir=tmp_path)
     store.register(
-        StoreEnvInfo(agent_id="agent_123", container_id="c1", container_name="c1", workspace_path="/w")
+        StoreEnvInfo(
+            agent_id="agent_123", container_id="c1", container_name="c1", workspace_path="/w"
+        )
     )
     # Legacy file named differently from the agent_id it contains.
     (tmp_path / "backup.json").write_text(

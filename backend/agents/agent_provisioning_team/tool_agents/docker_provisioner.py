@@ -19,6 +19,23 @@ from .base import BaseToolProvisioner
 
 logger = logging.getLogger(__name__)
 
+
+def _reports_container_absent(stderr: Optional[str]) -> bool:
+    """Report whether a docker CLI error message means the container is absent.
+
+    Preconditions:
+        * ``stderr`` is the captured stderr of a docker command (or ``None``).
+    Postconditions:
+        * Returns ``True`` only for the daemon's specific missing-container /
+          missing-object responses. Broad substrings like ``"no such"`` alone
+          would also match infrastructure errors ("no such file or directory"
+          from a missing daemon socket or storage path), which must NOT be
+          mistaken for proof of absence.
+    """
+    text = (stderr or "").lower()
+    return "no such container" in text or "no such object" in text
+
+
 # Every sandbox is provisioned with full access — there is no permission
 # tier ladder (#456). Tool provisioners record their canonical full set
 # here so onboarding docs / audit reports keep listing what the agent has.
@@ -111,15 +128,22 @@ class DockerProvisionerTool(BaseToolProvisioner):
                 text=True,
                 timeout=120,
             )
-        except subprocess.TimeoutExpired:
+        except Exception:
+            # Not just TimeoutExpired: any post-launch failure (e.g. decoding
+            # the captured output) can strike after the daemon already created
+            # the container, so every raising path gets the guarded cleanup.
             if existed_before is False:
                 self._best_effort_remove_container(container_name)
             raise
 
         if result.returncode != 0:
-            if existed_before is False:
+            stderr = result.stderr or ""
+            # A name-conflict failure proves this run created nothing — the
+            # container belongs to whoever won the name after our probe (e.g. a
+            # concurrent provision attempt) — so removal must never fire then.
+            if existed_before is False and "already in use" not in stderr.lower():
                 self._best_effort_remove_container(container_name)
-            raise RuntimeError(f"Docker run failed: {result.stderr}")
+            raise RuntimeError(f"Docker run failed: {stderr}")
 
         container_id = result.stdout.strip()[:12]
         permissions = list(_FULL_DOCKER_PERMISSIONS)
@@ -210,7 +234,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
             return None
         if probe.returncode == 0:
             return True
-        if "no such" in (probe.stderr or "").lower():
+        if _reports_container_absent(probe.stderr):
             return False
         return None
 
@@ -236,7 +260,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
                 timeout=30,
             )
             stderr = removal.stderr or ""
-            if removal.returncode != 0 and "no such" not in stderr.lower():
+            if removal.returncode != 0 and not _reports_container_absent(stderr):
                 logger.error(
                     "Best-effort removal of partially created container %s exited "
                     "nonzero; container may survive and block reprovisioning: %s",
@@ -277,7 +301,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
                 timeout=30,
             )
             stderr = removal.stderr or ""
-            if removal.returncode != 0 and "no such" not in stderr.lower():
+            if removal.returncode != 0 and not _reports_container_absent(stderr):
                 # Removal genuinely failed and the container may still exist.
                 # Keep the state row — deleting it would leave the live container
                 # untracked, unreachable by any later deprovision-by-agent-id, and

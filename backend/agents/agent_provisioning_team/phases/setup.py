@@ -201,6 +201,17 @@ def _rollback_failed_setup(
         if current is not None:
             # Ours never landed, so this record is a concurrent owner's.
             return
+        # A missing record only proves an orphan when the registry itself is
+        # readable: get() maps unreadable-store errors (e.g. EACCES) to None,
+        # and destroying a reused container on masked evidence could kill a
+        # healthy agent whose record simply cannot be read right now.
+        if not env_store.readable():
+            logger.error(
+                "Setup rollback: environment registry unreadable for agent_id=%s; "
+                "preserving reused container (ownership unknown)",
+                agent_id,
+            )
+            return
         # Reused orphan (no record anywhere): reclaim it.
     elif current is not None and (existing is None or current.to_dict() != existing.to_dict()):
         # We created the container, but a concurrent job has since registered a
@@ -242,13 +253,25 @@ def cleanup_setup(
           place so record and container stay consistent — deleting the container
           while a ``running`` record survived would let a later ``run_setup``'s
           fast path short-circuit onto a dead container.
-        * Returns ``True`` when both steps completed.
+        * Returns ``True`` only when the record was removed AND the container
+          teardown reported success. A teardown that reports failure is logged
+          and yields ``False``; the provisioner keeps its state row in that case
+          (see ``DockerProvisionerTool.deprovision``), so the surviving
+          container remains reachable by agent id for a later retry.
     """
     assert agent_id, "agent_id must be non-empty"
     env_store = environment_store or EnvironmentStore()
     docker = docker_provisioner or DockerProvisionerTool()
 
     env_store.remove(agent_id)
-    docker.deprovision(agent_id)
+    teardown = docker.deprovision(agent_id)
+    if not teardown.success:
+        logger.error(
+            "Cleanup: container teardown for agent_id=%s failed; container may "
+            "survive (provisioner state retained for retry): %s",
+            agent_id,
+            teardown.error,
+        )
+        return False
 
     return True

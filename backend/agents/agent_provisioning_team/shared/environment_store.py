@@ -314,6 +314,29 @@ class EnvironmentStore:
         with _lock:
             self._write_env_data(env_info.agent_id, env_info.to_dict())
 
+    def readable(self) -> bool:
+        """Report whether the primary storage directory is currently readable.
+
+        Preconditions:
+            * None.
+        Postconditions:
+            * Returns ``True`` iff the primary storage directory can be created
+              (if missing) and listed; never raises.
+
+        ``get`` maps unreadable-store errors (e.g. EACCES) to "record absent",
+        which is safe for lookups but not for destructive decisions. Callers
+        about to act destructively on a ``get() is None`` result combine it with
+        this probe to distinguish genuine absence from a store that cannot be
+        read right now.
+        """
+        try:
+            with _lock:
+                self.storage_dir.mkdir(parents=True, exist_ok=True)
+                next(iter(self.storage_dir.iterdir()), None)
+            return True
+        except OSError:
+            return False
+
     def get(self, agent_id: str) -> Optional[EnvironmentInfo]:
         """Get environment info for an agent.
 

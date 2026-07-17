@@ -310,6 +310,53 @@ def test_docker_provisioner_preserves_preexisting_container_on_failed_run(
     assert not any(cmd[:3] == ["docker", "rm", "-f"] for cmd in calls)
 
 
+def test_docker_provisioner_skips_removal_on_name_conflict(tmp_path: Path) -> None:
+    """A name-conflict run failure must never remove the conflicting container.
+
+    Two concurrent setups can both probe the name as absent; the loser's `docker
+    run` fails with "already in use" — which proves its run created nothing and
+    the container is the winner's. Removing by name would destroy the winner's
+    live container just before it registers.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    conflict = SimpleNamespace(
+        returncode=125,
+        stdout="",
+        stderr='Conflict. The container name "/agent-agent-1" is already in use by container "abc"',
+    )
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=conflict)):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert not any(cmd[:3] == ["docker", "rm", "-f"] for cmd in calls)
+
+
+def test_docker_provisioner_cleans_up_on_post_launch_exception(tmp_path: Path) -> None:
+    """A post-launch exception (e.g. output decoding) still triggers cleanup.
+
+    subprocess.run can raise after the daemon created the container; only
+    handling TimeoutExpired would leave that container untracked and its name
+    blocking future provisions.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    decode_error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=decode_error)):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert ["docker", "rm", "-f", "agent-agent-1"] in calls
+
+
 def test_docker_provisioner_logs_failed_best_effort_removal(tmp_path: Path, caplog) -> None:
     """A best-effort `docker rm -f` that exits nonzero must be logged, not silent."""
     from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
@@ -450,6 +497,31 @@ def test_docker_deprovision_reports_failure_and_keeps_state_on_rm_error(
 
     assert out.success is False
     assert "device busy" in out.error
+    assert prov._state.get("a1") is not None
+
+
+def test_docker_deprovision_infrastructure_error_is_not_absence(tmp_path: Path) -> None:
+    """'no such file or directory' (daemon/storage error) must not pass as absence.
+
+    Only the daemon's specific missing-container response proves the container
+    is gone; a broad "no such" match would delete the state row on an
+    infrastructure error while the container may still be alive.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put("a1", {"container_name": "c1"})
+
+    infra = SimpleNamespace(
+        returncode=1,
+        stdout="",
+        stderr="error during connect: open //./pipe/docker: no such file or directory",
+    )
+    with patch("subprocess.run", return_value=infra):
+        out = prov.deprovision("a1")
+
+    assert out.success is False
     assert prov._state.get("a1") is not None
 
 
