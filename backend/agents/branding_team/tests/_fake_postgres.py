@@ -467,13 +467,13 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
     monkeypatch.setattr(store_mod, "get_conn", _fake_get_conn)
     monkeypatch.setattr(assistant_store_mod, "get_conn", _fake_get_conn)
 
-    # ``branding_team.api.main`` imports ``get_conn`` at module scope for the
+    # ``branding_team.api.state`` imports ``get_conn`` at module scope for the
     # BrandingSessionStore. Patch there too when already imported.
     import sys
 
-    api_main = sys.modules.get("branding_team.api.main")
-    if api_main is not None:
-        monkeypatch.setattr(api_main, "get_conn", _fake_get_conn)
+    api_state = sys.modules.get("branding_team.api.state")
+    if api_state is not None:
+        monkeypatch.setattr(api_state, "get_conn", _fake_get_conn)
     return db
 
 

@@ -1290,11 +1290,13 @@ class RuleImplementationMap(BaseModel):
 class StrategyLabRecord(BaseModel):
     """Result of one strategy ideation + backtest + analysis (+ optional paper trading) cycle.
 
-    When ``is_winning`` is True and paper trading is enabled on the run, the
+    When ``is_publishable`` is True and paper trading is enabled on the run, the
     cycle also executes a paper-trading step and stores the session id and
     verdict here so clients can surface "winner + paper-trade verdict" without
     a separate lookup. Losing strategies short-circuit with
     ``paper_trading_status = "skipped"`` and ``paper_trading_skipped_reason = "not_winning"``.
+    Winning-but-not-publishable strategies short-circuit with the joined
+    gate codes from ``publishability_skip_reason``.
     """
 
     @classmethod
@@ -1308,6 +1310,22 @@ class StrategyLabRecord(BaseModel):
     strategy: StrategySpec
     backtest: BacktestRecord
     is_winning: bool  # deterministic: annualized_return_pct >= WINNING_THRESHOLD (8% S&P benchmark) on a valid run; robustness gates record caveats but never flip this
+    is_publishable: bool = Field(
+        default=False,
+        description=(
+            "True when is_winning and realism/alignment/exit-rule/lookahead "
+            "gates all clear. Paper-trading gates on this flag. Missing on "
+            "legacy rows → False."
+        ),
+    )
+    publishability_skip_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "Comma-joined failing publishability gate codes in veto order "
+            "(exit_rule_conformance_failed, realism_failed, alignment_unresolved, "
+            "lookahead_violation). None when is_publishable is True or on legacy rows."
+        ),
+    )
     strategy_rationale: str  # why the agent chose this strategy
     analysis_narrative: str  # LLM post-backtest analysis
     created_at: str
@@ -1364,7 +1382,10 @@ class StrategyLabRecord(BaseModel):
     )
     paper_trading_skipped_reason: Optional[str] = Field(
         default=None,
-        description="'not_winning' | 'disabled' | 'no_market_data'; only set when status=='skipped'.",
+        description=(
+            "'not_winning' | joined publishability gate codes | 'disabled' | "
+            "'no_market_data' | 'no_strategy_code'; only set when status=='skipped'."
+        ),
     )
     paper_trading_error: Optional[str] = None
     paper_trading_verdict: Optional[PaperTradingVerdict] = None

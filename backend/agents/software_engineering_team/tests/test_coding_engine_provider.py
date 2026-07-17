@@ -23,7 +23,7 @@ def test_import_bootstraps_se_team_dir_on_syspath() -> None:
     """
     team_dir = Path(__file__).resolve().parent.parent
     assert str(team_dir) in sys.path
-    assert str(team_dir / "architect-agents") in sys.path
+    assert str(team_dir / "architect_agents") in sys.path
     # The bare team-local name the engines depend on must now be discoverable.
     assert (team_dir / "code_review_agent").is_dir()
 

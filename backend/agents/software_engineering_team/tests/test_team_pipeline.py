@@ -1,9 +1,8 @@
-"""Integration tests for the full software engineering team pipeline."""
+"""Integration tests for the software engineering specialist pipeline."""
 
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
 from qa_agent import QAExpertAgent, QAInput
 from security_agent import CybersecurityExpertAgent, SecurityInput
-from tech_lead_agent import TechLeadAgent, TechLeadInput
 
 from llm_service import DummyLLMClient
 from software_engineering_team.shared.models import ProductRequirements
@@ -11,9 +10,12 @@ from software_engineering_team.shared.models import ProductRequirements
 
 def test_full_pipeline_with_dummy_llm() -> None:
     """
-    Run Architecture -> Tech Lead -> Specialists with DummyLLMClient.
+    Run Architecture -> Specialists with DummyLLMClient.
 
-    Verifies the pipeline completes without errors and produces expected outputs.
+    Verifies the pipeline completes without errors and produces expected
+    outputs. Task planning and code generation are owned by the coding_team
+    pipeline, so this test covers the remaining SE specialists that the
+    thread-mode orchestrator can still fan out to.
     """
     spec = """
 # Task Manager API
@@ -49,41 +51,21 @@ Build a REST API for task management.
     assert arch_output.architecture.overview
     architecture = arch_output.architecture
 
-    # Tech Lead
-    tech_lead = TechLeadAgent(llm_client=llm)
-    tech_output = tech_lead.run(TechLeadInput(requirements=requirements, architecture=architecture))
-    assignment = tech_output.assignment
-    assert assignment.tasks
-    assert assignment.execution_order
+    # Specialist gates run against the architecture produced above.
+    security_result = CybersecurityExpertAgent(llm).run(
+        SecurityInput(
+            code="",
+            task_description="Review authentication and data handling for the API",
+            architecture=architecture,
+        )
+    )
+    assert security_result.vulnerabilities is not None
 
-    # Run each specialist for their assigned tasks. Backend/frontend code generation is now owned
-    # by the coding_team pipeline, so this pipeline test covers the remaining SE specialists.
-    agent_map = {
-        "security": CybersecurityExpertAgent(llm),
-        "qa": QAExpertAgent(llm),
-    }
-
-    for task_id in assignment.execution_order:
-        task = next((t for t in assignment.tasks if t.id == task_id), None)
-        if not task or task.assignee not in agent_map:
-            continue
-
-        agent = agent_map[task.assignee]
-        if task.assignee == "security":
-            result = agent.run(
-                SecurityInput(
-                    code="",
-                    task_description=task.description,
-                    architecture=architecture,
-                )
-            )
-            assert result.vulnerabilities is not None
-        elif task.assignee == "qa":
-            result = agent.run(
-                QAInput(
-                    code="",
-                    task_description=task.description,
-                    architecture=architecture,
-                )
-            )
-            assert result.bugs_found is not None
+    qa_result = QAExpertAgent(llm).run(
+        QAInput(
+            code="",
+            task_description="Exercise CRUD and auth flows for the API",
+            architecture=architecture,
+        )
+    )
+    assert qa_result.bugs_found is not None

@@ -133,7 +133,7 @@ class TestOrchestratorRegistration:
 
         agents = _get_agents()
         assert "backend" in agents
-        from backend_code_v2_team import BackendCodeV2TeamLead
+        from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
 
         assert isinstance(agents["backend"], BackendCodeV2TeamLead)
         # Replaced standalone backend_code_v2 key with backend

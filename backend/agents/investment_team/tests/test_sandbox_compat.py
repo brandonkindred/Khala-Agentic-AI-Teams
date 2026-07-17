@@ -290,6 +290,54 @@ def test_probe_events_default_to_none_on_dataclass() -> None:
     construction site that didn't pass the field gets ``None``."""
     r = sandbox_compat.StrategyRunResult(success=True)
     assert r.probe_events is None
+    assert r.cost_stress_results is None
+
+
+def test_cost_stress_results_propagate_through_success_path(monkeypatch) -> None:
+    """``run_backtest`` populates ``BacktestResult.cost_stress_results``; the
+    compat shim must forward them onto ``StrategyRunResult`` so the
+    orchestrator can attach them after ``compute_metrics`` rebuilds the
+    ledger-only metrics (required for cost-stress publishability gating).
+    """
+    payload = [
+        {
+            "multiplier": 1.0,
+            "sharpe_ratio": 1.0,
+            "annualized_return_pct": 10.0,
+            "max_drawdown_pct": 5.0,
+            "trade_count": 10,
+        },
+        {
+            "multiplier": 2.0,
+            "sharpe_ratio": 0.5,
+            "annualized_return_pct": 6.0,
+            "max_drawdown_pct": 8.0,
+            "trade_count": 8,
+        },
+    ]
+    metrics = _empty_metrics()
+    metrics.cost_stress_results = payload
+
+    def _fake(*, strategy, config, market_data=None, **kwargs):
+        return BacktestRunResult(
+            result=metrics,
+            trades=[_partial_trade()],
+            service_result=TradingServiceResult(
+                trades=[_partial_trade()],
+                execution_diagnostics=BacktestExecutionDiagnostics(summary="ok"),
+            ),
+        )
+
+    monkeypatch.setattr(sandbox_compat, "run_backtest", _fake)
+
+    result = sandbox_compat.run_strategy_code(
+        strategy_code="def on_bar(ctx): pass\n",
+        market_data={},
+        config=_config(),
+        strategy=_strategy(),
+    )
+    assert result.success is True
+    assert result.cost_stress_results == payload
 
 
 def test_probe_events_propagate_through_success_path(monkeypatch) -> None:

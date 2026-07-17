@@ -70,7 +70,7 @@ def resolve_spec_source(
           caller's contract is ``result = resolve_spec_source(...); if result is None:
           return``.
     """
-    from spec_parser import (
+    from software_engineering_team.spec_parser import (
         gather_context_files,
         get_newest_spec_content,
         get_newest_spec_path,
@@ -183,7 +183,9 @@ def run_product_requirements_analysis(
 
     # ── Product Requirements Analysis Agent ────────────────────────────────
     # Validates spec, asks user questions, produces validated_spec.md
-    from product_requirements_analysis_agent import ProductRequirementsAnalysisAgent
+    from software_engineering_team.product_requirements_analysis_agent import (
+        ProductRequirementsAnalysisAgent,
+    )
 
     update_job_fn(
         job_id,

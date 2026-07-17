@@ -27,11 +27,6 @@ import logging
 import threading  # noqa: F401  (public re-export: tests patch main.threading.Thread)
 
 from fastapi.middleware.cors import CORSMiddleware
-from spec_parser import (  # noqa: F401
-    SPEC_FILENAME,
-    validate_work_path,
-    validate_workspace_path_no_spec,
-)
 
 from shared_app import create_team_app
 from software_engineering_team.api.background import (  # noqa: F401
@@ -121,6 +116,7 @@ from software_engineering_team.shared.job_store import (  # noqa: F401
     update_job,
 )
 from software_engineering_team.shared.logging_config import setup_logging
+from software_engineering_team.spec_parser import SPEC_FILENAME  # noqa: F401
 
 setup_logging(level=logging.INFO)
 logger = logging.getLogger(__name__)
