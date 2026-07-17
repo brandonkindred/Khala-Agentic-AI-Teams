@@ -479,7 +479,7 @@ def sub_agent_provisioning_activity(
 
 @activity.defn(name="planning_finalize")
 def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str, Any]:
-    """Finalize: mark the job completed at 100%.
+    """Finalize: mark the job completed at 100% and record a best-effort audit row.
 
     Preconditions:
         - The ``handoff_package`` has already been persisted to the job store by
@@ -487,16 +487,44 @@ def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str
     Postconditions:
         - Marks the job COMPLETED at 100% with a summary, WITHOUT passing
           ``handoff_package`` (a partial-update merge, so the already-persisted
-          handoff is preserved, not clobbered). Returns ``{"success": True, ...}``.
-          This is the sole terminal-success writer for the Temporal path.
+          handoff is preserved, not clobbered). Then, best-effort and fully isolated
+          from finalization, re-reads the job to derive the ``planning_runs`` audit
+          columns from the persisted handoff and calls ``record_planning_run``. Unlike
+          ``record_planning_run`` (which never raises), the ``get_job`` re-read is a
+          live job-service call that can raise on an operational failure — that
+          exception, and any other failure in the audit block, is caught here so it
+          can never escape ``_work``, retry the finalize activity via ``_guarded``, or
+          overwrite the already-completed job with a failure on retry exhaustion.
+          Returns ``{"success": True, ...}`` regardless of the audit outcome. This is
+          the sole terminal-success writer for the Temporal path.
     """
     from planning_team.models import Phase
-    from planning_team.shared.job_store import mark_job_completed
+    from planning_team.postgres.writer import record_planning_run
+    from planning_team.shared.job_store import get_job, mark_job_completed
 
     summary = "Planning completed; handoff package ready."
 
     def _work() -> Dict[str, Any]:
         mark_job_completed(job_id, summary=summary)
+        try:
+            job = get_job(job_id) or {}
+            handoff = job.get("handoff_package") or {}
+            # open_questions/resolved_questions are currently always [] here too —
+            # see the matching comment in api/main.py::run_workflow_background for
+            # why (a documented setdefault no-op upstream in both dispatch paths).
+            record_planning_run(
+                job_id,
+                client_name=(handoff.get("client_context") or {}).get("client_name"),
+                summary=summary,
+                handoff_summary=handoff.get("summary") or "",
+                open_questions=handoff.get("open_questions") or [],
+                resolved_questions=handoff.get("resolved_questions") or [],
+            )
+        except Exception:
+            # Audit-only: the job is already durably marked completed above, and a
+            # failure re-reading it (or writing the audit row) must never retry
+            # finalize or turn a completed run into a failed one.
+            logger.debug("failed to record planning_run audit for job %s", job_id, exc_info=True)
         return {"success": True, "summary": summary}
 
     # current_phase stays at the last real phase (sub_agent_provisioning); the
