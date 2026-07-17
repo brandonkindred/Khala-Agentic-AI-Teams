@@ -170,6 +170,41 @@ def test_shared_registry_skips_cache_when_no_timestamp_available(
     assert len(constructed) == 2
 
 
+def test_shared_registry_skips_cache_when_symbol_not_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bar-like object can expose ``timestamp`` without ``symbol`` — the
+    wrapper functions only require whichever field ``_coerce_series`` needs,
+    so two unrelated symbol-less-but-timestamped histories sharing the
+    anonymous bucket could hit/advance each other's registry state.
+    ``_shared_registry`` must fall back to a fresh, uncached instance for
+    these too, matching the no-timestamp escape hatch."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    class _TimestampedNoSymbol:
+        __slots__ = ("close", "timestamp")
+
+        def __init__(self, close: float, timestamp: str) -> None:
+            self.close = close
+            self.timestamp = timestamp
+
+    constructed: list[object] = []
+    real_init = IndicatorRegistry.__init__
+
+    def _counting_init(self) -> None:
+        constructed.append(self)
+        real_init(self)
+
+    monkeypatch.setattr(IndicatorRegistry, "__init__", _counting_init)
+
+    bars = [
+        _TimestampedNoSymbol(close=100.0 + i, timestamp=f"2024-01-{i + 1:02d}") for i in range(20)
+    ]
+    si.ema(bars, 5)
+    si.ema(bars, 5)
+    assert len(constructed) == 2
+
+
 # ---------------------------------------------------------------------------
 # Flat sandbox layout: the module imports the impl as ``_indicators_impl``
 # ---------------------------------------------------------------------------

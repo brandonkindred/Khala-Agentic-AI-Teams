@@ -305,6 +305,66 @@ def test_indicator_value_recomputes_when_trailing_close_coincidentally_matches()
     assert got_b == pytest.approx(expected_b)
 
 
+def test_indicator_value_source_bucket_isolates_high_and_close_projections() -> None:
+    """Regression test for a second bug caught in code review:
+    ``indicator_value`` always dispatches to the registry with the literal
+    ``source="close"`` (the caller's requested source is pre-projected onto
+    ``_RegBar.close`` before the registry ever sees it), so the registry's
+    own cache key can't tell "sma of high" apart from "sma of close" for the
+    same bars. Engineered so the trailing bar's ``high`` equals its
+    ``close`` (the exact scenario flagged in review) — without bucketing by
+    the true requested source, the two projections' fingerprints could
+    coincide entirely and one query would silently return the other's value.
+    """
+    n = 20
+    bars = [
+        Bar(
+            symbol="TEST",
+            timestamp=f"2024-01-{i + 1:02d}T00:00:00Z",
+            timeframe="1d",
+            open=100.0,
+            high=100.0 + i + (0.0 if i == n - 1 else 5.0),
+            low=99.0,
+            close=100.0 + i,
+            volume=1000.0,
+        )
+        for i in range(n)
+    ]
+    assert bars[-1].high == bars[-1].close  # the exact ambiguity flagged in review
+    assert any(b.high != b.close for b in bars[:-1])  # earlier bars genuinely differ
+
+    got_high = indicator_value("sma", bars, source="high", period=10)
+    got_close = indicator_value("sma", bars, source="close", period=10)
+
+    expected_high = sum(b.high for b in bars[-10:]) / 10
+    expected_close = sum(b.close for b in bars[-10:]) / 10
+    assert expected_high != expected_close  # the two sources must genuinely differ
+    assert got_high == pytest.approx(expected_high)
+    assert got_close == pytest.approx(expected_close)
+
+
+def test_shadow_context_init_resets_shared_registry_cache() -> None:
+    """Regression test for a third bug caught in code review: ``_ShadowContext``
+    runs in-process on worker threads (e.g. ``api.main``'s
+    ``_strategy_lab_worker`` ``ThreadPoolExecutor``) that can process many
+    unrelated shadow-conformance executions over their lifetime. Each new
+    execution must start with a clean indicator-registry cache so one
+    execution's deque state (e.g. Bollinger) never bleeds into another's, and
+    so the cache doesn't grow unboundedly across executions on a long-lived
+    thread.
+    """
+    from investment_team.strategy_lab.executor import strategy_indicators as si
+
+    first = _ShadowContext()
+    for i, b in enumerate(_shadow_bars(30)):
+        first._ingest_bar(b, i)
+    first.indicator("bollinger", period=20, band="upper")  # warms the cache for "QQQ"
+    assert si._thread_local.registries  # sanity: something got cached
+
+    _ShadowContext()  # a new, unrelated execution on the same thread
+    assert si._thread_local.registries == {}
+
+
 # ---------------------------------------------------------------------------
 # indicator_value — contract violations raise (DbC)
 # ---------------------------------------------------------------------------

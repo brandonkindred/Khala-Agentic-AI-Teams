@@ -119,6 +119,18 @@ class _ShadowContext:
         self._is_warmup: bool = False
         self._current_bar_index: int = -1
         self.orders: List[_OrderRecord] = []
+        # This runs in-process on worker threads (api.main's _strategy_lab_worker
+        # ThreadPoolExecutor and similar) that can process many unrelated shadow
+        # executions over their lifetime. indicator() shares one IndicatorRegistry
+        # per (thread, symbol, source) across a single execution's calls for
+        # performance (see strategy_indicators._shared_registry) — resetting it
+        # here bounds that sharing to this execution and its memory to one
+        # execution's worth of symbols, rather than leaking indicator state (and
+        # unbounded per-thread growth) across executions that happen to touch the
+        # same symbol.
+        from ..executor.strategy_indicators import _reset_shared_registries
+
+        _reset_shared_registries()
 
     @property
     def capital(self) -> float:
