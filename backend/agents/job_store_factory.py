@@ -13,7 +13,12 @@ Invariants:
   resolved at call time — never a cached client object — so a test that rebinds
   the team module's ``_client`` is observed by all bound functions.
 - ``cancel_job`` only transitions jobs currently ``pending``/``running``; jobs in
-  any terminal (or missing) state are left untouched and report ``False``.
+  any terminal (or missing) state are left untouched and report ``False``. This
+  is an atomic conditional update server-side (via ``cancel_active_job``) — no
+  read-then-write race.
+- ``update_job_if_not_cancelled`` atomically writes fields (typically a status
+  transition) unless the job is already cancelled, closing the same class of
+  check-then-write race for RUNNING/COMPLETED/FAILED transitions.
 """
 
 from __future__ import annotations
@@ -25,13 +30,10 @@ from typing import Any, Callable, Dict, List, Optional
 from job_service_client import (
     JOB_STATUS_CANCELLED,
     JOB_STATUS_PENDING,
-    JOB_STATUS_RUNNING,
     JobServiceClient,
 )
 
 logger = logging.getLogger(__name__)
-
-_ACTIVE_STATUSES = frozenset({JOB_STATUS_PENDING, JOB_STATUS_RUNNING})
 
 ClientGetter = Callable[[], JobServiceClient]
 
@@ -47,6 +49,7 @@ class StatusJobStore:
     create_job: Callable[..., None]
     get_job: Callable[[str], Optional[Dict[str, Any]]]
     update_job: Callable[..., None]
+    update_job_if_not_cancelled: Callable[..., Optional[bool]]
     list_jobs: Callable[..., List[Dict[str, Any]]]
     cancel_job: Callable[[str], bool]
     is_job_cancelled: Callable[[str], bool]
@@ -81,6 +84,23 @@ def make_status_job_store(client_getter: ClientGetter) -> StatusJobStore:
         """Merge ``fields`` into the job record for ``job_id``."""
         client_getter().update_job(job_id, **fields)
 
+    def update_job_if_not_cancelled(job_id: str, **fields: Any) -> Optional[bool]:
+        """Merge ``fields`` into ``job_id`` unless it is already cancelled.
+
+        Preconditions:
+            ``fields["status"]``, if present, must not be ``JOB_STATUS_CANCELLED``
+            — this is not a cancellation mechanism (use ``cancel_job``).
+        Postconditions:
+            Returns True iff the write happened (the job existed and was not
+            cancelled). Returns False if the job exists but is cancelled. Returns
+            None if the job does not exist at all — distinct from False so a
+            caller can tell a broken precondition apart from a legitimate
+            cancellation. Atomic — the cancelled-check and the write happen in
+            one server-side conditional update, so a cancel landing between a
+            caller's decision and this call can never be silently overwritten.
+        """
+        return client_getter().update_job_if_not_cancelled(job_id, **fields)
+
     def list_jobs(statuses: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """Return job records, optionally filtered to ``statuses``."""
         return client_getter().list_jobs(statuses=statuses)
@@ -90,12 +110,10 @@ def make_status_job_store(client_getter: ClientGetter) -> StatusJobStore:
 
         Postconditions: returns ``True`` and sets status ``cancelled`` when the
         job existed and was active; returns ``False`` with no write otherwise.
+        Atomic — delegates to the client's conditional-update cancellation
+        primitive, so there is no read-then-write race.
         """
-        job = client_getter().get_job(job_id)
-        if job is None or job.get("status") not in _ACTIVE_STATUSES:
-            return False
-        client_getter().update_job(job_id, status=JOB_STATUS_CANCELLED)
-        return True
+        return client_getter().cancel_active_job(job_id)
 
     def is_job_cancelled(job_id: str) -> bool:
         """Return ``True`` if the job exists and is marked cancelled."""
@@ -120,6 +138,7 @@ def make_status_job_store(client_getter: ClientGetter) -> StatusJobStore:
         create_job=create_job,
         get_job=get_job,
         update_job=update_job,
+        update_job_if_not_cancelled=update_job_if_not_cancelled,
         list_jobs=list_jobs,
         cancel_job=cancel_job,
         is_job_cancelled=is_job_cancelled,

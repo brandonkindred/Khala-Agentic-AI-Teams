@@ -1,10 +1,10 @@
 /**
  * Pure derivation helpers for the Code Review page's per-review metrics — the Severity
  * and Duration cells rendered by `PrReviewDetailComponent`, plus the live-poll completion
- * timestamp stamped by `CodeReviewPanelComponent`.
+ * timestamp stamped by `CodeReviewDashboardComponent`.
  *
  * Kept as standalone pure functions so the metric logic is unit-testable in isolation and
- * shared by both the parent panel (`terminalTimestamp`) and the detail child
+ * shared by both the parent dashboard (`terminalTimestamp`) and the detail child
  * (`severityEntries`, `reviewDuration`). Every function is pure except `reviewDuration`
  * (may `console.warn` on a clock-skew anomaly) and `terminalTimestamp` (reads the clock
  * only on its fallback path).

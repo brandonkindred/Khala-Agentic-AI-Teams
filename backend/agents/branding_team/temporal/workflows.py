@@ -55,6 +55,19 @@ _DEFAULT_RETRY = RetryPolicy(
     backoff_coefficient=2.0,
 )
 
+# Same as _DEFAULT_RETRY, but a missing job row (JobNotFoundError, raised by
+# branding_team.shared.job_store._guarded_transition) is a broken precondition
+# that will not resolve itself on retry — retrying it three times just delays
+# the inevitable failure by ~30s for nothing. Used for the three activities
+# that route through the guarded-transition primitive: begin/finalize/mark-failed.
+_GUARDED_TRANSITION_RETRY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=10),
+    maximum_interval=timedelta(minutes=1),
+    backoff_coefficient=2.0,
+    non_retryable_error_types=["JobNotFoundError"],
+)
+
 _SHORT_TIMEOUT = timedelta(minutes=5)
 _PHASE_TIMEOUT = timedelta(minutes=30)
 _PHASE_HEARTBEAT_TIMEOUT = timedelta(minutes=5)
@@ -153,7 +166,7 @@ class BrandingWorkflow:
                 args=[job_id],
                 task_queue=TASK_QUEUE,
                 start_to_close_timeout=_SHORT_TIMEOUT,
-                retry_policy=_DEFAULT_RETRY,
+                retry_policy=_GUARDED_TRANSITION_RETRY,
             )
             if not proceed:  # already cancelled at entry — terminal, not a failure
                 self._advance("cancelled", 1.0)
@@ -187,7 +200,7 @@ class BrandingWorkflow:
                 args=[payload, prior_outputs, competitive_snapshot, design_asset_result],
                 task_queue=TASK_QUEUE,
                 start_to_close_timeout=_FINALIZE_TIMEOUT,
-                retry_policy=_DEFAULT_RETRY,
+                retry_policy=_GUARDED_TRANSITION_RETRY,
             )
             self._advance("done", 1.0)
         except Exception as exc:  # noqa: BLE001 — record the failure, then re-raise
@@ -204,18 +217,27 @@ class BrandingWorkflow:
             if cancelled:
                 self._advance("cancelled", self._fraction)
                 return
-            # Not cancelled: record FAILED (best-effort — its own failure must not
-            # mask the original cause), then re-raise so the workflow reflects it.
+            # Not cancelled (as of the check above): record FAILED. Its own
+            # failure must not mask the original cause, so any exception here is
+            # swallowed and treated as "unknown — fall through and raise the
+            # original error", matching the previous behavior. But if the write
+            # itself reports False, a cancel raced in between our check and the
+            # atomic write — the job row is now cancelled, not failed, so keep
+            # the workflow's outcome consistent with it instead of raising into
+            # what would look like a FAILED run.
             try:
-                await workflow.execute_activity(
+                marked_failed = await workflow.execute_activity(
                     _activities.mark_branding_failed_activity,
                     args=[job_id, str(exc)],
                     task_queue=TASK_QUEUE,
                     start_to_close_timeout=_SHORT_TIMEOUT,
-                    retry_policy=_DEFAULT_RETRY,
+                    retry_policy=_GUARDED_TRANSITION_RETRY,
                 )
             except Exception:  # noqa: BLE001 — never mask the original pipeline error
-                pass
+                marked_failed = True
+            if marked_failed is False:
+                self._advance("cancelled", self._fraction)
+                return
             raise
 
     async def _cancelled(self, job_id: str) -> bool:
