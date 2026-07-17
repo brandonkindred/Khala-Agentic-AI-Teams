@@ -112,3 +112,42 @@ Migrated callers: the sales pod's per-prospect / decision-maker / dossier
 fan-outs (`sales_team/orchestrator.py`), the blog research agent's document
 scoring and summarization (`blogging/blog_research_agent/agent.py`), and the SE
 code-review coordinator's per-chunk map (`code_review_agent/coordinator.py`).
+
+## `LatestValueFlusher`
+
+A single-slot mailbox drained by one daemon writer thread, for moving a
+synchronous, possibly-slow write off a thread that holds a lock other threads
+need — the case that motivated it: `coding_team/orchestrator.py`'s task-graph
+mutators used to call a job-service HTTP write synchronously while holding
+`TaskGraphService`'s lock, serializing concurrent implementation workers on the
+sum of their write latencies even though their LLM/build/lint work ran in
+parallel.
+
+```python
+from shared_concurrency import LatestValueFlusher
+
+with LatestValueFlusher(job_client.update_job, name="job-persist") as flusher:
+    flusher.enqueue({"status_text": "working"})  # never blocks
+    ...
+    flusher.drain()  # block until the above (or a fresher payload) has landed
+```
+
+Because the destination write is assumed to be **overwrite, not append**
+semantics (e.g. the job service's `update_job` does a shallow JSONB merge —
+last write wins per field), `enqueue()` never queues more than one payload: a
+burst of mutations before the writer thread catches up coalesces into a single
+write of the latest state, not N sequential writes.
+
+- `enqueue(payload)` — replace the pending payload; never blocks on the writer.
+- `drain(timeout=None)` — block until idle (no pending payload, no write in
+  flight); the mechanism that makes ordering safe when a caller needs to do its
+  own synchronous write afterward without a stale background write landing
+  after it.
+- `on_error` — invoked on any writer exception; default logs and swallows. A
+  raising writer never kills the loop.
+- `start()`/`is_alive()`/context-manager use mirror `BackgroundHeartbeat`.
+  `stop()` drains first — **unbounded**, not bounded by `join_timeout` — so a
+  payload enqueued just before shutdown is guaranteed to land rather than
+  possibly being abandoned mid-write by a writer slower than `join_timeout`
+  (e.g. an HTTP client with its own longer timeout/retry budget);
+  `join_timeout` only bounds the final thread join once draining is done.

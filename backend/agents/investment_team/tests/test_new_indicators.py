@@ -31,6 +31,7 @@ from pydantic import ValidationError
 from investment_team.models import StrategySpec
 from investment_team.strategy_lab.executor import indicators as pdi
 from investment_team.strategy_lab.executor import strategy_indicators as si
+from investment_team.strategy_lab.executor.predicate_evaluator import compute_indicator_series
 from investment_team.strategy_lab.executor.strategy_indicators import indicator_value
 from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
 from investment_team.strategy_lab.quality_gates.code_conformance import (
@@ -912,12 +913,135 @@ def test_pandas_obv_matches_registry_tail() -> None:
     assert float(pdi.obv(close, vol).iloc[-1]) == pytest.approx(IndicatorRegistry().obv(bars))
 
 
+def test_pandas_macd_bounded_to_runtime_window_matches_engine() -> None:
+    """Pandas MACD past the ``STREAMING_WINDOW_BARS`` cap matches the engine audit path.
+
+    MACD's signal EMA folds over the entire macd_line, so its value depends on the
+    full history length — unlike the fixed-window indicators. The Series helper
+    bounds its walk to the same trailing-history window the engine uses
+    (``StreamingHistoryView`` / ``compute_indicator_series``, a ``deque(maxlen=500)``),
+    so on an >500-bar series with a large ``signal`` it stays bit-identical to the
+    engine rather than drifting off an unbounded macd_line. This is the coverage
+    probe's MACD reference, so any drift would let it score MACD predicates
+    differently from the engine it models.
+    """
+    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+
+    bars = _series(STREAMING_WINDOW_BARS + 300, seed=14)  # 800 bars > the 500-bar cap
+    close = pd.Series([b.close for b in bars])
+    df = pd.DataFrame(
+        {
+            "open": [b.open for b in bars],
+            "high": [b.high for b in bars],
+            "low": [b.low for b in bars],
+            "close": [b.close for b in bars],
+            "volume": [b.volume for b in bars],
+        }
+    )
+    # A large signal (legal up to 100) keeps the EMA seed's influence alive across
+    # hundreds of samples, so an unbounded walk would visibly diverge past the cap.
+    _line, signal, _hist = pdi.macd(close, fast=12, slow=26, signal=100)
+    ref = compute_indicator_series(
+        IndicatorRef(
+            name="macd", params={"fast": 12, "slow": 26, "signal": 100, "output": "signal"}
+        ),
+        df,
+    )
+    pd.testing.assert_series_equal(
+        signal.reset_index(drop=True), ref.reset_index(drop=True), check_names=False
+    )
+
+
+def test_pandas_macd_rejects_non_integer_periods() -> None:
+    """``macd`` rejects non-integer fast/slow/signal instead of silently truncating.
+
+    The params are passed straight to ``IndicatorRegistry.macd``, whose integer
+    contract is the single source of validation — so ``fast=12.9`` raises
+    ``ValueError`` (matching the runtime and the coverage probe's validator) rather
+    than being truncated to 12 and modelling a strategy the runtime would reject.
+    """
+    close = pd.Series([100.0 + i for i in range(40)])
+    with pytest.raises(ValueError):
+        pdi.macd(close, fast=12.9, slow=26, signal=9)
+    with pytest.raises(ValueError):
+        pdi.macd(close, fast=12, slow=26.5, signal=9)
+    # Integer configs still compute normally.
+    line, _signal, _hist = pdi.macd(close, fast=12, slow=26, signal=9)
+    assert len(line) == 40
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda s: pdi.sma(s, 2.5),
+        lambda s: pdi.ema(s, 2.5),
+        lambda s: pdi.rsi(s, 2.5),
+        lambda s: pdi.roc(s, 2.5),
+        lambda s: pdi.bollinger_bands(s, 2.5),
+        lambda s: pdi.atr(s, s, s, 2.5),
+        lambda s: pdi.adx(s, s, s, 2.5),
+        lambda s: pdi.stochastic(s, s, s, 2.5),  # k_period
+        lambda s: pdi.stochastic(s, s, s, 14, 2.5),  # d_period
+        lambda s: pdi.donchian_channels(s, s, 2.5),
+        lambda s: pdi.keltner_channels(s, s, s, 2.5),  # period
+        lambda s: pdi.keltner_channels(s, s, s, 20, 2.5),  # atr_period
+        lambda s: pdi.mfi(s, s, s, s, 2.5),
+        lambda s: pdi.cci(s, s, s, 2.5),
+        lambda s: pdi.williams_r(s, s, s, 2.5),
+    ],
+)
+def test_pandas_indicators_reject_non_integer_period(call) -> None:
+    """Non-integer periods raise ``ValueError`` instead of silently truncating.
+
+    Every Series wrapper validates its period/window args as integers at the call
+    boundary (matching the old pandas ``rolling(window=2.5)`` rejection and the
+    registry/probe integer contract), so a non-integral window can never quietly
+    run a different experiment (e.g. ``sma(series, 2.5)`` computing SMA(2)).
+    """
+    s = pd.Series([100.0 + i for i in range(30)])
+    with pytest.raises(ValueError):
+        call(s)
+
+
+def test_pandas_cumulative_vwap_matches_registry_period_none() -> None:
+    """The vectorised cumulative ``vwap`` is bit-identical to ``reg.vwap(period=None)``.
+
+    The plain cumulative helper is computed vectorised (O(n) ``cumsum``) rather than
+    by walking the registry over every expanding prefix (which would be O(n^2)).
+    ``cumsum`` is a sequential prefix sum, so it must reproduce the registry's
+    left-to-right running totals — and the same all-zero-volume-prefix mean-close
+    fallback — exactly. This pins the two together so the vectorised computation can
+    never silently drift from the registry definition it stands in for.
+    """
+    bars = _series(600, seed=21)
+    # Zero the first few volumes so the cumulative fallback (Σclose / bar_count on
+    # an all-zero-volume prefix) is exercised alongside the num/den path.
+    for b in bars[:5]:
+        b.volume = 0.0
+    high = pd.Series([b.high for b in bars])
+    low = pd.Series([b.low for b in bars])
+    close = pd.Series([b.close for b in bars])
+    vol = pd.Series([b.volume for b in bars])
+    series = pdi.vwap(high, low, close, vol)
+    for i in (0, 4, 5, 6, 50, 300, 599):
+        expected = IndicatorRegistry().vwap(bars[: i + 1], period=None)
+        assert float(series.iloc[i]) == pytest.approx(expected, rel=0, abs=1e-12), i
+
+
 def test_pandas_mfi_bounded_and_matches_registry_tail() -> None:
-    """Pandas MFI stays in [0, 100] and its tail matches the registry."""
+    """Pandas MFI stays in [0, 100] (modulo running-sum FP drift) and matches the registry.
+
+    The Series helper is derived from the engine's incremental ``IndicatorRegistry`` —
+    the same add/subtract-maintained running-sum path ``StreamingHistoryView`` /
+    ``compute_indicator_series`` use — so a value can sit one ULP past a bound (e.g.
+    ``100.00000000000001``). The registry documents this drift and its own
+    incremental-vs-cold checks tolerate it at ``abs=1e-6``; asserting the same here
+    keeps the Series helper bit-faithful to what the engine actually trades on.
+    """
     high, low, close, vol = _frame()
     series = pdi.mfi(high, low, close, vol, period=14)
     finite = series.dropna()
-    assert (finite >= 0).all() and (finite <= 100).all()
+    assert (finite >= -1e-6).all() and (finite <= 100 + 1e-6).all()
     bars = _series(80, seed=14)
     assert float(series.iloc[-1]) == pytest.approx(IndicatorRegistry().mfi(bars, 14))
 
@@ -962,19 +1086,20 @@ def _pandas_bb_bandwidth(close: pd.Series, period: int, num_std: float) -> pd.Se
     return (upper - lower) / middle
 
 
-def _ref_bb_sample(bars, period: int, num_std: float, select: str) -> Optional[float]:
-    """%B / bandwidth using *sample* std (ddof=1), matching pandas ``rolling().std()``.
+def _ref_bb_population(bars, period: int, num_std: float, select: str) -> Optional[float]:
+    """%B / bandwidth using *population* std (ddof=0), matching the streaming registry.
 
-    The streaming registry uses population variance (``sq/period − mean²``, ddof=0), but the
-    pandas reference ``bollinger_bands`` builds its bands from ``Series.rolling().std()`` —
-    pandas' sample std. This reference mirrors that convention so the pandas derived outputs
-    can be cross-checked against an independent computation rather than the registry tail.
+    The pandas reference ``bollinger_bands`` is now derived from the streaming
+    ``IndicatorRegistry`` (population variance ``sq/period − mean²``, ddof=0), so this
+    independent reference computes the same population variance a different way
+    (``Σ(v − mean)² / period``) — cross-checking the pandas bands against a hand-rolled
+    computation rather than the registry tail itself.
     """
     if len(bars) < period:
         return None
     vals = [b.close for b in bars[-period:]]
     mean = sum(vals) / period
-    var = sum((v - mean) ** 2 for v in vals) / (period - 1)  # sample variance (ddof=1)
+    var = sum((v - mean) ** 2 for v in vals) / period  # population variance (ddof=0)
     std = var**0.5
     upper, lower = mean + num_std * std, mean - num_std * std
     if select == "percent_b":
@@ -985,27 +1110,27 @@ def _ref_bb_sample(bars, period: int, num_std: float, select: str) -> Optional[f
     raise AssertionError(select)
 
 
-def test_pandas_bb_percent_b_matches_sample_std_reference() -> None:
-    """%B derived from the pandas bands matches an independent sample-std reference tail.
+def test_pandas_bb_percent_b_matches_population_std_reference() -> None:
+    """%B derived from the pandas bands matches an independent population-std reference tail.
 
-    The pandas bands use sample std (ddof=1), so this verifies the static reference layer
-    against a hand-rolled sample-std computation — not the registry, which uses population
-    std and so produces slightly different Bollinger values by construction.
+    The pandas bands are now registry-derived and use population std (ddof=0), so this
+    verifies the static reference layer against a hand-rolled population-std computation —
+    the two agree by construction (both population variance), which the registry does too.
     """
     _high, _low, close, _vol = _frame()
     bars = _series(80, seed=14)
     derived = _pandas_bb_percent_b(close, 20, 2.0)
-    assert float(derived.iloc[-1]) == pytest.approx(_ref_bb_sample(bars, 20, 2.0, "percent_b"))
+    assert float(derived.iloc[-1]) == pytest.approx(_ref_bb_population(bars, 20, 2.0, "percent_b"))
     # Warmup rows (insufficient bars for the rolling std) stay NaN, like the bands.
     assert pd.isna(derived.iloc[0])
 
 
-def test_pandas_bb_bandwidth_matches_sample_std_reference() -> None:
-    """Bandwidth derived from the pandas bands matches an independent sample-std reference tail."""
+def test_pandas_bb_bandwidth_matches_population_std_reference() -> None:
+    """Bandwidth derived from the pandas bands matches an independent population-std reference tail."""
     _high, _low, close, _vol = _frame()
     bars = _series(80, seed=14)
     derived = _pandas_bb_bandwidth(close, 20, 2.0)
-    assert float(derived.iloc[-1]) == pytest.approx(_ref_bb_sample(bars, 20, 2.0, "bandwidth"))
+    assert float(derived.iloc[-1]) == pytest.approx(_ref_bb_population(bars, 20, 2.0, "bandwidth"))
     assert pd.isna(derived.iloc[0])
 
 

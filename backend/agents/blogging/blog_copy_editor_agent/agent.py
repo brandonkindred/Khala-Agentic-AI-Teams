@@ -483,7 +483,9 @@ class BlogCopyEditorAgent:
               that path before returning. This write may silently fail (e.g. permission
               denied or disk-full); such failures are logged at WARNING and never raised,
               so the returned output is authoritative and callers must not assume the
-              file exists. `_write_feedback_to_path` returns whether the write succeeded.
+              file exists. The outcome is reported to the caller via
+              `output.feedback_file_written` (True/False), which stays None when
+              feedback_output_path is not given.
         """
         draft = copy_editor_input.draft.strip()
         if not draft:
@@ -493,7 +495,9 @@ class BlogCopyEditorAgent:
                 feedback_items=[],
             )
             if feedback_output_path:
-                self._write_feedback_to_path(output, feedback_output_path)
+                output.feedback_file_written = self._write_feedback_to_path(
+                    output, feedback_output_path
+                )
             return output
 
         style_guide_text = self._style_prompt
@@ -541,5 +545,7 @@ class BlogCopyEditorAgent:
             )
         output = CopyEditorOutput(approved=approved, summary=summary, feedback_items=feedback_items)
         if feedback_output_path:
-            self._write_feedback_to_path(output, feedback_output_path)
+            output.feedback_file_written = self._write_feedback_to_path(
+                output, feedback_output_path
+            )
         return output

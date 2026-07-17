@@ -15,7 +15,7 @@
         rel="noopener"
         aria-label="Open pull request on GitHub"
       >
-        <mat-icon>open_in_new</mat-icon>
+        <mat-icon aria-hidden="true">open_in_new</mat-icon>
       </a>
     }
   </div>
@@ -34,11 +34,11 @@
   <div class="cr-pull-detail__actions">
     <button mat-flat-button color="primary" (click)="onStartReview()" [disabled]="starting">
       @if (starting) {
-        <mat-spinner diameter="18"></mat-spinner>
+        <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
         Starting…
       } @else {
         <ng-container>
-          <mat-icon>play_arrow</mat-icon>
+          <mat-icon aria-hidden="true">play_arrow</mat-icon>
           Start Review
         </ng-container>
       }
@@ -52,6 +52,7 @@
   <!-- All review runs for this PR (newest-first). Reused below by the proposals loop. -->
   @if (reviews.length > 0) {
     <table class="cr-reviews-table">
+      <caption class="visually-hidden">Review runs for pull request #{{ pull.number }}, newest first</caption>
       <thead>
         <tr>
           <th scope="col">Status</th>
@@ -70,7 +71,7 @@
                 {{ rec.status }}
               </span>
               @if (!isRecordTerminal(rec) && !rec.error) {
-                <mat-spinner diameter="14"></mat-spinner>
+                <mat-spinner diameter="14" aria-hidden="true"></mat-spinner>
               }
             </td>
             <td>

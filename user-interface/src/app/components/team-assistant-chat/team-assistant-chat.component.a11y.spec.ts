@@ -60,4 +60,21 @@ describe('TeamAssistantChatComponent a11y', () => {
 
     await expectNoAxeViolations(fixture.nativeElement);
   });
+
+  it('has no axe violations with profile fields rendered', async () => {
+    await setup(stateResponse.messages);
+
+    const fixture = TestBed.createComponent(TeamAssistantChatComponent);
+    fixture.componentInstance.teamApiUrl = '/api/x/assistant';
+    fixture.componentInstance.fields = [
+      { key: 'foo', label: 'Foo' },
+      { key: 'bar', label: 'Bar', required: true },
+    ];
+    fixture.detectChanges();
+
+    const btn = fixture.nativeElement.querySelector('.field-value');
+    expect(btn?.tagName.toLowerCase()).toBe('button');
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  });
 });
