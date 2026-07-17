@@ -360,6 +360,62 @@ def test_v2_extract_plan_keywords_includes_hardware_and_networking_terms() -> No
     assert "ssh" in kws
 
 
+def test_v2_extract_plan_keywords_strips_smart_quotes_and_markdown_emphasis() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="A guide “about” **great** tools, explained—",
+        sections=[SimpleNamespace(title="**AI** for teams", order=0)],
+    )
+    kws = _extract_plan_keywords(plan)
+    # Smart quotes, markdown emphasis markers, and a trailing em-dash must be
+    # trimmed so the underlying word is compared cleanly: "about" (wrapped in
+    # curly quotes) is still recognized as a stopword, "great"/"explained"
+    # (wrapped in markdown emphasis / trailed by a dash) are still recognized
+    # as ordinary keywords, and "**AI**" still resolves to the "ai" allowlist
+    # entry rather than surviving as a malformed token.
+    assert "about" not in kws
+    assert "“about”" not in kws
+    assert "great" in kws
+    assert "explained" in kws
+    assert "explained—" not in kws
+    assert "ai" in kws
+    assert "**ai**" not in kws
+
+
+def test_v2_extract_plan_keywords_filters_sentence_connectives() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic=(
+            "Teams should adopt this pattern because it reduces risk, "
+            "not without tradeoffs, until it proves itself against "
+            "alternatives"
+        ),
+        sections=[],
+    )
+    kws = _extract_plan_keywords(plan)
+    # A full-sentence "stance" topic is dense with subordinating
+    # conjunctions/prepositions; these must be filtered like any other
+    # stopword even though they're common in argumentative prose.
+    assert "because" not in kws
+    assert "without" not in kws
+    assert "until" not in kws
+    assert "against" not in kws
+    assert "adopt" in kws
+    assert "pattern" in kws
+    assert "reduces" in kws
+    assert "alternatives" in kws
+
+
 def test_v2_extract_plan_keywords_drops_ordinary_short_words_below_length_floor() -> None:
     from types import SimpleNamespace
 

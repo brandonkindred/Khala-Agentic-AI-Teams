@@ -548,6 +548,26 @@ _PLAN_KEYWORD_STOPWORDS = frozenset(
         "now",
         "what",
         "while",
+        "because",
+        "without",
+        "until",
+        "against",
+        "although",
+        "though",
+        "unless",
+        "despite",
+        "since",
+        "whether",
+        "toward",
+        "towards",
+        "within",
+        "upon",
+        "across",
+        "among",
+        "amongst",
+        "beyond",
+        "regarding",
+        "concerning",
     }
 )
 
@@ -610,6 +630,23 @@ _PLAN_KEYWORD_SHORT_TERMS = frozenset(
 )
 
 
+def _strip_non_alnum_edges(word: str) -> str:
+    """Trim any non-alphanumeric characters from both ends of *word*.
+
+    Unlike ``str.strip()`` against a fixed character set, this handles
+    arbitrary wrapper punctuation LLM output commonly produces -- smart
+    quotes ("about"), markdown emphasis (**about**), em/en dashes
+    (about--) -- without needing to enumerate every such character.
+    Internal punctuation (e.g. the hyphen in "ai-driven") is untouched.
+    """
+    start, end = 0, len(word)
+    while start < end and not word[start].isalnum():
+        start += 1
+    while end > start and not word[end - 1].isalnum():
+        end -= 1
+    return word[start:end]
+
+
 def _extract_plan_keywords(plan: Any) -> list[str]:
     """Extract searchable keywords from a content plan for story bank queries.
 
@@ -625,7 +662,9 @@ def _extract_plan_keywords(plan: Any) -> list[str]:
       would otherwise cause spurious keyword-overlap matches in the story
       bank).
 
-    Punctuation-only tokens (e.g. "--", "##") are dropped regardless.
+    Tokens are trimmed of surrounding punctuation via
+    ``_strip_non_alnum_edges``; tokens with no alphanumeric content at all
+    (e.g. "--", "##") reduce to an empty string and are dropped.
     """
     parts: list[str] = []
     topic = getattr(plan, "overarching_topic", "") or ""
@@ -636,8 +675,8 @@ def _extract_plan_keywords(plan: Any) -> list[str]:
     seen: set[str] = set()
     keywords: list[str] = []
     for word in parts:
-        cleaned = word.strip(".,;:!?()[]\"'")
-        if not any(ch.isalnum() for ch in cleaned):
+        cleaned = _strip_non_alnum_edges(word)
+        if not cleaned:
             continue
         if cleaned in seen:
             continue
