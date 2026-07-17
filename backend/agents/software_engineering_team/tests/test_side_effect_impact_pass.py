@@ -12,12 +12,14 @@ this pass's call in an end-to-end ``run_coordinator`` run.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pytest
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import CodebaseIndex
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
+from code_review_agent.repo_reader import DiskRepoReader
 from code_review_agent.side_effect_impact_pass import (
     _build_prompt,
     _build_side_effect_tools,
@@ -144,6 +146,35 @@ def test_search_repository_respects_max_files_scanned() -> None:
     )
     matches = _search_repository(index, "needle", max_files_scanned=2)
     assert len(matches) == 2
+
+
+def test_search_repository_default_limit_stays_conservative_for_unknown_readers() -> None:
+    """A duck-typed reader (not a known-cheap ``DiskRepoReader``) still gets the
+    conservative default cap when the caller doesn't override it -- e.g. a
+    ``GitHubRepoReader``, whose per-file cost is real and must stay bounded."""
+    # Insertion order controls scan order for this in-memory fake; put the only
+    # matching file after the conservative default cap so it is missed.
+    files = {f"f{i}.py": "no match" for i in range(45)}
+    files["z_match.py"] = "needle\n"
+    index = CodebaseIndex(files={}, repo_reader=_FakeReader(files))
+    assert _search_repository(index, "needle") == []
+
+
+def test_search_repository_disk_reader_scans_beyond_the_conservative_cap(
+    tmp_path: Path,
+) -> None:
+    """Regression test: a real ``DiskRepoReader`` (the SE-pipeline path) must not
+    be limited to the GitHub-budget-driven default cap. ``DiskRepoReader.list_files()``
+    returns paths in fixed alphabetical order, so with the old flat
+    ``_REPO_SEARCH_FILE_SCAN_LIMIT`` applied uniformly, a needle placed in a
+    file that sorts after the cap would be silently unreachable on every call --
+    this asserts it IS found, proving the disk-specific higher cap is in effect."""
+    for i in range(45):
+        (tmp_path / f"a_{i:03d}.py").write_text("no match\n")
+    (tmp_path / "z_caller.py").write_text("result = bar()\n")
+    index = CodebaseIndex(files={}, repo_reader=DiskRepoReader(str(tmp_path)))
+    matches = _search_repository(index, "bar(")
+    assert matches == [("z_caller.py", 1, "result = bar()")]
 
 
 def test_search_repository_fails_safe_on_reader_error() -> None:

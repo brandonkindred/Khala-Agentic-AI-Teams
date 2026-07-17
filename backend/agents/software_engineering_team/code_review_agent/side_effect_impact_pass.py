@@ -65,7 +65,7 @@ from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_suggestion
 from .profiles import ReviewProfile
 from .prompts import SIDE_EFFECT_IMPACT_PROMPT
-from .repo_reader import RepoReader
+from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
 
 logger = logging.getLogger(__name__)
 
@@ -80,30 +80,40 @@ _ALLOWED_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
 # ``false_positive_filter._SEARCH_MATCH_LIMIT``'s rationale for ``search_codebase``.
 _REPO_SEARCH_MATCH_LIMIT = 60
 
-# Cap on how many repository files a single ``search_repository`` call will scan.
-# Deliberately conservative relative to the PR-review path's ``GitHubRepoReader``,
-# which caps at ``DEFAULT_MAX_FETCHES = 200`` distinct file fetches for the WHOLE
-# review (coding_team/github_source/repo_reader.py) -- and that one reader instance
-# is shared across the false-positive filter, the architecture-consistency pass,
-# and this pass (coordinator.py builds one ``shared_index``/``repo_reader`` and
-# passes it to all three, with this pass running LAST). Every scanned file costs
-# one fetch (``GitHubRepoReader`` has no cheaper contains-only check), so a limit
-# anywhere near the full 200 could single-handedly exhaust whatever budget the
-# earlier two passes left, starving every later ``read_file``/``search_repository``
-# call -- including this pass's own further tool calls -- for the rest of the
-# review. 40 keeps one call's worst case a small fraction of the shared budget
-# while still covering realistic caller searches, especially combined with
-# ``search_codebase``, ``list_files``, and the model's own targeted ``read_file``/
-# ``find_function_at_line`` calls. ``DiskRepoReader`` (the SE-pipeline path) has no
-# such fetch cap, so this bound is a pure safety margin there, not a functional one.
+# Cap on how many repository files a single ``search_repository`` call will scan
+# when the reader's per-fetch cost is unknown or expensive (e.g. the PR-review
+# path's ``GitHubRepoReader``, which caps at ``DEFAULT_MAX_FETCHES = 200`` distinct
+# file fetches for the WHOLE review -- coding_team/github_source/repo_reader.py --
+# and that one reader instance is shared across the false-positive filter, the
+# architecture-consistency pass, and this pass, with this pass running LAST).
+# Every scanned file costs one fetch under that reader (no cheaper contains-only
+# check exists), so a limit anywhere near the full 200 could single-handedly
+# exhaust whatever budget the earlier two passes left, starving every later
+# ``read_file``/``search_repository`` call -- including this pass's own further
+# tool calls -- for the rest of the review. 40 keeps one call's worst case a small
+# fraction of the shared budget while still covering realistic caller searches,
+# especially combined with ``search_codebase``, ``list_files``, and the model's
+# own targeted ``read_file``/``find_function_at_line`` calls.
 _REPO_SEARCH_FILE_SCAN_LIMIT = 40
+
+# Cap used instead of ``_REPO_SEARCH_FILE_SCAN_LIMIT`` when the reader is a
+# ``DiskRepoReader`` (the SE-pipeline path): it has no per-file fetch cost, only
+# its own ``list_files()`` listing cap (``DEFAULT_MAX_LISTED_FILES``), so the
+# GitHub-budget rationale above does not apply to it. Using the low cap there
+# anyway is actively harmful, not just conservative: ``DiskRepoReader.list_files()``
+# returns paths in fixed sorted (alphabetical) order, so a 40-file cap would
+# deterministically scan only the alphabetically-first ~40 non-submission files on
+# every call, silently missing nearly every real caller in a repository of any
+# realistic size. Bounding this at the reader's own listing cap instead lets a
+# disk-backed search cover everything ``list_files()`` can see.
+_DISK_REPO_SEARCH_FILE_SCAN_LIMIT = DEFAULT_MAX_LISTED_FILES
 
 
 def _search_repository(
     index: CodebaseIndex,
     query: str,
     max_matches: int = _REPO_SEARCH_MATCH_LIMIT,
-    max_files_scanned: int = _REPO_SEARCH_FILE_SCAN_LIMIT,
+    max_files_scanned: Optional[int] = None,
 ) -> List[Tuple[str, int, str]]:
     """Find a case-insensitive substring across the REST of the repository.
 
@@ -113,12 +123,17 @@ def _search_repository(
     and the submission-only search cannot reach them.
 
     Preconditions:
-        - ``max_matches`` > 0 and ``max_files_scanned`` > 0.
+        - ``max_matches`` > 0 and, when given explicitly, ``max_files_scanned`` > 0.
 
     Postconditions:
         - Returns ``[]`` when ``index.repo_reader`` is None, when the query is
           blank, or when the reader's own ``list_files`` fails.
-        - Otherwise scans up to ``max_files_scanned`` repository paths from
+        - When ``max_files_scanned`` is None (the normal call path), it resolves
+          to ``_DISK_REPO_SEARCH_FILE_SCAN_LIMIT`` for a ``DiskRepoReader`` (no
+          per-file fetch cost -- bounded only by the reader's own listing cap) or
+          ``_REPO_SEARCH_FILE_SCAN_LIMIT`` for any other reader (conservative
+          default for an unknown-cost reader, e.g. ``GitHubRepoReader``).
+        - Otherwise scans up to the resolved cap's worth of repository paths from
           ``index.repo_reader.list_files()``, skipping any path already a key
           of ``index.files`` (already reachable via ``search_codebase``, so
           scanning it again here would be redundant work), returning up to
@@ -129,9 +144,16 @@ def _search_repository(
           propagated -- a broken reader must only ever narrow what this
           search can find, never break the pass.
     """
-    assert max_matches > 0 and max_files_scanned > 0, "caps must be positive"
+    assert max_matches > 0, "max_matches must be positive"
+    assert max_files_scanned is None or max_files_scanned > 0, "max_files_scanned must be positive"
     if index.repo_reader is None:
         return []
+    if max_files_scanned is None:
+        max_files_scanned = (
+            _DISK_REPO_SEARCH_FILE_SCAN_LIMIT
+            if isinstance(index.repo_reader, DiskRepoReader)
+            else _REPO_SEARCH_FILE_SCAN_LIMIT
+        )
     needle = (query or "").strip().lower()
     if not needle:
         return []

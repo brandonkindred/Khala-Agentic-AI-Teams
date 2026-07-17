@@ -332,7 +332,7 @@ def _merge_narrative(
     approved: bool,
     issues: List[CodeReviewIssue],
     outcome: "_ChunkOutcome",
-    has_architecture_findings: bool = False,
+    has_additive_pass_findings: bool = False,
 ) -> Tuple[str, str]:
     """Produce the merged ``(summary, spec_compliance_notes)`` for the review.
 
@@ -343,20 +343,21 @@ def _merge_narrative(
           results from ``_reconcile_approval``; this function only shapes prose
           and never reconsults or mutates them.
         - ``outcome.summaries`` holds one entry per successful sub-review.
-        - ``has_architecture_findings`` is True when the architecture-consistency
-          pass (which runs outside the map phase) added findings not reflected
-          in any ``outcome.summaries`` entry.
+        - ``has_additive_pass_findings`` is True when the architecture-consistency
+          pass and/or the side-effect-impact pass (both of which run outside the
+          map phase) added findings not reflected in any ``outcome.summaries``
+          entry.
 
     Postconditions:
-        - With exactly one sub-review and no architecture findings, returns
+        - With exactly one sub-review and no additive-pass findings, returns
           that sub-review's summary/notes verbatim and makes no synthesis LLM
           call.
         - Otherwise attempts a single findings-only synthesis pass so the
           narrative reflects every source of ``issues`` (including the
-          architecture pass); on any failure (``None``) falls back to the
-          ``"\\n\\n"``-joined per-pass summaries/notes.
+          architecture and side-effect passes); on any failure (``None``) falls
+          back to the ``"\\n\\n"``-joined per-pass summaries/notes.
     """
-    if len(outcome.summaries) == 1 and not has_architecture_findings:
+    if len(outcome.summaries) == 1 and not has_additive_pass_findings:
         return outcome.summaries[0], (outcome.spec_notes[0] if outcome.spec_notes else "")
 
     concatenated_summary = "\n\n".join(s for s in outcome.summaries if s.strip())
@@ -655,7 +656,7 @@ def run_coordinator(
         approved,
         deduped,
         outcome,
-        has_architecture_findings=bool(architecture_findings),
+        has_additive_pass_findings=bool(architecture_findings) or bool(side_effect_findings),
     )
 
     logger.info(

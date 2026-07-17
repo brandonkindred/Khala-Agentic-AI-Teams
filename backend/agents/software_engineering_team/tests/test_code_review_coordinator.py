@@ -2630,3 +2630,42 @@ def test_single_chunk_summary_reflects_architecture_findings(monkeypatch) -> Non
 
     assert synth_calls, "synthesis must run so the narrative reflects the architecture finding"
     assert any(i.description == arch_issue.description for i in result.issues)
+
+
+def test_single_chunk_summary_reflects_side_effect_findings(monkeypatch) -> None:
+    """Regression test: the same gap as
+    ``test_single_chunk_summary_reflects_architecture_findings``, but for the
+    side-effect/blast-radius pass -- ``_merge_narrative`` was only ever told
+    about ``architecture_findings``, so a single-chunk review whose only new
+    findings come from the side-effect pass silently dropped them from the
+    narrative (returning the map phase's chunk summary verbatim, which never
+    mentions a finding it never saw)."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent.models import CodeReviewIssue
+
+    side_effect_issue = CodeReviewIssue(
+        severity="high",
+        category="side-effects",
+        file_path="a.py",
+        description="bar() no longer raises ValueError; app/caller.py still catches it.",
+    )
+    monkeypatch.setattr(
+        coord, "find_side_effect_impact_issues", lambda *a, **kw: [side_effect_issue]
+    )
+
+    synth_calls: list = []
+    original_synthesize = coord.synthesize_review_findings
+
+    def _spy(*args, **kwargs):
+        synth_calls.append(True)
+        return original_synthesize(*args, **kwargs)
+
+    monkeypatch.setattr(coord, "synthesize_review_findings", _spy)
+
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+
+    assert synth_calls, "synthesis must run so the narrative reflects the side-effect finding"
+    assert any(i.description == side_effect_issue.description for i in result.issues)
