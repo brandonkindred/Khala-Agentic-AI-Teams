@@ -46,6 +46,9 @@ TEAM_POSTGRES_MODULES: dict[str, str] = {
     # Issue #376 — investment team's first Postgres table: snapshot index
     # for the durable, content-hashed market-data cache.
     "investment_market_data": "investment_team.market_data_cache.postgres",
+    # Planning team's first Postgres table: an append-only audit record of
+    # each planning run (summary, handoff summary, open/resolved questions).
+    "planning": "planning_team.postgres",
 }
 
 
