@@ -46,14 +46,18 @@ class LatestValueFlusher:
         - ``writer`` is callable with exactly one positional argument (the payload)
           and is safe to invoke repeatedly, from a single daemon thread, with no
           concurrent invocation of itself.
-        - ``enqueue()`` is only called while the flusher is started and not yet
-          stopped (between a ``start()``/``__enter__`` and the matching
-          ``stop()``/``__exit__``) — see ``enqueue()``'s own precondition for why.
+        - ``enqueue()`` and ``write_now()`` are only called while the flusher is
+          started and not yet stopped (between a ``start()``/``__enter__`` and the
+          matching ``stop()``/``__exit__``) — see each one's own precondition for
+          why.
         - ``drain()``, ``stop()``, and ``write_now()`` are never called from within
-          ``writer`` or ``on_error`` (i.e. from the writer thread itself) — each
-          waits for the mailbox to go idle, which on that thread can only happen
-          after the very call in progress returns, so a self-call would deadlock.
-          Detected and raised explicitly rather than silently hanging.
+          ``writer`` or ``on_error`` (i.e. from the writer thread itself), nor from
+          within another ``write_now()`` call's ``fn`` on the same thread (direct
+          recursion, or indirectly via ``enqueue()`` followed by ``drain()``) — each
+          needs the mailbox to go idle and/or the write lock free, neither of which
+          that same thread can make happen until the call already in progress on it
+          returns, so a self-call would deadlock. Detected and raised explicitly
+          rather than silently hanging.
 
     Postconditions:
         - Between ``start()`` and ``stop()`` exactly one daemon thread is running.
@@ -86,6 +90,10 @@ class LatestValueFlusher:
           daemon thread is ever created.
         - At most one payload is ever pending: the mailbox holds zero or one items.
     """
+
+    # Floor for stop()'s final join-poll interval, so a caller-configured join_timeout of
+    # (or close to) zero can't turn the loop into a busy-spin — see stop()'s docstring.
+    _MIN_JOIN_POLL_INTERVAL = 0.05
 
     def __init__(
         self,
@@ -135,14 +143,40 @@ class LatestValueFlusher:
         # could begin creating a replacement thread while the old one is still alive —
         # the exact dual-writer race this lock exists to prevent.
         self._shutdown_lock = threading.Lock()
+        # The thread currently executing a write_now() call's fn (or self-flush loop), if
+        # any — set/cleared only by write_now() itself, always while holding _write_lock, so
+        # at most one thread can ever be recorded here at a time. Lets _reject_if_writer_thread
+        # detect a REENTRANT drain()/stop()/write_now() call made from within fn — e.g. fn
+        # recursively calling write_now(), or enqueuing a payload and then calling drain() —
+        # which would otherwise deadlock: _write_lock is not reentrant, and drain()'s _idle
+        # wait can only be satisfied by a write this same thread is blocking, unable to make.
+        self._write_now_thread: Optional[threading.Thread] = None
+        # Admission bookkeeping for write_now(), analogous to enqueue()'s _running check —
+        # both read/written only under _lifecycle_lock. _active_write_now_count is the number
+        # of write_now() calls admitted (checked _running while True) but not yet finished;
+        # _write_now_drained is set iff that count is 0. stop() waits on the event (after
+        # flipping _running to False, so the count can only fall from here) to make sure it
+        # never returns while an admitted-but-still-queued-for-_write_lock write_now() call
+        # could still land a write afterward — see stop()'s docstring.
+        self._active_write_now_count = 0
+        self._write_now_drained = threading.Event()
+        self._write_now_drained.set()
 
     def _reject_if_writer_thread(self, caller: str) -> None:
-        if threading.current_thread() is self._thread:
+        current = threading.current_thread()
+        if current is self._thread:
             raise RuntimeError(
                 f"{caller}() must not be called from the writer thread itself "
                 "(i.e. from within writer or on_error) — it waits for the mailbox to "
                 "go idle, which on this thread can only happen after this very call "
                 "returns, so it would deadlock"
+            )
+        if current is self._write_now_thread:
+            raise RuntimeError(
+                f"{caller}() must not be called from within a write_now() call's fn on "
+                "the same thread — that call already holds the (non-reentrant) write "
+                "lock write_now()/drain()/stop() all need to make progress, so it would "
+                "deadlock"
             )
 
     def start(self) -> "LatestValueFlusher":
@@ -241,7 +275,13 @@ class LatestValueFlusher:
         landed.
 
         Preconditions:
-            - Not called from the writer thread itself — see the class Preconditions.
+            - Not called from the writer thread itself, nor from within another
+              ``write_now()`` call's ``fn`` on the same thread — see the class
+              Preconditions.
+            - The flusher is currently started and not yet stopped — same
+              liveness requirement as ``enqueue()``, and for the same reason:
+              ``stop()`` must be able to know, by the time it starts waiting, the
+              complete set of ``write_now()`` calls it needs to wait for.
 
         Postconditions:
             - Any payload that was pending (enqueued but not yet written) at the
@@ -251,22 +291,39 @@ class LatestValueFlusher:
               failure is the caller's to handle) before this call returns.
         """
         self._reject_if_writer_thread("write_now")
-        with self._write_lock:
-            while True:
-                with self._lock:
-                    if not self._has_pending:
-                        break
-                    payload = self._pending
-                    self._pending = None
-                    self._has_pending = False
+        with self._lifecycle_lock:
+            if not self._running:
+                raise RuntimeError("write_now() requires a started, not-yet-stopped flusher")
+            self._active_write_now_count += 1
+            self._write_now_drained.clear()
+        try:
+            with self._write_lock:
+                # Recorded only while holding _write_lock, so _reject_if_writer_thread can
+                # never observe a stale value from a call that already released the lock.
+                self._write_now_thread = threading.current_thread()
                 try:
-                    self._writer(payload)
-                except BaseException as exc:  # noqa: BLE001 - see _run()'s identical rationale
-                    self._report_error(exc)
-                with self._lock:
-                    if not self._has_pending:
-                        self._idle.set()
-            fn()
+                    while True:
+                        with self._lock:
+                            if not self._has_pending:
+                                break
+                            payload = self._pending
+                            self._pending = None
+                            self._has_pending = False
+                        try:
+                            self._writer(payload)
+                        except BaseException as exc:  # noqa: BLE001 - see _run()'s rationale
+                            self._report_error(exc)
+                        with self._lock:
+                            if not self._has_pending:
+                                self._idle.set()
+                    fn()
+                finally:
+                    self._write_now_thread = None
+        finally:
+            with self._lifecycle_lock:
+                self._active_write_now_count -= 1
+                if self._active_write_now_count == 0:
+                    self._write_now_drained.set()
 
     def _run(self) -> None:
         while True:
@@ -352,9 +409,20 @@ class LatestValueFlusher:
         an already-unbounded ``drain()`` but observe a flag and return).
 
         The pre-shutdown ``drain()`` only tracks background mailbox writes, so it can return
-        while a caller-driven ``write_now()`` call is still in flight (holding ``_write_lock``
-        to run its own ``fn``) — ``stop()`` additionally waits out that lock afterward, or a
-        direct write could land on the wire after the caller believes shutdown has completed.
+        while a caller-driven ``write_now()`` call is still in flight — ``stop()`` additionally
+        waits for ``_write_now_drained``, or a direct write could land on the wire after the
+        caller believes shutdown has completed. A single acquire-then-release of ``_write_lock``
+        is not enough here: a ``write_now()`` call can already be *queued* waiting for that lock
+        (not holding it yet) when ``stop()`` reaches this point, and a bare acquire/release only
+        proves the lock was free at some instant — it does not wait for that queued caller to
+        actually get its turn and run ``fn``. ``_write_now_drained`` instead reflects
+        ``_active_write_now_count``, incremented/decremented by every ``write_now()`` call
+        across its *entire* duration (queued-and-waiting included, not just while holding
+        ``_write_lock``) — so waiting on it covers every ``write_now()`` call admitted before
+        this point, however far into acquiring the lock it had gotten. ``write_now()`` is
+        admitted under the same ``_running`` check ``enqueue()`` uses, so once this call flips
+        ``_running`` to False (below), no *new* ``write_now()`` call can be admitted — the count
+        this call waits for can only fall from here, never rise.
 
         This call flips ``_running`` under ``_lifecycle_lock`` (briefly — the same lock
         ``enqueue()``'s liveness check uses) but does *not* hold that lock across the drain
@@ -369,13 +437,21 @@ class LatestValueFlusher:
         side. A concurrent ``start()``/second ``stop()`` is instead serialized against this
         call end-to-end via ``_shutdown_lock``, held for the whole method.
 
+        The final join loop polls at ``join_timeout`` (or a small minimum, whichever is
+        larger) rather than the raw configured value: a ``join_timeout`` of (or close to)
+        zero — an accepted configuration, used by several tests to make other races easier to
+        hit — would otherwise turn the loop into a busy-spin that can consume a full core and
+        flood the log with an identical warning on every iteration while the daemon thread
+        finishes exiting. The warning itself is logged only once per call, not on every poll.
+
         Postconditions:
             - Safe to call when never started or already stopped (no-op).
             - Does not return until any payload enqueued before the call has been delivered
               (``writer`` returned) or raised (routed to ``on_error``) — never abandons an
               outstanding write.
-            - Does not return until a ``write_now()`` call already in progress when this was
-              invoked has completed — never returns while a direct write is still in flight.
+            - Does not return until every ``write_now()`` call admitted before this call —
+              whether already holding ``_write_lock`` or still queued waiting for it — has
+              completed. Never returns while a direct write is still in flight or pending.
             - Does not return until the writer thread has actually terminated — never leaves
               a live thread behind for a subsequent ``start()`` to race against.
             - Serialized against a concurrent ``start()``/``stop()`` end-to-end via a
@@ -392,13 +468,15 @@ class LatestValueFlusher:
                     return
                 self._running = False
             self.drain()  # unbounded — see docstring; not held under _lifecycle_lock
-            with self._write_lock:
-                pass  # wait out any in-flight write_now() call — see docstring
+            self._write_now_drained.wait()  # unbounded — waits out every admitted write_now()
             self._stop_flag.set()
             self._wake.set()
+            poll_timeout = max(self._join_timeout, self._MIN_JOIN_POLL_INTERVAL)
+            warned = False
             while self._thread is not None and self._thread.is_alive():
-                self._thread.join(timeout=self._join_timeout)
-                if self._thread.is_alive():
+                self._thread.join(timeout=poll_timeout)
+                if self._thread.is_alive() and not warned:
+                    warned = True
                     logger.warning(
                         "LatestValueFlusher %s: writer thread still exiting after %.1fs",
                         self._name,

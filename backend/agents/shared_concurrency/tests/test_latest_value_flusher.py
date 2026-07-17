@@ -583,3 +583,152 @@ def test_stop_does_not_deadlock_when_writer_thread_self_enqueues() -> None:
     stop_thread.join(timeout=5)
     assert not stop_thread.is_alive(), "stop() must not deadlock against a self-enqueue"
     assert len(reenqueue_errors) == 1, "the self-enqueue must fail fast, not hang"
+
+
+def test_write_now_calling_write_now_from_fn_raises_instead_of_deadlocking() -> None:
+    """fn recursively calling write_now() on the same thread must fail fast — _write_lock is
+    not reentrant, so the inner call would otherwise block forever waiting for a lock the
+    outer call (this same thread) already holds and cannot release until the inner call
+    returns."""
+    errors: list[BaseException] = []
+    flusher = LatestValueFlusher(lambda payload: None, name="reentrant-write-now").start()
+
+    def outer_fn() -> None:
+        try:
+            flusher.write_now(lambda: None)
+        except RuntimeError as e:
+            errors.append(e)
+
+    flusher.write_now(outer_fn)
+    assert len(errors) == 1
+    assert "write_now()" in str(errors[0])
+    flusher.stop()
+
+
+def test_write_now_calling_drain_from_fn_raises_instead_of_deadlocking() -> None:
+    """fn enqueuing a payload and then calling drain() on the same thread must fail fast, not
+    hang — the enqueue clears _idle, and nothing can set it again until this same thread's
+    write_now() call releases _write_lock, which can't happen until fn (i.e. this very drain()
+    call) returns."""
+    errors: list[BaseException] = []
+    flusher = LatestValueFlusher(lambda payload: None, name="reentrant-drain").start()
+
+    def fn() -> None:
+        flusher.enqueue("during-fn")
+        try:
+            flusher.drain()
+        except RuntimeError as e:
+            errors.append(e)
+
+    flusher.write_now(fn)
+    assert len(errors) == 1
+    assert flusher.drain(timeout=5) is True, "the enqueue from fn must still flush normally"
+    flusher.stop()
+
+
+def test_write_now_calling_stop_from_fn_raises_instead_of_deadlocking() -> None:
+    """fn calling stop() on the same thread must fail fast, not hang — stop() needs
+    _write_lock, which this same thread's outer write_now() call already holds."""
+    errors: list[BaseException] = []
+    flusher = LatestValueFlusher(lambda payload: None, name="reentrant-stop").start()
+
+    def fn() -> None:
+        try:
+            flusher.stop()
+        except RuntimeError as e:
+            errors.append(e)
+
+    flusher.write_now(fn)
+    assert len(errors) == 1
+    flusher.stop()
+
+
+def test_write_now_before_start_raises_instead_of_hanging() -> None:
+    """write_now() on a never-started flusher must fail fast (precondition violation),
+    matching enqueue()'s liveness check — not silently deadlock trying to acquire a write
+    lock no writer thread will ever contend for."""
+    flusher = LatestValueFlusher(lambda payload: None, name="write-now-not-started")
+    with pytest.raises(RuntimeError):
+        flusher.write_now(lambda: None)
+
+
+def test_write_now_after_stop_raises_instead_of_hanging() -> None:
+    """write_now() after stop() must also fail fast — a caller must not be able to schedule a
+    direct write on a flusher that has already fully shut down."""
+    flusher = LatestValueFlusher(lambda payload: None, name="write-now-post-stop").start()
+    flusher.stop()
+    with pytest.raises(RuntimeError):
+        flusher.write_now(lambda: None)
+
+
+def test_stop_waits_for_a_write_now_call_still_queued_for_the_write_lock() -> None:
+    """stop() must wait for a write_now() call that was admitted (started, checked _running)
+    but is still queued waiting for _write_lock at the moment stop() reaches its own wait —
+    not just one that already holds the lock. A single acquire-then-release of _write_lock
+    only proves the lock was free at some instant; it does not wait for an already-queued
+    caller to actually get its turn and run fn."""
+    holder_started = threading.Event()
+    release_holder = threading.Event()
+    queued_write_now_started = threading.Event()
+    written: list[str] = []
+
+    def slow_writer(payload: str) -> None:
+        holder_started.set()
+        release_holder.wait(timeout=5)
+
+    flusher = LatestValueFlusher(slow_writer, name="stop-vs-queued-write-now").start()
+    flusher.enqueue("first")
+    assert holder_started.wait(timeout=5), "background write must be holding _write_lock"
+
+    def _fn() -> None:
+        written.append("direct-write")
+
+    def _call_write_now() -> None:
+        queued_write_now_started.set()
+        flusher.write_now(_fn)
+
+    # This write_now() call is admitted (checked _running while True) immediately, then
+    # blocks trying to acquire _write_lock — which the background write above is holding.
+    t = threading.Thread(target=_call_write_now)
+    t.start()
+    assert queued_write_now_started.wait(timeout=5)
+    time.sleep(0.05)  # let the thread actually reach (and block on) _write_lock
+
+    stop_thread = threading.Thread(target=flusher.stop)
+    stop_thread.start()
+    time.sleep(0.1)  # give a buggy stop() a chance to race past the still-queued caller
+    assert not written, "stop() must not let the caller believe shutdown finished early"
+    assert stop_thread.is_alive(), "stop() must still be waiting on the queued write_now() call"
+
+    release_holder.set()  # let the background write finish, freeing _write_lock for write_now()
+    t.join(timeout=5)
+    stop_thread.join(timeout=5)
+    assert not stop_thread.is_alive()
+    assert written == ["direct-write"], "the queued write_now() call must complete before stop()"
+
+
+def test_stop_with_zero_join_timeout_does_not_busy_spin_or_flood_logs(caplog) -> None:
+    """A join_timeout of 0 must not turn stop()'s final join loop into a busy-spin that logs
+    on every iteration while the daemon thread is slow to exit — it should poll at a sane
+    minimum interval and log the warning at most once."""
+    release = threading.Event()
+
+    def slow_to_exit_writer(payload: str) -> None:
+        release.wait(timeout=5)
+
+    flusher = LatestValueFlusher(
+        slow_to_exit_writer, name="zero-timeout-slow-exit", join_timeout=0.0
+    )
+    flusher.start()
+    flusher.enqueue("first")
+
+    stop_thread = threading.Thread(target=flusher.stop)
+    with caplog.at_level("WARNING", logger="shared_concurrency.latest_value_flusher"):
+        stop_thread.start()
+        time.sleep(0.3)  # let stop() poll several times while the writer is still blocked
+        release.set()
+        stop_thread.join(timeout=5)
+
+    assert not stop_thread.is_alive()
+    warnings = [r for r in caplog.records if "still exiting after" in r.getMessage()]
+    assert len(warnings) <= 1, f"expected at most one still-exiting warning, got {len(warnings)}"
