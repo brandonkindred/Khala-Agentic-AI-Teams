@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from _api_test_utils import api_main as _api_main
 from _api_test_utils import create_job as _create_job
+from agents.blogging.api import job_workers
 from fastapi.testclient import TestClient
 
 # ``api_main``/``app`` load and the ``patched_client``/``client`` fixtures live in
@@ -487,25 +488,25 @@ def test_async_job_pool_is_bounded_and_enqueues(monkeypatch: pytest.MonkeyPatch)
     BLOGGING_ASYNC_MAX_WORKERS. Submit enqueues the (target, args) without running it."""
     import queue
 
-    assert _api_main._ASYNC_JOB_MAX_WORKERS >= 1
-    assert isinstance(_api_main._ASYNC_JOB_QUEUE, queue.Queue)
+    assert job_workers._ASYNC_JOB_MAX_WORKERS >= 1
+    assert isinstance(job_workers._ASYNC_JOB_QUEUE, queue.Queue)
 
     # Don't spin real worker threads; just verify submit enqueues the (target, args) job.
-    monkeypatch.setattr(_api_main, "_ensure_async_workers", lambda: None)
+    monkeypatch.setattr(job_workers, "_ensure_async_workers", lambda: None)
 
     def sentinel(*_a):
         return None
 
-    _api_main._submit_async_job(sentinel, "job-1", 2)
-    assert _api_main._ASYNC_JOB_QUEUE.get_nowait() == (sentinel, ("job-1", 2))
+    job_workers._submit_async_job(sentinel, "job-1", 2)
+    assert job_workers._ASYNC_JOB_QUEUE.get_nowait() == (sentinel, ("job-1", 2))
 
 
 def test_submit_async_job_rejects_non_callable(monkeypatch: pytest.MonkeyPatch) -> None:
     """The callable precondition is enforced at submit time (explicit raise so it survives
     python -O), not deferred to a worker."""
-    monkeypatch.setattr(_api_main, "_ensure_async_workers", lambda: None)
+    monkeypatch.setattr(job_workers, "_ensure_async_workers", lambda: None)
     with pytest.raises(TypeError):
-        _api_main._submit_async_job(object(), "job-1")
+        job_workers._submit_async_job(object(), "job-1")
 
 
 def test_async_job_workers_are_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -519,16 +520,18 @@ def test_async_job_workers_are_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
         def start(self):
             pass
 
-    monkeypatch.setattr(_api_main.threading, "Thread", _FakeThread)
-    monkeypatch.setattr(_api_main, "_ASYNC_JOB_WORKERS_STARTED", False)
-    _api_main._ensure_async_workers()
-    assert len(created) == _api_main._ASYNC_JOB_MAX_WORKERS
+    monkeypatch.setattr(job_workers.threading, "Thread", _FakeThread)
+    monkeypatch.setattr(job_workers, "_ASYNC_JOB_WORKERS_STARTED", False)
+    job_workers._ensure_async_workers()
+    assert len(created) == job_workers._ASYNC_JOB_MAX_WORKERS
     assert all(kw.get("daemon") is True for kw in created)
 
 
-def test_async_job_worker_runs_jobs_and_survives_crash() -> None:
+def test_async_job_worker_runs_jobs_and_survives_crash(monkeypatch: pytest.MonkeyPatch) -> None:
     """The worker loop runs queued jobs, keeps going after a job raises, and stops on the
     None sentinel (so one bad job never kills a worker)."""
+    import queue
+
     ran: list[str] = []
 
     def _ok():
@@ -537,28 +540,35 @@ def test_async_job_worker_runs_jobs_and_survives_crash() -> None:
     def _boom():
         raise RuntimeError("job crashed")
 
-    # No real workers run in tests, so the shared queue is safe to drive directly.
-    _api_main._ASYNC_JOB_QUEUE.put((_ok, ()))
-    _api_main._ASYNC_JOB_QUEUE.put((_boom, ()))
-    _api_main._ASYNC_JOB_QUEUE.put(None)  # stop sentinel
-    _api_main._async_job_worker()
+    # A fresh, test-local queue: real daemon workers from other test modules (e.g.
+    # test_medium_stats_api) drain the real job_workers._ASYNC_JOB_QUEUE, so driving
+    # that queue directly here would race a live worker for these items.
+    monkeypatch.setattr(job_workers, "_ASYNC_JOB_QUEUE", queue.Queue())
+    job_workers._ASYNC_JOB_QUEUE.put((_ok, ()))
+    job_workers._ASYNC_JOB_QUEUE.put((_boom, ()))
+    job_workers._ASYNC_JOB_QUEUE.put(None)  # stop sentinel
+    job_workers._async_job_worker()
     assert ran == ["ok"]
 
 
 def test_async_job_worker_marks_crashed_job_failed(monkeypatch: pytest.MonkeyPatch) -> None:
     """A job that crashes before failing its own store entry is marked failed by the worker
     as a safety net, so it doesn't sit in 'running' until the stale monitor reaps it."""
+    import queue
+
     failed: list = []
     monkeypatch.setattr(
         _api_main, "fail_blog_job", lambda job_id, error=None: failed.append((job_id, error))
     )
+    # Fresh, test-local queue — see test_async_job_worker_runs_jobs_and_survives_crash.
+    monkeypatch.setattr(job_workers, "_ASYNC_JOB_QUEUE", queue.Queue())
 
     def _boom(job_id):
         raise RuntimeError("crashed before own handler")
 
-    _api_main._ASYNC_JOB_QUEUE.put((_boom, ("job-x",)))
-    _api_main._ASYNC_JOB_QUEUE.put(None)  # stop sentinel
-    _api_main._async_job_worker()
+    job_workers._ASYNC_JOB_QUEUE.put((_boom, ("job-x",)))
+    job_workers._ASYNC_JOB_QUEUE.put(None)  # stop sentinel
+    job_workers._async_job_worker()
     assert failed == [("job-x", "crashed before own handler")]
 
 
