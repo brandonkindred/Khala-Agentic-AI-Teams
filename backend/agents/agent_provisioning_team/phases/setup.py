@@ -205,7 +205,7 @@ def _rollback_failed_setup(
         # readable: get() maps unreadable-store errors (e.g. EACCES) to None,
         # and destroying a reused container on masked evidence could kill a
         # healthy agent whose record simply cannot be read right now.
-        if not env_store.readable():
+        if not env_store.readable(agent_id):
             logger.error(
                 "Setup rollback: environment registry unreadable for agent_id=%s; "
                 "preserving reused container (ownership unknown)",

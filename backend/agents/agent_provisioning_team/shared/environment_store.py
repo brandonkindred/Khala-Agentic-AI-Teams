@@ -314,28 +314,37 @@ class EnvironmentStore:
         with _lock:
             self._write_env_data(env_info.agent_id, env_info.to_dict())
 
-    def readable(self) -> bool:
-        """Report whether the primary storage directory is currently readable.
+    def readable(self, agent_id: str) -> bool:
+        """Report whether ``agent_id``'s record location(s) can be examined now.
 
         Preconditions:
-            * None.
+            * ``agent_id`` is non-empty.
         Postconditions:
-            * Returns ``True`` iff the primary storage directory can be created
-              (if missing) and listed; never raises.
+            * Returns ``True`` iff every existing candidate path for
+              ``agent_id`` (primary store, then legacy locations) could be
+              stat'd and, when present, its content read; never raises.
+            * A path that does not exist is not a readability failure — only an
+              ``OSError`` while probing or reading an existing path is.
 
-        ``get`` maps unreadable-store errors (e.g. EACCES) to "record absent",
-        which is safe for lookups but not for destructive decisions. Callers
-        about to act destructively on a ``get() is None`` result combine it with
-        this probe to distinguish genuine absence from a store that cannot be
-        read right now.
+        A listable directory is not sufficient: the specific record file can be
+        individually unreadable (bad mode, transient I/O error) while sibling
+        files list fine, and a legacy-location record is invisible to a
+        primary-only directory listing. ``get`` maps any such failure to
+        "record absent", which is safe for lookups but not for destructive
+        decisions — callers about to act destructively on a ``get() is None``
+        result combine it with this probe to distinguish genuine absence from a
+        record that exists but cannot be read right now.
         """
-        try:
-            with _lock:
-                self.storage_dir.mkdir(parents=True, exist_ok=True)
-                next(iter(self.storage_dir.iterdir()), None)
-            return True
-        except OSError:
-            return False
+        assert agent_id, "agent_id must be non-empty"
+        with _lock:
+            for path in self._env_file_candidates(agent_id):
+                try:
+                    if not path.exists():
+                        continue
+                    path.read_text(encoding="utf-8")
+                except OSError:
+                    return False
+        return True
 
     def get(self, agent_id: str) -> Optional[EnvironmentInfo]:
         """Get environment info for an agent.

@@ -136,17 +136,56 @@ def test_environment_store_register_is_atomic_on_write_failure(tmp_path: Path) -
 
 
 def test_environment_store_readable_probe(tmp_path: Path) -> None:
-    """readable() is True for a listable store and False when listing fails.
+    """readable() is True when agent_id's record is absent or readable.
 
     Preconditions: ``tmp_path`` is an empty, writable directory.
-    Postconditions: a healthy store probes True; an OSError from the directory
-    listing (e.g. EACCES) probes False without raising.
+    Postconditions: no record and a readable record both probe True.
     """
     store = EnvironmentStore(storage_dir=tmp_path)
-    assert store.readable() is True
+    assert store.readable("missing") is True
 
-    with patch.object(Path, "iterdir", side_effect=OSError("permission denied")):
-        assert store.readable() is False
+    store.register(
+        StoreEnvInfo(agent_id="a1", container_id="c1", container_name="n1", workspace_path="/w")
+    )
+    assert store.readable("a1") is True
+
+
+def test_environment_store_readable_false_on_unreadable_record_content(tmp_path: Path) -> None:
+    """A record whose CONTENT can't be read (not just directory listing) probes False.
+
+    A listable directory is not sufficient evidence: the specific file can be
+    individually unreadable while the directory listing (and other files in it)
+    are fine.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(agent_id="a1", container_id="c1", container_name="n1", workspace_path="/w")
+    )
+
+    with patch.object(Path, "read_text", side_effect=OSError("permission denied")):
+        assert store.readable("a1") is False
+
+
+def test_environment_store_readable_false_on_unreadable_legacy_copy(tmp_path: Path) -> None:
+    """An unreadable LEGACY-location record also probes False.
+
+    A primary-directory-only listing check would miss this; readable() must
+    probe every candidate path readable() -> `get` would consult, including
+    legacy locations.
+    """
+    from agent_provisioning_team.shared import environment_store as es_mod
+
+    store = EnvironmentStore(storage_dir=tmp_path)
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir()
+    legacy_path = legacy_dir / "a1.json"
+    legacy_path.write_text("{}", encoding="utf-8")
+
+    with (
+        patch.object(es_mod, "legacy_environments_dirs", return_value=[legacy_dir]),
+        patch.object(Path, "read_text", side_effect=OSError("permission denied")),
+    ):
+        assert store.readable("a1") is False
 
 
 def test_environment_store_get_never_raises_on_unreadable_path(tmp_path: Path) -> None:
