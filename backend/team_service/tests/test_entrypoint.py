@@ -169,6 +169,38 @@ def test_wrapper_omits_temporal_worker_when_not_configured() -> None:
     assert "TEMPORAL_ADDRESS" not in body_partial
 
 
+def test_wrapper_registers_schema_before_temporal_worker() -> None:
+    """When both patterns are configured, the wrapper registers the app's Postgres
+    schema *before* starting the Temporal worker, closing the cold-start race where
+    a replayed activity could write to a not-yet-created table."""
+    body = entrypoint.build_wrapper_body(
+        "planning_team",
+        "planning_team.api.main",
+        "app",
+        "planning_team.temporal.worker",
+        "start_planning_temporal_worker_thread",
+    )
+    _compile(body)
+    # The schema is resolved off the imported app and registered via the shared helper.
+    assert "app, 'state'" in body
+    assert "postgres_schema" in body
+    assert "register_team_schemas" in body
+    # Ordering: registration must precede the worker-start block so the worker never
+    # picks up an activity before its tables exist.
+    reg_idx = body.index("register_team_schemas")
+    worker_idx = body.index("_il.import_module('planning_team.temporal.worker')")
+    assert reg_idx < worker_idx
+
+
+def test_wrapper_omits_schema_registration_without_temporal() -> None:
+    """A Pattern-B-only team (no Temporal worker) gets no new wrapper code — the
+    lifespan still owns schema registration, so behavior is unchanged."""
+    body = entrypoint.build_wrapper_body("coding_team", "coding_team.api.main", "app")
+    _compile(body)
+    assert "register_team_schemas" not in body
+    assert "postgres_schema" not in body
+
+
 def test_temporal_names_embedded_safely() -> None:
     """Worker module/func names are embedded via repr(), so a hostile value
     cannot inject code — the wrapper still compiles and the payload survives
