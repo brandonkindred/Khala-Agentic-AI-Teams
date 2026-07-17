@@ -256,6 +256,35 @@ def test_finalize_activity_marks_completed(job_store):
     assert job_store["jobs"]["job-1"]["status"] == "completed"
 
 
+def test_finalize_activity_records_planning_run(monkeypatch, job_store) -> None:
+    """finalize re-reads the persisted handoff and calls record_planning_run
+    with the audit columns derived from it."""
+    job_store["jobs"]["job-1"] = {
+        "handoff_package": {
+            "client_context": {"client_name": "Acme"},
+            "summary": "Handoff package produced by Planning.",
+            "open_questions": [{"id": "q1"}],
+            "resolved_questions": [{"question_id": "q1"}],
+        }
+    }
+    captured = {}
+    monkeypatch.setattr(
+        "planning_team.postgres.writer.record_planning_run",
+        lambda job_id, **kwargs: captured.setdefault("call", (job_id, kwargs)) or True,
+    )
+
+    result = A.finalize_planning_activity("job-1", {"repo_path": "/x"})
+
+    assert result == {"success": True, "summary": "Planning completed; handoff package ready."}
+    job_id, kwargs = captured["call"]
+    assert job_id == "job-1"
+    assert kwargs["client_name"] == "Acme"
+    assert kwargs["summary"] == "Planning completed; handoff package ready."
+    assert kwargs["handoff_summary"] == "Handoff package produced by Planning."
+    assert kwargs["open_questions"] == [{"id": "q1"}]
+    assert kwargs["resolved_questions"] == [{"question_id": "q1"}]
+
+
 def test_legacy_run_planning_activity_delegates(monkeypatch):
     """The legacy single-activity path (kept for rollout replay) delegates to the
     same run_workflow_background the thread-mode /run endpoint uses."""
