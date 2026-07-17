@@ -528,3 +528,181 @@ def test_run_security_agent_cache_hit_skips_second_security_call():
     run_security_agent(**kwargs)
 
     assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Failure fallbacks (approved=False + no findings) must never be cached
+# ---------------------------------------------------------------------------
+
+
+def test_qa_agent_fallback_is_not_cached_and_is_retried():
+    """QAExpertAgent's structured-output-failure fallback (approved=False, no
+    bugs, returned normally rather than raised) must not be cached as a clean
+    pass — the next call for the same content retries the agent for real."""
+    calls = {"n": 0}
+
+    class _FlakyQAAgent:
+        def run(self, inp):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return MagicMock(
+                    bugs_found=[], approved=False, summary="QA could not parse model response: boom"
+                )
+            return MagicMock(bugs_found=[_Bug()], approved=False)
+
+    cache = AgentReviewCache()
+    kwargs = dict(
+        qa_agent=_FlakyQAAgent(),
+        files={"x.py": "def f():\n    return 1"},
+        language="python",
+        task_description="t",
+        task_id="t1",
+        issue_factory=_Issue,
+        max_chars=MAX,
+        warn_threshold=20,
+        cache=cache,
+    )
+
+    first = run_qa_agent(**kwargs)
+    assert first == []  # the fallback piece was skipped, not turned into a false-clean issue set
+    assert calls["n"] == 1
+
+    second = run_qa_agent(**kwargs)
+    assert calls["n"] == 2  # not served from cache -- retried for real
+    assert len(second) == 1 and second[0].description == "real bug"
+
+
+def test_qa_agent_genuine_rejection_with_findings_is_still_cached():
+    """approved=False WITH populated bugs_found is a genuine result, not a
+    fallback — it's cached normally."""
+    calls = {"n": 0}
+
+    class _QAAgent:
+        def run(self, inp):
+            calls["n"] += 1
+            return MagicMock(bugs_found=[_Bug()], approved=False)
+
+    cache = AgentReviewCache()
+    kwargs = dict(
+        qa_agent=_QAAgent(),
+        files={"x.py": "def f():\n    return 1"},
+        language="python",
+        task_description="t",
+        task_id="t1",
+        issue_factory=_Issue,
+        max_chars=MAX,
+        warn_threshold=20,
+        cache=cache,
+    )
+
+    run_qa_agent(**kwargs)
+    run_qa_agent(**kwargs)
+
+    assert calls["n"] == 1
+
+
+def test_qa_agent_clean_pass_is_still_cached():
+    """approved=True with no bugs (a genuine clean pass) is not mistaken for a
+    fallback — it's cached normally."""
+    calls = {"n": 0}
+
+    class _QAAgent:
+        def run(self, inp):
+            calls["n"] += 1
+            return MagicMock(bugs_found=[], approved=True)
+
+    cache = AgentReviewCache()
+    kwargs = dict(
+        qa_agent=_QAAgent(),
+        files={"x.py": "def f():\n    return 1"},
+        language="python",
+        task_description="t",
+        task_id="t1",
+        issue_factory=_Issue,
+        max_chars=MAX,
+        warn_threshold=20,
+        cache=cache,
+    )
+
+    run_qa_agent(**kwargs)
+    run_qa_agent(**kwargs)
+
+    assert calls["n"] == 1
+
+
+def test_security_agent_fallback_is_not_cached_and_is_retried():
+    """CybersecurityExpertAgent's structured-output-failure fallback
+    (approved=False, no vulnerabilities, returned normally rather than raised)
+    must not be cached as a clean pass."""
+    calls = {"n": 0}
+
+    class _Vuln:
+        severity = "high"
+        description = "real vuln"
+        location = "x.ts"
+        recommendation = ""
+
+    class _FlakySecAgent:
+        def run(self, inp):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return MagicMock(
+                    vulnerabilities=[], approved=False, summary="Security analysis failed: boom"
+                )
+            return MagicMock(vulnerabilities=[_Vuln()], approved=False)
+
+    cache = AgentReviewCache()
+    kwargs = dict(
+        security_agent=_FlakySecAgent(),
+        files={"x.ts": "const f = () => 1;"},
+        language="typescript",
+        task_description="t",
+        task_id="t1",
+        issue_factory=_Issue,
+        max_chars=MAX,
+        warn_threshold=20,
+        cache=cache,
+    )
+
+    first = run_security_agent(**kwargs)
+    assert first == []
+    assert calls["n"] == 1
+
+    second = run_security_agent(**kwargs)
+    assert calls["n"] == 2  # not served from cache -- retried for real
+    assert len(second) == 1 and second[0].description == "real vuln"
+
+
+def test_security_agent_genuine_rejection_with_findings_is_still_cached():
+    """approved=False WITH populated vulnerabilities is a genuine result, not a
+    fallback — it's cached normally."""
+    calls = {"n": 0}
+
+    class _Vuln:
+        severity = "high"
+        description = "real vuln"
+        location = "x.ts"
+        recommendation = ""
+
+    class _SecAgent:
+        def run(self, inp):
+            calls["n"] += 1
+            return MagicMock(vulnerabilities=[_Vuln()], approved=False)
+
+    cache = AgentReviewCache()
+    kwargs = dict(
+        security_agent=_SecAgent(),
+        files={"x.ts": "const f = () => 1;"},
+        language="typescript",
+        task_description="t",
+        task_id="t1",
+        issue_factory=_Issue,
+        max_chars=MAX,
+        warn_threshold=20,
+        cache=cache,
+    )
+
+    run_security_agent(**kwargs)
+    run_security_agent(**kwargs)
+
+    assert calls["n"] == 1

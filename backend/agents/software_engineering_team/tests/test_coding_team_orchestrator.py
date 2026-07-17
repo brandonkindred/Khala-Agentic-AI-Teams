@@ -507,6 +507,65 @@ def test_changed_summary_invalidates_cache_even_with_unchanged_diff(tmp_path, mo
     assert "first summary" not in tech_lead.review_calls[-1]
 
 
+def test_changed_acceptance_criteria_invalidates_cache_even_with_unchanged_diff(
+    tmp_path, monkeypatch
+):
+    """Updated acceptance criteria must reach the reviewer even when the branch diff,
+    changes_summary, and decisions are all unchanged.
+
+    Regression test: TaskGraphService.update_task supports updating acceptance_criteria
+    on an in-flight task (e.g. a scope change); the cache previously covered only the
+    changes-summary/diff evidence and user decisions, so this went unnoticed.
+    """
+    _patch_git(monkeypatch, diff="same diff")
+    tech_lead = StubTechLead(approved=False)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1", acceptance_criteria=["first criterion"])
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+
+    swarm._compute_review(graph.get_task("t1"))
+    assert len(tech_lead.review_calls) == 1
+
+    graph.update_task("t1", acceptance_criteria=["second criterion"])
+    swarm._compute_review(graph.get_task("t1"))
+
+    assert len(tech_lead.review_calls) == 2  # changed criteria -> cache correctly missed
+
+
+def test_review_verdict_cache_key_covers_every_reviewer_input():
+    """The cache key changes when any of run_code_review's six inputs changes —
+    task title/description/acceptance criteria and spec_content, not just the
+    changes-summary/diff evidence and user decisions (spec_content is swarm-level
+    and never actually varies within one run, so this is exercised directly here
+    rather than through an end-to-end swarm scenario)."""
+    from software_engineering_team.coding_team.swarm_review import _review_verdict_cache_key
+
+    base = dict(
+        task_title="T",
+        task_description="D",
+        acceptance_criteria=["a", "b"],
+        evidence="ev",
+        user_decisions=["Q -> A"],
+        spec_content="spec",
+    )
+    baseline = _review_verdict_cache_key(**base)
+    assert _review_verdict_cache_key(**base) == baseline  # deterministic
+
+    for field, new_value in [
+        ("task_title", "T2"),
+        ("task_description", "D2"),
+        ("acceptance_criteria", ["a", "c"]),
+        ("evidence", "ev2"),
+        ("user_decisions", ["Q -> A2"]),
+        ("spec_content", "spec2"),
+    ]:
+        variant = dict(base, **{field: new_value})
+        assert _review_verdict_cache_key(**variant) != baseline, (
+            f"changing {field} did not invalidate the cache key"
+        )
+
+
 # ----------------------------------------------------- review retry / failure handling
 
 

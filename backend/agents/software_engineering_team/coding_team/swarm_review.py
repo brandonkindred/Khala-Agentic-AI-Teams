@@ -28,21 +28,40 @@ from software_engineering_team.coding_team.models import Task, TaskStatus
 logger = logging.getLogger(__name__)
 
 
-def _review_verdict_cache_key(evidence: str, user_decisions: List[str]) -> str:
+def _review_verdict_cache_key(
+    *,
+    task_title: str,
+    task_description: str,
+    acceptance_criteria: List[str],
+    evidence: str,
+    user_decisions: List[str],
+    spec_content: str,
+) -> str:
     """Hash of every input that determines one task's Tech Lead review verdict.
 
     Postconditions:
-        - Two calls collide only when ``evidence`` (the changes-summary + diff
-          text actually sent to ``run_code_review``) and ``user_decisions``
-          (every rendered decision line the reviewer is shown) are both
-          identical — mirroring ``code_review_agent.mapping._chunk_cache_key``'s
-          "exact LLM input" key design. ``evidence`` already embeds the branch
-          diff verbatim whenever it is non-empty (see
+        - Two calls collide only when every argument is identical — mirroring
+          ``code_review_agent.mapping._chunk_cache_key``'s "exact LLM input" key
+          design: this covers every field ``run_code_review`` is actually
+          called with (``task_title``/``task_description``/
+          ``acceptance_criteria``/``changes_summary``/``user_decisions``/
+          ``spec_content``), so a change to any one of them — not just the
+          branch diff — misses the cache. ``evidence`` already embeds the
+          branch diff verbatim whenever it is non-empty (see
           ``orchestrator._build_review_evidence``), so this key alone also
           captures every diff change — a separate branch-digest component is
           not needed.
     """
-    body = "\x00".join([evidence, *user_decisions])
+    body = "\x00".join(
+        [
+            task_title,
+            task_description,
+            *acceptance_criteria,
+            evidence,
+            *user_decisions,
+            spec_content,
+        ]
+    )
     return hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()
 
 
@@ -169,8 +188,9 @@ class _ReviewMixin:
         ``_apply_review_decision``; the caller owns any progress-bar lifecycle.
 
         A task whose review inputs are byte-identical to its last-cached call (``_review_verdict_cache``,
-        keyed by ``_review_verdict_cache_key`` over the exact ``changes_summary``/``user_decisions``
-        ``run_code_review`` sees — not the branch diff alone) reuses that verdict instead of calling
+        keyed by ``_review_verdict_cache_key`` over every field ``run_code_review`` actually sees —
+        title/description/acceptance criteria, ``changes_summary``/``user_decisions``, and
+        ``spec_content`` — not the branch diff alone) reuses that verdict instead of calling
         ``run_code_review`` again — the complementary, per-task counterpart to ``AgentReviewCache``'s
         per-file cache in the code-v2 execution loop. This only removes the redundant LLM call: the
         no-change bookkeeping downstream (``_escalate_if_no_change``/``_note_revision_progress``, driven
@@ -211,7 +231,14 @@ class _ReviewMixin:
             # reviewer is shown and thus the verdict.
             evidence = _orch._build_review_evidence(summary, diff)
             user_decisions = self._user_decisions_for(task)
-            cache_key = _review_verdict_cache_key(evidence, user_decisions)
+            cache_key = _review_verdict_cache_key(
+                task_title=task.title,
+                task_description=task.description,
+                acceptance_criteria=task.acceptance_criteria,
+                evidence=evidence,
+                user_decisions=user_decisions,
+                spec_content=self.spec_content,
+            )
             with self._review_verdict_cache_lock:
                 cached = self._review_verdict_cache.get(task.id)
             if cached is not None and cached[0] == cache_key:

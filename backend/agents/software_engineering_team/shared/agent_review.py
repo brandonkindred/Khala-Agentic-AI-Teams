@@ -225,7 +225,18 @@ def run_qa_agent(
         result = qa_agent.run(
             _QAInput(code=code, language=language, task_description=task_description)
         )
-        return getattr(result, "bugs_found", getattr(result, "issues", []))
+        bugs = getattr(result, "bugs_found", getattr(result, "issues", []))
+        # QAExpertAgent's structured-output-failure fallback (qa_agent.agent._fallback)
+        # returns a normal QAOutput with approved=False and an empty bugs_found rather
+        # than raising — indistinguishable from a genuine clean pass unless checked here.
+        # A real review never produces this combination (QAExpertAgent._finalize derives
+        # approved from bugs_found for every non-fallback result), so raising routes a
+        # fallback through the existing failed-piece path below: skipped, issues from
+        # other pieces still returned, and never cached — a transient parse/model
+        # failure is retried for real next time instead of being frozen as "no bugs".
+        if not getattr(result, "approved", True) and not bugs:
+            raise RuntimeError(getattr(result, "summary", "QA agent returned a failure fallback"))
+        return bugs
 
     return run_chunked_agent_review(
         run_chunk=_run_chunk,
@@ -272,7 +283,16 @@ def run_security_agent(
         result = security_agent.run(
             _SecInput(code=code, language=language, task_description=task_description)
         )
-        return getattr(result, "vulnerabilities", getattr(result, "issues", []))
+        vulns = getattr(result, "vulnerabilities", getattr(result, "issues", []))
+        # CybersecurityExpertAgent's structured-output-failure fallback
+        # (security_agent.agent._fallback) returns a normal SecurityOutput with
+        # approved=False and no vulnerabilities rather than raising — see the identical
+        # rationale in run_qa_agent's _run_chunk just above.
+        if not getattr(result, "approved", True) and not vulns:
+            raise RuntimeError(
+                getattr(result, "summary", "Security agent returned a failure fallback")
+            )
+        return vulns
 
     return run_chunked_agent_review(
         run_chunk=_run_chunk,
