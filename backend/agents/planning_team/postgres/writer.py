@@ -15,6 +15,13 @@ from shared_postgres import pg_cursor, statement_timeout_ms
 
 logger = logging.getLogger(__name__)
 
+# statement_timeout_ms() returns 0 when POSTGRES_STATEMENT_TIMEOUT_MS is explicitly
+# disabled for the shared pool — a supported operator choice for teams with
+# legitimately long-running queries. This write is disposable audit data with no
+# legitimate reason to ever run unbounded, so it floors to its own bound rather than
+# silently inheriting "unbounded" from that shared, general-purpose setting.
+_AUDIT_WRITE_TIMEOUT_FLOOR_MS = 5000
+
 
 def record_planning_run(
     job_id: str,
@@ -52,8 +59,10 @@ def record_planning_run(
             # "best-effort" write open indefinitely — worse than a fast failure,
             # since no exception would ever reach the except below. SET LOCAL
             # scopes the bound to this transaction only, so it can never leak onto
-            # the next reuse of this pooled connection.
-            cur.execute(f"SET LOCAL statement_timeout = {statement_timeout_ms()}")
+            # the next reuse of this pooled connection. `or` (not a plain value)
+            # so a shared-config 0 (disabled) still floors to a real bound here.
+            timeout_ms = statement_timeout_ms() or _AUDIT_WRITE_TIMEOUT_FLOOR_MS
+            cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
             cur.execute(
                 """
                 INSERT INTO planning_runs

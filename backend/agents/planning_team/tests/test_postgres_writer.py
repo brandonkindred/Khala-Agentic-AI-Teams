@@ -317,29 +317,18 @@ def test_record_planning_run_upserts_on_retry() -> None:
     assert rows[0][0] == "second attempt"
 
 
-def test_record_planning_run_is_bounded_by_statement_timeout(monkeypatch) -> None:
-    """A lock-contended write must be cancelled by the local statement_timeout, not
-    hang indefinitely — pg_cursor's shared pool sets no default timeout, so without
-    this bound a stalled/contended write could pin a worker forever (and never raise,
-    so the except guard below would never even get a chance to help)."""
+def _assert_write_is_bounded_under_lock_contention(job_id: str) -> None:
+    """Seed ``job_id``, hold its row lock on a second connection/thread, then confirm
+    a concurrent ``record_planning_run`` for the same ``job_id`` is cancelled promptly
+    (not left blocked until the lock is released ~5s later). Shared by both the
+    normal-timeout and the shared-timeout-disabled regression tests below."""
     import threading
     import time
 
-    import planning_team.postgres.writer as writer_module
-    from shared_postgres import get_conn, is_postgres_enabled, register_team_schemas
-    from shared_postgres.testing import truncate_team_tables
-
-    if not is_postgres_enabled():
-        pytest.skip("POSTGRES_HOST not set; skipping live-Postgres writer test")
-
-    register_team_schemas(SCHEMA)
-    truncate_team_tables(SCHEMA)
-
-    # A short bound so the test doesn't have to wait out the real default (5s).
-    monkeypatch.setattr(writer_module, "statement_timeout_ms", lambda: 200)
+    from shared_postgres import get_conn
 
     record_planning_run(
-        "job-lock",
+        job_id,
         client_name=None,
         summary="first",
         handoff_summary="",
@@ -352,7 +341,7 @@ def test_record_planning_run_is_bounded_by_statement_timeout(monkeypatch) -> Non
 
     def _hold_row_lock() -> None:
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("SELECT * FROM planning_runs WHERE job_id = %s FOR UPDATE", ("job-lock",))
+            cur.execute("SELECT * FROM planning_runs WHERE job_id = %s FOR UPDATE", (job_id,))
             lock_acquired.set()
             release_lock.wait(timeout=5)
 
@@ -362,10 +351,10 @@ def test_record_planning_run_is_bounded_by_statement_timeout(monkeypatch) -> Non
         assert lock_acquired.wait(timeout=2), "lock-holder thread failed to acquire the row lock"
 
         start = time.monotonic()
-        # ON CONFLICT DO UPDATE contends on the row FOR UPDATE holds; without the
-        # statement_timeout this call would block until release_lock fires (~5s).
+        # ON CONFLICT DO UPDATE contends on the row FOR UPDATE holds; without a
+        # bound this call would block until release_lock fires (~5s).
         result = record_planning_run(
-            "job-lock",
+            job_id,
             client_name=None,
             summary="second",
             handoff_summary="",
@@ -379,3 +368,48 @@ def test_record_planning_run_is_bounded_by_statement_timeout(monkeypatch) -> Non
 
     assert result is False
     assert elapsed < 2.0, f"write should have been cancelled by statement_timeout, took {elapsed}s"
+
+
+def test_record_planning_run_is_bounded_by_statement_timeout(monkeypatch) -> None:
+    """A lock-contended write must be cancelled by the local statement_timeout, not
+    hang indefinitely — pg_cursor's shared pool sets no default timeout, so without
+    this bound a stalled/contended write could pin a worker forever (and never raise,
+    so the except guard below would never even get a chance to help)."""
+    import planning_team.postgres.writer as writer_module
+    from shared_postgres import is_postgres_enabled, register_team_schemas
+    from shared_postgres.testing import truncate_team_tables
+
+    if not is_postgres_enabled():
+        pytest.skip("POSTGRES_HOST not set; skipping live-Postgres writer test")
+
+    register_team_schemas(SCHEMA)
+    truncate_team_tables(SCHEMA)
+
+    # A short bound so the test doesn't have to wait out the real default (5s).
+    monkeypatch.setattr(writer_module, "statement_timeout_ms", lambda: 200)
+
+    _assert_write_is_bounded_under_lock_contention("job-lock")
+
+
+def test_record_planning_run_floors_disabled_shared_timeout(monkeypatch) -> None:
+    """statement_timeout_ms() == 0 means the shared setting is explicitly disabled
+    (a supported operator choice for other teams' legitimately long-running
+    queries) — this write must still floor to its own bound rather than inheriting
+    "unbounded", or a shared-config change would silently reopen the exact hang
+    the other test above guards against."""
+    import planning_team.postgres.writer as writer_module
+    from shared_postgres import is_postgres_enabled, register_team_schemas
+    from shared_postgres.testing import truncate_team_tables
+
+    if not is_postgres_enabled():
+        pytest.skip("POSTGRES_HOST not set; skipping live-Postgres writer test")
+
+    register_team_schemas(SCHEMA)
+    truncate_team_tables(SCHEMA)
+
+    monkeypatch.setattr(writer_module, "statement_timeout_ms", lambda: 0)
+    # Lower the floor too, purely so this test doesn't have to wait out the real
+    # 5s floor; the point under test is that *some* positive bound is applied.
+    monkeypatch.setattr(writer_module, "_AUDIT_WRITE_TIMEOUT_FLOOR_MS", 200)
+
+    _assert_write_is_bounded_under_lock_contention("job-lock-floor")
