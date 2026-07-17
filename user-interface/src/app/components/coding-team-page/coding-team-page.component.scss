@@ -96,6 +96,27 @@
   }
 }
 
+// Collapsed-state signpost — names the repo → issue → confirm flow before any expansion.
+.github-flow-hint {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem;
+  padding: 0.625rem 0.875rem;
+  font-size: var(--kh-text-sm);
+  color: var(--kh-text-tertiary);
+  background: var(--kh-surface-2);
+  border: 1px dashed var(--kh-border);
+  border-radius: var(--kh-radius-md);
+
+  mat-icon {
+    font-size: 1.1rem;
+    width: 1.1rem;
+    height: 1.1rem;
+    color: var(--kh-text-tertiary);
+  }
+}
+
 // Repository accordion — one row per repo the PAT can access; expanding shows its issues.
 .github-repos-list {
   display: flex;
@@ -319,10 +340,19 @@
     margin: 0.75rem 0;
   }
 
+  // Persistent action bar — pinned to the viewport bottom so "Confirm & Start" stays
+  // reachable regardless of the selected issue body's length or the row's depth.
   &__actions {
     display: flex;
     gap: 0.75rem;
-    margin-top: 1rem;
+    position: sticky;
+    bottom: 0;
+    margin: 1rem -1.25rem -1.25rem; // span the panel's 1.25rem padding → full-width bar
+    padding: 0.75rem 1.25rem;
+    background: var(--kh-surface-3); // match the panel background so it reads as one bar
+    border-top: 1px solid var(--kh-border);
+    border-radius: 0 0 var(--kh-radius-md) var(--kh-radius-md);
+    z-index: 1;
   }
 }
 
