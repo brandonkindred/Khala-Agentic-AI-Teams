@@ -47,6 +47,17 @@ SANDBOX_REAP_TIMEOUT_S = env_int("AGENT_PROVISIONING_SANDBOX_REAP_TIMEOUT_S", 30
 SANDBOX_REAPER_INTERVAL_S = env_int("AGENT_PROVISIONING_SANDBOX_REAPER_INTERVAL_S", 60, floor=1)
 SANDBOX_REAPER_WORKFLOW_ID = "agent-provisioning-sandbox-idle-reaper"
 
+# --- Per-agent_id ownership lock (shared/agent_lock.py) ---------------------
+# AgentProvisioningWorkflow/AgentDeprovisioningWorkflow each acquire this lock
+# for their whole run so two workflows never process the same agent_id at
+# once. LOCK_ACQUIRE_TIMEOUT_S bounds how long a workflow keeps retrying a
+# busy lock before giving up; LOCK_TTL_S is AgentLockStore's own staleness
+# backstop for a lock orphaned by a hard-terminated workflow (bypassing its
+# `finally` release) — normal paths always release explicitly and never rely
+# on it.
+LOCK_ACQUIRE_TIMEOUT_S = env_int("AGENT_PROVISIONING_LOCK_ACQUIRE_TIMEOUT_S", 1800, floor=1)
+LOCK_TTL_S = env_int("AGENT_PROVISIONING_LOCK_TTL_S", 7200, floor=60)
+
 # --- Execute-and-wait client-side ceilings -----------------------------------
 # These must each exceed the corresponding workflow's own worst-case runtime
 # (its activity timeout(s) x retry attempts + backoff), or a legitimately slow
@@ -73,10 +84,14 @@ SANDBOX_TEARDOWN_CLIENT_TIMEOUT_S = env_int(
 )
 # AgentDeprovisioningWorkflow: schedule_to_close_timeout (PHASE_TIMEOUT, 20
 # minutes in temporal/workflows.py) already caps the total time across
-# DEFAULT_RETRY_POLICY's retries, so the client only needs that ceiling plus
-# margin.
+# DEFAULT_RETRY_POLICY's retries. The workflow also acquires the per-agent_id
+# lock (LOCK_ACQUIRE_TIMEOUT_S) before that activity runs, so the client-side
+# ceiling must budget for both or it can time out while the workflow is still
+# validly waiting for a busy lock to free, plus margin.
 DEPROVISION_CLIENT_TIMEOUT_S = env_int(
-    "AGENT_PROVISIONING_DEPROVISION_CLIENT_TIMEOUT_S", 20 * 60 + CLIENT_TIMEOUT_MARGIN_S, floor=1
+    "AGENT_PROVISIONING_DEPROVISION_CLIENT_TIMEOUT_S",
+    LOCK_ACQUIRE_TIMEOUT_S + 20 * 60 + CLIENT_TIMEOUT_MARGIN_S,
+    floor=1,
 )
 
 # Default in-container workspace path when setup did not persist one.

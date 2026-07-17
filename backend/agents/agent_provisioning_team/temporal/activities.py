@@ -154,6 +154,60 @@ def list_manifest_tools_activity(manifest_path: str) -> List[Dict[str, Any]]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Per-agent_id ownership lock — acquired first, released last, by both
+# AgentProvisioningWorkflow and AgentDeprovisioningWorkflow (shared/agent_lock.py)
+# ---------------------------------------------------------------------------
+
+
+@activity.defn(name="agent_provisioning_acquire_lock")
+def acquire_agent_lock_activity(job_id: str, agent_id: str) -> None:
+    """Claim exclusive ownership of ``agent_id`` for this workflow run.
+
+    Preconditions:
+        * ``job_id`` (a provisioning ``job_id`` or a deprovisioning workflow
+          id) and ``agent_id`` are non-empty.
+    Postconditions:
+        * On return, ``agent_id``'s lock record is owned by ``job_id``.
+        * Raises ``RuntimeError`` when a different, non-expired owner
+          currently holds the lock — deliberately a plain (retryable)
+          exception rather than a non-retryable one, so Temporal's retry
+          policy keeps polling with backoff until the lock frees or the
+          activity's ``schedule_to_close_timeout`` is exhausted.
+    """
+    from agent_provisioning_team.shared.agent_lock import AgentLockBusyError, AgentLockStore
+
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
+    activity.heartbeat("acquire-lock")
+    try:
+        AgentLockStore().acquire(agent_id, owner=job_id)
+    except AgentLockBusyError as e:
+        raise RuntimeError(str(e)) from e
+
+
+@activity.defn(name="agent_provisioning_release_lock")
+def release_agent_lock_activity(job_id: str, agent_id: str) -> None:
+    """Release this workflow's ownership of ``agent_id`` (best-effort, idempotent).
+
+    Preconditions:
+        * ``job_id`` and ``agent_id`` are non-empty.
+    Postconditions:
+        * Releases the lock only if ``job_id`` is still the current owner; a
+          no-op otherwise (already released, or owned by someone else).
+        * May raise on a transient I/O failure so Temporal retries — the
+          calling workflow wraps this activity in its own try/except so a
+          persistent release failure is logged, not fatal to the workflow's
+          outcome, and never masks the original failure it is cleaning up
+          after.
+    """
+    from agent_provisioning_team.shared.agent_lock import AgentLockStore
+
+    assert job_id, "job_id must be non-empty"
+    assert agent_id, "agent_id must be non-empty"
+    AgentLockStore().release(agent_id, owner=job_id)
+
+
 @activity.defn(name="agent_provisioning_setup")
 def setup_activity(
     job_id: str,

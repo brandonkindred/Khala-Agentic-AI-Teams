@@ -25,7 +25,11 @@ from temporalio.common import RetryPolicy
 # string — must stay inside the pass-through block with the other package imports.
 with workflow.unsafe.imports_passed_through():
     from agent_provisioning_team.temporal import activities as _activities
-    from agent_provisioning_team.temporal.constants import DEFAULT_WORKSPACE_PATH, TASK_QUEUE
+    from agent_provisioning_team.temporal.constants import (
+        DEFAULT_WORKSPACE_PATH,
+        LOCK_ACQUIRE_TIMEOUT_S,
+        TASK_QUEUE,
+    )
 
 PHASE_TIMEOUT = timedelta(minutes=20)
 TOOL_ACTIVITY_TIMEOUT = timedelta(minutes=15)
@@ -35,6 +39,18 @@ DEFAULT_RETRY_POLICY = RetryPolicy(
     maximum_attempts=3,
     initial_interval=timedelta(seconds=30),
     maximum_interval=timedelta(minutes=2),
+    backoff_coefficient=2.0,
+)
+
+# Bounds how long a workflow keeps retrying a busy per-agent_id lock
+# (shared/agent_lock.py) before giving up. Unbounded attempts — the ceiling
+# is schedule_to_close_timeout, not a retry count — so a busy lock is polled
+# with backoff until it frees or this budget is exhausted.
+LOCK_ACQUIRE_TIMEOUT = timedelta(seconds=LOCK_ACQUIRE_TIMEOUT_S)
+LOCK_ACQUIRE_RETRY_POLICY = RetryPolicy(
+    maximum_attempts=0,
+    initial_interval=timedelta(seconds=5),
+    maximum_interval=timedelta(minutes=1),
     backoff_coefficient=2.0,
 )
 
@@ -212,6 +228,50 @@ class AgentProvisioningWorkflow:
                     res if isinstance(res, dict) else {"tool_name": name, "success": False, "error": err}
                 )
         return tool_results_dump, succeeded, failures
+
+    async def _acquire_agent_lock(self, job_id: str, agent_id: str) -> None:
+        """Claim exclusive ownership of ``agent_id`` for this workflow run.
+
+        Preconditions:
+            * ``job_id`` / ``agent_id`` are non-empty.
+        Postconditions:
+            * Blocks (with backoff, via ``LOCK_ACQUIRE_RETRY_POLICY``) until
+              ``agent_id`` is free or ``LOCK_ACQUIRE_TIMEOUT`` is exhausted,
+              in which case the activity's exception propagates.
+        """
+        await workflow.execute_activity(
+            _activities.acquire_agent_lock_activity,
+            args=[job_id, agent_id],
+            task_queue=TASK_QUEUE,
+            schedule_to_close_timeout=LOCK_ACQUIRE_TIMEOUT,
+            retry_policy=LOCK_ACQUIRE_RETRY_POLICY,
+        )
+
+    async def _release_agent_lock(self, job_id: str, agent_id: str) -> None:
+        """Release this workflow's ownership of ``agent_id`` (best-effort).
+
+        Preconditions:
+            * ``job_id`` / ``agent_id`` are non-empty.
+        Postconditions:
+            * Logs and swallows any exception rather than raising, so a
+              release failure can never mask whatever exception (if any)
+              is already propagating out of ``run()``.
+        """
+        try:
+            await workflow.execute_activity(
+                _activities.release_agent_lock_activity,
+                args=[job_id, agent_id],
+                task_queue=TASK_QUEUE,
+                schedule_to_close_timeout=PHASE_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+        except Exception as release_exc:
+            workflow.logger.error(
+                "release_agent_lock_activity failed for job=%s agent=%s: %s",
+                job_id,
+                agent_id,
+                release_exc,
+            )
 
     async def _compensate_failed_tools(
         self, agent_id: str, succeeded: list[dict], job_id: str
@@ -402,6 +462,13 @@ class AgentProvisioningWorkflow:
             * One Temporal workflow id per ``job_id`` (starter uses a stable
               prefix); resume/restart mint a new run with skip/prior args rather
               than relying on history drain.
+            * At most one workflow (provision or deprovision) actively
+              processes a given ``agent_id`` at a time: this run holds
+              ``agent_id``'s ownership lock (``shared/agent_lock.py``) for its
+              entire duration — acquired before setup, released in a
+              ``finally`` regardless of outcome — so every agent_id-keyed
+              teardown call this run makes (``compensate_activity``,
+              ``cleanup_setup``) is race-free against any other job.
         """
         assert job_id, "job_id must be non-empty"
         assert agent_id, "agent_id must be non-empty"
@@ -416,6 +483,8 @@ class AgentProvisioningWorkflow:
         succeeded_tools: list[dict] = []
 
         try:
+            await self._acquire_agent_lock(job_id, agent_id)
+
             environment_dump = await self._execute_setup_phase(
                 job_id, agent_id, manifest_path, skip, prior
             )
@@ -513,6 +582,8 @@ class AgentProvisioningWorkflow:
                         exc,
                     )
             raise
+        finally:
+            await self._release_agent_lock(job_id, agent_id)
 
 
 @workflow.defn(name="AgentDeprovisioningWorkflow")
@@ -527,6 +598,11 @@ class AgentDeprovisioningWorkflow:
         * Runs exactly one activity — the orchestrator's existing best-effort
           deprovision — so the whole teardown is retried atomically on
           infrastructure failure.
+        * Holds ``agent_id``'s ownership lock (``shared/agent_lock.py``) for
+          the run's entire duration — acquired before ``deprovision_activity``,
+          released in a ``finally`` regardless of outcome — so this teardown
+          can never interleave with a concurrent ``AgentProvisioningWorkflow``
+          run (or another deprovision) for the same ``agent_id``.
     """
 
     @workflow.run
@@ -540,10 +616,40 @@ class AgentDeprovisioningWorkflow:
               ``deprovision_activity``.
         """
         assert agent_id, "agent_id must be non-empty"
-        return await workflow.execute_activity(
-            _activities.deprovision_activity,
-            args=[agent_id, force],
+        # Deprovision workflow ids are randomized per-call (repeated/concurrent
+        # deprovisions of the same agent must never collide on Temporal's own
+        # workflow-id uniqueness), so workflow_id doubles as this run's unique
+        # lock-owner token — stable across replay (WorkflowInfo fields are
+        # fixed from workflow start).
+        owner = workflow.info().workflow_id
+        await workflow.execute_activity(
+            _activities.acquire_agent_lock_activity,
+            args=[owner, agent_id],
             task_queue=TASK_QUEUE,
-            schedule_to_close_timeout=PHASE_TIMEOUT,
-            retry_policy=DEFAULT_RETRY_POLICY,
+            schedule_to_close_timeout=LOCK_ACQUIRE_TIMEOUT,
+            retry_policy=LOCK_ACQUIRE_RETRY_POLICY,
         )
+        try:
+            return await workflow.execute_activity(
+                _activities.deprovision_activity,
+                args=[agent_id, force],
+                task_queue=TASK_QUEUE,
+                schedule_to_close_timeout=PHASE_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+        finally:
+            try:
+                await workflow.execute_activity(
+                    _activities.release_agent_lock_activity,
+                    args=[owner, agent_id],
+                    task_queue=TASK_QUEUE,
+                    schedule_to_close_timeout=PHASE_TIMEOUT,
+                    retry_policy=DEFAULT_RETRY_POLICY,
+                )
+            except Exception as release_exc:
+                workflow.logger.error(
+                    "release_agent_lock_activity failed for owner=%s agent=%s: %s",
+                    owner,
+                    agent_id,
+                    release_exc,
+                )

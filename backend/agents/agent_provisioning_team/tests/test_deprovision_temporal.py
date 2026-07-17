@@ -59,23 +59,43 @@ def test_deprovision_activity_rejects_blank_agent() -> None:
 
 @pytest.mark.asyncio
 async def test_deprovision_workflow_returns_activity_result() -> None:
+    from types import SimpleNamespace
+
     from agent_provisioning_team.temporal import workflows as wf
     from agent_provisioning_team.temporal.workflows import PHASE_TIMEOUT
 
-    captured: dict = {}
+    calls: list[dict] = []
 
     async def fake_exec(activity_fn, *args, **kwargs):
-        captured["name"] = getattr(activity_fn, "__name__", str(activity_fn))
-        captured["args"] = kwargs.get("args")
-        captured["schedule_to_close_timeout"] = kwargs.get("schedule_to_close_timeout")
-        captured["retry_policy"] = kwargs.get("retry_policy")
-        return {"agent_id": "a", "success": True, "details": {}, "error": None}
+        name = getattr(activity_fn, "__name__", str(activity_fn))
+        calls.append(
+            {
+                "name": name,
+                "args": kwargs.get("args"),
+                "schedule_to_close_timeout": kwargs.get("schedule_to_close_timeout"),
+                "retry_policy": kwargs.get("retry_policy"),
+            }
+        )
+        if name == "deprovision_activity":
+            return {"agent_id": "a", "success": True, "details": {}, "error": None}
+        return None
 
-    with patch.object(wf.workflow, "execute_activity", new=fake_exec):
+    fake_info = SimpleNamespace(workflow_id="agent-provisioning-deprovision-a-xyz")
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=fake_exec),
+        patch.object(wf.workflow, "info", return_value=fake_info),
+    ):
         result = await wf.AgentDeprovisioningWorkflow().run("a", True)
 
     assert result["success"] is True
-    assert captured["name"] == "deprovision_activity"
+    # Acquire the lock, run deprovision, release the lock — in that order.
+    assert [c["name"] for c in calls] == [
+        "acquire_agent_lock_activity",
+        "deprovision_activity",
+        "release_agent_lock_activity",
+    ]
+    captured = next(c for c in calls if c["name"] == "deprovision_activity")
     assert captured["args"] == ["a", True]
     assert captured["schedule_to_close_timeout"] == PHASE_TIMEOUT
     assert captured["retry_policy"] is wf.DEFAULT_RETRY_POLICY
