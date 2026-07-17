@@ -7,56 +7,9 @@ import { provideRouter } from '@angular/router';
 import { vi } from 'vitest';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
-import { CodeReviewDashboardComponent, PrReviewRecord } from './code-review-dashboard.component';
-import type { PendingIssueProposal } from '../../models/coding-team.model';
-import type {
-  CodeReviewRunItem,
-  GitHubConfigResponse,
-  GitHubPullRequestItem,
-  GitHubRepoItem,
-  RunPrReviewResponse,
-} from '../../models/integrations.model';
-
-function makePulls(count: number): GitHubPullRequestItem[] {
-  return Array.from({ length: count }, (_, i) => ({
-    number: i + 1,
-    title: `PR ${i + 1}`,
-    body_preview: `body ${i + 1}`,
-    author: 'octocat',
-    html_url: `https://example.com/pull/${i + 1}`,
-    head: `feature-${i + 1}`,
-    base: 'main',
-    draft: i % 2 === 0,
-    labels: i % 2 === 0 ? ['needs-review'] : [],
-    updated_at: '2026-01-01T00:00:00Z',
-  }));
-}
-
-function record(over: Partial<PrReviewRecord> = {}): PrReviewRecord {
-  return {
-    jobId: 'j1',
-    prNumber: 1,
-    owner: 'acme',
-    repo: 'widgets',
-    startedAt: Date.parse('2026-01-01T00:00:00Z'),
-    status: 'running',
-    ...over,
-  };
-}
-
-/** The repo the fake PAT can access; the dashboard lists repos and loads PRs per repo. */
-const REPO: GitHubRepoItem = {
-  owner: 'acme',
-  name: 'widgets',
-  full_name: 'acme/widgets',
-  private: false,
-  archived: false,
-  html_url: 'https://github.com/acme/widgets',
-  description: 'Widget factory',
-  default_branch: 'main',
-  open_issues_count: 3,
-  pushed_at: '2026-06-09T10:00:00Z',
-};
+import { CodeReviewDashboardComponent } from './code-review-dashboard.component';
+import type { CodeReviewRunItem, GitHubConfigResponse, GitHubPullRequestItem, GitHubRepoItem } from '../../models/integrations.model';
+import { makePulls, makeReviewRecord as record, REPO } from './testing/fixtures';
 
 const CONFIGURED: GitHubConfigResponse = {
   enabled: true,
@@ -179,12 +132,12 @@ describe('CodeReviewDashboardComponent', () => {
 
   it('collapsing the expanded repo drops all repo-scoped state', async () => {
     await setup();
-    component.reviews.set(1, [record()]);
+    component['reviewRuns']['_reviews'].set(1, [record()]);
     component.toggleRepo(component.repos[0]); // collapse
     expect(component.selectedRepo).toBeNull();
     expect(component.pulls.length).toBe(0);
     expect(component.pullsLoaded).toBe(false);
-    expect(component.reviews.size).toBe(0);
+    expect(component['reviewRuns'].reviews.size).toBe(0);
   });
 
   it('treats a config check error as unconfigured', async () => {
@@ -270,6 +223,13 @@ describe('CodeReviewDashboardComponent', () => {
     expect(banner?.textContent).toContain('rate limited');
   });
 
+  it('survives a review-history load failure without breaking the PR list', async () => {
+    integrationsSpy.getGitHubReviewHistory.mockReturnValue(throwError(() => new Error('nope')));
+    await setup();
+    expect(component.pullsLoaded).toBe(true);
+    expect(component['reviewRuns'].reviews.size).toBe(0);
+  });
+
   // -------------------------------------------------------------------------
   // Accordion expand/collapse
   // -------------------------------------------------------------------------
@@ -288,406 +248,32 @@ describe('CodeReviewDashboardComponent', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Hydration from the backend
-  // -------------------------------------------------------------------------
-
-  it('hydrates the reviews map from history and resumes pollers for non-terminal runs', async () => {
-    const items: CodeReviewRunItem[] = [
-      {
-        job_id: 'done-1',
-        pr_number: 1,
-        pr_url: 'https://example.com/pull/1',
-        status: 'completed',
-        review_summary: { total_issues: 1, inline_comments: 1, comment_findings: 0, event: 'COMMENT' },
-        created_at: '2026-02-01T00:00:00Z',
-      },
-      {
-        job_id: 'live-1',
-        pr_number: 1,
-        status: 'running',
-        created_at: 'not-a-real-date', // exercises the invalid-timestamp fallback
-      },
-      {
-        job_id: 'done-2',
-        pr_number: 2,
-        status: 'completed',
-        created_at: '2026-02-02T00:00:00Z',
-      },
-    ];
-    integrationsSpy.getGitHubReviewHistory.mockReturnValue(of(items));
-    await setup();
-
-    expect(component.reviewsFor(1).map((r) => r.jobId)).toEqual(['done-1', 'live-1']);
-    expect(component.reviewsFor(2).map((r) => r.jobId)).toEqual(['done-2']);
-    // The running run keeps polling; the two completed runs do not.
-    expect(component['pollers'].has('live-1')).toBe(true);
-    expect(component['pollers'].has('done-1')).toBe(false);
-    // The invalid created_at fell back to a real timestamp.
-    expect(Number.isNaN(component.reviewsFor(1)[1].startedAt)).toBe(false);
-  });
-
-  it('survives a review-history load failure', async () => {
-    integrationsSpy.getGitHubReviewHistory.mockReturnValue(throwError(() => new Error('nope')));
-    await setup();
-    expect(component.pullsLoaded).toBe(true);
-    expect(component.reviews.size).toBe(0);
-  });
-
-  it('keeps an in-flight review that a concurrent hydrate snapshot omits', async () => {
-    await setup();
-    // A hydrate is in flight (response deferred) when the user starts a review.
-    const hydrate$ = new Subject<CodeReviewRunItem[]>();
-    integrationsSpy.getGitHubReviewHistory.mockReturnValue(hydrate$.asObservable());
-    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'A', status: 'running' }));
-    integrationsSpy.runGitHubReviewPr.mockReturnValue(
-      of({ job_id: 'A', pr_number: 1, pr_url: 'u', status: 'pending', message: '' }),
-    );
-
-    component.loadPulls(); // hydrate request fired, not yet resolved
-    component.startReview(component.pulls[0]); // record A + live poller A
-    expect(component.reviewsFor(1).map((r) => r.jobId)).toContain('A');
-    expect(component['pollers'].has('A')).toBe(true);
-
-    // The snapshot (taken before A was persisted) arrives without A.
-    hydrate$.next([]);
-    expect(component.reviewsFor(1).map((r) => r.jobId)).toContain('A');
-    expect(component['pollers'].has('A')).toBe(true);
-  });
-
-  it('prefers the live in-flight record over a stale hydrate snapshot copy', async () => {
-    await setup();
-    const hydrate$ = new Subject<CodeReviewRunItem[]>();
-    integrationsSpy.getGitHubReviewHistory.mockReturnValue(hydrate$.asObservable());
-    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'A', status: 'running', status_text: 'live' }));
-    integrationsSpy.runGitHubReviewPr.mockReturnValue(
-      of({ job_id: 'A', pr_number: 1, pr_url: 'u', status: 'pending', message: '' }),
-    );
-
-    component.loadPulls();
-    component.startReview(component.pulls[0]);
-    vi.advanceTimersByTime(5000); // poll advances A to running + status_text 'live'
-    const liveRec = component.reviewsFor(1).find((r) => r.jobId === 'A')!;
-
-    // The snapshot includes A but with stale 'pending' status.
-    hydrate$.next([{ job_id: 'A', pr_number: 1, status: 'pending', created_at: '2026-01-01T00:00:00Z' }]);
-
-    const afterRec = component.reviewsFor(1).find((r) => r.jobId === 'A')!;
-    expect(afterRec).toBe(liveRec); // same object, not a fresh snapshot copy
-    expect(afterRec.statusText).toBe('live'); // live state retained
-    expect(component['pollers'].has('A')).toBe(true);
-  });
-
-  // -------------------------------------------------------------------------
-  // Starting reviews + polling
-  // -------------------------------------------------------------------------
-
-  it('starts a review, records it, and polls it live', async () => {
-    await setup();
-    apiSpy.getJobStatus.mockReturnValue(
-      of({
-        job_id: 'j1',
-        status: 'completed',
-        status_text: 'done',
-        github_pr_url: 'https://example.com/pull/1',
-        review_summary: { total_issues: 2, inline_comments: 1, comment_findings: 1, event: 'REQUEST_CHANGES' },
-      }),
-    );
-    component.startReview(component.pulls[0]);
-    // The expanded repo is the review target — repository access comes from the PAT.
-    expect(integrationsSpy.runGitHubReviewPr).toHaveBeenCalledWith({ pr_number: 1, owner: 'acme', repo: 'widgets' });
-    expect(component.reviewsFor(1).length).toBe(1);
-    expect(component.reviewsFor(1)[0].jobId).toBe('j1');
-
-    vi.advanceTimersByTime(5000);
-    const rec = component.reviewsFor(1)[0];
-    expect(rec.status).toBe('completed');
-    expect(rec.reviewSummary?.event).toBe('REQUEST_CHANGES');
-    expect(rec.prUrl).toBe('https://example.com/pull/1');
-    // Terminal status removes the poller.
-    expect(component['pollers'].has('j1')).toBe(false);
-  });
-
-  // -------------------------------------------------------------------------
-  // Review-duration timestamps (server-clock start + terminal completion)
-  // -------------------------------------------------------------------------
-
-  it('maps created_at and completed_at from history into the record', async () => {
-    integrationsSpy.getGitHubReviewHistory.mockReturnValue(
-      of([
-        {
-          job_id: 'c1',
-          pr_number: 1,
-          status: 'completed',
-          review_summary: { total_issues: 0, inline_comments: 0, event: 'APPROVE' },
-          created_at: '2026-02-01T00:00:00Z',
-          completed_at: '2026-02-01T00:01:30Z',
-        },
-        {
-          job_id: 'c2',
-          pr_number: 1,
-          status: 'completed',
-          created_at: '2026-02-01T00:00:00Z',
-          completed_at: 'not-a-real-date', // unparseable -> completedAt undefined
-        },
-      ] as CodeReviewRunItem[]),
-    );
-    await setup();
-    const [withTime, badTime] = component.reviewsFor(1);
-    expect(withTime.completedAt).toBe(Date.parse('2026-02-01T00:01:30Z'));
-    expect(badTime.completedAt).toBeUndefined();
-  });
-
-  it('uses the server-clock created_at from the start response as the record start time', async () => {
-    await setup();
-    integrationsSpy.runGitHubReviewPr.mockReturnValue(
-      of({
-        job_id: 'j1',
-        pr_number: 1,
-        pr_url: 'u',
-        status: 'pending',
-        message: '',
-        created_at: '2026-03-01T00:00:00Z',
-      }),
-    );
-    component.startReview(component.pulls[0]);
-    expect(component.reviewsFor(1)[0].startedAt).toBe(Date.parse('2026-03-01T00:00:00Z'));
-  });
-
-  it('falls back to the browser clock for the start time when created_at is absent', async () => {
-    await setup();
-    // The default runGitHubReviewPr mock carries no created_at.
-    component.startReview(component.pulls[0]);
-    const rec = component.reviewsFor(1)[0];
-    expect(Number.isNaN(rec.startedAt)).toBe(false);
-    expect(rec.startedAt).toBeGreaterThan(0);
-  });
-
-  it('stamps completedAt from the terminal updated_at when a live poll goes terminal', async () => {
-    await setup();
-    // A stale-failed job bumps updated_at to the terminal time but leaves
-    // last_activity_at frozen; the duration must use the terminal updated_at.
-    apiSpy.getJobStatus.mockReturnValue(
-      of({
-        job_id: 'j1',
-        status: 'failed',
-        last_activity_at: '2026-03-01T00:02:00Z', // frozen at last activity
-        updated_at: '2026-03-01T00:10:00Z', // terminal transition time (wins)
-      }),
-    );
-    component.startReview(component.pulls[0]);
-    const rec = component.reviewsFor(1)[0];
-    expect(rec.completedAt).toBeUndefined(); // not terminal yet
-    vi.advanceTimersByTime(5000); // one poll tick -> terminal
-    expect(rec.completedAt).toBe(Date.parse('2026-03-01T00:10:00Z'));
-  });
-
-  it('stops polling once a review reaches a terminal status', async () => {
-    await setup();
-    apiSpy.getJobStatus.mockReturnValue(
-      of({
-        job_id: 'j1',
-        status: 'completed',
-        review_summary: { total_issues: 0, inline_comments: 0, comment_findings: 0, event: 'APPROVE' },
-      }),
-    );
-    component.startReview(component.pulls[0]);
-    vi.advanceTimersByTime(5000); // first poll -> terminal -> poller disposed
-    expect(component['pollers'].has('j1')).toBe(false);
-    // No further polling after the job is terminal (subscription was torn down).
-    const callsAfterTerminal = apiSpy.getJobStatus.mock.calls.length;
-    vi.advanceTimersByTime(20000);
-    expect(apiSpy.getJobStatus.mock.calls.length).toBe(callsAfterTerminal);
-  });
-
-  it('ignores a second startReview while one is already starting', async () => {
-    await setup();
-    const slow = new Subject<never>();
-    integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
-    component.startReview(component.pulls[0]);
-    component.startReview(component.pulls[0]); // second call ignored while the first is in flight
-    expect(integrationsSpy.runGitHubReviewPr).toHaveBeenCalledTimes(1);
-    expect(component.isStarting(component.pulls[0])).toBe(true);
-  });
-
-  it('surfaces a start-review error per PR without touching the list-load banner', async () => {
-    integrationsSpy.runGitHubReviewPr.mockReturnValue(
-      throwError(() => ({ error: { detail: 'no such PR' } })),
-    );
-    await setup();
-    component.startReview(component.pulls[0]);
-    expect(component.reviewErrorFor(1)).toBe('no such PR');
-    expect(component.reviewErrorFor(2)).toBeNull();
-    expect(component.pullError).toBeNull(); // list-load banner untouched
-    expect(component.isStarting(component.pulls[0])).toBe(false);
-  });
-
-  it('an in-flight start on one repo does not block the same-numbered PR in another repo', async () => {
-    await setup(); // acme/widgets expanded, PR #1 present
-    const slow = new Subject<never>();
-    integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
-    component.startReview(component.pulls[0]); // start acme/widgets PR #1 (in flight)
-    // Switch to another repo that also has a PR #1.
-    const other: GitHubRepoItem = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
-    component.repos = [REPO, other];
-    component.toggleRepo(other);
-    fixture.detectChanges();
-    // `starting` is keyed by owner/repo#number, so other/thing PR #1 is NOT considered starting.
-    expect(component.isStarting(component.pulls[0])).toBe(false);
-  });
-
-  it('falls back to err.message when a start-review error has no detail', async () => {
-    integrationsSpy.runGitHubReviewPr.mockReturnValue(throwError(() => ({ message: 'Network down' })));
-    await setup();
-    component.startReview(component.pulls[0]);
-    expect(component.reviewErrorFor(1)).toBe('Network down');
-  });
-
-  it('does not surface a start-review failure from a switched-away repo under the new repo', async () => {
-    await setup(); // acme/widgets expanded, PRs loaded (PR #1 present)
-    const slow = new Subject<never>();
-    integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
-    component.startReview(component.pulls[0]); // start on acme/widgets PR #1 (request pending)
-    // Switch to a different repo that also has a PR #1 before the start resolves.
-    const other: GitHubRepoItem = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
-    component.repos = [REPO, other];
-    component.toggleRepo(other);
-    fixture.detectChanges();
-    // acme/widgets' start now fails — reviewErrors is keyed by bare PR number, so an
-    // unguarded set would render this failure under other/thing's PR #1.
-    slow.error({ error: { detail: 'clone failed' } });
-    expect(component.reviewErrorFor(1)).toBeNull();
-  });
-
-  it('does not spin a poller for a review that resolves after a switch-away', async () => {
-    await setup(); // acme/widgets expanded, PR #1 present
-    const slow = new Subject<RunPrReviewResponse>();
-    integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
-    apiSpy.getJobStatus.mockClear();
-    component.startReview(component.pulls[0]); // start acme/widgets PR #1 (pending)
-    // Switch to another repo before the start resolves.
-    const other: GitHubRepoItem = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
-    component.repos = [REPO, other];
-    component.toggleRepo(other);
-    // The start now resolves while the user is on another repo — no record is shown and no
-    // orphan poller must be attached (startPolling is inside the same-repo guard).
-    slow.next({ job_id: 'jX', pr_number: 1, pr_url: 'u', status: 'pending', message: '' });
-    slow.complete();
-    vi.advanceTimersByTime(20000);
-    expect(apiSpy.getJobStatus).not.toHaveBeenCalledWith('jX');
-  });
-
-  it('falls back to a default message when a start-review error has no detail or message', async () => {
-    integrationsSpy.runGitHubReviewPr.mockReturnValue(throwError(() => ({})));
-    await setup();
-    component.startReview(component.pulls[0]);
-    expect(component.reviewErrorFor(1)).toBe('Failed to start review.');
-  });
-
-  it('accumulates multiple reviews on the same PR, newest-first', async () => {
-    await setup();
-    integrationsSpy.runGitHubReviewPr
-      .mockReturnValueOnce(of({ job_id: 'j1', pr_number: 1, pr_url: 'u1', status: 'pending', message: '' }))
-      .mockReturnValueOnce(of({ job_id: 'j2', pr_number: 1, pr_url: 'u2', status: 'pending', message: '' }));
-    component.startReview(component.pulls[0]);
-    component.startReview(component.pulls[0]);
-    expect(component.reviewsFor(1).map((r) => r.jobId)).toEqual(['j2', 'j1']);
-    expect(component.hasReviews(1)).toBe(true);
-  });
-
-  it('polls concurrent reviews on different PRs without cross-talk', async () => {
-    await setup();
-    integrationsSpy.runGitHubReviewPr
-      .mockReturnValueOnce(of({ job_id: 'ja', pr_number: 1, pr_url: 'u1', status: 'pending', message: '' }))
-      .mockReturnValueOnce(of({ job_id: 'jb', pr_number: 2, pr_url: 'u2', status: 'pending', message: '' }));
-    apiSpy.getJobStatus.mockImplementation((id: string) =>
-      of({
-        job_id: id,
-        status: 'completed',
-        review_summary: {
-          total_issues: 0,
-          inline_comments: 0,
-          comment_findings: 0,
-          event: id === 'ja' ? 'APPROVE' : 'COMMENT',
-        },
-      }),
-    );
-    component.startReview(component.pulls[0]);
-    component.startReview(component.pulls[1]);
-    vi.advanceTimersByTime(5000);
-
-    expect(apiSpy.getJobStatus).toHaveBeenCalledWith('ja');
-    expect(apiSpy.getJobStatus).toHaveBeenCalledWith('jb');
-    expect(component.reviewsFor(1)[0].reviewSummary?.event).toBe('APPROVE');
-    expect(component.reviewsFor(2)[0].reviewSummary?.event).toBe('COMMENT');
-  });
-
-  it('marks the record errored when polling loses the connection', async () => {
-    await setup();
-    apiSpy.getJobStatus.mockReturnValue(throwError(() => new Error('down')));
-    component.startReview(component.pulls[0]);
-    // Three consecutive failed polls trip the connection-lost handler.
-    vi.advanceTimersByTime(15001);
-    expect(component.reviewsFor(1)[0].error).toContain('Lost connection');
-    expect(component['pollers'].has('j1')).toBe(false);
-  });
-
-  // -------------------------------------------------------------------------
-  // Derived helpers (row badge + status)
-  // -------------------------------------------------------------------------
-
-  it('derives the row badge from the latest review run', async () => {
-    await setup();
-    expect(component.badgeLabel(1)).toBeNull();
-    expect(component.badgeClass(1)).toBe('');
-
-    component.reviews.set(1, [record({ status: 'running' })]);
-    expect(component.badgeLabel(1)).toBe('running');
-    expect(component.badgeClass(1)).toBe('');
-    expect(component.isLatestRunning(1)).toBe(true);
-
-    component.reviews.set(1, [
-      record({ status: 'completed', reviewSummary: { total_issues: 0, inline_comments: 0, comment_findings: 0, event: 'COMMENT' } }),
-    ]);
-    expect(component.badgeLabel(1)).toBe('COMMENT');
-    expect(component.badgeClass(1)).toBe('cr-job-status--completed');
-    expect(component.isLatestRunning(1)).toBe(false);
-
-    component.reviews.set(1, [record({ status: 'completed' })]); // terminal, no summary
-    expect(component.badgeLabel(1)).toBe('completed');
-
-    component.reviews.set(1, [record({ status: 'failed' })]);
-    expect(component.badgeLabel(1)).toBe('failed');
-    expect(component.badgeClass(1)).toBe('cr-job-status--failed');
-
-    component.reviews.set(1, [record({ status: 'running', error: 'Lost connection' })]);
-    expect(component.badgeLabel(1)).toBe('error');
-    expect(component.badgeClass(1)).toBe('cr-job-status--failed');
-    expect(component.isLatestRunning(1)).toBe(false);
-  });
-
-  // `commentFindings` and `isRecordTerminal` moved into PrReviewDetailComponent,
-  // which renders the reviews table; they're covered by its spec.
-
-  // -------------------------------------------------------------------------
   // Teardown
   // -------------------------------------------------------------------------
+  // The review-run domain (hydration, polling, starting reviews, badge derivation,
+  // issue creation) is owned by PrReviewRunsService and covered by its own spec
+  // (pr-review-runs.service.spec.ts); the template binds to `reviewRuns` directly for
+  // all of it, so this component holds no review-run wrapper methods of its own. This
+  // test instead covers the one invariant that spans both classes: destroying this
+  // component must stop the service's pollers, since the service is only torn down
+  // because Angular destroys it as a provider of this component.
 
-  it('tears down all pollers on destroy', async () => {
+  it('stops all live polling when the component is destroyed', async () => {
     await setup();
-    integrationsSpy.runGitHubReviewPr
-      .mockReturnValueOnce(of({ job_id: 'jx', pr_number: 1, pr_url: 'u', status: 'pending', message: '' }))
-      .mockReturnValueOnce(of({ job_id: 'jy', pr_number: 2, pr_url: 'u', status: 'pending', message: '' }));
-    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'jx', status: 'running' })); // stays non-terminal
-    component.startReview(component.pulls[0]);
-    component.startReview(component.pulls[1]);
-    expect(component['pollers'].size).toBe(2);
+    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'j1', status: 'running' })); // stays non-terminal
+    component['reviewRuns'].startReview(component.pulls[0]);
+    expect(component['reviewRuns']['pollers'].size).toBe(1);
 
     const callsBefore = apiSpy.getJobStatus.mock.calls.length;
-    component.ngOnDestroy();
-    expect(component['pollers'].size).toBe(0);
+    fixture.destroy();
+    expect(component['reviewRuns']['pollers'].size).toBe(0);
     vi.advanceTimersByTime(15000);
     expect(apiSpy.getJobStatus.mock.calls.length).toBe(callsBefore);
   });
+
+  // -------------------------------------------------------------------------
+  // Full-stack DOM integration (component + real PrReviewRunsService + child)
+  // -------------------------------------------------------------------------
 
   it('renders an expanded PR detail with a reviews table', async () => {
     integrationsSpy.getGitHubReviewHistory.mockReturnValue(
@@ -725,7 +311,7 @@ describe('CodeReviewDashboardComponent', () => {
     );
     const el: HTMLElement = fixture.nativeElement;
 
-    component.startReview(component.pulls[0]);
+    component['reviewRuns'].startReview(component.pulls[0]);
     component.togglePull(component.pulls[0]);
     fixture.detectChanges();
     // Before the first poll the row badge shows the initial (pending) status.
@@ -745,95 +331,20 @@ describe('CodeReviewDashboardComponent', () => {
     );
     await setup();
     component.togglePull(component.pulls[0]);
-    component.startReview(component.pulls[0]);
+    component['reviewRuns'].startReview(component.pulls[0]);
     fixture.detectChanges();
     const detail = fixture.nativeElement.querySelector('.cr-pull-detail');
     expect(detail?.textContent).toContain('no such PR');
   });
 
-
-  // -------------------------------------------------------------------------
-  // Pre-existing-bug proposals -> GitHub issues
-  // -------------------------------------------------------------------------
-  // Proposal formatting/selection now live in PendingIssueProposalsComponent
-  // (see pending-issue-proposals.component.spec.ts); this component only
-  // gates whether that child is shown and owns the actual create-issues call.
-
-  function proposal(id: string, over: Record<string, unknown> = {}): PendingIssueProposal {
-    return {
-      id,
-      severity: 'high',
-      category: 'logic',
-      file_path: 'a.py',
-      line: 3,
-      description: `bug ${id}`,
-      suggestion: 'fix',
-      issue_number: null,
-      issue_url: null,
-      ...over,
-    };
-  }
-
-  function terminalRecordWith(proposals: PendingIssueProposal[]): PrReviewRecord {
-    return record({
-      status: 'completed',
-      reviewSummary: {
-        total_issues: 0,
-        inline_comments: 0,
-        event: 'COMMENT',
-        pending_issue_proposals: proposals,
-      },
-    });
-  }
-
-  // `hasProposals` (the gate on whether the proposals child renders) moved into
-  // PrReviewDetailComponent and is covered by its spec.
-
-  it('files the given proposal ids and merges the updated list back', async () => {
-    await setup();
-    const rec = terminalRecordWith([proposal('p0'), proposal('p1')]);
-    integrationsSpy.createGitHubReviewIssues.mockReturnValue(
-      of({
-        job_id: 'j1',
-        created: [
-          { proposal_id: 'p0', issue_number: 5, issue_url: 'https://x/issues/5', title: 't' },
-        ],
-        proposals: [
-          proposal('p0', { issue_number: 5, issue_url: 'https://x/issues/5' }),
-          proposal('p1'),
-        ],
-      }),
+  it('leaves the PR-list banner untouched when a start-review request fails', async () => {
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(
+      throwError(() => ({ error: { detail: 'no such PR' } })),
     );
-    component.createIssuesFor(rec, ['p0']);
-    expect(integrationsSpy.createGitHubReviewIssues).toHaveBeenCalledWith(
-      'acme',
-      'widgets',
-      'j1',
-      ['p0'],
-    );
-    // The record's proposals now reflect the filed issue.
-    expect(rec.reviewSummary?.pending_issue_proposals?.[0].issue_url).toBe('https://x/issues/5');
-    // The in-flight flag (passed down to the child) is cleared on completion.
-    expect(component.creatingIssues.has('j1')).toBe(false);
-  });
-
-  it('does nothing when creating issues with no ids', async () => {
     await setup();
-    const rec = terminalRecordWith([proposal('p0')]);
-    component.createIssuesFor(rec, []);
-    expect(integrationsSpy.createGitHubReviewIssues).not.toHaveBeenCalled();
+    component['reviewRuns'].startReview(component.pulls[0]);
+    // A per-PR start-review failure is a PrReviewRunsService concern (reviewErrorFor);
+    // it must never surface through the component's own list-load banner.
+    expect(component.pullError).toBeNull();
   });
-
-  it('surfaces a create-issue error', async () => {
-    await setup();
-    const rec = terminalRecordWith([proposal('p0')]);
-    integrationsSpy.createGitHubReviewIssues.mockReturnValue(
-      throwError(() => ({ error: { detail: 'no scope' } })),
-    );
-    component.createIssuesFor(rec, ['p0']);
-    // The parent owns the create-issue state it passes down to the child.
-    expect(component.createIssueErrors.get('j1')).toBe('no scope');
-    expect(component.creatingIssues.has('j1')).toBe(false);
-  });
-
 });

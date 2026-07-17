@@ -684,13 +684,13 @@
             </mat-accordion>
             }
 
-            <!-- Paper Trading section (winning strategies only) -->
-            @if (record.is_winning) {
+            <!-- Paper trading: always show existing sessions; gate Run/Re-run on publishable -->
+            @if (record.is_winning || getPaperSession(record)) {
               <mat-divider class="card-divider"></mat-divider>
 
               <div class="paper-trading-section">
                 @if (getPaperSession(record); as session) {
-                  <!-- Paper trading results (or running state) -->
+                  <!-- Paper trading results (or running state) — visible even for legacy non-publishable winners -->
                   <div class="paper-trading-result">
                     <div class="paper-verdict-row">
                       @if (session.status === 'running') {
@@ -713,21 +713,23 @@
                           {{ session.trades.length }} trades &bull;
                           {{ session.data_period_start | slice:0:10 }} to {{ session.data_period_end | slice:0:10 }}
                         </span>
-                        @if (paperTradingLabRecordId === record.lab_record_id) {
-                          <button mat-stroked-button class="rerun-paper-btn" disabled>
-                            <mat-spinner diameter="16" class="btn-spinner"></mat-spinner>
-                            Re-run
-                          </button>
-                        } @else {
-                          <button
-                            mat-stroked-button
-                            class="rerun-paper-btn"
-                            (click)="runPaperTrading(record)"
-                            [disabled]="paperTradingLabRecordId !== null || running"
-                          >
-                            <mat-icon>refresh</mat-icon>
-                            Re-run
-                          </button>
+                        @if (record.is_publishable) {
+                          @if (paperTradingLabRecordId === record.lab_record_id) {
+                            <button mat-stroked-button class="rerun-paper-btn" disabled>
+                              <mat-spinner diameter="16" class="btn-spinner"></mat-spinner>
+                              Re-run
+                            </button>
+                          } @else {
+                            <button
+                              mat-stroked-button
+                              class="rerun-paper-btn"
+                              (click)="runPaperTrading(record)"
+                              [disabled]="paperTradingLabRecordId !== null || running"
+                            >
+                              <mat-icon>refresh</mat-icon>
+                              Re-run
+                            </button>
+                          }
                         }
                       }
                     </div>
@@ -769,9 +771,21 @@
                         <p>{{ session.divergence_analysis }}</p>
                       </div>
                     }
+
+                    @if (!record.is_publishable) {
+                      <div class="paper-trading-skipped paper-trading-skipped-inline">
+                        <mat-icon class="paper-skip-icon">block</mat-icon>
+                        <div class="paper-skip-copy">
+                          <span class="paper-skip-title">Re-run unavailable — record is not publishable</span>
+                          @if (publishabilitySkipLabel(record); as reason) {
+                            <span class="paper-skip-reason">{{ reason }}</span>
+                          }
+                        </div>
+                      </div>
+                    }
                   </div>
-                } @else {
-                  <!-- No paper trading yet — show button -->
+                } @else if (record.is_publishable) {
+                  <!-- No paper trading yet — show button only when publishable -->
                   @if (paperTradingLabRecordId === record.lab_record_id) {
                     <button
                       mat-stroked-button
@@ -794,6 +808,16 @@
                       <span>Paper Trade This Strategy</span>
                     </button>
                   }
+                } @else {
+                  <div class="paper-trading-skipped">
+                    <mat-icon class="paper-skip-icon">block</mat-icon>
+                    <div class="paper-skip-copy">
+                      <span class="paper-skip-title">Not publishable — paper trading unavailable</span>
+                      @if (publishabilitySkipLabel(record); as reason) {
+                        <span class="paper-skip-reason">{{ reason }}</span>
+                      }
+                    </div>
+                  </div>
                 }
               </div>
             }

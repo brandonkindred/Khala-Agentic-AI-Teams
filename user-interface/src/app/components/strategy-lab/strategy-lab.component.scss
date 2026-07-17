@@ -1256,6 +1256,43 @@
   margin-top: 0.5rem;
 }
 
+.paper-trading-skipped {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.65rem 0.75rem;
+  color: var(--kh-text-muted);
+}
+
+.paper-trading-skipped-inline {
+  margin-top: 0.75rem;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.paper-skip-icon {
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
+.paper-skip-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.paper-skip-title {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--kh-text);
+}
+
+.paper-skip-reason {
+  font-size: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-word;
+}
+
 .paper-trade-btn {
   display: flex;
   align-items: center;

@@ -2350,7 +2350,9 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                         details_str = ""
                         if check.details:
                             if "matches" in check.details:
-                                details_str = f" Found: {', '.join(str(m) for m in check.details['matches'])}"
+                                details_str = (
+                                    f" Found: {', '.join(str(m) for m in check.details['matches'])}"
+                                )
                             elif "violations" in check.details:
                                 details_str = f" Violations: {', '.join(str(v) for v in check.details['violations'])}"
                             elif "fk_grade" in check.details:

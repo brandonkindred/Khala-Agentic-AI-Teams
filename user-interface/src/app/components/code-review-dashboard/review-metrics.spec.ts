@@ -1,10 +1,14 @@
 import { vi } from 'vitest';
 import {
+  badgeClass,
+  badgeLabel,
+  isLatestRunning,
   reviewDuration,
   severityEntries,
   terminalTimestamp,
   type ReviewDurationInput,
 } from './review-metrics';
+import { makeReviewRecord as record } from './testing/fixtures';
 
 describe('review-metrics', () => {
   describe('severityEntries', () => {
@@ -71,12 +75,82 @@ describe('review-metrics', () => {
       );
     });
 
+    it('falls back to last_activity_at when updated_at is an empty string', () => {
+      expect(terminalTimestamp({ updated_at: '', last_activity_at: '2026-03-02T00:00:00Z' })).toBe(
+        Date.parse('2026-03-02T00:00:00Z'),
+      );
+    });
+
+    it('falls back to last_activity_at when updated_at is present but unparseable', () => {
+      expect(terminalTimestamp({ updated_at: 'not-a-date', last_activity_at: '2026-03-02T00:00:00Z' })).toBe(
+        Date.parse('2026-03-02T00:00:00Z'),
+      );
+    });
+
     it('falls back to Date.now() when no server timestamp is present or parseable', () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-04-01T00:00:00Z'));
       expect(terminalTimestamp({})).toBe(Date.parse('2026-04-01T00:00:00Z'));
       expect(terminalTimestamp({ updated_at: 'not-a-date' })).toBe(Date.parse('2026-04-01T00:00:00Z'));
       vi.useRealTimers();
+    });
+  });
+
+  describe('isLatestRunning', () => {
+    it('is false when there is no latest review', () => {
+      expect(isLatestRunning(null)).toBe(false);
+    });
+
+    it('is true only for a non-terminal, non-errored latest review', () => {
+      expect(isLatestRunning(record({ status: 'running' }))).toBe(true);
+      expect(isLatestRunning(record({ status: 'completed' }))).toBe(false);
+      expect(isLatestRunning(record({ status: 'running', error: 'boom' }))).toBe(false);
+    });
+  });
+
+  describe('badgeLabel', () => {
+    it('is null when there is no latest review', () => {
+      expect(badgeLabel(null)).toBeNull();
+    });
+
+    it('prefers an error over any status', () => {
+      expect(badgeLabel(record({ status: 'running', error: 'Lost connection' }))).toBe('error');
+    });
+
+    it('shows the review-summary event when terminal, falling back to the raw status', () => {
+      expect(
+        badgeLabel(
+          record({
+            status: 'completed',
+            reviewSummary: { total_issues: 0, inline_comments: 0, comment_findings: 0, event: 'COMMENT' },
+          }),
+        ),
+      ).toBe('COMMENT');
+      expect(badgeLabel(record({ status: 'completed' }))).toBe('completed'); // terminal, no summary
+      expect(badgeLabel(record({ status: 'failed' }))).toBe('failed');
+    });
+
+    it('shows the raw status while still running', () => {
+      expect(badgeLabel(record({ status: 'running' }))).toBe('running');
+    });
+  });
+
+  describe('badgeClass', () => {
+    it('is empty when there is no latest review', () => {
+      expect(badgeClass(null)).toBe('');
+    });
+
+    it('is the failed class for an error or a failed status', () => {
+      expect(badgeClass(record({ status: 'running', error: 'Lost connection' }))).toBe('cr-job-status--failed');
+      expect(badgeClass(record({ status: 'failed' }))).toBe('cr-job-status--failed');
+    });
+
+    it('is the completed class for any other terminal status', () => {
+      expect(badgeClass(record({ status: 'completed' }))).toBe('cr-job-status--completed');
+    });
+
+    it('is empty while still running', () => {
+      expect(badgeClass(record({ status: 'running' }))).toBe('');
     });
   });
 });

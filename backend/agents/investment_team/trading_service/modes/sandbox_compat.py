@@ -50,6 +50,14 @@ class StrategyRunResult:
     #: "truncated": bool}``.
     probe_events: Optional[Dict[str, Any]] = None
     open_position_entry_reasons: List[str] = field(default_factory=list)
+    #: Cost-stress sweep rows from :func:`run_backtest` when
+    #: ``BacktestConfig.cost_stress=True``. ``None`` when the sweep was
+    #: not requested or the run failed before producing a
+    #: ``BacktestResult``. Forwarded so the orchestrator can re-attach
+    #: them after ``compute_metrics`` rebuilds ledger-only metrics —
+    #: otherwise ``CostStressRealismGate`` always sees a missing payload
+    #: and (with publishability gating) falsely blocks paper-trading.
+    cost_stress_results: Optional[List[Dict[str, Any]]] = None
 
 
 # Keys here match the legacy sandbox ``error_type`` taxonomy so the
@@ -127,6 +135,7 @@ def run_strategy_code(
 
     elapsed = time.monotonic() - start
     service_result = run.service_result
+    cost_stress_results = getattr(run.result, "cost_stress_results", None) if run.result else None
 
     if service_result.lookahead_violation:
         return StrategyRunResult(
@@ -137,6 +146,7 @@ def run_strategy_code(
             execution_time_seconds=elapsed,
             execution_diagnostics=service_result.execution_diagnostics,
             probe_events=service_result.probe_events,
+            cost_stress_results=cost_stress_results,
         )
     if service_result.error:
         # Any surfaced service error — initialisation failure, mid-run
@@ -155,6 +165,7 @@ def run_strategy_code(
             execution_time_seconds=elapsed,
             execution_diagnostics=service_result.execution_diagnostics,
             probe_events=service_result.probe_events,
+            cost_stress_results=cost_stress_results,
         )
 
     return StrategyRunResult(
@@ -164,6 +175,7 @@ def run_strategy_code(
         execution_diagnostics=service_result.execution_diagnostics,
         probe_events=service_result.probe_events,
         open_position_entry_reasons=service_result.open_position_entry_reasons,
+        cost_stress_results=cost_stress_results,
     )
 
 

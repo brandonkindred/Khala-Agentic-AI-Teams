@@ -166,8 +166,6 @@ jobs:
             # and Temporal activities; coding_team is an in-package sub-team
             # (backend/agents/software_engineering_team/coding_team/), so it's
             # already covered by the software_engineering_team/** path below.
-            # agents/api is the blog research API (see agents/api/README.md) —
-            # it's owned by blogging, listed in the blogging filter below.
             software_engineering:
               - 'backend/agents/software_engineering_team/**'
               - 'backend/agents/planning_team/**'
@@ -179,7 +177,6 @@ jobs:
               - 'backend/agents/agent_repo_tools/**'
             blogging:
               - 'backend/agents/blogging/**'
-              - 'backend/agents/api/**'
               - 'backend/blogging_service/**'
             market_research:
               - 'backend/agents/market_research_team/**'
@@ -276,7 +273,6 @@ jobs:
               - '!backend/agents/planning_team/**'
               - '!backend/agents/agent_repair_team/**'
               - '!backend/agents/agent_repo_tools/**'
-              - '!backend/agents/api/**'
               - '!backend/agents/blogging/**'
               - '!backend/blogging_service/**'
               - '!backend/agents/market_research_team/**'
