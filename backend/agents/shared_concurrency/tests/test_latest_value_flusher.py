@@ -447,43 +447,49 @@ def test_write_now_flushes_a_racing_enqueue_before_running_fn() -> None:
     """A payload that is still being written when write_now(fn) is called — and a second
     payload enqueued while that write is in flight — must both land on the wire strictly
     before fn(), no matter which of write_now() or the background writer thread ends up
-    claiming/writing the second payload. A prior implementation drained via the ``_idle``
-    event and only then separately acquired the write lock, leaving a gap between the two
-    steps in which the background writer could win the race for the lock and write the
-    racing payload before fn() — this proves the fix folds both steps into one atomic
-    critical section instead."""
-    order: list[str] = []
-    log_lock = threading.Lock()
-    writing_first = threading.Event()
-    release_first = threading.Event()
+    claiming/writing the second payload. Two distinct races can otherwise let the second
+    payload land after fn(): (1) a prior write_now() implementation drained via the
+    ``_idle`` event and only then separately acquired the write lock, leaving a gap in
+    which the background writer could win the race for the lock and write the racing
+    payload first; (2) even with that closed, the background writer thread claiming a
+    payload from the mailbox *before* acquiring the write lock let write_now() observe an
+    empty mailbox (nothing left in `_has_pending`) while the writer was still holding an
+    already-claimed-but-unwritten payload, and run fn() first. Repeated: race (2) is
+    scheduler-dependent and did not reproduce on every run in isolation."""
+    for i in range(200):
+        order: list[str] = []
+        log_lock = threading.Lock()
+        writing_first = threading.Event()
+        release_first = threading.Event()
 
-    def writer(payload: str) -> None:
-        if payload == "first":
-            writing_first.set()
-            release_first.wait(timeout=5)
-        with log_lock:
-            order.append(payload)
+        def writer(payload: str, order=order, log_lock=log_lock) -> None:
+            if payload == "first":
+                writing_first.set()
+                release_first.wait(timeout=5)
+            with log_lock:
+                order.append(payload)
 
-    flusher = LatestValueFlusher(writer, name="write-now-atomic").start()
-    flusher.enqueue("first")
-    assert writing_first.wait(timeout=5), "writer must be blocked mid-write on 'first'"
+        flusher = LatestValueFlusher(writer, name=f"write-now-atomic-{i}").start()
+        flusher.enqueue("first")
+        assert writing_first.wait(timeout=5), "writer must be blocked mid-write on 'first'"
 
-    def _fn() -> None:
-        with log_lock:
-            order.append("external")
+        def _fn(order=order, log_lock=log_lock) -> None:
+            with log_lock:
+                order.append("external")
 
-    t = threading.Thread(target=lambda: flusher.write_now(_fn))
-    t.start()
-    time.sleep(0.02)  # let write_now() reach (and block on) _write_lock
-    flusher.enqueue("second")  # unambiguously concurrent with the in-progress write_now() call
-    release_first.set()
-    t.join(timeout=5)
-    assert flusher.drain(timeout=5) is True
-    flusher.stop()
+        t = threading.Thread(target=lambda: flusher.write_now(_fn))
+        t.start()
+        time.sleep(0.02)  # let write_now() reach (and block on) _write_lock
+        flusher.enqueue("second")  # unambiguously concurrent with the in-progress write_now()
+        release_first.set()
+        t.join(timeout=5)
+        assert flusher.drain(timeout=5) is True
+        flusher.stop()
 
-    assert order == ["first", "second", "external"], (
-        f"expected both racing payloads to land strictly before write_now's fn, got {order}"
-    )
+        assert order == ["first", "second", "external"], (
+            f"iteration {i}: expected both racing payloads to land strictly before "
+            f"write_now's fn, got {order}"
+        )
 
 
 def test_write_now_does_not_block_a_concurrent_enqueue() -> None:

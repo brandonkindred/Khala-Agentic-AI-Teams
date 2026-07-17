@@ -227,12 +227,18 @@ class LatestValueFlusher:
         in which a payload enqueued in between could be claimed and written by the
         background writer thread ahead of ``fn`` — a real ordering violation this
         method exists to prevent, not merely a benign race. Holding ``_write_lock``
-        for the whole call closes that gap: while held, the background writer thread
-        can still *claim* a newly enqueued payload (claiming only needs the small
-        internal state lock), but cannot *write* it until this call releases
-        ``_write_lock`` — so a payload that races this call is always written either
-        by this call itself (before ``fn``) or by the background writer (necessarily
-        after ``fn``, once this call returns), never interleaved with or ahead of it.
+        for the whole call closes that gap: the background writer thread also claims
+        a payload from the mailbox only while holding ``_write_lock`` (see ``_run``),
+        so while this call holds it, the writer thread can neither claim nor write a
+        newly enqueued payload — every payload that races this call is therefore
+        written either by this call itself (before ``fn``, via the self-flush loop
+        below) or by the background writer (necessarily after ``fn``, once this call
+        returns), never interleaved with or ahead of it. A version of this method that
+        let the writer thread claim a payload without ``_write_lock`` would reopen the
+        same gap one level deeper: this call could see an empty mailbox (nothing left
+        in ``_has_pending``) while the writer thread was still holding an
+        already-claimed-but-not-yet-written payload, and run ``fn`` before that write
+        landed.
 
         Preconditions:
             - Not called from the writer thread itself — see the class Preconditions.
@@ -267,20 +273,32 @@ class LatestValueFlusher:
             self._wake.wait()
             with self._lock:
                 self._wake.clear()
-                payload = self._pending
-                has_pending = self._has_pending
-                self._pending = None
-                self._has_pending = False
-            if has_pending:
-                try:
-                    with self._write_lock:
+            # Claiming (removing the payload from the mailbox) must happen under
+            # _write_lock, atomically with the write itself — not before it. If this
+            # thread claimed the payload first and only then queued up for _write_lock,
+            # write_now() could acquire that lock in between, observe an empty mailbox
+            # (nothing left in _has_pending, even though this thread is holding an
+            # already-claimed payload it hasn't written yet), and run its fn() first —
+            # letting this thread's write land AFTER write_now()'s fn even though it was
+            # claimed (and thus logically committed to being written) before write_now()
+            # ever checked. Holding _write_lock across both the claim and the write closes
+            # that gap: write_now() can only ever observe an empty mailbox once every
+            # payload claimed-before-it-checked has also already been written.
+            with self._write_lock:
+                with self._lock:
+                    payload = self._pending
+                    has_pending = self._has_pending
+                    self._pending = None
+                    self._has_pending = False
+                if has_pending:
+                    try:
                         self._writer(payload)
-                except BaseException as exc:  # noqa: BLE001 - the loop (and every future
-                    # drain()/stop()) must survive any writer error, including a
-                    # BaseException like SystemExit/asyncio.CancelledError — matching
-                    # BackgroundHeartbeat._tick's identical rationale: a dead loop would
-                    # leave _idle cleared forever, hanging every subsequent caller.
-                    self._report_error(exc)
+                    except BaseException as exc:  # noqa: BLE001 - the loop (and every future
+                        # drain()/stop()) must survive any writer error, including a
+                        # BaseException like SystemExit/asyncio.CancelledError — matching
+                        # BackgroundHeartbeat._tick's identical rationale: a dead loop would
+                        # leave _idle cleared forever, hanging every subsequent caller.
+                        self._report_error(exc)
             with self._lock:
                 # A fresh enqueue() may have landed while writer() ran above (it does not
                 # hold self._lock) — only declare idle/exit when nothing new arrived,

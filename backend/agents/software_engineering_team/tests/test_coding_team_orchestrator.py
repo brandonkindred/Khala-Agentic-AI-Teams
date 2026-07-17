@@ -1000,6 +1000,87 @@ def test_background_graph_write_after_pause_carries_pause_phase_not_stale_coding
     )
 
 
+def test_failed_direct_write_does_not_leak_into_background_graph_persist(tmp_path, monkeypatch):
+    """When _raw_update raises for a phase-changing _update() call (e.g. a pause write whose
+    job-service PATCH fails), the outer phase/status_text must NOT be updated to the failed
+    call's values. A subsequent background graph persist reads phase/status_text live (see
+    _persist_graph_async) — if the failed call had already committed its new values before
+    _raw_update raised, that background write would publish a phase/status_text that was never
+    actually confirmed on the wire, even though the rest of the failed call's fields (e.g. HITL
+    pending-question metadata on a real pause) never landed either."""
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    class StubSwarm:
+        aborted = False
+
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+
+        def run(self, **kw):
+            update_fn = kw["update_fn"]
+            try:
+                update_fn(
+                    status="waiting_for_user",
+                    phase="waiting",
+                    status_text="Paused for user input",
+                )
+            except RuntimeError:
+                pass  # simulates a caller (e.g. pause_cycle) surviving a failed publish
+            self.graph.mark_branch_merged("t1")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    updates: List[Dict[str, Any]] = []
+
+    def _update_job_fn(**kw: Any) -> None:
+        if kw.get("status") == "waiting_for_user":
+            raise RuntimeError("job service unavailable")
+        updates.append(kw)
+
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=_update_job_fn,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    mutation_write_indices = [
+        i
+        for i, kw in enumerate(updates)
+        if "task_graph_snapshot" in kw
+        and any(t.get("status") == "merged" for t in kw["task_graph_snapshot"])
+    ]
+    assert mutation_write_indices, "the graph mutation's write must eventually land"
+    mutation_write = updates[mutation_write_indices[0]]
+    assert mutation_write.get("phase") != "waiting", (
+        "background graph write leaked the failed direct write's phase into live state: "
+        f"{mutation_write.get('phase')!r}"
+    )
+    assert mutation_write.get("status_text") != "Paused for user input", (
+        "background graph write leaked the failed direct write's status_text into live state: "
+        f"{mutation_write.get('status_text')!r}"
+    )
+
+
 # ----------------------------------------------------- real quality-gate path
 
 

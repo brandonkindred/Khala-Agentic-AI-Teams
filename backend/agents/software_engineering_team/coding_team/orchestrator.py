@@ -212,18 +212,23 @@ def run_coding_team_orchestrator(
 
     def _update(**kw: Any) -> None:
         def _do_write() -> None:
-            # Keep the outer phase/status_text in sync with whatever this call actually
-            # writes, at the same serialization point as the write itself (write_now()
-            # holds _write_lock for this whole closure) — so a concurrent background
-            # graph persist's LIVE read of phase/status_text (see _persist_graph_async)
-            # is correctly ordered relative to this call, never observing a stale value
-            # from before it, nor a torn one from mid-write.
+            # _raw_update first, THEN commit — never the reverse. If _raw_update raises,
+            # this call's phase/status_text must never reach the outer variables: a
+            # concurrent background graph persist's LIVE read (see _persist_graph_async)
+            # would otherwise publish this call's NEW phase/status_text alongside the
+            # graph snapshot even though the rest of this call's write (e.g. HITL
+            # pending-question fields on a pause) never made it to the wire — a
+            # misleading partial state. Keeping the commit inside this write_now()-
+            # serialized closure (rather than after the write_now() call returns) still
+            # keeps it correctly ordered relative to that live read: write_now() holds
+            # _write_lock for this whole closure, so the commit below happens strictly
+            # before any concurrent background write can observe it.
+            _raw_update(**kw)
             nonlocal phase, status_text
             if "phase" in kw:
                 phase = kw["phase"]
             if "status_text" in kw:
                 status_text = kw["status_text"]
-            _raw_update(**kw)
 
         flusher.write_now(_do_write)
 
