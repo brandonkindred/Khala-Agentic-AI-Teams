@@ -2,7 +2,7 @@
 
 The Strategy Lab runs one or more sequential research cycles. Each cycle
 generates a fresh strategy, runs a historical backtest, analyzes the
-result, and (when the backtest passes the winner gate) paper-trades it on
+result, and (when the backtest is publishable) paper-trades it on
 recent market data.
 
 ## Cycle diagram
@@ -14,8 +14,9 @@ flowchart LR
     C --> AL[aligning]
     AL -->|trades_aligned| D[analyzing]
     AL -->|misaligned, fix proposed| C
-    D -->|is_winning && paper_trading_enabled| E[paper_trading]
+    D -->|is_publishable && paper_trading_enabled| E[paper_trading]
     D -->|losing strategy| S1[paper_trading_skipped<br/>reason=not_winning]
+    D -->|winning but not publishable| S4[paper_trading_skipped<br/>reason=gate codes]
     D -->|paper_trading_enabled=false| S2[paper_trading_skipped<br/>reason=disabled]
     E -->|market data OK| F[paper_trading_complete]
     E -->|no market data| S3[paper_trading_skipped<br/>reason=no_market_data]
@@ -24,6 +25,7 @@ flowchart LR
     S1 --> Z
     S2 --> Z
     S3 --> Z
+    S4 --> Z
     X --> Z
 ```
 
@@ -61,9 +63,9 @@ The pipeline lives in
 [`api/main.py::_run_one_strategy_lab_cycle`](../api/main.py) and
 [`api/main.py::_strategy_lab_worker`](../api/main.py).
 
-## Winner gate
+## Winner label vs publishable gate
 
-The verdict is deterministic: a *valid* run (it executed and produced a
+The **winner label** is deterministic: a *valid* run (it executed and produced a
 trade ledger) is winning iff its annualized return meets or beats the 8%
 S&P-500 amortized benchmark.
 
@@ -71,15 +73,32 @@ S&P-500 amortized benchmark.
 is_winning = execution_succeeded and trades and result.annualized_return_pct >= 8.0
 ```
 
-The robustness machinery (walk-forward acceptance gate / deflated Sharpe,
+Robustness machinery (walk-forward acceptance gate / deflated Sharpe,
 IS→OOS degradation, regime beats, alignment, conformance, realism, runtime
 look-ahead) still runs and records its findings on `acceptance_reason` and
-the gate timeline — and those findings surface as narrative caveats — but
-they never flip this label. This flag is the single source of truth:
+the gate timeline — those findings surface as narrative caveats — but they
+never flip `is_winning`.
+
+The **publishable gate** is the paper-trading decision:
+
+```python
+is_publishable = (
+    is_winning
+    and realism_passed
+    and trades_aligned
+    and exit_rule_conformance_passed
+    and not runtime_lookahead_violation
+)
+```
+
 `/strategy-lab/paper-trade` (standalone endpoint) and the integrated cycle
-both refuse to paper-trade a non-winning strategy. A losing strategy is
-still persisted as a `StrategyLabRecord` with `is_winning=False`, and
-`paper_trading_status="skipped"`, `paper_trading_skipped_reason="not_winning"`.
+both refuse to paper-trade a non-publishable strategy. A losing strategy is
+still persisted as a `StrategyLabRecord` with `is_winning=False`,
+`is_publishable=False`, and `paper_trading_status="skipped"`,
+`paper_trading_skipped_reason="not_winning"`. A winning-but-not-publishable
+record keeps `is_winning=True`, sets `is_publishable=False`, and skips with
+the joined failing gate codes (veto order: `exit_rule_conformance_failed`,
+`realism_failed`, `alignment_unresolved`, `lookahead_violation`).
 
 ## Phase events
 
@@ -93,11 +112,11 @@ canonical list is:
 | `fetching_data` | After ideation, before backtest | `{ strategy: {asset_class, hypothesis}, retry? }` |
 | `aligning` | Trade-alignment audit and problem-solving loop | `{ sub_phase, alignment_round, trades_count?, issues_count?, issues_preview?, findings_count?, findings_preview?, changes_made?, predicted_aligned_after_fix? }` |
 | `analyzing` | After backtest, before narrative | `{ strategy, metrics }` |
-| `paper_trading` | Entering the paper-trading step (winners only) | `{ strategy }` |
+| `paper_trading` | Entering the paper-trading step (publishable winners only) | `{ strategy }` |
 | `paper_trading_complete` | Paper trading finished successfully | `{ session_id, verdict, trade_count }` |
 | `paper_trading_skipped` | Paper trading did not run | `{ reason, detail? }` |
 | `paper_trading_failed` | Paper trading raised an exception (non-fatal) | `{ detail }` |
-| `complete` | Cycle fully persisted | `{ record_id, is_winning, metrics, paper_trading_status, paper_trading_verdict }` |
+| `complete` | Cycle fully persisted | `{ record_id, is_winning, is_publishable, metrics, paper_trading_status, paper_trading_verdict }` |
 
 UI clients should treat unknown phase names as opaque and ignore them.
 
@@ -106,9 +125,10 @@ UI clients should treat unknown phase names as opaque and ignore them.
 | `paper_trading_skipped_reason` | Meaning |
 |---|---|
 | `not_winning` | Backtest `annualized_return_pct < 8.0` (or the run produced no valid ledger) — paper trading never runs. |
+| `exit_rule_conformance_failed` / `realism_failed` / `alignment_unresolved` / `lookahead_violation` | Winning return, but one or more publishability gates failed. Multiple failures are comma-joined in that veto order. |
 | `disabled` | `RunStrategyLabRequest.paper_trading_enabled = false` — explicit opt-out. |
 | `no_market_data` | `MarketDataService` could not fetch live OHLCV data for the strategy's asset class — retry later. |
-| `no_strategy_code` | The orchestrator produced a winning record but no compilable `strategy_code` (e.g. refinement loop exhausted) — nothing to execute in the sandbox. |
+| `no_strategy_code` | The orchestrator produced a publishable record but no compilable `strategy_code` (e.g. refinement loop exhausted) — nothing to execute in the sandbox. |
 
 ## Failure isolation
 
@@ -124,9 +144,9 @@ with the `lab_record_id` once the underlying cause is fixed.
 
 ## Re-running paper trading
 
-The standalone `POST /strategy-lab/paper-trade` endpoint is unchanged.
-Use it to run (or re-run) paper trading against a specific winning
-`lab_record_id` — typical use cases:
+The standalone `POST /strategy-lab/paper-trade` endpoint is unchanged in
+shape. Use it to run (or re-run) paper trading against a specific
+publishable `lab_record_id` — typical use cases:
 
 - A cycle recorded `paper_trading_status = "failed"` or
   `paper_trading_skipped_reason = "no_market_data"` and you want to retry.

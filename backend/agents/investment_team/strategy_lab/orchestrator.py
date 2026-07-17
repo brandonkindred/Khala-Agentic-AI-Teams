@@ -3403,13 +3403,25 @@ class StrategyLabOrchestrator:
             upstream_admitted=upstream_admitted,
         )
 
+        # Step 7 — publishability: paper-trading decision distinct from the
+        # return-threshold ``is_winning`` label. Existing gate booleans only.
+        skip_reason = publishability_skip_reason(
+            exit_rule_conformance_passed=exit_rule_conformance_passed,
+            realism_passed=realism_passed,
+            trades_aligned=trades_aligned,
+            runtime_lookahead_violation=runtime_lookahead_violation,
+        )
+        is_publishable = bool(is_winning and skip_reason is None)
+
         return _VerificationOutcome(
             metrics=metrics,
             is_winning=is_winning,
+            is_publishable=is_publishable,
             upstream_admitted=upstream_admitted,
             acceptance_results=acceptance_results,
             walk_forward_failed=walk_forward_failed,
             exit_rule_conformance_passed=exit_rule_conformance_passed,
+            publishability_skip_reason=skip_reason if is_winning and not is_publishable else None,
         )
 
     def _run_walk_forward_acceptance(
@@ -3886,6 +3898,8 @@ class StrategyLabOrchestrator:
         alignment_findings: Optional[List[AlignmentFinding]] = None,
         phase_back_count: int = 0,
         drift_collector: Optional[_DriftCollector] = None,
+        is_publishable: bool = False,
+        publishability_skip_reason: Optional[str] = None,
     ) -> StrategyLabRecord:
         """Build the final ``StrategyLabRecord`` from a settled cycle.
 
@@ -3979,6 +3993,8 @@ class StrategyLabOrchestrator:
             strategy=spec,
             backtest=backtest_record,
             is_winning=is_winning,
+            is_publishable=is_publishable,
+            publishability_skip_reason=publishability_skip_reason,
             strategy_rationale=rationale,
             analysis_narrative=narrative,
             created_at=now_iso,
@@ -4005,6 +4021,7 @@ class StrategyLabOrchestrator:
             {
                 "record_id": lab_record_id,
                 "is_winning": is_winning,
+                "is_publishable": is_publishable,
                 "metrics": metrics.model_dump(),
                 "refinement_rounds": refinement_rounds,
                 "alignment_rounds": alignment_rounds,
@@ -4138,7 +4155,13 @@ class StrategyLabOrchestrator:
         alignment_reports = alignment_outcome.alignment_reports
 
         # ── Phases 2.6–3: TRIAL COUNTING → VERIFICATION → ANALYSIS ─────
-        metrics, is_winning, narrative = self._orchestrate_verification_and_analysis(
+        (
+            metrics,
+            is_winning,
+            is_publishable,
+            publishability_skip,
+            narrative,
+        ) = self._orchestrate_verification_and_analysis(
             spec=spec,
             trades=trades,
             metrics=metrics,
@@ -4187,6 +4210,8 @@ class StrategyLabOrchestrator:
             max_rounds_exhausted=max_rounds_exhausted,
             execution_succeeded=execution_succeeded,
             is_winning=is_winning,
+            is_publishable=is_publishable,
+            publishability_skip_reason=publishability_skip,
             trades_aligned=trades_aligned,
             refinement_attempts=refinement_attempts,
             alignment_rounds=alignment_rounds,
@@ -4621,15 +4646,17 @@ class StrategyLabOrchestrator:
         refinement_attempts: List[str],
         rationale: str,
         emit: PhaseCallback,
-    ) -> Tuple[BacktestResult, bool, str]:
+    ) -> Tuple[BacktestResult, bool, bool, Optional[str], str]:
         """Count the trial, run verification, and generate the analysis.
 
         Pre: the refinement + alignment loops have settled the run state.
-        Post: returns ``(metrics, is_winning, narrative)``. Increments the
+        Post: returns ``(metrics, is_winning, is_publishable,
+        publishability_skip_reason, narrative)``. Increments the
         convergence trial counter (one per refinement round, plus the first),
         runs ``_run_verification_phase`` (which mutates ``metrics`` /
-        ``all_gate_results`` and resolves ``is_winning``), and produces the
-        analysis narrative off the conformance-resolved alignment report.
+        ``all_gate_results`` and resolves ``is_winning`` / ``is_publishable``),
+        and produces the analysis narrative off the conformance-resolved
+        alignment report.
         """
         # ── Phase 2.6: TRIAL COUNTING (issue #247) ────────────────────
         # Every refinement round on the same window contributes to the
@@ -4655,6 +4682,8 @@ class StrategyLabOrchestrator:
         )
         metrics = verification.metrics
         is_winning = verification.is_winning
+        is_publishable = verification.is_publishable
+        publishability_skip = verification.publishability_skip_reason
         # The other ``_VerificationOutcome`` fields (acceptance_results,
         # walk_forward_failed, upstream_admitted) are unused beyond this
         # point — the verification phase already extended
@@ -4680,7 +4709,7 @@ class StrategyLabOrchestrator:
             alignment_report=latest_alignment_report,
             emit=emit,
         )
-        return metrics, is_winning, narrative
+        return metrics, is_winning, is_publishable, publishability_skip, narrative
 
     def _extract_findings_and_assemble_record(
         self,
@@ -4700,6 +4729,8 @@ class StrategyLabOrchestrator:
         max_rounds_exhausted: bool,
         execution_succeeded: bool,
         is_winning: bool,
+        is_publishable: bool,
+        publishability_skip_reason: Optional[str],
         trades_aligned: bool,
         refinement_attempts: List[str],
         alignment_rounds: int,
@@ -4745,6 +4776,8 @@ class StrategyLabOrchestrator:
             max_rounds_exhausted=max_rounds_exhausted,
             execution_succeeded=execution_succeeded,
             is_winning=is_winning,
+            is_publishable=is_publishable,
+            publishability_skip_reason=publishability_skip_reason,
             trades_aligned=trades_aligned,
             refinement_rounds=len(refinement_attempts),
             alignment_rounds=alignment_rounds,
@@ -5157,6 +5190,7 @@ class StrategyLabOrchestrator:
             {
                 "record_id": lab_record_id,
                 "is_winning": False,
+                "is_publishable": False,
                 "metrics": backtest_record.result.model_dump(),
                 "refinement_rounds": len(refinement_attempts),
                 "short_circuit": short_circuit_status,
@@ -5499,4 +5533,5 @@ from ._orchestrator_helpers import (  # noqa: E402  — keep at file end
     _SynthesisFetchResult,
     _SynthesisLoopOutcome,
     _VerificationOutcome,
+    publishability_skip_reason,
 )
