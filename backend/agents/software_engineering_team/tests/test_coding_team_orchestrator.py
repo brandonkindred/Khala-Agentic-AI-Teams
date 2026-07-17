@@ -803,6 +803,104 @@ def test_failed_background_persist_write_is_retried_at_round_boundary(tmp_path, 
     )
 
 
+def test_status_write_survives_concurrent_worker_graph_mutation(tmp_path, monkeypatch):
+    """A status write (e.g. a HITL pause to waiting_for_user) racing a DIFFERENT worker's
+    concurrent graph mutation must never be clobbered by that mutation's background write
+    landing after it — even though the mutation's own graph.update_task()/mark_branch_merged()
+    call returns immediately (never blocked by the status write), its resulting background
+    write must still be ordered to land AFTER, not before, the status write. Mirrors the
+    real implementation fan-out: one worker escalates a decision (publishing a status write
+    via _update) while another is still mutating the graph in the same round."""
+    import threading
+    import time
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    pause_write_started = threading.Event()
+    mutation_enqueued = threading.Event()
+
+    class StubSwarm:
+        aborted = False
+
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+
+        def run(self, **kw):
+            update_fn = kw["update_fn"]
+
+            def _mutate_concurrently() -> None:
+                # Simulates a second worker, still active in the same fan-out, mutating
+                # the graph (and thus enqueuing a background write) while the first
+                # worker's status write below is in flight.
+                pause_write_started.wait(timeout=5)
+                self.graph.mark_branch_merged("t1")
+                mutation_enqueued.set()
+
+            t = threading.Thread(target=_mutate_concurrently)
+            t.start()
+            update_fn(
+                status="waiting_for_user",
+                phase="waiting",
+                status_text="Paused for user input",
+            )
+            t.join(timeout=5)
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    updates: List[Dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def _update_job_fn(**kw: Any) -> None:
+        if kw.get("status") == "waiting_for_user":
+            pause_write_started.set()
+            # Hold this write "in flight" until the concurrent mutation has enqueued its
+            # background write, then a bit longer — giving that background write every
+            # chance to race ahead if the ordering guarantee were broken.
+            mutation_enqueued.wait(timeout=5)
+            time.sleep(0.05)
+        with lock:
+            updates.append(kw)
+
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=_update_job_fn,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    pause_idx = next(i for i, kw in enumerate(updates) if kw.get("status") == "waiting_for_user")
+    mutation_write_indices = [
+        i
+        for i, kw in enumerate(updates)
+        if "task_graph_snapshot" in kw
+        and any(t.get("status") == "merged" for t in kw["task_graph_snapshot"])
+    ]
+    assert mutation_write_indices, "the concurrent mutation's write must eventually land"
+    assert mutation_write_indices[0] > pause_idx, (
+        "the concurrently-enqueued mutation write landed before (or during) the pause "
+        "write instead of strictly after it — a stale background write could clobber a "
+        "fresher direct status write"
+    )
+
+
 # ----------------------------------------------------- real quality-gate path
 
 

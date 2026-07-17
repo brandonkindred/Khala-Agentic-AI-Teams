@@ -49,6 +49,11 @@ class LatestValueFlusher:
         - ``enqueue()`` is only called while the flusher is started and not yet
           stopped (between a ``start()``/``__enter__`` and the matching
           ``stop()``/``__exit__``) — see ``enqueue()``'s own precondition for why.
+        - ``drain()``, ``stop()``, and ``write_now()`` are never called from within
+          ``writer`` or ``on_error`` (i.e. from the writer thread itself) — each
+          waits for the mailbox to go idle, which on that thread can only happen
+          after the very call in progress returns, so a self-call would deadlock.
+          Detected and raised explicitly rather than silently hanging.
 
     Postconditions:
         - Between ``start()`` and ``stop()`` exactly one daemon thread is running.
@@ -60,6 +65,11 @@ class LatestValueFlusher:
           payload that was itself passed to ``writer`` — i.e. the destination
           reflects at least as fresh a state as of the ``drain()`` call once it
           returns True.
+        - ``write_now()`` calls ``writer`` and a caller-supplied ``fn`` on the same
+          serialization point, so ``fn`` can never interleave with, or be overtaken
+          on the wire by, a payload enqueued concurrently with (or racing) the
+          ``write_now()`` call — without blocking ``enqueue()`` itself, so a
+          concurrent graph/state mutation is never delayed by ``fn`` being slow.
         - A raising ``writer`` never kills the loop: the exception (including a
           ``BaseException`` such as ``SystemExit``/``asyncio.CancelledError`` — not
           just ``Exception``, matching ``BackgroundHeartbeat``'s ``_tick``) is
@@ -107,6 +117,23 @@ class LatestValueFlusher:
         # under _lifecycle_lock, so start()/enqueue() always see the state stop()
         # (or start()) last committed, never a stale thread-scheduling artifact.
         self._running = False
+        # Serializes writer(...) calls — both the flusher's own background writes and
+        # a caller's write_now(fn) — so the two can never interleave and a payload
+        # enqueued concurrently with a write_now() call can never reach the wire before
+        # (or during) it. Deliberately separate from _lifecycle_lock: enqueue() never
+        # touches this lock, so a concurrent graph/state mutation is never blocked
+        # waiting for a slow write_now() call — only the resulting BACKGROUND WRITE of
+        # that mutation's payload is delayed until write_now()'s fn releases the lock.
+        self._write_lock = threading.Lock()
+
+    def _reject_if_writer_thread(self, caller: str) -> None:
+        if threading.current_thread() is self._thread:
+            raise RuntimeError(
+                f"{caller}() must not be called from the writer thread itself "
+                "(i.e. from within writer or on_error) — it waits for the mailbox to "
+                "go idle, which on this thread can only happen after this very call "
+                "returns, so it would deadlock"
+            )
 
     def start(self) -> "LatestValueFlusher":
         """Start the daemon writer thread (idempotent — a no-op while already running).
@@ -159,10 +186,36 @@ class LatestValueFlusher:
     def drain(self, timeout: Optional[float] = None) -> bool:
         """Block until there is no pending payload and no write in flight.
 
+        Preconditions:
+            - Not called from the writer thread itself — see the class Preconditions.
+
         Returns:
             True once idle; False if ``timeout`` elapsed first.
         """
+        self._reject_if_writer_thread("drain")
         return self._idle.wait(timeout)
+
+    def write_now(self, fn: Callable[[], None]) -> None:
+        """Run ``fn`` serialized against the flusher's own background writes: drains
+        first, then holds the same lock ``writer`` is called under while running
+        ``fn`` — so a payload enqueued concurrently with (or racing) this call can
+        never reach the wire before, or interleaved with, ``fn``. Unlike gating on
+        ``_lifecycle_lock``, this never blocks ``enqueue()`` — a concurrent
+        graph/state mutation still returns immediately; only the eventual background
+        write of that mutation's payload is delayed until ``fn`` finishes.
+
+        Preconditions:
+            - Not called from the writer thread itself — see the class Preconditions.
+
+        Postconditions:
+            - ``fn`` has returned (or raised — propagated to the caller, not
+              swallowed; unlike a background write, a caller-driven ``write_now()``
+              failure is the caller's to handle) before this call returns.
+        """
+        self._reject_if_writer_thread("write_now")
+        self.drain()
+        with self._write_lock:
+            fn()
 
     def _run(self) -> None:
         while True:
@@ -175,7 +228,8 @@ class LatestValueFlusher:
                 self._has_pending = False
             if has_pending:
                 try:
-                    self._writer(payload)
+                    with self._write_lock:
+                        self._writer(payload)
                 except BaseException as exc:  # noqa: BLE001 - the loop (and every future
                     # drain()/stop()) must survive any writer error, including a
                     # BaseException like SystemExit/asyncio.CancelledError — matching
@@ -247,7 +301,11 @@ class LatestValueFlusher:
               instead of racing a payload past a dead writer thread), and a concurrent
               ``start()`` cannot begin creating a replacement thread until this one has
               confirmed the old thread is fully gone.
+
+        Preconditions:
+            - Not called from the writer thread itself — see the class Preconditions.
         """
+        self._reject_if_writer_thread("stop")
         with self._lifecycle_lock:
             if not self._running:
                 return

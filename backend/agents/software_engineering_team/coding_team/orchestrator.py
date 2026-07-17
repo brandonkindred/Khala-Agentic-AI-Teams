@@ -188,9 +188,15 @@ def run_coding_team_orchestrator(
     # write — it hands a write-and-commit closure to this flusher instead, which runs it
     # off-thread (the closure itself does the write and only then commits _persist_state, so a
     # failed write is never mistaken for a delivered one — see _compute_persist_payload). _update
-    # (below) drains the flusher before every write it makes, so a still-queued/in-flight
-    # background write can never land after — and clobber — a fresher one (most importantly a
-    # terminal status write).
+    # (below) uses write_now() for every write it makes: a still-queued/in-flight background
+    # write can never land after — and clobber — a fresher one (most importantly a terminal or
+    # HITL-pause status write), and — unlike draining then writing directly — a payload enqueued
+    # by a DIFFERENT concurrently-running worker's graph mutation (e.g. during the implementation
+    # fan-out, where one worker escalates a decision while others are still mutating the graph)
+    # can't slip in between the drain and the write either: write_now() shares one write lock
+    # with the flusher's own background writes, so that race is closed too, without blocking the
+    # other worker's own graph mutation (only the eventual background write of its payload is
+    # delayed until this write finishes).
     from shared_concurrency import LatestValueFlusher  # noqa: PLC0415 - local, optional dep path
 
     flusher = LatestValueFlusher(
@@ -200,8 +206,7 @@ def run_coding_team_orchestrator(
     ).start()
 
     def _update(**kw: Any) -> None:
-        flusher.drain()
-        _raw_update(**kw)
+        flusher.write_now(lambda: _raw_update(**kw))
 
     try:
         # Capture agents' streamed reasoning ("thinking") so the UI can show what is

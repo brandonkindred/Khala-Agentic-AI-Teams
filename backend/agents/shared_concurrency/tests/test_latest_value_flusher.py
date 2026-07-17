@@ -345,3 +345,126 @@ def test_start_after_stop_with_zero_join_timeout_still_works() -> None:
     assert written == [1], "the restarted flusher must actually deliver new payloads"
     flusher.stop()
     flusher.stop()
+
+
+def test_stop_from_writer_thread_raises_instead_of_deadlocking() -> None:
+    """A writer/on_error callback calling stop() on itself must fail fast — draining
+    would otherwise wait for the mailbox to go idle, which on this same thread can only
+    happen after this very stop() call returns, deadlocking the writer thread forever."""
+    errors: list[BaseException] = []
+
+    def writer(payload: int) -> None:
+        raise RuntimeError("trigger on_error")
+
+    def on_error(exc: BaseException) -> None:
+        try:
+            flusher.stop()
+        except RuntimeError as e:
+            errors.append(e)
+
+    flusher = LatestValueFlusher(writer, name="self-stop", on_error=on_error).start()
+    flusher.enqueue(1)
+    assert flusher.drain(timeout=5) is True, "drain() must not hang waiting on the self-call"
+    assert len(errors) == 1
+    assert "writer thread itself" in str(errors[0])
+    flusher.stop()
+
+
+def test_drain_from_writer_thread_raises_instead_of_deadlocking() -> None:
+    """Same self-deadlock risk as stop(), for a bare drain() call from within writer."""
+    errors: list[BaseException] = []
+
+    def writer(payload: int) -> None:
+        try:
+            flusher.drain()
+        except RuntimeError as e:
+            errors.append(e)
+
+    flusher = LatestValueFlusher(writer, name="self-drain").start()
+    flusher.enqueue(1)
+    assert flusher.drain(timeout=5) is True
+    assert len(errors) == 1
+    flusher.stop()
+
+
+def test_write_now_from_writer_thread_raises_instead_of_deadlocking() -> None:
+    """Same self-deadlock risk as stop()/drain(), for write_now() called from writer."""
+    errors: list[BaseException] = []
+
+    def writer(payload: int) -> None:
+        try:
+            flusher.write_now(lambda: None)
+        except RuntimeError as e:
+            errors.append(e)
+
+    flusher = LatestValueFlusher(writer, name="self-write-now").start()
+    flusher.enqueue(1)
+    assert flusher.drain(timeout=5) is True
+    assert len(errors) == 1
+    flusher.stop()
+
+
+def test_write_now_serializes_against_a_concurrently_enqueued_write() -> None:
+    """A payload enqueued while write_now(fn) is in flight must not reach the writer
+    until fn has finished — otherwise a concurrently racing background write could land
+    before, or interleaved with, the caller's own write. This is exactly the ordering bug
+    write_now() exists to close (e.g. a fresh direct status write getting overwritten by
+    a stale background graph-state write enqueued from another thread mid-fanout)."""
+    order: list[str] = []
+    log_lock = threading.Lock()
+    fn_started = threading.Event()
+    enqueued = threading.Event()
+
+    def writer(payload: str) -> None:
+        with log_lock:
+            order.append(f"background:{payload}")
+
+    flusher = LatestValueFlusher(writer, name="write-now-order").start()
+
+    def _fn() -> None:
+        fn_started.set()
+        enqueued.wait(timeout=5)  # let the concurrent enqueue below land while we "write"
+        time.sleep(0.05)
+        with log_lock:
+            order.append("external")
+
+    t = threading.Thread(target=lambda: flusher.write_now(_fn))
+    t.start()
+    fn_started.wait(timeout=5)
+    flusher.enqueue("stale")  # must not block, and must not be written until fn() is done
+    enqueued.set()
+    t.join(timeout=5)
+    assert flusher.drain(timeout=5) is True
+    flusher.stop()
+
+    assert order == ["external", "background:stale"], (
+        f"expected write_now's fn to land strictly before the concurrently enqueued "
+        f"background write, got {order}"
+    )
+
+
+def test_write_now_does_not_block_a_concurrent_enqueue() -> None:
+    """enqueue() must return immediately even while a slow write_now(fn) call is in
+    flight — a concurrent graph/state mutation must never be delayed by a slow direct
+    write; only the eventual background write of that mutation's payload is delayed."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def _slow_fn() -> None:
+        started.set()
+        release.wait(timeout=5)
+
+    flusher = LatestValueFlusher(lambda payload: None, name="write-now-nonblock").start()
+    t = threading.Thread(target=lambda: flusher.write_now(_slow_fn))
+    t.start()
+    started.wait(timeout=5)
+
+    start_time = time.monotonic()
+    flusher.enqueue("fast")
+    elapsed = time.monotonic() - start_time
+    assert elapsed < 0.5, "enqueue() must never block on a concurrent write_now() call"
+
+    release.set()
+    t.join(timeout=5)
+    assert flusher.drain(timeout=5) is True
+    flusher.stop()
