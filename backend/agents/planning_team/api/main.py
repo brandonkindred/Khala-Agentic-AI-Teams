@@ -31,6 +31,7 @@ from planning_team.models import (  # noqa: E402
 )
 from planning_team.orchestrator import run_workflow  # noqa: E402
 from planning_team.postgres import SCHEMA as PLANNING_POSTGRES_SCHEMA  # noqa: E402
+from planning_team.postgres.writer import record_planning_run  # noqa: E402
 from planning_team.shared.job_store import (  # noqa: E402
     JOB_STATUS_COMPLETED,
     JOB_STATUS_PENDING,
@@ -160,6 +161,22 @@ def run_workflow_background(
                 job_id,
                 handoff_package=result.get("handoff_package"),
                 summary=result.get("summary"),
+            )
+            handoff = result.get("handoff_package") or {}
+            # open_questions/resolved_questions read from the handoff are currently
+            # always [] on a normal run: HandoffPackage defaults both to [], and the
+            # setdefault above that would otherwise carry over the run's real
+            # questions is a documented no-op (kept that way so a non-empty
+            # handoff.open_questions doesn't pause every SE-driven run). The audit
+            # row faithfully mirrors the handoff as it exists today; sourcing the
+            # run's actual questions is tracked as separate follow-up work.
+            record_planning_run(
+                job_id,
+                client_name=client_name,
+                summary=result.get("summary") or "",
+                handoff_summary=handoff.get("summary") or "",
+                open_questions=handoff.get("open_questions") or [],
+                resolved_questions=handoff.get("resolved_questions") or [],
             )
         else:
             mark_job_failed(job_id, error=result.get("failure_reason", "Workflow failed"))
