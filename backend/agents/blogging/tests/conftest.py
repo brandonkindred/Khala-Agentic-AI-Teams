@@ -72,10 +72,13 @@ def make_stub_writer_class(*, escalation_summary: str = "") -> type:
         - None.
     Postconditions:
         - Returns a class (not an instance) suitable for monkeypatching a module's
-          ``BlogWriterAgent`` reference; every method returns a deterministic ``WriterOutput``
-          (``run`` yields ``_STUB_WRITER_DRAFT``, the revise variants yield
-          ``_STUB_WRITER_REVISED_DRAFT``) so ``run_pipeline`` can proceed without an LLM.
-          ``generate_escalation_summary`` returns ``escalation_summary`` (empty unless overridden).
+          ``BlogWriterAgent`` reference. The draft-producing methods each return a
+          deterministic ``WriterOutput`` (``run`` yields ``_STUB_WRITER_DRAFT``, the revise
+          variants yield ``_STUB_WRITER_REVISED_DRAFT``) so ``run_pipeline`` can proceed without
+          an LLM; ``identify_uncertainty_questions`` and
+          ``analyze_user_feedback_for_guideline_updates`` return ``[]``; and
+          ``generate_escalation_summary`` returns ``escalation_summary`` (empty unless
+          overridden).
     """
     from agents.blogging.blog_writer_agent.models import WriterOutput
 
