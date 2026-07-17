@@ -275,11 +275,16 @@ class EnvironmentStore:
               ``provisioner_state._save``): on any failure the primary file holds
               its previous content — never a truncated or partial record — so a
               raising write leaves the prior registration intact.
+            * The temp file's suffix is deliberately not ``.json``:
+              ``list_all``'s ``glob("*.json")`` (unlike shell globbing) matches
+              dotfiles too, so a fully-written temp file left behind by a crash
+              between ``fsync`` and ``os.replace`` would otherwise be scanned as
+              a phantom environment record indistinguishable from a real one.
         """
         primary = self._env_file(agent_id)
         primary.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(
-            prefix=f".{primary.stem}.", suffix=".json", dir=str(primary.parent)
+            prefix=f".{primary.stem}.", suffix=".tmp", dir=str(primary.parent)
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:

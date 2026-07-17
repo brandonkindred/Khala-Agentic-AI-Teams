@@ -174,9 +174,9 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
             continue
         collapsed.append(name)
     for prev, nxt in zip(collapsed, collapsed[1:]):
-        assert (
-            prev in lock_names or nxt in lock_names
-        ), f"no lock renewal between consecutive activities {prev!r} -> {nxt!r}: {fn_names}"
+        assert prev in lock_names or nxt in lock_names, (
+            f"no lock renewal between consecutive activities {prev!r} -> {nxt!r}: {fn_names}"
+        )
 
 
 @pytest.mark.asyncio
@@ -279,7 +279,10 @@ async def test_workflow_releases_lock_when_acquire_itself_fails(tmp_path) -> Non
         }
     )
 
-    with patch.object(wf.workflow, "execute_activity", new=stub):
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "logger", new=MagicMock()),
+    ):
         with pytest.raises(RuntimeError, match="currently locked"):
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
@@ -289,7 +292,9 @@ async def test_workflow_releases_lock_when_acquire_itself_fails(tmp_path) -> Non
         "mark_job_failed_activity",
         "release_agent_lock_activity",
     ]
-    # setup never ran, so no compensation should have been attempted.
+    # This run never held the lock at all, so compensating (which would be
+    # keyed on agent_id alone, like every teardown path) could tear down
+    # whatever job currently does hold it — must not be attempted.
     assert "compensate_activity" not in fn_names
 
 
@@ -834,12 +839,17 @@ async def test_workflow_compensates_succeeded_tools_on_checkpoint_failure(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_workflow_setup_failure_marks_failed_without_compensate(tmp_path) -> None:
-    """A setup failure is rolled back atomically inside ``run_setup``.
+async def test_workflow_setup_failure_compensates_and_marks_failed(tmp_path) -> None:
+    """A setup failure gets both ``run_setup``'s local rollback AND workflow compensation.
 
-    The workflow therefore marks the job failed but must NOT run agent_id-keyed
-    compensation for a setup failure — doing so could tear down a healthy
-    environment a prior job provisioned for the same agent.
+    ``run_setup`` already ran its own local best-effort rollback (scoped to
+    resources that attempt created) before this exception ever reached the
+    workflow. This run holds ``agent_id``'s exclusive lock for its entire
+    duration, so workflow-level ``compensate([])`` is safe to run here too, as
+    a second, independently-retried backstop for when the local rollback
+    itself fails (e.g. a transient ``docker rm`` error) — it cannot tear down
+    a healthy environment another job owns, since no other job can be running
+    against this ``agent_id`` while the lock is held.
     """
     from agent_provisioning_team.temporal import workflows as wf
 
@@ -847,6 +857,7 @@ async def test_workflow_setup_failure_marks_failed_without_compensate(tmp_path) 
     stub = _ExecActivityStub(
         {
             "setup_activity": RuntimeError("setup boom"),
+            "compensate_activity": None,
             "mark_job_failed_activity": None,
         }
     )
@@ -855,8 +866,8 @@ async def test_workflow_setup_failure_marks_failed_without_compensate(tmp_path) 
         with pytest.raises(RuntimeError, match="setup boom"):
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
-    fn_names = [c["name"] for c in stub.calls]
-    assert "compensate_activity" not in fn_names
+    compensate_call = _call(stub, "compensate_activity")
+    assert compensate_call["args"] == ["agent-1", [], "job-1"]
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
     assert "setup boom" in fail_call["args"][1]

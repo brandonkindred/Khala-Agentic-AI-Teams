@@ -243,7 +243,9 @@ class AgentProvisioningWorkflow:
                 err = (res.get("error") if isinstance(res, dict) else None) or "unknown"
                 failures.append(f"{name}: {err}")
                 tool_results_dump.append(
-                    res if isinstance(res, dict) else {"tool_name": name, "success": False, "error": err}
+                    res
+                    if isinstance(res, dict)
+                    else {"tool_name": name, "success": False, "error": err}
                 )
         return tool_results_dump, succeeded, failures
 
@@ -395,7 +397,9 @@ class AgentProvisioningWorkflow:
         tool_specs: list[dict[str, Any]] | None,
     ) -> dict[str, dict[str, Any]]:
         """Run or restore credential generation; return credentials keyed by tool."""
-        creds_prior = prior.get("credential_generation") if "credential_generation" in skip else None
+        creds_prior = (
+            prior.get("credential_generation") if "credential_generation" in skip else None
+        )
         creds_result = await workflow.execute_activity(
             _activities.credentials_activity,
             args=[job_id, agent_id, manifest_path, creds_prior, tool_specs],
@@ -502,16 +506,27 @@ class AgentProvisioningWorkflow:
               ``deliver_activity`` has written a terminal completed/failed job
               status.
             * On any unhandled phase failure (setup, credentials, tools, audit,
-              docs, deliver): ``mark_job_failed_activity`` records terminal
-              failure before the exception propagates (tool failures also
-              compensate succeeded tools first). A setup failure triggers
-              ``run_setup``'s own best-effort rollback, scoped to resources this
-              attempt created, so the workflow does NOT run ``agent_id``-keyed
-              compensation for it (which could tear down a healthy environment
-              another job owns for the same agent). Once setup has succeeded,
-              credentials / manifest-list failures call ``compensate_activity``
-              with an empty succeeded list to tear down the Docker env and
-              credentials setup created.
+              docs, deliver) while this run still holds ``agent_id``'s lock:
+              ``mark_job_failed_activity`` records terminal failure before the
+              exception propagates, and ``compensate_activity`` runs (tool
+              failures compensate the succeeded set; any other failure
+              compensates an empty set) to tear down the Docker env and
+              credentials, unconditionally including a setup-phase failure. A
+              setup failure ALSO triggers ``run_setup``'s own local best-effort
+              rollback first (scoped to resources that attempt created) — the
+              workflow-level ``compensate_activity`` is a second, independently
+              retried backstop for when that local rollback itself fails (e.g.
+              a transient ``docker rm`` error), not a replacement for it. This
+              is safe unconditionally (including before setup ever runs, e.g. a
+              manifest-load failure) because ``compensate_activity`` is fully
+              idempotent — a no-op wherever nothing was created — and this run
+              holds ``agent_id``'s exclusive lock throughout, so there is no
+              other job's environment it could tear down instead. If this run
+              never acquired the lock at all (exhausted retries against a live
+              holder), or acquired it but later lost it (a renewal failure
+              might indicate a replacement job now owns ``agent_id``),
+              compensation is skipped entirely to avoid tearing down that
+              other job's resources.
             * After a successful tool fan-out (not a restored skip),
               ``account_provisioning`` is written to ``completed_phases`` /
               ``phase_results`` before later phases run.
@@ -539,10 +554,10 @@ class AgentProvisioningWorkflow:
         skip = set(skip_phases or [])
         prior = prior_results or {}
         terminal_failure_recorded = False
-        setup_completed = False
         tools_phase_compensated = False
         account_provisioning_done = False
         succeeded_tools: list[dict] = []
+        lock_acquired = False
         lock_lost = False
 
         async def _renew_or_mark_lost() -> None:
@@ -561,11 +576,17 @@ class AgentProvisioningWorkflow:
 
         try:
             await self._acquire_agent_lock(job_id, agent_id)
+            # Only set once acquire itself has actually succeeded — if it
+            # raises (exhausted retries against a live holder), this run never
+            # held agent_id's lock at all, and the except block below must
+            # treat that exactly like losing it: compensating without ever
+            # having held exclusive ownership could tear down whatever job
+            # currently does hold the lock.
+            lock_acquired = True
 
             environment_dump = await self._execute_setup_phase(
                 job_id, agent_id, manifest_path, skip, prior
             )
-            setup_completed = True
             await _renew_or_mark_lost()
 
             # Freeze manifest tools once for credential + provision phases so a
@@ -598,7 +619,9 @@ class AgentProvisioningWorkflow:
                 prior,
             )
             succeeded_tools = list(succeeded)
-            credentials_by_tool = self._merge_enriched_credentials(credentials_by_tool, tool_results_dump)
+            credentials_by_tool = self._merge_enriched_credentials(
+                credentials_by_tool, tool_results_dump
+            )
             # Renew immediately after the fan-out — its own worst-case
             # duration (TOOL_RETRY_POLICY's ceiling) is this workflow's
             # single largest un-renewed gap; keep the checkpoint below out
@@ -649,30 +672,29 @@ class AgentProvisioningWorkflow:
                 onboarding_dump,
             )
         except Exception as exc:
-            # Compensation is gated on `setup_completed`: only once setup returns
-            # do we know a Docker environment exists for this agent_id. A setup
-            # failure is NOT compensated here — `run_setup` runs its own
-            # best-effort rollback scoped to resources that attempt created (see
-            # its postconditions), while agent_id-keyed compensation from here
-            # could tear down a healthy environment another job owns for the
-            # same agent.
-            # Credentials / manifest-list failures after setup → compensate([])
-            # to tear down the Docker env and credentials that setup created.
-            # Fan-out completed but checkpoint/later phase not durable yet →
-            # compensate the tools that already succeeded.
+            # Compensation runs unconditionally (compensate([]) when nothing
+            # succeeded yet, including before setup ever ran) rather than being
+            # gated on how far the pipeline got: `compensate_activity` is fully
+            # idempotent — a no-op wherever nothing was created — and this run
+            # holds agent_id's exclusive lock for its entire duration, so there
+            # is no concurrent owner it could tear down instead. For a setup
+            # failure specifically this is a deliberate SECOND cleanup attempt:
+            # `run_setup` already ran its own local best-effort rollback (see
+            # its postconditions) before this exception ever reached here; this
+            # workflow-level call is retried independently by
+            # `compensate_activity`'s own retry policy, so a transient failure
+            # in the local rollback (e.g. a flaky `docker rm`) still gets torn
+            # down instead of being left as an untracked orphan.
             # Nested try/except: compensation / terminal writes must not mask
             # the original failure if Temporal activity retries are exhausted.
-            # lock_lost gates this: a renewal failure means we can no longer
-            # prove we still own agent_id's resources (a replacement job may
-            # already own them), so compensating here — keyed on agent_id
-            # alone, like every teardown path — would recreate the exact
-            # cross-job teardown race this lock exists to prevent.
-            if (
-                setup_completed
-                and not account_provisioning_done
-                and not tools_phase_compensated
-                and not lock_lost
-            ):
+            # lock_acquired / lock_lost gate this: if acquire itself failed, this
+            # run never held the lock at all; if a renewal failed, it no longer
+            # can prove it still does (a replacement job may already own
+            # agent_id's resources) — either way, compensating here — keyed on
+            # agent_id alone, like every teardown path — would recreate the
+            # exact cross-job teardown race this lock exists to prevent.
+            currently_locked = lock_acquired and not lock_lost
+            if currently_locked and not account_provisioning_done and not tools_phase_compensated:
                 try:
                     await self._compensate_failed_tools(agent_id, succeeded_tools, job_id)
                 except Exception as comp_exc:
@@ -682,12 +704,13 @@ class AgentProvisioningWorkflow:
                         comp_exc,
                         exc,
                     )
-            elif setup_completed and not account_provisioning_done and not tools_phase_compensated:
+            elif not account_provisioning_done and not tools_phase_compensated:
                 workflow.logger.error(
-                    "Skipped unfenced compensation for job=%s agent=%s after losing the "
-                    "agent_id lock (a replacement job may now own its resources): %s",
+                    "Skipped unfenced compensation for job=%s agent=%s: this run %s "
+                    "the agent_id lock (a different job may now own its resources): %s",
                     job_id,
                     agent_id,
+                    "never acquired" if not lock_acquired else "lost",
                     exc,
                 )
             if not terminal_failure_recorded:

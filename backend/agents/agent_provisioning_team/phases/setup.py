@@ -227,7 +227,18 @@ def _rollback_failed_setup(
     """
     assert agent_id, "agent_id must be non-empty"
     if registered_by_this_call:
-        env_store.remove(agent_id)
+        try:
+            env_store.remove(agent_id)
+        except Exception:
+            # Never let a record-removal failure (e.g. a now-read-only registry
+            # directory) escape and mask the original setup error, or skip the
+            # container teardown below — both matter regardless of whether the
+            # record itself could be removed.
+            logger.exception(
+                "Setup rollback: failed to remove this attempt's own environment "
+                "record for agent_id=%s; record may be stale",
+                agent_id,
+            )
     else:
         reused = bool(result.details.get("reused", False))
         if reused and existing is not None:
