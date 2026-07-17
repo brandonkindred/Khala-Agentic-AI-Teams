@@ -479,7 +479,7 @@ def sub_agent_provisioning_activity(
 
 @activity.defn(name="planning_finalize")
 def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str, Any]:
-    """Finalize: mark the job completed at 100%.
+    """Finalize: mark the job completed at 100% and record a best-effort audit row.
 
     Preconditions:
         - The ``handoff_package`` has already been persisted to the job store by
@@ -489,14 +489,34 @@ def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str
           ``handoff_package`` (a partial-update merge, so the already-persisted
           handoff is preserved, not clobbered). Returns ``{"success": True, ...}``.
           This is the sole terminal-success writer for the Temporal path.
+        - Re-reads the persisted ``handoff_package`` and best-effort records one
+          ``planning_runs`` row via ``record_planning_run``; that write is a
+          guarded no-op when Postgres is unconfigured and never affects the
+          return value above.
     """
     from planning_team.models import Phase
-    from planning_team.shared.job_store import mark_job_completed
+    from planning_team.postgres.writer import record_planning_run
+    from planning_team.shared.job_store import get_job, mark_job_completed
 
     summary = "Planning completed; handoff package ready."
 
     def _work() -> Dict[str, Any]:
         mark_job_completed(job_id, summary=summary)
+        job = get_job(job_id) or {}
+        handoff = job.get("handoff_package")
+        handoff = handoff if isinstance(handoff, dict) else {}
+        client_context = handoff.get("client_context")
+        client_name = (
+            client_context.get("client_name") if isinstance(client_context, dict) else None
+        )
+        record_planning_run(
+            job_id,
+            client_name=client_name,
+            summary=summary,
+            handoff_summary=handoff.get("summary") or "",
+            open_questions=handoff.get("open_questions") or [],
+            resolved_questions=handoff.get("resolved_questions") or [],
+        )
         return {"success": True, "summary": summary}
 
     # current_phase stays at the last real phase (sub_agent_provisioning); the
