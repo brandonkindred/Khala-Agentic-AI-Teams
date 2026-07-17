@@ -272,6 +272,50 @@ describe('CodeReviewDashboardComponent', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Review-completion live region (Group B2)
+  // -------------------------------------------------------------------------
+
+  it('mirrors reviewRuns.announce$ into reviewAnnouncement for the live-region binding', async () => {
+    await setup();
+    expect(component.reviewAnnouncement).toBe('');
+    component['reviewRuns'].announce$.next('Review for pull request #1 completed.');
+    // Cleared synchronously, then set on the next tick (see the repeated-announcement test).
+    expect(component.reviewAnnouncement).toBe('');
+    vi.advanceTimersByTime(0);
+    expect(component.reviewAnnouncement).toBe('Review for pull request #1 completed.');
+  });
+
+  it('re-announces an identical outcome by passing through empty first, so the DOM text always changes', async () => {
+    await setup();
+    component['reviewRuns'].announce$.next('Review for pull request #1 completed.');
+    vi.advanceTimersByTime(0);
+    expect(component.reviewAnnouncement).toBe('Review for pull request #1 completed.');
+    // A second, identical outcome (e.g. re-running the review) must still clear first —
+    // otherwise Angular's interpolation sees no string change and never touches the DOM,
+    // so assistive tech would not re-announce it.
+    component['reviewRuns'].announce$.next('Review for pull request #1 completed.');
+    expect(component.reviewAnnouncement).toBe('');
+    vi.advanceTimersByTime(0);
+    expect(component.reviewAnnouncement).toBe('Review for pull request #1 completed.');
+  });
+
+  it('stops mirroring announce$ into reviewAnnouncement once the component is destroyed', async () => {
+    await setup();
+    fixture.destroy();
+    component['reviewRuns'].announce$.next('Review for pull request #1 completed.');
+    expect(component.reviewAnnouncement).toBe('');
+  });
+
+  it('does not land a deferred announcement that was still pending when the component was destroyed', async () => {
+    await setup();
+    component['reviewRuns'].announce$.next('Review for pull request #1 completed.');
+    expect(component.reviewAnnouncement).toBe(''); // cleared, deferred write not yet run
+    fixture.destroy();
+    vi.advanceTimersByTime(0);
+    expect(component.reviewAnnouncement).toBe('');
+  });
+
+  // -------------------------------------------------------------------------
   // Full-stack DOM integration (component + real PrReviewRunsService + child)
   // -------------------------------------------------------------------------
 
@@ -298,6 +342,15 @@ describe('CodeReviewDashboardComponent', () => {
     component.togglePull(component.pulls[0]);
     fixture.detectChanges();
     expect(el.querySelector('.cr-pull-detail')).toBeNull();
+  });
+
+  it('renders a review-runs announcement in the visually-hidden status live region', async () => {
+    await setup();
+    component['reviewRuns'].announce$.next('Review for pull request #1 completed.');
+    vi.advanceTimersByTime(0);
+    fixture.detectChanges();
+    const region = fixture.nativeElement.querySelector('[role="status"]');
+    expect(region?.textContent?.trim()).toBe('Review for pull request #1 completed.');
   });
 
   it('updates the rendered row badge + table as a live poll completes', async () => {

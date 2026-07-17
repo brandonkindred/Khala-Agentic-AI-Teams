@@ -401,11 +401,249 @@ def run_planning(
     return planning_phase_result
 
 
+# Common English stopwords to drop when extracting plan keywords. Length-based
+# filtering alone drops meaningful short acronyms (e.g. "API", "SQL", "UX", "AI")
+# while letting long stopwords (e.g. "with", "your", "about") through, so we
+# filter by membership in this list instead.
+_PLAN_KEYWORD_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "but",
+        "nor",
+        "for",
+        "so",
+        "yet",
+        "to",
+        "of",
+        "in",
+        "on",
+        "at",
+        "by",
+        "as",
+        "is",
+        "it",
+        "be",
+        "are",
+        "was",
+        "were",
+        "been",
+        "being",
+        "am",
+        "do",
+        "does",
+        "did",
+        "has",
+        "have",
+        "had",
+        "will",
+        "would",
+        "shall",
+        "should",
+        "can",
+        "could",
+        "may",
+        "might",
+        "must",
+        "with",
+        "from",
+        "into",
+        "onto",
+        "about",
+        "over",
+        "under",
+        "between",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "up",
+        "down",
+        "out",
+        "off",
+        "again",
+        "further",
+        "then",
+        "than",
+        "once",
+        "here",
+        "there",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "any",
+        "both",
+        "each",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "only",
+        "own",
+        "same",
+        "not",
+        "too",
+        "very",
+        "just",
+        "also",
+        "this",
+        "that",
+        "these",
+        "those",
+        "your",
+        "you",
+        "our",
+        "their",
+        "its",
+        "his",
+        "her",
+        "which",
+        "who",
+        "whom",
+        "using",
+        "use",
+        "used",
+        "i",
+        "we",
+        "us",
+        "my",
+        "me",
+        "he",
+        "she",
+        "him",
+        "they",
+        "them",
+        "if",
+        "no",
+        "now",
+        "what",
+        "while",
+        "because",
+        "without",
+        "until",
+        "against",
+        "although",
+        "though",
+        "unless",
+        "despite",
+        "since",
+        "whether",
+        "toward",
+        "towards",
+        "within",
+        "upon",
+        "across",
+        "among",
+        "amongst",
+        "beyond",
+        "regarding",
+        "concerning",
+    }
+)
+
+
+# Short (< 4 char) technical/domain terms admitted regardless of the general
+# length floor below. This is an explicit, bounded allowlist rather than a
+# casing-based heuristic ("all uppercase => acronym") on purpose: LLM-generated
+# plan text doesn't reliably capitalize real acronyms ("api" or "Api" are as
+# likely as "API"), and conversely an all-caps heading doesn't mean every word
+# in it is an acronym (a heading like "HOW TO USE AI" is not three acronyms
+# and a stopword) -- casing is wrong as a signal in both directions. This list
+# is necessarily incomplete (there's no bounded, casing-independent way to
+# recognize *every* short technical term without reintroducing the false
+# positives above); it covers common terms and can grow as real gaps surface.
+_PLAN_KEYWORD_SHORT_TERMS = frozenset(
+    {
+        "ai",
+        "ml",
+        "ux",
+        "ui",
+        "os",
+        "io",
+        "db",
+        "ip",
+        "vr",
+        "ar",
+        "api",
+        "sql",
+        "css",
+        "xml",
+        "url",
+        "uri",
+        "aws",
+        "gcp",
+        "ci",
+        "cd",
+        "qa",
+        "cli",
+        "sdk",
+        "llm",
+        "nlp",
+        "seo",
+        "roi",
+        "kpi",
+        "crm",
+        "erp",
+        "iot",
+        "b2b",
+        "b2c",
+        "saas",
+        "gpu",
+        "cpu",
+        "dns",
+        "ssh",
+        "html",
+        "http",
+        "https",
+        "json",
+    }
+)
+
+
+def _strip_non_alnum_edges(word: str) -> str:
+    """Trim any non-alphanumeric characters from both ends of *word*.
+
+    Unlike ``str.strip()`` against a fixed character set, this handles
+    arbitrary wrapper punctuation LLM output commonly produces -- smart
+    quotes ("about"), markdown emphasis (**about**), em/en dashes
+    (about--) -- without needing to enumerate every such character.
+    Internal punctuation (e.g. the hyphen in "ai-driven") is untouched.
+    """
+    start, end = 0, len(word)
+    while start < end and not word[start].isalnum():
+        start += 1
+    while end > start and not word[end - 1].isalnum():
+        end -= 1
+    return word[start:end]
+
+
 def _extract_plan_keywords(plan: Any) -> list[str]:
     """Extract searchable keywords from a content plan for story bank queries.
 
-    Combines the overarching topic and section titles, splits on whitespace,
-    and filters to words >= 4 chars to avoid noise from short stopwords.
+    Combines the overarching topic and section titles, lowercases, and
+    splits on whitespace. A token is admitted as a keyword if either:
+
+    - it's in ``_PLAN_KEYWORD_SHORT_TERMS``, a bounded allowlist of short
+      technical/domain terms (e.g. "api", "sql", "ux") that would otherwise
+      be dropped by the length floor below; or
+    - it is at least 4 characters and not in ``_PLAN_KEYWORD_STOPWORDS``
+      (the original length heuristic, still needed to drop long stopwords
+      like "with"/"your"/"about" and ordinary short words like "new" that
+      would otherwise cause spurious keyword-overlap matches in the story
+      bank).
+
+    Tokens are trimmed of surrounding punctuation via
+    ``_strip_non_alnum_edges``; tokens with no alphanumeric content at all
+    (e.g. "--", "##") reduce to an empty string and are dropped.
     """
     parts: list[str] = []
     topic = getattr(plan, "overarching_topic", "") or ""
@@ -413,12 +651,18 @@ def _extract_plan_keywords(plan: Any) -> list[str]:
     for section in getattr(plan, "sections", []) or []:
         title = getattr(section, "title", "") or ""
         parts.extend(title.lower().split())
-    # Deduplicate and filter short words (stopwords like "the", "and", "for")
     seen: set[str] = set()
     keywords: list[str] = []
     for word in parts:
-        cleaned = word.strip(".,;:!?()[]\"'")
-        if len(cleaned) >= 4 and cleaned not in seen:
+        cleaned = _strip_non_alnum_edges(word)
+        if not cleaned:
+            continue
+        if cleaned in seen:
+            continue
+        admitted = cleaned in _PLAN_KEYWORD_SHORT_TERMS or (
+            len(cleaned) >= 4 and cleaned not in _PLAN_KEYWORD_STOPWORDS
+        )
+        if admitted:
             seen.add(cleaned)
             keywords.append(cleaned)
     return keywords
