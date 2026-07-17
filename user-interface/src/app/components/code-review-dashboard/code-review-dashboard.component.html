@@ -34,6 +34,10 @@
   </div>
 } @else {
   <section class="cr-section">
+    <!-- Persistent status region (kept in the DOM, text mutated) so a screen reader
+         hears a review's completion/failure; a gated element wouldn't announce. -->
+    <p class="visually-hidden" role="status" aria-live="polite">{{ reviewAnnouncement }}</p>
+
     <div class="cr-section__header">
       <h2>
         <mat-icon aria-hidden="true">rate_review</mat-icon>
