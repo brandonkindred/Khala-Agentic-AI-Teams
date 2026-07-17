@@ -3625,7 +3625,7 @@ class TestCreateReviewIssuesUnit:
         """When the in-memory job has aged out, the durable review row's proposals
         are used to file an issue instead."""
         from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.coding_team.api import pr_review_issues as pr_review
 
         # No live job, but a durable review row carries the proposals.
         monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: None)
@@ -3676,7 +3676,7 @@ class TestCreateReviewIssuesUnit:
     def test_raises_review_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Neither store knowing the job id raises ReviewNotFoundError."""
         from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.coding_team.api import pr_review_issues as pr_review
 
         monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: None)
         monkeypatch.setattr(api_main, "get_review", lambda *_a, **_k: None)
@@ -3687,7 +3687,7 @@ class TestCreateReviewIssuesUnit:
         """When one proposal's GitHub call fails, the other's successful creation is
         still persisted rather than lost."""
         from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.coding_team.api import pr_review_issues as pr_review
 
         job = {
             "github_context": {
@@ -3745,7 +3745,7 @@ class TestCreateReviewIssuesUnit:
         failure must also still be logged, regardless of which one ends up in the
         composite exception."""
         from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.coding_team.api import pr_review_issues as pr_review
 
         job = {
             "github_context": {
@@ -3798,7 +3798,7 @@ class TestCreateReviewIssuesUnit:
         """A non-list pending_issue_proposals field degrades to no candidates rather
         than raising."""
         from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.coding_team.api import pr_review_issues as pr_review
 
         job = {
             "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
@@ -3817,7 +3817,7 @@ class TestCreateReviewIssuesUnit:
         """A proposal already carrying an issue_url is skipped even when explicitly
         requested again alongside a genuinely unfiled one."""
         from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.coding_team.api import pr_review_issues as pr_review
 
         job = {
             "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
@@ -3860,7 +3860,7 @@ class TestCreateReviewIssuesUnit:
         tasks for the SAME proposal both observing issue_url unset before either
         writes it, so the id list itself must be deduped first."""
         from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.coding_team.api import pr_review_issues as pr_review
 
         job = {
             "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
@@ -3894,7 +3894,7 @@ class TestCreateReviewIssuesUnit:
         """A failure persisting the updated proposals never fails the request — the
         GitHub issue already exists regardless of whether the local record updates."""
         from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.coding_team.api import pr_review_issues as pr_review
 
         job = {
             "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
@@ -3930,7 +3930,7 @@ class TestCreateReviewIssuesUnit:
         """A mismatched expected owner/repo raises RepoMismatchError before the
         GitHub client is ever constructed."""
         from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.coding_team.api import pr_review_issues as pr_review
 
         job = {
             "github_context": {"owner": "acme", "repo": "widget", "pr_number": 1, "pr_url": "u"},
@@ -3953,7 +3953,7 @@ class TestCreateReviewIssuesUnit:
     def test_repo_match_is_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Expected owner/repo are compared case-insensitively, as GitHub treats them."""
         from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.coding_team.api import pr_review_issues as pr_review
 
         job = {
             "github_context": {"owner": "Acme", "repo": "Widget", "pr_number": 1, "pr_url": "u"},
@@ -3982,3 +3982,95 @@ class TestCreateReviewIssuesUnit:
             "job1", ["p0"], token="t", expected_owner="acme", expected_repo="widget"
         )
         assert out["created"][0]["issue_url"] == "u1"
+
+    def test_issue_creation_lock_takes_pg_advisory_lock_when_postgres_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With Postgres configured, issue filing additionally takes a transaction-scoped
+        advisory lock keyed on the job id — the cross-worker half of the mutual
+        exclusion, mirroring _pr_review_admission."""
+        import contextlib as _contextlib
+
+        import shared_postgres
+        from software_engineering_team.coding_team.api import pr_review_issues
+
+        conn = MagicMock()
+
+        @_contextlib.contextmanager
+        def _fake_conn():
+            yield conn
+
+        monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+        monkeypatch.setattr(shared_postgres, "get_conn", _fake_conn)
+        with pr_review_issues._issue_creation_lock("job-lock"):
+            pass
+        conn.execute.assert_called_once_with(
+            "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+            ("coding_team_issue_creation", "job-lock"),
+        )
+
+    def test_issue_creation_lock_degrades_when_postgres_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing advisory-lock acquisition degrades to the process-local lock alone
+        (logged) — issue filing must never raise or block on a Postgres outage."""
+        import shared_postgres
+        from software_engineering_team.coding_team.api import pr_review_issues
+
+        monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+        monkeypatch.setattr(
+            shared_postgres, "get_conn", MagicMock(side_effect=RuntimeError("pg down"))
+        )
+        with pr_review_issues._issue_creation_lock("job-degrade"):
+            pass  # must not raise
+
+    def test_merge_filed_proposals_prefers_whichever_copy_already_filed(self) -> None:
+        """A proposal only transitions unfiled -> filed: when the preferred copy is
+        still unfiled but the other store's copy carries issue_url, the filed copy
+        wins; an already-filed preferred copy and an id unknown to the other list
+        pass through unchanged."""
+        from software_engineering_team.coding_team.api import pr_review_issues
+
+        preferred = [
+            {"id": "p0", "issue_url": None},
+            {"id": "p1", "issue_url": "u-preferred"},
+            {"id": "p2", "issue_url": None},
+        ]
+        other = [
+            {"id": "p0", "issue_url": "u-other", "issue_number": 9},
+            {"id": "p1", "issue_url": None},
+        ]
+        merged = pr_review_issues._merge_filed_proposals(preferred, other)
+        assert [p["id"] for p in merged] == ["p0", "p1", "p2"]
+        assert merged[0]["issue_url"] == "u-other"  # other side already filed -> wins
+        assert merged[1]["issue_url"] == "u-preferred"  # filed preferred copy is kept
+        assert merged[2]["issue_url"] is None  # unknown to other -> unchanged
+        # The merge returns fresh dicts, never aliases of either input list's entries.
+        assert merged[0] is not other[0] and merged[2] is not preferred[2]
+
+    def test_context_merges_row_proposals_when_job_and_row_both_exist(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the live job AND the durable row both know the review, the loaded
+        context's proposals are the merge of both copies, so a row that already
+        filed an issue makes the job's stale unfiled copy filed."""
+        from software_engineering_team.coding_team.api import main as api_main
+        from software_engineering_team.coding_team.api import pr_review_issues
+
+        job = {
+            "status": "completed",
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 5, "pr_url": "u"},
+            "review_summary": {
+                "pending_issue_proposals": [{"id": "p0", "issue_url": None}]
+            },
+        }
+        row = {
+            "review_summary": {
+                "pending_issue_proposals": [{"id": "p0", "issue_url": "u0", "issue_number": 1}]
+            }
+        }
+        monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: job)
+        monkeypatch.setattr(api_main, "get_review", lambda *_a, **_k: row)
+        ctx = pr_review_issues._load_review_issue_context("job1")
+        assert ctx is not None
+        assert ctx.summary["pending_issue_proposals"][0]["issue_url"] == "u0"
