@@ -684,8 +684,8 @@
             </mat-accordion>
             }
 
-            <!-- Paper Trading section (winning strategies only) -->
-            @if (record.is_winning) {
+            <!-- Paper Trading section (publishable strategies only) -->
+            @if (record.is_publishable) {
               <mat-divider class="card-divider"></mat-divider>
 
               <div class="paper-trading-section">
@@ -795,6 +795,17 @@
                     </button>
                   }
                 }
+              </div>
+            } @else if (record.is_winning) {
+              <mat-divider class="card-divider"></mat-divider>
+              <div class="paper-trading-section paper-trading-skipped">
+                <mat-icon class="paper-skip-icon">block</mat-icon>
+                <div class="paper-skip-copy">
+                  <span class="paper-skip-title">Not publishable — paper trading unavailable</span>
+                  @if (publishabilitySkipLabel(record); as reason) {
+                    <span class="paper-skip-reason">{{ reason }}</span>
+                  }
+                </div>
               </div>
             }
 
