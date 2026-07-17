@@ -13,9 +13,6 @@ from pathlib import Path
 import pytest
 from conftest import make_stub_editor_class, make_stub_writer_class
 
-_StubWriter = make_stub_writer_class()
-_StubEditor = make_stub_editor_class()
-
 
 def _make_plan():
     from _content_plan_test_utils import make_minimal_planning_phase_result
@@ -29,8 +26,8 @@ def test_run_pipeline_no_gates_no_job(monkeypatch, tmp_path: Path) -> None:
 
     # Stub heavy steps:
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
-    monkeypatch.setattr(v2, "BlogWriterAgent", _StubWriter)
-    monkeypatch.setattr(v2, "BlogCopyEditorAgent", _StubEditor)
+    monkeypatch.setattr(v2, "BlogWriterAgent", make_stub_writer_class())
+    monkeypatch.setattr(v2, "BlogCopyEditorAgent", make_stub_editor_class())
 
     # Style and brand spec — non-empty strings so the missing-guideline check passes
     monkeypatch.setattr(v2, "load_style_file", lambda path, label="": "guidelines text")
@@ -56,8 +53,8 @@ def test_run_pipeline_no_gates_no_workdir(monkeypatch) -> None:
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
 
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
-    monkeypatch.setattr(v2, "BlogWriterAgent", _StubWriter)
-    monkeypatch.setattr(v2, "BlogCopyEditorAgent", _StubEditor)
+    monkeypatch.setattr(v2, "BlogWriterAgent", make_stub_writer_class())
+    monkeypatch.setattr(v2, "BlogCopyEditorAgent", make_stub_editor_class())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
 
     from agents.blogging.blog_research_agent.models import ResearchBriefInput
@@ -119,7 +116,7 @@ def test_run_pipeline_copy_editor_stalls_then_accepts(monkeypatch, tmp_path: Pat
                 ],
             )
 
-    monkeypatch.setattr(v2, "BlogWriterAgent", _StubWriter)
+    monkeypatch.setattr(v2, "BlogWriterAgent", make_stub_writer_class())
     monkeypatch.setattr(v2, "BlogCopyEditorAgent", _StubEditorNeverApproves)
 
     from agents.blogging.blog_research_agent.models import ResearchBriefInput

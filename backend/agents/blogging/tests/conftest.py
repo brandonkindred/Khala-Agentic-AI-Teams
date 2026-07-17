@@ -58,6 +58,13 @@ def make_writer_agent(
     )
 
 
+# Canonical draft bodies the stub writer emits. Named so the single shared value is
+# deliberate (the per-file stubs this factory replaced used slightly different whitespace);
+# no test asserts on the exact body, only that a draft starting with ``# Draft`` is produced.
+_STUB_WRITER_DRAFT = "# Draft\n\nBody."
+_STUB_WRITER_REVISED_DRAFT = "# Revised\n\nBody."
+
+
 def make_stub_writer_class(*, escalation_summary: str = "") -> type:
     """Build a BlogWriterAgent stand-in class returning canned, always-approvable output.
 
@@ -66,8 +73,9 @@ def make_stub_writer_class(*, escalation_summary: str = "") -> type:
     Postconditions:
         - Returns a class (not an instance) suitable for monkeypatching a module's
           ``BlogWriterAgent`` reference; every method returns a deterministic ``WriterOutput``
-          so ``run_pipeline`` can proceed without an LLM. ``generate_escalation_summary``
-          returns ``escalation_summary`` (empty string unless overridden).
+          (``run`` yields ``_STUB_WRITER_DRAFT``, the revise variants yield
+          ``_STUB_WRITER_REVISED_DRAFT``) so ``run_pipeline`` can proceed without an LLM.
+          ``generate_escalation_summary`` returns ``escalation_summary`` (empty unless overridden).
     """
     from agents.blogging.blog_writer_agent.models import WriterOutput
 
@@ -76,13 +84,13 @@ def make_stub_writer_class(*, escalation_summary: str = "") -> type:
             pass
 
         def run(self, *a, **kw):
-            return WriterOutput(draft="# Draft\n\nBody.")
+            return WriterOutput(draft=_STUB_WRITER_DRAFT)
 
         def revise(self, *a, **kw):
-            return WriterOutput(draft="# Revised\n\nBody.")
+            return WriterOutput(draft=_STUB_WRITER_REVISED_DRAFT)
 
         def revise_from_user_feedback(self, *a, **kw):
-            return WriterOutput(draft="# Revised\n\nBody.")
+            return WriterOutput(draft=_STUB_WRITER_REVISED_DRAFT)
 
         def identify_uncertainty_questions(self, *a, **kw):
             return []

@@ -94,12 +94,15 @@ def make_minimal_planning_phase_result(
     copy-pasted as a local ``_make_plan()`` helper in multiple pipeline-gate test modules.
 
     Preconditions:
-        - ``probability`` is a valid success probability for a ``TitleCandidate``.
+        - ``title`` and ``probability`` are a valid title / success probability for the single
+          ``TitleCandidate`` the plan is built with.
         - ``overrides`` keys are valid ``PlanningPhaseResult`` field names other than
           ``content_plan`` (e.g. ``planning_wall_ms_total``).
     Postconditions:
         - Returns a ``PlanningPhaseResult`` wrapping a one-section, one-title-candidate
-          ContentPlan, with :func:`make_planning_phase_result`'s defaults unless overridden.
+          ContentPlan whose sole title candidate is ``TitleCandidate(title=title,
+          probability_of_success=probability)``, with :func:`make_planning_phase_result`'s
+          defaults unless overridden.
     """
     plan = make_content_plan(
         overarching_topic="Topic",
