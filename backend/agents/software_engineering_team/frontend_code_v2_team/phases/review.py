@@ -15,11 +15,7 @@ from strands import Agent
 
 from llm_service import LLMClient
 from software_engineering_team.shared.agent_review import run_qa_agent, run_security_agent
-from software_engineering_team.shared.context_sizing import (
-    compute_code_review_arch_overview_chars,
-    compute_code_review_spec_excerpt_chars,
-)
-from software_engineering_team.shared.llm_review import LlmReviewOutput, run_llm_review
+from software_engineering_team.shared.llm_review import LlmReviewOutput, run_team_llm_review
 from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.review_utils import (
     DOC_QUALITY_THRESHOLD,
@@ -67,57 +63,22 @@ def _run_llm_review(
 ) -> LlmReviewOutput[ReviewIssue]:
     """LLM-based code review when no external review agent is available.
 
-    Thin wrapper that delegates the chunking/prompt/parse orchestration to the
-    shared ``run_llm_review`` helper, passing this team's prompt, parser, and
-    ``ReviewIssue`` factory. The Strands ``Agent`` invocation is built here so
-    this module stays the patch surface for ``Agent`` and
-    ``resolve_text_mode_strands_model``.
+    Thin wrapper that builds the Strands ``Agent`` invocation (kept here so this
+    module stays the patch surface for ``Agent`` and
+    ``resolve_text_mode_strands_model``) and delegates everything else --
+    ``review_context`` bounding, chunking, prompt formatting, and parsing -- to
+    the shared ``run_team_llm_review`` helper, passing this team's prompt,
+    parser, and ``ReviewIssue`` factory.
 
-    Preconditions:
-        - ``files`` maps file paths to their full source text.
-        - ``review_context`` bundles the caller's system architecture and project
-          specification, when available; ``None`` means "nothing to add" so a
-          caller without this context yet keeps working unchanged. Rendered and
-          hard-truncated to the same per-chunk caps the coordinator's own
-          architecture/spec excerpts use (this runs once per chunk, so an
-          uncapped document would repeat its full size in every chunk's prompt).
-        - ``enable_llm_review_grounding`` defaults True; when False, skips
-          ungrounded-claim filtering in the shared helper (kill switch).
-
-    Postconditions:
-        - Returns the shared helper's :class:`LlmReviewOutput` unchanged (issues
-          plus their pre-grounding ``raw_issue_count``); see
-          ``software_engineering_team.shared.llm_review.run_llm_review`` for the
-          full contract: function-aware chunking with no tail truncation,
-          per-chunk skip-on-failure, single call for small inputs, and a
-          header-preserving hard-split for any chunk that is itself over budget
-          (a single line longer than the cap).
+    Preconditions/Postconditions: see
+    ``software_engineering_team.shared.llm_review.run_team_llm_review``.
     """
 
     def _invoke(prompt: str) -> str:
         return str(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
 
-    architecture_context = ""
-    spec_content = ""
-    if review_context is not None:
-        if review_context.architecture is not None:
-            # Lazy import: code_review_agent submodules are imported on demand
-            # rather than at module scope elsewhere in the review call chain
-            # (e.g. _code_review_step's CodeReviewInput import), so this module
-            # follows the same convention rather than adding a new eager edge.
-            from code_review_agent.architecture_context import render_architecture_context
-
-            architecture_context = render_architecture_context(review_context.architecture)
-        spec_content = review_context.spec_content or ""
-        # Bounded here (only when there is context to bound): this runs once per
-        # chunk, so an uncapped document would repeat its full size in every
-        # chunk's prompt. Skipped entirely with no review_context so a caller's
-        # bare llm handle (e.g. a test double without get_max_context_tokens)
-        # is never touched when there is nothing to bound.
-        architecture_context = architecture_context[: compute_code_review_arch_overview_chars(llm)]
-        spec_content = spec_content[: compute_code_review_spec_excerpt_chars(llm)]
-
-    return run_llm_review(
+    return run_team_llm_review(
+        llm=llm,
         task=task,
         files=files,
         prompt_template=REVIEW_PROMPT,
@@ -126,8 +87,7 @@ def _run_llm_review(
         invoke_model=_invoke,
         max_chars=MAX_REVIEW_CODE_CHARS,
         warn_threshold=MANY_CHUNKS_WARN_THRESHOLD,
-        architecture_context=architecture_context,
-        spec_content=spec_content,
+        review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
     )
 

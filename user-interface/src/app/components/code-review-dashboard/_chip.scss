@@ -1,5 +1,5 @@
 // Shared looks for the Code Review components' `.cr-chip` and `.cr-job-status`
-// classes, used by code-review-panel.component.scss and its pr-review-detail /
+// classes, used by code-review-dashboard.component.scss and its pr-review-detail /
 // pending-issue-proposals children. Angular's view encapsulation scopes each
 // component's styles to its own template, so each still needs its own rule
 // (e.g. `.cr-chip { @include chip.look; }`) -- these mixins just keep the

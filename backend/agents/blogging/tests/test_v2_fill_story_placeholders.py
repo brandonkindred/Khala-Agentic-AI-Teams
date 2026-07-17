@@ -95,6 +95,15 @@ def test_fill_story_placeholders_user_skips_all(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _make_stub_ghost(skipped=True))
 
+    # Stub draft_agent.run to return the redraft, capturing the WriterInput it
+    # was called with so we can confirm the skip instruction was built.
+    captured: dict = {}
+
+    class _StubAgent:
+        def run(self, draft_input, **kw):
+            captured["draft_input"] = draft_input
+            return WriterOutput(draft="# Redraft without stories\nBody.")
+
     out_draft, out_stories = v2._fill_story_placeholders(
         draft_text="# Draft\n[Author: add a real story]\nBody.",
         plan=_plan(),
@@ -102,13 +111,26 @@ def test_fill_story_placeholders_user_skips_all(monkeypatch, tmp_path) -> None:
         job_id=job_id,
         job_updater=lambda **kw: None,
         elicited_stories_text=None,
-        draft_agent=_make_stub_draft_agent("# Redraft without stories\nBody.")(),
+        draft_agent=_StubAgent(),
         draft_input_kwargs={"content_plan": _plan()},
         work_dir=tmp_path,
         iteration=1,
     )
-    # Since all were skipped, the original draft might still be returned with redraft attempt
-    assert "Redraft" in out_draft.draft or "Draft" in out_draft.draft
+    # The redraft (success) branch must have run — not the exception-fallback
+    # branch that keeps the original draft — so the stubbed output is returned
+    # verbatim.
+    assert out_draft.draft == "# Redraft without stories\nBody."
+    # No narrative was collected, so elicited_stories_text is left untouched.
+    assert out_stories is None
+    # The draft agent must have actually been invoked with the skip
+    # instruction naming the skipped topic, proving the skip path was
+    # exercised rather than silently no-op'd.
+    elicited = captured["draft_input"].elicited_stories
+    assert elicited is not None
+    assert "NO PERSONAL EXPERIENCE" in elicited
+    # _PLACEHOLDER_RE strips a leading "add " from the placeholder body, so
+    # the topic recorded in the skip instruction is "a real story".
+    assert "a real story" in elicited
 
 
 def test_fill_story_placeholders_user_provides_narrative(monkeypatch, tmp_path) -> None:
