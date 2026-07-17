@@ -887,17 +887,32 @@ export interface InvestmentJobsListResponse {
 // (an ISO timestamp publish() stamps on most, but not all, frames) is
 // deliberately omitted — nothing reads it and its presence isn't uniform.
 
+type StrategyLabSnapshotCycleProgress = Omit<StrategyLabCycleProgress, 'phase' | 'strategy' | 'metrics'> & {
+  phase: string;
+  strategy: StrategyLabCycleProgress['strategy'] | null;
+  metrics: StrategyLabCycleProgress['metrics'] | null;
+};
+
 /**
  * Initial/refresh snapshot — wire shape matches the polling endpoint 1:1,
- * except `current_cycle.phase` is widened to `string`: the backend's
- * StrategyLabCycleProgress model (main.py:322-328) declares it as an open
- * `str`, same as StrategyLabProgressEvent.phase below. The shared
- * StrategyLabCycleProgress/StrategyLabPhase frontend types still narrow it;
- * fixing those is a separate, pre-existing issue (see PR description).
+ * with two widenings confirmed against the backend:
+ *  - `current_cycle` (and nested `strategy`/`metrics`) can be a real
+ *    `null`, not just an omitted key: `_run_state_to_response(...)
+ *    .model_dump(mode="json")` serializes unset Optional[...] fields as
+ *    JSON `null`, and StrategyLabCycleProgress (main.py:322-328) declares
+ *    all three as Optional. `phase` stays widened to `string` per
+ *    StrategyLabProgressEvent's reasoning below.
+ *  - `status` additionally allows `'interrupted'`, a real, tested backend
+ *    status (`_STRATEGY_LAB_CANCEL_STATUSES` in main.py) the shared
+ *    StrategyLabRunStatus.status union doesn't have. Widened locally here,
+ *    not on StrategyLabRunStatus itself — that type also backs the REST
+ *    polling endpoint and has other UI consumers not audited for a 6th
+ *    status value (see PR description).
  */
-export interface StrategyLabSnapshotEvent extends Omit<StrategyLabRunStatus, 'current_cycle'> {
+export interface StrategyLabSnapshotEvent extends Omit<StrategyLabRunStatus, 'current_cycle' | 'status'> {
   type: 'snapshot';
-  current_cycle?: Omit<StrategyLabCycleProgress, 'phase'> & { phase: string };
+  status: StrategyLabRunStatus['status'] | 'interrupted';
+  current_cycle?: StrategyLabSnapshotCycleProgress | null;
 }
 
 /**
@@ -908,6 +923,13 @@ export interface StrategyLabSnapshotEvent extends Omit<StrategyLabRunStatus, 'cu
  * `string`, not the narrower StrategyLabPhase: the backend's real phase set
  * (`designing`, `design_review`, `aligning`, `telemetry`, `phase_transition`,
  * paper-trading phases, ...) is open-ended and already broader than that enum.
+ *
+ * Deliberately incomplete: some real phases carry fields not modeled here
+ * (`phase_transition`: from_phase/to_phase/spec_hash/code_hash/attempt;
+ * `telemetry`: scope/kind + counters). #1656's acceptance criteria requires
+ * no catch-all index signature on this union, so reading them needs a
+ * future, explicit field addition rather than an escape hatch — tracked
+ * separately from cataloguing the full phase/sub_phase payload matrix.
  */
 export interface StrategyLabProgressEvent {
   type: 'progress';
@@ -958,20 +980,24 @@ export interface StrategyLabCompleteEvent {
   total_batches: number;
 }
 
+export interface StrategyLabErrorDetailEvent  { type: 'error'; detail: string; error?: undefined; }
+export interface StrategyLabErrorReclaimEvent { type: 'error'; error: string; detail?: undefined; }
 /**
- * `detail` and `error` are mutually exclusive on the wire (three strategy-lab
- * call sites send `detail`; one shared-infra "subscription reclaimed" call
- * site sends `error`), but both are modeled as optional on one flat interface
- * — not a nested per-key sub-union — so handleStreamEvent()'s existing
- * `event['detail'] as string` read keeps compiling unchanged.
+ * Two mutually-exclusive wire shapes: three strategy-lab call sites always
+ * send `detail`; one shared-infra "subscription reclaimed" call site always
+ * sends `error` instead. Each branch declares the other field as optional
+ * `undefined` (rather than omitting it) so handleStreamEvent()'s existing
+ * `event['detail'] as string` read still type-checks uniformly across the
+ * union as `string | undefined`, without needing body changes here.
  */
-export interface StrategyLabErrorEvent { type: 'error'; detail?: string; error?: string; }
+export type StrategyLabErrorEvent = StrategyLabErrorDetailEvent | StrategyLabErrorReclaimEvent;
 
 /**
  * Sole terminal frame — always exactly `{ type: 'done' }`. The investment-api
- * service's streamRunStatus() intercepts it (`data.type === 'done'` calls
- * `subscriber.complete()` instead of forwarding it), so handleStreamEvent()
- * never actually receives one in practice.
+ * service's streamRunStatus() forwards it via `subscriber.next(data)` before
+ * completing the observable (`data.type === 'done'` only triggers *after*
+ * the forward), so handleStreamEvent() does receive one — it just has no
+ * branch that matches `'done'`, so the call is a silent no-op today.
  */
 export interface StrategyLabDoneEvent { type: 'done'; }
 
