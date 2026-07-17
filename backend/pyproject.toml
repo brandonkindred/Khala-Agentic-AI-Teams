@@ -86,13 +86,15 @@ omit = [
     "agents/software_engineering_team/temporal/activities.py",
     "agents/software_engineering_team/temporal/worker.py",
     "agents/software_engineering_team/temporal/workflows.py",
-    # Code review agent's Temporal layer — same story: the workflow body, sync
-    # dispatch bridge, and worker bootstrap only run inside a live Temporal
-    # cluster. The pure resolver (config.py), the boundary DTOs
+    # Code review agent's Temporal layer — the workflow body only runs inside a
+    # live Temporal cluster. The pure resolver (config.py), the boundary DTOs
     # (phase_models.py), and the activity wrappers are covered by
-    # tests/test_code_review_temporal.py against the in-process coordinator.
-    "agents/software_engineering_team/code_review_agent/temporal/start_workflow.py",
-    "agents/software_engineering_team/code_review_agent/temporal/worker.py",
+    # tests/test_code_review_temporal.py against the in-process coordinator; the
+    # sync dispatch bridge (start_workflow.py) and worker bootstrap (worker.py)
+    # are unit-tested against a fake client + real background event loop
+    # (tests/test_code_review_start_workflow.py,
+    # tests/test_code_review_temporal.py's worker-boot section) so they are
+    # deliberately NOT omitted, unlike workflows.py below.
     "agents/software_engineering_team/code_review_agent/temporal/workflows.py",
     # Planning team's Temporal layer — same story: the per-phase workflow body,
     # sync dispatch bridge, and worker bootstrap only run inside a live Temporal
