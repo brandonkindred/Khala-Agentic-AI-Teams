@@ -1,6 +1,6 @@
 <div class="cr-proposals">
   <h4 class="cr-proposals__title">
-    <mat-icon>bug_report</mat-icon>
+    <mat-icon aria-hidden="true">bug_report</mat-icon>
     Pre-existing bugs found (not on this PR)
   </h4>
   <p class="cr-proposals__hint">
@@ -14,12 +14,12 @@
         @if (p.issue_url) {
           @if (p.matched_existing) {
             <span class="cr-proposal__matched">
-              <mat-icon>link</mat-icon>
+              <mat-icon aria-hidden="true">link</mat-icon>
               already tracked
             </span>
           } @else {
             <span class="cr-proposal__filed">
-              <mat-icon>check_circle</mat-icon>
+              <mat-icon aria-hidden="true">check_circle</mat-icon>
               filed
             </span>
           }
@@ -44,7 +44,7 @@
             rel="noopener"
             [attr.aria-label]="'Open issue #' + p.issue_number"
           >
-            <mat-icon>open_in_new</mat-icon>
+            <mat-icon aria-hidden="true">open_in_new</mat-icon>
           </a>
         }
         @if (isCombinedProposal(p)) {
@@ -71,11 +71,11 @@
         [disabled]="selectedCount === 0 || creatingIssues"
       >
         @if (creatingIssues) {
-          <mat-spinner diameter="18"></mat-spinner>
+          <mat-spinner diameter="18" aria-hidden="true"></mat-spinner>
           Creating…
         } @else {
           <ng-container>
-            <mat-icon>add</mat-icon>
+            <mat-icon aria-hidden="true">add</mat-icon>
             Create GitHub issue(s) ({{ selectedCount }})
           </ng-container>
         }
