@@ -887,8 +887,18 @@ export interface InvestmentJobsListResponse {
 // (an ISO timestamp publish() stamps on most, but not all, frames) is
 // deliberately omitted — nothing reads it and its presence isn't uniform.
 
-/** Initial/refresh snapshot — wire shape matches the polling endpoint 1:1. */
-export interface StrategyLabSnapshotEvent extends StrategyLabRunStatus { type: 'snapshot'; }
+/**
+ * Initial/refresh snapshot — wire shape matches the polling endpoint 1:1,
+ * except `current_cycle.phase` is widened to `string`: the backend's
+ * StrategyLabCycleProgress model (main.py:322-328) declares it as an open
+ * `str`, same as StrategyLabProgressEvent.phase below. The shared
+ * StrategyLabCycleProgress/StrategyLabPhase frontend types still narrow it;
+ * fixing those is a separate, pre-existing issue (see PR description).
+ */
+export interface StrategyLabSnapshotEvent extends Omit<StrategyLabRunStatus, 'current_cycle'> {
+  type: 'snapshot';
+  current_cycle?: Omit<StrategyLabCycleProgress, 'phase'> & { phase: string };
+}
 
 /**
  * Per-cycle progress ping. `cycle_index` and `phase` are the only fields the
@@ -906,7 +916,14 @@ export interface StrategyLabProgressEvent {
   sub_phase?: string;
   refinement_round?: number;
   strategy?: { asset_class: string; hypothesis: string };
-  metrics?: Record<string, number>;
+  /**
+   * Not numeric-only: a cycle's "complete" sub-phase republishes a full
+   * BacktestResult.model_dump() here (orchestrator.py:4020-4026), which
+   * includes non-numeric fields (terminated_reason, cost_stress_results,
+   * execution_diagnostics, ...). `Record<string, unknown>` reflects that
+   * honestly rather than asserting a numeric shape most events don't have.
+   */
+  metrics?: Record<string, unknown>;
   checks_passed?: number;
   checks_total?: number;
   symbols_count?: number;
