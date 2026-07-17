@@ -7,7 +7,7 @@ import { provideRouter } from '@angular/router';
 import { vi } from 'vitest';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
-import { CodeReviewPanelComponent, PrReviewRecord } from './code-review-panel.component';
+import { CodeReviewDashboardComponent, PrReviewRecord } from './code-review-dashboard.component';
 import type { PendingIssueProposal } from '../../models/coding-team.model';
 import type {
   CodeReviewRunItem,
@@ -44,7 +44,7 @@ function record(over: Partial<PrReviewRecord> = {}): PrReviewRecord {
   };
 }
 
-/** The repo the fake PAT can access; the panel lists repos and loads PRs per repo. */
+/** The repo the fake PAT can access; the dashboard lists repos and loads PRs per repo. */
 const REPO: GitHubRepoItem = {
   owner: 'acme',
   name: 'widgets',
@@ -70,9 +70,9 @@ const UNCONFIGURED: GitHubConfigResponse = {
   default_label: '',
 };
 
-describe('CodeReviewPanelComponent', () => {
-  let component: CodeReviewPanelComponent;
-  let fixture: ComponentFixture<CodeReviewPanelComponent>;
+describe('CodeReviewDashboardComponent', () => {
+  let component: CodeReviewDashboardComponent;
+  let fixture: ComponentFixture<CodeReviewDashboardComponent>;
   let apiSpy: {
     health: ReturnType<typeof vi.fn>;
     getJobStatus: ReturnType<typeof vi.fn>;
@@ -88,7 +88,7 @@ describe('CodeReviewPanelComponent', () => {
 
   async function setup(): Promise<void> {
     await TestBed.configureTestingModule({
-      imports: [CodeReviewPanelComponent, NoopAnimationsModule],
+      imports: [CodeReviewDashboardComponent, NoopAnimationsModule],
       providers: [
         provideHttpClient(),
         provideHttpClientTesting(),
@@ -98,7 +98,7 @@ describe('CodeReviewPanelComponent', () => {
       ],
     }).compileComponents();
 
-    fixture = TestBed.createComponent(CodeReviewPanelComponent);
+    fixture = TestBed.createComponent(CodeReviewDashboardComponent);
     component = fixture.componentInstance;
     fixture.detectChanges();
     // PRs are per-repo now: expand the first accessible repo (when any) so its open
