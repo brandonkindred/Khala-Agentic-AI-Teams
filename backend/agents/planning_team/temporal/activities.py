@@ -351,7 +351,11 @@ def document_production_activity(
           poll is not mistaken for a stalled worker. Persists the handoff (which
           carries the full spec/PRD content) to the durable job store and returns a
           *slim* ``{repo_path}`` result, so the large handoff never crosses a
-          Temporal activity boundary / blob limit.
+          Temporal activity boundary / blob limit. Also persists the actual
+          ``open_questions``/``resolved_questions`` as their own top-level job
+          fields (separate from the deliberately-empty copies inside the
+          handoff) so ``finalize_planning_activity``'s audit write has a real
+          source for them.
         - PRA clarification questions are auto-answered with defaults (parity with
           the current HTTP Temporal path: no user ``answer_callback``); the
           architecture step is not run here (it is a gated non-HTTP feature).
@@ -398,9 +402,19 @@ def document_production_activity(
             # payload limit; returning it as an activity result would strand the job
             # (files already written, but the workflow can't advance to finalize).
             # So the handoff never crosses a Temporal boundary — only the job store.
+            # open_questions/resolved_questions are ALSO persisted as their own
+            # top-level job fields (separate from the deliberately-empty copies
+            # inside handoff above) so finalize_planning_activity's audit write
+            # can read the actual discovery questions. context/merged is already
+            # JSON-native here via _json_safe, so no dump step is needed.
             from planning_team.shared.job_store import update_job
 
-            update_job(job_id, handoff_package=handoff)
+            update_job(
+                job_id,
+                handoff_package=handoff,
+                open_questions=list(merged.get("open_questions") or []),
+                resolved_questions=list(merged.get("resolved_questions") or []),
+            )
         # Slim result: downstream phases read only repo_path; the handoff lives in
         # the job store from here on.
         return {"repo_path": merged.get("repo_path")}
@@ -482,14 +496,17 @@ def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str
     """Finalize: mark the job completed at 100% and record a best-effort audit row.
 
     Preconditions:
-        - The ``handoff_package`` has already been persisted to the job store by
+        - The ``handoff_package`` and the actual ``open_questions``/
+          ``resolved_questions`` have already been persisted to the job store by
           ``document_production_activity`` (``context`` is the slim ``{repo_path}``).
     Postconditions:
         - Marks the job COMPLETED at 100% with a summary, WITHOUT passing
           ``handoff_package`` (a partial-update merge, so the already-persisted
           handoff is preserved, not clobbered). Then, best-effort and fully isolated
           from finalization, re-reads the job to derive the ``planning_runs`` audit
-          columns from the persisted handoff and calls ``record_planning_run``. Unlike
+          columns — ``open_questions``/``resolved_questions`` from the job's own
+          top-level fields, the rest from the persisted handoff — and calls
+          ``record_planning_run``. Unlike
           ``record_planning_run`` (which never raises), the ``get_job`` re-read is a
           live job-service call that can raise on an operational failure — that
           exception, and any other failure in the audit block, is caught here so it
@@ -509,16 +526,17 @@ def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str
         try:
             job = get_job(job_id) or {}
             handoff = job.get("handoff_package") or {}
-            # open_questions/resolved_questions are currently always [] here too —
-            # see the matching comment in api/main.py::run_workflow_background for
-            # why (a documented setdefault no-op upstream in both dispatch paths).
+            # open_questions/resolved_questions are sourced from the job record's
+            # own top-level fields (persisted by document_production_activity), not
+            # from handoff: handoff's copies are deliberately left empty — see the
+            # matching comment in document_production_activity.
             record_planning_run(
                 job_id,
                 client_name=(handoff.get("client_context") or {}).get("client_name"),
                 summary=summary,
                 handoff_summary=handoff.get("summary") or "",
-                open_questions=handoff.get("open_questions") or [],
-                resolved_questions=handoff.get("resolved_questions") or [],
+                open_questions=job.get("open_questions") or [],
+                resolved_questions=job.get("resolved_questions") or [],
             )
         except Exception:
             # Audit-only: the job is already durably marked completed above, and a
