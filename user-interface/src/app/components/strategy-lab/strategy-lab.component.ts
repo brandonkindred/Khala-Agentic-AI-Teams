@@ -228,6 +228,42 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return this.expandedCards.has(id);
   }
 
+  /**
+   * DOM id for a card's disclosure region, shared by the toggle button's
+   * `aria-controls` and the region's `id` so the two can't drift apart.
+   *
+   * Preconditions: `id` is a non-empty `lab_record_id`.
+   * Postconditions: returns a non-empty string unique per `id`, stable across
+   *   change-detection cycles for the same `id`.
+   */
+  cardBodyId(id: string): string {
+    return 'card-body-' + id;
+  }
+
+  /**
+   * Accessible name for a card's disclosure button. States the action
+   * available (Show/Hide) rather than the current state, per standard
+   * toggle-button ARIA labeling convention.
+   *
+   * Preconditions: `record.strategy.asset_class` is a non-empty string.
+   * Postconditions: returns "Show details for {asset_class} strategy" when
+   *   collapsed, "Hide details for {asset_class} strategy" when expanded.
+   */
+  cardToggleLabel(record: StrategyLabRecord): string {
+    const verb = this.isCardExpanded(record.lab_record_id) ? 'Hide' : 'Show';
+    return `${verb} details for ${record.strategy.asset_class} strategy`;
+  }
+
+  /**
+   * Accessible name for a card's disclosure region (`role="region"`).
+   *
+   * Preconditions: `record.strategy.asset_class` is a non-empty string.
+   * Postconditions: returns a non-empty, state-independent label.
+   */
+  cardRegionLabel(record: StrategyLabRecord): string {
+    return `${record.strategy.asset_class} strategy details`;
+  }
+
   // Per-card trade ledger state
   tradeLedgerPages: Record<string, number> = {};       // lab_record_id → current page index
   readonly PAGE_SIZE = 20;
