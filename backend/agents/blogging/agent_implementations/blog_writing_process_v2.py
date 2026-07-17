@@ -555,31 +555,46 @@ _PLAN_KEYWORD_STOPWORDS = frozenset(
 def _extract_plan_keywords(plan: Any) -> list[str]:
     """Extract searchable keywords from a content plan for story bank queries.
 
-    Combines the overarching topic and section titles, splits on whitespace,
-    and filters out stopwords (see ``_PLAN_KEYWORD_STOPWORDS``) plus any
-    single-character or punctuation-only noise, so short but meaningful terms
-    like "API" or "UX" survive while common filler words and stray tokens
-    (e.g. "--", "##") are dropped regardless of length.
+    Combines the overarching topic and section titles and splits on
+    whitespace *before* lowercasing, so each token's original casing is
+    still available to classify it. A token is admitted as a keyword if
+    either:
+
+    - it is acronym-shaped (all uppercase in the original text, e.g. "API",
+      "UX", "IT", "US") -- these bypass both the length floor and the
+      stopword list, since capitalization is the caller's explicit signal
+      that a short token is a meaningful domain term rather than an
+      ordinary word that happens to collide with one (e.g. "IT"/"US" vs.
+      the pronouns "it"/"us"); or
+    - it is at least 4 characters and not in ``_PLAN_KEYWORD_STOPWORDS``
+      (the original length heuristic, still needed to drop long stopwords
+      like "with"/"your"/"about" and ordinary short words like "new" that
+      would otherwise cause spurious keyword-overlap matches in the story
+      bank).
+
+    Returned keywords are lowercased for matching against stored story
+    keywords, and punctuation-only tokens (e.g. "--", "##") are dropped.
     """
     parts: list[str] = []
     topic = getattr(plan, "overarching_topic", "") or ""
-    parts.extend(topic.lower().split())
+    parts.extend(topic.split())
     for section in getattr(plan, "sections", []) or []:
         title = getattr(section, "title", "") or ""
-        parts.extend(title.lower().split())
-    # Deduplicate and filter stopwords and punctuation-only tokens
+        parts.extend(title.split())
     seen: set[str] = set()
     keywords: list[str] = []
     for word in parts:
         cleaned = word.strip(".,;:!?()[]\"'")
-        if (
-            len(cleaned) >= 2
-            and any(ch.isalnum() for ch in cleaned)
-            and cleaned not in _PLAN_KEYWORD_STOPWORDS
-            and cleaned not in seen
-        ):
-            seen.add(cleaned)
-            keywords.append(cleaned)
+        if not any(ch.isalnum() for ch in cleaned):
+            continue
+        lowered = cleaned.lower()
+        if lowered in seen:
+            continue
+        is_acronym = len(cleaned) >= 2 and cleaned.isupper()
+        admitted = is_acronym or (len(cleaned) >= 4 and lowered not in _PLAN_KEYWORD_STOPWORDS)
+        if admitted:
+            seen.add(lowered)
+            keywords.append(lowered)
     return keywords
 
 

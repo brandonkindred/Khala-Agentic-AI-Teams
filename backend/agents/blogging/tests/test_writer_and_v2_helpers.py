@@ -254,6 +254,73 @@ def test_v2_extract_plan_keywords_drops_punctuation_only_tokens() -> None:
     assert "legacy" in kws
 
 
+def test_v2_extract_plan_keywords_preserves_uppercase_acronyms_over_pronouns() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="IT in the US",
+        sections=[
+            SimpleNamespace(title="Notes from the office", order=0),
+        ],
+    )
+    kws = _extract_plan_keywords(plan)
+    # "IT" and "US" are domain acronyms (Information Technology / United
+    # States) written in caps in the original text, and must survive even
+    # though they'd collide with the pronouns "it"/"us" once lowercased.
+    assert "it" in kws
+    assert "us" in kws
+    assert "in" not in kws
+    assert "the" not in kws
+    assert "notes" in kws
+    assert "office" in kws
+
+
+def test_v2_extract_plan_keywords_lowercase_pronouns_still_filtered() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="We asked if it could work for us",
+        sections=[],
+    )
+    kws = _extract_plan_keywords(plan)
+    # Same words as the acronym case above, but written in ordinary
+    # lowercase/title case here -- they must still be filtered as pronouns,
+    # confirming the acronym exception only fires on genuine all-caps tokens.
+    assert "it" not in kws
+    assert "us" not in kws
+    assert "we" not in kws
+
+
+def test_v2_extract_plan_keywords_drops_ordinary_short_words_below_length_floor() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    ai_plan = SimpleNamespace(overarching_topic="New AI tools", sections=[])
+    sql_plan = SimpleNamespace(overarching_topic="New SQL workflows", sections=[])
+    ai_kws = _extract_plan_keywords(ai_plan)
+    sql_kws = _extract_plan_keywords(sql_plan)
+    # "New" is an ordinary word, not an acronym, and short enough (3 chars)
+    # that admitting it regardless of stopword status would let unrelated
+    # plans match in the story bank purely on "new". Acronyms ("AI", "SQL")
+    # still survive since they're capitalized in the original text.
+    assert "new" not in ai_kws
+    assert "new" not in sql_kws
+    assert "ai" in ai_kws
+    assert "sql" in sql_kws
+    assert not (set(ai_kws) & set(sql_kws))
+
+
 def test_v2_extract_plan_keywords_handles_empty() -> None:
     from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         _extract_plan_keywords,
