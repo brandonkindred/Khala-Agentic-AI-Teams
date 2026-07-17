@@ -82,7 +82,9 @@ def test_building_and_probing_the_fleet_constructs_nothing(get_client_spy):
 
 def test_subscript_builds_and_caches_the_agent(get_client_spy):
     """First subscript builds via ``get_client``; repeat access is cached."""
-    from architecture_expert import ArchitectureExpertAgent
+    from software_engineering_team.architect_agents.architecture_expert import (
+        ArchitectureExpertAgent,
+    )
 
     agents = orchestrator._get_agents()
 
@@ -97,7 +99,7 @@ def test_subscript_builds_and_caches_the_agent(get_client_spy):
 
 def test_git_setup_entry_resolves_without_get_client(get_client_spy):
     """``git_setup`` uses a zero-arg class factory — no ``get_client`` cost."""
-    from git_setup_agent import GitSetupAgent
+    from software_engineering_team.git_setup_agent import GitSetupAgent
 
     agents = orchestrator._get_agents()
 

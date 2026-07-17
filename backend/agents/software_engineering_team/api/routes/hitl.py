@@ -144,9 +144,10 @@ def auto_answer_run_team_question(
     additional_context = request.spec_context if request else None
 
     try:  # pragma: no cover  # integration-only: runs PRA's LLM auto-answer pipeline
-        from product_requirements_analysis_agent import get_auto_answer_for_job
-
         from llm_service import get_client
+        from software_engineering_team.product_requirements_analysis_agent import (
+            get_auto_answer_for_job,
+        )
 
         llm = get_client("backend")
         result = get_auto_answer_for_job(

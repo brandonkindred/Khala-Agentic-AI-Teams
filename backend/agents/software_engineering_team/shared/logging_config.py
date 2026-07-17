@@ -35,7 +35,14 @@ JOB_LOG_FILENAME = "job.log"
 
 # Agent and infrastructure logger names (enable DEBUG for verbose step-by-step visibility)
 AGENT_LOGGERS = [
-    # Orchestrator and infrastructure
+    # Production modules import team-local packages via their dotted
+    # ``software_engineering_team.*`` names, so every such module logger is a
+    # child of this one entry and inherits its level through the logging
+    # hierarchy (child loggers default to NOTSET).
+    "software_engineering_team",
+    # Bare aliases kept for bare-import contexts (tests via the pytest
+    # ``pythonpath`` entries, and ``cd software_engineering_team && python``
+    # style local runs), where module __name__ has no package prefix.
     "orchestrator",
     # git ops moved to the neutral shared_git package; its modules log as
     # shared_git.git_utils / shared_git.branch_utils under EVERY import path

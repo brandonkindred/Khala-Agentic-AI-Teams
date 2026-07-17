@@ -76,7 +76,7 @@ def test_run_orchestrator_pauses_on_llm_rate_limit_in_spec_parsing(
 
     with patch("orchestrator.update_job", side_effect=capture_update_job):
         with patch(
-            "spec_parser.parse_spec_with_llm",
+            "software_engineering_team.spec_parser.parse_spec_with_llm",
             side_effect=LLMRateLimitError("429 rate limited", status_code=429),
         ):
             orchestrator.run_orchestrator(job_id, str(tmp_path))
@@ -448,7 +448,7 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
     with patch("orchestrator.update_job", side_effect=capture_update_job):
         with patch("orchestrator._get_agents", return_value=mock_agents):
             with patch(
-                "spec_parser.parse_spec_with_llm",
+                "software_engineering_team.spec_parser.parse_spec_with_llm",
                 return_value=ProductRequirements(
                     title="Test App",
                     description="Build a todo app",
@@ -457,7 +457,7 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
                 ),
             ):
                 with patch(
-                    "product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
+                    "software_engineering_team.product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
                     return_value=mock_pra_agent,
                 ):
                     with patch("planning_team.orchestrator.run_workflow") as mock_run_planning:
@@ -543,7 +543,7 @@ def test_run_orchestrator_invokes_coding_team_not_v2_workers(
     with patch("orchestrator.update_job", side_effect=capture_update_job):
         with patch("orchestrator._get_agents", return_value=mock_agents):
             with patch(
-                "spec_parser.parse_spec_with_llm",
+                "software_engineering_team.spec_parser.parse_spec_with_llm",
                 return_value=ProductRequirements(
                     title="Test",
                     description="Desc",
@@ -552,7 +552,7 @@ def test_run_orchestrator_invokes_coding_team_not_v2_workers(
                 ),
             ):
                 with patch(
-                    "product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
+                    "software_engineering_team.product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
                     return_value=mock_pra_agent,
                 ):
                     with patch("planning_team.orchestrator.run_workflow") as mock_run_planning:
@@ -564,7 +564,7 @@ def test_run_orchestrator_invokes_coding_team_not_v2_workers(
                             "failure_reason": None,
                         }
                         with patch(
-                            "planning_adapter.adapt_planning_result",
+                            "software_engineering_team.planning_adapter.adapt_planning_result",
                             return_value=adapter_result,
                         ):
                             with patch(

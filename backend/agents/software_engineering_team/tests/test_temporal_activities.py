@@ -226,7 +226,7 @@ def test_plan_project_activity_exception_path(monkeypatch, tmp_path, patched_job
     def boom(*a, **kw):
         raise RuntimeError("check failed")
 
-    monkeypatch.setattr("spec_parser.parse_spec_with_llm", boom)
+    monkeypatch.setattr("software_engineering_team.spec_parser.parse_spec_with_llm", boom)
     with pytest.raises(RuntimeError):
         activities.plan_project_activity(
             "pp-j",
@@ -272,7 +272,7 @@ def test_plan_project_activity_wires_lazy_architecture_callback(
     monkeypatch.setattr(
         "software_engineering_team.orchestrator._get_agents", lambda: _Registry()
     )
-    monkeypatch.setattr("spec_parser.parse_spec_with_llm", lambda *a, **kw: MagicMock())
+    monkeypatch.setattr("software_engineering_team.spec_parser.parse_spec_with_llm", lambda *a, **kw: MagicMock())
 
     captured: Dict[str, Any] = {}
 

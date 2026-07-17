@@ -23,11 +23,14 @@ router = APIRouter()
 def architect_design(request: ArchitectDesignRequest) -> ArchitectDesignResponse:
     """Generate software architecture from a product specification."""
     try:
-        from architecture_expert import ArchitectureExpertAgent
-        from architecture_expert.models import ArchitectureInput
-        from spec_parser import parse_spec_with_llm
-
         from llm_service import get_client
+        from software_engineering_team.architect_agents.architecture_expert import (
+            ArchitectureExpertAgent,
+        )
+        from software_engineering_team.architect_agents.architecture_expert.models import (
+            ArchitectureInput,
+        )
+        from software_engineering_team.spec_parser import parse_spec_with_llm
     except (
         ImportError
     ) as e:  # pragma: no cover  # defensive: architect deps always importable in-env

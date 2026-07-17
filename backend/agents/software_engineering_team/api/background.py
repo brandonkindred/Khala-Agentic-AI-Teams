@@ -39,7 +39,7 @@ def _run_orchestrator_background(
     """Run orchestrator in background thread."""
     _registry.register(job_id)
     try:  # pragma: no cover  # integration-only: delegates into run_orchestrator (LLM + git + subprocess)
-        from orchestrator import run_orchestrator
+        from software_engineering_team.orchestrator import run_orchestrator
 
         run_orchestrator(
             job_id,
@@ -61,7 +61,7 @@ def _run_orchestrator_background(
 def _run_retry_background(job_id: str) -> None:
     """Run retry in background thread."""
     try:  # pragma: no cover  # integration-only: thin wrapper around run_failed_tasks
-        from orchestrator import run_failed_tasks
+        from software_engineering_team.orchestrator import run_failed_tasks
 
         run_failed_tasks(job_id)
     except (
@@ -239,13 +239,12 @@ def _run_product_analysis_background(
     try:  # pragma: no cover  # integration-only: drives ProductRequirementsAnalysisAgent.run_workflow (multi-phase LLM)
         from pathlib import Path as _Path
 
-        from product_requirements_analysis_agent import (
+        from llm_service import get_client
+        from software_engineering_team.product_requirements_analysis_agent import (
             AnalysisPhase,
             ProductRequirementsAnalysisAgent,
         )
-        from spec_parser import gather_context_files
-
-        from llm_service import get_client
+        from software_engineering_team.spec_parser import gather_context_files
 
         update_job(job_id, status="running")
 
