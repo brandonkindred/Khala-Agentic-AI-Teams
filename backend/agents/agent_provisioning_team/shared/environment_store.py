@@ -244,18 +244,21 @@ class EnvironmentStore:
         Postconditions:
             * Returns ``(data, path)`` when a candidate file parses as a dict with
               the required ``agent_id`` / ``container_id`` / ``container_name`` keys.
-            * Malformed JSON or incomplete records are skipped (treated as absent).
+            * Malformed JSON, invalid UTF-8 bytes, or incomplete records are
+              skipped (treated as absent).
         """
         required = ("agent_id", "container_id", "container_name")
         for path in self._env_file_candidates(agent_id):
             # Path.exists() itself can raise OSError (e.g. EACCES on a parent
             # directory), so it lives inside the handler — otherwise `get`'s
-            # "never raises" postcondition would be false.
+            # "never raises" postcondition would be false. read_text() can also
+            # raise UnicodeDecodeError on invalid UTF-8 bytes, which is neither
+            # OSError nor JSONDecodeError.
             try:
                 if not path.exists():
                     continue
                 data = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                 continue
             if not isinstance(data, dict) or any(k not in data for k in required):
                 continue
@@ -323,36 +326,47 @@ class EnvironmentStore:
             * Returns ``True`` iff every existing candidate path for
               ``agent_id`` (primary store, then legacy locations) is either
               genuinely absent, or present and parses as a well-formed record
-              (valid JSON object with the required keys); never raises.
+              that also passes the same semantic validation ``get`` applies
+              (via ``EnvironmentInfo.from_dict``); never raises.
             * A path that does not exist is not a readability failure. A path
-              that exists but cannot be stat'd/read (``OSError``), or whose
-              content is not a well-formed record (malformed JSON, or valid
-              JSON missing a required key), IS a readability failure — such a
-              file is evidence *something* was written there, which must not
-              be conflated with confirmed absence.
+              that exists but cannot be stat'd/read (``OSError``), whose bytes
+              are not valid UTF-8 (``UnicodeDecodeError``), or whose content is
+              not a well-formed record (malformed JSON, valid JSON missing a
+              required key, or a required key present with an invalid value —
+              e.g. an out-of-range ``ssh_port`` — that fails construction), IS a
+              readability failure — such a file is evidence *something* was
+              written there, which must not be conflated with confirmed
+              absence.
 
         A listable directory is not sufficient: the specific record file can be
         individually unreadable (bad mode, transient I/O error) while sibling
         files list fine, and a legacy-location record is invisible to a
         primary-only directory listing. Nor is "the bytes could be read"
-        sufficient: ``get`` maps a malformed/incomplete record to ``None`` —
-        correct for lookups, since callers don't care why a record is
-        unusable — but a destructive rollback caller needs to know the
-        difference between "confirmed nothing was ever registered here" and
-        "something is here but we can't trust it" before treating ``get() is
-        None`` as proof an orphan is safe to reclaim.
+        sufficient on its own: ``get`` maps a malformed/incomplete/invalid
+        record to ``None`` — correct for lookups, since callers don't care why
+        a record is unusable — but a destructive rollback caller needs to know
+        the difference between "confirmed nothing was ever registered here"
+        and "something is here but we can't trust it" before treating
+        ``get() is None`` as proof an orphan is safe to reclaim. Applying the
+        exact same validation as ``get`` (rather than a shallower "required
+        keys present" check) keeps the two methods from disagreeing on a
+        present-but-invalid record — disagreement that previously let such a
+        record be misread as confirmed absence.
         """
         assert agent_id, "agent_id must be non-empty"
-        required = ("agent_id", "container_id", "container_name")
         with _lock:
             for path in self._env_file_candidates(agent_id):
                 try:
                     if not path.exists():
                         continue
                     data = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                     return False
-                if not isinstance(data, dict) or any(k not in data for k in required):
+                if not isinstance(data, dict):
+                    return False
+                try:
+                    EnvironmentInfo.from_dict(data)
+                except (KeyError, TypeError, ValueError):
                     return False
         return True
 

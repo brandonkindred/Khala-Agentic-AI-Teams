@@ -182,6 +182,94 @@ def test_run_idempotent_hydrates_extras(tmp_path: Path) -> None:
     assert creds2.extra.get("workspace_path") == "/ws"
 
 
+def test_run_idempotent_calls_on_persist_failure_when_state_put_raises(tmp_path: Path) -> None:
+    """A resource `create` returns must not leak when persisting its state fails.
+
+    If `state.put` raises after `create` succeeds, the store never recorded the
+    resource, so the normal state-lookup-based `deprovision(agent_id)` path has
+    nothing to find it by. `on_persist_failure` gets the just-returned `details`
+    directly so a provisioner can tear the resource down by name instead.
+    """
+    cleanup_calls = []
+
+    class _PersistFailProv(BaseToolProvisioner):
+        tool_name = "persistfail"
+
+        def __init__(self) -> None:
+            self._state = ProvisionerStateStore("persistfail_prov", storage_dir=tmp_path)
+
+        def provision(self, agent_id, config, credentials):
+            return self.run_idempotent(
+                agent_id,
+                credentials=credentials,
+                create=lambda _r: (["read"], {"resource": "x"}),
+                on_persist_failure=cleanup_calls.append,
+            )
+
+        def verify_access(self, agent_id):
+            return self._make_verification(passed=True, actual_permissions=[])
+
+        def deprovision(self, agent_id):
+            from agent_provisioning_team.models import DeprovisionResult
+
+            return DeprovisionResult(tool_name=self.tool_name, success=True)
+
+    prov = _PersistFailProv()
+
+    def _boom(agent_id, value):
+        raise OSError("disk full")
+
+    prov._state.put = _boom
+
+    out = prov.provision("a", {}, GeneratedCredentials(tool_name="x"))
+    assert out.success is False
+    assert "disk full" in out.error
+    assert cleanup_calls == [{"resource": "x"}]
+
+
+def test_run_idempotent_on_persist_failure_exception_is_swallowed(tmp_path: Path, caplog) -> None:
+    """A raising `on_persist_failure` cleanup must not mask the original error."""
+
+    class _PersistFailProv(BaseToolProvisioner):
+        tool_name = "persistfail2"
+
+        def __init__(self) -> None:
+            self._state = ProvisionerStateStore("persistfail2_prov", storage_dir=tmp_path)
+
+        def provision(self, agent_id, config, credentials):
+            def _hook_boom(details):
+                raise RuntimeError("cleanup also failed")
+
+            return self.run_idempotent(
+                agent_id,
+                credentials=credentials,
+                create=lambda _r: (["read"], {"resource": "x"}),
+                on_persist_failure=_hook_boom,
+            )
+
+        def verify_access(self, agent_id):
+            return self._make_verification(passed=True, actual_permissions=[])
+
+        def deprovision(self, agent_id):
+            from agent_provisioning_team.models import DeprovisionResult
+
+            return DeprovisionResult(tool_name=self.tool_name, success=True)
+
+    prov = _PersistFailProv()
+
+    def _boom(agent_id, value):
+        raise OSError("disk full")
+
+    prov._state.put = _boom
+
+    with caplog.at_level(logging.ERROR):
+        out = prov.provision("a", {}, GeneratedCredentials(tool_name="x"))
+
+    assert out.success is False
+    assert "disk full" in out.error
+    assert "cleanup also failed" not in out.error
+
+
 # ---------------------------------------------------------------------------
 # docker_provisioner.py
 # ---------------------------------------------------------------------------
@@ -336,6 +424,33 @@ def test_docker_provisioner_skips_removal_on_name_conflict(tmp_path: Path) -> No
     assert not any(cmd[:3] == ["docker", "rm", "-f"] for cmd in calls)
 
 
+def test_docker_provisioner_removes_container_on_port_bind_failure(tmp_path: Path) -> None:
+    """A port-bind failure ('address already in use') is not a name conflict.
+
+    Docker's port-bind error also contains the substring "already in use" but
+    is unrelated to the container-name conflict; matching that broad substring
+    would suppress cleanup and leak the container docker created before the
+    bind step failed. Only the daemon's actual name-conflict wording should
+    suppress removal.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    bind_failure = SimpleNamespace(
+        returncode=125,
+        stdout="",
+        stderr="failed to bind host port for 0.0.0.0:8000: address already in use",
+    )
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=bind_failure)):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert ["docker", "rm", "-f", "agent-agent-1"] in calls
+
+
 def test_docker_provisioner_cleans_up_on_post_launch_exception(tmp_path: Path) -> None:
     """A post-launch exception (e.g. output decoding) still triggers cleanup.
 
@@ -373,6 +488,37 @@ def test_docker_provisioner_logs_failed_best_effort_removal(tmp_path: Path, capl
     assert result.success is False
     assert ["docker", "rm", "-f", "agent-agent-1"] in calls
     assert "device busy" in caplog.text
+
+
+def test_docker_provisioner_removes_container_when_state_persist_fails(
+    tmp_path: Path,
+) -> None:
+    """A successfully created container must not leak when persisting state fails.
+
+    `docker run` can succeed and then the idempotency-store write can still
+    raise (e.g. disk full): the store never recorded the container, so
+    `deprovision(agent_id)`'s state-lookup path can't find it afterward — this
+    exercises the `on_persist_failure` wiring that removes it directly by the
+    name `_do_provision` already returned.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    def _put_boom(agent_id, value):
+        raise OSError("disk full")
+
+    prov._state.put = _put_boom
+
+    calls = []
+    success = SimpleNamespace(returncode=0, stdout="abc123def456789012\n", stderr="")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=success)):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert ["docker", "rm", "-f", "agent-agent-1"] in calls
+    assert prov._state.get("agent-1") is None
 
 
 def test_docker_provisioner_is_idempotent_on_existing_state(tmp_path: Path) -> None:

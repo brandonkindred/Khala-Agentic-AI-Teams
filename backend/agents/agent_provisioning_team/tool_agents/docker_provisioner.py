@@ -36,6 +36,23 @@ def _reports_container_absent(stderr: Optional[str]) -> bool:
     return "no such container" in text or "no such object" in text
 
 
+def _reports_name_conflict(stderr: Optional[str]) -> bool:
+    """Report whether a ``docker run`` error is the container-name-conflict response.
+
+    Preconditions:
+        * ``stderr`` is the captured stderr of a ``docker run`` command (or ``None``).
+    Postconditions:
+        * Returns ``True`` only for the daemon's specific "name ... already in use
+          by container" response. A broader ``"already in use"`` substring would
+          also match unrelated failures — e.g. the port-bind error documented in
+          ``backend/agents/docker/README.md`` (``"address already in use"``) —
+          which must NOT suppress cleanup of a container this attempt actually
+          created before the unrelated failure struck.
+    """
+    text = (stderr or "").lower()
+    return "already in use by container" in text
+
+
 # Every sandbox is provisioned with full access — there is no permission
 # tier ladder (#456). Tool provisioners record their canonical full set
 # here so onboarding docs / audit reports keep listing what the agent has.
@@ -71,6 +88,14 @@ class DockerProvisionerTool(BaseToolProvisioner):
             credentials=credentials,
             create=lambda _register: self._do_provision(agent_id, config, credentials),
             reuse=lambda existing: self._on_reuse(existing, credentials),
+            # `_do_provision` can succeed (container created) and then the
+            # idempotency-store write can still fail (full/read-only cache):
+            # the store never recorded the container, so the state-lookup-based
+            # `deprovision(agent_id)` path can't find it — remove it by the name
+            # `_do_provision` just returned instead.
+            on_persist_failure=lambda details: self._best_effort_remove_container(
+                details["container_name"]
+            ),
         )
 
     def _do_provision(
@@ -141,7 +166,11 @@ class DockerProvisionerTool(BaseToolProvisioner):
             # A name-conflict failure proves this run created nothing — the
             # container belongs to whoever won the name after our probe (e.g. a
             # concurrent provision attempt) — so removal must never fire then.
-            if existed_before is False and "already in use" not in stderr.lower():
+            # Matched narrowly: a broad "already in use" substring also matches
+            # unrelated failures (e.g. a port-bind "address already in use"),
+            # which must still trigger cleanup of the container this attempt
+            # actually created.
+            if existed_before is False and not _reports_name_conflict(stderr):
                 self._best_effort_remove_container(container_name)
             raise RuntimeError(f"Docker run failed: {stderr}")
 

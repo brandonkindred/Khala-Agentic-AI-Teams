@@ -205,6 +205,53 @@ def test_environment_store_readable_false_on_malformed_record(tmp_path: Path) ->
     assert store.readable("a2") is False
 
 
+def test_environment_store_readable_false_on_invalid_utf8(tmp_path: Path) -> None:
+    """Invalid UTF-8 bytes are a readability failure, not a silent pass-through.
+
+    ``Path.read_text`` raises ``UnicodeDecodeError`` on invalid UTF-8, which is
+    neither ``OSError`` nor ``json.JSONDecodeError`` — an except clause naming
+    only those two would let this exception escape and violate the
+    "never raises" contract.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+    (tmp_path / "a1.json").write_bytes(b"\xff\xfe not valid utf-8")
+    assert store.readable("a1") is False
+
+
+def test_environment_store_get_none_on_invalid_utf8(tmp_path: Path) -> None:
+    """``get`` also treats invalid UTF-8 bytes as absent rather than raising."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    (tmp_path / "a1.json").write_bytes(b"\xff\xfe not valid utf-8")
+    assert store.get("a1") is None
+
+
+def test_environment_store_readable_false_on_invalid_field_value(tmp_path: Path) -> None:
+    """A record with all required keys but an invalid value also probes False.
+
+    ``get`` maps this to ``None`` via ``EnvironmentInfo.from_dict`` raising
+    ``ValueError`` on the out-of-range ``ssh_port``. Before applying the same
+    validation, ``readable`` only checked required-key presence, so it
+    disagreed with ``get`` here and reported ``True`` — a destructive rollback
+    caller combining ``get() is None`` with ``readable() is True`` would then
+    misread this as a confirmed-absent orphan safe to reclaim, when a
+    corrupt-but-present record for someone else's container sits right there.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+    (tmp_path / "a1.json").write_text(
+        json.dumps(
+            {
+                "agent_id": "a1",
+                "container_id": "c1",
+                "container_name": "n1",
+                "ssh_port": 99999,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert store.get("a1") is None
+    assert store.readable("a1") is False
+
+
 def test_environment_store_get_never_raises_on_unreadable_path(tmp_path: Path) -> None:
     """``get`` honors its never-raises contract even when Path.exists raises.
 
