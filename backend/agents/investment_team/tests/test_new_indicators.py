@@ -31,6 +31,7 @@ from pydantic import ValidationError
 from investment_team.models import StrategySpec
 from investment_team.strategy_lab.executor import indicators as pdi
 from investment_team.strategy_lab.executor import strategy_indicators as si
+from investment_team.strategy_lab.executor.predicate_evaluator import compute_indicator_series
 from investment_team.strategy_lab.executor.strategy_indicators import indicator_value
 from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
 from investment_team.strategy_lab.quality_gates.code_conformance import (
@@ -910,6 +911,45 @@ def test_pandas_obv_matches_registry_tail() -> None:
     _high, _low, close, vol = _frame()
     bars = _series(80, seed=14)
     assert float(pdi.obv(close, vol).iloc[-1]) == pytest.approx(IndicatorRegistry().obv(bars))
+
+
+def test_pandas_macd_bounded_to_runtime_window_matches_engine() -> None:
+    """Pandas MACD past the ``STREAMING_WINDOW_BARS`` cap matches the engine audit path.
+
+    MACD's signal EMA folds over the entire macd_line, so its value depends on the
+    full history length — unlike the fixed-window indicators. The Series helper
+    bounds its walk to the same trailing-history window the engine uses
+    (``StreamingHistoryView`` / ``compute_indicator_series``, a ``deque(maxlen=500)``),
+    so on an >500-bar series with a large ``signal`` it stays bit-identical to the
+    engine rather than drifting off an unbounded macd_line. This is the coverage
+    probe's MACD reference, so any drift would let it score MACD predicates
+    differently from the engine it models.
+    """
+    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+
+    bars = _series(STREAMING_WINDOW_BARS + 300, seed=14)  # 800 bars > the 500-bar cap
+    close = pd.Series([b.close for b in bars])
+    df = pd.DataFrame(
+        {
+            "open": [b.open for b in bars],
+            "high": [b.high for b in bars],
+            "low": [b.low for b in bars],
+            "close": [b.close for b in bars],
+            "volume": [b.volume for b in bars],
+        }
+    )
+    # A large signal (legal up to 100) keeps the EMA seed's influence alive across
+    # hundreds of samples, so an unbounded walk would visibly diverge past the cap.
+    _line, signal, _hist = pdi.macd(close, fast=12, slow=26, signal=100)
+    ref = compute_indicator_series(
+        IndicatorRef(
+            name="macd", params={"fast": 12, "slow": 26, "signal": 100, "output": "signal"}
+        ),
+        df,
+    )
+    pd.testing.assert_series_equal(
+        signal.reset_index(drop=True), ref.reset_index(drop=True), check_names=False
+    )
 
 
 def test_pandas_mfi_bounded_and_matches_registry_tail() -> None:

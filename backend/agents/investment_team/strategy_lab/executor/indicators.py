@@ -33,6 +33,7 @@ caller (the coverage probe's DataFrame columns and ``market_regime``'s repeated
 from __future__ import annotations
 
 import numbers
+from collections import deque
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Callable, List, Literal, Mapping, Optional, Sequence, Tuple, Union
@@ -246,22 +247,36 @@ def _run_tuple(
     bars: Sequence[_Bar],
     index,
     fns: Sequence[Callable[[IndicatorRegistry, List[_Bar]], Optional[float]]],
+    max_bars: Optional[int] = None,
 ) -> Tuple[pd.Series, ...]:
     """Walk one registry for a multi-output indicator, one column per ``fns`` entry.
 
     Preconditions: ``len(bars) == len(index)``; each ``fn`` selects one output of
     the same underlying indicator (the registry caches the full tuple on the
     same-bar fingerprint, so the 2nd/3rd select of a bar is a cache hit).
+    ``max_bars``, when set, bounds the history handed to the registry to the
+    trailing ``max_bars`` bars — mirroring ``StreamingHistoryView`` /
+    ``compute_indicator_series`` (``deque(maxlen=_SERIES_WINDOW)`` + ``list(...)``)
+    so a history-length-dependent indicator (MACD's signal EMA spans the whole
+    macd_line) stays bit-identical to the engine past the cap. Fixed-window
+    indicators are unaffected (they only read the trailing ``period`` bars), so
+    the default is unbounded.
     Postconditions: a tuple of float ``pd.Series`` on ``index``, one per ``fns``
     entry in declared order.
     """
     reg = IndicatorRegistry()
-    window: List[_Bar] = []
+    # Unbounded: reuse one growing list (object identity at index -2 lets the
+    # registry classify each step as "expand"). Bounded: a maxlen deque, and each
+    # bar hands the registry a fresh ``list(window)`` snapshot — the same shape
+    # ``compute_indicator_series`` feeds, so once the window fills the registry
+    # sees a "slide" and the two stay bit-identical.
+    window: "deque[_Bar] | List[_Bar]" = deque(maxlen=max_bars) if max_bars else []
     cols: List[List[Optional[float]]] = [[] for _ in fns]
     for b in bars:
         window.append(b)
+        snapshot: List[_Bar] = list(window) if max_bars else window  # type: ignore[assignment]
         for i, fn in enumerate(fns):
-            cols[i].append(fn(reg, window))
+            cols[i].append(fn(reg, snapshot))
     return tuple(_emit(col, index) for col in cols)
 
 
@@ -317,7 +332,20 @@ def macd(
     Preconditions: ``series`` is coercible; ``2 <= fast < slow``; ``signal >= 2``.
     Postconditions: three same-length Series; the line is NaN until ``slow`` bars
     exist, the signal and histogram until ``slow + signal - 1``.
+
+    Unlike the fixed-window indicators, MACD's signal EMA folds over the entire
+    macd_line, so its value depends on the full history length. The walk is
+    therefore bounded to the engine's trailing-history window
+    (``STREAMING_WINDOW_BARS``) so this reference stays bit-identical to
+    ``StreamingHistoryView`` / ``compute_indicator_series`` for histories longer
+    than the cap — otherwise the coverage probe (which resolves MACD through this
+    helper) would score MACD predicates differently from the engine it models.
     """
+    # Lazy import (mirrors :func:`_windowed_obv`): only reached in-package
+    # (coverage probe / tests), never in the flat sandbox where MACD's math runs
+    # through the scalar ``strategy_indicators`` API instead.
+    from ..runtime_window import STREAMING_WINDOW_BARS
+
     s = _coerce_series(series)
     f, sl, sg = int(fast), int(slow), int(signal)
     return _run_tuple(
@@ -328,6 +356,7 @@ def macd(
             lambda r, w: r.macd(w, f, sl, sg, source="close", select="signal"),
             lambda r, w: r.macd(w, f, sl, sg, source="close", select="histogram"),
         ],
+        max_bars=STREAMING_WINDOW_BARS,
     )
 
 
