@@ -99,8 +99,9 @@ class TestNoFrontendTeamImports:
 
 class TestOrchestratorRegistration:
     def test_get_agents_includes_frontend_code_v2(self):
-        from frontend_code_v2_team import FrontendCodeV2TeamLead
         from orchestrator import _get_agents
+
+        from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
 
         agents = _get_agents()
         assert "frontend_code_v2" in agents

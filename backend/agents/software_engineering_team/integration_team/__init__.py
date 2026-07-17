@@ -7,7 +7,10 @@ These agents run after backend and frontend workers complete. Tech Lead triggers
 from __future__ import annotations
 
 # Re-exports for discoverability
-from technical_writers.documentation_agent import DocumentationAgent, DocumentationInput
+from software_engineering_team.technical_writers.documentation_agent import (
+    DocumentationAgent,
+    DocumentationInput,
+)
 
 # Integration agent (in-package)
 from .agent import IntegrationAgent

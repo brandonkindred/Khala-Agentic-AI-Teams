@@ -361,7 +361,9 @@ def _run_general_microtask_impl(
         # rather than at module scope elsewhere in the review call chain
         # (e.g. _code_review_step's CodeReviewInput import), so this module
         # follows the same convention rather than adding a new eager edge.
-        from code_review_agent.architecture_context import render_architecture_context
+        from software_engineering_team.code_review_agent.architecture_context import (
+            render_architecture_context,
+        )
 
         arch_ctx = render_architecture_context(architecture)
 

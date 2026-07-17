@@ -12,11 +12,10 @@ from __future__ import annotations
 import logging
 from typing import cast, get_args
 
-from devops_team.models import GateStatus
-from qa_agent import QAExpertAgent, QAInput
-
 from llm_service import LLMClient, get_strands_model
 from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.devops_team.models import GateStatus
+from software_engineering_team.qa_agent import QAExpertAgent, QAInput
 
 from .models import (
     DevOpsTestValidationInput,

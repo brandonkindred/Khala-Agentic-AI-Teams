@@ -16,9 +16,6 @@ from shared_command_runner.runner import CommandResult
 from software_engineering_team.shared.models import (
     ProductRequirements,
     SystemArchitecture,
-    Task,
-    TaskAssignment,
-    TaskType,
 )
 
 
@@ -79,7 +76,7 @@ def test_run_orchestrator_pauses_on_llm_rate_limit_in_spec_parsing(
 
     with patch("orchestrator.update_job", side_effect=capture_update_job):
         with patch(
-            "spec_parser.parse_spec_with_llm",
+            "software_engineering_team.spec_parser.parse_spec_with_llm",
             side_effect=LLMRateLimitError("429 rate limited", status_code=429),
         ):
             orchestrator.run_orchestrator(job_id, str(tmp_path))
@@ -425,24 +422,8 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
 
     mock_arch.run.side_effect = capture_arch_run
 
-    one_task = Task(
-        id="t1",
-        type=TaskType.BACKEND,
-        title="Backend task",
-        assignee="backend",
-    )
-    mock_tech_lead = MagicMock()
-    mock_tech_lead.run.return_value = MagicMock(
-        spec_clarification_needed=False,
-        assignment=TaskAssignment(tasks=[one_task], execution_order=["t1"]),
-        summary="",
-        requirement_task_mapping=[],
-    )
-    mock_tech_lead.llm.get_max_context_tokens.return_value = 262144
-
     mock_agents = {
         "architecture": mock_arch,
-        "tech_lead": mock_tech_lead,
         "devops": MagicMock(),
         "backend": MagicMock(),
         "frontend": MagicMock(),
@@ -467,7 +448,7 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
     with patch("orchestrator.update_job", side_effect=capture_update_job):
         with patch("orchestrator._get_agents", return_value=mock_agents):
             with patch(
-                "spec_parser.parse_spec_with_llm",
+                "software_engineering_team.spec_parser.parse_spec_with_llm",
                 return_value=ProductRequirements(
                     title="Test App",
                     description="Build a todo app",
@@ -476,7 +457,7 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
                 ),
             ):
                 with patch(
-                    "product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
+                    "software_engineering_team.product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
                     return_value=mock_pra_agent,
                 ):
                     with patch("planning_team.orchestrator.run_workflow") as mock_run_planning:
@@ -498,10 +479,10 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
 # copy added no coverage and only duplicated setup.
 
 
-def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers(
+def test_run_orchestrator_invokes_coding_team_not_v2_workers(
     tmp_path: Path,
 ) -> None:
-    """Main path: after Planning and adapter, run_coding_team_orchestrator is called; Tech Lead and v2 workers are not."""
+    """Main path: after Planning and adapter, run_coding_team_orchestrator is called; the v2 workers are not."""
     from planning_adapter import PlanningAdapterResult
 
     (tmp_path / "initial_spec.md").write_text("# Test\n\nSpec.", encoding="utf-8")
@@ -544,7 +525,6 @@ def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers
 
     mock_agents = {
         "architecture": MagicMock(),
-        "tech_lead": MagicMock(),
         "devops": MagicMock(),
         "backend": MagicMock(),
         "frontend": MagicMock(),
@@ -563,7 +543,7 @@ def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers
     with patch("orchestrator.update_job", side_effect=capture_update_job):
         with patch("orchestrator._get_agents", return_value=mock_agents):
             with patch(
-                "spec_parser.parse_spec_with_llm",
+                "software_engineering_team.spec_parser.parse_spec_with_llm",
                 return_value=ProductRequirements(
                     title="Test",
                     description="Desc",
@@ -572,7 +552,7 @@ def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers
                 ),
             ):
                 with patch(
-                    "product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
+                    "software_engineering_team.product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
                     return_value=mock_pra_agent,
                 ):
                     with patch("planning_team.orchestrator.run_workflow") as mock_run_planning:
@@ -584,7 +564,7 @@ def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers
                             "failure_reason": None,
                         }
                         with patch(
-                            "planning_adapter.adapt_planning_result",
+                            "software_engineering_team.planning_adapter.adapt_planning_result",
                             return_value=adapter_result,
                         ):
                             with patch(
@@ -599,7 +579,6 @@ def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers
     assert call["repo_path"] == str(tmp_path)
     assert hasattr(call["plan_input"], "architecture_overview")
     assert call["plan_input"].architecture_overview == "Backend FastAPI; frontend Angular."
-    mock_agents["tech_lead"].run.assert_not_called()
     mock_agents["architecture"].run.assert_not_called()
     # The code-v2 team leads are not invoked either: the main path delegates
     # per-task work to the coding team (patched above). Asserted on

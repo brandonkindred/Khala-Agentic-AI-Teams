@@ -126,9 +126,9 @@ def run_code_review(
           (context prep, per-chunk review, parsing, approval) are reported live.
     """
     try:
-        from code_review_agent import CodeReviewAgent
-        from code_review_agent.models import build_code_review_input
-        from code_review_agent.repo_reader import DiskRepoReader
+        from software_engineering_team.code_review_agent import CodeReviewAgent
+        from software_engineering_team.code_review_agent.models import build_code_review_input
+        from software_engineering_team.code_review_agent.repo_reader import DiskRepoReader
 
         llm = llm_getter("code_review")
         agent = CodeReviewAgent(llm)
@@ -198,7 +198,7 @@ def run_linting(
 ) -> LintResult:
     """Run the linting tool agent on the repo."""
     try:
-        from linting_tool_agent import LintingToolAgent
+        from software_engineering_team.linting_tool_agent import LintingToolAgent
 
         llm = llm_getter("linting_tool_agent")
         agent = LintingToolAgent(llm)
@@ -240,10 +240,13 @@ def run_dbc_comments(
 ) -> DbcResult:
     """Run the Design by Contract comments agent. Non-blocking on failure."""
     try:
-        from technical_writers.dbc_comments_agent import DbcCommentsAgent
-        from technical_writers.dbc_comments_agent.models import DbcCommentsInput
-
         from software_engineering_team.shared.git_utils import write_files_and_commit
+        from software_engineering_team.technical_writers.dbc_comments_agent import (
+            DbcCommentsAgent,
+        )
+        from software_engineering_team.technical_writers.dbc_comments_agent.models import (
+            DbcCommentsInput,
+        )
 
         # Streamed os.walk with in-place dir pruning so the traversal never
         # descends into node_modules/.git/__pycache__/venv — the prior
@@ -310,7 +313,7 @@ def run_qa_check(
 ) -> QAResult:
     """Run the QA expert agent."""
     try:
-        from qa_agent import QAExpertAgent
+        from software_engineering_team.qa_agent import QAExpertAgent
 
         llm = llm_getter("qa")
         agent = QAExpertAgent(llm)
@@ -342,7 +345,7 @@ def run_security_scan(
 ) -> SecurityResult:
     """Run the cybersecurity expert agent."""
     try:
-        from security_agent import CybersecurityExpertAgent
+        from software_engineering_team.security_agent import CybersecurityExpertAgent
 
         llm = llm_getter("security")
         agent = CybersecurityExpertAgent(llm)
@@ -374,7 +377,7 @@ def run_acceptance_verification(
 ) -> AcceptanceResult:
     """Run the acceptance verifier agent."""
     try:
-        from acceptance_verifier_agent import AcceptanceVerifierAgent
+        from software_engineering_team.acceptance_verifier_agent import AcceptanceVerifierAgent
 
         llm = llm_getter("acceptance_verifier")
         agent = AcceptanceVerifierAgent(llm)

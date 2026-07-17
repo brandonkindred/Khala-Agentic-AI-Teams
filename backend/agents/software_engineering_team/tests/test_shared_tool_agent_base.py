@@ -5,10 +5,10 @@ from __future__ import annotations
 import logging
 
 import pytest
-from code_review_agent import CodeReviewUnavailableError
-from code_review_agent.profiles import ReviewProfile
 
 from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.code_review_agent import CodeReviewUnavailableError
+from software_engineering_team.code_review_agent.profiles import ReviewProfile
 from software_engineering_team.shared.tool_agent_base import (
     DEFAULT_MAX_RELEVANT_CODE_CHARS,
     BaseReviewToolAgent,
@@ -349,7 +349,7 @@ def test_engine_review_degrades_on_unavailable(monkeypatch: pytest.MonkeyPatch) 
     """A CodeReviewUnavailableError from the engine degrades to a "(LLM error)"
     summary instead of raising."""
     monkeypatch.setattr(
-        "code_review_agent.CodeReviewAgent",
+        "software_engineering_team.code_review_agent.CodeReviewAgent",
         _RaisingEngine(CodeReviewUnavailableError("engine down")),
     )
     agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
@@ -361,7 +361,7 @@ def test_engine_review_degrades_on_unavailable(monkeypatch: pytest.MonkeyPatch) 
 
 def test_engine_review_propagates_unexpected_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """An unexpected engine error (e.g. TypeError) is not masked — it propagates."""
-    monkeypatch.setattr("code_review_agent.CodeReviewAgent", _RaisingEngine(TypeError("boom")))
+    monkeypatch.setattr("software_engineering_team.code_review_agent.CodeReviewAgent", _RaisingEngine(TypeError("boom")))
     agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
     agent._model = object()
     agent.llm = None

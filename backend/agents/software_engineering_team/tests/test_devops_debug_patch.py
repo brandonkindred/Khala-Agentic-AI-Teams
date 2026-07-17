@@ -4,15 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from devops_team.infra_debug_agent import (
+from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.devops_team.infra_debug_agent import (
     IaCDebugInput,
     IaCDebugOutput,
     IaCExecutionError,
     InfraDebugAgent,
 )
-from devops_team.infra_patch_agent import IaCPatchInput, InfraPatchAgent
-
-from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.devops_team.infra_patch_agent import IaCPatchInput, InfraPatchAgent
 
 
 class _StubClient(DummyLLMClient):
@@ -231,7 +230,7 @@ class TestInfraPatchAgent:
 class TestDevOpsPipelineDebugPatchLoop:
     def test_loop_terminates_after_max_iterations(self) -> None:
         """Execution always fails -> loop must stop at MAX_INFRA_FIX_ITERATIONS."""
-        from devops_team.orchestrator import DevOpsTeamLeadAgent
+        from software_engineering_team.devops_team.orchestrator import DevOpsTeamLeadAgent
 
         client = _ScriptedClient(
             [
@@ -301,7 +300,7 @@ class TestDevOpsPipelineDebugPatchLoop:
 
         agent._run_execution_tools = always_fail_exec  # type: ignore[assignment]
 
-        from devops_team.models import DevOpsTaskSpec
+        from software_engineering_team.devops_team.models import DevOpsTaskSpec
 
         spec = DevOpsTaskSpec(
             task_id="t1",
@@ -327,7 +326,7 @@ class TestDevOpsPipelineDebugPatchLoop:
 
     def test_loop_converges_on_fixable_error(self) -> None:
         """Execution fails once, patch fixes it, second execution succeeds."""
-        from devops_team.orchestrator import DevOpsTeamLeadAgent
+        from software_engineering_team.devops_team.orchestrator import DevOpsTeamLeadAgent
 
         client = _ScriptedClient(
             [
@@ -388,7 +387,7 @@ class TestDevOpsPipelineDebugPatchLoop:
 
         agent._run_execution_tools = exec_tools  # type: ignore[assignment]
 
-        from devops_team.models import DevOpsTaskSpec
+        from software_engineering_team.devops_team.models import DevOpsTaskSpec
 
         spec = DevOpsTaskSpec(
             task_id="t1",

@@ -11,7 +11,7 @@ Lead Orchestrator + Specialist Agents-as-Tools pattern for enterprise architectu
 ## Quick Start
 
 ```bash
-cd architect-agents
+cd architect_agents
 pip install -r requirements.txt
 python main.py path/to/spec.md
 # or

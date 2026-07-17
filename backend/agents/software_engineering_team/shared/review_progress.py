@@ -26,7 +26,7 @@ def build_disk_repo_reader(repo_path: Any) -> Any:
           never breaks on reader setup.
     """
     try:
-        from code_review_agent.repo_reader import DiskRepoReader
+        from software_engineering_team.code_review_agent.repo_reader import DiskRepoReader
 
         return DiskRepoReader(str(repo_path))
     except Exception as exc:  # noqa: BLE001 - the reader is an optional enhancement
