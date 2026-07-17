@@ -124,6 +124,64 @@ def test_record_planning_run_bounds_the_insert_with_a_statement_timeout(monkeypa
     assert captured["timeout_s"] == writer._AUDIT_WRITE_TIMEOUT_S
 
 
+def test_record_planning_run_bounds_the_whole_operation(monkeypatch) -> None:
+    """probe_cursor only bounds the statement once a connection exists — a wedged
+    pool acquisition (or a fully dead socket) never even reaches it. Simulate that
+    by hanging inside get_conn() itself and prove record_planning_run still
+    returns False promptly, bounded by _AUDIT_OPERATION_BUDGET_S end-to-end rather
+    than blocking for the full simulated hang."""
+    import time
+
+    monkeypatch.setattr(writer, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(writer, "_AUDIT_OPERATION_BUDGET_S", 0.2)
+
+    @contextmanager
+    def _wedged_get_conn(*args, **kwargs):
+        time.sleep(1.5)  # simulates a stalled pool acquisition / dead socket
+        yield object()
+
+    monkeypatch.setattr(writer, "get_conn", _wedged_get_conn)
+
+    start = time.monotonic()
+    result = record_planning_run(
+        "job-1",
+        client_name=None,
+        summary="s",
+        handoff_summary="hs",
+        open_questions=[],
+        resolved_questions=[],
+    )
+    elapsed = time.monotonic() - start
+
+    assert result is False
+    # Returned at ~budget, NOT after the 1.5s simulated hang (proves the
+    # end-to-end bound actually works, not just the statement-level one).
+    assert elapsed < 1.0
+
+
+def test_record_planning_run_swallows_bounded_probe_setup_failure(monkeypatch) -> None:
+    """A failure in the bounded_probe machinery itself (not just in the write
+    callable) is swallowed by the outer guard too — never raised."""
+    monkeypatch.setattr(writer, "is_postgres_enabled", lambda: True)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("event loop setup failed")
+
+    monkeypatch.setattr(writer, "bounded_probe", _boom)
+
+    assert (
+        record_planning_run(
+            "job-1",
+            client_name=None,
+            summary="s",
+            handoff_summary="hs",
+            open_questions=[],
+            resolved_questions=[],
+        )
+        is False
+    )
+
+
 # ---------------------------------------------------------------------------
 # Live-Postgres tests (skipped unless POSTGRES_HOST is set).
 # ---------------------------------------------------------------------------
