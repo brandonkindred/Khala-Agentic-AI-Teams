@@ -188,7 +188,8 @@ def setup_activity(
             "environment": snap.environment.model_dump() if snap.environment else None,
         }
 
-    _best_effort_job_store(_js.update_job,
+    _best_effort_job_store(
+        _js.update_job,
         job_id,
         current_phase="setup",
         progress=5,
@@ -196,11 +197,29 @@ def setup_activity(
     )
     orch, manifest = _load_ctx(manifest_path)
     activity.heartbeat("setup")
+
+    checkpointed = False
+
+    def _checkpoint_on_register(env_info) -> None:
+        # Runs inside run_setup's own rollback boundary: if this durable
+        # checkpoint write fails or the activity is cancelled here, run_setup
+        # tears the container/env record it just registered back down instead
+        # of leaking it. Only reached on a freshly created/registered
+        # environment, never the already-running fast path below.
+        nonlocal checkpointed
+        _js.add_completed_phase(
+            job_id,
+            "setup",
+            {"success": True, "environment": env_info.model_dump() if env_info else None},
+        )
+        checkpointed = True
+
     result = run_setup(
         agent_id=agent_id,
         manifest=manifest,
         environment_store=orch.environment_store,
         docker_provisioner=orch.tool_agents.get("docker_provisioner"),
+        on_registered=_checkpoint_on_register,
     )
     if not result.success:
         raise RuntimeError(f"setup failed: {result.error}")
@@ -209,8 +228,11 @@ def setup_activity(
         "success": True,
         "environment": result.environment.model_dump() if result.environment else None,
     }
-    # Durable checkpoint — must raise so Temporal retries before later phases.
-    _js.add_completed_phase(job_id, "setup", payload)
+    if not checkpointed:
+        # Fast path: an already-running environment was reused, so nothing new
+        # was created here — a checkpoint failure has nothing to leak, and a
+        # bare durable write (Temporal retries the whole activity) suffices.
+        _js.add_completed_phase(job_id, "setup", payload)
     _best_effort_job_store(_js.update_job, job_id, progress=15, status_text="Setup complete")
     return payload
 
@@ -291,7 +313,8 @@ def credentials_activity(
             "credentials": {k: v.model_dump() for k, v in stored.items()},
         }
 
-    _best_effort_job_store(_js.update_job,
+    _best_effort_job_store(
+        _js.update_job,
         job_id,
         current_phase="credential_generation",
         progress=20,
@@ -425,7 +448,8 @@ def audit_activity(
         _record_phase_restored(job_id, "access_audit", 75)
         return result.model_dump()
 
-    _best_effort_job_store(_js.update_job,
+    _best_effort_job_store(
+        _js.update_job,
         job_id,
         current_phase="access_audit",
         progress=70,
@@ -480,7 +504,8 @@ def documentation_activity(
             "onboarding": snap.onboarding.model_dump() if snap.onboarding else None,
         }
 
-    _best_effort_job_store(_js.update_job,
+    _best_effort_job_store(
+        _js.update_job,
         job_id,
         current_phase="documentation",
         progress=85,
@@ -502,7 +527,9 @@ def documentation_activity(
         "onboarding": result.onboarding.model_dump() if result.onboarding else None,
     }
     _js.add_completed_phase(job_id, "documentation", payload)
-    _best_effort_job_store(_js.update_job, job_id, progress=92, status_text="Documentation complete")
+    _best_effort_job_store(
+        _js.update_job, job_id, progress=92, status_text="Documentation complete"
+    )
     return payload
 
 
@@ -543,7 +570,8 @@ def deliver_activity(
     )
     from agent_provisioning_team.shared.environment_store import EnvironmentStore
 
-    _best_effort_job_store(_js.update_job,
+    _best_effort_job_store(
+        _js.update_job,
         job_id,
         current_phase="deliver",
         progress=95,

@@ -567,9 +567,7 @@ def test_credentials_activity_restores_from_prior() -> None:
         patch("temporalio.activity.heartbeat"),
     ):
         prior = {"success": True, "tool_names": ["pg"], "credentials": {}}
-        payload = activities.credentials_activity(
-            "j", "a", "default.yaml", prior_credentials=prior
-        )
+        payload = activities.credentials_activity("j", "a", "default.yaml", prior_credentials=prior)
 
     assert payload["success"] is True
     assert payload["credentials"]["pg"]["password"] == "secret"
@@ -954,9 +952,7 @@ def test_credentials_activity_migrates_legacy_plaintext_and_redacts_checkpoint()
             "tool_names": ["pg"],
             "credentials": {k: v.model_dump() for k, v in legacy.items()},
         }
-        payload = activities.credentials_activity(
-            "j", "a", "default.yaml", prior_credentials=prior
-        )
+        payload = activities.credentials_activity("j", "a", "default.yaml", prior_credentials=prior)
 
     assert payload["credentials"]["pg"]["password"] == "legacy-secret"
     store.store_credentials.assert_called_once()
@@ -1113,9 +1109,7 @@ def test_record_account_provisioning_persists_enriched_credentials(tmp_path: Pat
     with (
         patch.object(activities._js, "add_completed_phase") as mock_phase,
         patch.object(activities._js, "update_job"),
-        patch(
-            "agent_provisioning_team.shared.environment_store.EnvironmentStore"
-        ) as mock_env_cls,
+        patch("agent_provisioning_team.shared.environment_store.EnvironmentStore") as mock_env_cls,
         patch(
             "agent_provisioning_team.phases.credential_generation.CredentialStore",
             return_value=store,
@@ -1174,6 +1168,7 @@ def test_list_manifest_tools_activity_rejects_empty_path() -> None:
     with pytest.raises(AssertionError):
         activities.list_manifest_tools_activity("")
 
+
 # ---------------------------------------------------------------------------
 # setup_activity — moved from test_workflows_unit
 # ---------------------------------------------------------------------------
@@ -1217,6 +1212,52 @@ def test_setup_activity_progress_path() -> None:
     assert "mark_job_running" in fn_names
     assert "update_job" in fn_names
     mock_phase.assert_called_once()
+
+
+def test_setup_activity_checkpoints_inside_run_setup_rollback_boundary() -> None:
+    """The durable checkpoint write is passed to run_setup as on_registered.
+
+    A fresh setup must run the job-store checkpoint write inside run_setup's
+    own atomic rollback boundary (so a checkpoint failure tears the container
+    back down) rather than after run_setup has already returned — this
+    exercises that setup_activity actually wires the hook through and that a
+    single checkpoint write happens (not a duplicate fallback write).
+    """
+    from agent_provisioning_team.models import EnvironmentInfo, SetupResult
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    fake_env = EnvironmentInfo(container_id="c1", container_name="c1")
+    fake_orch = MagicMock()
+    fake_orch.environment_store = MagicMock()
+    fake_orch.tool_agents = {"docker_provisioner": MagicMock()}
+    fake_manifest = MagicMock()
+
+    captured_hook = {}
+
+    def fake_run_setup(**kwargs):
+        captured_hook["on_registered"] = kwargs["on_registered"]
+        kwargs["on_registered"](fake_env)
+        return SetupResult(success=True, environment=fake_env)
+
+    with (
+        patch.object(t_acts, "_best_effort_job_store"),
+        patch.object(t_acts._js, "add_completed_phase") as mock_phase,
+        patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
+        patch(
+            "agent_provisioning_team.phases.setup.run_setup",
+            side_effect=fake_run_setup,
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        payload = t_acts.setup_activity("j", "a", "default.yaml")
+
+    assert payload["success"] is True
+    assert payload["environment"]["container_id"] == "c1"
+    assert "on_registered" in captured_hook
+    # Checkpointed inside the hook — the post-return fallback must not also fire.
+    mock_phase.assert_called_once()
+    assert mock_phase.call_args.args[0] == "j"
+    assert mock_phase.call_args.args[1] == "setup"
 
 
 def test_setup_activity_raises_when_setup_fails() -> None:

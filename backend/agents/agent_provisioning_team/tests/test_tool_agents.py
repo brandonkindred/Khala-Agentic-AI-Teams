@@ -863,6 +863,56 @@ def test_docker_on_reuse_populates_credentials(tmp_path: Path) -> None:
     assert creds.extra["container_id"] == "abcd"
 
 
+def test_docker_on_reuse_clears_stale_state_when_container_confirmed_gone(
+    tmp_path: Path,
+) -> None:
+    """A stored container that the daemon confirms is gone must not be reused.
+
+    Trusting a stale idempotency row would register a "running" environment
+    backed by nothing. The row is deleted so a retried provision() recreates
+    the container fresh instead of hitting the same stale row forever.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put(
+        "a1",
+        {"container_id": "abcd", "container_name": "c1", "workspace_path": "/ws"},
+    )
+
+    absent = SimpleNamespace(returncode=1, stdout="", stderr="Error: No such object")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub([], inspect=absent)):
+        result = prov.provision("a1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert prov._state.get("a1") is None
+
+
+def test_docker_on_reuse_proceeds_when_existence_unknown(tmp_path: Path) -> None:
+    """An unreachable daemon during the reuse probe must not block reuse.
+
+    Unknown is not the same as confirmed-absent — treating it as absence would
+    risk tearing down tracking for a container that is actually still alive.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put(
+        "a1",
+        {"container_id": "abcd", "container_name": "c1", "workspace_path": "/ws"},
+    )
+
+    unreachable = SimpleNamespace(returncode=1, stdout="", stderr="daemon unavailable")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub([], inspect=unreachable)):
+        result = prov.provision("a1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is True
+    assert result.details.get("reused") is True
+    assert prov._state.get("a1") is not None
+
+
 # ---------------------------------------------------------------------------
 # generic_provisioner.py
 # ---------------------------------------------------------------------------

@@ -431,6 +431,74 @@ def test_run_setup_rolls_back_when_progress_callback_raises() -> None:
     docker.deprovision.assert_called_once_with("a12")
 
 
+def test_run_setup_rolls_back_when_on_registered_raises() -> None:
+    """A failing on_registered hook rolls back the fresh container.
+
+    A durable checkpoint write (e.g. a Temporal activity's job-store record)
+    belongs inside this same atomic boundary: if it fails or the activity is
+    cancelled here, the container this attempt just created must not leak,
+    exactly like a failing register call.
+    """
+    env_store = _rollback_env_store(get=None, register_error=lambda *a, **kw: None)
+    docker = _docker_stub(container_id="c-new", container_name="agent-a15")
+
+    def on_registered(env_info):
+        raise RuntimeError("checkpoint boom")
+
+    _run_setup_expecting("checkpoint boom", "a15", env_store, docker, on_registered=on_registered)
+    docker.deprovision.assert_called_once_with("a15")
+
+
+def test_run_setup_calls_on_registered_with_fresh_environment(tmp_path: Path) -> None:
+    """on_registered fires with the freshly registered EnvironmentInfo on success."""
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    docker = _docker_stub(container_id="c-new", container_name="agent-a16")
+
+    received = []
+    result = run_setup(
+        agent_id="a16",
+        manifest=ToolManifest(),
+        environment_store=env_store,
+        docker_provisioner=docker,
+        on_registered=received.append,
+    )
+
+    assert result.success is True
+    assert len(received) == 1
+    assert received[0].container_id == "c-new"
+
+
+def test_run_setup_skips_on_registered_on_fast_path(tmp_path: Path) -> None:
+    """on_registered is not called when an already-running environment is reused.
+
+    Nothing new is created on the fast path, so there is nothing for a
+    checkpoint failure there to leak — the hook is scoped to fresh
+    registrations only.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    ready_env = _stored_env("a17", status="running")
+    env_store = _rollback_env_store(get=ready_env)
+    docker = _docker_stub()
+
+    received = []
+    result = run_setup(
+        agent_id="a17",
+        manifest=ToolManifest(),
+        environment_store=env_store,
+        docker_provisioner=docker,
+        on_registered=received.append,
+    )
+
+    assert result.success is True
+    assert received == []
+
+
 def test_run_setup_rollback_swallows_deprovision_error() -> None:
     """The best-effort rollback must not mask the original register failure."""
     env_store = _rollback_env_store(get=None)

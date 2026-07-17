@@ -87,7 +87,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
             agent_id,
             credentials=credentials,
             create=lambda _register: self._do_provision(agent_id, config, credentials),
-            reuse=lambda existing: self._on_reuse(existing, credentials),
+            reuse=lambda existing: self._on_reuse(agent_id, existing, credentials),
             # `_do_provision` can succeed (container created) and then the
             # idempotency-store write can still fail (full/read-only cache):
             # the store never recorded the container, so the state-lookup-based
@@ -192,9 +192,40 @@ class DockerProvisionerTool(BaseToolProvisioner):
 
     def _on_reuse(
         self,
+        agent_id: str,
         existing: Dict[str, Any],
         credentials: GeneratedCredentials,
     ) -> List[str]:
+        """Populate credentials from stored state, after checking it isn't stale.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+            * ``existing`` is the persisted idempotency-state ``details`` dict
+              for ``agent_id``.
+        Postconditions:
+            * When the daemon confirms ``existing``'s container no longer
+              exists, the stale state row is deleted and ``RuntimeError`` is
+              raised (via ``run_idempotent``'s exception handling this becomes
+              an error result) — trusting it would register a "running"
+              environment backed by nothing; deleting it lets a retried
+              ``provision()`` recreate the container fresh instead of hitting
+              the same stale row forever.
+            * Otherwise (confirmed alive, or unknown because the daemon
+              couldn't be reached) proceeds normally: mutates ``credentials``
+              from ``existing`` and returns the full permission set. An
+              *unknown* result is not treated as absence — that would risk
+              tearing down tracking for a container that is actually still
+              alive, the same conservative default used elsewhere in this
+              provisioner.
+        """
+        assert agent_id, "agent_id must be non-empty"
+        container_name = existing.get("container_name", "")
+        if container_name and self._container_exists(container_name) is False:
+            self._state.delete(agent_id)
+            raise RuntimeError(
+                f"container {container_name!r} no longer exists; "
+                "stale idempotency state cleared for retry"
+            )
         credentials.extra["container_id"] = existing.get("container_id", "")
         credentials.extra["container_name"] = existing.get("container_name", "")
         credentials.extra["workspace_path"] = existing.get("workspace_path", "")

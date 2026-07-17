@@ -179,6 +179,11 @@ class BaseToolProvisioner(ABC):
             current access tier.
           - When neither is enough to derive permissions, the default is
             ``stored_details.get("permissions", [])``.
+          - ``reuse`` may also raise to reject stale stored state instead of
+            trusting it (e.g. a provisioner that confirms the underlying
+            resource no longer exists): the exception is caught by the same
+            handling as ``create``'s, producing an error result instead of a
+            silently-wrong success.
         * Exceptions from infrastructure boundaries (missing binaries, subprocess
           timeouts, permission errors) are caught and converted to error results.
           Compensation records already registered before the exception remain

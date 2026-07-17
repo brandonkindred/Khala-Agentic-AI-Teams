@@ -27,6 +27,7 @@ def run_setup(
     environment_store: Optional[EnvironmentStore] = None,
     docker_provisioner: Optional[DockerProvisionerTool] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
+    on_registered: Optional[Callable[[EnvironmentInfo], None]] = None,
 ) -> SetupResult:
     """
     Execute the setup phase: create (or reuse) the agent's Docker container.
@@ -37,6 +38,16 @@ def run_setup(
         environment_store: Store for tracking environments
         docker_provisioner: Docker provisioner instance
         progress_callback: Optional callback for progress updates
+        on_registered: Optional hook run immediately after a freshly created
+            (or docker-reused-but-freshly-registered) environment is
+            registered, receiving the registered ``EnvironmentInfo``. Runs
+            inside the same rollback boundary as registration itself — a
+            durable checkpoint write (e.g. a Temporal activity's job-store
+            record) belongs here, not after ``run_setup`` returns, so that a
+            checkpoint failure tears the container back down instead of
+            leaking it. Not called on the fast path (an already-``running``
+            record reused with nothing freshly created) — there is no new
+            infrastructure there for a checkpoint failure to leak.
 
     Returns:
         SetupResult with environment info
@@ -53,16 +64,16 @@ def run_setup(
           written, and the docker provisioner best-effort-removes a container its
           own failed ``docker run`` left behind (never a pre-existing same-named
           container, which may be a healthy agent).
-        * On a failure after provisioning (progress callback or registration):
-          a best-effort rollback runs before the exception propagates. Because
-          registration is atomic, a failed register leaves no record from this
-          attempt, so ownership is decided by what the store actually holds: a
-          record owned by a prior or concurrent registration preserves the
-          container; otherwise the container this attempt created (or a reused
-          orphan with no record) is deprovisioned. Best-effort means teardown
-          failures are logged rather than raised, and concurrent same-agent
-          provisioning is not serialized — a narrow adoption race remains,
-          tracked as separate follow-up work.
+        * On a failure after provisioning (progress callback, registration, or
+          ``on_registered``): a best-effort rollback runs before the exception
+          propagates. Because registration is atomic, a failed register leaves
+          no record from this attempt, so ownership is decided by what the
+          store actually holds: a record owned by a prior or concurrent
+          registration preserves the container; otherwise the container this
+          attempt created (or a reused orphan with no record) is deprovisioned.
+          Best-effort means teardown failures are logged rather than raised,
+          and concurrent same-agent provisioning is not serialized — a narrow
+          adoption race remains, tracked as separate follow-up work.
     """
     assert agent_id, "agent_id must be non-empty"
     assert manifest is not None, "manifest must be a loaded ToolManifest"
@@ -145,6 +156,8 @@ def run_setup(
                 updated_at=(datetime.now(timezone.utc).isoformat() if existing else None),
             )
         )
+        if on_registered is not None:
+            on_registered(env_info)
     except Exception:
         _rollback_failed_setup(agent_id, existing, result, env_store, docker)
         raise
