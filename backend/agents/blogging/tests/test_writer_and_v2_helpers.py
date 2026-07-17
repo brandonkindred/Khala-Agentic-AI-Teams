@@ -161,10 +161,52 @@ def test_v2_extract_plan_keywords() -> None:
         ],
     )
     kws = _extract_plan_keywords(plan)
-    # Words like 'and', 'to' (<4 chars) should be dropped; longer kept
+    # Stopwords like 'and', 'to' should be dropped regardless of length; longer
+    # content words kept.
     assert "scalable" in kws
     assert "systems" in kws
-    assert all(len(k) >= 4 for k in kws)
+    assert "and" not in kws
+    assert "to" not in kws
+
+
+def test_v2_extract_plan_keywords_keeps_short_acronyms() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="Improving UX and AI-driven API design",
+        sections=[
+            SimpleNamespace(title="SQL query tuning", order=0),
+        ],
+    )
+    kws = _extract_plan_keywords(plan)
+    # Short but meaningful acronyms must survive the stopword filter.
+    assert "ux" in kws
+    assert "api" in kws
+    assert "sql" in kws
+
+
+def test_v2_extract_plan_keywords_drops_long_stopwords() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="A guide about your favourite tools",
+        sections=[],
+    )
+    kws = _extract_plan_keywords(plan)
+    # "about" and "your" are >= 4 chars but are stopwords, so should be dropped
+    # despite the old length-only heuristic keeping them.
+    assert "about" not in kws
+    assert "your" not in kws
+    assert "guide" in kws
+    assert "favourite" in kws
 
 
 def test_v2_extract_plan_keywords_handles_empty() -> None:

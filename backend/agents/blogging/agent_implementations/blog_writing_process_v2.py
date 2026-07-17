@@ -422,11 +422,128 @@ def run_planning(
     return planning_phase_result
 
 
+# Common English stopwords to drop when extracting plan keywords. Length-based
+# filtering alone drops meaningful short acronyms (e.g. "API", "SQL", "UX", "AI")
+# while letting long stopwords (e.g. "with", "your", "about") through, so we
+# filter by membership in this list instead.
+_PLAN_KEYWORD_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "but",
+        "nor",
+        "for",
+        "so",
+        "yet",
+        "to",
+        "of",
+        "in",
+        "on",
+        "at",
+        "by",
+        "as",
+        "is",
+        "it",
+        "be",
+        "are",
+        "was",
+        "were",
+        "been",
+        "being",
+        "am",
+        "do",
+        "does",
+        "did",
+        "has",
+        "have",
+        "had",
+        "will",
+        "would",
+        "shall",
+        "should",
+        "can",
+        "could",
+        "may",
+        "might",
+        "must",
+        "with",
+        "from",
+        "into",
+        "onto",
+        "about",
+        "over",
+        "under",
+        "between",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "up",
+        "down",
+        "out",
+        "off",
+        "again",
+        "further",
+        "then",
+        "than",
+        "once",
+        "here",
+        "there",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "any",
+        "both",
+        "each",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "only",
+        "own",
+        "same",
+        "not",
+        "too",
+        "very",
+        "just",
+        "also",
+        "this",
+        "that",
+        "these",
+        "those",
+        "your",
+        "you",
+        "our",
+        "their",
+        "its",
+        "his",
+        "her",
+        "which",
+        "who",
+        "whom",
+        "using",
+        "use",
+        "used",
+    }
+)
+
+
 def _extract_plan_keywords(plan: Any) -> list[str]:
     """Extract searchable keywords from a content plan for story bank queries.
 
     Combines the overarching topic and section titles, splits on whitespace,
-    and filters to words >= 4 chars to avoid noise from short stopwords.
+    and filters out stopwords (see ``_PLAN_KEYWORD_STOPWORDS``) plus any
+    single-character noise, so short but meaningful terms like "API" or "UX"
+    survive while common filler words are dropped regardless of length.
     """
     parts: list[str] = []
     topic = getattr(plan, "overarching_topic", "") or ""
@@ -434,12 +551,12 @@ def _extract_plan_keywords(plan: Any) -> list[str]:
     for section in getattr(plan, "sections", []) or []:
         title = getattr(section, "title", "") or ""
         parts.extend(title.lower().split())
-    # Deduplicate and filter short words (stopwords like "the", "and", "for")
+    # Deduplicate and filter stopwords
     seen: set[str] = set()
     keywords: list[str] = []
     for word in parts:
         cleaned = word.strip(".,;:!?()[]\"'")
-        if len(cleaned) >= 4 and cleaned not in seen:
+        if len(cleaned) >= 2 and cleaned not in _PLAN_KEYWORD_STOPWORDS and cleaned not in seen:
             seen.add(cleaned)
             keywords.append(cleaned)
     return keywords
@@ -2350,7 +2467,9 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
                         details_str = ""
                         if check.details:
                             if "matches" in check.details:
-                                details_str = f" Found: {', '.join(str(m) for m in check.details['matches'])}"
+                                details_str = (
+                                    f" Found: {', '.join(str(m) for m in check.details['matches'])}"
+                                )
                             elif "violations" in check.details:
                                 details_str = f" Violations: {', '.join(str(v) for v in check.details['violations'])}"
                             elif "fk_grade" in check.details:
