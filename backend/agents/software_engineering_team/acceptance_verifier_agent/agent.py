@@ -17,15 +17,14 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Optional
 
-from code_review_agent import (
+from llm_service import LLMClient
+from software_engineering_team.code_review_agent import (
     CodeReviewAgent,
     CodeReviewInput,
     CodeReviewUnavailableError,
     ReviewProfile,
 )
-from code_review_agent.models import CodeReviewIssue
-
-from llm_service import LLMClient
+from software_engineering_team.code_review_agent.models import CodeReviewIssue
 
 from .models import AcceptanceVerifierInput, AcceptanceVerifierOutput, CriterionStatus
 

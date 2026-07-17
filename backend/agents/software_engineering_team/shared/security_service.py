@@ -272,7 +272,7 @@ def run_policy_scan(repo_path: str, *, runner: Any = None) -> Any:
         scan the runner performs.
     """
     assert repo_path and repo_path.strip(), "repo_path is required"
-    from devops_team.tool_agents.policy_as_code import (
+    from software_engineering_team.devops_team.tool_agents.policy_as_code import (
         PolicyAsCodeInput,
         PolicyAsCodeToolAgent,
     )

@@ -38,7 +38,7 @@ from typing import Any
 # package ``__init__``, which pulls in FastAPI — too heavy for a provider whose
 # contract is to be cheap and import-safe. ``__file__`` lives in the SE team root.
 _TEAM_DIR = Path(__file__).resolve().parent
-for _p in (_TEAM_DIR / "architect-agents", _TEAM_DIR):
+for _p in (_TEAM_DIR / "architect_agents", _TEAM_DIR):
     if _p.exists():
         _s = str(_p)
         if _s not in sys.path:
