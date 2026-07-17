@@ -15,7 +15,7 @@ import {
 } from './testing/fixtures';
 
 /**
- * `PrReviewRunsService` is provided at `CodeReviewPanelComponent`'s own component level in
+ * `PrReviewRunsService` is provided at `CodeReviewDashboardComponent`'s own component level in
  * production (so `inject(ChangeDetectorRef)` inside it resolves to that host's change
  * detector) — this minimal host reproduces that same component-provider context for tests.
  */

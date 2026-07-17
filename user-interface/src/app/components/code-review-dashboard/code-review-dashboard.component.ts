@@ -19,7 +19,7 @@ import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
 
 /**
- * Code Review panel: lists every repository the configured PAT can access and, per
+ * Code Review dashboard: lists every repository the configured PAT can access and, per
  * expanded repo, its open pull requests, letting the user start AI code reviews on
  * them. Each PR row expands inline to show the PR detail, a Start Review action, and
  * a table of every review run on that PR (status + outcome). A live status badge on
@@ -32,7 +32,7 @@ import { LatestOnly } from '../../shared/latest-only';
  * review-run wrapper methods. See `PrReviewRunsService` for that contract.
  */
 @Component({
-  selector: 'app-code-review-panel',
+  selector: 'app-code-review-dashboard',
   standalone: true,
   imports: [
     CommonModule,
@@ -47,10 +47,10 @@ import { LatestOnly } from '../../shared/latest-only';
     PrReviewDetailComponent,
   ],
   providers: [PrReviewRunsService],
-  templateUrl: './code-review-panel.component.html',
-  styleUrl: './code-review-panel.component.scss',
+  templateUrl: './code-review-dashboard.component.html',
+  styleUrl: './code-review-dashboard.component.scss',
 })
-export class CodeReviewPanelComponent implements OnInit, OnDestroy {
+export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
   private readonly api = inject(CodingTeamApiService);
   private readonly integrationsApi = inject(IntegrationsApiService);
   /** Exposed (not private) so the template can bind to it directly, e.g. `reviewRuns.badgeLabel(...)`. */

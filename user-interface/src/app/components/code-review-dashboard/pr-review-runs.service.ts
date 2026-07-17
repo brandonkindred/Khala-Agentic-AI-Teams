@@ -29,13 +29,13 @@ const EMPTY_REVIEWS: readonly PrReviewRecord[] = Object.freeze([]);
 /**
  * Owns the Code Review page's review-run domain: hydrating review history from the
  * backend, starting new reviews, live-polling them to completion, and filing GitHub
- * issues from a completed review's proposals — everything `CodeReviewPanelComponent`
+ * issues from a completed review's proposals — everything `CodeReviewDashboardComponent`
  * used to hold directly (issue: the component mixed this with PR-list management).
  *
- * Provided in `CodeReviewPanelComponent`'s own `providers` array (not `providedIn: 'root'`)
- * so each panel instance gets a fresh service instance whose state resets cleanly on
+ * Provided in `CodeReviewDashboardComponent`'s own `providers` array (not `providedIn: 'root'`)
+ * so each dashboard instance gets a fresh service instance whose state resets cleanly on
  * navigation, mirroring `AgentStudioStateService`. Because of that, `inject(ChangeDetectorRef)`
- * below resolves to the *hosting* `CodeReviewPanelComponent`'s change detector, so this
+ * below resolves to the *hosting* `CodeReviewDashboardComponent`'s change detector, so this
  * service can call `markForCheck()` itself wherever the component used to.
  *
  * IMPORTANT: this dependency on `ChangeDetectorRef` means this service is ONLY safe to
@@ -43,7 +43,7 @@ const EMPTY_REVIEWS: readonly PrReviewRecord[] = Object.freeze([]);
  * `providedIn: 'root'` and do not provide it on a shared/ancestor component — a root
  * provider has no `ChangeDetectorRef` in its injector and construction throws
  * `NullInjectorError`; an ancestor-component provider would silently mark the *ancestor's*
- * view instead of this panel's, and live updates would stop rendering with no error.
+ * view instead of this dashboard's, and live updates would stop rendering with no error.
  *
  * This service is the sole owner of "which repo is current": every method that acts on
  * the expanded repo reads `currentRepo` (set only by {@link reset}) rather than taking a
@@ -557,7 +557,7 @@ export class PrReviewRunsService implements OnDestroy {
 
   /**
    * Tears down all pollers and completes `destroy$`. Called by Angular when the
-   * hosting `CodeReviewPanelComponent` is destroyed (this service is component-provided).
+   * hosting `CodeReviewDashboardComponent` is destroyed (this service is component-provided).
    *
    * Preconditions: none.
    * Postconditions: `destroy$` is completed (so any subscription still gated on it via

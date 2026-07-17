@@ -40,6 +40,7 @@ from ..models import (
 from ..trade_simulator import compute_metrics
 from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
 from .agents.zero_trade_repair import ZeroTradeRepairReport
+from .exceptions import OrchestratorContractError
 from .quality_gates.models import QualityGateResult
 
 if TYPE_CHECKING:  # circular at runtime; only needed for type hints.
@@ -116,8 +117,10 @@ def _apply_zero_trade_spec_updates(
     Restricts merges to :data:`_ZERO_TRADE_SPEC_UPDATE_KEYS` so an off-list
     LLM hallucination cannot rewrite arbitrary spec fields.
     """
-    assert isinstance(spec, StrategySpec), "spec must be a StrategySpec"
-    assert isinstance(code, str), "code must be a str"
+    if not isinstance(spec, StrategySpec):
+        raise OrchestratorContractError("spec must be a StrategySpec")
+    if not isinstance(code, str):
+        raise OrchestratorContractError("code must be a str")
     data = spec.model_dump()
     for key in _ZERO_TRADE_SPEC_UPDATE_KEYS:
         if updates and key in updates:
@@ -147,7 +150,8 @@ class ZeroTradeRepairer:
         # Pre: orchestrator is non-None; the repairer reads gate instances
         # and helper methods (``record_gates``, ``build_orchestrator_gate``) off
         # it. No duplication of those collaborators here.
-        assert orchestrator is not None, "orchestrator must be supplied"
+        if orchestrator is None:
+            raise OrchestratorContractError("orchestrator must be supplied")
         self._orch = orchestrator
 
     def try_repair(

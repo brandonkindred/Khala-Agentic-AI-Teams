@@ -2,7 +2,7 @@ import type { PendingIssueProposal } from '../../../models/coding-team.model';
 import type { GitHubPullRequestItem, GitHubRepoItem } from '../../../models/integrations.model';
 import type { PrReviewRecord } from '../pr-review-record.model';
 
-/** Shared test fixtures for the Code Review panel's specs — kept in one place so a
+/** Shared test fixtures for the Code Review dashboard's specs — kept in one place so a
  * shape change to these models needs one edit instead of one per spec file. */
 
 export function makePulls(count: number): GitHubPullRequestItem[] {

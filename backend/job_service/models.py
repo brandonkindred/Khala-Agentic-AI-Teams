@@ -66,6 +66,13 @@ class CancelResponse(BaseModel):
     cancelled: bool
 
 
+class UpdateIfNotCancelledResponse(BaseModel):
+    """``updated`` is tri-state: True (wrote), False (blocked — job cancelled),
+    or None (the job does not exist at all)."""
+
+    updated: bool | None
+
+
 class MarkStaleResponse(BaseModel):
     failed_job_ids: list[str]
 

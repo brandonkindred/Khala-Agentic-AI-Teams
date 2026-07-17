@@ -1,11 +1,11 @@
 /**
  * Pure derivation helpers for the Code Review page's per-review metrics — the Severity
  * and Duration cells rendered by `PrReviewDetailComponent`, the row status badge rendered
- * by `CodeReviewPanelComponent`, and the live-poll completion timestamp stamped by
+ * by `CodeReviewDashboardComponent`, and the live-poll completion timestamp stamped by
  * `PrReviewRunsService`.
  *
  * Kept as standalone pure functions so the metric logic is unit-testable in isolation and
- * shared across the parent panel, its review-runs service, and the detail child. Every
+ * shared across the parent dashboard, its review-runs service, and the detail child. Every
  * function is pure except `reviewDuration` (may `console.warn` on a clock-skew anomaly)
  * and `terminalTimestamp` (reads the clock only on its fallback path).
  */
