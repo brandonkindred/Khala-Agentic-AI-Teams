@@ -22,6 +22,10 @@ import {
   terminalTimestamp,
 } from './review-metrics';
 
+/** Shared empty result for `reviewsFor` misses, so callers binding it to a template
+ * input (or comparing by reference) don't see a fresh array identity on every call. */
+const EMPTY_REVIEWS: readonly PrReviewRecord[] = Object.freeze([]);
+
 /**
  * Owns the Code Review page's review-run domain: hydrating review history from the
  * backend, starting new reviews, live-polling them to completion, and filing GitHub
@@ -33,6 +37,19 @@ import {
  * navigation, mirroring `AgentStudioStateService`. Because of that, `inject(ChangeDetectorRef)`
  * below resolves to the *hosting* `CodeReviewPanelComponent`'s change detector, so this
  * service can call `markForCheck()` itself wherever the component used to.
+ *
+ * IMPORTANT: this dependency on `ChangeDetectorRef` means this service is ONLY safe to
+ * provide inside a component's own `providers` array. Do not change this to
+ * `providedIn: 'root'` and do not provide it on a shared/ancestor component — a root
+ * provider has no `ChangeDetectorRef` in its injector and construction throws
+ * `NullInjectorError`; an ancestor-component provider would silently mark the *ancestor's*
+ * view instead of this panel's, and live updates would stop rendering with no error.
+ *
+ * This service is the sole owner of "which repo is current": every method that acts on
+ * the expanded repo reads `currentRepo` (set only by {@link reset}) rather than taking a
+ * `repo` parameter, so there is exactly one place a caller/service disagreement could
+ * happen — call {@link reset} before {@link hydrate}, {@link isStarting}, or
+ * {@link startReview} so they act on the intended repo.
  *
  * Invariants: `reviews`/`reviewErrors` only ever hold records for `currentRepo` — callers
  * must call {@link reset} before hydrating a newly-expanded repo so records from a
@@ -55,11 +72,11 @@ export class PrReviewRunsService implements OnDestroy {
    * Read-only view so external code cannot bypass reset/hydrate/startReview to mutate state directly.
    *
    * Preconditions: none.
-   * Postconditions: returns the live per-PR review map typed read-only (the same reference
-   * the pollers/hydrate mutate, so bound views stay current); callers must not mutate it.
-   * Pure — no side effects.
+   * Postconditions: returns the live per-PR review map typed read-only, including its
+   * per-PR arrays (the same references the pollers/hydrate mutate, so bound views stay
+   * current); callers must not mutate the map or the arrays it holds. Pure — no side effects.
    */
-  get reviews(): ReadonlyMap<number, PrReviewRecord[]> {
+  get reviews(): ReadonlyMap<number, readonly PrReviewRecord[]> {
     return this._reviews;
   }
 
@@ -109,7 +126,9 @@ export class PrReviewRunsService implements OnDestroy {
     return this._createIssueErrors;
   }
 
-  // The repo whose reviews/pollers this service currently holds; set by `reset`.
+  // The repo whose reviews/pollers this service currently holds; set by `reset`. The
+  // sole source of truth for "which repo is current" — hydrate/isStarting/startReview
+  // read this instead of taking a repo parameter (see the class doc).
   private currentRepo: GitHubRepoItem | null = null;
 
   // "Latest wins" guard so a slow hydrate response from a superseded repo load can't
@@ -148,12 +167,12 @@ export class PrReviewRunsService implements OnDestroy {
   }
 
   /**
-   * Reconcile the in-memory review map with the backend for `repo`. The backend is the
-   * source of truth, but any review that still has a live poller is preserved as the
-   * *same* object its poller mutates — so a review started while this request was on the
-   * wire is never dropped and its poller is never killed (closing a hydrate-vs-startReview
-   * race). Records from a *different* repository are never folded in: PR numbers collide
-   * across repos, so the rebuilt map holds this repo's reviews only.
+   * Reconcile the in-memory review map with the backend for the current repo. The
+   * backend is the source of truth, but any review that still has a live poller is
+   * preserved as the *same* object its poller mutates — so a review started while this
+   * request was on the wire is never dropped and its poller is never killed (closing a
+   * hydrate-vs-startReview race). Records from a *different* repository are never folded
+   * in: PR numbers collide across repos, so the rebuilt map holds this repo's reviews only.
    *
    * Note: this fetches the repository's recent reviews in one call (the backend `limit`,
    * default 500) rather than per-PR, because the row status badges need the latest review
@@ -163,13 +182,15 @@ export class PrReviewRunsService implements OnDestroy {
    * run per PR" backend query lands. Best-effort: a failure leaves the page usable
    * without history.
    *
-   * Preconditions: `repo` is the currently-expanded repo (the caller must have already
-   * called {@link reset} with this same repo).
-   * Postconditions: on success, `reviews` holds this repo's review history plus any
-   * still-live in-flight reviews; non-terminal runs resume polling. A failure leaves
+   * Preconditions: none — no-ops when no repo is current (call {@link reset} first).
+   * Postconditions: on success, `reviews` holds the current repo's review history plus
+   * any still-live in-flight reviews, in newest-first order per PR; non-terminal runs
+   * resume polling. A failure, or a repo switch before the response arrives, leaves
    * `reviews` unchanged.
    */
-  hydrate(repo: GitHubRepoItem): void {
+  hydrate(): void {
+    const repo = this.currentRepo;
+    if (!repo) return;
     const token = this.reviewsLoad.next();
     this.integrationsApi
       .getGitHubReviewHistory({ owner: repo.owner, repo: repo.name })
@@ -200,13 +221,20 @@ export class PrReviewRunsService implements OnDestroy {
           // Carry over any still-polling review the snapshot didn't include yet
           // (e.g. one started while this request was in flight) — but only when it
           // belongs to this repository, so a switched-away repo's run can't surface
-          // under another repo's identical PR number.
+          // under another repo's identical PR number. Collected per PR first, then
+          // prepended as one batch: unshifting each live record individually (in
+          // `live`'s already newest-first order) would reverse their relative order
+          // when more than one is carried over for the same PR.
+          const carryOver = new Map<number, PrReviewRecord[]>();
           for (const [jobId, record] of live) {
             if (seen.has(jobId)) continue;
             if (record.owner !== repo.owner || record.repo !== repo.name) continue;
-            const list = map.get(record.prNumber) ?? [];
-            list.unshift(record); // newest-first
-            map.set(record.prNumber, list);
+            const list = carryOver.get(record.prNumber) ?? [];
+            list.push(record);
+            carryOver.set(record.prNumber, list);
+          }
+          for (const [prNumber, records] of carryOver) {
+            map.set(prNumber, [...records, ...(map.get(prNumber) ?? [])]);
           }
           this._reviews = map;
           for (const list of map.values()) {
@@ -224,6 +252,15 @@ export class PrReviewRunsService implements OnDestroy {
       });
   }
 
+  /**
+   * Map one backend review-run row into a `PrReviewRecord`.
+   *
+   * Preconditions: `item` is a review-history row for `repo`.
+   * Postconditions: returns a record with `owner`/`repo` from `repo`; `startedAt` from
+   * `item.created_at` (falling back to the browser clock when absent/unparseable);
+   * `completedAt` from `item.completed_at` when present and parseable, else `undefined`.
+   * Pure — no side effects.
+   */
   private toRecord(item: CodeReviewRunItem, repo: GitHubRepoItem): PrReviewRecord {
     const parsed = Date.parse(item.created_at);
     // completed_at is present only on terminal runs; an unparseable/absent value
@@ -256,15 +293,14 @@ export class PrReviewRunsService implements OnDestroy {
   }
 
   /**
-   * Whether a Start Review request for this PR in `repo` is in flight.
+   * Whether a Start Review request for this PR in the current repo is in flight.
    *
-   * Preconditions: `repo` is the currently-expanded repo, or `null` when none is expanded;
-   * `prNumber` is a PR number from that repo's list.
-   * Postconditions: returns true iff `repo` is non-null and its `owner/repo#prNumber` key
+   * Preconditions: `prNumber` is a PR number from the current repo's list.
+   * Postconditions: returns true iff a repo is current and its `owner/repo#prNumber` key
    * is in `starting`. Pure — no side effects.
    */
-  isStarting(repo: GitHubRepoItem | null, prNumber: number): boolean {
-    return !!repo && this.starting.has(this.startKey(repo, prNumber));
+  isStarting(prNumber: number): boolean {
+    return !!this.currentRepo && this.starting.has(this.startKey(this.currentRepo, prNumber));
   }
 
   /**
@@ -279,16 +315,20 @@ export class PrReviewRunsService implements OnDestroy {
   }
 
   /**
-   * Start a code review on `pull` in `repo`, recording it and polling it live.
+   * Start a code review on `pull` in the current repo, recording it and polling it live.
    *
-   * Preconditions: `repo` is the currently-expanded repo; `pull` is one of its open PRs.
-   * Postconditions: no-op when a start for `owner/repo#pull.number` is already in flight.
-   * Otherwise fires the start request; on success, and only while `currentRepo` is still
-   * `repo`, prepends a new `PrReviewRecord` to that PR's list and begins polling it; on
-   * failure, and only while still on `repo`, records the message under `pull.number` in
-   * `reviewErrors`. Always calls `markForCheck()`.
+   * Preconditions: `pull` is one of the current repo's open PRs.
+   * Postconditions: no-op when no repo is current, or a start for
+   * `owner/repo#pull.number` is already in flight. Otherwise fires the start request; on
+   * success, and only while still on the same repo, adds a new `PrReviewRecord` to that
+   * PR's list (unless a record for the same job already exists there — e.g. a hydrate
+   * that ran while this request was in flight already added it) and begins polling it; on
+   * failure, and only while still on the same repo, records the message under
+   * `pull.number` in `reviewErrors`. Always calls `markForCheck()`.
    */
-  startReview(repo: GitHubRepoItem, pull: GitHubPullRequestItem): void {
+  startReview(pull: GitHubPullRequestItem): void {
+    const repo = this.currentRepo;
+    if (!repo) return;
     const key = this.startKey(repo, pull.number);
     if (this.starting.has(key)) return;
     this.starting.add(key);
@@ -318,9 +358,15 @@ export class PrReviewRunsService implements OnDestroy {
           // the hydrate on return re-fetches this run's history and attaches a fresh poller.
           if (this.currentRepo?.full_name === repo.full_name) {
             const list = this._reviews.get(pull.number) ?? [];
-            list.unshift(record); // newest-first
-            this._reviews.set(pull.number, list);
-            this.startPolling(record);
+            // A concurrent hydrate may have already picked up this job (it was already
+            // persisted server-side when this response was still in flight) and attached
+            // its own poller; adding a second record here would leave that duplicate
+            // stuck, since startPolling below no-ops once a poller for the job exists.
+            if (!list.some((r) => r.jobId === record.jobId)) {
+              list.unshift(record); // newest-first
+              this._reviews.set(pull.number, list);
+              this.startPolling(record);
+            }
           }
           this.cdr.markForCheck();
         },
@@ -344,6 +390,11 @@ export class PrReviewRunsService implements OnDestroy {
    * teardown and is explicitly unsubscribed — and removed from `pollers` — once
    * the job reaches a terminal state or the connection is lost, so no poller
    * outlives the job. `reset`/`ngOnDestroy` tear down any still-running pollers.
+   *
+   * Preconditions: `record` is not already being polled.
+   * Postconditions: no-op if `record.jobId` is already in `pollers`. Otherwise registers
+   * a poller subscription under `record.jobId` that mutates `record` in place on each
+   * status update and removes itself from `pollers` once terminal or connection-lost.
    */
   private startPolling(record: PrReviewRecord): void {
     if (this.pollers.has(record.jobId)) return;
@@ -377,12 +428,22 @@ export class PrReviewRunsService implements OnDestroy {
     this.pollers.set(record.jobId, sub);
   }
 
-  /** Unsubscribe a poller and drop it from the registry (idempotent). */
+  /**
+   * Unsubscribe a poller and drop it from the registry (idempotent).
+   *
+   * Preconditions: `jobId` is a job id, possibly not in `pollers`.
+   * Postconditions: `pollers` no longer has an entry for `jobId`, and any subscription
+   * that was registered there is unsubscribed.
+   */
   private disposePoller(jobId: string): void {
     this.pollers.get(jobId)?.unsubscribe();
     this.pollers.delete(jobId);
   }
 
+  /**
+   * Preconditions: none.
+   * Postconditions: every subscription in `pollers` is unsubscribed and `pollers` is empty.
+   */
   private stopAllPollers(): void {
     for (const sub of this.pollers.values()) {
       sub.unsubscribe();
@@ -394,13 +455,14 @@ export class PrReviewRunsService implements OnDestroy {
    * All review runs for a PR, newest-first.
    *
    * Preconditions: `prNumber` is a PR number.
-   * Postconditions: returns this PR's review list (empty when it has none). The array is
-   * the service's own storage typed read-only — callers must not mutate it, and it stays
-   * the *same* reference the live pollers write to (so the detail child sees live updates).
-   * Pure — no side effects.
+   * Postconditions: returns this PR's review list (a shared empty array when it has
+   * none — the same reference every time, so callers comparing/binding it by identity
+   * see no spurious change). The array is the service's own storage typed read-only —
+   * callers must not mutate it, and it stays the *same* reference the live pollers write
+   * to (so the detail child sees live updates). Pure — no side effects.
    */
   reviewsFor(prNumber: number): readonly PrReviewRecord[] {
-    return this._reviews.get(prNumber) ?? [];
+    return this._reviews.get(prNumber) ?? EMPTY_REVIEWS;
   }
 
   /**
@@ -410,18 +472,8 @@ export class PrReviewRunsService implements OnDestroy {
    * Postconditions: returns the newest recorded run for `prNumber`, or null when it has
    * none. Pure — no side effects.
    */
-  latestReview(prNumber: number): PrReviewRecord | null {
+  private latestReview(prNumber: number): PrReviewRecord | null {
     return this.reviewsFor(prNumber)[0] ?? null;
-  }
-
-  /**
-   * True when a PR has at least one recorded review run.
-   *
-   * Preconditions: `prNumber` is a PR number.
-   * Postconditions: returns true iff `prNumber` has one or more recorded runs. Pure.
-   */
-  hasReviews(prNumber: number): boolean {
-    return this.reviewsFor(prNumber).length > 0;
   }
 
   /**
@@ -467,12 +519,16 @@ export class PrReviewRunsService implements OnDestroy {
    * from that run's summary.
    * Postconditions: no-op when `ids` is empty or a request for `record.jobId` is already
    * in flight. Otherwise marks the job in `creatingIssues` for the request's duration; on
-   * success replaces `record.reviewSummary.pending_issue_proposals` with the server's copy;
-   * on failure records the message in `createIssueErrors` under `record.jobId`. Always
-   * calls `markForCheck()`.
+   * success, looks up the *current* record for `record.prNumber`/`record.jobId` (a repo
+   * collapse/re-expand between the request firing and this response may have rebuilt
+   * `reviews` with a fresh record for the same job, orphaning the one passed in here) and
+   * replaces its `reviewSummary.pending_issue_proposals` with the server's copy — a no-op
+   * if that job no longer has a current record; on failure records the message in
+   * `createIssueErrors` under `record.jobId`. Always calls `markForCheck()`.
    */
   createIssuesFor(record: PrReviewRecord, ids: string[]): void {
     const jobId = record.jobId;
+    const prNumber = record.prNumber;
     if (ids.length === 0 || this._creatingIssues.has(jobId)) return;
     this._creatingIssues.add(jobId);
     this._createIssueErrors.delete(jobId);
@@ -482,9 +538,10 @@ export class PrReviewRunsService implements OnDestroy {
       .subscribe({
         next: (resp) => {
           this._creatingIssues.delete(jobId);
-          if (record.reviewSummary) {
-            record.reviewSummary = {
-              ...record.reviewSummary,
+          const current = this._reviews.get(prNumber)?.find((r) => r.jobId === jobId);
+          if (current?.reviewSummary) {
+            current.reviewSummary = {
+              ...current.reviewSummary,
               pending_issue_proposals: resp.proposals,
             };
           }
@@ -498,8 +555,15 @@ export class PrReviewRunsService implements OnDestroy {
       });
   }
 
-  /** Tears down all pollers and completes `destroy$`. Called by Angular when the
-   * hosting `CodeReviewPanelComponent` is destroyed (this service is component-provided). */
+  /**
+   * Tears down all pollers and completes `destroy$`. Called by Angular when the
+   * hosting `CodeReviewPanelComponent` is destroyed (this service is component-provided).
+   *
+   * Preconditions: none.
+   * Postconditions: `destroy$` is completed (so any subscription still gated on it via
+   * `takeUntil` unsubscribes); every poller subscription is unsubscribed and `pollers`
+   * is empty.
+   */
   ngOnDestroy(): void {
     this.destroy$.next();
     this.destroy$.complete();

@@ -8,19 +8,7 @@ import {
   terminalTimestamp,
   type ReviewDurationInput,
 } from './review-metrics';
-import type { PrReviewRecord } from './pr-review-record.model';
-
-function record(over: Partial<PrReviewRecord> = {}): PrReviewRecord {
-  return {
-    jobId: 'j1',
-    prNumber: 1,
-    owner: 'acme',
-    repo: 'widgets',
-    startedAt: Date.parse('2026-01-01T00:00:00Z'),
-    status: 'running',
-    ...over,
-  };
-}
+import { makeReviewRecord as record } from './testing/fixtures';
 
 describe('review-metrics', () => {
   describe('severityEntries', () => {
@@ -83,6 +71,18 @@ describe('review-metrics', () => {
 
     it('falls back to last_activity_at when updated_at is absent', () => {
       expect(terminalTimestamp({ last_activity_at: '2026-03-02T00:00:00Z' })).toBe(
+        Date.parse('2026-03-02T00:00:00Z'),
+      );
+    });
+
+    it('falls back to last_activity_at when updated_at is an empty string', () => {
+      expect(terminalTimestamp({ updated_at: '', last_activity_at: '2026-03-02T00:00:00Z' })).toBe(
+        Date.parse('2026-03-02T00:00:00Z'),
+      );
+    });
+
+    it('falls back to last_activity_at when updated_at is present but unparseable', () => {
+      expect(terminalTimestamp({ updated_at: 'not-a-date', last_activity_at: '2026-03-02T00:00:00Z' })).toBe(
         Date.parse('2026-03-02T00:00:00Z'),
       );
     });

@@ -18,11 +18,6 @@ import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
 
-// Re-exported so existing importers of `PrReviewRecord` from this module keep working;
-// the interface now lives in ./pr-review-record.model so both this panel and its
-// extracted detail child can depend on it without a component-to-component import cycle.
-export type { PrReviewRecord } from './pr-review-record.model';
-
 /**
  * Code Review panel: lists every repository the configured PAT can access and, per
  * expanded repo, its open pull requests, letting the user start AI code reviews on
@@ -30,12 +25,11 @@ export type { PrReviewRecord } from './pr-review-record.model';
  * a table of every review run on that PR (status + outcome). A live status badge on
  * each row reflects the latest review.
  *
- * This component owns repo/PR-list browsing and pagination; the review-run domain
- * (hydration, live polling, starting reviews, filing issues from proposals, and the
- * row status badge derivation) is owned by the injected `PrReviewRunsService`. The
- * template binds directly to `reviewRuns` for all of that — this class only wraps
- * `isStarting`/`startReview`, which need this component's own `selectedRepo` threaded
- * through. See `PrReviewRunsService` for the contract of everything else.
+ * This component owns repo/PR-list browsing and pagination only; the review-run domain
+ * (hydration, live polling, starting reviews, filing issues from proposals, and the row
+ * status badge derivation) is owned by the injected `PrReviewRunsService`, and the
+ * template binds directly to `reviewRuns` for all of it — this class holds no
+ * review-run wrapper methods. See `PrReviewRunsService` for that contract.
  */
 @Component({
   selector: 'app-code-review-panel',
@@ -104,6 +98,13 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     this.checkGitHubConfig();
   }
 
+  /**
+   * Preconditions: none.
+   * Postconditions: `destroy$` is completed, so any subscription still gated on it via
+   * `takeUntil` unsubscribes. (The injected `PrReviewRunsService`'s own `ngOnDestroy` —
+   * called automatically by Angular since it is provided in this component's own
+   * `providers` array — tears down its pollers independently.)
+   */
   ngOnDestroy(): void {
     this.destroy$.next();
     this.destroy$.complete();
@@ -210,7 +211,7 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
           this.pulls = pulls;
           this.pageIndex = 0;
           this.pullsLoaded = true;
-          this.reviewRuns.hydrate(repo);
+          this.reviewRuns.hydrate();
         },
         error: (err: unknown) => {
           if (!this.pullsLoad.isCurrent(token)) return;
@@ -236,19 +237,5 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   /** Toggle the accordion expansion for a PR (only one open at a time). */
   togglePull(pull: GitHubPullRequestItem): void {
     this.expandedPrNumber = this.expandedPrNumber === pull.number ? null : pull.number;
-  }
-
-  // --- The only review-run wrappers this component needs ---------------------
-  // Everything else in PrReviewRunsService's public API is bound directly by the
-  // template (`reviewRuns.badgeLabel(...)`, etc.). These two remain component
-  // methods because they need `selectedRepo`, which only this component holds.
-
-  isStarting(pull: GitHubPullRequestItem): boolean {
-    return this.reviewRuns.isStarting(this.selectedRepo, pull.number);
-  }
-
-  startReview(pull: GitHubPullRequestItem): void {
-    if (!this.selectedRepo) return;
-    this.reviewRuns.startReview(this.selectedRepo, pull);
   }
 }

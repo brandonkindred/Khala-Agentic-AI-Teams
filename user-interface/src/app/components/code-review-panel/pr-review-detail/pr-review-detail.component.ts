@@ -23,6 +23,14 @@ import { reviewDuration, severityEntries } from '../review-metrics';
  * parent's pollers mutate a `PrReviewRecord` in place and call `markForCheck()`,
  * this child is re-checked in the same pass and the table/badges refresh.
  *
+ * Do NOT add `changeDetection: ChangeDetectionStrategy.OnPush` to this component:
+ * the `reviews`/`creatingIssues`/`createIssueErrors` inputs are typed read-only
+ * because callers must not mutate them, but the parent's live pollers *do* mutate
+ * the records those inputs point at, in place, on the same object reference —
+ * that is precisely what keeps the table/badges live. OnPush only re-checks a
+ * component when an `@Input()`'s reference changes, so it would stop seeing those
+ * in-place updates and the table would silently freeze mid-poll.
+ *
  * Invariants:
  * - Inputs are held by reference and never mutated here — in particular the
  *   `reviews` array and its records must be the *same* objects the parent's

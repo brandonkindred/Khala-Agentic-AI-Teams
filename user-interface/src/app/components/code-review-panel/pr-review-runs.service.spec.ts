@@ -5,76 +5,14 @@ import { vi } from 'vitest';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { PrReviewRunsService } from './pr-review-runs.service';
-import type { PrReviewRecord } from './pr-review-record.model';
-import type { PendingIssueProposal } from '../../models/coding-team.model';
-import type { CodeReviewRunItem, GitHubPullRequestItem, GitHubRepoItem } from '../../models/integrations.model';
-
-function makePulls(count: number): GitHubPullRequestItem[] {
-  return Array.from({ length: count }, (_, i) => ({
-    number: i + 1,
-    title: `PR ${i + 1}`,
-    body_preview: `body ${i + 1}`,
-    author: 'octocat',
-    html_url: `https://example.com/pull/${i + 1}`,
-    head: `feature-${i + 1}`,
-    base: 'main',
-    draft: i % 2 === 0,
-    labels: i % 2 === 0 ? ['needs-review'] : [],
-    updated_at: '2026-01-01T00:00:00Z',
-  }));
-}
-
-function record(over: Partial<PrReviewRecord> = {}): PrReviewRecord {
-  return {
-    jobId: 'j1',
-    prNumber: 1,
-    owner: 'acme',
-    repo: 'widgets',
-    startedAt: Date.parse('2026-01-01T00:00:00Z'),
-    status: 'running',
-    ...over,
-  };
-}
-
-const REPO: GitHubRepoItem = {
-  owner: 'acme',
-  name: 'widgets',
-  full_name: 'acme/widgets',
-  private: false,
-  archived: false,
-  html_url: 'https://github.com/acme/widgets',
-  description: 'Widget factory',
-  default_branch: 'main',
-  open_issues_count: 3,
-  pushed_at: '2026-06-09T10:00:00Z',
-};
-
-function proposal(id: string, over: Record<string, unknown> = {}): PendingIssueProposal {
-  return {
-    id,
-    severity: 'high',
-    category: 'logic',
-    file_path: 'a.py',
-    line: 3,
-    description: `bug ${id}`,
-    suggestion: 'fix',
-    issue_number: null,
-    issue_url: null,
-    ...over,
-  };
-}
-
-function terminalRecordWith(proposals: PendingIssueProposal[]): PrReviewRecord {
-  return record({
-    status: 'completed',
-    reviewSummary: {
-      total_issues: 0,
-      inline_comments: 0,
-      event: 'COMMENT',
-      pending_issue_proposals: proposals,
-    },
-  });
-}
+import type { CodeReviewRunItem } from '../../models/integrations.model';
+import {
+  makePulls,
+  makeProposal as proposal,
+  makeReviewRecord as record,
+  REPO,
+  terminalReviewRecordWith as terminalRecordWith,
+} from './testing/fixtures';
 
 /**
  * `PrReviewRunsService` is provided at `CodeReviewPanelComponent`'s own component level in
@@ -151,7 +89,7 @@ describe('PrReviewRunsService', () => {
     ];
     integrationsSpy.getGitHubReviewHistory.mockReturnValue(of(items));
     service.reset(REPO);
-    service.hydrate(REPO);
+    service.hydrate();
 
     expect(service.reviewsFor(1).map((r) => r.jobId)).toEqual(['done-1', 'live-1']);
     expect(service.reviewsFor(2).map((r) => r.jobId)).toEqual(['done-2']);
@@ -165,8 +103,13 @@ describe('PrReviewRunsService', () => {
   it('survives a review-history load failure', () => {
     integrationsSpy.getGitHubReviewHistory.mockReturnValue(throwError(() => new Error('nope')));
     service.reset(REPO);
-    service.hydrate(REPO);
+    service.hydrate();
     expect(service.reviews.size).toBe(0);
+  });
+
+  it('does nothing when hydrate is called with no current repo', () => {
+    service.hydrate(); // reset() was never called — nothing to hydrate
+    expect(integrationsSpy.getGitHubReviewHistory).not.toHaveBeenCalled();
   });
 
   it('keeps an in-flight review that a concurrent hydrate snapshot omits', () => {
@@ -179,8 +122,8 @@ describe('PrReviewRunsService', () => {
       of({ job_id: 'A', pr_number: 1, pr_url: 'u', status: 'pending', message: '' }),
     );
 
-    service.hydrate(REPO); // hydrate request fired, not yet resolved
-    service.startReview(REPO, makePulls(1)[0]); // record A + live poller A
+    service.hydrate(); // hydrate request fired, not yet resolved
+    service.startReview(makePulls(1)[0]); // record A + live poller A
     expect(service.reviewsFor(1).map((r) => r.jobId)).toContain('A');
     expect(service['pollers'].has('A')).toBe(true);
 
@@ -199,8 +142,8 @@ describe('PrReviewRunsService', () => {
       of({ job_id: 'A', pr_number: 1, pr_url: 'u', status: 'pending', message: '' }),
     );
 
-    service.hydrate(REPO);
-    service.startReview(REPO, makePulls(1)[0]);
+    service.hydrate();
+    service.startReview(makePulls(1)[0]);
     vi.advanceTimersByTime(5000); // poll advances A to running + status_text 'live'
     const liveRec = service.reviewsFor(1).find((r) => r.jobId === 'A')!;
 
@@ -211,6 +154,24 @@ describe('PrReviewRunsService', () => {
     expect(afterRec).toBe(liveRec); // same object, not a fresh snapshot copy
     expect(afterRec.statusText).toBe('live'); // live state retained
     expect(service['pollers'].has('A')).toBe(true);
+  });
+
+  it('preserves relative newest-first order when carrying over multiple live records the snapshot omits', () => {
+    service.reset(REPO);
+    const pull = makePulls(1)[0];
+    integrationsSpy.runGitHubReviewPr
+      .mockReturnValueOnce(of({ job_id: 'A', pr_number: 1, pr_url: 'u', status: 'pending', message: '' }))
+      .mockReturnValueOnce(of({ job_id: 'B', pr_number: 1, pr_url: 'u', status: 'pending', message: '' }));
+    service.startReview(pull); // A recorded
+    service.startReview(pull); // B recorded, newest-first -> [B, A]
+    expect(service.reviewsFor(1).map((r) => r.jobId)).toEqual(['B', 'A']);
+
+    // A hydrate whose snapshot omits both still-live runs must carry them both over,
+    // preserving their relative order rather than reversing it (a plain per-record
+    // unshift in `live`'s iteration order would produce [A, B] instead of [B, A]).
+    integrationsSpy.getGitHubReviewHistory.mockReturnValue(of([]));
+    service.hydrate();
+    expect(service.reviewsFor(1).map((r) => r.jobId)).toEqual(['B', 'A']);
   });
 
   // -------------------------------------------------------------------------
@@ -228,7 +189,7 @@ describe('PrReviewRunsService', () => {
         review_summary: { total_issues: 2, inline_comments: 1, comment_findings: 1, event: 'REQUEST_CHANGES' },
       }),
     );
-    service.startReview(REPO, makePulls(1)[0]);
+    service.startReview(makePulls(1)[0]);
     expect(integrationsSpy.runGitHubReviewPr).toHaveBeenCalledWith({ pr_number: 1, owner: 'acme', repo: 'widgets' });
     expect(service.reviewsFor(1).length).toBe(1);
     expect(service.reviewsFor(1)[0].jobId).toBe('j1');
@@ -240,6 +201,42 @@ describe('PrReviewRunsService', () => {
     expect(rec.prUrl).toBe('https://example.com/pull/1');
     // Terminal status removes the poller.
     expect(service['pollers'].has('j1')).toBe(false);
+  });
+
+  it('does nothing when startReview is called with no current repo', () => {
+    service.startReview(makePulls(1)[0]); // reset() was never called
+    expect(integrationsSpy.runGitHubReviewPr).not.toHaveBeenCalled();
+  });
+
+  it('does not insert a duplicate record when a concurrent hydrate already recorded the same job', () => {
+    service.reset(REPO);
+    const startReview$ = new Subject<{
+      job_id: string;
+      pr_number: number;
+      pr_url: string;
+      status: string;
+      message: string;
+    }>();
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(startReview$.asObservable());
+    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'A', status: 'running' }));
+
+    service.startReview(makePulls(1)[0]); // request in flight for job A, not yet resolved
+
+    // Meanwhile a hydrate's snapshot already includes job A — it was persisted
+    // server-side before this client's start-review response arrived — and attaches
+    // its own poller.
+    integrationsSpy.getGitHubReviewHistory.mockReturnValue(
+      of([{ job_id: 'A', pr_number: 1, status: 'running', created_at: '2026-01-01T00:00:00Z' }]),
+    );
+    service.hydrate();
+    expect(service.reviewsFor(1).length).toBe(1);
+
+    // The original start-review response now resolves.
+    startReview$.next({ job_id: 'A', pr_number: 1, pr_url: 'u', status: 'pending', message: '' });
+    startReview$.complete();
+
+    // No duplicate record for job A was added.
+    expect(service.reviewsFor(1).length).toBe(1);
   });
 
   // -------------------------------------------------------------------------
@@ -267,7 +264,7 @@ describe('PrReviewRunsService', () => {
       ] as CodeReviewRunItem[]),
     );
     service.reset(REPO);
-    service.hydrate(REPO);
+    service.hydrate();
     const [withTime, badTime] = service.reviewsFor(1);
     expect(withTime.completedAt).toBe(Date.parse('2026-02-01T00:01:30Z'));
     expect(badTime.completedAt).toBeUndefined();
@@ -285,14 +282,14 @@ describe('PrReviewRunsService', () => {
         created_at: '2026-03-01T00:00:00Z',
       }),
     );
-    service.startReview(REPO, makePulls(1)[0]);
+    service.startReview(makePulls(1)[0]);
     expect(service.reviewsFor(1)[0].startedAt).toBe(Date.parse('2026-03-01T00:00:00Z'));
   });
 
   it('falls back to the browser clock for the start time when created_at is absent', () => {
     service.reset(REPO);
     // The default runGitHubReviewPr mock carries no created_at.
-    service.startReview(REPO, makePulls(1)[0]);
+    service.startReview(makePulls(1)[0]);
     const rec = service.reviewsFor(1)[0];
     expect(Number.isNaN(rec.startedAt)).toBe(false);
     expect(rec.startedAt).toBeGreaterThan(0);
@@ -310,7 +307,7 @@ describe('PrReviewRunsService', () => {
         updated_at: '2026-03-01T00:10:00Z', // terminal transition time (wins)
       }),
     );
-    service.startReview(REPO, makePulls(1)[0]);
+    service.startReview(makePulls(1)[0]);
     const rec = service.reviewsFor(1)[0];
     expect(rec.completedAt).toBeUndefined(); // not terminal yet
     vi.advanceTimersByTime(5000); // one poll tick -> terminal
@@ -326,7 +323,7 @@ describe('PrReviewRunsService', () => {
         review_summary: { total_issues: 0, inline_comments: 0, comment_findings: 0, event: 'APPROVE' },
       }),
     );
-    service.startReview(REPO, makePulls(1)[0]);
+    service.startReview(makePulls(1)[0]);
     vi.advanceTimersByTime(5000); // first poll -> terminal -> poller disposed
     expect(service['pollers'].has('j1')).toBe(false);
     // No further polling after the job is terminal (subscription was torn down).
@@ -340,37 +337,37 @@ describe('PrReviewRunsService', () => {
     const slow = new Subject<never>();
     integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
     const pull = makePulls(1)[0];
-    service.startReview(REPO, pull);
-    service.startReview(REPO, pull); // second call ignored while the first is in flight
+    service.startReview(pull);
+    service.startReview(pull); // second call ignored while the first is in flight
     expect(integrationsSpy.runGitHubReviewPr).toHaveBeenCalledTimes(1);
-    expect(service.isStarting(REPO, pull.number)).toBe(true);
+    expect(service.isStarting(pull.number)).toBe(true);
   });
 
   it('surfaces a start-review error per PR without touching other PRs', () => {
     integrationsSpy.runGitHubReviewPr.mockReturnValue(throwError(() => ({ error: { detail: 'no such PR' } })));
     service.reset(REPO);
-    service.startReview(REPO, makePulls(1)[0]);
+    service.startReview(makePulls(1)[0]);
     expect(service.reviewErrorFor(1)).toBe('no such PR');
     expect(service.reviewErrorFor(2)).toBeNull();
-    expect(service.isStarting(REPO, 1)).toBe(false);
+    expect(service.isStarting(1)).toBe(false);
   });
 
   it('an in-flight start on one repo does not block the same-numbered PR in another repo', () => {
     service.reset(REPO);
     const slow = new Subject<never>();
     integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
-    service.startReview(REPO, makePulls(1)[0]); // start acme/widgets PR #1 (in flight)
+    service.startReview(makePulls(1)[0]); // start acme/widgets PR #1 (in flight)
     // Switch to another repo that also has a PR #1.
-    const other: GitHubRepoItem = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
+    const other = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
     service.reset(other);
     // `starting` is keyed by owner/repo#number, so other/thing PR #1 is NOT considered starting.
-    expect(service.isStarting(other, 1)).toBe(false);
+    expect(service.isStarting(1)).toBe(false);
   });
 
   it('falls back to err.message when a start-review error has no detail', () => {
     integrationsSpy.runGitHubReviewPr.mockReturnValue(throwError(() => ({ message: 'Network down' })));
     service.reset(REPO);
-    service.startReview(REPO, makePulls(1)[0]);
+    service.startReview(makePulls(1)[0]);
     expect(service.reviewErrorFor(1)).toBe('Network down');
   });
 
@@ -378,9 +375,9 @@ describe('PrReviewRunsService', () => {
     service.reset(REPO); // acme/widgets expanded
     const slow = new Subject<never>();
     integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
-    service.startReview(REPO, makePulls(1)[0]); // start on acme/widgets PR #1 (request pending)
+    service.startReview(makePulls(1)[0]); // start on acme/widgets PR #1 (request pending)
     // Switch to a different repo that also has a PR #1 before the start resolves.
-    const other: GitHubRepoItem = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
+    const other = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
     service.reset(other);
     // acme/widgets' start now fails — reviewErrors is keyed by bare PR number, so an
     // unguarded set would render this failure under other/thing's PR #1.
@@ -393,9 +390,9 @@ describe('PrReviewRunsService', () => {
     const slow = new Subject<{ job_id: string; pr_number: number; pr_url: string; status: string; message: string }>();
     integrationsSpy.runGitHubReviewPr.mockReturnValue(slow.asObservable());
     apiSpy.getJobStatus.mockClear();
-    service.startReview(REPO, makePulls(1)[0]); // start acme/widgets PR #1 (pending)
+    service.startReview(makePulls(1)[0]); // start acme/widgets PR #1 (pending)
     // Switch to another repo before the start resolves.
-    const other: GitHubRepoItem = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
+    const other = { ...REPO, full_name: 'other/thing', owner: 'other', name: 'thing' };
     service.reset(other);
     // The start now resolves while the user is on another repo — no record is shown and no
     // orphan poller must be attached (startPolling is inside the same-repo guard).
@@ -408,7 +405,7 @@ describe('PrReviewRunsService', () => {
   it('falls back to a default message when a start-review error has no detail or message', () => {
     integrationsSpy.runGitHubReviewPr.mockReturnValue(throwError(() => ({})));
     service.reset(REPO);
-    service.startReview(REPO, makePulls(1)[0]);
+    service.startReview(makePulls(1)[0]);
     expect(service.reviewErrorFor(1)).toBe('Failed to start review.');
   });
 
@@ -418,10 +415,10 @@ describe('PrReviewRunsService', () => {
       .mockReturnValueOnce(of({ job_id: 'j1', pr_number: 1, pr_url: 'u1', status: 'pending', message: '' }))
       .mockReturnValueOnce(of({ job_id: 'j2', pr_number: 1, pr_url: 'u2', status: 'pending', message: '' }));
     const pull = makePulls(1)[0];
-    service.startReview(REPO, pull);
-    service.startReview(REPO, pull);
+    service.startReview(pull);
+    service.startReview(pull);
     expect(service.reviewsFor(1).map((r) => r.jobId)).toEqual(['j2', 'j1']);
-    expect(service.hasReviews(1)).toBe(true);
+    expect(service.reviewsFor(1).length).toBe(2);
   });
 
   it('polls concurrent reviews on different PRs without cross-talk', () => {
@@ -442,8 +439,8 @@ describe('PrReviewRunsService', () => {
       }),
     );
     const pulls = makePulls(2);
-    service.startReview(REPO, pulls[0]);
-    service.startReview(REPO, pulls[1]);
+    service.startReview(pulls[0]);
+    service.startReview(pulls[1]);
     vi.advanceTimersByTime(5000);
 
     expect(apiSpy.getJobStatus).toHaveBeenCalledWith('ja');
@@ -455,7 +452,7 @@ describe('PrReviewRunsService', () => {
   it('marks the record errored when polling loses the connection', () => {
     service.reset(REPO);
     apiSpy.getJobStatus.mockReturnValue(throwError(() => new Error('down')));
-    service.startReview(REPO, makePulls(1)[0]);
+    service.startReview(makePulls(1)[0]);
     // Three consecutive failed polls trip the connection-lost handler.
     vi.advanceTimersByTime(15001);
     expect(service.reviewsFor(1)[0].error).toContain('Lost connection');
@@ -493,8 +490,8 @@ describe('PrReviewRunsService', () => {
       .mockReturnValueOnce(of({ job_id: 'jy', pr_number: 2, pr_url: 'u', status: 'pending', message: '' }));
     apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'jx', status: 'running' })); // stays non-terminal
     const pulls = makePulls(2);
-    service.startReview(REPO, pulls[0]);
-    service.startReview(REPO, pulls[1]);
+    service.startReview(pulls[0]);
+    service.startReview(pulls[1]);
     expect(service['pollers'].size).toBe(2);
 
     const callsBefore = apiSpy.getJobStatus.mock.calls.length;
@@ -510,6 +507,8 @@ describe('PrReviewRunsService', () => {
 
   it('files the given proposal ids and merges the updated list back', () => {
     const rec = terminalRecordWith([proposal('p0'), proposal('p1')]);
+    service.reset(REPO);
+    service['_reviews'].set(1, [rec]);
     integrationsSpy.createGitHubReviewIssues.mockReturnValue(
       of({
         job_id: 'j1',
@@ -537,5 +536,37 @@ describe('PrReviewRunsService', () => {
     service.createIssuesFor(rec, ['p0']);
     expect(service.createIssueErrors.get('j1')).toBe('no scope');
     expect(service.creatingIssues.has('j1')).toBe(false);
+  });
+
+  it('updates the current record, not an orphaned one, when a create-issues response lands after a repo reset', () => {
+    service.reset(REPO);
+    const rec = terminalRecordWith([proposal('p0')]);
+    service['_reviews'].set(1, [rec]); // this is the record currently rendered for PR #1
+
+    const createIssues$ = new Subject<{
+      job_id: string;
+      created: unknown[];
+      proposals: ReturnType<typeof proposal>[];
+    }>();
+    integrationsSpy.createGitHubReviewIssues.mockReturnValue(createIssues$.asObservable());
+    service.createIssuesFor(rec, ['p0']);
+
+    // The repo is collapsed and re-expanded before the response arrives: reset() clears
+    // the map, and a fresh hydrate (simulated here directly) rebuilds a NEW record object
+    // for the same PR/job — this is now the one actually rendered.
+    service.reset(REPO);
+    const freshRec = terminalRecordWith([proposal('p0')]);
+    service['_reviews'].set(1, [freshRec]);
+
+    createIssues$.next({
+      job_id: 'j1',
+      created: [{ proposal_id: 'p0', issue_number: 5, issue_url: 'https://x/issues/5', title: 't' }],
+      proposals: [proposal('p0', { issue_number: 5, issue_url: 'https://x/issues/5' })],
+    });
+
+    // The currently-rendered record is updated...
+    expect(freshRec.reviewSummary?.pending_issue_proposals?.[0].issue_url).toBe('https://x/issues/5');
+    // ...and the orphaned record captured at call time is left untouched.
+    expect(rec.reviewSummary?.pending_issue_proposals?.[0].issue_url).toBeNull();
   });
 });

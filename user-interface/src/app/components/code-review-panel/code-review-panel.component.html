@@ -152,11 +152,11 @@
                 <app-pr-review-detail
                   [pull]="pull"
                   [reviews]="reviewRuns.reviewsFor(pull.number)"
-                  [starting]="isStarting(pull)"
+                  [starting]="reviewRuns.isStarting(pull.number)"
                   [reviewError]="reviewRuns.reviewErrorFor(pull.number)"
                   [creatingIssues]="reviewRuns.creatingIssues"
                   [createIssueErrors]="reviewRuns.createIssueErrors"
-                  (startReviewRequested)="startReview($event)"
+                  (startReviewRequested)="reviewRuns.startReview($event)"
                   (createIssuesRequested)="reviewRuns.createIssuesFor($event.record, $event.ids)"
                 />
               }

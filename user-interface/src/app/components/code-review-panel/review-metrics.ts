@@ -84,14 +84,16 @@ export function reviewDuration(record: ReviewDurationInput): string | null {
  * (`Date.now()`). `updated_at` is preferred because it is stamped on the terminal
  * transition itself — including when the stale-job monitor fails a dead worker, which
  * bumps `updated_at` but leaves `last_activity_at` frozen at the last progress event
- * (that would understate a timed-out review). Reads the clock only on the fallback path.
+ * (that would understate a timed-out review). Each candidate is tried in turn — an
+ * empty or unparseable `updated_at` falls through to `last_activity_at` rather than
+ * skipping straight to the browser clock. Reads the clock only on the final fallback.
  */
 export function terminalTimestamp(
   status: Pick<CodingTeamJobStatus, 'updated_at' | 'last_activity_at'>,
 ): number {
-  const serverTs = status.updated_at ?? status.last_activity_at;
-  if (serverTs) {
-    const parsed = Date.parse(serverTs);
+  for (const candidate of [status.updated_at, status.last_activity_at]) {
+    if (!candidate) continue;
+    const parsed = Date.parse(candidate);
     if (!Number.isNaN(parsed)) return parsed;
   }
   return Date.now();

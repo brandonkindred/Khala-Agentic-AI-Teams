@@ -7,54 +7,9 @@ import { provideRouter } from '@angular/router';
 import { vi } from 'vitest';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
-import { CodeReviewPanelComponent, PrReviewRecord } from './code-review-panel.component';
-import type {
-  CodeReviewRunItem,
-  GitHubConfigResponse,
-  GitHubPullRequestItem,
-  GitHubRepoItem,
-} from '../../models/integrations.model';
-
-function makePulls(count: number): GitHubPullRequestItem[] {
-  return Array.from({ length: count }, (_, i) => ({
-    number: i + 1,
-    title: `PR ${i + 1}`,
-    body_preview: `body ${i + 1}`,
-    author: 'octocat',
-    html_url: `https://example.com/pull/${i + 1}`,
-    head: `feature-${i + 1}`,
-    base: 'main',
-    draft: i % 2 === 0,
-    labels: i % 2 === 0 ? ['needs-review'] : [],
-    updated_at: '2026-01-01T00:00:00Z',
-  }));
-}
-
-function record(over: Partial<PrReviewRecord> = {}): PrReviewRecord {
-  return {
-    jobId: 'j1',
-    prNumber: 1,
-    owner: 'acme',
-    repo: 'widgets',
-    startedAt: Date.parse('2026-01-01T00:00:00Z'),
-    status: 'running',
-    ...over,
-  };
-}
-
-/** The repo the fake PAT can access; the panel lists repos and loads PRs per repo. */
-const REPO: GitHubRepoItem = {
-  owner: 'acme',
-  name: 'widgets',
-  full_name: 'acme/widgets',
-  private: false,
-  archived: false,
-  html_url: 'https://github.com/acme/widgets',
-  description: 'Widget factory',
-  default_branch: 'main',
-  open_issues_count: 3,
-  pushed_at: '2026-06-09T10:00:00Z',
-};
+import { CodeReviewPanelComponent } from './code-review-panel.component';
+import type { CodeReviewRunItem, GitHubConfigResponse, GitHubPullRequestItem, GitHubRepoItem } from '../../models/integrations.model';
+import { makePulls, makeReviewRecord as record, REPO } from './testing/fixtures';
 
 const CONFIGURED: GitHubConfigResponse = {
   enabled: true,
@@ -293,26 +248,27 @@ describe('CodeReviewPanelComponent', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Delegation to PrReviewRunsService
+  // Teardown
   // -------------------------------------------------------------------------
   // The review-run domain (hydration, polling, starting reviews, badge derivation,
   // issue creation) is owned by PrReviewRunsService and covered by its own spec
-  // (pr-review-runs.service.spec.ts); the template binds to `reviewRuns` directly
-  // for all of that (see the DOM integration tests below). `isStarting`/`startReview`
-  // are the only methods this component still wraps, since they need `selectedRepo`,
-  // which only this component holds — this confirms that threading.
+  // (pr-review-runs.service.spec.ts); the template binds to `reviewRuns` directly for
+  // all of it, so this component holds no review-run wrapper methods of its own. This
+  // test instead covers the one invariant that spans both classes: destroying this
+  // component must stop the service's pollers, since the service is only torn down
+  // because Angular destroys it as a provider of this component.
 
-  it('threads selectedRepo through isStarting/startReview to the injected PrReviewRunsService', async () => {
+  it('stops all live polling when the component is destroyed', async () => {
     await setup();
-    const reviewRuns = component['reviewRuns'];
-    const isStartingSpy = vi.spyOn(reviewRuns, 'isStarting');
-    const startSpy = vi.spyOn(reviewRuns, 'startReview').mockImplementation(() => undefined);
+    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'j1', status: 'running' })); // stays non-terminal
+    component['reviewRuns'].startReview(component.pulls[0]);
+    expect(component['reviewRuns']['pollers'].size).toBe(1);
 
-    component.isStarting(component.pulls[0]);
-    expect(isStartingSpy).toHaveBeenCalledWith(component.selectedRepo, component.pulls[0].number);
-
-    component.startReview(component.pulls[0]);
-    expect(startSpy).toHaveBeenCalledWith(component.selectedRepo, component.pulls[0]);
+    const callsBefore = apiSpy.getJobStatus.mock.calls.length;
+    fixture.destroy();
+    expect(component['reviewRuns']['pollers'].size).toBe(0);
+    vi.advanceTimersByTime(15000);
+    expect(apiSpy.getJobStatus.mock.calls.length).toBe(callsBefore);
   });
 
   // -------------------------------------------------------------------------
@@ -355,7 +311,7 @@ describe('CodeReviewPanelComponent', () => {
     );
     const el: HTMLElement = fixture.nativeElement;
 
-    component.startReview(component.pulls[0]);
+    component['reviewRuns'].startReview(component.pulls[0]);
     component.togglePull(component.pulls[0]);
     fixture.detectChanges();
     // Before the first poll the row badge shows the initial (pending) status.
@@ -375,9 +331,20 @@ describe('CodeReviewPanelComponent', () => {
     );
     await setup();
     component.togglePull(component.pulls[0]);
-    component.startReview(component.pulls[0]);
+    component['reviewRuns'].startReview(component.pulls[0]);
     fixture.detectChanges();
     const detail = fixture.nativeElement.querySelector('.cr-pull-detail');
     expect(detail?.textContent).toContain('no such PR');
+  });
+
+  it('leaves the PR-list banner untouched when a start-review request fails', async () => {
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(
+      throwError(() => ({ error: { detail: 'no such PR' } })),
+    );
+    await setup();
+    component['reviewRuns'].startReview(component.pulls[0]);
+    // A per-PR start-review failure is a PrReviewRunsService concern (reviewErrorFor);
+    // it must never surface through the component's own list-load banner.
+    expect(component.pullError).toBeNull();
   });
 });
