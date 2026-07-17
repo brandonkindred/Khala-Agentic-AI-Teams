@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -40,29 +41,38 @@ def _review_verdict_cache_key(
     """Hash of every input that determines one task's Tech Lead review verdict.
 
     Postconditions:
-        - Two calls collide only when every argument is identical — mirroring
-          ``code_review_agent.mapping._chunk_cache_key``'s "exact LLM input" key
-          design: this covers every field ``run_code_review`` is actually
-          called with (``task_title``/``task_description``/
-          ``acceptance_criteria``/``changes_summary``/``user_decisions``/
-          ``spec_content``), so a change to any one of them — not just the
-          branch diff — misses the cache. ``evidence`` already embeds the
-          branch diff verbatim whenever it is non-empty (see
-          ``orchestrator._build_review_evidence``), so this key alone also
-          captures every diff change — a separate branch-digest component is
-          not needed.
+        - Two calls collide only when every argument is identical — covering
+          every field ``run_code_review`` is actually called with
+          (``task_title``/``task_description``/``acceptance_criteria``/
+          ``changes_summary``/``user_decisions``/``spec_content``), so a
+          change to any one of them — not just the branch diff — misses the
+          cache. ``evidence`` already embeds the branch diff verbatim whenever
+          it is non-empty (see ``orchestrator._build_review_evidence``), so
+          this key alone also captures every diff change — a separate
+          branch-digest component is not needed.
+        - Hashes a JSON serialization (``sort_keys=True``) rather than a flat
+          separator-joined string — mirroring
+          ``code_review_agent.mapping._stable_json_digest``'s "unambiguous
+          structured hash" design (reimplemented locally rather than
+          imported, since that helper is deliberately module-private to
+          ``mapping.py``). A flat join of ``[..., *acceptance_criteria,
+          evidence, *user_decisions, ...]`` cannot distinguish where one
+          variable-length list ends and the next begins — e.g.
+          ``acceptance_criteria=["a", "b"], evidence="c", user_decisions=[]``
+          and ``acceptance_criteria=["a"], evidence="b", user_decisions=["c"]``
+          would flatten to the same sequence — whereas JSON's array/object
+          delimiters make every field's boundary explicit.
     """
-    body = "\x00".join(
-        [
-            task_title,
-            task_description,
-            *acceptance_criteria,
-            evidence,
-            *user_decisions,
-            spec_content,
-        ]
-    )
-    return hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()
+    payload = {
+        "task_title": task_title,
+        "task_description": task_description,
+        "acceptance_criteria": acceptance_criteria,
+        "evidence": evidence,
+        "user_decisions": user_decisions,
+        "spec_content": spec_content,
+    }
+    body = json.dumps(payload, sort_keys=True)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 class _ReviewMixin:

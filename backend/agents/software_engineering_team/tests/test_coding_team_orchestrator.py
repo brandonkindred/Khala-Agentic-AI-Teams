@@ -566,6 +566,31 @@ def test_review_verdict_cache_key_covers_every_reviewer_input():
         )
 
 
+def test_review_verdict_cache_key_does_not_collide_across_list_boundaries():
+    """Shifting an element between acceptance_criteria and user_decisions (the
+    two variable-length lists sandwiched around evidence) must not produce the
+    same key.
+
+    Regression test: a flat separator-joined encoding cannot tell where one
+    variable-length list ends and the next begins, so
+    acceptance_criteria=["a", "b"], evidence="c", user_decisions=[] and
+    acceptance_criteria=["a"], evidence="b", user_decisions=["c"] previously
+    flattened to an identical sequence and collided.
+    """
+    from software_engineering_team.coding_team.swarm_review import _review_verdict_cache_key
+
+    base = dict(task_title="T", task_description="D", spec_content="spec")
+
+    key_a = _review_verdict_cache_key(
+        acceptance_criteria=["a", "b"], evidence="c", user_decisions=[], **base
+    )
+    key_b = _review_verdict_cache_key(
+        acceptance_criteria=["a"], evidence="b", user_decisions=["c"], **base
+    )
+
+    assert key_a != key_b
+
+
 # ----------------------------------------------------- review retry / failure handling
 
 
