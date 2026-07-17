@@ -8,7 +8,7 @@ an integration test that runs the critic inside BlogPlanningAgent.run.
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from typing import Any
 from unittest.mock import patch
 
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent, PlanCriticReport
@@ -68,9 +68,18 @@ class _FakeAgent:
     """Drop-in replacement for strands.Agent that returns a canned response.
 
     Records every call into ``self.calls`` and pops replies off
-    ``self.responses``. Both are instance attributes -- construct via
-    ``_fake_agent_factory`` so each test gets its own private state instead of
-    sharing mutable state across tests.
+    ``self.responses``. Both are instance attributes shared across every
+    ``_FakeAgent`` built by the same ``_FakeAgentFactory``, rather than
+    class-level mutable state -- so tests never need a fixture-based reset.
+
+    Preconditions:
+        calls and responses are lists owned by the caller (typically a single
+        ``_FakeAgentFactory`` instance); this object mutates them in place and
+        does not copy them.
+    Postconditions:
+        Each ``__call__`` appends exactly one ``(system_prompt, user_prompt)``
+        tuple to ``calls`` and, if ``responses`` is non-empty, removes and
+        returns its first element; otherwise returns a canned PASS payload.
     """
 
     def __init__(
@@ -78,12 +87,12 @@ class _FakeAgent:
         model: Any,
         system_prompt: str = "",
         *,
-        calls: list[tuple[str, str]] | None = None,
-        responses: list[str] | None = None,
+        calls: list[tuple[str, str]],
+        responses: list[str],
     ) -> None:
         self._system = system_prompt
-        self.calls = calls if calls is not None else []
-        self.responses = responses if responses is not None else []
+        self.calls = calls
+        self.responses = responses
 
     def __call__(self, user_prompt: str) -> str:
         self.calls.append((self._system, user_prompt))
@@ -100,26 +109,32 @@ class _FakeAgent:
         )
 
 
-def _fake_agent_factory(responses: list[str] | None = None) -> Callable[..., _FakeAgent]:
-    """Build a fake ``Agent`` constructor with its own private call/response state.
+class _FakeAgentFactory:
+    """Callable matching ``Agent(model, system_prompt=...)`` for use with ``patch()``.
 
-    Returns a callable matching ``Agent(model, system_prompt=...)`` so it can be
-    swapped in via ``patch()``. Every ``_FakeAgent`` instance it constructs
-    shares this factory's ``calls``/``responses`` lists (also exposed as
-    attributes on the returned callable for assertions), scoped to a single
-    factory call rather than shared across the module.
+    Every ``_FakeAgent`` this factory constructs shares this instance's
+    ``calls``/``responses`` lists, so a test can hand one factory instance to
+    ``patch()`` and later inspect ``factory.calls`` -- private, instance-owned
+    state instead of class-level attributes reset by a fixture.
+
+    Preconditions:
+        responses, if provided, is a list of JSON (or deliberately malformed)
+        strings to return in call order.
+    Postconditions:
+        self.calls starts empty and gains one entry per ``_FakeAgent.__call__``
+        across every instance this factory constructs.
+        self.responses starts as a copy of the input list (empty if omitted)
+        and is consumed in order as instances are called.
     """
-    calls: list[tuple[str, str]] = []
-    pending_responses = list(responses) if responses is not None else []
 
-    def _construct(model: Any, system_prompt: str = "") -> _FakeAgent:
+    def __init__(self, responses: list[str] | None = None) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.responses: list[str] = list(responses) if responses is not None else []
+
+    def __call__(self, model: Any, system_prompt: str = "") -> _FakeAgent:
         return _FakeAgent(
-            model, system_prompt=system_prompt, calls=calls, responses=pending_responses
+            model, system_prompt=system_prompt, calls=self.calls, responses=self.responses
         )
-
-    _construct.calls = calls
-    _construct.responses = pending_responses
-    return _construct
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +143,7 @@ def _fake_agent_factory(responses: list[str] | None = None) -> Callable[..., _Fa
 
 
 def test_critic_returns_pass_on_clean_json() -> None:
-    fake_agent = _fake_agent_factory(
+    fake_agent = _FakeAgentFactory(
         responses=[
             json.dumps(
                 {
@@ -156,7 +171,7 @@ def test_critic_returns_pass_on_clean_json() -> None:
 
 
 def test_critic_surfaces_violations_and_fails() -> None:
-    fake_agent = _fake_agent_factory(
+    fake_agent = _FakeAgentFactory(
         responses=[
             json.dumps(
                 {
@@ -203,7 +218,7 @@ def test_critic_surfaces_violations_and_fails() -> None:
 
 def test_critic_approved_invariant_enforced() -> None:
     """approved must equal (status == PASS) regardless of what the LLM returned."""
-    fake_agent = _fake_agent_factory(
+    fake_agent = _FakeAgentFactory(
         responses=[
             json.dumps(
                 {
@@ -234,7 +249,7 @@ def test_critic_approved_invariant_enforced() -> None:
 
 
 def test_critic_parse_failure_falls_back_to_fail() -> None:
-    fake_agent = _fake_agent_factory(responses=["not json at all", "also not json"])
+    fake_agent = _FakeAgentFactory(responses=["not json at all", "also not json"])
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
     with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
         report = critic.run(
@@ -249,7 +264,7 @@ def test_critic_parse_failure_falls_back_to_fail() -> None:
 
 
 def test_critic_persists_report_to_work_dir(tmp_path) -> None:
-    fake_agent = _fake_agent_factory(
+    fake_agent = _FakeAgentFactory(
         responses=[
             json.dumps(
                 {
