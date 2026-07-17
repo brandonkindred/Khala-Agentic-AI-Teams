@@ -342,6 +342,24 @@ def test_v2_extract_plan_keywords_all_caps_heading_does_not_admit_stopwords() ->
     assert "ai" in kws
 
 
+def test_v2_extract_plan_keywords_includes_hardware_and_networking_terms() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="GPU vs CPU for inference",
+        sections=[SimpleNamespace(title="DNS and SSH basics", order=0)],
+    )
+    kws = _extract_plan_keywords(plan)
+    assert "gpu" in kws
+    assert "cpu" in kws
+    assert "dns" in kws
+    assert "ssh" in kws
+
+
 def test_v2_extract_plan_keywords_drops_ordinary_short_words_below_length_floor() -> None:
     from types import SimpleNamespace
 

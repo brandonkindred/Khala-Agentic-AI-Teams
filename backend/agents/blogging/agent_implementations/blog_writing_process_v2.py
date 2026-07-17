@@ -558,7 +558,10 @@ _PLAN_KEYWORD_STOPWORDS = frozenset(
 # plan text doesn't reliably capitalize real acronyms ("api" or "Api" are as
 # likely as "API"), and conversely an all-caps heading doesn't mean every word
 # in it is an acronym (a heading like "HOW TO USE AI" is not three acronyms
-# and a stopword) -- casing is wrong as a signal in both directions.
+# and a stopword) -- casing is wrong as a signal in both directions. This list
+# is necessarily incomplete (there's no bounded, casing-independent way to
+# recognize *every* short technical term without reintroducing the false
+# positives above); it covers common terms and can grow as real gaps surface.
 _PLAN_KEYWORD_SHORT_TERMS = frozenset(
     {
         "ai",
@@ -595,6 +598,10 @@ _PLAN_KEYWORD_SHORT_TERMS = frozenset(
         "b2b",
         "b2c",
         "saas",
+        "gpu",
+        "cpu",
+        "dns",
+        "ssh",
         "html",
         "http",
         "https",
