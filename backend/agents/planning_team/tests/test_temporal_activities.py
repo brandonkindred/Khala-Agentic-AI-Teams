@@ -358,6 +358,39 @@ def test_non_final_attempt_does_not_mark_failed(monkeypatch, job_store):
     assert job_store["failed"] == []
 
 
+def test_finalize_activity_sources_questions_from_job_not_handoff(monkeypatch, job_store):
+    """record_planning_run must receive the real open_questions/resolved_questions
+    from the job record's own top-level fields (persisted by
+    document_production_activity), not handoff_package's deliberately empty copies."""
+    real_open_questions = [{"id": "q1", "question_text": "Scope?"}]
+    real_resolved_questions = [{"question_id": "q0", "selected_option_id": "o1"}]
+    job_store["jobs"]["job-3"] = {
+        "handoff_package": {
+            "summary": "hp",
+            "client_context": {"client_name": "Acme"},
+            "open_questions": [],
+            "resolved_questions": [],
+        },
+        "open_questions": real_open_questions,
+        "resolved_questions": real_resolved_questions,
+    }
+
+    record_calls = []
+    monkeypatch.setattr(
+        "planning_team.postgres.writer.record_planning_run",
+        lambda job_id, **kw: record_calls.append((job_id, kw)),
+    )
+
+    result = A.finalize_planning_activity("job-3", {"repo_path": "/x"})
+
+    assert result == {"success": True, "summary": "Planning completed; handoff package ready."}
+    assert len(record_calls) == 1
+    _, kwargs = record_calls[0]
+    assert kwargs["client_name"] == "Acme"
+    assert kwargs["open_questions"] == real_open_questions
+    assert kwargs["resolved_questions"] == real_resolved_questions
+
+
 # --------------------------------------------------------------------------- #
 # Parity: the activity sequence == the in-process orchestrator
 # --------------------------------------------------------------------------- #
@@ -406,6 +439,16 @@ def test_activity_sequence_matches_orchestrator_handoff(tmp_path, monkeypatch, j
     # open_questions, so this empty handoff is deliberately preserved).
     assert act_handoff["open_questions"] == orch_result["handoff_package"]["open_questions"]
     assert act_handoff["resolved_questions"] == orch_result["handoff_package"]["resolved_questions"]
+    # The *actual* questions — sourced separately from the deliberately-empty
+    # handoff copies above — must also stay identical across both paths: the
+    # job record's top-level fields (Temporal) vs result's top-level keys
+    # (thread), both non-empty here since the fake LLM always emits a question.
+    act_job = job_store["jobs"]["job-1"]
+    assert act_job["open_questions"] == orch_result["open_questions"]
+    assert act_job["resolved_questions"] == orch_result["resolved_questions"]
+    assert act_job["open_questions"], (
+        "expected the fake LLM's question to survive to the job record"
+    )
 
 
 def test_activity_sequence_matches_orchestrator_handoff_with_pra_and_mr(

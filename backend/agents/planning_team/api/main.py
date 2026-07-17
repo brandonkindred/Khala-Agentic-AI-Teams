@@ -169,8 +169,11 @@ def run_workflow_background(
                     client_name=client_name,
                     summary=result.get("summary") or "",
                     handoff_summary=_handoff_field(handoff_package, "summary") or "",
-                    open_questions=_handoff_field(handoff_package, "open_questions") or [],
-                    resolved_questions=_handoff_field(handoff_package, "resolved_questions") or [],
+                    # Sourced from result, not handoff_package: the handoff's own
+                    # open_questions/resolved_questions are deliberately left empty
+                    # (see orchestrator.py) so downstream SE gating isn't tripped.
+                    open_questions=result.get("open_questions") or [],
+                    resolved_questions=result.get("resolved_questions") or [],
                 )
             except Exception:
                 # Belt-and-braces on top of record_planning_run's own internal guard: this

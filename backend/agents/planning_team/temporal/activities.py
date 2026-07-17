@@ -351,7 +351,11 @@ def document_production_activity(
           poll is not mistaken for a stalled worker. Persists the handoff (which
           carries the full spec/PRD content) to the durable job store and returns a
           *slim* ``{repo_path}`` result, so the large handoff never crosses a
-          Temporal activity boundary / blob limit.
+          Temporal activity boundary / blob limit. Also persists the actual
+          ``open_questions``/``resolved_questions`` as their own top-level job
+          fields (separate from the deliberately-empty copies inside the
+          handoff) so ``finalize_planning_activity``'s audit write has a real
+          source for them.
         - PRA clarification questions are auto-answered with defaults (parity with
           the current HTTP Temporal path: no user ``answer_callback``); the
           architecture step is not run here (it is a gated non-HTTP feature).
@@ -398,9 +402,18 @@ def document_production_activity(
             # payload limit; returning it as an activity result would strand the job
             # (files already written, but the workflow can't advance to finalize).
             # So the handoff never crosses a Temporal boundary — only the job store.
+            # open_questions/resolved_questions are ALSO persisted as their own
+            # top-level job fields (separate from the deliberately-empty copies
+            # inside handoff above) so finalize_planning_activity's audit write
+            # can read the actual discovery questions.
             from planning_team.shared.job_store import update_job
 
-            update_job(job_id, handoff_package=handoff)
+            update_job(
+                job_id,
+                handoff_package=handoff,
+                open_questions=list(merged.get("open_questions") or []),
+                resolved_questions=list(merged.get("resolved_questions") or []),
+            )
         # Slim result: downstream phases read only repo_path; the handoff lives in
         # the job store from here on.
         return {"repo_path": merged.get("repo_path")}
@@ -482,15 +495,20 @@ def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str
     """Finalize: mark the job completed at 100% and record a best-effort audit row.
 
     Preconditions:
-        - The ``handoff_package`` has already been persisted to the job store by
-          ``document_production_activity`` (``context`` is the slim ``{repo_path}``).
+        - The ``handoff_package`` and the actual ``open_questions``/
+          ``resolved_questions`` have already been persisted to the job store
+          by ``document_production_activity`` (``context`` is the slim
+          ``{repo_path}``).
     Postconditions:
         - Marks the job COMPLETED at 100% with a summary, WITHOUT passing
           ``handoff_package`` (a partial-update merge, so the already-persisted
           handoff is preserved, not clobbered). Returns ``{"success": True, ...}``.
           This is the sole terminal-success writer for the Temporal path.
-        - Re-reads the persisted ``handoff_package`` and best-effort records one
-          ``planning_runs`` row via ``record_planning_run``. This whole audit
+        - Re-reads the job record and best-effort records one ``planning_runs``
+          row via ``record_planning_run``, sourcing ``open_questions``/
+          ``resolved_questions`` from the job's own top-level fields rather
+          than from ``handoff_package`` (whose copies are deliberately left
+          empty — see ``document_production_activity``). This whole audit
           step — the re-read included — is wrapped in its own guard: a failure
           here (e.g. a transient job-service read error) is logged and
           swallowed rather than propagating into ``_guarded``, which would
@@ -519,8 +537,12 @@ def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str
                 client_name=client_name,
                 summary=summary,
                 handoff_summary=handoff.get("summary") or "",
-                open_questions=handoff.get("open_questions") or [],
-                resolved_questions=handoff.get("resolved_questions") or [],
+                # Sourced from the job record's own top-level fields, not from
+                # handoff: handoff's copies are deliberately left empty (see
+                # document_production_activity) so downstream SE gating isn't
+                # tripped.
+                open_questions=job.get("open_questions") or [],
+                resolved_questions=job.get("resolved_questions") or [],
             )
         except Exception:
             logger.debug("planning_runs audit enrichment failed for job %s", job_id, exc_info=True)

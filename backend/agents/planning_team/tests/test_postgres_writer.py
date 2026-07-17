@@ -183,6 +183,54 @@ def test_run_workflow_background_survives_audit_write_failure(monkeypatch) -> No
     assert failed_calls == []
 
 
+def test_run_workflow_background_sources_questions_from_result_not_handoff(monkeypatch) -> None:
+    """record_planning_run must receive the real open_questions/resolved_questions
+    from result, not handoff_package's own (deliberately empty) copies of those
+    same-named fields."""
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+
+    import planning_team.api.main as main_module
+
+    real_open_questions = [{"id": "q1", "question_text": "Scope?"}]
+    real_resolved_questions = [{"question_id": "q0", "selected_option_id": "o1"}]
+    fake_result = {
+        "success": True,
+        "handoff_package": {
+            "summary": "hp",
+            # Deliberately empty, mirroring orchestrator.py's real behavior.
+            "open_questions": [],
+            "resolved_questions": [],
+        },
+        "summary": "Planning completed; handoff package ready.",
+        "open_questions": real_open_questions,
+        "resolved_questions": real_resolved_questions,
+    }
+
+    monkeypatch.setattr(main_module, "run_workflow", lambda **kw: fake_result)
+    monkeypatch.setattr(main_module, "_get_llm", lambda: object())
+    monkeypatch.setattr(main_module, "update_job", lambda job_id, **fields: None)
+    monkeypatch.setattr(main_module, "mark_job_completed", lambda job_id, **fields: None)
+    monkeypatch.setattr(
+        main_module, "mark_job_failed", lambda job_id, error: pytest.fail(f"unexpected: {error}")
+    )
+
+    record_calls = []
+    monkeypatch.setattr(
+        main_module,
+        "record_planning_run",
+        lambda job_id, **kw: record_calls.append((job_id, kw)),
+    )
+
+    main_module.run_workflow_background(
+        "job-thread-3", "/repo", "Acme", "brief", None, False, False
+    )
+
+    assert len(record_calls) == 1
+    _, kwargs = record_calls[0]
+    assert kwargs["open_questions"] == real_open_questions
+    assert kwargs["resolved_questions"] == real_resolved_questions
+
+
 # ---------------------------------------------------------------------------
 # Live-Postgres tests.
 # ---------------------------------------------------------------------------
