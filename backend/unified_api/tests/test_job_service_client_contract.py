@@ -367,6 +367,114 @@ def test_real_client_retries_on_write_error(monkeypatch: pytest.MonkeyPatch) -> 
     assert calls["n"] == 2  # one failure + one successful retry
 
 
+# ---------------------------------------------------------------------------
+# delete_job — retry-after-commit must not report a false "not found"
+# ---------------------------------------------------------------------------
+
+
+def test_real_client_delete_job_true_when_deleted_directly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No transient error at all: the server reports ``deleted: true`` and
+    ``delete_job`` returns it as-is on the first attempt."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={"deleted": True})
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    assert client.delete_job("j1") is True
+    assert calls["n"] == 1
+
+
+def test_real_client_delete_job_false_when_not_found_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine not-found delete (no transient error, so no retry ambiguity)
+    still reports ``deleted: false`` — no behavior change for this case."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={"deleted": False})
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    assert client.delete_job("j1") is False
+    assert calls["n"] == 1
+
+
+def test_real_client_delete_job_true_when_retry_follows_lost_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bug this guards against: attempt 1's DELETE reaches the server and
+    commits the row deletion, but the response is lost to a ``ReadError``
+    (stale keep-alive reset). ``_request`` retries the idempotent DELETE;
+    attempt 2 correctly finds no row and answers ``deleted: false``. Because
+    an earlier attempt may have already reached the server, ``delete_job``
+    must report this as success, not a spurious not-found."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    monkeypatch.setattr("job_service_client.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadError("[Errno 104] Connection reset by peer")
+        return httpx.Response(200, json={"deleted": False})
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    assert client.delete_job("j1") is True
+    assert calls["n"] == 2  # one lost-response failure + one successful retry
+
+
+def test_real_client_delete_job_false_when_connect_error_then_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ConnectError`` proves the first attempt never reached the server at
+    all, so a subsequent ``deleted: false`` is unambiguous and must NOT be
+    upgraded to success — this pins that the fix doesn't overreach beyond the
+    ``_RETRY_IDEMPOTENT_ONLY_ERRORS`` class."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    monkeypatch.setattr("job_service_client.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("connection refused")
+        return httpx.Response(200, json={"deleted": False})
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    assert client.delete_job("j1") is False
+    assert calls["n"] == 2  # one connect failure + one successful retry
+
+
+def test_real_client_delete_job_reraises_when_retries_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When every attempt hits the connection reset, ``delete_job`` still lets
+    ``ReadError`` propagate after the retry budget — the ambiguity tracker
+    never masks a final, real failure."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    monkeypatch.setattr("job_service_client.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ReadError("[Errno 104] Connection reset by peer")
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    with pytest.raises(httpx.ReadError):
+        client.delete_job("j1")
+    assert calls["n"] == 4  # max_retries (3) + 1 initial attempt
+
+
 def test_real_client_mark_all_active_jobs_failed_hits_bulk_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
