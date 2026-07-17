@@ -119,3 +119,11 @@ class CopyEditorOutput(GateReport):
         default_factory=list,
         description="Detailed feedback items: each explains what is wrong, why it matters, and how to fix it.",
     )
+    feedback_file_written: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Outcome of the best-effort feedback-file write requested via run()'s "
+            "feedback_output_path: None when no path was given (write never attempted), "
+            "True/False when a write was attempted and succeeded/failed."
+        ),
+    )
