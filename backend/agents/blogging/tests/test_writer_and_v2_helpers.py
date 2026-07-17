@@ -209,6 +209,29 @@ def test_v2_extract_plan_keywords_drops_long_stopwords() -> None:
     assert "favourite" in kws
 
 
+def test_v2_extract_plan_keywords_drops_short_pronouns() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="We asked us if my team could help me",
+        sections=[],
+    )
+    kws = _extract_plan_keywords(plan)
+    # First/third-person pronouns are short (<4 chars) but survive the pure
+    # length floor, so they must be dropped via the stopword list explicitly
+    # to avoid spurious story-bank matches on words like "we" or "my".
+    assert "we" not in kws
+    assert "us" not in kws
+    assert "my" not in kws
+    assert "me" not in kws
+    assert "team" in kws
+    assert "help" in kws
+
+
 def test_v2_extract_plan_keywords_handles_empty() -> None:
     from agents.blogging.agent_implementations.blog_writing_process_v2 import (
         _extract_plan_keywords,

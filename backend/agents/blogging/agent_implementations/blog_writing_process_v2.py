@@ -533,6 +533,16 @@ _PLAN_KEYWORD_STOPWORDS = frozenset(
         "using",
         "use",
         "used",
+        "i",
+        "we",
+        "us",
+        "my",
+        "me",
+        "he",
+        "she",
+        "him",
+        "they",
+        "them",
     }
 )
 
