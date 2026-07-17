@@ -28,7 +28,7 @@ import { InlineBannerComponent } from '../../../shared/inline-banner/inline-bann
 /**
  * Presentational block of pre-existing-bug issue proposals for one review run.
  * Owns its own selection state (`selectedProposalIds`) and emits user intent to
- * the parent `CodeReviewPanelComponent` via `createIssuesRequested`; it never
+ * the parent `CodeReviewDashboardComponent` via `createIssuesRequested`; it never
  * calls the GitHub API or mutates its inputs itself. OnPush — the parent feeds
  * it a fresh `proposals` reference once issues are filed.
  */
