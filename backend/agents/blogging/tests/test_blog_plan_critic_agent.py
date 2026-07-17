@@ -8,10 +8,9 @@ an integration test that runs the critic inside BlogPlanningAgent.run.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 from unittest.mock import patch
 
-import pytest
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent, PlanCriticReport
 from agents.blogging.blog_plan_critic_agent.agent import build_refine_feedback_from_critic
 from agents.blogging.blog_planning_agent import BlogPlanningAgent
@@ -68,19 +67,28 @@ def _minimal_plan(topic: str = "A stance about X that readers should adopt") -> 
 class _FakeAgent:
     """Drop-in replacement for strands.Agent that returns a canned response.
 
-    Tracks every call so tests can assert how many critic passes ran.
+    Records every call into ``self.calls`` and pops replies off
+    ``self.responses``. Both are instance attributes -- construct via
+    ``_fake_agent_factory`` so each test gets its own private state instead of
+    sharing mutable state across tests.
     """
 
-    calls: list[tuple[str, str]] = []
-    responses: list[str] = []
-
-    def __init__(self, model: Any, system_prompt: str = "") -> None:
+    def __init__(
+        self,
+        model: Any,
+        system_prompt: str = "",
+        *,
+        calls: list[tuple[str, str]] | None = None,
+        responses: list[str] | None = None,
+    ) -> None:
         self._system = system_prompt
+        self.calls = calls if calls is not None else []
+        self.responses = responses if responses is not None else []
 
     def __call__(self, user_prompt: str) -> str:
-        _FakeAgent.calls.append((self._system, user_prompt))
-        if _FakeAgent.responses:
-            return _FakeAgent.responses.pop(0)
+        self.calls.append((self._system, user_prompt))
+        if self.responses:
+            return self.responses.pop(0)
         return json.dumps(
             {
                 "status": "PASS",
@@ -92,13 +100,26 @@ class _FakeAgent:
         )
 
 
-@pytest.fixture(autouse=True)
-def _reset_fake_agent():
-    _FakeAgent.calls = []
-    _FakeAgent.responses = []
-    yield
-    _FakeAgent.calls = []
-    _FakeAgent.responses = []
+def _fake_agent_factory(responses: list[str] | None = None) -> Callable[..., _FakeAgent]:
+    """Build a fake ``Agent`` constructor with its own private call/response state.
+
+    Returns a callable matching ``Agent(model, system_prompt=...)`` so it can be
+    swapped in via ``patch()``. Every ``_FakeAgent`` instance it constructs
+    shares this factory's ``calls``/``responses`` lists (also exposed as
+    attributes on the returned callable for assertions), scoped to a single
+    factory call rather than shared across the module.
+    """
+    calls: list[tuple[str, str]] = []
+    pending_responses = list(responses) if responses is not None else []
+
+    def _construct(model: Any, system_prompt: str = "") -> _FakeAgent:
+        return _FakeAgent(
+            model, system_prompt=system_prompt, calls=calls, responses=pending_responses
+        )
+
+    _construct.calls = calls
+    _construct.responses = pending_responses
+    return _construct
 
 
 # ---------------------------------------------------------------------------
@@ -107,19 +128,21 @@ def _reset_fake_agent():
 
 
 def test_critic_returns_pass_on_clean_json() -> None:
-    _FakeAgent.responses = [
-        json.dumps(
-            {
-                "status": "PASS",
-                "approved": True,
-                "violations": [],
-                "notes": "Plan looks good.",
-                "rubric_version": "v1",
-            }
-        )
-    ]
+    fake_agent = _fake_agent_factory(
+        responses=[
+            json.dumps(
+                {
+                    "status": "PASS",
+                    "approved": True,
+                    "violations": [],
+                    "notes": "Plan looks good.",
+                    "rubric_version": "v1",
+                }
+            )
+        ]
+    )
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _FakeAgent):
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="Brand spec text.",
@@ -129,39 +152,41 @@ def test_critic_returns_pass_on_clean_json() -> None:
     assert report.status == "PASS"
     assert report.approved is True
     assert report.violations == []
-    assert len(_FakeAgent.calls) == 1
+    assert len(fake_agent.calls) == 1
 
 
 def test_critic_surfaces_violations_and_fails() -> None:
-    _FakeAgent.responses = [
-        json.dumps(
-            {
-                "status": "FAIL",
-                "approved": False,
-                "violations": [
-                    {
-                        "rule_id": "overarching_topic.stance_not_label",
-                        "severity": "must_fix",
-                        "section": "overall",
-                        "evidence_quote": "A guide to caching",
-                        "description": "Topic is a label, not a stance.",
-                        "suggested_fix": "Rewrite as a stance.",
-                    },
-                    {
-                        "rule_id": "section.key_points.specificity",
-                        "severity": "must_fix",
-                        "section": "Introduction",
-                        "evidence_quote": "Discuss scaling",
-                        "description": "Vague key point.",
-                        "suggested_fix": "Replace with a specific claim.",
-                    },
-                ],
-                "rubric_version": "v1",
-            }
-        )
-    ]
+    fake_agent = _fake_agent_factory(
+        responses=[
+            json.dumps(
+                {
+                    "status": "FAIL",
+                    "approved": False,
+                    "violations": [
+                        {
+                            "rule_id": "overarching_topic.stance_not_label",
+                            "severity": "must_fix",
+                            "section": "overall",
+                            "evidence_quote": "A guide to caching",
+                            "description": "Topic is a label, not a stance.",
+                            "suggested_fix": "Rewrite as a stance.",
+                        },
+                        {
+                            "rule_id": "section.key_points.specificity",
+                            "severity": "must_fix",
+                            "section": "Introduction",
+                            "evidence_quote": "Discuss scaling",
+                            "description": "Vague key point.",
+                            "suggested_fix": "Replace with a specific claim.",
+                        },
+                    ],
+                    "rubric_version": "v1",
+                }
+            )
+        ]
+    )
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _FakeAgent):
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="Brand spec text.",
@@ -178,25 +203,27 @@ def test_critic_surfaces_violations_and_fails() -> None:
 
 def test_critic_approved_invariant_enforced() -> None:
     """approved must equal (status == PASS) regardless of what the LLM returned."""
-    _FakeAgent.responses = [
-        json.dumps(
-            {
-                "status": "FAIL",
-                "approved": True,  # inconsistent with status; critic should fix
-                "violations": [
-                    {
-                        "rule_id": "x",
-                        "severity": "must_fix",
-                        "description": "y",
-                        "suggested_fix": "z",
-                    }
-                ],
-                "rubric_version": "v1",
-            }
-        )
-    ]
+    fake_agent = _fake_agent_factory(
+        responses=[
+            json.dumps(
+                {
+                    "status": "FAIL",
+                    "approved": True,  # inconsistent with status; critic should fix
+                    "violations": [
+                        {
+                            "rule_id": "x",
+                            "severity": "must_fix",
+                            "description": "y",
+                            "suggested_fix": "z",
+                        }
+                    ],
+                    "rubric_version": "v1",
+                }
+            )
+        ]
+    )
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _FakeAgent):
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="b",
@@ -207,9 +234,9 @@ def test_critic_approved_invariant_enforced() -> None:
 
 
 def test_critic_parse_failure_falls_back_to_fail() -> None:
-    _FakeAgent.responses = ["not json at all", "also not json"]
+    fake_agent = _fake_agent_factory(responses=["not json at all", "also not json"])
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _FakeAgent):
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
         report = critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="b",
@@ -222,18 +249,20 @@ def test_critic_parse_failure_falls_back_to_fail() -> None:
 
 
 def test_critic_persists_report_to_work_dir(tmp_path) -> None:
-    _FakeAgent.responses = [
-        json.dumps(
-            {
-                "status": "PASS",
-                "approved": True,
-                "violations": [],
-                "rubric_version": "v1",
-            }
-        )
-    ]
+    fake_agent = _fake_agent_factory(
+        responses=[
+            json.dumps(
+                {
+                    "status": "PASS",
+                    "approved": True,
+                    "violations": [],
+                    "rubric_version": "v1",
+                }
+            )
+        ]
+    )
     critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
-    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _FakeAgent):
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
         critic.run(
             plan=_minimal_plan(),
             brand_spec_prompt="b",
