@@ -15,6 +15,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 import pytest
+from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE
 from code_review_agent.coordinator import (
     MIN_SPLIT_SEGMENT_CHARS,
     _issues_from_chunk_output,
@@ -968,8 +969,10 @@ def test_failing_multi_segment_chunk_bisects_and_recovers() -> None:
         ),
     )
     # combined fail + two single-file successes + 1 reduce-phase synthesis pass
-    # (two recovered sub-reviews → one findings-only synthesis call).
-    assert client.calls == 4
+    # (two recovered sub-reviews → one findings-only synthesis call) + 1
+    # side-effect/blast-radius pass call (its single prompt also inlines both
+    # files together, so it hits the same synthetic failure and fails safe).
+    assert client.calls == 5
     assert result.approved is True
     assert all(i.severity != "info" for i in result.issues)
 
@@ -987,7 +990,9 @@ def test_transient_failure_recovers_via_same_input_retry() -> None:
         ),
     )
     assert result.approved is True
-    assert len(client.prompts) == 2  # initial failure + successful retry
+    # initial failure + successful retry + 1 side-effect/blast-radius pass call
+    # (additive, runs once per submission after the map phase completes).
+    assert len(client.prompts) == 3
 
 
 def test_transient_failure_in_bisected_child_recovers() -> None:
@@ -1021,8 +1026,11 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
     )
     assert result.approved is True
     # combined fail + a fail + a retry success + b success
-    # + 1 reduce-phase synthesis pass (two recovered sub-reviews).
-    assert client.calls == 5
+    # + 1 reduce-phase synthesis pass (two recovered sub-reviews)
+    # + 1 side-effect/blast-radius pass call (its single prompt also inlines
+    # both files together, so it hits the same combined-fail branch and fails
+    # safe).
+    assert client.calls == 6
 
 
 def test_semantic_exhaustion_single_file_degrades_without_bisect_or_retry() -> None:
@@ -1141,7 +1149,9 @@ def test_semantic_exhaustion_without_ladder_still_gets_same_input_retry() -> Non
         ),
     )
     assert result.approved is True
-    assert client.calls == 2  # initial no-ladder exhaustion + successful same-input retry
+    # initial no-ladder exhaustion + successful same-input retry + 1
+    # side-effect/blast-radius pass call (additive, runs once per submission).
+    assert client.calls == 3
 
 
 def test_context_chained_child_failure_is_not_misclassified_as_semantic() -> None:
@@ -2352,8 +2362,9 @@ def test_language_is_threaded_into_every_chunk_prompt() -> None:
             language="python",
         ),
     )
-    assert client.prompts
-    assert all("**Language:** python" in p for p in client.prompts)
+    chunk_prompts = [p for p in client.prompts if CHUNK_REVIEW_NOTE in p]
+    assert chunk_prompts
+    assert all("**Language:** python" in p for p in chunk_prompts)
 
 
 def test_user_decisions_thread_through_coordinator_to_chunk_prompt() -> None:
@@ -2378,8 +2389,9 @@ def test_user_decisions_thread_through_coordinator_to_chunk_prompt() -> None:
             user_decisions=["Which timeout? → 30s"],
         ),
     )
-    assert client.prompts
-    assert all("Which timeout? → 30s" in p for p in client.prompts)
+    chunk_prompts = [p for p in client.prompts if CHUNK_REVIEW_NOTE in p]
+    assert chunk_prompts
+    assert all("Which timeout? → 30s" in p for p in chunk_prompts)
 
 
 # ---------------------------------------------------------------------------

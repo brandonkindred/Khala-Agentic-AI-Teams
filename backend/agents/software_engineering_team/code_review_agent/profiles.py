@@ -102,7 +102,7 @@ _SHARED_OUTPUT_SECTION = (
     '- "approved": boolean (true ONLY if there are no critical or high issues; be strict)\n'
     '- "issues": list of objects, each with:\n'
     '  - "severity": "critical" | "high" | "medium" | "low" | "info"\n'
-    '  - "category": "naming" | "structure" | "logic" | "spec-compliance" | "standards" | "integration" | "testing" | "architecture" | "refactor" | "maintainability"\n'
+    '  - "category": "naming" | "structure" | "logic" | "spec-compliance" | "standards" | "integration" | "testing" | "architecture" | "refactor" | "maintainability" | "side-effects"\n'
     '  - "file_path": string (which file has the issue)\n'
     '  - "line": integer (1-based line number in the NEW version of file_path where the issue is). '
     'When the code is presented with line-number prefixes (e.g. `123: <code>`), set "line" to '
@@ -263,7 +263,20 @@ _CODE_REVIEW_CRITERIA = (
     "   - Functions/classes doing more than one job, making future changes riskier\n"
     "   - Default severity is medium/low; escalate only when the maintainability problem is "
     "already causing a concrete defect (e.g. hidden state that produces incorrect behavior), not "
-    "for a design preference alone."
+    "for a design preference alone.\n\n"
+    "12. **Behavior & Side-Effect Impact** - Does this change alter what the enclosing "
+    "function/method DOES, beyond the touched lines themselves?\n"
+    "   - Compare the enclosing function's new behavior to what it appears to have promised "
+    "before: its return value/type, exceptions it can now raise (or no longer raises), side "
+    "effects (writes, network calls, mutation of shared/passed-in state), or ordering/timing "
+    "guarantees.\n"
+    "   - If the behavior changed, is that documented (docstring/DbC postcondition updated, "
+    "comment, changelog)? An undocumented behavior change is itself a finding, even if the "
+    "change is intentional and correct.\n"
+    "   - You cannot see this function's callers from this chunk alone -- do NOT guess whether a "
+    "change is safe for them. Flag the behavior change itself (what changed, old vs new) so the "
+    "whole-repository pass can verify caller impact; do not suppress it merely because you "
+    "cannot see who calls it."
 )
 
 _SPEC_CONFORMANCE_CRITERIA = (

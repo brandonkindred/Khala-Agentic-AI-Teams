@@ -13,6 +13,9 @@ phase, with independent retries and resumability:
 - :func:`find_architecture_and_redundancy_activity` — once-per-submission
   architecture-consistency / cross-codebase-redundancy pass (wraps
   ``architecture_consistency_pass.find_architecture_and_redundancy_issues``).
+- :func:`find_side_effect_impact_activity` — once-per-submission side-effect /
+  blast-radius pass (wraps
+  ``side_effect_impact_pass.find_side_effect_impact_issues``).
 - :func:`finalize_review_activity` — deterministic reduce gate: dedupe +
   approval reconciliation (wraps ``coordinator._dedupe_issues`` /
   ``_reconcile_approval``).
@@ -277,6 +280,40 @@ def find_architecture_and_redundancy_activity(
     input_data = CodeReviewInput.model_validate(review_input)
     llm = _resolve_llm()
     findings = find_architecture_and_redundancy_issues(llm, input_data, repo_reader=None)
+    return [i.model_dump(mode="json") for i in findings]
+
+
+@activity.defn(name="code_review_side_effect_impact")
+def find_side_effect_impact_activity(
+    review_input: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Once-per-submission side-effect / blast-radius pass.
+
+    Preconditions:
+        - ``review_input`` is a ``CodeReviewInput.model_dump(mode="json")`` dict
+          (the same one every other activity in this module reconstructs from).
+
+    Postconditions:
+        - Returns zero or more NEW ``CodeReviewIssue`` dicts (category
+          ``"side-effects"``); never mutates or removes any finding from the
+          caller's perspective — this activity is purely additive, mirroring
+          ``find_side_effect_impact_issues``'s own contract. ``repo_reader`` is
+          not available across the Temporal boundary (same limitation as
+          ``find_architecture_and_redundancy_activity``), so this pass can find
+          callers only within the submission's own files plus the
+          ``existing_codebase`` excerpt via ``search_codebase`` — the
+          ``search_repository`` tool has nothing to search without a reader.
+        - Never raises: the wrapped function is itself fail-safe (disabled via
+          env, wrong profile, or any setup/LLM failure all degrade to an empty
+          list), so an activity failure here would only ever be an unexpected
+          defect, not an expected outcome.
+    """
+    from ..models import CodeReviewInput
+    from ..side_effect_impact_pass import find_side_effect_impact_issues
+
+    input_data = CodeReviewInput.model_validate(review_input)
+    llm = _resolve_llm()
+    findings = find_side_effect_impact_issues(llm, input_data, repo_reader=None)
     return [i.model_dump(mode="json") for i in findings]
 
 

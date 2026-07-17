@@ -528,8 +528,9 @@ def test_dispatch_unavailable_is_distinct_from_review_failure() -> None:
 
 def test_workflow_and_activities_are_registered() -> None:
     assert CodeReviewWorkflow in WORKFLOWS
-    assert len(ACTIVITIES) == 6
+    assert len(ACTIVITIES) == 7
     names = {getattr(a, "__name__", "") for a in ACTIVITIES}
     assert "review_chunk_activity" in names
     assert "prepare_review_activity" in names
     assert "find_architecture_and_redundancy_activity" in names
+    assert "find_side_effect_impact_activity" in names

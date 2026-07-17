@@ -8,7 +8,10 @@ chunk reviewer saw only a slice, and confirmed false positives are dropped — s
 ``false_positive_filter``) → architecture-consistency / cross-codebase-redundancy
 pass (a single additive, whole-repository check for architecture contradictions
 and duplicated capabilities the per-chunk view cannot see — see
-``architecture_consistency_pass``) → deterministic merge (dedupe, severity gate,
+``architecture_consistency_pass``) → side-effect / blast-radius pass (a single
+additive, whole-repository check for behavior changes that break a caller
+elsewhere in the codebase, or ship undocumented — see
+``side_effect_impact_pass``) → deterministic merge (dedupe, severity gate,
 safety nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
 code regardless of input size, and no input file is ever silently dropped:
 empty files are named by info findings, and a chunk that cannot be reviewed
@@ -141,6 +144,7 @@ from .models import (
     notify_review_progress,
 )
 from .repo_reader import RepoReader
+from .side_effect_impact_pass import find_side_effect_impact_issues
 from .synthesis import synthesize_review_findings
 
 logger = logging.getLogger(__name__)
@@ -603,6 +607,19 @@ def run_coordinator(
     )
     if architecture_findings:
         verified = [*verified, *architecture_findings]
+
+    # Side-effect / blast-radius pass: a separate, additive, once-per-submission check
+    # for whether a changed function/method's new behavior breaks a caller elsewhere in
+    # the codebase, or ships with no documentation update -- something the per-chunk map
+    # phase cannot verify (it has no tools to find callers) and neither the false-positive
+    # filter nor the architecture pass checks. Runs after the architecture pass and folds
+    # into the same dedupe/severity-gate/merge machinery below. (Restricted internally to
+    # the default CODE_REVIEW profile -- see that function's own docstring for why.)
+    side_effect_findings = find_side_effect_impact_issues(
+        llm, input_data, repo_reader=repo_reader, index=shared_index
+    )
+    if side_effect_findings:
+        verified = [*verified, *side_effect_findings]
 
     notify_review_progress(
         progress_callback,

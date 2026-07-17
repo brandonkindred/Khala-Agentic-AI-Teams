@@ -746,6 +746,29 @@ Default `40000`, floor `2000` — generous relative to the per-chunk
 `CODE_REVIEW_ARCH_OVERVIEW_CHARS` excerpt because this pass pays its cost once
 per submission, not once per chunk.
 
+### CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS
+Default-on toggle for the side-effect / blast-radius pass. After the
+architecture-consistency pass runs, this pass makes exactly one additional LLM
+call for the whole submission (never once per chunk) with read access to the
+rest of the repository (the same `read_file`/`list_files`/`search_codebase`/
+`find_function_at_line` tools the false-positive filter and architecture pass
+use, plus a new `search_repository` tool that searches the REST of the
+repository — beyond the submission — for a substring, since finding a changed
+function's callers outside the diff is this pass's whole purpose and
+`search_codebase` is explicitly submission-only). It can only ADD findings, in
+one category: `side-effects` — a behavior change (return value, exceptions,
+side effects, ordering/timing) whose new behavior breaks a tool-verified
+caller, or a real behavior change that ships with no documentation update. It
+never removes or alters any finding the map phase, the false-positive filter,
+or the architecture pass already produced. `search_repository` requires a
+repository reader to be attached (the GitHub PR-review path and the
+software-engineering pipeline both supply one; without one, this pass can
+still find callers within the submission's own files via `search_codebase`).
+Any setup or LLM failure is fail-safe: it is logged and yields no additional
+findings, so a broken pass never blocks or changes the rest of the review. Set
+to `false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
+enabled).
+
 ---
 
 ## Shared Infrastructure and Storage

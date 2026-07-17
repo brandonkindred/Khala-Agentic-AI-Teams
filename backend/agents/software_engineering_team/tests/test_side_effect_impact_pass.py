@@ -1,0 +1,583 @@
+"""Tests for the side-effect / blast-radius pass.
+
+This pass is purely additive (it can only ADD findings on top of what the map
+phase, false-positive filter, and architecture-consistency pass already
+produced) and fail-safe (any setup or LLM failure yields no additional
+findings, never an exception). Style mirrors
+``test_architecture_consistency_pass.py``: the LLM seam is exercised with
+``DummyLLMClient`` subclasses that pattern-match on the user prompt (never the
+system prompt) so one scripted client can serve both the chunk-review call and
+this pass's call in an end-to-end ``run_coordinator`` run.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+import pytest
+from code_review_agent.coordinator import run_coordinator
+from code_review_agent.false_positive_filter import CodebaseIndex
+from code_review_agent.models import CodeReviewInput, CodeReviewIssue
+from code_review_agent.side_effect_impact_pass import (
+    _build_prompt,
+    _build_side_effect_tools,
+    _coerce_finding,
+    _is_changed_file,
+    _parse_findings,
+    _search_repository,
+    _validate_finding_line,
+    _validate_findings,
+    find_side_effect_impact_issues,
+)
+
+from llm_service.clients.dummy import DummyLLMClient
+
+# Unique anchor in this pass's user prompt (never the system prompt), distinct
+# from architecture_consistency_pass's own anchor so a DummyLLMClient subclass
+# can route between the two passes' calls without collision.
+_SIDE_EFFECT_PASS_ANCHOR = '"side-effects" findings array'
+
+
+def _input(files: Optional[Dict[str, str]] = None) -> CodeReviewInput:
+    return CodeReviewInput(
+        files=files if files is not None else {"app/main.py": "def bar():\n    return 1\n"},
+        task_description="wire up bar",
+    )
+
+
+class _FakeReader:
+    """A minimal duck-typed RepoReader over an in-memory {path: content} map."""
+
+    def __init__(self, files: Dict[str, str]):
+        self._files = files
+
+    def list_files(self):
+        return list(self._files)
+
+    def read_file(self, path: str):
+        return self._files.get((path or "").strip())
+
+
+# --------------------------------------------------------------------------- helpers
+
+
+def test_build_prompt_includes_changed_files() -> None:
+    index = CodebaseIndex.from_input(_input())
+    prompt = _build_prompt(index, max_inline_chars=100_000)
+    assert "app/main.py" in prompt
+    assert "def bar():" in prompt
+
+
+def test_build_prompt_omits_files_beyond_inline_budget() -> None:
+    file_a_content = "x" * 50
+    files = {"a.py": file_a_content, "b.py": "y" * 50}
+    index = CodebaseIndex.from_input(_input(files=files))
+    prompt = _build_prompt(index, max_inline_chars=len(file_a_content))
+    assert file_a_content in prompt  # inlined in full (fits the budget exactly)
+    assert "more changed file(s) not shown above" in prompt
+    assert "list_files()" in prompt
+
+
+def test_build_prompt_notes_mid_file_truncation() -> None:
+    files = {"a.py": "x" * 100}
+    index = CodebaseIndex.from_input(_input(files=files))
+    prompt = _build_prompt(index, max_inline_chars=30)
+    assert "Only the first 30 characters of `a.py` are shown above" in prompt
+
+
+def test_build_prompt_mentions_search_repository_tool() -> None:
+    index = CodebaseIndex.from_input(_input())
+    prompt = _build_prompt(index, max_inline_chars=100_000)
+    assert "search_repository" in prompt
+
+
+# --------------------------------------------------------------------------- repo-wide search
+
+
+def test_search_repository_returns_empty_with_no_reader() -> None:
+    index = CodebaseIndex(files={"app/main.py": "code"})
+    assert _search_repository(index, "bar") == []
+
+
+def test_search_repository_returns_empty_for_blank_query() -> None:
+    index = CodebaseIndex(
+        files={"app/main.py": "code"}, repo_reader=_FakeReader({"app/caller.py": "bar()"})
+    )
+    assert _search_repository(index, "") == []
+    assert _search_repository(index, "   ") == []
+
+
+def test_search_repository_finds_matches_in_repo_reader_files() -> None:
+    index = CodebaseIndex(
+        files={"app/main.py": "def bar():\n    return 1\n"},
+        repo_reader=_FakeReader({"app/caller.py": "from app.main import bar\n\nresult = bar()\n"}),
+    )
+    matches = _search_repository(index, "bar(")
+    assert matches == [("app/caller.py", 3, "result = bar()")]
+
+
+def test_search_repository_skips_files_already_in_the_submission() -> None:
+    """A path the repo reader also lists but that is already one of the
+    submission's own files is skipped -- it is already reachable via
+    search_codebase, so scanning it again here would be redundant work."""
+    index = CodebaseIndex(
+        files={"app/main.py": "needle here"},
+        repo_reader=_FakeReader({"app/main.py": "needle here", "app/other.py": "needle there"}),
+    )
+    matches = _search_repository(index, "needle")
+    assert matches == [("app/other.py", 1, "needle there")]
+
+
+def test_search_repository_respects_max_matches() -> None:
+    index = CodebaseIndex(
+        files={},
+        repo_reader=_FakeReader({f"f{i}.py": "needle\n" for i in range(5)}),
+    )
+    matches = _search_repository(index, "needle", max_matches=2)
+    assert len(matches) == 2
+
+
+def test_search_repository_respects_max_files_scanned() -> None:
+    index = CodebaseIndex(
+        files={},
+        repo_reader=_FakeReader({f"f{i}.py": "needle\n" for i in range(5)}),
+    )
+    matches = _search_repository(index, "needle", max_files_scanned=2)
+    assert len(matches) == 2
+
+
+def test_search_repository_fails_safe_on_reader_error() -> None:
+    class _RaisingReader:
+        def list_files(self):
+            raise RuntimeError("boom")
+
+        def read_file(self, path: str):
+            raise RuntimeError("boom")
+
+    index = CodebaseIndex(files={}, repo_reader=_RaisingReader())
+    assert _search_repository(index, "bar") == []
+
+
+def test_search_repository_skips_a_single_unreadable_file() -> None:
+    """One file raising on read must not abort the scan of the rest."""
+
+    class _PartlyRaisingReader:
+        def list_files(self):
+            return ["bad.py", "good.py"]
+
+        def read_file(self, path: str):
+            if path == "bad.py":
+                raise RuntimeError("boom")
+            return "needle\n"
+
+    index = CodebaseIndex(files={}, repo_reader=_PartlyRaisingReader())
+    matches = _search_repository(index, "needle")
+    assert matches == [("good.py", 1, "needle")]
+
+
+def test_search_repository_skips_files_the_reader_cannot_read() -> None:
+    """A path the reader lists but returns None for (fail-safe RepoReader
+    contract) is skipped rather than crashing the scan."""
+    index = CodebaseIndex(files={}, repo_reader=_FakeReader({"present.py": "needle here"}))
+    # "missing.py" is not in the reader's map, so read_file returns None for it.
+    index.repo_reader._files["missing.py"] = None
+    matches = _search_repository(index, "needle")
+    assert matches == [("present.py", 1, "needle here")]
+
+
+# --------------------------------------------------------------------------- tools
+
+
+def test_build_side_effect_tools_includes_search_repository() -> None:
+    index = CodebaseIndex(files={"app/main.py": "def bar(): pass\n"})
+    tools = _build_side_effect_tools(index)
+    names = {getattr(t, "tool_name", "") for t in tools}
+    assert names == {
+        "read_file",
+        "list_files",
+        "search_codebase",
+        "find_function_at_line",
+        "search_repository",
+    }
+
+
+def test_search_repository_tool_reports_no_reader() -> None:
+    index = CodebaseIndex(files={"app/main.py": "code"})
+    search_repository = _build_side_effect_tools(index)[-1]
+    assert "No repository access" in search_repository("bar")
+
+
+def test_search_repository_tool_reports_no_matches() -> None:
+    index = CodebaseIndex(
+        files={"app/main.py": "code"}, repo_reader=_FakeReader({"app/caller.py": "unrelated"})
+    )
+    search_repository = _build_side_effect_tools(index)[-1]
+    assert "No matches" in search_repository("bar(")
+
+
+def test_search_repository_tool_finds_matches() -> None:
+    index = CodebaseIndex(
+        files={"app/main.py": "def bar(): pass\n"},
+        repo_reader=_FakeReader({"app/caller.py": "result = bar()\n"}),
+    )
+    search_repository = _build_side_effect_tools(index)[-1]
+    assert "app/caller.py:1: result = bar()" in search_repository("bar(")
+
+
+# --------------------------------------------------------------------------- line bounds
+
+
+def test_validate_finding_line_keeps_in_range_line() -> None:
+    index = CodebaseIndex.from_input(_input(files={"a.py": "one\ntwo\nthree\n"}))
+    assert _validate_finding_line(index, "a.py", 2) == 2
+
+
+def test_validate_finding_line_drops_out_of_range_line() -> None:
+    index = CodebaseIndex.from_input(_input(files={"a.py": "one\ntwo\nthree\n"}))
+    assert _validate_finding_line(index, "a.py", 9999) is None
+
+
+def test_validate_finding_line_drops_when_file_unresolved() -> None:
+    index = CodebaseIndex.from_input(_input(files={"a.py": "one\ntwo\n"}))
+    assert _validate_finding_line(index, "does/not/exist.py", 1) is None
+
+
+def test_validate_finding_line_trusts_pre_numbered_citation_as_is() -> None:
+    index = CodebaseIndex.from_input(
+        CodeReviewInput(
+            files={"a.py": "4242: one\n4243: two\n"},
+            task_description="t",
+            pre_numbered=True,
+        )
+    )
+    assert _validate_finding_line(index, "a.py", 4242, pre_numbered=True) == 4242
+    assert _validate_finding_line(index, "a.py", None, pre_numbered=True) is None
+
+
+def test_is_changed_file_true_only_for_submission_files() -> None:
+    index = CodebaseIndex(
+        files={"app/main.py": "code"},
+        repo_reader=_FakeReader({"app/existing_helper.py": "helper code"}),
+    )
+    assert _is_changed_file(index, "app/main.py") is True
+    assert _is_changed_file(index, "app/existing_helper.py") is False
+    assert _is_changed_file(index, "") is False
+
+
+def test_validate_findings_normalizes_a_changed_file_alias_to_its_real_key() -> None:
+    """A finding anchored by a basename/suffix alias of a changed file is kept
+    AND its ``file_path`` is normalized to the submission's real key."""
+    index = CodebaseIndex(files={"app/main.py": "def bar():\n    return 1\n"})
+    finding = CodeReviewIssue(
+        category="side-effects", description="d1", file_path="main.py", line=1
+    )
+    validated = _validate_findings(index, [finding])
+    assert validated[0].file_path == "app/main.py"
+    assert validated[0].line == 1
+
+
+def test_validate_findings_blanks_file_path_anchored_outside_the_diff() -> None:
+    """A caller-impact finding that cites the OUT-OF-DIFF caller file it found
+    the break in (rather than the changed function's own file) cannot become a
+    useful PR comment -- that file is not part of the diff. Kept, but degraded
+    to a submission-wide finding."""
+    index = CodebaseIndex(
+        files={"app/bar.py": "code"},
+        repo_reader=_FakeReader({"app/caller.py": "bar()\n"}),
+    )
+    outside_diff = CodeReviewIssue(
+        category="side-effects",
+        description="app/caller.py assumes the old return shape",
+        file_path="app/caller.py",
+        line=1,
+    )
+    validated = _validate_findings(index, [outside_diff])
+    assert validated[0].file_path == ""
+    assert validated[0].line is None
+    assert validated[0].description == "app/caller.py assumes the old return shape"
+
+
+# --------------------------------------------------------------------------- parsing
+
+
+def test_coerce_finding_accepts_side_effects_category() -> None:
+    finding = _coerce_finding(
+        {
+            "severity": "high",
+            "category": "side-effects",
+            "file_path": "app/main.py",
+            "description": "bar() no longer raises ValueError; app/caller.py still catches it",
+            "suggestion": "update app/caller.py's except clause",
+        }
+    )
+    assert finding is not None
+    assert finding.category == "side-effects"
+    assert finding.severity == "high"
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "not-a-dict",
+        {"category": "architecture", "description": "wrong category for this pass"},
+        {"category": "side-effects", "description": ""},
+        {"category": "", "description": "no category at all"},
+        {
+            "category": "side-effects",
+            "description": "no behavior change found",
+            "suggestion": "No changes needed.",
+        },
+    ],
+)
+def test_coerce_finding_rejects_invalid_items(item: object) -> None:
+    assert _coerce_finding(item) is None
+
+
+def test_coerce_finding_coerces_line_and_unknown_severity() -> None:
+    finding = _coerce_finding(
+        {
+            "severity": "not-a-real-severity",
+            "category": "side-effects",
+            "description": "d",
+            "line": "42",
+        }
+    )
+    assert finding is not None
+    assert finding.severity == "medium"
+    assert finding.line == 42
+
+
+def test_parse_findings_handles_off_contract_replies() -> None:
+    assert _parse_findings("not-a-dict") == []
+    assert _parse_findings({}) == []
+    assert _parse_findings({"findings": "not-a-list"}) == []
+    parsed = _parse_findings(
+        {
+            "findings": [
+                {"category": "side-effects", "description": "real"},
+                {"category": "bogus", "description": "dropped"},
+            ]
+        }
+    )
+    assert len(parsed) == 1
+    assert parsed[0].description == "real"
+
+
+# --------------------------------------------------------------------------- gating / fail-safe
+
+
+def test_returns_empty_when_disabled_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS", "false")
+    result = find_side_effect_impact_issues(DummyLLMClient(), _input())
+    assert result == []
+
+
+def test_returns_empty_when_submission_has_no_readable_files() -> None:
+    result = find_side_effect_impact_issues(DummyLLMClient(), _input(files={"empty.py": "   "}))
+    assert result == []
+
+
+def test_fails_safe_on_llm_error() -> None:
+    class _Raiser(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            raise RuntimeError("boom")
+
+    result = find_side_effect_impact_issues(_Raiser(), _input())
+    assert result == []
+
+
+def test_fails_safe_on_unparsable_reply() -> None:
+    class _Gibberish(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return "not even a dict-shaped reply"  # type: ignore[return-value]
+
+    result = find_side_effect_impact_issues(_Gibberish(), _input())
+    assert result == []
+
+
+def test_returns_empty_for_non_code_review_profile() -> None:
+    from code_review_agent.profiles import ReviewProfile
+
+    class _FailIfAskedClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "side-effect pass should not run"
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    result = find_side_effect_impact_issues(
+        _FailIfAskedClient(),
+        CodeReviewInput(
+            files={"app/main.py": "def bar():\n    return 1\n"},
+            task_description="wire up bar",
+            profile=ReviewProfile.ACCEPTANCE,
+        ),
+    )
+    assert result == []
+
+
+# --------------------------------------------------------------------------- happy path
+
+
+def test_finds_and_returns_new_findings() -> None:
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                return {
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "description": (
+                                "bar() no longer raises ValueError on empty input; "
+                                "app/caller.py still catches it and would now hang"
+                            ),
+                            "suggestion": "update app/caller.py to handle the new return value",
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    result = find_side_effect_impact_issues(_FindingsClient(), _input())
+    assert len(result) == 1
+    assert result[0].category == "side-effects"
+    assert "app/caller.py" in result[0].description
+
+
+def test_finds_and_returns_new_findings_drops_hallucinated_line() -> None:
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                return {
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "line": 9999,
+                            "description": "behavior change",
+                            "suggestion": "fix it",
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    result = find_side_effect_impact_issues(
+        _FindingsClient(), _input(files={"app/main.py": "def bar():\n    return 1\n"})
+    )
+    assert len(result) == 1
+    assert result[0].line is None  # line 9999 doesn't exist in a 2-line file
+
+
+# --------------------------------------------------------------------------- caller-impact fixture
+
+
+def test_finds_caller_impact_across_the_repository() -> None:
+    """End-to-end: the pass is given a changed function and, via
+    ``search_repository``, an out-of-diff caller whose usage the new behavior
+    breaks. This exercises the actual reason this pass exists -- something no
+    other pass or the per-chunk map phase can do."""
+
+    caller_content = "from app.main import bar\n\ndef use_bar():\n    return bar() + 1\n"
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                assert "def bar():" in prompt  # the changed function reached the prompt
+                return {
+                    "findings": [
+                        {
+                            "severity": "critical",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "description": (
+                                "bar() now returns a string instead of an int; "
+                                "app/caller.py:4 does `bar() + 1`, which will raise TypeError"
+                            ),
+                            "suggestion": "either keep bar() returning an int, or update the caller",
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    result = find_side_effect_impact_issues(
+        _FindingsClient(),
+        _input(files={"app/main.py": "def bar():\n    return 'one'\n"}),
+        repo_reader=_FakeReader({"app/caller.py": caller_content}),
+    )
+    assert len(result) == 1
+    assert "TypeError" in result[0].description
+
+
+# --------------------------------------------------------------------------- coordinator integration
+
+
+def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
+    calls = {"side_effect_pass": 0, "chunk_review": 0}
+
+    class _CountingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                calls["side_effect_pass"] += 1
+                return {"findings": []}
+            calls["chunk_review"] += 1
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    files = {"a.py": "def a():\n    return 1\n", "b.py": "def b():\n    return 2\n"}
+    run_coordinator(_CountingClient(), CodeReviewInput(files=files))
+
+    assert calls["side_effect_pass"] == 1
+
+
+def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                return {
+                    "findings": [
+                        {
+                            "severity": "medium",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "description": "bar()'s new retry side effect is undocumented",
+                            "suggestion": "document the retry behavior in bar()'s docstring",
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    result = run_coordinator(
+        _FindingsClient(),
+        CodeReviewInput(files={"app/main.py": "def bar():\n    return 1\n"}),
+    )
+    assert result.approved  # a medium side-effects finding never blocks approval alone
+    assert any(
+        i.category == "side-effects" and "undocumented" in i.description for i in result.issues
+    )
+
+
+def test_coordinator_skips_pass_for_non_default_profile() -> None:
+    from code_review_agent.profiles import ReviewProfile
+
+    class _FailIfAskedClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "side-effect pass should not run"
+            return {
+                "index": 0,
+                "is_real_issue": True,
+                "confidence": "high",
+                "reasoning": "n/a",
+                "verdicts": [],
+                "approved": True,
+                "issues": [],
+                "summary": "ok",
+            }
+
+    run_coordinator(
+        _FailIfAskedClient(),
+        CodeReviewInput(
+            files={"app/main.py": "def bar():\n    return 1\n"},
+            task_description="verify",
+            acceptance_criteria=["bar returns 1"],
+            profile=ReviewProfile.ACCEPTANCE,
+        ),
+    )
