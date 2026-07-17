@@ -58,6 +58,65 @@ def make_writer_agent(
     )
 
 
+def make_stub_writer_class(*, escalation_summary: str = "") -> type:
+    """Build a BlogWriterAgent stand-in class returning canned, always-approvable output.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns a class (not an instance) suitable for monkeypatching a module's
+          ``BlogWriterAgent`` reference; every method returns a deterministic ``WriterOutput``
+          so ``run_pipeline`` can proceed without an LLM. ``generate_escalation_summary``
+          returns ``escalation_summary`` (empty string unless overridden).
+    """
+    from agents.blogging.blog_writer_agent.models import WriterOutput
+
+    class _StubWriter:
+        def __init__(self, *a, **kw):
+            pass
+
+        def run(self, *a, **kw):
+            return WriterOutput(draft="# Draft\n\nBody.")
+
+        def revise(self, *a, **kw):
+            return WriterOutput(draft="# Revised\n\nBody.")
+
+        def revise_from_user_feedback(self, *a, **kw):
+            return WriterOutput(draft="# Revised\n\nBody.")
+
+        def identify_uncertainty_questions(self, *a, **kw):
+            return []
+
+        def analyze_user_feedback_for_guideline_updates(self, *a, **kw):
+            return []
+
+        def generate_escalation_summary(self, *a, **kw):
+            return escalation_summary
+
+    return _StubWriter
+
+
+def make_stub_editor_class() -> type:
+    """Build a BlogCopyEditorAgent stand-in class that always approves on the first pass.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns a class (not an instance) suitable for monkeypatching a module's
+          ``BlogCopyEditorAgent`` reference; its ``run`` always returns an approved report.
+    """
+    from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput
+
+    class _StubEditor:
+        def __init__(self, *a, **kw):
+            pass
+
+        def run(self, *a, **kw):
+            return CopyEditorOutput(approved=True, summary="ok", feedback_items=[])
+
+    return _StubEditor
+
+
 # Job-store helpers captured by reference inside ``api/main`` at import time. The
 # ``patched_client`` fixture rebinds each to the fake-backed implementation so
 # every endpoint hits the in-memory store.
@@ -92,9 +151,8 @@ def patched_blog_client(monkeypatch, fake_job_client) -> Any:
     Postconditions:
         - ``agents.blogging.shared.blog_job_store._client`` returns ``fake_job_client`` for the
           duration of the test; ``monkeypatch`` restores the original on teardown. Autouse, so no
-          test needs to request this explicitly; ``patched_client`` and
-          ``patched_blog_job_store_client`` below rely on this fixture for the base patch rather
-          than re-applying it themselves.
+          test needs to request this explicitly; ``patched_client`` below relies on this fixture
+          for the base patch rather than re-applying it itself.
     """
     from agents.blogging.shared import blog_job_store as bjs
 
@@ -136,20 +194,3 @@ def client(patched_client) -> Any:
     from fastapi.testclient import TestClient
 
     return TestClient(app)
-
-
-@pytest.fixture
-def patched_blog_job_store_client(patched_blog_client, monkeypatch, fake_job_client) -> Any:
-    """Back ``agents.blogging.shared.blog_job_store._client`` with the in-memory fake.
-
-    The patch is already applied by the autouse ``patched_blog_client`` fixture (requested
-    explicitly here to make the dependency clear and to hand back the fake for assertions);
-    this fixture is otherwise a thin pass-through now that there is a single import path.
-
-    Preconditions:
-        - ``patched_blog_client`` has already patched
-          ``agents.blogging.shared.blog_job_store._client``.
-    Postconditions:
-        - Returns ``fake_job_client``, the same instance ``patched_blog_client`` patched in.
-    """
-    return fake_job_client

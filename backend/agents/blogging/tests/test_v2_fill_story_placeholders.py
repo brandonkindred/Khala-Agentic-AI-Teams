@@ -82,9 +82,7 @@ def test_fill_story_placeholders_no_placeholders_returns_input(monkeypatch) -> N
     assert out_stories == "existing stories"
 
 
-def test_fill_story_placeholders_user_skips_all(
-    monkeypatch, patched_blog_job_store_client, tmp_path
-) -> None:
+def test_fill_story_placeholders_user_skips_all(monkeypatch, tmp_path) -> None:
     """User skips all placeholders → re-draft path with skip instruction."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import blog_job_store as bjs
@@ -113,9 +111,7 @@ def test_fill_story_placeholders_user_skips_all(
     assert "Redraft" in out_draft.draft or "Draft" in out_draft.draft
 
 
-def test_fill_story_placeholders_user_provides_narrative(
-    monkeypatch, patched_blog_job_store_client, tmp_path
-) -> None:
+def test_fill_story_placeholders_user_provides_narrative(monkeypatch, tmp_path) -> None:
     """User provides a story → narrative collected and re-drafted."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import blog_job_store as bjs
@@ -147,9 +143,7 @@ def test_fill_story_placeholders_user_provides_narrative(
     assert "debugged" in out_stories
 
 
-def test_fill_story_placeholders_redraft_fails_keeps_original(
-    monkeypatch, patched_blog_job_store_client, tmp_path
-) -> None:
+def test_fill_story_placeholders_redraft_fails_keeps_original(monkeypatch, tmp_path) -> None:
     """When re-draft raises, keep original draft."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import blog_job_store as bjs
@@ -181,7 +175,7 @@ def test_fill_story_placeholders_redraft_fails_keeps_original(
 
 
 def test_fill_story_placeholders_story_bank_save_cancellation_propagates(
-    monkeypatch, patched_client, tmp_path
+    monkeypatch, tmp_path
 ) -> None:
     """A Temporal cancellation raised from the story-bank save must propagate,
     not be swallowed by the non-fatal save guard."""
@@ -219,9 +213,7 @@ def test_fill_story_placeholders_story_bank_save_cancellation_propagates(
         )
 
 
-def test_fill_story_placeholders_cancelled_break(
-    monkeypatch, patched_blog_job_store_client, tmp_path
-) -> None:
+def test_fill_story_placeholders_cancelled_break(monkeypatch, tmp_path) -> None:
     """If job goes to cancelled mid-loop, break out."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared import blog_job_store as bjs

@@ -12,52 +12,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from conftest import make_stub_editor_class, make_stub_writer_class
+
 
 def _make_plan():
     from _content_plan_test_utils import make_minimal_planning_phase_result
 
     return make_minimal_planning_phase_result()
-
-
-def _stub_writer_class():
-    from agents.blogging.blog_writer_agent.models import WriterOutput
-
-    class _StubWriter:
-        def __init__(self, *a, **kw):
-            pass
-
-        def run(self, *a, **kw):
-            return WriterOutput(draft="# Draft\nBody.")
-
-        def revise(self, *a, **kw):
-            return WriterOutput(draft="# Revised\nBody.")
-
-        def revise_from_user_feedback(self, *a, **kw):
-            return WriterOutput(draft="# Revised\nBody.")
-
-        def identify_uncertainty_questions(self, *a, **kw):
-            return []
-
-        def analyze_user_feedback_for_guideline_updates(self, *a, **kw):
-            return []
-
-        def generate_escalation_summary(self, *a, **kw):
-            return ""
-
-    return _StubWriter
-
-
-def _stub_editor_class():
-    from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput
-
-    class _StubEditor:
-        def __init__(self, *a, **kw):
-            pass
-
-        def run(self, *a, **kw):
-            return CopyEditorOutput(approved=True, summary="ok", feedback_items=[])
-
-    return _StubEditor
 
 
 def _stub_compliance(status: str = "PASS"):
@@ -109,8 +70,8 @@ def _common_v2_setup(monkeypatch, validator_status: str = "PASS"):
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda *a, **kw: "brand")
-    monkeypatch.setattr(v2, "BlogWriterAgent", _stub_writer_class())
-    monkeypatch.setattr(v2, "BlogCopyEditorAgent", _stub_editor_class())
+    monkeypatch.setattr(v2, "BlogWriterAgent", make_stub_writer_class())
+    monkeypatch.setattr(v2, "BlogCopyEditorAgent", make_stub_editor_class())
     monkeypatch.setattr(
         v2,
         "run_validators_from_work_dir",
@@ -164,8 +125,8 @@ def test_run_pipeline_with_gates_pass_after_one_rewrite(monkeypatch, tmp_path: P
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
     monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda *a, **kw: "brand")
-    monkeypatch.setattr(v2, "BlogWriterAgent", _stub_writer_class())
-    monkeypatch.setattr(v2, "BlogCopyEditorAgent", _stub_editor_class())
+    monkeypatch.setattr(v2, "BlogWriterAgent", make_stub_writer_class())
+    monkeypatch.setattr(v2, "BlogCopyEditorAgent", make_stub_editor_class())
 
     # Validator: FAIL first, PASS second
     state = {"i": 0}

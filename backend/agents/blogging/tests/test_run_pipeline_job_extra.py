@@ -41,9 +41,7 @@ def test_publish_terminal_swallows_publish_errors(monkeypatch) -> None:
     assert calls == ["publish"]
 
 
-def test_fail_job_works_via_shared_blog_job_store(
-    monkeypatch, patched_blog_job_store_client, tmp_path: Path
-) -> None:
+def test_fail_job_works_via_shared_blog_job_store(monkeypatch, tmp_path: Path) -> None:
     """_fail_job records the failure (status/error) via the shared job store."""
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
@@ -62,9 +60,7 @@ def test_fail_job_works_via_shared_blog_job_store(
     assert job["error"] == "oh no"
 
 
-def test_publish_publishes_via_job_event_bus(
-    monkeypatch, tmp_path: Path, patched_blog_job_store_client
-) -> None:
+def test_publish_publishes_via_job_event_bus(monkeypatch, tmp_path: Path) -> None:
     """A full run publishes at least one ``update`` event through the SSE bus."""
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
@@ -91,9 +87,7 @@ def test_publish_publishes_via_job_event_bus(
     assert any(et == "update" for et, _ in seen)
 
 
-def test_job_updater_swallows_publish_exception(
-    monkeypatch, tmp_path: Path, patched_blog_job_store_client
-) -> None:
+def test_job_updater_swallows_publish_exception(monkeypatch, tmp_path: Path) -> None:
     """A raising SSE publish is swallowed; the run still completes."""
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
@@ -122,9 +116,7 @@ def test_job_updater_swallows_publish_exception(
     assert boomed  # the raising publish was actually reached and swallowed
 
 
-def test_external_cancellation_planning_path(
-    monkeypatch, tmp_path: Path, patched_blog_job_store_client
-) -> None:
+def test_external_cancellation_planning_path(monkeypatch, tmp_path: Path) -> None:
     """A PlanningError wrapping a Temporal cancellation marks the job cancelled."""
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
@@ -150,9 +142,7 @@ def test_external_cancellation_planning_path(
     assert job["status"] == "cancelled"
 
 
-def test_external_cancellation_blogging_error_path(
-    monkeypatch, tmp_path: Path, patched_blog_job_store_client
-) -> None:
+def test_external_cancellation_blogging_error_path(monkeypatch, tmp_path: Path) -> None:
     """A BloggingError wrapping a Temporal cancellation marks the job cancelled."""
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
@@ -178,9 +168,7 @@ def test_external_cancellation_blogging_error_path(
     assert job["status"] == "cancelled"
 
 
-def test_external_cancellation_unexpected_error_path(
-    monkeypatch, tmp_path: Path, patched_blog_job_store_client
-) -> None:
+def test_external_cancellation_unexpected_error_path(monkeypatch, tmp_path: Path) -> None:
     """A generic error wrapping a Temporal cancellation marks the job cancelled."""
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
@@ -205,9 +193,7 @@ def test_external_cancellation_unexpected_error_path(
     assert job["status"] == "cancelled"
 
 
-def test_mark_cancelled_swallows_update_exception(
-    monkeypatch, tmp_path: Path, patched_blog_job_store_client
-) -> None:
+def test_mark_cancelled_swallows_update_exception(monkeypatch, tmp_path: Path) -> None:
     """A failing update inside the cancellation path is swallowed (no crash)."""
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
@@ -242,9 +228,7 @@ def test_mark_cancelled_swallows_update_exception(
     rpj.run_blog_full_pipeline_job(job_id, {"brief": "hi"})
 
 
-def test_pipeline_heartbeat_loop_runs_body_directly(
-    monkeypatch, tmp_path: Path, patched_blog_job_store_client
-) -> None:
+def test_pipeline_heartbeat_loop_runs_body_directly(monkeypatch, tmp_path: Path) -> None:
     """Drive the inner ``_pipeline_heartbeat`` body by patching threading.Event.wait."""
     from agents.blogging.shared import blog_job_store as bjs
 

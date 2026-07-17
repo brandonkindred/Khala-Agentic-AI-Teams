@@ -22,9 +22,7 @@ def _make_pipeline_doubles():
     return make_pipeline_doubles()
 
 
-def test_run_blog_full_pipeline_job_completes(
-    monkeypatch, tmp_path: Path, patched_blog_job_store_client
-) -> None:
+def test_run_blog_full_pipeline_job_completes(monkeypatch, tmp_path: Path) -> None:
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
 
@@ -48,9 +46,7 @@ def test_run_blog_full_pipeline_job_completes(
     assert job["status"] == "completed"
 
 
-def test_run_blog_full_pipeline_job_completes_needs_review(
-    monkeypatch, tmp_path: Path, patched_blog_job_store_client
-) -> None:
+def test_run_blog_full_pipeline_job_completes_needs_review(monkeypatch, tmp_path: Path) -> None:
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
 
@@ -83,9 +79,7 @@ def _import_errors_used_by_run_pipeline_job():
     return BloggingError, PlanningError, DraftError
 
 
-def test_run_blog_full_pipeline_job_planning_error(
-    monkeypatch, tmp_path: Path, patched_blog_job_store_client
-) -> None:
+def test_run_blog_full_pipeline_job_planning_error(monkeypatch, tmp_path: Path) -> None:
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
 
@@ -110,9 +104,7 @@ def test_run_blog_full_pipeline_job_planning_error(
     assert job["planning_failure_reason"] == "MAX_ITER"
 
 
-def test_run_blog_full_pipeline_job_blogging_error(
-    monkeypatch, tmp_path: Path, patched_blog_job_store_client
-) -> None:
+def test_run_blog_full_pipeline_job_blogging_error(monkeypatch, tmp_path: Path) -> None:
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
 
@@ -134,9 +126,7 @@ def test_run_blog_full_pipeline_job_blogging_error(
     assert job["failed_phase"] == "draft"
 
 
-def test_run_blog_full_pipeline_job_unknown_error(
-    monkeypatch, tmp_path: Path, patched_blog_job_store_client
-) -> None:
+def test_run_blog_full_pipeline_job_unknown_error(monkeypatch, tmp_path: Path) -> None:
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
 
@@ -155,7 +145,7 @@ def test_run_blog_full_pipeline_job_unknown_error(
 
 
 def test_run_blog_full_pipeline_job_job_updater_failure_swallowed(
-    monkeypatch, tmp_path: Path, patched_blog_job_store_client
+    monkeypatch, tmp_path: Path
 ) -> None:
     """A failing update_blog_job inside the job_updater is swallowed; the run still completes.
 

@@ -52,7 +52,7 @@ def test_build_brief_input_appends_title_concept_and_normalizes_audience() -> No
 # ---------------------------------------------------------------------------
 
 
-def test_start_blog_job_is_idempotent_across_retries(patched_blog_job_store_client) -> None:
+def test_start_blog_job_is_idempotent_across_retries() -> None:
     """Calling start_blog_job twice (as a Temporal retry would) never raises and
     preserves the original started_at — it merges status=running onto the existing
     row rather than re-creating it or resetting the start time."""
@@ -79,7 +79,7 @@ def test_start_blog_job_is_idempotent_across_retries(patched_blog_job_store_clie
 
 
 def test_make_job_updater_writes_store_and_publishes(
-    monkeypatch, patched_blog_job_store_client
+    monkeypatch,
 ) -> None:
     """The updater writes kwargs to the store and broadcasts an ``update`` SSE event."""
     from agents.blogging.shared import blog_job_store as bjs
@@ -162,7 +162,7 @@ def test_start_pipeline_heartbeat_starts_and_stops(monkeypatch) -> None:
 
 
 def test_mark_job_cancelled_sets_status_and_returns_true(
-    monkeypatch, patched_blog_job_store_client
+    monkeypatch,
 ) -> None:
     """The job is marked cancelled, a terminal event is published, and True is returned."""
     from agents.blogging.shared import blog_job_store as bjs
@@ -191,7 +191,7 @@ def _pipeline_doubles():
     return ppr, draft
 
 
-def test_finalize_blog_job_pass_completes(monkeypatch, patched_blog_job_store_client) -> None:
+def test_finalize_blog_job_pass_completes(monkeypatch) -> None:
     """status PASS completes the job (COMPLETED) and returns the completed status."""
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.shared import run_pipeline_job as rpj
@@ -208,7 +208,7 @@ def test_finalize_blog_job_pass_completes(monkeypatch, patched_blog_job_store_cl
 
 
 def test_finalize_blog_job_non_pass_needs_review(
-    monkeypatch, patched_blog_job_store_client
+    monkeypatch,
 ) -> None:
     """A non-PASS status finalizes as NEEDS_REVIEW rather than COMPLETED."""
     from agents.blogging.shared import blog_job_store as bjs

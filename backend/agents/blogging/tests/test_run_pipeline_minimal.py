@@ -11,49 +11,16 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput
-from agents.blogging.blog_writer_agent.models import WriterOutput
+from conftest import make_stub_editor_class, make_stub_writer_class
+
+_StubWriter = make_stub_writer_class()
+_StubEditor = make_stub_editor_class()
 
 
 def _make_plan():
     from _content_plan_test_utils import make_minimal_planning_phase_result
 
     return make_minimal_planning_phase_result()
-
-
-class _StubWriter:
-    """A BlogWriterAgent stand-in returning canned, always-approvable output."""
-
-    def __init__(self, *a, **kw):
-        pass
-
-    def run(self, *a, **kw):
-        return WriterOutput(draft="# Draft\n\nBody.")
-
-    def revise(self, *a, **kw):
-        return WriterOutput(draft="# Revised\n\nBody.")
-
-    def revise_from_user_feedback(self, *a, **kw):
-        return WriterOutput(draft="# Revised\n\nBody.")
-
-    def identify_uncertainty_questions(self, *a, **kw):
-        return []
-
-    def analyze_user_feedback_for_guideline_updates(self, *a, **kw):
-        return []
-
-    def generate_escalation_summary(self, *a, **kw):
-        return ""
-
-
-class _StubEditor:
-    """A BlogCopyEditorAgent stand-in that always approves on the first pass."""
-
-    def __init__(self, *a, **kw):
-        pass
-
-    def run(self, *a, **kw):
-        return CopyEditorOutput(approved=True, summary="ok", feedback_items=[])
 
 
 def test_run_pipeline_no_gates_no_job(monkeypatch, tmp_path: Path) -> None:
@@ -132,7 +99,7 @@ def test_run_pipeline_copy_editor_stalls_then_accepts(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
 
-    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput, FeedbackItem
 
     class _StubEditorNeverApproves:
         def __init__(self, *a, **kw):

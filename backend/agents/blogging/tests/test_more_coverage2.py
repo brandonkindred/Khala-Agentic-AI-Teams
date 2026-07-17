@@ -341,30 +341,19 @@ def test_planning_agent_make_default_init() -> None:
 
 def test_planning_agent_runner_delegates(monkeypatch) -> None:
     """The _BlogPlanningAgentRunner.run() delegates to BlogPlanningAgent.run."""
-    from _content_plan_test_utils import make_requirements_analysis
+    from _content_plan_test_utils import make_content_plan, make_planning_phase_result
     from agents.blogging.blog_planning_agent.agent import make_blog_planning_agent
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        PlanningPhaseResult,
-        TitleCandidate,
-    )
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     runner = make_blog_planning_agent()
 
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="x",
         narrative_flow="f",
         sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=make_requirements_analysis(),
     )
-    ppr = PlanningPhaseResult(
-        content_plan=plan,
-        planning_iterations_used=1,
-        parse_retry_count=0,
-        planning_wall_ms_total=1.0,
-    )
+    ppr = make_planning_phase_result(plan, planning_wall_ms_total=1.0)
 
     # Patch the wrapped agent's run method
     monkeypatch.setattr(runner._agent.__class__, "run", lambda self, *a, **kw: ppr)

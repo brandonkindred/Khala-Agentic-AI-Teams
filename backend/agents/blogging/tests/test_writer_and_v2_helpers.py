@@ -272,24 +272,19 @@ def test_ghost_writer_agent_construction() -> None:
 
 def test_ghost_writer_extract_gaps_from_plan_no_opportunities() -> None:
     """find_story_gaps falls back to LLM when plan has no story_opportunity fields."""
-    from _content_plan_test_utils import make_requirements_analysis
+    from _content_plan_test_utils import make_content_plan
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        TitleCandidate,
-    )
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     from llm_service import DummyLLMClient
 
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="X",
         narrative_flow="flow",
         sections=[
             ContentPlanSection(title="A", coverage_description="cov", order=0),
         ],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=make_requirements_analysis(),
     )
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     # When no story_opportunity on sections, _extract_gaps_from_plan returns []
@@ -298,13 +293,9 @@ def test_ghost_writer_extract_gaps_from_plan_no_opportunities() -> None:
 
 
 def test_ghost_writer_extract_gaps_from_plan_with_opportunities(monkeypatch) -> None:
-    from _content_plan_test_utils import make_requirements_analysis
+    from _content_plan_test_utils import make_content_plan
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        TitleCandidate,
-    )
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     from llm_service import DummyLLMClient
 
@@ -317,12 +308,11 @@ def test_ghost_writer_extract_gaps_from_plan_with_opportunities(monkeypatch) -> 
         order=1,
         story_opportunity="A migration story",
     )
-    plan = ContentPlan(
+    plan = make_content_plan(
         overarching_topic="X",
         narrative_flow="flow",
         sections=[sec_a, sec_b],
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
-        requirements_analysis=make_requirements_analysis(),
     )
 
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())

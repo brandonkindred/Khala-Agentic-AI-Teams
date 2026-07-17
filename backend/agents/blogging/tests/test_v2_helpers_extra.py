@@ -31,7 +31,7 @@ def _plan(target_reader: str | None = None):
 
 
 def test_run_title_selection_replaces_disliked_with_llm_replacement(
-    monkeypatch, patched_blog_job_store_client
+    monkeypatch,
 ) -> None:
     from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
     from agents.blogging.shared import blog_job_store as bjs
@@ -74,7 +74,7 @@ def test_run_title_selection_replaces_disliked_with_llm_replacement(
 
 
 def test_run_title_selection_llm_failure_falls_back_to_removal(
-    monkeypatch, patched_blog_job_store_client
+    monkeypatch,
 ) -> None:
     """If LLM raises while generating a replacement, the disliked title is REMOVED.
     Then the user selects another title (= loves it) and we return it."""
@@ -118,7 +118,7 @@ def test_run_title_selection_llm_failure_falls_back_to_removal(
 
 
 def test_run_title_selection_propagates_cancelled_error(
-    monkeypatch, patched_blog_job_store_client
+    monkeypatch,
 ) -> None:
     """CancelledError inside the loop propagates out — does not become None."""
     from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
@@ -148,7 +148,7 @@ def test_run_title_selection_propagates_cancelled_error(
 
 
 def test_run_title_selection_swallows_generic_error(
-    monkeypatch, patched_blog_job_store_client
+    monkeypatch,
 ) -> None:
     """Non-Cancelled exceptions inside the function are caught and return None."""
     from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection

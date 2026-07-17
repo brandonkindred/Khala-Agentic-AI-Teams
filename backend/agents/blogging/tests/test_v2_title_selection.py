@@ -45,7 +45,7 @@ def test_run_title_selection_returns_none_without_job_id() -> None:
     assert out is None
 
 
-def test_run_title_selection_returns_loved_title(patched_blog_job_store_client) -> None:
+def test_run_title_selection_returns_loved_title() -> None:
     """User submits 'love' rating → selected_title set, function returns it."""
     from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
     from agents.blogging.shared import blog_job_store as bjs
@@ -77,7 +77,7 @@ def test_run_title_selection_returns_loved_title(patched_blog_job_store_client) 
     assert out == "First"
 
 
-def test_run_title_selection_returns_none_on_cancellation(patched_blog_job_store_client) -> None:
+def test_run_title_selection_returns_none_on_cancellation() -> None:
     """When the job is cancelled mid-wait, return None."""
     from agents.blogging.agent_implementations.blog_writing_process_v2 import _run_title_selection
     from agents.blogging.shared import blog_job_store as bjs
@@ -97,7 +97,7 @@ def test_run_title_selection_returns_none_on_cancellation(patched_blog_job_store
 
 
 def test_run_title_selection_processes_pending_feedback(
-    monkeypatch, patched_blog_job_store_client
+    monkeypatch,
 ) -> None:
     """User dislikes title → LLM generates replacement → process continues until 'love'."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
@@ -143,7 +143,7 @@ def test_run_title_selection_processes_pending_feedback(
 
 
 def test_run_title_selection_handles_llm_failure(
-    monkeypatch, patched_blog_job_store_client
+    monkeypatch,
 ) -> None:
     """If LLM fails to generate replacement, just remove the rated title."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2

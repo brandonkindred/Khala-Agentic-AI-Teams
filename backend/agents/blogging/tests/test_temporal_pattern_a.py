@@ -479,27 +479,9 @@ def test_workflow_unpatched_replay_runs_legacy_monolith(monkeypatch) -> None:
 
 
 def _real_planning_phase_result():
-    from _content_plan_test_utils import make_requirements_analysis
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        PlanningPhaseResult,
-        TitleCandidate,
-    )
+    from _content_plan_test_utils import make_minimal_planning_phase_result
 
-    plan = ContentPlan(
-        overarching_topic="Topic",
-        narrative_flow="Flow",
-        sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
-        title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
-        requirements_analysis=make_requirements_analysis(),
-    )
-    return PlanningPhaseResult(
-        content_plan=plan,
-        planning_iterations_used=1,
-        parse_retry_count=0,
-        planning_wall_ms_total=10.0,
-    )
+    return make_minimal_planning_phase_result()
 
 
 def test_planning_dto_round_trips_real_model() -> None:

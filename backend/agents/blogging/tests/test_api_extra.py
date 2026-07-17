@@ -118,7 +118,7 @@ def test_resume_job_happy(client: TestClient, monkeypatch) -> None:
     assert job["status"] == "running"
 
 
-def test_restart_job_happy(client: TestClient, monkeypatch, patched_blog_job_store_client) -> None:
+def test_restart_job_happy(client: TestClient, monkeypatch) -> None:
     """Restart uses `agents.blogging.shared.blog_job_store`, backed by the in-memory fake."""
     from agents.blogging.shared import blog_job_store as bjs
 

@@ -64,9 +64,7 @@ def test_resume_with_temporal(client: TestClient, monkeypatch) -> None:
     assert "(Temporal)" in r.json()["message"]
 
 
-def test_restart_with_temporal(
-    client: TestClient, monkeypatch, patched_blog_job_store_client
-) -> None:
+def test_restart_with_temporal(client: TestClient, monkeypatch) -> None:
     from agents.blogging.shared import blog_job_store as bjs
     from agents.blogging.temporal import client as tc_mod
     from agents.blogging.temporal import start_workflow as sw_mod

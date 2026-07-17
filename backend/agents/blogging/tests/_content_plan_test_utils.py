@@ -85,13 +85,16 @@ def make_planning_phase_result(plan: ContentPlan, **result_overrides: Any) -> Pl
     return PlanningPhaseResult(content_plan=plan, **defaults)
 
 
-def make_minimal_planning_phase_result(**overrides: Any) -> PlanningPhaseResult:
+def make_minimal_planning_phase_result(
+    *, title: str = "My Title", probability: float = 0.7, **overrides: Any
+) -> PlanningPhaseResult:
     """Build the canonical minimal PlanningPhaseResult (Topic/Flow/Intro plan, one title).
 
     Centralizes the "Topic"/"Flow"/single-"Intro"-section/"My Title" shape previously
     copy-pasted as a local ``_make_plan()`` helper in multiple pipeline-gate test modules.
 
     Preconditions:
+        - ``probability`` is a valid success probability for a ``TitleCandidate``.
         - ``overrides`` keys are valid ``PlanningPhaseResult`` field names other than
           ``content_plan`` (e.g. ``planning_wall_ms_total``).
     Postconditions:
@@ -102,7 +105,7 @@ def make_minimal_planning_phase_result(**overrides: Any) -> PlanningPhaseResult:
         overarching_topic="Topic",
         narrative_flow="Flow",
         sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
-        title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
+        title_candidates=[TitleCandidate(title=title, probability_of_success=probability)],
     )
     return make_planning_phase_result(plan, **overrides)
 
@@ -115,9 +118,10 @@ def make_pipeline_doubles(
 ) -> tuple[PlanningPhaseResult, Any, str]:
     """Build a (planning_phase_result, draft_double, status) triple for pipeline-job tests.
 
-    Centralizes the "Topic"/"Flow"/single-"Intro"-section plan plus a minimal draft stub
-    previously copy-pasted as local ``_make_pipeline_doubles``/``_pipeline_doubles`` helpers
-    across the run_pipeline_job test modules.
+    Centralizes the minimal draft stub previously copy-pasted as local
+    ``_make_pipeline_doubles``/``_pipeline_doubles`` helpers across the run_pipeline_job test
+    modules; the underlying ContentPlan/PlanningPhaseResult shape is the same canonical
+    "Topic"/"Flow"/"Intro" plan :func:`make_minimal_planning_phase_result` builds.
 
     Preconditions:
         - ``probability`` is a valid success probability for a ``TitleCandidate``.
@@ -126,13 +130,9 @@ def make_pipeline_doubles(
           status unpack it as ``ppr, draft, _ = make_pipeline_doubles()``. ``draft`` always
           exposes a ``.draft`` attribute with placeholder markdown body text.
     """
-    plan = make_content_plan(
-        overarching_topic="Topic",
-        narrative_flow="Flow",
-        sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
-        title_candidates=[TitleCandidate(title=title, probability_of_success=probability)],
+    ppr = make_minimal_planning_phase_result(
+        title=title, probability=probability, planning_wall_ms_total=planning_wall_ms_total
     )
-    ppr = make_planning_phase_result(plan, planning_wall_ms_total=planning_wall_ms_total)
 
     class _Draft:
         draft = "# Draft\n\nBody."
