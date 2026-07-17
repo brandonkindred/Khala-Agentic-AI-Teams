@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
+from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.gate_outcomes import record_gate_outcome
 from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.repo_writer import (
@@ -568,9 +569,7 @@ class GateOutcome:
     raw_issue_count: Optional[int] = None
 
 
-def grounding_rejection_ratio(
-    raw_issue_count: Optional[int], kept_count: int
-) -> Optional[float]:
+def grounding_rejection_ratio(raw_issue_count: Optional[int], kept_count: int) -> Optional[float]:
     """Compute the fraction of raw LLM issues rejected by grounding.
 
     Preconditions:
@@ -675,8 +674,7 @@ def _apply_code_review_retry_exhausted(
     mt.status = review_failed_status
     review_failed_ids.add(mt.id)
     mt.notes = (
-        f"Code review failed after {code_review_retry_cap} batch fix attempts: "
-        f"{cr_outcome.summary}"
+        f"Code review failed after {code_review_retry_cap} batch fix attempts: {cr_outcome.summary}"
     )
     _record_terminal_gate_failure("code_review_retry_exhausted", cr_outcome, task_id)
     logger.warning(
@@ -738,8 +736,7 @@ def _apply_grounding_circuit_breaker_trip(
         record_outcome = GateOutcome(
             passed=False,
             issues=list(cr_outcome.issues),
-            summary=cr_outcome.summary
-            or "Grounding-failure circuit breaker tripped",
+            summary=cr_outcome.summary or "Grounding-failure circuit breaker tripped",
             raw_issue_count=cr_outcome.raw_issue_count,
         )
     _record_terminal_gate_failure("review_grounding_circuit_breaker", record_outcome, task_id)
@@ -856,7 +853,10 @@ class GatedExecutionConfig:
     # ``run_{code_review,qa,security}_testing_phase`` calls returning
     # ``PhaseReviewResult``; frontend calls unified ``run_microtask_review()``
     # three times and filters issues by ``source``. Both normalize to
-    # ``GateOutcome``.
+    # ``GateOutcome``. ``run_qa_gate``/``run_security_gate`` additionally
+    # receive a ``cache: AgentReviewCache`` keyword (see ``_run_review_cycles``)
+    # — ``run_code_review_gate`` does not, since code review already has its
+    # own cross-cycle cache.
     run_code_review_gate: Callable[..., GateOutcome]
     run_qa_gate: Callable[..., GateOutcome]
     run_security_gate: Callable[..., GateOutcome]
@@ -1033,6 +1033,16 @@ def _run_review_cycles(
     cr_outcome = GateOutcome(passed=True)
     qa_outcome = GateOutcome(passed=True)
     sec_outcome = GateOutcome(passed=True)
+
+    # Per-piece QA/security verdict cache, scoped to this microtask's own review
+    # cycles (constructed here, discarded on return) — see AgentReviewCache. A
+    # cycle's batch fix typically rewrites only some of ``microtask_files``
+    # (``run_batch_coding_fixes_impl`` returns the full set with just the fixed
+    # keys overlaid), so files a fix didn't touch are byte-identical across
+    # cycles and skip their QA/security LLM call. Code review is not threaded
+    # through here: it already has its own cross-cycle chunk cache
+    # (code_review_agent.mapping._cached_review_chunk).
+    agent_review_cache = AgentReviewCache()
 
     # Grounding-failure circuit breaker + issue dedup state, scoped to this
     # microtask's own review lifecycle (see grounding circuit-breaker design doc).
@@ -1226,6 +1236,7 @@ def _run_review_cycles(
             files=microtask_files,
             deps=deps,
             detail_callback=lambda d: detail_cb(d, current_idx, "qa_testing"),
+            cache=agent_review_cache,
         )
 
         if not qa_outcome.passed:
@@ -1308,6 +1319,7 @@ def _run_review_cycles(
             files=microtask_files,
             deps=deps,
             detail_callback=lambda d: detail_cb(d, current_idx, "security_testing"),
+            cache=agent_review_cache,
         )
 
         if not sec_outcome.passed:
@@ -1390,8 +1402,7 @@ def _run_review_cycles(
             _rollback_microtask_files(microtask_rollback, all_files, mt)
             # Security failures always stop regardless of on_failure setting
             _force_stop = config.on_failure == "stop" or (
-                getattr(config, "security_failure_always_stops", True)
-                and not sec_outcome.passed
+                getattr(config, "security_failure_always_stops", True) and not sec_outcome.passed
             )
             if _force_stop:
                 raise review_failed_error_cls(
@@ -1457,9 +1468,7 @@ def _run_documentation_phase(
         )
 
     # Generate initial documentation
-    doc_agent = (
-        deps.tool_agents.get(tool_agent_kind.DOCUMENTATION) if deps.tool_agents else None
-    )
+    doc_agent = deps.tool_agents.get(tool_agent_kind.DOCUMENTATION) if deps.tool_agents else None
     doc_files: Dict[str, str] = {}
     if doc_agent and hasattr(doc_agent, "document_microtask"):
         try:

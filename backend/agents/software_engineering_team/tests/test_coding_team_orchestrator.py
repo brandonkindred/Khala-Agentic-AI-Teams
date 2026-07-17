@@ -297,6 +297,146 @@ def test_swarm_completes_when_dependency_fails(tmp_path, monkeypatch):
     assert swarm._is_complete()
 
 
+# ----------------------------------------------------- review-verdict cache (_review_verdict_cache)
+
+
+def test_identical_diff_reuses_cached_verdict_without_second_review_call(tmp_path, monkeypatch):
+    """A task reviewed twice with a byte-identical diff only pays for one Tech Lead call."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 20)
+    _patch_git(monkeypatch, diff="same diff every time")
+    tech_lead = StubTechLead(approved=False, reason="needs work", requested_changes=["fix X"])
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+
+    swarm._review_and_merge(lambda **kw: None)
+    assert len(tech_lead.review_calls) == 1
+    first_feedback = graph.get_task("t1").revision_feedback[-1]
+
+    graph.set_task_in_review("t1")  # simulate the task coming back into review with no changes
+    swarm._review_and_merge(lambda **kw: None)
+
+    assert len(tech_lead.review_calls) == 1  # second round reused the cached verdict
+    second_feedback = graph.get_task("t1").revision_feedback[-1]
+    assert second_feedback["reason"] == first_feedback["reason"] == "needs work"
+    assert second_feedback["requested_changes"] == ["fix X"]
+
+
+def test_changed_diff_triggers_fresh_review_call(tmp_path, monkeypatch):
+    """A task reviewed twice with a genuinely different diff is reviewed both times."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 20)
+    diffs = iter(["diff-round-1", "diff-round-2"])
+    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: next(diffs))
+    tech_lead = StubTechLead(approved=False)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+
+    swarm._review_and_merge(lambda **kw: None)
+    assert len(tech_lead.review_calls) == 1
+
+    graph.set_task_in_review("t1")
+    swarm._review_and_merge(lambda **kw: None)
+
+    assert len(tech_lead.review_calls) == 2  # different diff each round -> reviewed both times
+
+
+def test_errored_review_is_never_cached(tmp_path, monkeypatch):
+    """An ``error`` verdict is never cached — the next call for the same diff retries for real."""
+    _patch_git(monkeypatch, diff="same diff")
+
+    class FlakyTechLead(StubTechLead):
+        def run_code_review(self, **kw):
+            self.review_calls.append(kw.get("changes_summary", ""))
+            if len(self.review_calls) == 1:
+                return {
+                    "approved": False,
+                    "error": True,
+                    "reason": "transient",
+                    "requested_changes": [],
+                }
+            return {
+                "approved": False,
+                "error": False,
+                "reason": "reject",
+                "requested_changes": ["y"],
+            }
+
+    tech_lead = FlakyTechLead(approved=False)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+    task = graph.get_task("t1")
+
+    _, review1 = swarm._compute_review(task)
+    assert review1["error"] is True
+
+    _, review2 = swarm._compute_review(task)
+    assert review2["error"] is False
+    assert review2["reason"] == "reject"
+    assert len(tech_lead.review_calls) == 2  # the errored call was never cached, so it retried
+
+    # A third call with the same diff now hits the cache seeded by the second (non-error) call.
+    _, review3 = swarm._compute_review(task)
+    assert review3["reason"] == "reject"
+    assert len(tech_lead.review_calls) == 2
+
+
+def test_approved_verdict_is_also_cached(tmp_path, monkeypatch):
+    """An approved verdict is cached too — only ``error`` verdicts are excluded."""
+    _patch_git(monkeypatch, diff="same diff")
+    tech_lead = StubTechLead(approved=True, reason="looks good")
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+    task = graph.get_task("t1")
+
+    swarm._compute_review(task)
+    swarm._compute_review(task)
+
+    assert len(tech_lead.review_calls) == 1
+
+
+def test_cached_review_verdict_is_an_independent_copy(tmp_path, monkeypatch):
+    """A cache hit returns its own copy — mutating it never corrupts the cached entry."""
+    _patch_git(monkeypatch, diff="same diff")
+    tech_lead = StubTechLead(approved=False, requested_changes=["fix X"])
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+    task = graph.get_task("t1")
+
+    _, review1 = swarm._compute_review(task)
+    review1["requested_changes"].append("mutated!")  # mutate the caller's copy
+
+    _, review2 = swarm._compute_review(task)  # cache hit
+    assert review2["requested_changes"] == ["fix X"]  # unaffected by the mutation above
+    assert len(tech_lead.review_calls) == 1
+
+
+def test_review_verdict_cache_is_scoped_per_task(tmp_path, monkeypatch):
+    """Two different tasks with byte-identical diffs are each reviewed once — no cross-task reuse."""
+    _patch_git(monkeypatch, diff="same diff for both tasks")
+    tech_lead = StubTechLead(approved=False)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1"), StubWorker("a2")])
+    graph.add_task("t1", title="T1")
+    graph.add_task("t2", title="T2")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.assign_task_to_agent("t2", "a2")
+    graph.set_task_in_review("t1")
+    graph.set_task_in_review("t2")
+
+    swarm._compute_review(graph.get_task("t1"))
+    swarm._compute_review(graph.get_task("t2"))
+
+    assert len(tech_lead.review_calls) == 2  # each task's own first review, not shared
+
+
 # ----------------------------------------------------- review retry / failure handling
 
 
@@ -3039,7 +3179,9 @@ def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeyp
     assert progresses, "orchestrator must write job-level progress"
     assert progresses[0] == progress_mod._DEFAULT_PROGRESS_BASE
     # 1 of 2 tasks terminal mid-run
-    expected_mid = progress_mod._DEFAULT_PROGRESS_BASE + int(progress_mod._DEFAULT_PROGRESS_SPAN / 2)
+    expected_mid = progress_mod._DEFAULT_PROGRESS_BASE + int(
+        progress_mod._DEFAULT_PROGRESS_SPAN / 2
+    )
     assert expected_mid in progresses
     assert progresses[-1] == 100
     assert progresses == sorted(progresses), "progress must be monotone non-decreasing"

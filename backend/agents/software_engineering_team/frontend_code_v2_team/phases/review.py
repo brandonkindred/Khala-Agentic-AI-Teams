@@ -14,7 +14,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from strands import Agent
 
 from llm_service import LLMClient
-from software_engineering_team.shared.agent_review import run_qa_agent, run_security_agent
+from software_engineering_team.shared.agent_review import (
+    AgentReviewCache,
+    run_qa_agent,
+    run_security_agent,
+)
 from software_engineering_team.shared.llm_review import LlmReviewOutput, run_team_llm_review
 from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.review_utils import (
@@ -100,6 +104,7 @@ def _run_qa_agent(
     task_description: str,
     task_id: str,
     context: str = "",
+    cache: Optional[AgentReviewCache] = None,
 ) -> List[ReviewIssue]:
     """Run the external QA agent over each file's raw, function-aware-split source.
 
@@ -108,6 +113,7 @@ def _run_qa_agent(
 
     Preconditions:
         - ``qa_agent`` is not None and exposes ``.run(QAInput) -> QAOutput``.
+        - ``cache``: see ``software_engineering_team.shared.agent_review``.
 
     Postconditions: see ``software_engineering_team.shared.agent_review``; QA bugs
     become ``ReviewIssue``s with ``source="qa"``.
@@ -122,6 +128,7 @@ def _run_qa_agent(
         max_chars=MAX_REVIEW_CODE_CHARS,
         warn_threshold=MANY_CHUNKS_WARN_THRESHOLD,
         context=context,
+        cache=cache,
     )
 
 
@@ -133,6 +140,7 @@ def _run_security_agent(
     task_description: str,
     task_id: str,
     context: str = "",
+    cache: Optional[AgentReviewCache] = None,
 ) -> List[ReviewIssue]:
     """Run the external security agent over each file's raw, function-aware-split source.
 
@@ -142,6 +150,7 @@ def _run_security_agent(
     Preconditions:
         - ``security_agent`` is not None and exposes
           ``.run(SecurityInput) -> SecurityOutput``.
+        - ``cache``: see ``software_engineering_team.shared.agent_review``.
 
     Postconditions: see ``software_engineering_team.shared.agent_review``;
     vulnerabilities become ``ReviewIssue``s with ``source="security"``.
@@ -156,6 +165,7 @@ def _run_security_agent(
         max_chars=MAX_REVIEW_CODE_CHARS,
         warn_threshold=MANY_CHUNKS_WARN_THRESHOLD,
         context=context,
+        cache=cache,
     )
 
 
@@ -245,6 +255,7 @@ def run_microtask_review(
     language: str = "typescript",
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
+    cache: Optional[AgentReviewCache] = None,
 ) -> ReviewResult:
     """Run full review on a single microtask's output files.
 
@@ -254,6 +265,8 @@ def run_microtask_review(
 
     Preconditions:
         - ``microtask`` exposes ``.id``/``.title``/``.description``.
+        - ``cache``: see ``software_engineering_team.shared.agent_review``;
+          forwarded to the QA/security steps only.
 
     Postconditions:
         - Delegates to ``_shared_run_microtask_review``, which forwards
@@ -282,6 +295,7 @@ def run_microtask_review(
         build_verify_fn=_run_build_verification,
         review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
+        agent_review_cache=cache,
     )
 
 

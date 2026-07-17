@@ -98,8 +98,8 @@ def _noop_runners() -> Dict[str, Any]:
     """Stub runners that return no issues and never touch an LLM/agent."""
     return {
         "llm_review_fn": lambda *, llm, task, files, **kw: [],
-        "qa_agent_fn": lambda *, qa_agent, files, language, task_description, task_id, context="": [],
-        "security_agent_fn": lambda *, security_agent, files, language, task_description, task_id, context="": [],
+        "qa_agent_fn": lambda *, qa_agent, files, language, task_description, task_id, context="", cache=None: [],
+        "security_agent_fn": lambda *, security_agent, files, language, task_description, task_id, context="", cache=None: [],
         "build_verify_fn": _build_verify_fn,
     }
 
@@ -572,10 +572,10 @@ def test_microtask_qa_and_security_with_detail_callback(tmp_path: Path) -> None:
         detail_callback=details.append,
         language="python",
         llm_review_fn=lambda *, llm, task, files, **kw: [],
-        qa_agent_fn=lambda *, qa_agent, files, language, task_description, task_id, context="": [
+        qa_agent_fn=lambda *, qa_agent, files, language, task_description, task_id, context="", cache=None: [
             ReviewIssue(source="qa", severity="low", description="bug")
         ],
-        security_agent_fn=lambda *, security_agent, files, language, task_description, task_id, context="": [
+        security_agent_fn=lambda *, security_agent, files, language, task_description, task_id, context="", cache=None: [
             ReviewIssue(source="security", severity="low", description="vuln")
         ],
         build_verify_fn=_build_verify_fn,

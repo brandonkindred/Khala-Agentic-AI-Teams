@@ -17,6 +17,7 @@ monkeypatchability of ``MAX_TASK_REVISIONS``/``ActivityBridge`` in tests).
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -148,6 +149,14 @@ class _ReviewMixin:
         concurrently across tasks. The merge/revision decision is applied separately and serially by
         ``_apply_review_decision``; the caller owns any progress-bar lifecycle.
 
+        A branch whose digest matches ``task.id``'s last-cached digest (``_review_verdict_cache``)
+        reuses that verdict instead of calling ``run_code_review`` again — the complementary,
+        branch-level counterpart to ``AgentReviewCache``'s per-file cache in the code-v2 execution
+        loop. This only removes the redundant LLM call: the no-change bookkeeping downstream
+        (``_escalate_if_no_change``/``_note_revision_progress``, driven by the same ``_branch_digest``)
+        still sees the same rejected verdict every round on an unchanged branch and escalates to Tech
+        Lead adjudication at the same cap as before caching.
+
         Preconditions:
             - ``task`` is IN_REVIEW with a recorded feature branch (or the default ``feature/{id}``).
             - ``progress_callback`` is None (the concurrent fan-out, which suppresses per-task
@@ -159,6 +168,12 @@ class _ReviewMixin:
               exception is contained and converted into an ``error=True`` review (with an empty diff),
               so one task's failure fails only that task once (via ``_apply_review_decision``) and
               never aborts the round; no graph or git state is changed here.
+            - A cache hit returns an independent deep copy of the stored verdict, never the shared
+              instance, so the caller may mutate it freely. A fresh, non-``error`` verdict is stored
+              under ``task.id`` keyed by this round's digest, overwriting any prior entry for that
+              task — an ``error`` verdict is never cached (mirrors
+              ``code_review_agent.mapping``'s chunk cache: a review that could not run must be
+              retried for real, not frozen).
         """
         from software_engineering_team.coding_team import orchestrator as _orch
 
@@ -168,6 +183,15 @@ class _ReviewMixin:
             branch = _orch._feature_branch_name(task)
             summary = task.changes_summary or "(no summary recorded)"
             diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
+            digest = self._branch_digest(task, diff=diff)
+            with self._review_verdict_cache_lock:
+                cached = self._review_verdict_cache.get(task.id)
+            if cached is not None and cached[0] == digest:
+                logger.info(
+                    "Task %s: branch unchanged since last review; reusing cached verdict", task.id
+                )
+                return diff, copy.deepcopy(cached[1])
+
             evidence = _orch._build_review_evidence(summary, diff)
             review = self.tech_lead.run_code_review(
                 task_title=task.title,
@@ -178,6 +202,9 @@ class _ReviewMixin:
                 progress_callback=progress_callback,
                 spec_content=self.spec_content,
             )
+            if not review.get("error"):
+                with self._review_verdict_cache_lock:
+                    self._review_verdict_cache[task.id] = (digest, copy.deepcopy(review))
             return diff, review
         except Exception as e:  # noqa: BLE001 — a failed review must never abort the swarm
             logger.warning("Tech Lead review preparation failed for %s: %s", task.id, e)

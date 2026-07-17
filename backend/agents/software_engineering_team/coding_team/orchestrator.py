@@ -669,6 +669,14 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
         # Repo context only changes when merged work lands new files on the working tree, so cache
         # the merged-task count the context reflects and re-read only when it advances (see run()).
         self._context_merged_count = self._merged_count()
+        # Per-task Tech Lead review-verdict cache: task.id -> (branch_digest, verdict). An unchanged
+        # branch (same digest as the task's last-reviewed one) reuses the cached verdict instead of
+        # paying for another run_code_review call (see swarm_review._compute_review). Scoped to this
+        # swarm instance's own run — never persisted/restored across a resume, matching
+        # _repo_context_cache. Locked because _review_and_merge fans _compute_review out across
+        # multiple in-review tasks via parallel_map.
+        self._review_verdict_cache: Dict[str, tuple[str, Dict[str, Any]]] = {}
+        self._review_verdict_cache_lock = threading.Lock()
         # One isolated git worktree per worker (see coding_team.worktree_manager) — created up
         # front in run(), never lazily from inside a worker thread. Construction itself does no
         # filesystem/git I/O.

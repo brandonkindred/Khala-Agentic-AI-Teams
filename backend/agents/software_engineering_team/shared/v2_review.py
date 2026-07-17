@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from llm_service import LLMClient
+from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.llm_review import LlmReviewOutput
 from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.review_progress import (
@@ -363,11 +364,13 @@ def _qa_review_step(
     task_id: str,
     qa_agent_fn: Callable[..., List[ReviewIssue]],
     context: str = "",
+    cache: Optional[AgentReviewCache] = None,
 ) -> _ReviewStepResult:
     """Independent QA step.
 
     Preconditions: ``qa_agent_fn`` is the per-team QA runner (the test patch
-        surface for ``_run_qa_agent``).
+        surface for ``_run_qa_agent``). ``cache``: see
+        ``software_engineering_team.shared.agent_review.run_chunked_agent_review``.
     Postconditions:
         - Returns an empty :class:`_ReviewStepResult` when ``qa_agent`` is None.
           Otherwise never raises: an outright QA-agent failure is reported as a
@@ -386,6 +389,7 @@ def _qa_review_step(
                 task_description=task_description,
                 task_id=task_id,
                 context=context,
+                cache=cache,
             )
         )
     except Exception as exc:
@@ -411,11 +415,13 @@ def _security_review_step(
     task_id: str,
     security_agent_fn: Callable[..., List[ReviewIssue]],
     context: str = "",
+    cache: Optional[AgentReviewCache] = None,
 ) -> _ReviewStepResult:
     """Independent security step.
 
     Preconditions: ``security_agent_fn`` is the per-team security runner (the
-        test patch surface for ``_run_security_agent``).
+        test patch surface for ``_run_security_agent``). ``cache``: see
+        ``software_engineering_team.shared.agent_review.run_chunked_agent_review``.
     Postconditions:
         - Returns an empty :class:`_ReviewStepResult` when ``security_agent`` is None.
           Otherwise never raises: an outright security-agent failure is reported as
@@ -433,6 +439,7 @@ def _security_review_step(
                 task_description=task_description,
                 task_id=task_id,
                 context=context,
+                cache=cache,
             )
         )
     except Exception as exc:
@@ -474,10 +481,16 @@ def _run_review_steps(
         # concurrent branch (e.g. every DummyLLMClient-backed test).
         from shared_concurrency import parallel_map
 
-        results = parallel_map(step_fns, lambda fn: fn(), max_workers=len(step_fns), skip_none=False)
+        results = parallel_map(
+            step_fns, lambda fn: fn(), max_workers=len(step_fns), skip_none=False
+        )
     issues = [issue for step_result in results for issue in step_result.issues]
     raw_issue_count = next(
-        (step_result.raw_issue_count for step_result in results if step_result.raw_issue_count is not None),
+        (
+            step_result.raw_issue_count
+            for step_result in results
+            if step_result.raw_issue_count is not None
+        ),
         None,
     )
     return _ReviewStepResult(issues=issues, raw_issue_count=raw_issue_count)
@@ -733,6 +746,7 @@ def run_microtask_review(
     build_verify_fn: Callable[..., Tuple[bool, str]],
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
+    agent_review_cache: Optional[AgentReviewCache] = None,
 ) -> ReviewResult:
     """Run the shared full review on a single microtask's output files.
 
@@ -744,6 +758,9 @@ def run_microtask_review(
           unaffected.
         - ``enable_llm_review_grounding`` is forwarded to the LLM-fallback path
           (defaults True).
+        - ``agent_review_cache``, when given, is forwarded to the QA and security
+          steps only (not code review, which has its own cache) — see
+          ``software_engineering_team.shared.agent_review.run_chunked_agent_review``.
 
     Postconditions:
         - Returns a :class:`ReviewResult` scoped to ``files``; ``passed``
@@ -849,6 +866,7 @@ def run_microtask_review(
                 task_id=task_id,
                 qa_agent_fn=qa_agent_fn,
                 context=microtask_ctx,
+                cache=agent_review_cache,
             ),
             lambda: _security_review_step(
                 security_agent=security_agent,
@@ -858,6 +876,7 @@ def run_microtask_review(
                 task_id=task_id,
                 security_agent_fn=security_agent_fn,
                 context=microtask_ctx,
+                cache=agent_review_cache,
             ),
         ],
         llm=llm,

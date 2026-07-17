@@ -16,14 +16,59 @@ invalid, provoking bogus findings).
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from typing import Any, Callable, Dict, List, TypeVar
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
 
 # Each V2 team owns a distinct ``ReviewIssue`` type, so the helpers are generic
 # over whatever the caller's ``issue_factory`` produces.
 IssueT = TypeVar("IssueT")
+
+
+class AgentReviewCache:
+    """Per-run cache of per-piece QA/security review outcomes, keyed on exact LLM input.
+
+    Complementary to ``code_review_agent.mapping``'s chunk-outcome cache (which
+    covers code review), for the QA/security agents ``run_chunked_agent_review``
+    drives. Deliberately NOT process-global like that cache: the caller
+    constructs one instance per fix loop (see ``run_chunked_agent_review``'s
+    ``cache`` precondition) and discards it when the loop ends, so a verdict
+    never leaks across unrelated runs or tasks.
+
+    Invariants:
+        - A caller can never observe or mutate the cache's internal state: both
+          ``get`` and ``put`` copy the list, so appending to a returned/stored
+          list never affects the other's copy.
+    """
+
+    def __init__(self) -> None:
+        self._entries: Dict[str, List[Any]] = {}
+
+    def get(self, key: str) -> Optional[List[Any]]:
+        """Return a copy of the items stored under ``key``, or None on a miss."""
+        cached = self._entries.get(key)
+        return list(cached) if cached is not None else None
+
+    def put(self, key: str, items: List[Any]) -> None:
+        """Store a copy of ``items`` under ``key``, overwriting any prior entry."""
+        self._entries[key] = list(items)
+
+
+def _piece_cache_key(source: str, cache_context: str, piece: str) -> str:
+    """Hash of one review piece's exact LLM input (source/context/raw content).
+
+    Postconditions:
+        - Two calls collide only when ``source``, ``cache_context``, and
+          ``piece`` are all identical — mirroring
+          ``code_review_agent.mapping._chunk_cache_key``'s "exact LLM input" key
+          design — so any edit to the piece's content (or a different
+          language/task_description folded into ``cache_context``) changes the
+          digest and naturally invalidates a prior entry.
+    """
+    body = f"{source}\x00{cache_context}\x00{piece}"
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def run_chunked_agent_review(
@@ -38,6 +83,8 @@ def run_chunked_agent_review(
     max_chars: int,
     warn_threshold: int,
     context: str = "",
+    cache: Optional[AgentReviewCache] = None,
+    cache_context: str = "",
 ) -> List[IssueT]:
     """Run a quality agent over each file's raw, function-aware-split source.
 
@@ -49,6 +96,12 @@ def run_chunked_agent_review(
           ``description``, ``file_path``, and ``recommendation`` (each team's
           ``ReviewIssue``); an incompatible factory raises ``TypeError``.
         - ``max_chars`` > 0 and ``warn_threshold`` >= 0.
+        - ``cache``, when given, is scoped to the caller's own fix loop (e.g. one
+          microtask's review-cycle lifetime) — never shared across unrelated
+          runs or tasks. ``cache_context`` folds in whatever besides the piece's
+          raw content affects the agent's verdict (e.g. language/task
+          description); a caller that omits it while distinguishing calls only
+          by those fields risks a false cache hit.
 
     Postconditions:
         - Each non-blank file is split at function/method boundaries via
@@ -65,8 +118,15 @@ def run_chunked_agent_review(
           agent does not report a location, so every piece stays attributable.
         - A piece whose ``run_chunk`` call fails is logged and skipped; issues
           from the other pieces are still returned (one bad piece never aborts
-          the whole review).
+          the whole review). Such a piece is never cached, so it is retried for
+          real on the next call.
         - A file that fits in one segment is reviewed in a single call.
+        - When ``cache`` is given, a piece whose exact LLM input (``source`` +
+          ``cache_context`` + raw content) was already reviewed earlier in the
+          cache's lifetime is served from the cache instead of calling
+          ``run_chunk`` again, producing identical issues. When ``cache`` is
+          None (the default), behavior is identical to today — a pure
+          passthrough.
     """
     # Imported lazily (not at module level) so importing this helper does not
     # pull in the whole code_review_agent package; this also matches the V2
@@ -101,19 +161,24 @@ def run_chunked_agent_review(
         )
     issues: List[IssueT] = []
     for idx, (path, piece) in enumerate(pieces, start=1):
-        try:
-            items = run_chunk(piece)
-        except Exception as exc:
-            logger.warning(
-                "[%s] %s failed (piece %d/%d)%s: %s",
-                task_id,
-                label,
-                idx,
-                len(pieces),
-                context,
-                exc,
-            )
-            continue
+        cache_key = _piece_cache_key(source, cache_context, piece) if cache is not None else None
+        items = cache.get(cache_key) if cache_key is not None else None
+        if items is None:
+            try:
+                items = run_chunk(piece)
+            except Exception as exc:
+                logger.warning(
+                    "[%s] %s failed (piece %d/%d)%s: %s",
+                    task_id,
+                    label,
+                    idx,
+                    len(pieces),
+                    context,
+                    exc,
+                )
+                continue
+            if cache_key is not None:
+                cache.put(cache_key, list(items or []))
         for item in items or []:
             issues.append(
                 issue_factory(
@@ -143,11 +208,13 @@ def run_qa_agent(
     max_chars: int,
     warn_threshold: int,
     context: str = "",
+    cache: Optional[AgentReviewCache] = None,
 ) -> List[IssueT]:
     """Run the external QA agent over each file's raw, function-aware-split source.
 
     Preconditions:
         - ``qa_agent`` is not None and exposes ``.run(QAInput) -> QAOutput``.
+        - ``cache``: see ``run_chunked_agent_review``.
 
     Postconditions: see ``run_chunked_agent_review``; QA bugs become issues with
     ``source="qa"``.
@@ -171,6 +238,8 @@ def run_qa_agent(
         max_chars=max_chars,
         warn_threshold=warn_threshold,
         context=context,
+        cache=cache,
+        cache_context=f"{language}\x00{task_description}",
     )
 
 
@@ -185,12 +254,14 @@ def run_security_agent(
     max_chars: int,
     warn_threshold: int,
     context: str = "",
+    cache: Optional[AgentReviewCache] = None,
 ) -> List[IssueT]:
     """Run the external security agent over each file's raw, function-aware-split source.
 
     Preconditions:
         - ``security_agent`` is not None and exposes
           ``.run(SecurityInput) -> SecurityOutput``.
+        - ``cache``: see ``run_chunked_agent_review``.
 
     Postconditions: see ``run_chunked_agent_review``; vulnerabilities become
     issues with ``source="security"``.
@@ -214,4 +285,6 @@ def run_security_agent(
         max_chars=max_chars,
         warn_threshold=warn_threshold,
         context=context,
+        cache=cache,
+        cache_context=f"{language}\x00{task_description}",
     )
