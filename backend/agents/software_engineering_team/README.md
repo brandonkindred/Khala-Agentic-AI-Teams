@@ -287,8 +287,6 @@ Agents log progress at INFO level so you can see what’s happening at each step
 15:57:33 | INFO    | spec_parser | Parsing spec with LLM (1234 chars)
 15:57:33 | INFO    | architecture_expert.agent | Architecture Expert: starting design for Task Manager API
 15:57:33 | INFO    | architecture_expert.agent | Architecture Expert: done, 2 components
-15:57:33 | INFO    | tech_lead_agent.agent | Tech Lead: planning tasks for Task Manager API
-15:57:33 | INFO    | tech_lead_agent.agent | Tech Lead: assigned 2 tasks in order ['t1', 't2']
 15:57:33 | INFO    | api.main | Pipeline: Task t1 (backend) -> backend
 15:57:33 | INFO    | backend_agent.agent | Backend: implementing task 'Implement API'
 15:57:33 | INFO    | backend_agent.agent | Backend: done, code=0 chars, summary=0 chars
@@ -356,7 +354,6 @@ software_engineering_team/
 │  # --- Design / setup ---
 ├── product_requirements_analysis_agent/  # Spec review, constraint analysis, Q&A, PRD writing
 ├── architect-agents/      # ArchitectureExpertAgent + Enterprise Orchestrator
-├── tech_lead_agent/       # Tech Lead: build plan, task distribution, progress tracking
 ├── git_setup_agent/       # Repo setup (clones/branches; ensures development branch)
 │
 │  # --- Implementation sub-teams ---

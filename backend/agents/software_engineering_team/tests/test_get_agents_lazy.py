@@ -22,13 +22,12 @@ if str(_team_dir) not in sys.path:
 import orchestrator  # noqa: E402
 import pytest  # noqa: E402
 
-# The 17 roles the fleet factory exposes. Kept explicit so a drift in the
+# The 16 roles the fleet factory exposes. Kept explicit so a drift in the
 # registry's key set is a visible test failure, not a silent behavior change.
 _EXPECTED_ROLES = {
     "architecture",
     "integration",
     "acceptance_verifier",
-    "tech_lead",
     "devops",
     "backend",
     "frontend_code_v2",

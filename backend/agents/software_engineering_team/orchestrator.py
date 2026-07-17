@@ -24,8 +24,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # These two sys.path insertions are still required by this module itself:
 # below (and further down), it does *bare* (non-dotted) imports of its own
-# sibling sub-packages -- `from qa_agent import ...`, `from tech_lead_agent
-# import ...`, `from architecture_expert import ...` -- rather than
+# sibling sub-packages -- `from qa_agent import ...`, `from architecture_expert
+# import ...` -- rather than
 # `from software_engineering_team.qa_agent import ...`. The app launcher
 # putting `backend/agents` on sys.path (run_unified_api.py /
 # unified_api/main.py) only resolves *dotted* imports like
@@ -668,7 +668,6 @@ def _get_agents() -> Mapping[str, Any]:
     from linting_tool_agent import LintingToolAgent
     from qa_agent import QAExpertAgent
     from security_agent import CybersecurityExpertAgent
-    from tech_lead_agent import TechLeadAgent
     from technical_writers.dbc_comments_agent import DbcCommentsAgent
     from technical_writers.documentation_agent import DocumentationAgent
 
@@ -681,7 +680,6 @@ def _get_agents() -> Mapping[str, Any]:
             "acceptance_verifier": lambda: AcceptanceVerifierAgent(
                 get_client("acceptance_verifier")
             ),
-            "tech_lead": lambda: TechLeadAgent(get_client("tech_lead")),
             "devops": lambda: DevOpsTeamLeadAgent(get_client("devops")),
             "backend": _lazy_init_backend_code_v2_team,
             "frontend_code_v2": _lazy_init_frontend_code_v2_team,

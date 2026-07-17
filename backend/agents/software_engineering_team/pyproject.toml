@@ -111,7 +111,6 @@ where = ["."]
 include = [
     "software_engineering_team*",
     "architect-agents*",
-    "tech_lead_agent*",
     "security_agent*",
     "qa_agent*",
 ]

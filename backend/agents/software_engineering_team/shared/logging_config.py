@@ -46,7 +46,6 @@ AGENT_LOGGERS = [
     "shared_command_runner",
     # Agent loggers
     "architecture_expert.agent",
-    "tech_lead_agent.agent",
     "security_agent.agent",
     "qa_agent.agent",
     "code_review_agent.agent",

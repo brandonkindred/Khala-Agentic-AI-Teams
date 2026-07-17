@@ -1,15 +1,14 @@
 """End-to-end learning-loop integration test (requires Postgres).
 
 Acceptance criterion: a simulated agent crash produces a post-mortem, which
-becomes a ``se_learnings`` row, which then appears in the next Tech Lead prompt.
+becomes a ``se_learnings`` row retrievable through the public
+``learnings_store`` seam.
 
 Skipped unless run with ``-m integration`` against a live Postgres (CI's
 ``test-integration`` job provides one).
 """
 
 from __future__ import annotations
-
-from types import SimpleNamespace
 
 import pytest
 
@@ -35,11 +34,10 @@ def _se_schema():
         cur.execute("TRUNCATE se_learnings")
 
 
-def test_crash_to_post_mortem_to_learning_to_prompt(_se_schema, tmp_path) -> None:
-    """A simulated crash flows through post-mortem to learning to the next Tech Lead prompt."""
+def test_crash_to_post_mortem_to_learning(_se_schema, tmp_path) -> None:
+    """A simulated crash flows through post-mortem to a retrievable learning row."""
     from software_engineering_team.shared.learnings_store import count_learnings, retrieve_learnings
     from software_engineering_team.shared.post_mortem import write_post_mortem
-    from software_engineering_team.tech_lead_agent.agent import TechLeadAgent
 
     # 1. A simulated agent crash writes a post-mortem (which ingests a learning).
     unique_error = "DatabaseConnectionTimeout while seeding fixtures"
@@ -54,20 +52,7 @@ def test_crash_to_post_mortem_to_learning_to_prompt(_se_schema, tmp_path) -> Non
         project_root=tmp_path,
     )
 
-    # 2. The learning row exists.
+    # 2. The learning row exists and is retrievable through the public seam.
     assert count_learnings() >= 1
     hits = retrieve_learnings("database connection timeout seeding")
     assert any(unique_error in h.trigger for h in hits)
-
-    # 3. It surfaces in the next Tech Lead Design prompt.
-    fake_input = SimpleNamespace(
-        requirements=SimpleNamespace(
-            title="Database seeding",
-            description="Reliably seed the database with connection handling",
-        ),
-        architecture=SimpleNamespace(overview="Postgres-backed service"),
-        spec_content="seed the database connection timeout handling",
-    )
-    block = TechLeadAgent._relevant_learnings_block(fake_input)
-    assert any("RELEVANT LEARNINGS FROM PAST SPRINTS" in line for line in block)
-    assert any("backend_dev" in line for line in block)
