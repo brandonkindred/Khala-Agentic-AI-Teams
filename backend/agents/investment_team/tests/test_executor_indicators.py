@@ -113,14 +113,21 @@ def test_vwap_runs_on_synthetic_ohlcv() -> None:
     assert all(math.isfinite(x) for x in out)
 
 
-def test_vwap_returns_nan_for_zero_cumulative_volume() -> None:
-    """``vwap`` falls back to NaN when the cumulative volume sums to zero."""
+def test_vwap_zero_cumulative_volume_falls_back_to_mean_close() -> None:
+    """``vwap`` falls back to the running mean close when cumulative volume is zero.
+
+    The Series helper is derived from ``IndicatorRegistry.vwap(period=None)``, whose
+    zero-volume-window convention is the window's mean close (a finite value the
+    engine evaluates predicates against), not NaN.
+    """
     high = pd.Series([1.0, 2.0])
     low = pd.Series([0.5, 1.0])
     close = pd.Series([1.0, 2.0])
     volume = pd.Series([0.0, 0.0])
     out = ind.vwap(high, low, close, volume)
-    assert out.isna().all()
+    # Every bar is finite (mean of the closes seen so far): [1.0, 1.5].
+    assert out.notna().all()
+    assert out.tolist() == pytest.approx([1.0, 1.5])
 
 
 # ---------------------------------------------------------------------------

@@ -913,11 +913,19 @@ def test_pandas_obv_matches_registry_tail() -> None:
 
 
 def test_pandas_mfi_bounded_and_matches_registry_tail() -> None:
-    """Pandas MFI stays in [0, 100] and its tail matches the registry."""
+    """Pandas MFI stays in [0, 100] (modulo running-sum FP drift) and matches the registry.
+
+    The Series helper is derived from the engine's incremental ``IndicatorRegistry`` —
+    the same add/subtract-maintained running-sum path ``StreamingHistoryView`` /
+    ``compute_indicator_series`` use — so a value can sit one ULP past a bound (e.g.
+    ``100.00000000000001``). The registry documents this drift and its own
+    incremental-vs-cold checks tolerate it at ``abs=1e-6``; asserting the same here
+    keeps the Series helper bit-faithful to what the engine actually trades on.
+    """
     high, low, close, vol = _frame()
     series = pdi.mfi(high, low, close, vol, period=14)
     finite = series.dropna()
-    assert (finite >= 0).all() and (finite <= 100).all()
+    assert (finite >= -1e-6).all() and (finite <= 100 + 1e-6).all()
     bars = _series(80, seed=14)
     assert float(series.iloc[-1]) == pytest.approx(IndicatorRegistry().mfi(bars, 14))
 
@@ -962,19 +970,20 @@ def _pandas_bb_bandwidth(close: pd.Series, period: int, num_std: float) -> pd.Se
     return (upper - lower) / middle
 
 
-def _ref_bb_sample(bars, period: int, num_std: float, select: str) -> Optional[float]:
-    """%B / bandwidth using *sample* std (ddof=1), matching pandas ``rolling().std()``.
+def _ref_bb_population(bars, period: int, num_std: float, select: str) -> Optional[float]:
+    """%B / bandwidth using *population* std (ddof=0), matching the streaming registry.
 
-    The streaming registry uses population variance (``sq/period − mean²``, ddof=0), but the
-    pandas reference ``bollinger_bands`` builds its bands from ``Series.rolling().std()`` —
-    pandas' sample std. This reference mirrors that convention so the pandas derived outputs
-    can be cross-checked against an independent computation rather than the registry tail.
+    The pandas reference ``bollinger_bands`` is now derived from the streaming
+    ``IndicatorRegistry`` (population variance ``sq/period − mean²``, ddof=0), so this
+    independent reference computes the same population variance a different way
+    (``Σ(v − mean)² / period``) — cross-checking the pandas bands against a hand-rolled
+    computation rather than the registry tail itself.
     """
     if len(bars) < period:
         return None
     vals = [b.close for b in bars[-period:]]
     mean = sum(vals) / period
-    var = sum((v - mean) ** 2 for v in vals) / (period - 1)  # sample variance (ddof=1)
+    var = sum((v - mean) ** 2 for v in vals) / period  # population variance (ddof=0)
     std = var**0.5
     upper, lower = mean + num_std * std, mean - num_std * std
     if select == "percent_b":
@@ -985,27 +994,27 @@ def _ref_bb_sample(bars, period: int, num_std: float, select: str) -> Optional[f
     raise AssertionError(select)
 
 
-def test_pandas_bb_percent_b_matches_sample_std_reference() -> None:
-    """%B derived from the pandas bands matches an independent sample-std reference tail.
+def test_pandas_bb_percent_b_matches_population_std_reference() -> None:
+    """%B derived from the pandas bands matches an independent population-std reference tail.
 
-    The pandas bands use sample std (ddof=1), so this verifies the static reference layer
-    against a hand-rolled sample-std computation — not the registry, which uses population
-    std and so produces slightly different Bollinger values by construction.
+    The pandas bands are now registry-derived and use population std (ddof=0), so this
+    verifies the static reference layer against a hand-rolled population-std computation —
+    the two agree by construction (both population variance), which the registry does too.
     """
     _high, _low, close, _vol = _frame()
     bars = _series(80, seed=14)
     derived = _pandas_bb_percent_b(close, 20, 2.0)
-    assert float(derived.iloc[-1]) == pytest.approx(_ref_bb_sample(bars, 20, 2.0, "percent_b"))
+    assert float(derived.iloc[-1]) == pytest.approx(_ref_bb_population(bars, 20, 2.0, "percent_b"))
     # Warmup rows (insufficient bars for the rolling std) stay NaN, like the bands.
     assert pd.isna(derived.iloc[0])
 
 
-def test_pandas_bb_bandwidth_matches_sample_std_reference() -> None:
-    """Bandwidth derived from the pandas bands matches an independent sample-std reference tail."""
+def test_pandas_bb_bandwidth_matches_population_std_reference() -> None:
+    """Bandwidth derived from the pandas bands matches an independent population-std reference tail."""
     _high, _low, close, _vol = _frame()
     bars = _series(80, seed=14)
     derived = _pandas_bb_bandwidth(close, 20, 2.0)
-    assert float(derived.iloc[-1]) == pytest.approx(_ref_bb_sample(bars, 20, 2.0, "bandwidth"))
+    assert float(derived.iloc[-1]) == pytest.approx(_ref_bb_population(bars, 20, 2.0, "bandwidth"))
     assert pd.isna(derived.iloc[0])
 
 
