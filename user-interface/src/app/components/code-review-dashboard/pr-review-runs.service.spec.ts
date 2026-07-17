@@ -513,7 +513,7 @@ describe('PrReviewRunsService', () => {
     expect(messages).toEqual(['Review for pull request #1 completed.']);
   });
 
-  it('announces a cancelled review as cancelled, not completed', () => {
+  it('announces a cancelled review with no error attached as cancelled, not completed', () => {
     service.reset(REPO);
     apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'j1', status: 'cancelled' }));
     const messages: string[] = [];
@@ -521,6 +521,18 @@ describe('PrReviewRunsService', () => {
     service.startReview(makePulls(1)[0]);
     vi.advanceTimersByTime(5000);
     expect(messages).toEqual(['Review for pull request #1 cancelled.']);
+  });
+
+  it('announces a real-world cancellation (status + error, per the /cancel route) as failed, matching the badge', () => {
+    service.reset(REPO);
+    apiSpy.getJobStatus.mockReturnValue(
+      of({ job_id: 'j1', status: 'cancelled', error: 'Cancelled by user' }),
+    );
+    const messages: string[] = [];
+    service.announce$.subscribe((m) => messages.push(m));
+    service.startReview(makePulls(1)[0]);
+    vi.advanceTimersByTime(5000);
+    expect(messages).toEqual(['Review for pull request #1 failed.']);
   });
 
   // -------------------------------------------------------------------------
