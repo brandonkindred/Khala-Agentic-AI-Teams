@@ -847,6 +847,7 @@ def test_run_publication_agent_main_smoke(monkeypatch, capsys, tmp_path) -> None
 
 def test_run_writer_agent_main_smoke(monkeypatch, capsys) -> None:
     import agents.blogging.agent_implementations.run_writer_agent as mod
+    from conftest import _STUB_WRITER_DRAFT
 
     from llm_service import DummyLLMClient
 
@@ -866,7 +867,7 @@ def test_run_writer_agent_main_smoke(monkeypatch, capsys) -> None:
 
         def run(self, inp):
             captured_input["inp"] = inp
-            return WriterOutput(draft="# Draft\n\nBody.")
+            return WriterOutput(draft=_STUB_WRITER_DRAFT)
 
     monkeypatch.setattr(mod, "BlogWriterAgent", _Stub)
 

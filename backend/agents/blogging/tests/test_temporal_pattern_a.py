@@ -380,11 +380,11 @@ def test_run_stage_transient_error_funnels_fail_dto_on_last_attempt(monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-def _run_workflow(monkeypatch, statuses, patched=True):
+def _run_workflow(monkeypatch, statuses, is_patched=True):
     """Drive BlogFullPipelineWorkflow.run with a stubbed execute_activity.
 
     ``statuses`` maps activity function name -> DTO returned by that activity;
-    ``patched`` is what the stubbed ``workflow.patched`` reports (False replays the
+    ``is_patched`` is what the stubbed ``workflow.patched`` reports (False replays the
     pre-decomposition history path). Returns the ordered activity names scheduled.
     """
     import asyncio
@@ -399,7 +399,7 @@ def _run_workflow(monkeypatch, statuses, patched=True):
         return statuses.get(name, {})
 
     monkeypatch.setattr(wf.workflow, "execute_activity", fake_execute)
-    monkeypatch.setattr(wf.workflow, "patched", lambda _id: patched)
+    monkeypatch.setattr(wf.workflow, "patched", lambda _id: is_patched)
     asyncio.run(wf.BlogFullPipelineWorkflow().run("j1", {"brief": "x"}))
     return calls
 
@@ -469,7 +469,7 @@ def test_workflow_finalizes_on_needs_human_review(monkeypatch) -> None:
 
 def test_workflow_unpatched_replay_runs_legacy_monolith(monkeypatch) -> None:
     """Pre-decomposition histories replay the single-activity path deterministically."""
-    calls = _run_workflow(monkeypatch, {"run_full_pipeline_activity": None}, patched=False)
+    calls = _run_workflow(monkeypatch, {"run_full_pipeline_activity": None}, is_patched=False)
     assert calls == ["run_full_pipeline_activity"]
 
 
@@ -479,29 +479,9 @@ def test_workflow_unpatched_replay_runs_legacy_monolith(monkeypatch) -> None:
 
 
 def _real_planning_phase_result():
-    from agents.blogging.shared.content_plan import (
-        ContentPlan,
-        ContentPlanSection,
-        PlanningPhaseResult,
-        RequirementsAnalysis,
-        TitleCandidate,
-    )
+    from _content_plan_test_utils import make_minimal_planning_phase_result
 
-    plan = ContentPlan(
-        overarching_topic="Topic",
-        narrative_flow="Flow",
-        sections=[ContentPlanSection(title="Intro", coverage_description="hook", order=0)],
-        title_candidates=[TitleCandidate(title="My Title", probability_of_success=0.7)],
-        requirements_analysis=RequirementsAnalysis(
-            plan_acceptable=True, scope_feasible=True, research_gaps=[]
-        ),
-    )
-    return PlanningPhaseResult(
-        content_plan=plan,
-        planning_iterations_used=1,
-        parse_retry_count=0,
-        planning_wall_ms_total=10.0,
-    )
+    return make_minimal_planning_phase_result()
 
 
 def test_planning_dto_round_trips_real_model() -> None:
