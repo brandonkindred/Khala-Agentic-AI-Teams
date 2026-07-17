@@ -1,7 +1,15 @@
 """
 Document production phase: produce context doc and spec; call PRA.
 
-Persists artifacts to repo path and builds handoff package.
+The orchestration (file writes, PRA run/wait, architecture step, handoff assembly) lives
+in ``planning_team.agents.document_production.DocumentProductionAgent``; ``run_document_production``
+below is a thin backward-compatible adapter over it.
+
+The leaf IO/compaction helpers (``_compact_architecture_overview``, ``_write_context_document``,
+``_write_initial_spec``) and the ``compact_text``/``get_client`` bindings intentionally stay
+defined *here*: the compaction test suite monkeypatches these module globals, and a function
+only observes patches applied to its defining module. The agent imports them from this module
+lazily at call time.
 """
 
 from __future__ import annotations
@@ -11,8 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import compact_text, get_client
-from planning_team.models import ClientContext, HandoffPackage
-from planning_team.phases._util import as_client_context
+from planning_team.models import ClientContext
 
 logger = logging.getLogger(__name__)
 
@@ -126,97 +133,28 @@ def run_document_production(
     """
     Run document production: write context doc and spec; optionally call PRA.
 
-    Adapters are injected (run_pra, wait_pra, etc.) so tests can mock them.
-    answer_callback(pending_questions) should return list of {question_id, selected_option_id, other_text?}
-    for PRA when waiting_for_answers. If None, PRA may block on questions.
-    Returns (context_update, artifacts). artifacts includes handoff_package.
+    Thin adapter over ``DocumentProductionAgent``. Adapters are injected (run_pra, wait_pra,
+    etc.) so tests can mock them. answer_callback(pending_questions) should return list of
+    {question_id, selected_option_id, other_text?} for PRA when waiting_for_answers. If None,
+    PRA may block on questions. Returns (context_update, artifacts). artifacts includes
+    handoff_package.
     """
-    repo_path = context.get("repo_path", "")
-    client_context = as_client_context(context.get("client_context"))
-    spec_content = context.get("spec_content") or ""
-    initial_brief = context.get("initial_brief") or ""
-    spec_to_use = spec_content or initial_brief or "# Specification\n\n(To be refined.)"
-
-    context_update: Dict[str, Any] = {}
-    artifacts: Dict[str, Any] = {}
-    client_context_doc_path: Optional[str] = None
-    validated_spec_path: Optional[str] = None
-    prd_path: Optional[str] = None
-
-    path = Path(repo_path)
-    path.mkdir(parents=True, exist_ok=True)
-    (path / "plan").mkdir(parents=True, exist_ok=True)
-
-    if client_context:
-        client_context_doc_path = _write_context_document(repo_path, client_context)
-        artifacts["client_context_document_path"] = client_context_doc_path
-
-    initial_spec_path = _write_initial_spec(repo_path, spec_to_use)
-    artifacts["initial_spec_path"] = initial_spec_path
-
-    if use_product_analysis and run_pra and wait_pra:
-        job_id = run_pra(repo_path=repo_path, spec_content=spec_to_use)
-        if job_id:
-            final = wait_pra(job_id=job_id, answer_callback=answer_callback)
-            if final.get("status") == "completed":
-                validated_spec_path = final.get("validated_spec_path")
-                if not validated_spec_path:
-                    validated_spec_path = str(
-                        Path(repo_path) / "plan" / "product_analysis" / "validated_spec.md"
-                    )
-                prd_path = str(
-                    Path(repo_path)
-                    / "plan"
-                    / "product_analysis"
-                    / "product_requirements_document.md"
-                )
-            else:
-                logger.warning("PRA did not complete: %s", final.get("error"))
-        else:
-            logger.warning("PRA run failed (no job_id)")
-    else:
-        validated_spec_path = initial_spec_path
-
-    def _read_if_exists(p: Optional[str]) -> Optional[str]:
-        if not p:
-            return None
-        path = Path(p)
-        return path.read_text(encoding="utf-8") if path.exists() else None
-
-    architecture_overview: Optional[str] = None
-    if run_architecture_fn:
-        try:
-            spec_content_for_arch = _read_if_exists(validated_spec_path) or spec_to_use
-            prd_content_for_arch = _read_if_exists(prd_path)
-            cc_dict: Optional[Dict[str, Any]] = None
-            if client_context and hasattr(client_context, "model_dump"):
-                cc_dict = client_context.model_dump()
-            elif isinstance(context.get("client_context"), dict):
-                cc_dict = context["client_context"]
-            architecture_overview = run_architecture_fn(
-                spec_content=spec_content_for_arch or "",
-                prd_content=prd_content_for_arch,
-                repo_path=repo_path,
-                client_context=cc_dict,
-            )
-            if (
-                architecture_overview
-                and len(architecture_overview) > ARCHITECTURE_OVERVIEW_MAX_CHARS
-            ):
-                architecture_overview = _compact_architecture_overview(architecture_overview)
-        except Exception as e:
-            logger.warning("Architecture step failed: %s", e)
-
-    handoff = HandoffPackage(
-        client_context=client_context,
-        client_context_document_path=client_context_doc_path,
-        validated_spec_path=validated_spec_path,
-        validated_spec_content=_read_if_exists(validated_spec_path),
-        prd_path=prd_path,
-        prd_content=_read_if_exists(prd_path),
-        architecture_overview=architecture_overview,
-        summary="Handoff package produced by Planning.",
+    from planning_team.agents.document_production import (
+        DocumentProductionAgent,
+        DocumentProductionInput,
     )
-    context_update["handoff_package"] = handoff
-    artifacts["handoff_package"] = handoff.model_dump()
-    return context_update, artifacts
+
+    out = DocumentProductionAgent().run(
+        DocumentProductionInput(
+            repo_path=context.get("repo_path", ""),
+            client_context=context.get("client_context"),
+            spec_content=context.get("spec_content") or "",
+            initial_brief=context.get("initial_brief") or "",
+            use_product_analysis=use_product_analysis,
+        ),
+        run_pra=run_pra,
+        wait_pra=wait_pra,
+        answer_callback=answer_callback,
+        run_architecture_fn=run_architecture_fn,
+    )
+    return {"handoff_package": out.handoff_package}, out.artifacts

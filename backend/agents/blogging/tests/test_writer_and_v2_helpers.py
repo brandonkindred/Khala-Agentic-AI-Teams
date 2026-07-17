@@ -161,10 +161,281 @@ def test_v2_extract_plan_keywords() -> None:
         ],
     )
     kws = _extract_plan_keywords(plan)
-    # Words like 'and', 'to' (<4 chars) should be dropped; longer kept
+    # Stopwords like 'and', 'to' should be dropped regardless of length; longer
+    # content words kept.
     assert "scalable" in kws
     assert "systems" in kws
-    assert all(len(k) >= 4 for k in kws)
+    assert "and" not in kws
+    assert "to" not in kws
+
+
+def test_v2_extract_plan_keywords_keeps_short_acronyms() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="Improving UX and AI-driven API design",
+        sections=[
+            SimpleNamespace(title="SQL query tuning", order=0),
+        ],
+    )
+    kws = _extract_plan_keywords(plan)
+    # Short but meaningful acronyms must survive the stopword filter.
+    assert "ux" in kws
+    assert "api" in kws
+    assert "sql" in kws
+
+
+def test_v2_extract_plan_keywords_drops_long_stopwords() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="A guide about your favourite tools",
+        sections=[],
+    )
+    kws = _extract_plan_keywords(plan)
+    # "about" and "your" are >= 4 chars but are stopwords, so should be dropped
+    # despite the old length-only heuristic keeping them.
+    assert "about" not in kws
+    assert "your" not in kws
+    assert "guide" in kws
+    assert "favourite" in kws
+
+
+def test_v2_extract_plan_keywords_drops_short_pronouns() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="We asked us if my team could help me",
+        sections=[],
+    )
+    kws = _extract_plan_keywords(plan)
+    # First/third-person pronouns are short (<4 chars) but survive the pure
+    # length floor, so they must be dropped via the stopword list explicitly
+    # to avoid spurious story-bank matches on words like "we" or "my".
+    assert "we" not in kws
+    assert "us" not in kws
+    assert "my" not in kws
+    assert "me" not in kws
+    assert "if" not in kws
+    assert "team" in kws
+    assert "help" in kws
+
+
+def test_v2_extract_plan_keywords_drops_punctuation_only_tokens() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="Migration guide -- ## legacy systems",
+        sections=[],
+    )
+    kws = _extract_plan_keywords(plan)
+    # Standalone punctuation tokens (e.g. "--", "##") have no alphanumeric
+    # content and must not be treated as keywords, since they'd otherwise
+    # cause spurious story-bank matches on formatting artifacts alone.
+    assert "--" not in kws
+    assert "##" not in kws
+    assert "migration" in kws
+    assert "legacy" in kws
+
+
+def test_v2_extract_plan_keywords_ambiguous_short_words_filtered_regardless_of_case() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="IT in the US",
+        sections=[
+            SimpleNamespace(title="Notes from the office", order=0),
+        ],
+    )
+    kws = _extract_plan_keywords(plan)
+    # "it"/"us" are genuinely ambiguous between a domain acronym and the
+    # pronouns "it"/"us"; casing can't reliably disambiguate them (an
+    # all-caps heading doesn't mean every word is an acronym -- see
+    # test_v2_extract_plan_keywords_all_caps_heading_does_not_admit_stopwords),
+    # so they're filtered like any other stopword regardless of case, and
+    # they aren't in the ``_PLAN_KEYWORD_SHORT_TERMS`` allowlist.
+    assert "it" not in kws
+    assert "us" not in kws
+    assert "in" not in kws
+    assert "the" not in kws
+    assert "notes" in kws
+    assert "office" in kws
+
+
+def test_v2_extract_plan_keywords_lowercase_pronouns_still_filtered() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="We asked if it could work for us",
+        sections=[],
+    )
+    kws = _extract_plan_keywords(plan)
+    assert "it" not in kws
+    assert "us" not in kws
+    assert "we" not in kws
+
+
+def test_v2_extract_plan_keywords_short_terms_admitted_regardless_of_casing() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="A guide to the Api and sql basics",
+        sections=[SimpleNamespace(title="UX vs ai tradeoffs", order=0)],
+    )
+    kws = _extract_plan_keywords(plan)
+    # Short domain terms are admitted via a fixed allowlist rather than by
+    # inferring "acronym" from casing -- the planning LLM doesn't reliably
+    # capitalize acronyms, so "Api" (title case) and "sql" (lowercase) must
+    # be recognized exactly like "UX" (all caps).
+    assert "api" in kws
+    assert "sql" in kws
+    assert "ux" in kws
+    assert "ai" in kws
+
+
+def test_v2_extract_plan_keywords_all_caps_heading_does_not_admit_stopwords() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="HOW TO USE AI",
+        sections=[],
+    )
+    kws = _extract_plan_keywords(plan)
+    # An all-caps heading must not be treated as "every word is an acronym";
+    # ordinary stopwords ("how", "to", "use") stay filtered even in caps.
+    # Only "ai" is admitted, via the allowlist.
+    assert "how" not in kws
+    assert "to" not in kws
+    assert "use" not in kws
+    assert "ai" in kws
+
+
+def test_v2_extract_plan_keywords_includes_hardware_and_networking_terms() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="GPU vs CPU for inference",
+        sections=[SimpleNamespace(title="DNS and SSH basics", order=0)],
+    )
+    kws = _extract_plan_keywords(plan)
+    assert "gpu" in kws
+    assert "cpu" in kws
+    assert "dns" in kws
+    assert "ssh" in kws
+
+
+def test_v2_extract_plan_keywords_strips_smart_quotes_and_markdown_emphasis() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic="A guide “about” **great** tools, explained—",
+        sections=[SimpleNamespace(title="**AI** for teams", order=0)],
+    )
+    kws = _extract_plan_keywords(plan)
+    # Smart quotes, markdown emphasis markers, and a trailing em-dash must be
+    # trimmed so the underlying word is compared cleanly: "about" (wrapped in
+    # curly quotes) is still recognized as a stopword, "great"/"explained"
+    # (wrapped in markdown emphasis / trailed by a dash) are still recognized
+    # as ordinary keywords, and "**AI**" still resolves to the "ai" allowlist
+    # entry rather than surviving as a malformed token.
+    assert "about" not in kws
+    assert "“about”" not in kws
+    assert "great" in kws
+    assert "explained" in kws
+    assert "explained—" not in kws
+    assert "ai" in kws
+    assert "**ai**" not in kws
+
+
+def test_v2_extract_plan_keywords_filters_sentence_connectives() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    plan = SimpleNamespace(
+        overarching_topic=(
+            "Teams should adopt this pattern because it reduces risk, "
+            "not without tradeoffs, until it proves itself against "
+            "alternatives"
+        ),
+        sections=[],
+    )
+    kws = _extract_plan_keywords(plan)
+    # A full-sentence "stance" topic is dense with subordinating
+    # conjunctions/prepositions; these must be filtered like any other
+    # stopword even though they're common in argumentative prose.
+    assert "because" not in kws
+    assert "without" not in kws
+    assert "until" not in kws
+    assert "against" not in kws
+    assert "adopt" in kws
+    assert "pattern" in kws
+    assert "reduces" in kws
+    assert "alternatives" in kws
+
+
+def test_v2_extract_plan_keywords_drops_ordinary_short_words_below_length_floor() -> None:
+    from types import SimpleNamespace
+
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _extract_plan_keywords,
+    )
+
+    ai_plan = SimpleNamespace(overarching_topic="New AI tools", sections=[])
+    sql_plan = SimpleNamespace(overarching_topic="New SQL workflows", sections=[])
+    ai_kws = _extract_plan_keywords(ai_plan)
+    sql_kws = _extract_plan_keywords(sql_plan)
+    # "New" is an ordinary word, not an acronym, and short enough (3 chars)
+    # that admitting it regardless of stopword status would let unrelated
+    # plans match in the story bank purely on "new". Acronyms ("AI", "SQL")
+    # still survive since they're capitalized in the original text.
+    assert "new" not in ai_kws
+    assert "new" not in sql_kws
+    assert "ai" in ai_kws
+    assert "sql" in sql_kws
+    assert not (set(ai_kws) & set(sql_kws))
 
 
 def test_v2_extract_plan_keywords_handles_empty() -> None:

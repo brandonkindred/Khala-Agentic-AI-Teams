@@ -11,6 +11,7 @@ their docstring below for why).
 """
 
 from agent_provisioning_team.temporal.activities import (
+    acquire_agent_lock_activity,
     audit_activity,
     compensate_activity,
     credentials_activity,
@@ -21,6 +22,7 @@ from agent_provisioning_team.temporal.activities import (
     mark_job_failed_activity,
     provision_tool_activity,
     record_account_provisioning_activity,
+    release_agent_lock_activity,
     setup_activity,
 )
 from agent_provisioning_team.temporal.client import is_temporal_enabled
@@ -45,6 +47,8 @@ WORKFLOWS = [
     AgentDeprovisioningWorkflow,
 ]
 ACTIVITIES = [
+    acquire_agent_lock_activity,
+    release_agent_lock_activity,
     setup_activity,
     list_manifest_tools_activity,
     credentials_activity,

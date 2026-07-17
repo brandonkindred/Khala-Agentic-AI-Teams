@@ -657,6 +657,430 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
     assert "1 merged, 1 failed" in final["status_text"]
 
 
+def test_terminal_status_write_survives_slow_pending_graph_persist(tmp_path, monkeypatch):
+    """A graph mutation's background persist write must never land AFTER — and clobber —
+    the terminal status write. Task-graph mutators (e.g. mark_branch_merged) enqueue their
+    job-service write into a background flusher (see _persist_graph_async) rather than
+    writing synchronously while TaskGraphService's lock is held; every _update() call —
+    including the final terminal status write — must drain that flusher first, so a
+    still-in-flight write can never complete after and overwrite fresher phase/status_text/
+    progress with stale data. Simulates a slow job-service write for any call carrying a
+    task_graph_snapshot (the background-persist payload) and asserts the terminal write is
+    always the last one recorded."""
+    import threading
+    import time
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+
+        def run(self, **kw):
+            # Triggers the async persist_callback path (invoked while TaskGraphService's
+            # lock is held) — enqueues a slow-to-write payload in the background and
+            # returns immediately, well before the terminal write below.
+            self.graph.mark_branch_merged("t1")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    updates: List[Dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def _update_job_fn(**kw: Any) -> None:
+        if "task_graph_snapshot" in kw:
+            time.sleep(0.1)  # simulate a slow background job-service write
+        with lock:
+            updates.append(kw)
+
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=_update_job_fn,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    assert updates, "orchestrator must write at least the terminal status"
+    final = updates[-1]
+    assert final.get("status") == "completed"
+    assert final.get("progress") == 100
+    # No write after the terminal one may carry a task_graph_snapshot: that would mean a
+    # stale background write landed after — and could have clobbered — the terminal fields.
+    assert "task_graph_snapshot" not in final
+
+
+def test_failed_background_persist_write_is_retried_at_round_boundary(tmp_path, monkeypatch):
+    """If the background write for a graph mutation fails, _persist_state must NOT have
+    already been marked as delivered — otherwise the round-boundary sync checkpoint
+    (_persist_graph_sync) sees no change and skips retrying, permanently leaving the
+    terminal job's snapshot stale even though later status writes succeed. Fails the first
+    job-service write that carries a task_graph_snapshot and asserts the retried write
+    still lands with the correct (merged) state."""
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    class StubSwarm:
+        aborted = False
+
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+
+        def run(self, **kw):
+            # Triggers the async persist_callback path, then simulates the round-boundary
+            # durability checkpoint the real swarm loop performs every round.
+            self.graph.mark_branch_merged("t1")
+            kw["persist_fn"]()
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    updates: List[Dict[str, Any]] = []
+    failed_once = {"done": False}
+
+    def _update_job_fn(**kw: Any) -> None:
+        snap = kw.get("task_graph_snapshot")
+        # Target specifically the write for the merge mutation (not the earlier add_task /
+        # pre-loop writes, whose snapshot has no merged task yet) — this is what the review
+        # comment described: a failure on the FINAL mutation's write, with no later mutation
+        # around to incidentally paper over it.
+        if snap and any(t.get("status") == "merged" for t in snap) and not failed_once["done"]:
+            failed_once["done"] = True
+            raise RuntimeError("job service unavailable")
+        updates.append(kw)
+
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=_update_job_fn,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    assert failed_once["done"], "the merge write must have been attempted and failed once"
+    snapshot_writes = [kw for kw in updates if "task_graph_snapshot" in kw]
+    merged_writes = [
+        kw
+        for kw in snapshot_writes
+        if any(t["status"] == "merged" for t in kw["task_graph_snapshot"])
+    ]
+    assert merged_writes, (
+        "the merged state must have been retried and successfully delivered — a failed "
+        "write must not be silently mistaken for a delivered one"
+    )
+
+
+def test_status_write_survives_concurrent_worker_graph_mutation(tmp_path, monkeypatch):
+    """A status write (e.g. a HITL pause to waiting_for_user) racing a DIFFERENT worker's
+    concurrent graph mutation must never be clobbered by that mutation's background write
+    landing after it — even though the mutation's own graph.update_task()/mark_branch_merged()
+    call returns immediately (never blocked by the status write), its resulting background
+    write must still be ordered to land AFTER, not before, the status write. Mirrors the
+    real implementation fan-out: one worker escalates a decision (publishing a status write
+    via _update) while another is still mutating the graph in the same round."""
+    import threading
+    import time
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    pause_write_started = threading.Event()
+    mutation_enqueued = threading.Event()
+
+    class StubSwarm:
+        aborted = False
+
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+
+        def run(self, **kw):
+            update_fn = kw["update_fn"]
+
+            def _mutate_concurrently() -> None:
+                # Simulates a second worker, still active in the same fan-out, mutating
+                # the graph (and thus enqueuing a background write) while the first
+                # worker's status write below is in flight.
+                pause_write_started.wait(timeout=5)
+                self.graph.mark_branch_merged("t1")
+                mutation_enqueued.set()
+
+            t = threading.Thread(target=_mutate_concurrently)
+            t.start()
+            update_fn(
+                status="waiting_for_user",
+                phase="waiting",
+                status_text="Paused for user input",
+            )
+            t.join(timeout=5)
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    updates: List[Dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def _update_job_fn(**kw: Any) -> None:
+        if kw.get("status") == "waiting_for_user":
+            pause_write_started.set()
+            # Hold this write "in flight" until the concurrent mutation has enqueued its
+            # background write, then a bit longer — giving that background write every
+            # chance to race ahead if the ordering guarantee were broken.
+            mutation_enqueued.wait(timeout=5)
+            time.sleep(0.05)
+        with lock:
+            updates.append(kw)
+
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=_update_job_fn,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    pause_idx = next(i for i, kw in enumerate(updates) if kw.get("status") == "waiting_for_user")
+    mutation_write_indices = [
+        i
+        for i, kw in enumerate(updates)
+        if "task_graph_snapshot" in kw
+        and any(t.get("status") == "merged" for t in kw["task_graph_snapshot"])
+    ]
+    assert mutation_write_indices, "the concurrent mutation's write must eventually land"
+    assert mutation_write_indices[0] > pause_idx, (
+        "the concurrently-enqueued mutation write landed before (or during) the pause "
+        "write instead of strictly after it — a stale background write could clobber a "
+        "fresher direct status write"
+    )
+
+
+def test_background_graph_write_after_pause_carries_pause_phase_not_stale_coding_phase(
+    tmp_path, monkeypatch
+):
+    """Same race as test_status_write_survives_concurrent_worker_graph_mutation, but checking
+    the LANDED CONTENT rather than just write order: the concurrently-enqueued mutation's
+    background write — which write_now() deliberately lets land AFTER the pause's direct write,
+    not before — must itself carry the pause's phase="waiting"/status_text, never the stale
+    phase="coding"/status_text="Assigning and implementing tasks" that was current when the
+    graph mutation triggered the persist callback. A prior implementation baked phase/
+    status_text into the background payload at enqueue time; since that write is guaranteed to
+    land after the pause write (not before, so drain-based ordering doesn't save it either), the
+    stale value would win via the job service's shallow merge — silently un-pausing the job's
+    displayed phase/status_text even though status/waiting_for_answers stayed correctly paused."""
+    import threading
+    import time
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    pause_write_started = threading.Event()
+    mutation_enqueued = threading.Event()
+
+    class StubSwarm:
+        aborted = False
+
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+
+        def run(self, **kw):
+            update_fn = kw["update_fn"]
+
+            def _mutate_concurrently() -> None:
+                pause_write_started.wait(timeout=5)
+                self.graph.mark_branch_merged("t1")
+                mutation_enqueued.set()
+
+            t = threading.Thread(target=_mutate_concurrently)
+            t.start()
+            update_fn(
+                status="waiting_for_user",
+                phase="waiting",
+                status_text="Paused for user input",
+            )
+            t.join(timeout=5)
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    updates: List[Dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def _update_job_fn(**kw: Any) -> None:
+        if kw.get("status") == "waiting_for_user":
+            pause_write_started.set()
+            mutation_enqueued.wait(timeout=5)
+            time.sleep(0.05)
+        with lock:
+            updates.append(kw)
+
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=_update_job_fn,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    mutation_write_indices = [
+        i
+        for i, kw in enumerate(updates)
+        if "task_graph_snapshot" in kw
+        and any(t.get("status") == "merged" for t in kw["task_graph_snapshot"])
+    ]
+    assert mutation_write_indices, "the concurrent mutation's write must eventually land"
+    mutation_write = updates[mutation_write_indices[0]]
+    assert mutation_write.get("phase") == "waiting", (
+        f"background graph write regressed phase to a stale value: {mutation_write.get('phase')!r}"
+    )
+    assert mutation_write.get("status_text") == "Paused for user input", (
+        "background graph write regressed status_text to a stale value: "
+        f"{mutation_write.get('status_text')!r}"
+    )
+
+
+def test_failed_direct_write_does_not_leak_into_background_graph_persist(tmp_path, monkeypatch):
+    """When _raw_update raises for a phase-changing _update() call (e.g. a pause write whose
+    job-service PATCH fails), the outer phase/status_text must NOT be updated to the failed
+    call's values. A subsequent background graph persist reads phase/status_text live (see
+    _persist_graph_async) — if the failed call had already committed its new values before
+    _raw_update raised, that background write would publish a phase/status_text that was never
+    actually confirmed on the wire, even though the rest of the failed call's fields (e.g. HITL
+    pending-question metadata on a real pause) never landed either."""
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    class StubSwarm:
+        aborted = False
+
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+
+        def run(self, **kw):
+            update_fn = kw["update_fn"]
+            try:
+                update_fn(
+                    status="waiting_for_user",
+                    phase="waiting",
+                    status_text="Paused for user input",
+                )
+            except RuntimeError:
+                pass  # simulates a caller (e.g. pause_cycle) surviving a failed publish
+            self.graph.mark_branch_merged("t1")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    updates: List[Dict[str, Any]] = []
+
+    def _update_job_fn(**kw: Any) -> None:
+        if kw.get("status") == "waiting_for_user":
+            raise RuntimeError("job service unavailable")
+        updates.append(kw)
+
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=_update_job_fn,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    mutation_write_indices = [
+        i
+        for i, kw in enumerate(updates)
+        if "task_graph_snapshot" in kw
+        and any(t.get("status") == "merged" for t in kw["task_graph_snapshot"])
+    ]
+    assert mutation_write_indices, "the graph mutation's write must eventually land"
+    mutation_write = updates[mutation_write_indices[0]]
+    assert mutation_write.get("phase") != "waiting", (
+        "background graph write leaked the failed direct write's phase into live state: "
+        f"{mutation_write.get('phase')!r}"
+    )
+    assert mutation_write.get("status_text") != "Paused for user input", (
+        "background graph write leaked the failed direct write's status_text into live state: "
+        f"{mutation_write.get('status_text')!r}"
+    )
+
+
 # ----------------------------------------------------- real quality-gate path
 
 

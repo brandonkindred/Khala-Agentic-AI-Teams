@@ -331,6 +331,13 @@ class BlogPublicationAgent:
             copy_editor_result = copy_editor_agent.run(
                 copy_editor_input, feedback_output_path=feedback_path
             )
+            if copy_editor_result.feedback_file_written is False:
+                logger.warning(
+                    "Copy editor feedback file failed to write for submission %s iteration %s (path=%s)",
+                    submission_id,
+                    iteration + 1,
+                    feedback_path,
+                )
 
             all_feedback = (
                 human_feedback_items + copy_editor_result.feedback_items

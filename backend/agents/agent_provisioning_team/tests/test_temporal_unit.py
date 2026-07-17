@@ -8,6 +8,7 @@ verify the contracts each surface exposes.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from pathlib import Path
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -95,6 +96,31 @@ def test_workflows_activities_exclude_sandbox_items() -> None:
         "sandbox_teardown_activity",
         "sandbox_reap_activity",
     }
+
+
+def test_activities_includes_every_activity_a_workflow_schedules() -> None:
+    """P1 regression: every activity name AgentProvisioningWorkflow /
+    AgentDeprovisioningWorkflow schedules via workflow.execute_activity must
+    be present in the canonical ACTIVITIES list registered with the worker
+    (temporal/__init__.py) — an activity missing here has no worker able to
+    execute it, so the scheduling workflow hangs until its activity timeout
+    on every real run. Unit tests that stub workflow.execute_activity (see
+    test_workflows_unit.py) cannot catch this class of omission themselves,
+    since they never consult ACTIVITIES."""
+    import re
+
+    from agent_provisioning_team import temporal as temporal_pkg
+    from agent_provisioning_team.temporal import workflows as wf
+
+    source = inspect.getsource(wf)
+    scheduled = set(re.findall(r"_activities\.(\w+_activity)\b", source))
+    assert scheduled, "expected to find at least one _activities.*_activity reference"
+
+    activity_names = {getattr(a, "__name__", str(a)) for a in temporal_pkg.ACTIVITIES}
+    missing = scheduled - activity_names
+    assert (
+        not missing
+    ), f"activities scheduled by workflows.py but missing from ACTIVITIES: {missing}"
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +575,80 @@ def test_record_phase_restored_writes_status_update() -> None:
         progress=15,
         status_text="Restored setup from previous run",
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-agent_id lock activities
+# ---------------------------------------------------------------------------
+
+
+def test_acquire_agent_lock_activity_uses_configured_ttl() -> None:
+    """P1 regression: the AGENT_PROVISIONING_LOCK_TTL_S constant must reach
+    AgentLockStore's constructor, not just get parsed and discarded."""
+    from agent_provisioning_team.temporal import activities
+
+    captured: dict = {}
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            captured["ttl_seconds"] = ttl_seconds
+
+        def acquire(self, agent_id, owner):
+            captured["acquire_args"] = (agent_id, owner)
+
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch("agent_provisioning_team.temporal.constants.LOCK_TTL_S", 321),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        activities.acquire_agent_lock_activity("job-1", "agent-1")
+
+    assert captured["ttl_seconds"] == 321
+    assert captured["acquire_args"] == ("agent-1", "job-1")
+
+
+def test_release_agent_lock_activity_uses_configured_ttl() -> None:
+    """P1 regression: same TTL-wiring requirement as acquire, for release."""
+    from agent_provisioning_team.temporal import activities
+
+    captured: dict = {}
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            captured["ttl_seconds"] = ttl_seconds
+
+        def release(self, agent_id, owner):
+            captured["release_args"] = (agent_id, owner)
+
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch("agent_provisioning_team.temporal.constants.LOCK_TTL_S", 321),
+    ):
+        activities.release_agent_lock_activity("job-1", "agent-1")
+
+    assert captured["ttl_seconds"] == 321
+    assert captured["release_args"] == ("agent-1", "job-1")
+
+
+def test_acquire_agent_lock_activity_translates_busy_error() -> None:
+    """A busy lock surfaces as a plain (retryable) RuntimeError, not
+    AgentLockBusyError, so Temporal's retry policy keeps polling."""
+    from agent_provisioning_team.shared.agent_lock import AgentLockBusyError
+    from agent_provisioning_team.temporal import activities
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            pass
+
+        def acquire(self, agent_id, owner):
+            raise AgentLockBusyError(agent_id, "other-job")
+
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        with pytest.raises(RuntimeError, match="other-job"):
+            activities.acquire_agent_lock_activity("job-1", "agent-1")
 
 
 def test_credentials_activity_restores_from_prior() -> None:
