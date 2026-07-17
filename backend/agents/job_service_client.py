@@ -272,6 +272,43 @@ class JobServiceClient:
             json={"heartbeat": heartbeat, "fields": fields},
         )
 
+    def update_job_if_not_cancelled(
+        self, job_id: str, *, heartbeat: bool = True, **fields: Any
+    ) -> Optional[bool]:
+        """Atomically merge ``fields`` into ``job_id`` unless it is already cancelled.
+
+        Preconditions: ``job_id`` is non-empty (the caller validates); ``fields``
+            must not set ``status`` to ``JOB_STATUS_CANCELLED`` — this primitive
+            only guards against writing over an *existing* cancellation, it is
+            not a cancellation mechanism itself (use ``cancel_active_job``, whose
+            guard additionally excludes jobs already in a terminal state).
+            Enforced by an explicit raise (never an ``assert``, which is stripped
+            under ``python -O`` — this guard exists to prevent silent data
+            corruption, not just to document caller intent).
+        Postconditions: returns True when the server performed the write because
+            the job existed and was not cancelled. Returns False when the job
+            exists but is already cancelled (no write). Returns None when the job
+            does not exist at all (no write) — distinct from False so a caller
+            can tell a broken precondition (missing row) apart from a legitimate
+            cancellation, without an extra round trip. The cancelled-check is
+            evaluated in the same conditional UPDATE that performs the write, so a
+            cancel that lands between a caller's earlier read and this call is
+            never overwritten (no read-then-write race) — the same guarantee
+            ``cancel_active_job`` provides for cancellation itself, mirrored here
+            for RUNNING/COMPLETED/FAILED transitions.
+        """
+        if fields.get("status") == JOB_STATUS_CANCELLED:
+            raise ValueError(
+                "update_job_if_not_cancelled must not be used to cancel a job "
+                "(it would overwrite a completed/failed job too) — use cancel_active_job"
+            )
+        resp = self._request(
+            "POST",
+            self._url(f"/jobs/{self.team}/{job_id}/update-if-not-cancelled"),
+            json={"heartbeat": heartbeat, "fields": fields},
+        )
+        return resp.json().get("updated")
+
     def append_event(
         self,
         job_id: str,

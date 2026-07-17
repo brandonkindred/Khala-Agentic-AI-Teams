@@ -198,7 +198,7 @@
   color: var(--mat-sys-on-secondary-container, #2a3441);
 }
 
-// Base chip look shared via the code-review-panel chip partial. The `--event`
+// Base chip look shared via the code-review-dashboard chip partial. The `--event`
 // variant moved to the pr-review-detail child with the reviews table.
 .cr-chip {
   @include chip.look;

@@ -69,6 +69,10 @@ def begin_branding_job_activity(job_id: str) -> bool:
         - Returns False without side effects when the job is already cancelled
           (terminal — the workflow returns without failing).
         - Otherwise sets the row to RUNNING and returns True.
+        - Raises ``branding_team.shared.job_store.JobNotFoundError`` if
+          ``job_id`` does not exist — dispatched under a retry policy that
+          treats that specific error as non-retryable (a missing row will not
+          resolve itself on retry).
     """
     from branding_team.shared.job_store import begin_job
 
@@ -199,6 +203,9 @@ def finalize_branding_activity(
           best-effort dedup, not an exactly-once guarantee.
         - The COMPLETED write is idempotent and always applied unless the job was
           cancelled (cancel is terminal, not completed).
+        - Raises ``branding_team.shared.job_store.JobNotFoundError`` if
+          ``job_id`` does not exist — dispatched under a retry policy that
+          treats that specific error as non-retryable.
     """
     from branding_team.models import (
         BrandCheckRequest,
@@ -275,7 +282,7 @@ def finalize_branding_activity(
 
 
 @activity.defn(name="branding_mark_failed")
-def mark_branding_failed_activity(job_id: str, error: str) -> None:
+def mark_branding_failed_activity(job_id: str, error: str) -> bool:
     """Record a FAILED job row for a pipeline failure.
 
     Preconditions:
@@ -284,10 +291,20 @@ def mark_branding_failed_activity(job_id: str, error: str) -> None:
         - Sets the row to FAILED with ``error`` unless the job was cancelled (a
           cancelled run is terminal, not a failure), via the shared
           ``job_store.mark_failed`` guard.
+        - Returns ``mark_failed``'s bool: True if the FAILED write happened,
+          False if a cancel raced in between the workflow's own cancellation
+          check and this write. The workflow caller uses False to reclassify
+          its outcome as cancelled rather than raising into what would look
+          like a failed run.
+        - Raises ``branding_team.shared.job_store.JobNotFoundError`` (a
+          ``ValueError`` subclass) if ``job_id`` does not exist — the workflow
+          dispatches this activity under a retry policy that treats that
+          specific error as non-retryable, since a missing row will not
+          resolve itself on retry.
     """
     from branding_team.shared.job_store import mark_failed
 
-    mark_failed(job_id, error)
+    return mark_failed(job_id, error)
 
 
 @activity.defn(name="branding_check_cancelled")
