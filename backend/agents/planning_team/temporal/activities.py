@@ -509,6 +509,9 @@ def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str
         try:
             job = get_job(job_id) or {}
             handoff = job.get("handoff_package") or {}
+            # open_questions/resolved_questions are currently always [] here too —
+            # see the matching comment in api/main.py::run_workflow_background for
+            # why (a documented setdefault no-op upstream in both dispatch paths).
             record_planning_run(
                 job_id,
                 client_name=(handoff.get("client_context") or {}).get("client_name"),
