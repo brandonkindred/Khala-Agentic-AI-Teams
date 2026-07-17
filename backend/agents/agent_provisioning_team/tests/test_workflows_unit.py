@@ -225,6 +225,60 @@ async def test_workflow_unpatched_replay_skips_lock_activities(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_workflow_post_lock_pre_check_replay_skips_new_activity_and_renewal(
+    tmp_path, monkeypatch
+) -> None:
+    """P1 regression: a history recorded after the lock existed but before
+    check_existing_environment_activity was introduced must replay without
+    that activity or its accompanying renewal call. Both are new commands
+    relative to that history's already-recorded "lock acquired -> setup"
+    sequence — reusing _PROVISIONING_LOCK_PATCH (already True for such a
+    history) to gate them would insert unrecorded commands into its replay
+    and report Temporal nondeterminism. A dedicated, independent
+    _PRE_EXISTING_ENV_CHECK_PATCH marker is required.
+    """
+    from agent_provisioning_team.temporal import workflows as wf
+
+    def _patched(marker, *a, **k):
+        return marker != wf._PRE_EXISTING_ENV_CHECK_PATCH
+
+    monkeypatch.setattr(wf.workflow, "patched", _patched)
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": _TOOL_SPECS,
+            "credentials_activity": {
+                "success": True,
+                "credentials": {
+                    "postgresql": {"tool_name": "postgresql", "username": "u", "password": "p"},
+                    "redis": {"tool_name": "redis", "username": "u", "password": "p"},
+                },
+            },
+            "provision_tool_activity": lambda call: {
+                "tool_name": call["args"][2],
+                "success": True,
+                "provisioner_key": "x",
+            },
+            "record_account_provisioning_activity": {"success": True, "tool_results": []},
+            "audit_activity": {"passed": True, "verifications": []},
+            "documentation_activity": {"success": True, "onboarding": {"summary": "s"}},
+            "deliver_activity": {"success": True, "error": None},
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    fn_names = [c["name"] for c in stub.calls]
+    assert "check_existing_environment_activity" not in fn_names
+    # Exactly the pre-this-round sequence: acquire, then straight to setup —
+    # no extra renewal call inserted for the skipped check.
+    assert fn_names[0] == "acquire_agent_lock_activity"
+    assert fn_names[1] == "setup_activity"
+
+
+@pytest.mark.asyncio
 async def test_workflow_releases_lock_when_deliver_fails(tmp_path) -> None:
     """The agent_id lock is released even when the workflow ultimately raises."""
     from agent_provisioning_team.temporal import workflows as wf

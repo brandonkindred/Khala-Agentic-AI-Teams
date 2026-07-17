@@ -985,6 +985,7 @@ def test_compensate_activity_invokes_orchestrator() -> None:
     from agent_provisioning_team.temporal import activities
 
     fake_orch = MagicMock()
+    fake_orch.tool_agents.get.return_value.get_container_info.return_value = None
     with (
         patch(
             "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
@@ -1021,6 +1022,51 @@ def test_compensate_activity_clears_phases_so_resume_reruns_credentials() -> Non
         patch.object(activities._js, "clear_completed_phases") as mock_clear,
     ):
         Orch.return_value.compensate = MagicMock()
+        Orch.return_value.tool_agents.get.return_value.get_container_info.return_value = None
+        activities.compensate_activity("a1", [], job_id="j-comp")
+
+    mock_clear.assert_called_once_with("j-comp")
+
+
+def test_compensate_activity_raises_when_docker_state_survives() -> None:
+    """compensate() never raises even when its own docker teardown fails — this
+    activity must verify teardown independently and raise itself, or Temporal
+    considers compensation successful and never retries a leaked container."""
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.tool_agents.get.return_value.get_container_info.return_value = {
+        "container_name": "agent-a1"
+    }
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases") as mock_clear,
+    ):
+        with pytest.raises(RuntimeError, match="did not complete"):
+            activities.compensate_activity("a1", [], job_id="j-comp")
+
+    # A raised activity must not still clear phase checkpoints as if resume
+    # were now safe — teardown didn't actually finish.
+    mock_clear.assert_not_called()
+
+
+def test_compensate_activity_skips_verification_without_docker_provisioner() -> None:
+    """No docker_provisioner registered (e.g. a non-docker tool manifest) must
+    not spuriously raise — there is nothing to verify."""
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.tool_agents = {}
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases") as mock_clear,
+    ):
         activities.compensate_activity("a1", [], job_id="j-comp")
 
     mock_clear.assert_called_once_with("j-comp")
@@ -1320,6 +1366,67 @@ def test_check_existing_environment_activity_false_when_not_running(tmp_path: Pa
         return_value=env_store,
     ):
         assert t_acts.check_existing_environment_activity("a2") is False
+
+
+def test_check_existing_environment_activity_true_when_ready(tmp_path: Path) -> None:
+    """A delivered ("ready") environment must count as pre-existing too.
+
+    phases/deliver.py moves a completed environment from "running" to
+    "ready" — a check that only recognized "running" would report a fully
+    delivered agent as nonexistent, letting a later provisioning attempt's
+    failure destroy it via workflow-level compensation.
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentInfo, EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(
+        EnvironmentInfo(agent_id="a3", container_id="c3", container_name="agent-a3", status="ready")
+    )
+
+    with patch(
+        "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+        return_value=env_store,
+    ):
+        assert t_acts.check_existing_environment_activity("a3") is True
+
+
+def test_check_existing_environment_activity_true_when_registry_unreadable(
+    tmp_path: Path,
+) -> None:
+    """An unreadable registry location must NOT be treated as confirmed absence.
+
+    get() maps both "genuinely nothing here" and "something's here but we
+    can't read it" to None — conflating those would let compensation destroy
+    a healthy environment whose record simply can't be read right now.
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(env_store, "readable", return_value=False),
+    ):
+        assert t_acts.check_existing_environment_activity("a4") is True
+
+
+def test_check_existing_environment_activity_false_when_confirmed_absent(
+    tmp_path: Path,
+) -> None:
+    """A confirmed-readable, confirmed-empty registry correctly reports False."""
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    with patch(
+        "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+        return_value=env_store,
+    ):
+        assert t_acts.check_existing_environment_activity("a5") is False
 
 
 def test_check_existing_environment_activity_rejects_empty_agent_id() -> None:

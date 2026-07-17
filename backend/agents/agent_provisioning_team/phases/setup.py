@@ -199,10 +199,16 @@ def _rollback_failed_setup(
     "current record belongs to someone else" heuristic does not apply: the
     record in the store is unambiguously this attempt's own write (its
     ``container_id`` matching ``result`` is expected, not evidence of a
-    concurrent adopter), so it is removed unconditionally before the container
-    is torn down — the record-then-container ordering matches
-    :func:`cleanup_setup`, so a later ``run_setup`` can't fast-path onto a
-    ``running`` record backed by a container that's about to be deprovisioned.
+    concurrent adopter), so it is removed unconditionally — the
+    record-then-container ordering matches :func:`cleanup_setup`, so a later
+    ``run_setup`` can't fast-path onto a ``running`` record backed by a
+    container that's about to be deprovisioned. The container itself is only
+    deprovisioned when ``result.details["reused"]`` is falsy, though: a
+    non-``running`` ``existing`` record (e.g. a delivered agent's ``"ready"``
+    record) skips the fast path yet still resolves to a docker-level reuse —
+    ``register`` succeeding there doesn't mean *this* attempt's own
+    ``docker.provision`` call created a fresh container, so a failure after
+    registering must not destroy a container that predates this attempt.
 
     Preconditions:
         * ``agent_id`` is non-empty.
@@ -220,10 +226,12 @@ def _rollback_failed_setup(
           is not modified (nothing this attempt wrote survived, and other
           owners' records are not touched). When ``True``: this attempt's own
           record is removed, and the container is deprovisioned only if that
-          removal succeeded — if removal itself raises, the container is left
-          alone too, so the (now-stale) surviving record and the surviving
-          container stay consistent with each other rather than the record
-          claiming ``running`` for a container that's actually gone.
+          removal succeeded AND ``result.details["reused"]`` is falsy (a
+          reused container predates this attempt and is preserved) — if
+          removal itself raises, the container is left alone too, so the
+          (now-stale) surviving record and the surviving container stay
+          consistent with each other rather than the record claiming
+          ``running`` for a container that's actually gone.
 
     Concurrent same-agent provisioning is not serialized, so a job that adopts
     this attempt's container and registers between the ownership read below and
@@ -249,6 +257,16 @@ def _rollback_failed_setup(
                 "container stay consistent",
                 agent_id,
             )
+            return
+        if bool(result.details.get("reused", False)):
+            # register() succeeding doesn't mean this attempt's OWN docker.provision
+            # call created a fresh container — a non-"running" existing record
+            # (e.g. a delivered agent's "ready" record) skips run_setup's fast
+            # path but still resolves to docker-level reuse here. The record
+            # this attempt overwrote is gone (removed above; a later run_setup
+            # will rediscover and re-register the still-alive container), but
+            # the container itself predates this attempt and must not be
+            # destroyed just because this attempt's own bookkeeping failed.
             return
     else:
         reused = bool(result.details.get("reused", False))

@@ -160,9 +160,12 @@ def list_manifest_tools_activity(manifest_path: str) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+_LIVE_ENVIRONMENT_STATUSES = frozenset({"running", "ready"})
+
+
 @activity.defn(name="agent_provisioning_check_existing_environment")
 def check_existing_environment_activity(agent_id: str) -> bool:
-    """Report whether ``agent_id`` already has a running environment (read-only).
+    """Report whether ``agent_id`` already has a live environment (read-only).
 
     Called by the workflow right after acquiring ``agent_id``'s lock, before
     setup runs, so a later failure's compensation decision can tell "this run
@@ -173,16 +176,30 @@ def check_existing_environment_activity(agent_id: str) -> bool:
     Preconditions:
         * ``agent_id`` is non-empty.
     Postconditions:
-        * Returns ``True`` iff ``EnvironmentStore`` currently holds a
-          ``status == "running"`` record for ``agent_id`` — the identical
-          condition ``run_setup``'s own fast path checks. Never raises
-          (``EnvironmentStore.get`` never raises).
+        * Returns ``True`` iff ``EnvironmentStore`` currently holds a record
+          for ``agent_id`` whose status is ``"running"`` (``run_setup``'s own
+          fast-path condition) or ``"ready"`` (a fully delivered environment —
+          ``phases/deliver.py`` moves a completed environment from
+          ``"running"`` to ``"ready"``, so a delivered agent's record would
+          otherwise read as "nothing exists" here and let a later re-run's
+          failure destroy it).
+        * Also returns ``True`` — conservatively, "might exist" — when the
+          record location is present but genuinely unreadable (``get()``
+          returns ``None`` for that case too, indistinguishable from
+          confirmed absence without ``readable()``): the registry being
+          unreadable is not proof nothing is there.
+        * Returns ``False`` only when the registry is confirmed readable and
+          holds nothing (or a non-live-status record) for ``agent_id``.
+        * Never raises (``EnvironmentStore.get``/``readable`` never raise).
     """
     assert agent_id, "agent_id must be non-empty"
     from agent_provisioning_team.shared.environment_store import EnvironmentStore
 
-    existing = EnvironmentStore().get(agent_id)
-    return bool(existing and existing.status == "running")
+    env_store = EnvironmentStore()
+    existing = env_store.get(agent_id)
+    if existing is not None:
+        return existing.status in _LIVE_ENVIRONMENT_STATUSES
+    return not env_store.readable(agent_id)
 
 
 @activity.defn(name="agent_provisioning_acquire_lock")
@@ -783,7 +800,19 @@ def compensate_activity(
           checkpoints must be cleared after teardown.
     Postconditions:
         * Invokes ``ProvisioningOrchestrator.compensate`` once. Failures inside
-          compensation are absorbed by the orchestrator (best effort).
+          compensation are absorbed by the orchestrator (best effort) — every
+          step there, including the Docker teardown, is individually
+          try/except-wrapped so one failing step doesn't block the others.
+        * Raises ``RuntimeError`` when the docker provisioner's own
+          idempotency state for ``agent_id`` still exists after
+          ``compensate`` returns — ``deprovision()`` only clears that row on
+          a confirmed-successful (or confirmed-absent) removal, so a
+          surviving row means the container may still be alive despite
+          ``compensate`` itself never raising. Raising here (rather than
+          silently returning as if teardown succeeded) lets Temporal's own
+          retry policy give teardown another attempt instead of leaking the
+          container — the workflow's setup-failure path in particular relies
+          on this activity actually retrying when its local rollback fails.
         * When ``job_id`` is set: clears ``completed_phases`` / ``phase_results``
           so a later ``/resume`` cannot skip credential_generation (or setup)
           after CredentialStore / Docker were torn down. Missing jobs are a
@@ -801,6 +830,14 @@ def compensate_activity(
         for t in succeeded_tools
     ]
     orch.compensate(agent_id, shims)
+
+    docker = orch.tool_agents.get("docker_provisioner")
+    if docker is not None and docker.get_container_info(agent_id) is not None:
+        raise RuntimeError(
+            f"compensate_activity: docker teardown for agent_id={agent_id!r} did not "
+            "complete (provisioner state still present after compensate)"
+        )
+
     if job_id:
         # Compensate tears down Docker, env, and CredentialStore — no prior
         # phase remains safe to skip on resume.

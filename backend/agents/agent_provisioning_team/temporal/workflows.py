@@ -80,6 +80,18 @@ TOOL_RETRY_POLICY = RetryPolicy(
 _PROVISIONING_LOCK_PATCH = "agent-provisioning-lock"
 _DEPROVISIONING_LOCK_PATCH = "agent-deprovisioning-lock"
 
+# A SEPARATE, independent gate for check_existing_environment_activity —
+# deliberately NOT reusing _PROVISIONING_LOCK_PATCH. An in-flight history
+# recorded after the lock existed but before this check was introduced
+# already recorded "lock acquired -> setup" as its command sequence; since
+# workflow.patched(_PROVISIONING_LOCK_PATCH) is already True for such a
+# history, gating this newer activity behind that same marker would insert
+# it into that history's replay and report nondeterminism. A fresh marker
+# returns False for any history recorded before ITS OWN introduction —
+# whether pre-lock or merely pre-this-check — reproducing each one's
+# original sequence exactly.
+_PRE_EXISTING_ENV_CHECK_PATCH = "agent-provisioning-pre-existing-check"
+
 
 @workflow.defn(name="AgentProvisioningWorkflow")
 class AgentProvisioningWorkflow:
@@ -287,17 +299,19 @@ class AgentProvisioningWorkflow:
               setup runs, so nothing else can register an environment in the
               gap between this check and setup starting).
         Postconditions:
-            * Gated by the same ``_PROVISIONING_LOCK_PATCH`` marker as the
-              lock itself: an unpatched (pre-lock) replay returns ``True``
-              without scheduling anything, reproducing that history's
-              original command sequence — this is moot for compensation
-              safety there, since ``lock_acquired`` is already ``False`` on
-              that branch, which alone disables compensation regardless of
-              this value.
+            * Gated by its own ``_PRE_EXISTING_ENV_CHECK_PATCH`` marker — NOT
+              ``_PROVISIONING_LOCK_PATCH`` (see that marker's own comment for
+              why reusing the lock's marker would misfire this activity into
+              an in-flight post-lock, pre-this-check history's replay).
+              Returns ``True`` without scheduling anything when unpatched,
+              reproducing that history's original command sequence; this is
+              moot for compensation safety on a pre-lock replay specifically,
+              since ``lock_acquired`` is already ``False`` there, which alone
+              disables compensation regardless of this value.
             * Otherwise returns ``check_existing_environment_activity``'s
               result.
         """
-        if not workflow.patched(_PROVISIONING_LOCK_PATCH):
+        if not workflow.patched(_PRE_EXISTING_ENV_CHECK_PATCH):
             return True
         return await workflow.execute_activity(
             _activities.check_existing_environment_activity,
@@ -633,16 +647,25 @@ class AgentProvisioningWorkflow:
             # running lock-free against the same agent_id).
             lock_acquired = await self._acquire_agent_lock(job_id, agent_id)
 
-            try:
-                # Best-effort: this check exists only to make compensation
-                # ownership-safe, not as a pipeline gate — an infra hiccup
-                # here must not abort provisioning outright. Falls back to
-                # the conservative pre_existing_environment=True default set
-                # above, which alone is enough to keep compensation disabled.
-                pre_existing_environment = await self._check_existing_environment(agent_id)
-            except Exception:
-                pass
-            await _renew_or_mark_lost()
+            # Gated on the SAME marker _check_existing_environment checks
+            # internally: a history recorded before this check existed
+            # scheduled no activity and no renewal at this point (its
+            # original sequence went straight from "lock acquired" to
+            # "setup"), so both must be skipped together on replay, or the
+            # renewal call alone would still insert a new, unrecorded command
+            # into that history and report nondeterminism.
+            if workflow.patched(_PRE_EXISTING_ENV_CHECK_PATCH):
+                try:
+                    # Best-effort: this check exists only to make compensation
+                    # ownership-safe, not as a pipeline gate — an infra hiccup
+                    # here must not abort provisioning outright. Falls back to
+                    # the conservative pre_existing_environment=True default
+                    # set above, which alone is enough to keep compensation
+                    # disabled.
+                    pre_existing_environment = await self._check_existing_environment(agent_id)
+                except Exception:
+                    pass
+                await _renew_or_mark_lost()
 
             environment_dump = await self._execute_setup_phase(
                 job_id, agent_id, manifest_path, skip, prior

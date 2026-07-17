@@ -514,6 +514,30 @@ def test_run_setup_preserves_container_when_record_removal_fails() -> None:
     docker.deprovision.assert_not_called()
 
 
+def test_run_setup_preserves_reused_container_when_checkpoint_fails_after_reregister() -> None:
+    """A delivered ("ready") agent's container must survive a checkpoint failure.
+
+    A non-running existing record (e.g. "ready", set by phases/deliver.py)
+    skips run_setup's fast path, but docker.provision() still resolves via
+    docker-level reuse (reused=True) — register() succeeding on top of that
+    doesn't mean THIS attempt's own docker.provision call created a fresh
+    container. If on_registered then fails, the container must be preserved
+    even though registered_by_this_call is True: only a genuinely fresh
+    (non-reused) container is this attempt's own to tear down.
+    """
+    ready = _stored_env("a21", container_id="c-existing")  # status="ready" by default
+    env_store = _rollback_env_store(get=ready, register_error=lambda *a, **kw: None)
+    docker = _docker_stub(container_id="c-existing", container_name="agent-a21", reused=True)
+
+    def on_registered(env_info):
+        raise RuntimeError("checkpoint boom")
+
+    _run_setup_expecting("checkpoint boom", "a21", env_store, docker, on_registered=on_registered)
+
+    env_store.remove.assert_called_once_with("a21")
+    docker.deprovision.assert_not_called()
+
+
 def test_run_setup_calls_on_registered_with_fresh_environment(tmp_path: Path) -> None:
     """on_registered fires with the freshly registered EnvironmentInfo on success."""
     from agent_provisioning_team.phases.setup import run_setup
