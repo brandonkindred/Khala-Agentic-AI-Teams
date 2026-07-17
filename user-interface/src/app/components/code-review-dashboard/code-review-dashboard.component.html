@@ -20,18 +20,11 @@
 </div>
 
 @if (loadingConfig) {
-  <div class="cr-section cr-section--loading">
-    <mat-spinner diameter="24"></mat-spinner>
-    <span>Checking GitHub integration…</span>
-  </div>
+  <app-loading-spinner [diameter]="24" message="Checking GitHub integration…" />
 } @else if (!githubConfigured) {
-  <div class="cr-section cr-section--unconfigured">
-    <mat-icon aria-hidden="true">info</mat-icon>
-    <span>
-      GitHub integration is not configured.
-      <a routerLink="/integrations">Set up GitHub</a> to browse pull requests and start a review.
-    </span>
-  </div>
+  <app-empty-state icon="info" title="GitHub integration is not configured">
+    <p><a routerLink="/integrations">Set up GitHub</a> to browse pull requests and start a review.</p>
+  </app-empty-state>
 } @else {
   <section class="cr-section">
     <!-- Persistent status region (kept in the DOM, text mutated) so a screen reader
@@ -55,19 +48,18 @@
     }
 
     @if (loadingRepos) {
-      <div class="cr-section--loading">
-        <mat-spinner diameter="24"></mat-spinner>
-        <span>Loading repositories…</span>
-      </div>
+      <app-loading-spinner [diameter]="24" message="Loading repositories…" />
     }
 
     <!-- Repo list; expanding a repo loads its open PRs -->
     @if (reposLoaded) {
       @if (repos.length === 0) {
-        <div class="cr-empty">
-          <mat-icon aria-hidden="true">folder_off</mat-icon>
-          <span>The personal access token has no repository access.</span>
-        </div>
+        <app-empty-state
+          icon="folder_off"
+          title="No repository access"
+          description="The personal access token has no repository access."
+          [headingLevel]="3"
+        />
       } @else {
         <div class="cr-repos-list">
           @for (repo of repos; track repo.full_name; let i = $index) {
@@ -95,10 +87,7 @@
                   <app-inline-banner variant="error" [message]="pullError" />
                 }
                 @if (loadingPulls) {
-                  <div class="cr-section--loading">
-                    <mat-spinner diameter="20"></mat-spinner>
-                    <span>Loading pull requests…</span>
-                  </div>
+                  <app-loading-spinner [diameter]="20" message="Loading pull requests…" />
                 }
                 <ng-container [ngTemplateOutlet]="pullsPanel"></ng-container>
               </div>
@@ -112,10 +101,7 @@
     <ng-template #pullsPanel>
     @if (pullsLoaded) {
       @if (pulls.length === 0) {
-        <div class="cr-empty">
-          <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
-          <span>No open pull requests found.</span>
-        </div>
+        <app-empty-state icon="check_circle_outline" title="No open pull requests" [headingLevel]="3" />
       } @else {
         <div class="cr-pulls-list">
           @for (pull of pagedPulls; track pull.number) {
