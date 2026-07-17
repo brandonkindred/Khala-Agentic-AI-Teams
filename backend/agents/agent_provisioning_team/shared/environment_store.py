@@ -6,6 +6,7 @@ Maintains mapping of agent IDs to their container information.
 
 import json
 import os
+import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -247,9 +248,12 @@ class EnvironmentStore:
         """
         required = ("agent_id", "container_id", "container_name")
         for path in self._env_file_candidates(agent_id):
-            if not path.exists():
-                continue
+            # Path.exists() itself can raise OSError (e.g. EACCES on a parent
+            # directory), so it lives inside the handler — otherwise `get`'s
+            # "never raises" postcondition would be false.
             try:
+                if not path.exists():
+                    continue
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 continue
@@ -261,10 +265,31 @@ class EnvironmentStore:
     def _write_env_data(
         self, agent_id: str, data: Dict[str, Any], source: Optional[Path] = None
     ) -> None:
-        """Persist environment JSON to the primary store, dropping a legacy copy."""
+        """Persist environment JSON to the primary store, dropping a legacy copy.
+
+        Postconditions:
+            * The write is atomic (tempfile → fsync → ``os.replace``, matching
+              ``provisioner_state._save``): on any failure the primary file holds
+              its previous content — never a truncated or partial record — so a
+              raising write leaves the prior registration intact.
+        """
         primary = self._env_file(agent_id)
         primary.parent.mkdir(parents=True, exist_ok=True)
-        primary.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f".{primary.stem}.", suffix=".json", dir=str(primary.parent)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, primary)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
         if source is not None and source != primary and source.exists():
             source.unlink()
 
@@ -277,6 +302,9 @@ class EnvironmentStore:
         Postconditions:
             * ``env_info`` is serialized to the primary store, replacing any
               prior record for the same ``agent_id``.
+            * The replacement is atomic: if the write raises, the prior record
+              (or the absence of one) is preserved unchanged — a failed register
+              never leaves a truncated or partial record behind.
             * Returns ``None``.
         """
         if env_info is None:

@@ -108,6 +108,45 @@ def test_environment_store_register_get_remove(tmp_path: Path) -> None:
     assert store.get("a1") is None
 
 
+def test_environment_store_register_is_atomic_on_write_failure(tmp_path: Path) -> None:
+    """A register whose write fails leaves the prior record fully intact.
+
+    Preconditions: ``tmp_path`` is an empty, writable directory.
+    Postconditions: after a raising register, ``get`` returns the previous
+    record unchanged (never a truncated/partial one) and no temp files remain.
+    """
+    from agent_provisioning_team.shared import environment_store as es_mod
+
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(agent_id="a1", container_id="c1", container_name="n1", workspace_path="/w")
+    )
+
+    with patch.object(es_mod.os, "replace", side_effect=OSError("disk full")):
+        with pytest.raises(OSError, match="disk full"):
+            store.register(
+                StoreEnvInfo(
+                    agent_id="a1", container_id="c2", container_name="n2", workspace_path="/w2"
+                )
+            )
+
+    fetched = store.get("a1")
+    assert fetched is not None and fetched.container_id == "c1"
+    assert [p for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+
+
+def test_environment_store_get_never_raises_on_unreadable_path(tmp_path: Path) -> None:
+    """``get`` honors its never-raises contract even when Path.exists raises.
+
+    Preconditions: ``tmp_path`` is an empty, writable directory.
+    Postconditions: an OSError from the filesystem probe (e.g. EACCES) is
+    treated as record-absent, not propagated.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+    with patch.object(Path, "exists", side_effect=OSError("permission denied")):
+        assert store.get("a1") is None
+
+
 def test_environment_store_preserves_updated_at_on_get(tmp_path: Path) -> None:
     """Preconditions: ``tmp_path`` is an empty, writable directory.
     Postconditions: an explicit ``updated_at`` passed to ``register`` is

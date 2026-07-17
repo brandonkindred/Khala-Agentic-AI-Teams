@@ -392,13 +392,14 @@ class AgentProvisioningWorkflow:
             * On any unhandled phase failure (setup, credentials, tools, audit,
               docs, deliver): ``mark_job_failed_activity`` records terminal
               failure before the exception propagates (tool failures also
-              compensate succeeded tools first). A setup failure is rolled back
-              atomically inside ``run_setup`` itself, so the workflow does NOT
-              run ``agent_id``-keyed compensation for it (which could tear down a
-              healthy environment a prior job left for the same agent). Once
-              setup has succeeded, credentials / manifest-list failures call
-              ``compensate_activity`` with an empty succeeded list to tear down
-              the Docker env setup created.
+              compensate succeeded tools first). A setup failure triggers
+              ``run_setup``'s own best-effort rollback, scoped to resources this
+              attempt created, so the workflow does NOT run ``agent_id``-keyed
+              compensation for it (which could tear down a healthy environment
+              another job owns for the same agent). Once setup has succeeded,
+              credentials / manifest-list failures call ``compensate_activity``
+              with an empty succeeded list to tear down the Docker env and
+              credentials setup created.
             * After a successful tool fan-out (not a restored skip),
               ``account_provisioning`` is written to ``completed_phases`` /
               ``phase_results`` before later phases run.
@@ -493,13 +494,13 @@ class AgentProvisioningWorkflow:
         except Exception as exc:
             # Compensation is gated on `setup_completed`: only once setup returns
             # do we know a Docker environment exists for this agent_id. A setup
-            # failure is NOT compensated here — `run_setup` is atomic and rolls
-            # back only what it created, so a setup that created nothing (or left
-            # a partial container) is already cleaned up. Running agent_id-keyed
-            # compensation on a setup failure could instead tear down a healthy
-            # environment a prior job provisioned for the same agent.
+            # failure is NOT compensated here — `run_setup` runs its own
+            # best-effort rollback scoped to resources that attempt created (see
+            # its postconditions), while agent_id-keyed compensation from here
+            # could tear down a healthy environment another job owns for the
+            # same agent.
             # Credentials / manifest-list failures after setup → compensate([])
-            # to tear down the Docker env that setup created.
+            # to tear down the Docker env and credentials that setup created.
             # Fan-out completed but checkpoint/later phase not durable yet →
             # compensate the tools that already succeeded.
             # Nested try/except: compensation / terminal writes must not mask

@@ -224,6 +224,47 @@ def test_docker_provisioner_provision_returns_error_on_nonzero(tmp_path: Path) -
     assert "Docker run failed" in result.error or "something bad" in result.error
 
 
+def test_docker_provisioner_removes_partial_container_on_failed_run(tmp_path: Path) -> None:
+    """A failed/timed-out `docker run` triggers best-effort removal by name.
+
+    No state row is written on failure, so deprovision-by-state could never find
+    such a container; without this cleanup the leftover name would block every
+    future provision for the agent.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+
+    def _fail_then_record(cmd, *a, **kw):
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "run"]:
+            return SimpleNamespace(returncode=125, stdout="", stderr="name in use")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=_fail_then_record):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert ["docker", "rm", "-f", "agent-agent-1"] in calls
+
+    calls.clear()
+
+    def _timeout_then_record(cmd, *a, **kw):
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "run"]:
+            raise _subprocess.TimeoutExpired(cmd=cmd, timeout=120)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=_timeout_then_record):
+        result = prov.provision("agent-2", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert ["docker", "rm", "-f", "agent-agent-2"] in calls
+
+
 def test_docker_provisioner_is_idempotent_on_existing_state(tmp_path: Path) -> None:
     from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
 

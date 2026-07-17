@@ -45,22 +45,26 @@ def run_setup(
         * ``agent_id`` is a non-empty identifier.
         * ``manifest`` is a loaded ``ToolManifest``.
     Postconditions:
-        * On success: returns ``SetupResult(success=True, environment=...)``; a
-          newly created container is registered in ``environment_store``.
+        * On success: returns ``SetupResult(success=True, environment=...)``; the
+          environment record is registered (registration is atomic — see
+          ``EnvironmentStore.register``).
         * On Docker provisioning failure: returns
-          ``SetupResult(success=False, error=...)`` — nothing is created.
-        * Atomicity: if the container is created but the environment cannot be
-          registered, this attempt's own env record (if the failed register wrote
-          one) is cleared and then the container is deleted — the container only if
-          the record removal is confirmed — before the exception propagates. That
-          ordering keeps record and container consistent, so a failed setup leaves
-          neither an orphaned container nor a stale record a retry's early-return
-          could short-circuit onto, including across Temporal retries of this
-          activity. Teardown is skipped entirely when a *reused* container already
-          has an environment record (of any status — ``running``, ``ready``, ...),
-          which means a prior successful setup or a concurrent job owns and is
-          using it; tearing that down would break a live agent.
+          ``SetupResult(success=False, error=...)``; no environment record is
+          written, and the docker provisioner best-effort-removes a container a
+          failed ``docker run`` may have left behind.
+        * On a failure after provisioning (progress callback or registration):
+          a best-effort rollback runs before the exception propagates. Because
+          registration is atomic, a failed register leaves no record from this
+          attempt, so ownership is decided by what the store actually holds: a
+          record owned by a prior or concurrent registration preserves the
+          container; otherwise the container this attempt created (or a reused
+          orphan with no record) is deprovisioned. Best-effort means teardown
+          failures are logged rather than raised, and concurrent same-agent
+          provisioning is not serialized — a narrow adoption race remains,
+          tracked as separate follow-up work.
     """
+    assert agent_id, "agent_id must be non-empty"
+    assert manifest is not None, "manifest must be a loaded ToolManifest"
     env_store = environment_store or EnvironmentStore()
     docker = docker_provisioner or DockerProvisionerTool()
 
@@ -141,98 +145,7 @@ def run_setup(
             )
         )
     except Exception:
-        # Atomic setup: a container this setup produced must not outlive a failure
-        # to record it. Only reclaim a container THIS attempt is responsible for:
-        #   * one we created (provision did not report it as ``reused``) — it is
-        #     ours, tear it down; or
-        #   * a reused container that has NO environment record — an orphan left by
-        #     a prior failed attempt/retry, safe (and, across retries, necessary)
-        #     to reclaim.
-        # A reused container that already HAS an environment record is owned by a
-        # prior successful setup or a concurrent job — its status may be "running",
-        # "ready" (a completed agent, per deliver), or anything else — so deleting
-        # it would break a live agent. Existence of the record, NOT its status, is
-        # the ownership signal, so re-provisioning a completed "ready" agent whose
-        # register transiently fails does not destroy it.
-        #
-        # Ownership evidence starts from the record read BEFORE this attempt's
-        # register (``existing``, captured at the top of run_setup), which is
-        # immune to a register write that truncates/corrupts the prior record. For
-        # a reused container with no such record, a fresh read additionally catches
-        # a concurrent job that registered after our pre-check — but that read is
-        # best-effort: EnvironmentStore.get CAN raise (its _read_env_data calls
-        # Path.exists outside the OSError handler, which can fail on e.g. EACCES),
-        # and a failed re-read must not abort this rollback or mask the original
-        # error, so we log and fall back to reclaiming.
-        #
-        # NOTE: not atomic — a container we created can be adopted by a concurrent
-        # job before this rollback runs, so this still races concurrent
-        # provisioning of the same agent_id. Fully closing that race needs
-        # agent-level serialization, tracked as separate follow-up work.
-        reused = bool(result.details.get("reused", False))
-        owned_by_other = reused and existing is not None
-        if reused and not owned_by_other:
-            try:
-                owned_by_other = env_store.get(agent_id) is not None
-            except Exception:
-                logger.exception(
-                    "Setup rollback: ownership re-read failed for agent_id=%s; "
-                    "proceeding with reclaim",
-                    agent_id,
-                )
-        if not owned_by_other:
-            # Order matters: clear this attempt's own record BEFORE deleting the
-            # container, and delete the container only if the record is actually
-            # gone. register can write a complete record and then raise (flush /
-            # close), so deleting the container while a ``running`` record survives
-            # would let a retry's running-only early-return short-circuit onto the
-            # deleted container. Removing first keeps the two consistent: a failed
-            # removal leaves both in place (a retry safely reuses the existing
-            # container), and only a confirmed removal lets us reclaim the
-            # container. Safe because we only reach here when no *other* owner
-            # holds a record, so the record (if any) is this attempt's; on the
-            # retry-orphan path there is no record and remove is a no-op.
-            record_cleared = False
-            try:
-                env_store.remove(agent_id)
-                record_cleared = True
-            except Exception:
-                logger.exception(
-                    "Setup rollback: could not remove env record for agent_id=%s; "
-                    "leaving the container in place to stay consistent with it",
-                    agent_id,
-                )
-            if record_cleared:
-                try:
-                    teardown = docker.deprovision(agent_id)
-                    # deprovision() reports failure (e.g. a `docker stop` timeout)
-                    # via its result rather than raising, so inspect it — otherwise
-                    # a failed rollback would leave the container silently orphaned.
-                    if not getattr(teardown, "success", True):
-                        logger.error(
-                            "Setup rollback: container teardown for agent_id=%s "
-                            "reported failure; container may be orphaned: %s",
-                            agent_id,
-                            getattr(teardown, "error", None),
-                        )
-                except Exception:
-                    logger.exception(
-                        "Setup rollback: failed to tear down container for agent_id=%s",
-                        agent_id,
-                    )
-        elif existing is not None:
-            # We're preserving a container a prior successful setup owns, but this
-            # attempt's register may have overwritten/corrupted that record before
-            # raising (register's write is not atomic). Restore the pre-write
-            # snapshot so the live agent isn't left missing from queries or wrongly
-            # flipped to "running". Best effort; must not mask the original error.
-            try:
-                env_store.register(existing)
-            except Exception:
-                logger.exception(
-                    "Setup rollback: could not restore prior env record for agent_id=%s",
-                    agent_id,
-                )
+        _rollback_failed_setup(agent_id, existing, result, env_store, docker)
         raise
 
     return SetupResult(
@@ -241,21 +154,100 @@ def run_setup(
     )
 
 
+def _rollback_failed_setup(
+    agent_id: str,
+    existing,
+    result,
+    env_store: EnvironmentStore,
+    docker: DockerProvisionerTool,
+) -> None:
+    """Best-effort teardown after a failure between provisioning and registration.
+
+    Ownership rule: because ``EnvironmentStore.register`` is atomic, a failed
+    register from this attempt leaves NO record, so any record the store holds
+    now belongs to someone else — a prior successful setup (``existing``, read
+    before this attempt wrote anything) or a concurrent job that registered
+    after our pre-check. Containers backed by such a record are preserved; a
+    container this attempt created, or a reused orphan with no record, is
+    deprovisioned. A prior non-running record is left in place for continuity
+    (its ``created_at`` / ``tools_provisioned`` survive, and a non-``running``
+    status cannot short-circuit a retry's fast path).
+
+    Preconditions:
+        * ``agent_id`` is non-empty.
+        * ``result`` is the successful ``ToolProvisionResult`` for this attempt
+          (a container exists or was reused for ``agent_id``).
+        * ``existing`` is the environment record read before this attempt wrote
+          anything (or ``None``).
+    Postconditions:
+        * Never raises; teardown failures are logged so they cannot mask the
+          original setup error.
+        * The environment store is not modified (nothing this attempt wrote
+          survived, and other owners' records are not touched).
+
+    Concurrent same-agent provisioning is not serialized, so a job that adopts
+    this attempt's container and registers between the ownership read below and
+    the deprovision call can still lose it — tracked as separate follow-up work.
+    """
+    assert agent_id, "agent_id must be non-empty"
+    reused = bool(result.details.get("reused", False))
+    if reused and existing is not None:
+        # A prior successful setup owns this container; its record is intact
+        # (atomic register), whatever its status ("running", "ready", ...).
+        return
+    current = env_store.get(agent_id)  # never raises (store contract)
+    if reused:
+        if current is not None:
+            # Ours never landed, so this record is a concurrent owner's.
+            return
+        # Reused orphan (no record anywhere): reclaim it.
+    elif current is not None and (existing is None or current.to_dict() != existing.to_dict()):
+        # We created the container, but a concurrent job has since registered a
+        # record of its own — it adopted the container; it is theirs now.
+        return
+    # Remaining created-path cases: no record at all, or the untouched prior
+    # non-running record (kept for continuity) — either way the fresh container
+    # is exclusively this attempt's, so tear it down.
+    try:
+        teardown = docker.deprovision(agent_id)
+        # deprovision() reports failure (e.g. a `docker stop` timeout) via its
+        # result rather than raising; surface it or the container leaks silently.
+        if not teardown.success:
+            logger.error(
+                "Setup rollback: container teardown for agent_id=%s reported "
+                "failure; container may be orphaned: %s",
+                agent_id,
+                teardown.error,
+            )
+    except Exception:
+        logger.exception(
+            "Setup rollback: failed to tear down container for agent_id=%s",
+            agent_id,
+        )
+
+
 def cleanup_setup(
     agent_id: str,
     environment_store: Optional[EnvironmentStore] = None,
     docker_provisioner: Optional[DockerProvisionerTool] = None,
 ) -> bool:
-    """
-    Clean up a failed setup by removing any partially created resources.
+    """Clean up a failed setup by removing its environment record and container.
 
-    Returns:
-        True if cleanup successful
+    Preconditions:
+        * ``agent_id`` is non-empty.
+    Postconditions:
+        * The environment record is removed FIRST, then the container is
+          deprovisioned. If the record removal raises, the container is left in
+          place so record and container stay consistent — deleting the container
+          while a ``running`` record survived would let a later ``run_setup``'s
+          fast path short-circuit onto a dead container.
+        * Returns ``True`` when both steps completed.
     """
+    assert agent_id, "agent_id must be non-empty"
     env_store = environment_store or EnvironmentStore()
     docker = docker_provisioner or DockerProvisionerTool()
 
-    docker.deprovision(agent_id)
     env_store.remove(agent_id)
+    docker.deprovision(agent_id)
 
     return True

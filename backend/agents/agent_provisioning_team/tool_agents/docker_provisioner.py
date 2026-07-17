@@ -4,6 +4,7 @@ Docker container provisioner tool agent.
 Handles container lifecycle: create, start, stop, remove.
 """
 
+import logging
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -15,6 +16,8 @@ from ..models import (
 )
 from ..shared.provisioner_state import ProvisionerStateStore
 from .base import BaseToolProvisioner
+
+logger = logging.getLogger(__name__)
 
 # Every sandbox is provisioned with full access — there is no permission
 # tier ladder (#456). Tool provisioners record their canonical full set
@@ -92,14 +95,23 @@ class DockerProvisionerTool(BaseToolProvisioner):
         init_cmd = config.get("init_command", "tail -f /dev/null")
         build_cmd.extend(["sh", "-c", init_cmd])
 
-        result = subprocess.run(
-            build_cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        # A failed or timed-out `docker run` can still have created the container
+        # (created/exited state, or running when the timeout fired). No state row
+        # is written on failure, so deprovision-by-state could never find it —
+        # best-effort remove it here, or the name blocks every future provision.
+        try:
+            result = subprocess.run(
+                build_cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            self._best_effort_remove_container(container_name)
+            raise
 
         if result.returncode != 0:
+            self._best_effort_remove_container(container_name)
             raise RuntimeError(f"Docker run failed: {result.stderr}")
 
         container_id = result.stdout.strip()[:12]
@@ -164,6 +176,30 @@ class DockerProvisionerTool(BaseToolProvisioner):
                 passed=False,
                 actual_permissions=[],
                 errors=[str(e)],
+            )
+
+    @staticmethod
+    def _best_effort_remove_container(container_name: str) -> None:
+        """Remove a container left behind by a failed ``docker run``, by name.
+
+        Preconditions:
+            * ``container_name`` is non-empty.
+        Postconditions:
+            * ``docker rm -f`` was attempted; failures (container absent, daemon
+              down, timeout) are logged and swallowed — this cleanup must never
+              mask the provisioning error that triggered it.
+        """
+        assert container_name, "container_name must be non-empty"
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", container_name],
+                capture_output=True,
+                timeout=30,
+            )
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            logger.exception(
+                "Best-effort removal of partially created container %s failed",
+                container_name,
             )
 
     def deprovision(self, agent_id: str) -> DeprovisionResult:
