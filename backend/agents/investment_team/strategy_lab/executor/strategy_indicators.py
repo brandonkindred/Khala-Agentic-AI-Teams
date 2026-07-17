@@ -202,12 +202,20 @@ def _reset_shared_registries() -> None:
 
     Only affects calls with no ``registries`` argument — i.e. the 16 wrapper
     functions below and any direct call with no owning execution context.
-    ``StrategyContext``/``_ShadowContext`` own their indicator registries as
-    an instance attribute instead (see ``contract.py``/
-    ``predicate_conformance.py``), so a new instance never depends on this
-    being called: its dict starts empty because it's a new dict, the same as
-    any other freshly-initialised attribute. Called directly by tests that
-    need a clean slate for the thread-local fallback between cases.
+    ``StrategyContext``/``_ShadowContext`` each also call this from their own
+    ``__init__`` (see ``contract.py``/``predicate_conformance.py``) even
+    though they own an ``_indicator_registries`` instance attribute too:
+    that dict only covers ``ctx.indicator(...)`` calls.
+    ``_build_indicators_stub``/the flat sandbox's ``indicators`` module bind
+    the 16 wrapper functions below directly, with no ``registries`` argument
+    — generated code that does ``from indicators import sma`` (a documented,
+    supported call shape; see this module's docstring) always falls through
+    to this thread-local fallback instead, regardless of which context is
+    driving it. Without a reset at construction, that fallback survives
+    across unrelated executions on the same thread and can hand a new
+    execution a stale cached value for a symbol it's never seen before.
+    Called directly by tests that need a clean slate for the thread-local
+    fallback between cases.
 
     Preconditions: none.
     Postconditions: the next :func:`_shared_registry` call on this thread

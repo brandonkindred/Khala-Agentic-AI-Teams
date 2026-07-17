@@ -25,7 +25,7 @@ from investment_team.strategy_lab.executor.predicate_evaluator import (
     BarRecord,
     StreamingHistoryView,
 )
-from investment_team.strategy_lab.executor.strategy_indicators import indicator_value
+from investment_team.strategy_lab.executor.strategy_indicators import ema, indicator_value
 from investment_team.strategy_lab.quality_gates.code_conformance import CodeConformanceGate
 from investment_team.strategy_lab.quality_gates.predicate_conformance import (
     _ShadowBar,
@@ -365,6 +365,32 @@ def test_shadow_context_owns_isolated_indicator_registries() -> None:
     assert first._indicator_registries  # constructing `second` didn't touch `first`
 
 
+def test_shadow_context_construction_resets_the_standalone_wrapper_fallback_cache() -> None:
+    """Regression test for a fifth bug caught in code review: the instance-
+    owned ``_indicator_registries`` dict (see
+    ``test_shadow_context_owns_isolated_indicator_registries``) only covers
+    ``ctx.indicator(...)`` calls. ``_build_indicators_stub`` binds the 16
+    standalone wrapper functions (``sma``/``ema``/...) straight from
+    ``strategy_indicators`` onto the shadow ``indicators`` module with no
+    ``registries`` argument, so generated code that does ``from indicators
+    import sma`` (a documented, supported call shape — see
+    ``strategy_indicators``'s module docstring) always falls through to
+    ``_shared_registry``'s thread-local fallback cache instead, bypassing
+    ``_ShadowContext`` entirely. That cache is keyed only by ``(symbol,
+    source)`` and survives across unrelated executions on the same worker
+    thread unless reset, so ``_ShadowContext.__init__`` must still call
+    ``_reset_shared_registries()`` even though it also owns its own dict.
+    """
+    from investment_team.strategy_lab.executor import strategy_indicators as si
+
+    _ShadowContext()  # first shadow execution
+    ema(_shadow_bars(30), 5)  # warms the thread-local fallback cache for QQQ
+    assert si._thread_local.registries  # sanity: something got cached
+
+    _ShadowContext()  # a second, unrelated shadow execution on the same thread
+    assert si._thread_local.registries == {}
+
+
 def test_strategy_context_owns_isolated_indicator_registries() -> None:
     """``StrategyContext`` can be constructed in-process (not just inside the
     sandboxed subprocess — e.g. by tests); it gets the same per-instance
@@ -379,6 +405,26 @@ def test_strategy_context_owns_isolated_indicator_registries() -> None:
     second = StrategyContext(emit=lambda _d: None)
     assert second._indicator_registries == {}
     assert first._indicator_registries
+
+
+def test_strategy_context_construction_resets_the_standalone_wrapper_fallback_cache() -> None:
+    """``StrategyContext`` gets the same fallback-cache reset as
+    ``_ShadowContext`` (see
+    ``test_shadow_context_construction_resets_the_standalone_wrapper_fallback_cache``)
+    and for the same reason: it can be constructed in-process on a shared
+    thread (e.g. this test suite, or any other in-process caller), and the 16
+    standalone wrapper functions bypass its instance-owned
+    ``_indicator_registries`` dict entirely — see
+    ``strategy_indicators._reset_shared_registries``'s docstring.
+    """
+    from investment_team.strategy_lab.executor import strategy_indicators as si
+
+    StrategyContext(emit=lambda _d: None)
+    ema(_make_bars(30, symbol="QQQ"), 5)  # warms the thread-local fallback cache for QQQ
+    assert si._thread_local.registries  # sanity: something got cached
+
+    StrategyContext(emit=lambda _d: None)  # a new, unrelated execution on the same thread
+    assert si._thread_local.registries == {}
 
 
 def test_interleaved_contexts_do_not_corrupt_each_others_indicator_state() -> None:

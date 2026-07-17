@@ -132,6 +132,20 @@ class _ShadowContext:
         # running to completion before the next starts; a thread-local cache
         # can't tell those apart, a fresh dict per instance doesn't need to.
         self._indicator_registries: dict = {}
+        # This dict only covers indicator() calls. _build_indicators_stub
+        # below binds the 16 standalone wrapper functions (sma/ema/...)
+        # straight from strategy_indicators onto the shadow indicators
+        # module with no registries argument, so generated code that does
+        # `from indicators import sma` (a documented, supported call shape —
+        # see strategy_indicators' module docstring) always falls through to
+        # _shared_registry's thread-local fallback cache, never this dict.
+        # That cache is keyed only by (symbol, source), so without a reset
+        # here it survives across unrelated shadow executions on the same
+        # worker thread and can hand this execution a stale value cached by
+        # a different execution for the same symbol.
+        from ..executor.strategy_indicators import _reset_shared_registries
+
+        _reset_shared_registries()
 
     @property
     def capital(self) -> float:
