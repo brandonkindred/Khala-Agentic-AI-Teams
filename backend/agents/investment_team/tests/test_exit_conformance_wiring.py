@@ -196,6 +196,39 @@ def test_attach_execution_diagnostics_copies_when_present() -> None:
     assert metrics.execution_diagnostics is diag
 
 
+def test_attach_execution_diagnostics_copies_cost_stress_results() -> None:
+    """``compute_metrics`` drops cost-stress rows; attach must restore them.
+
+    Production Strategy Lab sets ``cost_stress=True``. Without this hand-off
+    ``CostStressRealismGate`` always sees missing results and emits a
+    critical — which now blocks ``is_publishable`` / paper-trading.
+    """
+    cfg = _config()
+    metrics = compute_metrics([], cfg.initial_capital, cfg.start_date, cfg.end_date)
+    assert metrics.cost_stress_results is None
+
+    payload = [
+        {
+            "multiplier": 1.0,
+            "sharpe_ratio": 1.2,
+            "annualized_return_pct": 15.0,
+            "max_drawdown_pct": 5.0,
+            "trade_count": 20,
+        },
+        {
+            "multiplier": 2.0,
+            "sharpe_ratio": 0.4,
+            "annualized_return_pct": 8.0,
+            "max_drawdown_pct": 7.0,
+            "trade_count": 18,
+        },
+    ]
+    exec_result = StrategyRunResult(success=True, trades=[], cost_stress_results=payload)
+    _attach_execution_diagnostics(metrics=metrics, exec_result=exec_result)
+
+    assert metrics.cost_stress_results == payload
+
+
 def test_attach_execution_diagnostics_noop_when_absent() -> None:
     cfg = _config()
     metrics = compute_metrics([], cfg.initial_capital, cfg.start_date, cfg.end_date)
