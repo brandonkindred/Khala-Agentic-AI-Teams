@@ -126,6 +126,7 @@ def run_setup(
     # The progress callback is inside the rollback boundary: the container already
     # exists here, so a callback (e.g. a job_updater) that raises must trigger the
     # same atomic-setup cleanup as a register failure, not leak the container.
+    registered = False
     try:
         if progress_callback:
             progress_callback("Registering environment...")
@@ -156,10 +157,14 @@ def run_setup(
                 updated_at=(datetime.now(timezone.utc).isoformat() if existing else None),
             )
         )
+        # Set only after register() itself succeeds — _rollback_failed_setup
+        # uses this to tell "we just wrote the record ourselves" (on_registered
+        # then failed) apart from "register() failed and never landed."
+        registered = True
         if on_registered is not None:
             on_registered(env_info)
     except Exception:
-        _rollback_failed_setup(agent_id, existing, result, env_store, docker)
+        _rollback_failed_setup(agent_id, existing, result, env_store, docker, registered)
         raise
 
     return SetupResult(
@@ -174,10 +179,12 @@ def _rollback_failed_setup(
     result,
     env_store: EnvironmentStore,
     docker: DockerProvisionerTool,
+    registered_by_this_call: bool = False,
 ) -> None:
-    """Best-effort teardown after a failure between provisioning and registration.
+    """Best-effort teardown after a failure between provisioning and commit.
 
-    Ownership rule: because ``EnvironmentStore.register`` is atomic, a failed
+    Ownership rule when ``registered_by_this_call`` is ``False`` (``register``
+    itself failed): because ``EnvironmentStore.register`` is atomic, a failed
     register from this attempt leaves NO record, so any record the store holds
     now belongs to someone else — a prior successful setup (``existing``, read
     before this attempt wrote anything) or a concurrent job that registered
@@ -187,56 +194,74 @@ def _rollback_failed_setup(
     (its ``created_at`` / ``tools_provisioned`` survive, and a non-``running``
     status cannot short-circuit a retry's fast path).
 
+    When ``registered_by_this_call`` is ``True`` (``register`` itself
+    succeeded and a *later* step — e.g. ``on_registered`` — then failed), that
+    "current record belongs to someone else" heuristic does not apply: the
+    record in the store is unambiguously this attempt's own write (its
+    ``container_id`` matching ``result`` is expected, not evidence of a
+    concurrent adopter), so it is removed unconditionally before the container
+    is torn down — the record-then-container ordering matches
+    :func:`cleanup_setup`, so a later ``run_setup`` can't fast-path onto a
+    ``running`` record backed by a container that's about to be deprovisioned.
+
     Preconditions:
         * ``agent_id`` is non-empty.
         * ``result`` is the successful ``ToolProvisionResult`` for this attempt
           (a container exists or was reused for ``agent_id``).
         * ``existing`` is the environment record read before this attempt wrote
           anything (or ``None``).
+        * ``registered_by_this_call`` is ``True`` iff this attempt's own
+          ``env_store.register(...)`` call already completed before the
+          failure being rolled back.
     Postconditions:
         * Never raises; teardown failures are logged so they cannot mask the
           original setup error.
-        * The environment store is not modified (nothing this attempt wrote
-          survived, and other owners' records are not touched).
+        * When ``registered_by_this_call`` is ``False``: the environment store
+          is not modified (nothing this attempt wrote survived, and other
+          owners' records are not touched). When ``True``: this attempt's own
+          record is removed.
 
     Concurrent same-agent provisioning is not serialized, so a job that adopts
     this attempt's container and registers between the ownership read below and
     the deprovision call can still lose it — tracked as separate follow-up work.
     """
     assert agent_id, "agent_id must be non-empty"
-    reused = bool(result.details.get("reused", False))
-    if reused and existing is not None:
-        # A prior successful setup owns this container; its record is intact
-        # (atomic register), whatever its status ("running", "ready", ...).
-        return
-    current = env_store.get(agent_id)  # never raises (store contract)
-    if reused:
-        if current is not None:
-            # Ours never landed, so this record is a concurrent owner's.
+    if registered_by_this_call:
+        env_store.remove(agent_id)
+    else:
+        reused = bool(result.details.get("reused", False))
+        if reused and existing is not None:
+            # A prior successful setup owns this container; its record is intact
+            # (atomic register), whatever its status ("running", "ready", ...).
             return
-        # A missing record only proves an orphan when the registry itself is
-        # readable: get() maps unreadable-store errors (e.g. EACCES) to None,
-        # and destroying a reused container on masked evidence could kill a
-        # healthy agent whose record simply cannot be read right now.
-        if not env_store.readable(agent_id):
-            logger.error(
-                "Setup rollback: environment registry unreadable for agent_id=%s; "
-                "preserving reused container (ownership unknown)",
-                agent_id,
-            )
+        current = env_store.get(agent_id)  # never raises (store contract)
+        if reused:
+            if current is not None:
+                # Ours never landed, so this record is a concurrent owner's.
+                return
+            # A missing record only proves an orphan when the registry itself is
+            # readable: get() maps unreadable-store errors (e.g. EACCES) to None,
+            # and destroying a reused container on masked evidence could kill a
+            # healthy agent whose record simply cannot be read right now.
+            if not env_store.readable(agent_id):
+                logger.error(
+                    "Setup rollback: environment registry unreadable for agent_id=%s; "
+                    "preserving reused container (ownership unknown)",
+                    agent_id,
+                )
+                return
+            # Reused orphan (no record anywhere): reclaim it.
+        elif current is not None and current.container_id == result.details.get("container_id", ""):
+            # We created the container, and the current record identifies THAT
+            # container — a concurrent job registered it; it is theirs now. Compare
+            # container identity, not the whole record: an unrelated field bump on
+            # a record for a DIFFERENT (e.g. the old, non-running) container — say
+            # a concurrent add_tool/update_status touching `updated_at` — must not
+            # be mistaken for adoption of the container this attempt just created.
             return
-        # Reused orphan (no record anywhere): reclaim it.
-    elif current is not None and current.container_id == result.details.get("container_id", ""):
-        # We created the container, and the current record identifies THAT
-        # container — a concurrent job registered it; it is theirs now. Compare
-        # container identity, not the whole record: an unrelated field bump on
-        # a record for a DIFFERENT (e.g. the old, non-running) container — say
-        # a concurrent add_tool/update_status touching `updated_at` — must not
-        # be mistaken for adoption of the container this attempt just created.
-        return
-    # Remaining created-path cases: no record at all, or the untouched prior
-    # non-running record (kept for continuity) — either way the fresh container
-    # is exclusively this attempt's, so tear it down.
+        # Remaining created-path cases: no record at all, or the untouched prior
+        # non-running record (kept for continuity) — either way the fresh container
+        # is exclusively this attempt's, so tear it down.
     try:
         teardown = docker.deprovision(agent_id)
         # deprovision() reports failure (e.g. a `docker stop` timeout) via its

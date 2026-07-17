@@ -431,22 +431,63 @@ def test_run_setup_rolls_back_when_progress_callback_raises() -> None:
     docker.deprovision.assert_called_once_with("a12")
 
 
-def test_run_setup_rolls_back_when_on_registered_raises() -> None:
-    """A failing on_registered hook rolls back the fresh container.
+def test_run_setup_rolls_back_when_on_registered_raises(tmp_path: Path) -> None:
+    """A failing on_registered hook rolls back this attempt's own record too.
 
     A durable checkpoint write (e.g. a Temporal activity's job-store record)
     belongs inside this same atomic boundary: if it fails or the activity is
     cancelled here, the container this attempt just created must not leak,
-    exactly like a failing register call.
+    exactly like a failing register call. Unlike a failing register() call,
+    though, this attempt's own record now sits in the store with a
+    container_id that matches `result` — the exact signal the "adopted by a
+    concurrent job" heuristic uses for the register-failure case — so the
+    rollback must recognize this as its own write (not a concurrent owner's)
+    and remove it, using a REAL EnvironmentStore rather than an always-None
+    stub so `get()` reflects what `register()` actually just wrote.
     """
-    env_store = _rollback_env_store(get=None, register_error=lambda *a, **kw: None)
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
     docker = _docker_stub(container_id="c-new", container_name="agent-a15")
 
     def on_registered(env_info):
         raise RuntimeError("checkpoint boom")
 
     _run_setup_expecting("checkpoint boom", "a15", env_store, docker, on_registered=on_registered)
+
     docker.deprovision.assert_called_once_with("a15")
+    assert env_store.get("a15") is None
+
+
+def test_run_setup_removes_overwritten_prior_record_when_on_registered_raises(
+    tmp_path: Path,
+) -> None:
+    """Contrast with the register()-fails case: here register() overwrote a
+    prior record before on_registered raised, so there is no stale prior
+    content left to preserve for continuity — the rollback must remove this
+    attempt's own (now current) record, not leave a dangling `running` row.
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentInfo as StoreEnvInfo
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(
+        StoreEnvInfo(
+            agent_id="a19",
+            container_id="c-old",
+            container_name="agent-a19",
+            status="stopped",
+        )
+    )
+    docker = _docker_stub(container_id="c-new", container_name="agent-a19")
+
+    def on_registered(env_info):
+        raise RuntimeError("checkpoint boom")
+
+    _run_setup_expecting("checkpoint boom", "a19", env_store, docker, on_registered=on_registered)
+
+    docker.deprovision.assert_called_once_with("a19")
+    assert env_store.get("a19") is None
 
 
 def test_run_setup_calls_on_registered_with_fresh_environment(tmp_path: Path) -> None:
