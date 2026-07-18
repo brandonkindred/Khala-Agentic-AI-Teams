@@ -209,6 +209,42 @@ def test_credential_store_delete_tool_credentials_purges_stale_copy_alongside_pr
     assert legacy_reader.get_credentials("a1", "redis") == {"password": "r"}
 
 
+def test_credential_store_delete_tool_credentials_removes_emptied_primary_to_expose_legacy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An emptied primary file must be unlinked, not left behind as an empty blob.
+
+    _read_agent_credentials stops at the first candidate path that EXISTS,
+    regardless of its content — so a primary rewritten to an encrypted
+    ``{}`` after its only tool is purged would mask an untouched legacy
+    entry for a completely different tool from ever being read again by
+    the same CredentialStore instance. Unlinking the emptied primary lets
+    that read fall through to the legacy candidate that still legitimately
+    owns it, exactly like an emptied legacy candidate already does.
+    """
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    monkeypatch.chdir(tmp_path)
+    key = CredentialStore.generate_key()
+    primary = tmp_path / "primary"
+    store = CredentialStore(storage_dir=primary, encryption_key=key)
+    store.store_credentials("a1", "pg", {"password": "current"})  # primary's only tool
+
+    legacy_dir = tmp_path / ".agent_cache" / "provisioning_credentials"
+    legacy_dir.mkdir(parents=True)
+    legacy_store = CredentialStore(storage_dir=legacy_dir, encryption_key=key)
+    legacy_store.store_credentials("a1", "redis", {"password": "r"})  # legacy-only survivor
+
+    assert store.delete_tool_credentials("a1", "pg") is True
+
+    assert not (primary / "a1.enc").exists()
+    # Reads on the very same store instance now fall through to legacy and
+    # still find the untouched "redis" entry instead of being masked by an
+    # emptied-but-still-present primary file.
+    assert store.get_credentials("a1", "redis") == {"password": "r"}
+    assert store.get_credentials("a1", "pg") is None
+
+
 def test_credential_store_delete_tool_credentials_purges_legacy_when_primary_lacks_tool(
     tmp_path: Path, monkeypatch
 ) -> None:

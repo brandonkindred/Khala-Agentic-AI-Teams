@@ -444,18 +444,23 @@ class CredentialStore:
             * Otherwise every candidate path that independently contains
               ``tool_name`` is purged of that entry: the primary store path
               (the same target ``store_credentials`` always writes to) is
-              rewritten in place if it contains ``tool_name`` (never
-              unlinked, even if left empty, so a later ``store_credentials``
-              call — which only ever checks the primary path's existence —
-              does not silently start from an empty file while a legacy
-              candidate still holds other tools); every OTHER (legacy)
-              candidate containing ``tool_name`` is rewritten if other
-              entries survive, or removed if left fully empty. Returns
+              rewritten in place if other entries survive the removal, or
+              unlinked if left fully empty; every OTHER (legacy) candidate
+              containing ``tool_name`` gets the same treatment. Returns
               ``True`` iff at least one candidate was purged. Used by
               compensation to purge a single tool's generated-but-now-stale
               secret (its account was just rolled back) without discarding
               the agent's other, still-valid tools' credentials the way
               ``delete_credentials`` would.
+            * An emptied primary is unlinked rather than left as an encrypted
+              ``{}`` blob: ``_read_agent_credentials`` (and so
+              ``get_credentials``) stops at the first candidate path that
+              EXISTS, regardless of its content, so a primary left behind
+              empty would mask any still-present legacy entries for OTHER
+              tools from ever being read again. Unlinking it lets those
+              reads fall through to the legacy candidate that still
+              legitimately owns them, exactly like an emptied legacy
+              candidate already falls through to the next one.
             * Each candidate is inspected independently for ``tool_name``'s
               presence — not gated on whichever single file
               ``_read_agent_credentials`` would have preferred — because a
@@ -476,8 +481,11 @@ class CredentialStore:
                 data = None
             if isinstance(data, dict) and tool_name in data:
                 del data[tool_name]
-                primary.write_bytes(self.multifernet.encrypt(json.dumps(data).encode()))
-                primary.chmod(0o600)
+                if data:
+                    primary.write_bytes(self.multifernet.encrypt(json.dumps(data).encode()))
+                    primary.chmod(0o600)
+                else:
+                    primary.unlink()
                 removed_any = True
 
         for path in self._agent_file_candidates(agent_id):
