@@ -135,6 +135,7 @@ from investment_team.strategy_lab_context import (
 )
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
 from shared_app import create_team_app
+from shared_concurrency import parallel_map
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -2995,8 +2996,11 @@ def _delete_jobs_concurrently(
             return 0
 
     workers = min(max_workers, len(job_ids))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        return sum(pool.map(_delete_one, job_ids))
+    return sum(
+        parallel_map(
+            job_ids, _delete_one, max_workers=workers, preserve_order=False, skip_none=False
+        )
+    )
 
 
 def _delete_paper_sessions_for_lab_record(lab_record_id: str) -> int:

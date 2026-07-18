@@ -120,6 +120,36 @@ def _temporal_dispatch_inline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _signal_paper_trading_stop)
 
 
+@pytest.fixture(autouse=True)
+def _reset_indicator_registries():
+    """Force-clear strategy_indicators' ``_active_registries`` contextvar per test.
+
+    ``strategy_indicators._shared_registry`` only ever caches an
+    ``IndicatorRegistry`` in a dict it's explicitly handed — the caller's own
+    ``registries`` argument, or (for the 16 standalone wrapper functions and
+    any direct ``indicator_value`` call) whatever dict the ``_active_
+    registries`` contextvar currently points to; with neither set, it always
+    returns a fresh, uncached instance. Tests that exercise the contextvar
+    directly (e.g. to prove it takes precedence, or to simulate a dispatch
+    bracket) are expected to reset their own ``Token`` via ``try``/``finally``;
+    this is a defensive backstop, not the primary mechanism, so a test with a
+    bug in that cleanup — or a future test that forgets it — can't leave a
+    stale registries dict active for whatever test runs next on this thread.
+
+    Preconditions:
+        None (import is lazy so tests that never touch strategy_indicators
+        are unaffected).
+    Postconditions:
+        Every test starts with, and leaves behind, no ``_active_registries``
+        context set.
+    """
+    from investment_team.strategy_lab.executor import strategy_indicators as si
+
+    si._active_registries.set(None)
+    yield
+    si._active_registries.set(None)
+
+
 @pytest.fixture
 def stub_readiness_market_data_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     """Return a single synthetic OHLCV bar for any ``fetch_ohlcv`` call.

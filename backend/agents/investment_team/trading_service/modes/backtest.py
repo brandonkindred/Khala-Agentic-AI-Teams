@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+
+from shared_concurrency import parallel_map
 
 from ...execution.cost_stress import CostStressReport, CostStressRow
 from ...execution.data_quality import validate_market_data
@@ -305,11 +306,19 @@ def run_backtest(
         parallel_indices = list(range(parallel_start, len(multipliers)))
         if parallel_indices:
             workers = min(len(parallel_indices), os.cpu_count() or 4)
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="cost-stress") as pool:
-                futures = {pool.submit(_stress_row, idx): idx for idx in parallel_indices}
-                for fut in as_completed(futures):
-                    idx = futures[fut]
-                    rows_by_index[idx] = fut.result()
+            # wait_for_stragglers: _stress_row hits the provider-backed cache
+            # (see the stampede-guard comment above) — an in-flight replay's
+            # fetch/cache-write must finish, not race a later run, before we
+            # propagate this failure.
+            stressed_rows = parallel_map(
+                parallel_indices,
+                _stress_row,
+                max_workers=workers,
+                skip_none=False,
+                wait_for_stragglers=True,
+            )
+            for idx, row in zip(parallel_indices, stressed_rows):
+                rows_by_index[idx] = row
 
         for row in rows_by_index:
             assert row is not None  # every position filled

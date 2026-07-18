@@ -13,6 +13,7 @@ their docstring below for why).
 from agent_provisioning_team.temporal.activities import (
     acquire_agent_lock_activity,
     audit_activity,
+    check_existing_environment_activity,
     compensate_activity,
     credentials_activity,
     deliver_activity,
@@ -49,6 +50,7 @@ WORKFLOWS = [
 ACTIVITIES = [
     acquire_agent_lock_activity,
     release_agent_lock_activity,
+    check_existing_environment_activity,
     setup_activity,
     list_manifest_tools_activity,
     credentials_activity,

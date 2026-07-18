@@ -355,6 +355,7 @@ class ProvisioningOrchestrator:
         self,
         agent_id: str,
         tool_results: List[Any],
+        tear_down_environment: bool = True,
     ) -> None:
         """Roll back partial provisioning after a phase failure.
 
@@ -362,6 +363,74 @@ class ProvisioningOrchestrator:
         shutdown compensation. Best-effort: deprovisions any tools that did
         succeed, tears down the Docker environment, and removes encrypted
         credentials so a failed run doesn't leak resources or secrets to disk.
+
+        Preconditions:
+            * ``tool_results`` entries are the tool results this ATTEMPT
+              itself produced — rolling those back always runs (except for
+              entries whose ``details.reused`` is true — see below),
+              regardless of ``tear_down_environment``.
+        Postconditions:
+            * A result whose ``details.reused`` is true is skipped entirely:
+              ``reused`` means the provisioner found and idempotently reused
+              an existing account rather than creating a new one, so it is
+              never this attempt's own creation — rolling it back (or
+              purging its credential entry) would destroy/invalidate a
+              resource that predates this attempt, independent of
+              ``tear_down_environment``.
+            * Every other tool has its ``details.reused``-derived rollback
+              attempted (replay-compensation or ``deprovision``, whichever
+              applies), and only when that rollback CONFIRMS success — a
+              replay with no individual step failures, or a
+              ``DeprovisionResult(success=True)`` — is its generated
+              credential entry purged from the credential store
+              (``CredentialStore.delete_tool_credentials``). Rollback
+              "not raising" is not enough: ``deprovision()`` commonly reports
+              failure via ``DeprovisionResult(success=False)`` rather than an
+              exception, and a replay step can fail without escaping its own
+              try/except — purging the credential in either case would strip
+              the only remaining way to reach an account that may still be
+              live. The credentials phase generates a fresh secret for every
+              tool upfront, so once (and only once) a tool's account is
+              confirmed torn back down, that secret no longer corresponds to
+              anything live and is safe to discard.
+            * When a replay step fails, the provisioner's persisted
+              compensation records and idempotency state row are left
+              intact rather than cleared — clearing them would make an
+              un-replayed (or partially-applied) step's side effect
+              permanently unreachable by a future retry of this same
+              method; ``list_compensations`` must still return every
+              record next time so the retry can pick up where this
+              attempt left off.
+            * ``tear_down_environment=False`` skips the Docker / whole-agent
+              credential-file / environment-record teardown entirely, while
+              tool rollback above still runs unconditionally (modulo the
+              ``reused`` exclusion). Callers set this ``False`` when
+              ``agent_id``'s environment predates this attempt (e.g. a re-run
+              against an already-delivered agent) and must be preserved — a
+              newly-provisioned tool from THIS attempt still gets rolled
+              back, but the environment this attempt never created is left
+              untouched.
+            * ``tear_down_environment=True``'s credential-file cleanup is
+              NOT an unconditional ``delete_credentials(agent_id)`` when any
+              tool was excluded from the per-tool purge above (reused, or an
+              attempted rollback that never confirmed success): it instead
+              purges every OTHER currently-stored tool's entry individually,
+              leaving those excluded ones alone. An unconditional delete
+              here would otherwise strip the only remaining way to reach an
+              account whose rollback may not have actually landed, even
+              though the environment/container around it is being torn
+              down — that account is frequently an external resource (e.g.
+              a database), not something destroying the container alone
+              would also destroy.
+            * Whether it is safe to independently reclaim an
+              orphaned container by name afterward (e.g.
+              ``compensate_activity``'s own ``verify_and_remove_orphan``
+              follow-up) is not reported here — callers needing that answer
+              should check ``EnvironmentStore`` directly rather than infer it
+              from how this method's internal steps happened to fare, since
+              ``cleanup_setup`` raising does not always mean the record
+              survived (e.g. the record removal itself can succeed and a
+              later step in the same call still raise).
         """
         # Look each successfully-provisioned tool back up by its registry key
         # (stamped onto the result in run_account_provisioning). Prior to #293
@@ -369,20 +438,43 @@ class ProvisioningOrchestrator:
         # provisioners whose class `tool_name` differs from the registry stem
         # (e.g. PostgresProvisionerTool.tool_name == "postgresql" vs key
         # "postgres_provisioner"), leaking accounts + encrypted credentials.
+        #
+        # Every tool this loop does NOT confirm-and-purge itself (reused, no
+        # rollback attempted, or an attempted rollback that didn't confirm
+        # success) is tracked here so the tear_down_environment=True cleanup
+        # below can exclude it from the credential purge — that cleanup used
+        # to be an unconditional delete_credentials(agent_id), which
+        # defeated this same preservation the moment the environment (not
+        # just an individual tool) was being torn down.
+        preserved_credentials: set[str] = set()
         for r in tool_results:
             if not getattr(r, "success", False):
+                continue
+            tool_name = getattr(r, "tool_name", None)
+            if bool((getattr(r, "details", None) or {}).get("reused", False)):
+                logger.info(
+                    "Compensation: skipping rollback for %s — this attempt reused a "
+                    "pre-existing account rather than creating one",
+                    tool_name or "?",
+                )
+                if tool_name:
+                    preserved_credentials.add(tool_name)
                 continue
             key = getattr(r, "provisioner_key", None)
             if not key:
                 logger.warning(
                     "Compensation: tool_result for %s has no provisioner_key; "
                     "skipping rollback (stale result pre-#293).",
-                    getattr(r, "tool_name", "?"),
+                    tool_name or "?",
                 )
+                if tool_name:
+                    preserved_credentials.add(tool_name)
                 continue
             provisioner = self.tool_agents.get(key)
             if provisioner is None:
                 logger.warning("Compensation: no provisioner registered for key=%s", key)
+                if tool_name:
+                    preserved_credentials.add(tool_name)
                 continue
             # Prefer persisted per-step compensations when the provisioner
             # registered any during `_do_provision`: replay in LIFO order,
@@ -396,7 +488,16 @@ class ProvisioningOrchestrator:
                     "Compensation: could not read records for %s; falling back to deprovision",
                     key,
                 )
+            # Tracks whether rollback actually landed, not merely whether it
+            # avoided raising — deprovision() reports many failures via
+            # DeprovisionResult(success=False) rather than an exception, and a
+            # replay step can individually fail without raising past its own
+            # try/except. Only a confirmed-successful rollback should purge
+            # the credential entry below; otherwise the account may still be
+            # live and the credential is the only way left to reach it.
+            rollback_succeeded = False
             if records:
+                replay_failed = False
                 for rec in reversed(records):
                     try:
                         provisioner.replay_compensation(agent_id, rec.kind, rec.payload)
@@ -404,16 +505,60 @@ class ProvisioningOrchestrator:
                         logger.exception(
                             "Compensation: replay failed kind=%s for %s", rec.kind, key
                         )
-                try:
-                    provisioner.clear_compensations(agent_id)
-                    provisioner._state.delete(agent_id)
-                except Exception:  # noqa: BLE001
-                    logger.exception("Compensation: post-replay state cleanup failed for %s", key)
+                        replay_failed = True
+                if replay_failed:
+                    # Preserve the persisted records and state row rather
+                    # than clearing them: a step that failed to replay left
+                    # its side effect (partially) intact, and a Temporal
+                    # retry of this whole activity needs list_compensations
+                    # to still return every record — including the ones that
+                    # DID replay successfully, since replaying an idempotent
+                    # step twice is safe but losing track of one that never
+                    # ran is not — to finish the rollback. Clearing here
+                    # would make that side effect permanently unreachable by
+                    # any future compensation attempt.
+                    logger.error(
+                        "Compensation: preserving compensation records for %s "
+                        "(agent_id=%s) after a replay step failed, so a retry can "
+                        "still attempt them",
+                        key,
+                        agent_id,
+                    )
+                else:
+                    try:
+                        provisioner.clear_compensations(agent_id)
+                        provisioner._state.delete(agent_id)
+                        rollback_succeeded = True
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Compensation: post-replay state cleanup failed for %s", key
+                        )
             else:
                 try:
-                    provisioner.deprovision(agent_id)
+                    deprovision_result = provisioner.deprovision(agent_id)
+                    rollback_succeeded = bool(getattr(deprovision_result, "success", False))
+                    if not rollback_succeeded:
+                        logger.error(
+                            "Compensation: deprovision reported failure for %s "
+                            "(agent_id=%s, error=%s); credential entry preserved since "
+                            "the account may still be live",
+                            key,
+                            agent_id,
+                            getattr(deprovision_result, "error", None),
+                        )
                 except Exception:  # noqa: BLE001 — best-effort cleanup
                     logger.exception("Compensation: deprovision failed for %s", key)
+
+            if tool_name and rollback_succeeded:
+                try:
+                    self.credential_store.delete_tool_credentials(agent_id, tool_name)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Compensation: credential cleanup failed for %s", tool_name)
+            elif tool_name:
+                preserved_credentials.add(tool_name)
+
+        if not tear_down_environment:
+            return
 
         docker = self.tool_agents.get("docker_provisioner")
         if docker is not None:
@@ -423,7 +568,27 @@ class ProvisioningOrchestrator:
                 logger.exception("Compensation: docker teardown failed")
 
         try:
-            self.credential_store.delete_credentials(agent_id)
+            if preserved_credentials:
+                # A plain delete_credentials(agent_id) here would defeat the
+                # per-tool preservation above the moment the environment
+                # itself is also being torn down — purge only the entries
+                # NOT deliberately preserved (reused, or a rollback that
+                # didn't confirm success) instead of the whole file.
+                #
+                # list_tool_names (not get_credentials) so a tool name that
+                # exists ONLY in a legacy candidate — never migrated to the
+                # primary file — still gets enumerated here and purged via
+                # delete_tool_credentials below; get_credentials stops at
+                # whichever single candidate it reads first and would
+                # silently skip a legacy-only tool, leaving its stale
+                # credential behind after this same compensation pass.
+                stored = self.credential_store.list_tool_names(agent_id)
+                for stored_tool_name in stored:
+                    if stored_tool_name in preserved_credentials:
+                        continue
+                    self.credential_store.delete_tool_credentials(agent_id, stored_tool_name)
+            else:
+                self.credential_store.delete_credentials(agent_id)
         except Exception:  # noqa: BLE001
             logger.exception("Compensation: credential cleanup failed")
 
