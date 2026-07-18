@@ -637,6 +637,31 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
+  it('gate-result rows keep stable DOM node identity across a re-render with unchanged data', async () => {
+    const fixture = await createFixture(RECORD_WITH_GATES, {
+      items: [RECORD_WITH_GATES], count: 1, winning_count: 0, losing_count: 1,
+    });
+    fixture.componentInstance.toggleCard('rec-1');
+    fixture.detectChanges();
+    const headers: HTMLElement[] = Array.from(
+      fixture.nativeElement.querySelectorAll('mat-expansion-panel-header'),
+    );
+    headers.find((h) => h.textContent?.includes('Quality Gates'))!.click();
+    fixture.detectChanges();
+
+    const before: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.gate-result'));
+    expect(before).toHaveLength(2);
+
+    // An unrelated change-detection pass — gateViewModels(record) is called
+    // again by the @for expression, but for the same record it must return
+    // the same memoized array/objects, so @for reuses these exact DOM nodes
+    // instead of tearing down and recreating them.
+    fixture.detectChanges();
+
+    const after: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.gate-result'));
+    expect(after).toEqual(before);
+  }, 15000);
+
   it('paper-trading verdict icon and comparison-table aligned icon are aria-hidden', async () => {
     const fixture = await createFixture();
     stubOf(fixture).paperTradingSessions.set({ 'rec-1': PAPER_SESSION });

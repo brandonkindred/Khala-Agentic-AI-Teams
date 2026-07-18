@@ -69,6 +69,22 @@ interface ActivityLogEntry {
   message: string;
 }
 
+/** Precomputed per-gate template data — see `gateViewModels`. */
+interface GateViewModel {
+  gate: QualityGateResult;
+  icon: string;
+  severityClass: string;
+  isRemedied: boolean;
+}
+
+/** Precomputed comparison-table row — see `comparisonMetrics`. */
+interface ComparisonRow {
+  label: string;
+  backtest: string;
+  paper: string;
+  aligned: boolean;
+}
+
 const STRATEGY_LAB_PHASES: PhaseDefinition[] = [
   { id: 'ideating',     label: 'Ideate',    icon: 'psychology' },
   { id: 'coding',       label: 'Code',      icon: 'code' },
@@ -753,11 +769,16 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     }
   }
 
-  progressPercent(): number {
+  /**
+   * Precomputed (via `computed()`, not a template-bound method call) so it's
+   * only recalculated when `runService.runStatus()` actually changes, not on
+   * every change-detection pass that happens to touch this template region.
+   */
+  readonly progressPercent = computed(() => {
     const status = this.runService.runStatus();
     if (!status || status.total_cycles === 0) return 0;
     return Math.round((status.completed_cycles / status.total_cycles) * 100);
-  }
+  });
 
   /** Short multi-line tooltip summarizing recent errored cycles for hover. */
   erroredTooltip(): string {
@@ -880,6 +901,30 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   gateSeverityClass(gate: QualityGateResult, record: StrategyLabRecord): string {
     if (this.isRemedied(gate, record)) return 'gate-remedied';
     return 'gate-' + gate.severity;
+  }
+
+  // record.quality_gate_results is replaced wholesale (a new array/objects)
+  // whenever loadResults() re-polls, so the WeakMap entry falls away
+  // naturally — same lifecycle as _pagedTradesCache/_winCountCache above.
+  private readonly _gateViewModelsCache = new WeakMap<StrategyLabRecord, GateViewModel[]>();
+
+  /**
+   * Per-gate template data (icon, severity class, remedied flag), computed
+   * once per record on first access and cached — the template iterates this
+   * instead of calling `gateIcon`/`gateSeverityClass`/`isRemedied` directly
+   * per gate on every change-detection pass.
+   */
+  gateViewModels(record: StrategyLabRecord): GateViewModel[] {
+    const cached = this._gateViewModelsCache.get(record);
+    if (cached) return cached;
+    const viewModels = (record.quality_gate_results ?? []).map((gate) => ({
+      gate,
+      icon: this.gateIcon(gate, record),
+      severityClass: this.gateSeverityClass(gate, record),
+      isRemedied: this.isRemedied(gate, record),
+    }));
+    this._gateViewModelsCache.set(record, viewModels);
+    return viewModels;
   }
 
   /**
@@ -1064,13 +1109,24 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return 'neutral';
   }
 
-  comparisonMetrics(c: PaperTradingComparison): { label: string; backtest: string; paper: string; aligned: boolean }[] {
-    return [
+  // Keyed by the PaperTradingComparison object itself: a poll tick replaces
+  // the whole PaperTradingSession (and its nested `comparison`) with a fresh
+  // object, so this cache naturally invalidates on real data changes while
+  // giving repeat calls for the same object a stable array — same lifecycle
+  // as _pagedTradesCache/_winCountCache/_gateViewModelsCache above.
+  private readonly _comparisonMetricsCache = new WeakMap<PaperTradingComparison, ComparisonRow[]>();
+
+  comparisonMetrics(c: PaperTradingComparison): ComparisonRow[] {
+    const cached = this._comparisonMetricsCache.get(c);
+    if (cached) return cached;
+    const rows: ComparisonRow[] = [
       { label: 'Win Rate', backtest: c.backtest_win_rate_pct.toFixed(1) + '%', paper: c.paper_win_rate_pct.toFixed(1) + '%', aligned: c.win_rate_aligned },
       { label: 'Annual Return', backtest: c.backtest_annualized_return_pct.toFixed(1) + '%', paper: c.paper_annualized_return_pct.toFixed(1) + '%', aligned: c.return_aligned },
       { label: 'Sharpe', backtest: c.backtest_sharpe_ratio.toFixed(2), paper: c.paper_sharpe_ratio.toFixed(2), aligned: c.sharpe_aligned },
       { label: 'Max Drawdown', backtest: c.backtest_max_drawdown_pct.toFixed(1) + '%', paper: c.paper_max_drawdown_pct.toFixed(1) + '%', aligned: c.drawdown_aligned },
       { label: 'Profit Factor', backtest: c.backtest_profit_factor.toFixed(2), paper: c.paper_profit_factor.toFixed(2), aligned: c.profit_factor_aligned },
     ];
+    this._comparisonMetricsCache.set(c, rows);
+    return rows;
   }
 }

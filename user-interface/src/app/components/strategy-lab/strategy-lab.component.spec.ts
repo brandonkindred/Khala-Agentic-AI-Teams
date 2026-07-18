@@ -1164,6 +1164,67 @@ describe('StrategyLabComponent — pure helpers and remaining error paths', () =
     });
   });
 
+  describe('gateViewModels (precomputed per-gate template data)', () => {
+    it('maps each gate to its icon/severityClass/isRemedied, matching the underlying methods', () => {
+      const gates: QualityGateResult[] = [
+        { gate_name: 'a', passed: true, details: 'ok', severity: 'info' },
+        { gate_name: 'b', passed: false, details: 'bad', severity: 'critical', refinement_round: 0 },
+      ];
+      const record = { refinement_rounds: 2, quality_gate_results: gates } as unknown as StrategyLabRecord;
+
+      const viewModels = component.gateViewModels(record);
+
+      expect(viewModels).toEqual([
+        { gate: gates[0], icon: component.gateIcon(gates[0], record), severityClass: component.gateSeverityClass(gates[0], record), isRemedied: false },
+        { gate: gates[1], icon: component.gateIcon(gates[1], record), severityClass: component.gateSeverityClass(gates[1], record), isRemedied: true },
+      ]);
+    });
+
+    it('returns the same array reference for the same record (memoized), and independent arrays for different records', () => {
+      const record1 = { refinement_rounds: 0, quality_gate_results: [{ gate_name: 'a', passed: true, details: '', severity: 'info' }] } as unknown as StrategyLabRecord;
+      const record2 = { refinement_rounds: 0, quality_gate_results: [{ gate_name: 'b', passed: true, details: '', severity: 'info' }] } as unknown as StrategyLabRecord;
+
+      const first = component.gateViewModels(record1);
+      expect(component.gateViewModels(record1)).toBe(first);
+      expect(component.gateViewModels(record2)).not.toBe(first);
+    });
+
+    it('returns an empty array when a record has no quality_gate_results', () => {
+      const record = { refinement_rounds: 0 } as unknown as StrategyLabRecord;
+      expect(component.gateViewModels(record)).toEqual([]);
+    });
+  });
+
+  describe('comparisonMetrics (precomputed comparison-table rows)', () => {
+    const comparison = {
+      backtest_win_rate_pct: 55, paper_win_rate_pct: 52,
+      backtest_annualized_return_pct: 12, paper_annualized_return_pct: 11,
+      backtest_sharpe_ratio: 1.5, paper_sharpe_ratio: 1.4,
+      backtest_max_drawdown_pct: -5, paper_max_drawdown_pct: -6,
+      backtest_profit_factor: 1.8, paper_profit_factor: 1.7,
+      win_rate_aligned: true, return_aligned: true, sharpe_aligned: true,
+      drawdown_aligned: true, profit_factor_aligned: true, overall_aligned: true,
+    };
+
+    it('formats each metric row', () => {
+      expect(component.comparisonMetrics(comparison)).toEqual([
+        { label: 'Win Rate', backtest: '55.0%', paper: '52.0%', aligned: true },
+        { label: 'Annual Return', backtest: '12.0%', paper: '11.0%', aligned: true },
+        { label: 'Sharpe', backtest: '1.50', paper: '1.40', aligned: true },
+        { label: 'Max Drawdown', backtest: '-5.0%', paper: '-6.0%', aligned: true },
+        { label: 'Profit Factor', backtest: '1.80', paper: '1.70', aligned: true },
+      ]);
+    });
+
+    it('keeps a stable array reference across repeat calls for the same comparison object (so @for does not thrash)', () => {
+      const first = component.comparisonMetrics(comparison);
+      expect(component.comparisonMetrics(comparison)).toBe(first);
+
+      const differentObject = { ...comparison };
+      expect(component.comparisonMetrics(differentObject)).not.toBe(first);
+    });
+  });
+
   it('loadPaperTradingResults keeps the most recent session per lab record and resumes polling', () => {
     const older = { lab_record_id: 'rec-1', session_id: 'pt-old', status: 'completed', started_at: '2026-01-01T00:00:00Z', completed_at: '2026-01-01T00:05:00Z' };
     const newer = { lab_record_id: 'rec-1', session_id: 'pt-new', status: 'running', started_at: '2026-01-02T00:00:00Z', completed_at: '' };
