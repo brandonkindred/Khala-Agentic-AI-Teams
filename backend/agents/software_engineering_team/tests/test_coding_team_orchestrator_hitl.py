@@ -802,7 +802,7 @@ class _DecisionWorker:
         self.calls = 0
         self._ask_rounds = ask_rounds
 
-    def run_implement(self, task, path, repo_context=""):
+    def run_implement(self, task, path):
         self.calls += 1
         if self.calls <= self._ask_rounds:
             return {
