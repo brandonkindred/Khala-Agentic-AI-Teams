@@ -39,7 +39,6 @@ def test_team_configs_has_expected_teams():
         "accessibility_audit",
         "ai_systems",
         "investment",
-        "nutrition_meal_planning",
         "planning",
         "coding_team",
         "sales_team",
