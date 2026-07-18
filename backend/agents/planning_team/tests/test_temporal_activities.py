@@ -206,6 +206,25 @@ def test_document_production_activity_with_pra(tmp_path, monkeypatch, job_store)
     assert answered["result"] == [{"question_id": "q1", "selected_option_id": "o1"}]
 
 
+def test_document_production_activity_persists_questions_as_job_fields(
+    tmp_path, job_store, dummy_llm
+):
+    """The actual open_questions/resolved_questions are persisted as their own
+    top-level job fields, separate from the handoff's deliberately-empty copies —
+    the source finalize_planning_activity's audit write reads from."""
+    ctx = A.intake_activity("job-1", str(tmp_path), "Acme", "brief", None)
+    ctx = A.discovery_activity("job-1", ctx)
+    ctx = A.requirements_activity("job-1", ctx)
+    A.document_production_activity("job-1", ctx, False)
+
+    job = job_store["jobs"]["job-1"]
+    assert job["open_questions"], "expected the requirements phase's question to be persisted"
+    assert job["open_questions"][0]["question_text"] == "Scope?"
+    assert job["resolved_questions"] == []
+    # The handoff's own copies stay empty on purpose.
+    assert job["handoff_package"]["open_questions"] == []
+
+
 def test_sub_agent_provisioning_activity_noop_without_gap(tmp_path, job_store):
     ctx = A.intake_activity("job-1", str(tmp_path), "Acme", "brief", None)
     ctx = A.document_production_activity("job-1", ctx, False)
@@ -254,6 +273,59 @@ def test_finalize_activity_marks_completed(job_store):
     # The previously-persisted handoff survives the completion write.
     assert job_store["jobs"]["job-1"]["handoff_package"] == {"summary": "hp"}
     assert job_store["jobs"]["job-1"]["status"] == "completed"
+
+
+def test_finalize_activity_records_planning_run(monkeypatch, job_store) -> None:
+    """finalize re-reads the persisted job record and calls record_planning_run
+    with the audit columns derived from it — open_questions/resolved_questions
+    from the job's own top-level fields (persisted by document_production_activity),
+    not from the handoff's deliberately-empty copies of those same-named fields."""
+    job_store["jobs"]["job-1"] = {
+        "handoff_package": {
+            "client_context": {"client_name": "Acme"},
+            "summary": "Handoff package produced by Planning.",
+            "open_questions": [],
+            "resolved_questions": [],
+        },
+        "open_questions": [{"id": "q1"}],
+        "resolved_questions": [{"question_id": "q1"}],
+    }
+    captured = {}
+    monkeypatch.setattr(
+        "planning_team.postgres.writer.record_planning_run",
+        lambda job_id, **kwargs: captured.setdefault("call", (job_id, kwargs)) or True,
+    )
+
+    result = A.finalize_planning_activity("job-1", {"repo_path": "/x"})
+
+    assert result == {"success": True, "summary": "Planning completed; handoff package ready."}
+    job_id, kwargs = captured["call"]
+    assert job_id == "job-1"
+    assert kwargs["client_name"] == "Acme"
+    assert kwargs["summary"] == "Planning completed; handoff package ready."
+    assert kwargs["handoff_summary"] == "Handoff package produced by Planning."
+    assert kwargs["open_questions"] == [{"id": "q1"}]
+    assert kwargs["resolved_questions"] == [{"question_id": "q1"}]
+
+
+def test_finalize_activity_audit_read_failure_does_not_fail_finalize(
+    monkeypatch, job_store
+) -> None:
+    """A live get_job failure during the audit re-read (unlike record_planning_run,
+    which never raises) must not escape _work, retry via _guarded, or turn the
+    already-completed job into a failure."""
+    job_store["jobs"]["job-1"] = {"handoff_package": {"summary": "hp"}}
+
+    def _raise_get_job(job_id):
+        raise RuntimeError("job service unreachable")
+
+    monkeypatch.setattr("planning_team.shared.job_store.get_job", _raise_get_job)
+
+    result = A.finalize_planning_activity("job-1", {"repo_path": "/x"})
+
+    assert result == {"success": True, "summary": "Planning completed; handoff package ready."}
+    assert job_store["completed"][0][0] == "job-1"
+    assert job_store["failed"] == []
 
 
 def test_legacy_run_planning_activity_delegates(monkeypatch):
@@ -386,6 +458,16 @@ def test_activity_sequence_matches_orchestrator_handoff(tmp_path, monkeypatch, j
     # open_questions, so this empty handoff is deliberately preserved).
     assert act_handoff["open_questions"] == orch_result["handoff_package"]["open_questions"]
     assert act_handoff["resolved_questions"] == orch_result["handoff_package"]["resolved_questions"]
+    # The *actual* questions — sourced separately from the deliberately-empty
+    # handoff copies above — must also stay identical across both paths: the
+    # job record's top-level fields (Temporal) vs result's top-level keys
+    # (thread), both non-empty here since the fake LLM always emits a question.
+    act_job = job_store["jobs"]["job-1"]
+    assert act_job["open_questions"] == orch_result["open_questions"]
+    assert act_job["resolved_questions"] == orch_result["resolved_questions"]
+    assert act_job["open_questions"], (
+        "expected the fake LLM's question to survive to the job record"
+    )
 
 
 def test_activity_sequence_matches_orchestrator_handoff_with_pra_and_mr(

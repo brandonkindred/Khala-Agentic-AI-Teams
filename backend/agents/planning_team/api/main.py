@@ -31,6 +31,7 @@ from planning_team.models import (  # noqa: E402
 )
 from planning_team.orchestrator import run_workflow  # noqa: E402
 from planning_team.postgres import SCHEMA as PLANNING_POSTGRES_SCHEMA  # noqa: E402
+from planning_team.postgres.writer import record_planning_run  # noqa: E402
 from planning_team.shared.job_store import (  # noqa: E402
     JOB_STATUS_COMPLETED,
     JOB_STATUS_PENDING,
@@ -160,6 +161,20 @@ def run_workflow_background(
                 job_id,
                 handoff_package=result.get("handoff_package"),
                 summary=result.get("summary"),
+            )
+            handoff = result.get("handoff_package") or {}
+            # open_questions/resolved_questions are sourced from result, not the
+            # handoff: handoff.open_questions/.resolved_questions are deliberately
+            # left empty (see orchestrator.py) so a non-empty handoff doesn't pause
+            # every SE-driven run. result carries the run's actual questions as
+            # their own top-level keys instead.
+            record_planning_run(
+                job_id,
+                client_name=client_name,
+                summary=result.get("summary") or "",
+                handoff_summary=handoff.get("summary") or "",
+                open_questions=result.get("open_questions") or [],
+                resolved_questions=result.get("resolved_questions") or [],
             )
         else:
             mark_job_failed(job_id, error=result.get("failure_reason", "Workflow failed"))

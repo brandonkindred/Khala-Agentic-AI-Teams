@@ -264,6 +264,29 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return `${record.strategy.asset_class} strategy details`;
   }
 
+  /**
+   * Accessible name for the trade-table's scrollable wrapper (WCAG 2.4.7 —
+   * the wrapper, not the table, must be focusable since the global outline
+   * would otherwise be clipped by `overflow-x: auto`).
+   *
+   * Preconditions: `record.strategy.asset_class` is a non-empty string.
+   * Postconditions: returns a non-empty, state-independent label.
+   */
+  tradeTableRegionLabel(record: StrategyLabRecord): string {
+    return `${record.strategy.asset_class} strategy trade history, scrollable`;
+  }
+
+  /**
+   * Accessible name for the paper-trading comparison table's scrollable
+   * wrapper (same rationale as `tradeTableRegionLabel`).
+   *
+   * Preconditions: `record.strategy.asset_class` is a non-empty string.
+   * Postconditions: returns a non-empty, state-independent label.
+   */
+  comparisonTableRegionLabel(record: StrategyLabRecord): string {
+    return `${record.strategy.asset_class} strategy backtest vs. paper-trading comparison, scrollable`;
+  }
+
   // Per-card trade ledger state
   tradeLedgerPages: Record<string, number> = {};       // lab_record_id → current page index
   readonly PAGE_SIZE = 20;
