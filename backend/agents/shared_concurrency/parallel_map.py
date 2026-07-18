@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional, Sequence, TypeVar
 
@@ -120,13 +121,18 @@ def parallel_map(
         - Empty *items* returns ``[]`` without creating an executor.
         - At most ``min(max_workers, len(items))`` workers run concurrently.
         - Error policy is **fast-fail**: the first worker exception is observed as
-          it happens (never delayed behind a slower earlier task), not-yet-started
-          tasks are cancelled, ``on_first_exception`` fires once, and the exception
-          propagates with its original traceback. With the default
-          ``wait_for_stragglers=False``, already-running tasks are left to finish
-          in the background rather than blocking the failure; with
-          ``wait_for_stragglers=True``, the shutdown instead blocks until every
-          already-running task finishes before the exception propagates.
+          it happens (never delayed behind a slower earlier task). An internal
+          abort flag is set *before* anything else — before ``on_first_exception``
+          and before ``ThreadPoolExecutor.shutdown(cancel_futures=True)`` — so a
+          not-yet-started task that hasn't begun ``fn`` yet skips it, narrowing
+          (not eliminating: a task that already slipped past its own check races
+          the flag) the window in which ``ThreadPoolExecutor``'s own worker loop
+          can pull another queued item before cancellation lands. With the default
+          ``wait_for_stragglers=False``, already-running tasks (including any that
+          won that race) are left to finish in the background rather than blocking
+          the failure; with ``wait_for_stragglers=True``, the shutdown instead
+          blocks until every already-running task finishes before the exception
+          propagates.
         - On success with ``preserve_order`` True, ``result[i]`` corresponds to
           ``items[i]`` (before any ``skip_none`` filtering).
 
@@ -158,13 +164,24 @@ def parallel_map(
         return []
 
     workers = min(max_workers, n)
+    # Set the instant a first exception is caught (see the ``except`` block
+    # below) so a task that hasn't called ``fn`` yet can skip it — this is
+    # what ``_guarded`` checks. It only narrows the race documented in the
+    # Postconditions above; a task that already passed the check is treated
+    # as legitimately "already running".
+    abort = threading.Event()
+
+    def _guarded(item: T) -> Optional[R]:
+        if abort.is_set():
+            return None
+        return fn(item)
 
     def _submit(pool: ThreadPoolExecutor, item: T):
         # A fresh context copy per task: a single Context can't be entered
         # concurrently, and each worker must see the parent's attribution.
         if propagate_context:
-            return pool.submit(contextvars.copy_context().run, fn, item)
-        return pool.submit(fn, item)
+            return pool.submit(contextvars.copy_context().run, _guarded, item)
+        return pool.submit(_guarded, item)
 
     pool = ThreadPoolExecutor(max_workers=workers)
     try:
@@ -180,6 +197,11 @@ def parallel_map(
             ordered[index_of[fut]] = value
             completion.append(value)
     except BaseException as exc:
+        # Set before anything else below (including the hook, which is
+        # caller-supplied and may be slow) to give not-yet-started tasks the
+        # best chance of seeing it in ``_guarded`` before a freed worker
+        # thread pulls them off the queue.
+        abort.set()
         # Fire the caller's hook only for an actual worker failure (an
         # ``Exception``), never for a main-thread interrupt — ``KeyboardInterrupt``
         # / ``SystemExit`` are ``BaseException`` but not ``Exception`` — that

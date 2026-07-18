@@ -255,8 +255,18 @@ def test_wait_for_stragglers_blocks_until_inflight_tasks_finish() -> None:
 
 def test_wait_for_stragglers_still_cancels_not_yet_started_tasks() -> None:
     """wait_for_stragglers=True only waits for *already-running* tasks — tasks
-    still queued behind a single busy worker are cancelled, not run to
-    completion, exactly like the default policy."""
+    still queued behind a single busy worker are cancelled rather than run to
+    completion, exactly like the default policy.
+
+    Item 1 may or may not slip in: a freed worker racing the internal abort
+    flag (set the instant the first exception is caught — see
+    ``test_abort_is_set_before_a_slow_hook_so_queued_tasks_never_start`` for
+    the deterministic half of this contract) can win that single race. But
+    items 2 and 3 can't — each item that *does* start sleeps a full second,
+    which is ample time for the flag to land before the next one would be
+    dispatched — so the leak is bounded to at most one extra item, never the
+    whole remaining queue.
+    """
     started = {"count": 0}
     lock = threading.Lock()
 
@@ -271,8 +281,39 @@ def test_wait_for_stragglers_still_cancels_not_yet_started_tasks() -> None:
     with pytest.raises(RuntimeError, match="fast"):
         parallel_map([0, 1, 2, 3], fn, max_workers=1, wait_for_stragglers=True)
 
-    # Only item 0 ever got a worker; items 1-3 were still queued and were
-    # cancelled rather than started.
+    assert 1 <= started["count"] <= 2
+
+
+def test_abort_is_set_before_a_slow_hook_so_queued_tasks_never_start() -> None:
+    """The internal abort flag is set before ``on_first_exception`` runs, so
+    a slow hook can't widen the window for a freed worker to start another
+    queued item — cancellation would otherwise only happen after the hook
+    returns, inside ``shutdown(cancel_futures=True)``. Unlike the sibling
+    "no hook" test above, this scenario is fully deterministic: the hook's
+    sleep gives the freed worker ample time to observe the flag, which was
+    already set before the hook was even called."""
+    started = {"count": 0}
+    lock = threading.Lock()
+
+    def fn(x: int) -> int:
+        with lock:
+            started["count"] += 1
+        if x == 0:
+            raise RuntimeError("fast")
+        return x
+
+    def slow_hook() -> None:
+        time.sleep(0.2)
+
+    with pytest.raises(RuntimeError, match="fast"):
+        parallel_map(
+            [0, 1, 2, 3],
+            fn,
+            max_workers=1,
+            wait_for_stragglers=True,
+            on_first_exception=slow_hook,
+        )
+
     assert started["count"] == 1
 
 
