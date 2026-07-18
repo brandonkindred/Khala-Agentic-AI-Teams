@@ -921,8 +921,20 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       // otherwise repeat an already-attempted strategy's number as the
       // "next" one, and would miss the "Finishing up" terminal gap below
       // when the last attempted cycle was skipped/errored rather than
-      // completed.
-      const attemptedCycles = status.completed_cycles + status.skipped_cycles + (status.errored_cycles ?? 0);
+      // completed. A post-completion tracker-merge failure (main.py's wave
+      // loop, tagged reason: 'tracker_merge_failed' in errored_details)
+      // double-counts one cycle in both completed_cycles and errored_cycles
+      // — it was published as cycle_complete, then separately re-published
+      // as cycle_errored for the same cycle_index — so those entries are
+      // subtracted back out. (errored_details is capped at 50 entries
+      // server-side, same as elsewhere in this file, so this correction can
+      // under-count for a run with 50+ errors of mixed kinds — a narrower
+      // edge case than the double-count it fixes.)
+      const trackerMergeDoubleCounts = (status.errored_details ?? []).filter(
+        (d) => d.reason === 'tracker_merge_failed',
+      ).length;
+      const attemptedCycles =
+        status.completed_cycles + status.skipped_cycles + (status.errored_cycles ?? 0) - trackerMergeDoubleCounts;
       // Once the last cycle's cycle_complete/skipped/errored lands,
       // attemptedCycles already equals total_cycles — briefly, before the
       // terminal `complete` event arrives, there is no "next" strategy to

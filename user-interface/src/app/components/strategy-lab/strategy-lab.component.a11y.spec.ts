@@ -504,6 +504,38 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
   }, 15000);
 
+  it('does not double-count a cycle that completed but then hit a tracker-merge failure', async () => {
+    // Regression: main.py's wave loop can publish cycle_complete for a
+    // cycle, then separately publish cycle_errored for that same
+    // cycle_index if the post-completion convergence-tracker merge step
+    // throws (tagged reason: 'tracker_merge_failed' in errored_details).
+    // Naively summing completed_cycles + skipped_cycles + errored_cycles
+    // would count that one cycle twice.
+    const { fixture } = await createFixture();
+    fixture.componentInstance.running = true;
+    fixture.componentInstance.runStatus = {
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 2,
+      skipped_cycles: 0,
+      errored_cycles: 1,
+      errored_details: [
+        { cycle_index: 2, error: 'merge boom', reason: 'tracker_merge_failed' },
+      ],
+      completed_record_ids: ['rec-1', 'rec-2'],
+    };
+    fixture.detectChanges();
+
+    // Without the correction this would read "Strategy 4 of 5" (2 + 0 + 1 + 1).
+    expect(liveRegionText(fixture)).toBe('Strategy 3 of 5 — Run in progress.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
   it('announces "Finishing up" when the last attempted cycle was errored rather than completed', async () => {
     // Regression: for a 3-cycle run where the last cycle errored (not
     // completed), completed_cycles stays at 2 and never reaches
