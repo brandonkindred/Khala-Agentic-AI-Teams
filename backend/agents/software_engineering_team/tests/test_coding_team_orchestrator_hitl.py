@@ -607,6 +607,18 @@ def test_entry_gate_pauses_then_resumes_and_threads_answers(tmp_path, monkeypatc
                 "open_questions": [],
             }
 
+        def run_groom_task(
+            self, task_id, task_title, task_description, task_dependencies, plan_context
+        ):
+            return {
+                "acceptance_criteria": [],
+                "out_of_scope": "",
+                "description_enriched": task_description,
+                "priority": "medium",
+                "subtasks": [],
+                "task_dependencies": task_dependencies,
+            }
+
     class Swarm:
         def __init__(self, *a, **k):
             self.graph = k["graph"]
@@ -722,6 +734,18 @@ def test_already_resolved_entry_questions_do_not_pause(tmp_path, monkeypatch):
                 "tasks": [{"id": "t1", "title": "T1"}],
                 "stacks": [{"name": "b", "tools_services": []}],
                 "open_questions": [],
+            }
+
+        def run_groom_task(
+            self, task_id, task_title, task_description, task_dependencies, plan_context
+        ):
+            return {
+                "acceptance_criteria": [],
+                "out_of_scope": "",
+                "description_enriched": task_description,
+                "priority": "medium",
+                "subtasks": [],
+                "task_dependencies": task_dependencies,
             }
 
     class Swarm:
@@ -909,6 +933,18 @@ def test_orchestrator_returns_when_swarm_aborts(tmp_path, monkeypatch):
                 "tasks": [{"id": "t1", "title": "T1"}],
                 "stacks": [{"name": "b", "tools_services": []}],
                 "open_questions": [],
+            }
+
+        def run_groom_task(
+            self, task_id, task_title, task_description, task_dependencies, plan_context
+        ):
+            return {
+                "acceptance_criteria": [],
+                "out_of_scope": "",
+                "description_enriched": task_description,
+                "priority": "medium",
+                "subtasks": [],
+                "task_dependencies": task_dependencies,
             }
 
     class Swarm:
