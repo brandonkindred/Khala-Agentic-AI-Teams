@@ -140,16 +140,19 @@ def _search_repository(
           scanning it again here would be redundant work), returning up to
           ``max_matches`` ``(path, 1-based-line, line-text)`` tuples in
           list-then-line order, alongside a ``truncated`` flag.
-        - ``truncated`` is ``True`` whenever the scan stopped before examining
-          every candidate path -- either the file-scan cap was hit or
-          ``max_matches`` was reached first. A caller must not treat an empty
-          result list as proof the substring is absent anywhere in the
-          repository when ``truncated`` is ``True``; it only proves the
-          substring is absent from the files actually scanned.
+        - ``truncated`` is ``True`` whenever the scan did not actually inspect
+          the full content of every candidate path -- the file-scan cap was
+          hit, ``max_matches`` was reached first, OR a candidate file was
+          skipped because ``read_file`` raised or returned ``None`` (e.g. a
+          shared ``GitHubRepoReader`` fetch budget already exhausted by an
+          earlier pass). A caller must not treat an empty result list as proof
+          the substring is absent anywhere in the repository when
+          ``truncated`` is ``True``; it only proves the substring is absent
+          from the files this call actually managed to read.
         - Never raises: a reader ``list_files``/``read_file`` failure is
-          logged and treated as "no matches from that path/call", not
-          propagated -- a broken reader must only ever narrow what this
-          search can find, never break the pass.
+          logged and treated as "no matches from that path/call" (folded into
+          ``truncated``, never dropped silently) -- a broken reader must only
+          ever narrow what this search can find, never break the pass.
     """
     assert max_matches > 0, "max_matches must be positive"
     assert max_files_scanned is None or max_files_scanned > 0, "max_files_scanned must be positive"
@@ -172,6 +175,7 @@ def _search_repository(
 
     results: List[Tuple[str, int, str]] = []
     scanned = 0
+    incomplete = False
     for path in paths:
         if path in index.files:
             continue
@@ -182,15 +186,17 @@ def _search_repository(
             content = index.repo_reader.read_file(path)
         except Exception as exc:  # noqa: BLE001 - one unreadable file must not abort the scan
             logger.debug("SideEffectImpactPass: repo_reader.read_file(%r) failed: %s", path, exc)
+            incomplete = True
             continue
         if content is None:
+            incomplete = True
             continue
         for lineno, line in enumerate(content.splitlines(), start=1):
             if needle in line.lower():
                 results.append((path, lineno, line.rstrip()))
                 if len(results) >= max_matches:
                     return results, True
-    return results, False
+    return results, incomplete
 
 
 def _build_side_effect_tools(index: CodebaseIndex) -> list:

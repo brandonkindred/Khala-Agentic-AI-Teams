@@ -209,7 +209,9 @@ def test_search_repository_fails_safe_on_reader_error() -> None:
 
 
 def test_search_repository_skips_a_single_unreadable_file() -> None:
-    """One file raising on read must not abort the scan of the rest."""
+    """One file raising on read must not abort the scan of the rest, but the
+    scan must report itself as incomplete rather than an exhaustive negative --
+    the raising file's content was never actually inspected."""
 
     class _PartlyRaisingReader:
         def list_files(self):
@@ -223,18 +225,21 @@ def test_search_repository_skips_a_single_unreadable_file() -> None:
     index = CodebaseIndex(files={}, repo_reader=_PartlyRaisingReader())
     matches, truncated = _search_repository(index, "needle")
     assert matches == [("good.py", 1, "needle")]
-    assert truncated is False
+    assert truncated is True
 
 
 def test_search_repository_skips_files_the_reader_cannot_read() -> None:
     """A path the reader lists but returns None for (fail-safe RepoReader
-    contract) is skipped rather than crashing the scan."""
+    contract) is skipped rather than crashing the scan, but -- same as the
+    raising case -- must mark the scan truncated since that file's content
+    was never actually inspected (e.g. a shared GitHubRepoReader fetch budget
+    already exhausted by an earlier pass would surface exactly this way)."""
     index = CodebaseIndex(files={}, repo_reader=_FakeReader({"present.py": "needle here"}))
     # "missing.py" is not in the reader's map, so read_file returns None for it.
     index.repo_reader._files["missing.py"] = None
     matches, truncated = _search_repository(index, "needle")
     assert matches == [("present.py", 1, "needle here")]
-    assert truncated is False
+    assert truncated is True
 
 
 # --------------------------------------------------------------------------- tools
