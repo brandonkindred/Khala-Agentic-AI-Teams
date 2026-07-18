@@ -61,6 +61,17 @@ def test_create_team_app_rejects_empty_required_strings(kwargs) -> None:
         create_team_app(**kwargs)
 
 
+def test_postgres_schema_exposed_on_app_state() -> None:
+    """The app exposes its schema (or None) on app.state so early bootstrap paths
+    (e.g. the team-service wrapper) can register DDL before starting workers."""
+    schema = object()
+    app = create_team_app(service_name="svc", team_key="tk", title="T", postgres_schema=schema)
+    assert app.state.postgres_schema is schema
+    # Omitted ⇒ None (no Postgres wiring), still explicitly present on state.
+    app_none = create_team_app(service_name="svc", team_key="tk", title="T")
+    assert app_none.state.postgres_schema is None
+
+
 def test_no_postgres_schema_skips_db_wiring(monkeypatch) -> None:
     import shared_postgres
 
