@@ -62,6 +62,25 @@ class _ScriptedAgent:
 _GOOD = '{"strategy_code": "# fixed", "changes_made": "tightened guard"}'
 
 
+def test_agent_key_is_strategy_refinement_not_ideation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression guard: the call site must identify itself as
+    ``strategy_refinement`` (not the mislabeled ``strategy_ideation`` copied
+    from an unrelated agent) so per-agent telemetry/timeout/model routing is
+    not mis-attributed."""
+    agent = _ScriptedAgent([_GOOD])
+    model_keys: List[str] = []
+    monkeypatch.setattr(
+        mod, "get_strands_model", lambda key, *_a, **_k: model_keys.append(key) or object()
+    )
+    monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
+
+    RefinementAgent().run(
+        spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
+    )
+
+    assert model_keys == ["strategy_refinement"]
+
+
 def test_retries_unparseable_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
     """A first no-JSON response is re-prompted; the second (valid) one is used."""
     agent = _ScriptedAgent(["I could not find a fix.", _GOOD])
