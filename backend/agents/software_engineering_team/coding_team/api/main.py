@@ -91,12 +91,15 @@ from software_engineering_team.coding_team.api.models import (  # noqa: F401
 )
 from software_engineering_team.coding_team.api.orchestration import (  # noqa: F401
     _RESUME_RECHECK_DELAY_S,
+    _claim_and_spawn_resume,
     _defer_terminal_success,
     _failed_tasks,
     _format_failed_tasks,
     _has_merged_tasks,
     _record_failure,
     _record_review_outage,
+    _recover_resume_plan,
+    _resolve_github_job_token,
     _run_with_github_hooks,
     _running_job_for_issue,
     _schedule_resume_recheck,

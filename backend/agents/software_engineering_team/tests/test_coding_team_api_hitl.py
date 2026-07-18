@@ -428,6 +428,49 @@ def test_resume_500_when_claim_store_errors(monkeypatch):
     assert "job-store error" in r.json()["detail"]
 
 
+def test_resume_500_when_post_claim_read_errors(monkeypatch):
+    """A job-store transport error during the post-claim re-read surfaces as a controlled 500 and
+    releases the resume claim so a later attempt can still succeed."""
+    job = _job(status="waiting_for_user", plan_input={"requirements_title": "T"})
+    read_count = {"n": 0}
+
+    def _get_job(jid):
+        read_count["n"] += 1
+        # Read 1 (initial endpoint check) succeeds; read 2 (post-claim re-read) fails.
+        if read_count["n"] == 1:
+            return job
+        raise RuntimeError("store error during post-claim read")
+
+    monkeypatch.setattr(api, "get_job", _get_job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    release_calls: List[str] = []
+    monkeypatch.setattr(api, "release_resume_claim", lambda jid: release_calls.append(jid))
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 500
+    assert "job state" in r.json()["detail"]
+    assert release_calls, "claim must be released on post-claim store error"
+
+
+def test_resume_noop_when_thread_claim_lost(monkeypatch):
+    """/resume must report 'already running' (not spawn) when the shared resume claim is won but
+    the local run-thread claim is lost to a racing spawn already under way in this process."""
+    job = _job(status="waiting_for_user", plan_input={"requirements_title": "T"})
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "_claim_run_thread", lambda jid: False)
+    release_calls: List[str] = []
+    monkeypatch.setattr(api, "release_resume_claim", lambda jid: release_calls.append(jid))
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn when the local run-thread claim is lost")
+
+    monkeypatch.setattr(api.threading, "Thread", _no_spawn)
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 200
+    assert "already running" in r.json()["message"]
+    assert release_calls, "shared claim must be released when the local claim is lost"
+
+
 def test_answers_dead_thread_claim_lost_counts_as_resuming(monkeypatch):
     """A lost thread claim means someone else is starting the orchestrator — not a failure."""
     calls = {}

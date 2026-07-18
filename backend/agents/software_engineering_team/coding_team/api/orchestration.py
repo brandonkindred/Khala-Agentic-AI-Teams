@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared_env_config import env_bool
@@ -322,6 +323,85 @@ def _resolve_github_job_token(
     return is_github_job, ctx, token
 
 
+class ResumeSpawnResult(str, Enum):
+    """Outcome of ``_claim_and_spawn_resume``. Each caller (the HTTP route, auto-resume) maps
+    every member onto its own response/log/scheduling behavior; the helper itself stays silent
+    on logging and recheck scheduling since those differ per caller for the same outcome."""
+
+    SPAWNED = "spawned"
+    CLAIM_LOST = "claim_lost"
+    CLAIM_STORE_ERROR = "claim_store_error"
+    NOT_WAITING = "not_waiting"
+    POST_CLAIM_READ_ERROR = "post_claim_read_error"
+    THREAD_CLAIM_LOST = "thread_claim_lost"
+    SPAWN_FAILED = "spawn_failed"
+
+
+def _claim_and_spawn_resume(
+    job_id: str,
+    ctx: Dict[str, Any],
+    repo_path: str,
+    plan: CodingTeamPlanInput,
+    token: Optional[str],
+    is_github_job: bool,
+) -> Tuple[ResumeSpawnResult, Optional[Dict[str, Any]], Optional[Exception]]:
+    """Cross-worker claim → post-claim re-read → local run-thread claim → spawn, shared by the
+    HTTP ``/resume`` route and ``_try_auto_resume``.
+
+    Single source of the resume-once safety sequence: winning the shared-store claim FIRST (the
+    process-local run-thread claim alone cannot stop a different worker process from also
+    spawning), re-reading the job post-claim (the job could have transitioned out of
+    ``waiting_for_user`` between the caller's snapshot and the claim — claim_resume checks only
+    the claim stamp, not status), then the local run-thread claim, then the actual spawn. A
+    failed step past the shared claim always releases it so a later attempt can win.
+
+    Preconditions:
+        - ``repo_path``/``plan`` are a recovered, validated resume plan (e.g. from
+          ``_recover_resume_plan``); ``token``/``ctx``/``is_github_job`` are a resolved GitHub
+          classification (e.g. from ``_resolve_github_job_token``); the caller has already
+          verified the job is paused (``waiting_for_user``) and not already alive.
+    Postconditions:
+        - Returns ``(SPAWNED, post_claim_data, None)`` when a thread was started here.
+        - Returns ``(CLAIM_LOST | THREAD_CLAIM_LOST, ..., None)`` when another worker/caller
+          already owns the resume; the shared claim is released in the ``THREAD_CLAIM_LOST``
+          case (this worker's local claim lost, not the shared one) and left with the other
+          owner in the ``CLAIM_LOST`` case (never acquired here).
+        - Returns ``(NOT_WAITING, post_claim_data_or_None, None)`` and releases the shared claim
+          when the post-claim re-read finds the job missing or no longer ``waiting_for_user``.
+        - Returns ``(CLAIM_STORE_ERROR | POST_CLAIM_READ_ERROR | SPAWN_FAILED, ..., exc)`` on a
+          collaborator exception, releasing the shared claim first except for
+          ``CLAIM_STORE_ERROR`` (no claim was won). Never raises.
+    """
+    try:
+        claimed = _main.claim_resume(job_id)
+    except Exception as e:
+        return ResumeSpawnResult.CLAIM_STORE_ERROR, None, e
+    if not claimed:
+        return ResumeSpawnResult.CLAIM_LOST, None, None
+    try:
+        post_claim_data = _main.get_job(job_id)
+    except Exception as e:
+        _main.release_resume_claim(job_id)
+        return ResumeSpawnResult.POST_CLAIM_READ_ERROR, None, e
+    if not post_claim_data or post_claim_data.get("status") != hitl.WAITING_STATUS:
+        _main.release_resume_claim(job_id)
+        return ResumeSpawnResult.NOT_WAITING, post_claim_data, None
+    if not _main._claim_run_thread(job_id):
+        # The shared claim is ours but this process is already spawning (a racing thread):
+        # release the shared claim so the in-flight spawn (or a later retry) isn't blocked.
+        _main.release_resume_claim(job_id)
+        return ResumeSpawnResult.THREAD_CLAIM_LOST, post_claim_data, None
+    try:
+        if is_github_job:
+            _main._start_github_resume_thread(job_id, ctx, repo_path, plan, token or "")
+        else:
+            _main._start_orchestrator_thread(job_id, repo_path, plan)
+    except Exception as e:
+        _main.release_resume_claim(job_id)
+        return ResumeSpawnResult.SPAWN_FAILED, post_claim_data, e
+    return ResumeSpawnResult.SPAWNED, post_claim_data, None
+
+
 def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
     """Best-effort restart of a dead orchestrator after answers arrived.
 
@@ -366,18 +446,20 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
     if resolved is None:
         return False
     is_github_job, ctx, token = resolved
-    # Cross-worker claim FIRST: the process-local _claim_run_thread cannot stop a different worker
-    # process from also spawning. The shared-store claim is the authoritative gate; only the worker
-    # that wins it proceeds to the local claim and spawn. claim_resume() is the one job-store
-    # read-modify-write here and may raise on a transport error; this function promises "Never
-    # raises", so degrade a store failure to a False (manual-resume hint) rather than letting it
-    # escape into submit_pending_answers after the answers were already stored.
-    try:
-        claimed = _main.claim_resume(job_id)
-    except Exception:
-        logger.exception("Auto-resume for job %s skipped: resume-claim store error.", job_id)
+
+    result, post_claim_data, err = _claim_and_spawn_resume(
+        job_id, ctx, repo_path, plan, token, is_github_job
+    )
+    if result is ResumeSpawnResult.CLAIM_STORE_ERROR:
+        # claim_resume() is the one job-store read-modify-write here and may raise on a transport
+        # error; this function promises "Never raises", so degrade a store failure to a False
+        # (manual-resume hint) rather than letting it escape into submit_pending_answers after the
+        # answers were already stored.
+        logger.error(
+            "Auto-resume for job %s skipped: resume-claim store error.", job_id, exc_info=err
+        )
         return False
-    if not claimed:
+    if result is ResumeSpawnResult.CLAIM_LOST:
         logger.info(
             "Auto-resume for job %s skipped: another worker holds the resume claim.", job_id
         )
@@ -387,42 +469,26 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
         # waiting with no live thread, that recheck reclaims and resumes it.
         _main._schedule_resume_recheck(job_id, delay=RESUME_CLAIM_TTL_S + 5.0)
         return True
-    # Post-claim freshness check: the job could have transitioned out of waiting_for_user between
-    # the caller's snapshot and the claim. claim_resume checks only the claim stamp, not the
-    # job status, so re-read here. If the job is no longer waiting (terminal OR a wait loop in
-    # another worker consumed the answers and moved the job to 'running'), release the claim and
-    # abort — spawning here would double-drive a running job or clobber a terminal one. If the
-    # read itself fails (store temporarily unavailable), the unknown state is treated conservatively:
-    # release the claim and return False so the caller gets the manual-resume hint.
-    try:
-        post_claim_data = _main.get_job(job_id)
-    except Exception:
-        logger.exception(
-            "Auto-resume for job %s aborted: could not verify state after acquiring claim.", job_id
+    if result is ResumeSpawnResult.POST_CLAIM_READ_ERROR:
+        logger.error(
+            "Auto-resume for job %s aborted: could not verify state after acquiring claim.",
+            job_id,
+            exc_info=err,
         )
-        _main.release_resume_claim(job_id)
         return False
-    if post_claim_data and post_claim_data.get("status") != hitl.WAITING_STATUS:
-        _main.release_resume_claim(job_id)
+    if result is ResumeSpawnResult.NOT_WAITING:
         logger.warning(
             "Auto-resume for job %s aborted: status is '%s' after claim (no longer waiting).",
             job_id,
-            post_claim_data.get("status"),
+            (post_claim_data or {}).get("status"),
         )
         return False
-    if not _main._claim_run_thread(job_id):
-        # The cross-worker claim is ours but this process is already spawning (a racing thread):
-        # release the shared claim so the in-flight spawn (or a later retry) isn't blocked.
-        _main.release_resume_claim(job_id)
+    if result is ResumeSpawnResult.THREAD_CLAIM_LOST:
         return True
-    try:
-        if is_github_job:
-            _main._start_github_resume_thread(job_id, ctx, repo_path, plan, token or "")
-        else:
-            _main._start_orchestrator_thread(job_id, repo_path, plan)
-    except Exception:
-        logger.exception("Auto-resume for job %s failed to start the orchestrator thread.", job_id)
-        _main.release_resume_claim(job_id)
+    if result is ResumeSpawnResult.SPAWN_FAILED:
+        logger.error(
+            "Auto-resume for job %s failed to start the orchestrator thread.", job_id, exc_info=err
+        )
         return False
     return True
 
