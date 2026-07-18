@@ -247,6 +247,23 @@ describe('CodeReviewDashboardComponent', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Visible repo description (Group E2)
+  // -------------------------------------------------------------------------
+
+  it("renders a repo's description as visible text under its name", async () => {
+    await setup();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.cr-repo-row__description')?.textContent?.trim()).toBe(REPO.description);
+  });
+
+  it('renders no description element for a repo with no description', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([{ ...REPO, description: '' }]));
+    await setup();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.cr-repo-row__description')).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
   // Accordion expand/collapse
   // -------------------------------------------------------------------------
 

@@ -72,7 +72,12 @@
               (click)="toggleRepo(repo)"
             >
               <mat-icon aria-hidden="true">{{ repo.private ? 'lock' : 'public' }}</mat-icon>
-              <span class="cr-repo-row__name" [matTooltip]="repo.description">{{ repo.full_name }}</span>
+              <span class="cr-repo-row__main">
+                <span class="cr-repo-row__name">{{ repo.full_name }}</span>
+                @if (repo.description) {
+                  <span class="cr-repo-row__description" [matTooltip]="repo.description">{{ repo.description }}</span>
+                }
+              </span>
               @if (repo.archived) {
                 <span class="cr-chip">archived</span>
               }

@@ -77,9 +77,29 @@
     border-color: var(--mat-sys-primary, #1a73e8);
   }
 
-  &__name {
+  &__main {
+    display: flex;
+    flex-direction: column;
     flex: 1 1 auto;
+    // A flex item's automatic min-width is its content's natural (unwrapped) width
+    // unless the item itself sets overflow — since __name/__description (not __main)
+    // are the ones with `overflow: hidden`, __main needs this explicitly or neither
+    // child's ellipsis ever triggers.
+    min-width: 0;
+    gap: 0.1rem;
+  }
+
+  &__name {
     font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__description {
+    font-size: 0.8rem;
+    font-weight: 400;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
