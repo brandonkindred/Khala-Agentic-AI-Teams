@@ -329,6 +329,22 @@ def test_agent_review_cache_get_put_returns_independent_copies():
     assert len(cache.get("k")) == 1  # a second get is unaffected
 
 
+def test_agent_review_cache_deep_copies_items_so_mutating_a_field_is_safe():
+    """get/put copy more than just the list container -- mutating a FIELD on a
+    returned/stored item (cached items are mutable objects, e.g. Pydantic
+    models) must not corrupt the cached entry."""
+    cache = AgentReviewCache()
+    bug = _Bug()
+    cache.put("k", [bug])
+
+    bug.severity = "mutated-after-put"  # mutate the caller's own object after storing
+    assert cache.get("k")[0].severity == "low"  # stored copy is unaffected
+
+    fetched = cache.get("k")
+    fetched[0].severity = "mutated-after-get"  # mutate the returned item
+    assert cache.get("k")[0].severity == "low"  # a second get is unaffected
+
+
 def test_piece_cache_key_does_not_collide_across_separator_boundary():
     """A literal NUL byte inside cache_context or piece must not let two
     different (cache_context, piece) pairs hash identically (the flat

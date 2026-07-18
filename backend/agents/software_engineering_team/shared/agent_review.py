@@ -16,6 +16,7 @@ invalid, provoking bogus findings).
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -39,22 +40,23 @@ class AgentReviewCache:
     never leaks across unrelated runs or tasks.
 
     Invariants:
-        - A caller can never observe or mutate the cache's internal state: both
-          ``get`` and ``put`` copy the list, so appending to a returned/stored
-          list never affects the other's copy.
+        - A caller can never observe or mutate the cache's internal state:
+          both ``get`` and ``put`` deep-copy the items, so mutating a
+          returned/stored item's fields — not just appending to the list
+          itself — never affects the other's copy.
     """
 
     def __init__(self) -> None:
         self._entries: Dict[str, List[Any]] = {}
 
     def get(self, key: str) -> Optional[List[Any]]:
-        """Return a copy of the items stored under ``key``, or None on a miss."""
+        """Return a deep copy of the items stored under ``key``, or None on a miss."""
         cached = self._entries.get(key)
-        return list(cached) if cached is not None else None
+        return copy.deepcopy(cached) if cached is not None else None
 
     def put(self, key: str, items: List[Any]) -> None:
-        """Store a copy of ``items`` under ``key``, overwriting any prior entry."""
-        self._entries[key] = list(items)
+        """Store a deep copy of ``items`` under ``key``, overwriting any prior entry."""
+        self._entries[key] = copy.deepcopy(items)
 
 
 def _piece_cache_key(source: str, cache_context: str, piece: str) -> str:
