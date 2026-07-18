@@ -120,7 +120,13 @@ def test_blogging_app_lifespan_runs_in_event_loop(monkeypatch) -> None:
     """
     fake_shared_postgres = type(sys)("shared_postgres")
     registered: list = []
+
+    def _register_many(schemas):
+        for s in schemas:
+            registered.append(s)
+
     fake_shared_postgres.register_team_schemas = lambda s: registered.append(s)
+    fake_shared_postgres.register_team_schemas_many = _register_many
     fake_shared_postgres.close_pool = lambda: None
     monkeypatch.setitem(sys.modules, "shared_postgres", fake_shared_postgres)
 
@@ -153,6 +159,7 @@ def test_blogging_app_lifespan_swallows_schema_errors(monkeypatch) -> None:
         raise RuntimeError("close failed")
 
     fake_shared_postgres.register_team_schemas = boom_register
+    fake_shared_postgres.register_team_schemas_many = boom_register
     fake_shared_postgres.close_pool = boom_close
     monkeypatch.setitem(sys.modules, "shared_postgres", fake_shared_postgres)
 
