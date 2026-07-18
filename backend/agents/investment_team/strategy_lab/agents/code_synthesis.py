@@ -23,8 +23,8 @@ from pathlib import Path
 from strands import Agent
 
 from ...models import StrategySpec
-from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import invoke_agent
+from ._prompt_context import spec_prompt_fields
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -90,15 +90,9 @@ class CodeSynthesisAgent:
         assert isinstance(spec, StrategySpec), "spec must be a StrategySpec"
 
         user_prompt = _CODE_SYNTHESIS_USER_TEMPLATE.format(
-            asset_class=spec.asset_class,
-            hypothesis=spec.hypothesis,
-            signal_definition=spec.signal_definition,
+            **spec_prompt_fields(spec),
             timeframe=spec.timeframe,
-            entry_rules=format_rules_for_prompt(spec.entry_rules),
-            exit_rules=format_rules_for_prompt(spec.exit_rules),
-            sizing_rules=format_sizing_rule(spec.sizing),
             target_symbols=list(spec.target_symbols),
-            risk_limits=spec.risk_limits.model_dump_json(),
         )
 
         agent = Agent(

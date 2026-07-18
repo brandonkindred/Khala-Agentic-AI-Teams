@@ -36,9 +36,9 @@ from pydantic import BaseModel, Field
 from strands import Agent
 
 from ..alignment_findings import AlignmentFinding, NearMissVerdict
-from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import extract_json_object
+from ._prompt_context import render_prior_attempts, spec_prompt_fields
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -358,25 +358,11 @@ class TradeAlignmentAgent:
 
         critical = [f for f in findings if f.severity == "critical" and not f.passed]
         info_warning = [f for f in findings if f not in critical]
-        prior_text = (
-            "None yet."
-            if not prior_attempts
-            else "\n".join(f"  Round {i + 1}: {a}" for i, a in enumerate(prior_attempts))
-        )
+        prior_text = render_prior_attempts(prior_attempts)
 
         user_prompt = _PROPOSE_FIX_USER_TEMPLATE.format(
-            asset_class=getattr(spec, "asset_class", "?"),
-            hypothesis=getattr(spec, "hypothesis", "?"),
-            signal_definition=getattr(spec, "signal_definition", "?"),
+            **spec_prompt_fields(spec, defensive=True),
             target_symbols=list(getattr(spec, "target_symbols", []) or []),
-            entry_rules=format_rules_for_prompt(getattr(spec, "entry_rules", []) or []),
-            exit_rules=format_rules_for_prompt(getattr(spec, "exit_rules", []) or []),
-            sizing_rules=format_sizing_rule(spec.sizing)
-            if getattr(spec, "sizing", None) is not None
-            else "(none)",
-            risk_limits=spec.risk_limits.model_dump_json()
-            if hasattr(getattr(spec, "risk_limits", None), "model_dump_json")
-            else str(getattr(spec, "risk_limits", "")),
             n_critical=len(critical),
             n_info_warning=len(info_warning),
             findings_section=_format_findings_section(findings),

@@ -10,13 +10,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from strands import Agent
 
 from ...models import BacktestResult, StrategySpec
-from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import (
     build_json_correction_prompt,
     extract_json_object,
     parse_retry_budget,
 )
+from ._prompt_context import render_prior_attempts, spec_prompt_fields
 from ._response_schemas import REFINEMENT_SCHEMA
 from .model_factory import get_strands_model
 
@@ -145,20 +145,11 @@ class RefinementAgent:
                 f"Profit factor: {metrics.profit_factor:.2f}"
             )
 
-        prior_text = (
-            "None yet."
-            if not prior_attempts
-            else "\n".join(f"  Round {i + 1}: {a}" for i, a in enumerate(prior_attempts))
-        )
+        prior_text = render_prior_attempts(prior_attempts)
 
         user_prompt = _REFINEMENT_USER_TEMPLATE.format(
             failure_phase=failure_phase,
-            asset_class=spec.asset_class,
-            hypothesis=spec.hypothesis,
-            entry_rules=format_rules_for_prompt(spec.entry_rules),
-            exit_rules=format_rules_for_prompt(spec.exit_rules),
-            sizing_rules=format_sizing_rule(spec.sizing),
-            risk_limits=spec.risk_limits.model_dump_json(),
+            **spec_prompt_fields(spec),
             strategy_code=code,
             failure_details=failure_details,
             metrics_section=metrics_section,

@@ -23,9 +23,9 @@ from strands import Agent
 
 from ...models import BacktestExecutionDiagnostics, CoverageReport, StrategySpec, ZeroTradeCategory
 from ..coverage_probe import format_coverage_report
-from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import StrategySpecParseError, extract_json_object, validate_structured_rules
+from ._prompt_context import render_prior_attempts, spec_prompt_fields
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -171,23 +171,13 @@ class ZeroTradeRepairAgent:
 
         system_prompt = _SYSTEM_PROMPT
 
-        prior_text = (
-            "None yet."
-            if not prior_attempts
-            else "\n".join(f"  Round {i + 1}: {a}" for i, a in enumerate(prior_attempts))
-        )
+        prior_text = render_prior_attempts(prior_attempts)
 
         coverage_rendered = format_coverage_report(coverage_report)
         coverage_section = f"\n{coverage_rendered}" if coverage_rendered else ""
 
         user_prompt = _ZERO_TRADE_USER_TEMPLATE.format(
-            asset_class=spec.asset_class,
-            hypothesis=spec.hypothesis,
-            signal_definition=spec.signal_definition,
-            entry_rules=format_rules_for_prompt(spec.entry_rules),
-            exit_rules=format_rules_for_prompt(spec.exit_rules),
-            sizing_rules=format_sizing_rule(spec.sizing),
-            risk_limits=spec.risk_limits.model_dump_json(),
+            **spec_prompt_fields(spec),
             strategy_code=code,
             zero_trade_category=diagnostics.zero_trade_category,
             summary=diagnostics.summary or "(no executor summary)",
