@@ -413,26 +413,61 @@ describe('reduce (strategy-lab-run.reducer)', () => {
   });
 
   describe('no-op event types (no StrategyLabRunStatus field to update)', () => {
-    it('returns the exact same state reference for batch_warning, complete, error, and done', () => {
+    it('returns the exact same state reference for batch_warning and done', () => {
       const events: StrategyLabStreamEvent[] = [
         { type: 'batch_warning', batch_index: 1, reason: 'signal_brief_failed' },
-        {
-          type: 'complete',
-          message: 'done',
-          status: 'completed',
-          completed_count: 10,
-          skipped_count: 0,
-          errored_count: 0,
-          errored_details: [],
-          completed_batches: 2,
-          total_batches: 2,
-        },
-        { type: 'error', detail: 'Run failed' },
-        { type: 'error', error: 'subscription reclaimed' },
         { type: 'done' },
       ];
       for (const event of events) {
         expect(reduce(baseState, event)).toBe(baseState);
+      }
+    });
+  });
+
+  describe('complete', () => {
+    it('folds the event status into state, leaving every other field unchanged', () => {
+      // Regression: a run whose SSE connection stays open its whole
+      // lifetime never sees a 'snapshot' event (the only other case that
+      // updates `status`), so without this fold `status` would stay at its
+      // initial 'running' value straight through to whatever captures it
+      // afterward (e.g. StrategyLabRunService.finishRun()'s
+      // lastTerminalStatus), misreporting an errored run as still running.
+      const event: StrategyLabStreamEvent = {
+        type: 'complete',
+        message: 'done',
+        status: 'completed_with_errors',
+        completed_count: 10,
+        skipped_count: 0,
+        errored_count: 2,
+        errored_details: [],
+        completed_batches: 2,
+        total_batches: 2,
+      };
+
+      const result = reduce(baseState, event);
+
+      expect(result).not.toBe(baseState);
+      expect(result).toEqual({ ...baseState, status: 'completed_with_errors' });
+    });
+  });
+
+  describe('error', () => {
+    it('folds a safe "failed" status into state for either wire shape, leaving every other field unchanged', () => {
+      // A terminal 'error' event carries no structured outcome field (only
+      // free-text detail/error), so 'failed' is a safe default that can
+      // never misreport as success — same regression rationale as
+      // 'complete' above. The component's own detail-based classification
+      // (failed/cancelled/connection-lost) for the live announcement reads
+      // the event directly, outside this reducer.
+      const events: StrategyLabStreamEvent[] = [
+        { type: 'error', detail: 'Run failed' },
+        { type: 'error', error: 'subscription reclaimed' },
+      ];
+
+      for (const event of events) {
+        const result = reduce(baseState, event);
+        expect(result).not.toBe(baseState);
+        expect(result).toEqual({ ...baseState, status: 'failed' });
       }
     });
   });

@@ -14,11 +14,16 @@ import type {
  *   `type` (the discriminated union's field/optionality guarantees are
  *   trusted as-is, not re-validated at runtime); `state`/`event` are never
  *   mutated by the caller after this call.
- * Postconditions: for an event that carries no run-status field
- *   (`batch_warning`, `complete`, `error`, `done`) or when `state` is
- *   `null` (no run is being tracked), returns the exact same `state`
- *   reference, unchanged. Otherwise returns a **new** `StrategyLabRunStatus`
- *   object reflecting the event; `state` and `event` are never mutated.
+ * Postconditions: for an event that carries no run-status field at all
+ *   (`batch_warning`, `done`) or when `state` is `null` (no run is being
+ *   tracked), returns the exact same `state` reference, unchanged.
+ *   `complete`/`error` fold only `status` (`event.status`, or the safe
+ *   default `'failed'` for `error`, which carries no structured outcome
+ *   field) — every other field is unaffected, since the component derives
+ *   the announcement/warning text for these two directly from the event
+ *   outside this reducer. Every other event type returns a **new**
+ *   `StrategyLabRunStatus` object reflecting the event; `state` and `event`
+ *   are never mutated.
  */
 export function reduce(
   state: StrategyLabRunStatus | null,
@@ -140,12 +145,38 @@ export function reduce(
       };
     }
 
+    case 'complete': {
+      if (!state) return state;
+      // event.status is the one StrategyLabRunStatus field a terminal
+      // 'complete' event actually carries — folding it in keeps `state`
+      // (and anything that captures it afterward, e.g. finishRun()'s
+      // lastTerminalStatus) accurate even for a run whose SSE connection
+      // stayed open its whole lifetime, when no other case here would ever
+      // have updated `status` away from its initial 'running' value. The
+      // component reacts to the event's own richer fields (errored_count,
+      // skipped_count) for the announcement/warning text outside this
+      // reducer — this only keeps the shared status field truthful.
+      return { ...state, status: event.status };
+    }
+
+    case 'error': {
+      if (!state) return state;
+      // Unlike 'complete', a terminal 'error' event carries no structured
+      // outcome field (just free-text detail/error) — 'failed' is a safe,
+      // never-wrongly-successful default for the same reason as above:
+      // a run whose connection stayed open its whole lifetime would
+      // otherwise leave `status` at its initial 'running' value straight
+      // through to finishRun()'s lastTerminalStatus capture. The
+      // component's own detail-based classification (failed/cancelled/
+      // connection-lost) for the live announcement happens outside this
+      // reducer, from the event directly.
+      return { ...state, status: 'failed' };
+    }
+
     // These event types carry no StrategyLabRunStatus field — the component
     // reacts to them for other state (completionWarning, error, activity log)
     // outside this reducer.
     case 'batch_warning':
-    case 'complete':
-    case 'error':
     case 'done':
       return state;
   }

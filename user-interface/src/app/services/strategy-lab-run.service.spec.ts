@@ -178,6 +178,30 @@ describe('StrategyLabRunService', () => {
       expect(service.runStatus()).toBeNull();
     });
 
+    it('captures the true status into lastTerminalStatus on a "complete" event, not the stale initial "running"', () => {
+      // Regression: the reducer's 'complete' case used to be a no-op for
+      // `status`, so a run whose SSE connection stayed open its whole
+      // lifetime (no 'snapshot' event to update it) would have finishRun()
+      // capture the stale initial 'running' value into lastTerminalStatus.
+      const sse = new Subject<StrategyLabStreamEvent>();
+      api.streamRunStatus.mockReturnValue(sse);
+      service.startRun('run-1', baseRunStatus);
+
+      sse.next({
+        type: 'complete',
+        message: 'done',
+        status: 'completed_with_errors',
+        completed_count: 3,
+        skipped_count: 0,
+        errored_count: 2,
+        errored_details: [],
+        completed_batches: 1,
+        total_batches: 1,
+      });
+
+      expect(service.lastTerminalStatus()?.status).toBe('completed_with_errors');
+    });
+
     it('finishes the run on an "error" event', () => {
       const sse = new Subject<StrategyLabStreamEvent>();
       api.streamRunStatus.mockReturnValue(sse);
@@ -187,6 +211,16 @@ describe('StrategyLabRunService', () => {
 
       expect(service.running()).toBe(false);
       expect(service.runStatus()).toBeNull();
+    });
+
+    it('captures "failed" into lastTerminalStatus on an "error" event, not the stale initial "running"', () => {
+      const sse = new Subject<StrategyLabStreamEvent>();
+      api.streamRunStatus.mockReturnValue(sse);
+      service.startRun('run-1', baseRunStatus);
+
+      sse.next({ type: 'error', detail: 'boom' });
+
+      expect(service.lastTerminalStatus()?.status).toBe('failed');
     });
 
     it('finishes the run when the stream completes (the "done" sentinel)', () => {

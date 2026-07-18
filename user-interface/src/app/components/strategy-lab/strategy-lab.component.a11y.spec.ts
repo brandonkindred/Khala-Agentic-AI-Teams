@@ -575,6 +575,65 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
   }, 15000);
 
+  it('the sighted "Strategy N of M" text agrees with the aria-live text for the same skipped-cycle state', async () => {
+    // Regression: the sighted progress-title/run-button text used to read
+    // `completed_cycles + 1` directly, disagreeing with the aria-live
+    // region's corrected number for the exact scenario above — sighted and
+    // screen-reader users were told contradictory strategy numbers for the
+    // same run. Both now derive from the same currentStrategyNumber().
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 1,
+      skipped_cycles: 1,
+      completed_record_ids: ['rec-1'],
+    });
+    fixture.detectChanges();
+
+    const sightedText: string = fixture.nativeElement.querySelector('.progress-title').textContent;
+    expect(sightedText).toContain('Strategy 3 of 5');
+    expect(liveRegionText(fixture)).toContain('Strategy 3 of 5');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('the sighted "Batch N of M" text agrees with the aria-live text once the last batch has completed', async () => {
+    // Regression: the sighted text had no clamp and could render the
+    // impossible "Batch 4 of 3" in the window after the last batch_complete
+    // but before the terminal complete event — the aria-live region already
+    // clamped this. Both now derive from the same currentBatchNumber().
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 15,
+      completed_cycles: 15,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      batch_count: 3,
+      completed_batches: 3,
+      current_batch: null,
+    });
+    fixture.detectChanges();
+
+    const sightedText: string = fixture.nativeElement.querySelector('.progress-title').textContent;
+    expect(sightedText).toContain('Batch 3 of 3');
+    expect(sightedText).not.toContain('Batch 4 of 3');
+    expect(liveRegionText(fixture)).toBe('Batch 3 of 3 — Finishing up.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
   it('does not double-count a cycle that completed but then hit a tracker-merge failure', async () => {
     // Regression: main.py's wave loop can publish cycle_complete for a
     // cycle, then separately publish cycle_errored for that same
@@ -836,6 +895,75 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
+  it('announces a qualified terminal outcome, not a plain "complete", when the run finishes with only skipped cycles', async () => {
+    // Regression: a run that skips cycles (e.g. unavailable market data —
+    // a real, non-error outcome) but errors on none used to be announced as
+    // an unqualified "Strategy Lab run complete.", even though the sighted
+    // UI shows a live "N skipped" badge throughout the run — screen-reader
+    // users got systematically less information about the same outcome.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).events$.next({
+      type: 'complete',
+      message: 'done',
+      status: 'completed',
+      completed_count: 3,
+      skipped_count: 2,
+      errored_count: 0,
+      errored_details: [],
+      completed_batches: 1,
+      total_batches: 1,
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run finished with some strategies skipped.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a qualified outcome from lastTerminalStatus.skipped_cycles when no complete/error event ever reaches the component', async () => {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 3,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1', 'rec-2', 'rec-3'],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).lastTerminalStatus.set({
+      run_id: 'run-1',
+      status: 'completed',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 3,
+      skipped_cycles: 2,
+      completed_record_ids: ['rec-1', 'rec-2', 'rec-3'],
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run finished with some strategies skipped.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
   it('announces run failure as the terminal outcome', async () => {
     const fixture = await createFixture();
     stubOf(fixture).running.set(true);
@@ -882,6 +1010,33 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy Lab run cancelled.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a neutral "lost track" outcome, not a definite failure, for a shared-infra subscription-reclaim event', async () => {
+    // Regression: the shared-infra "subscription reclaimed" wire shape
+    // (StrategyLabErrorReclaimEvent — only .error, never .detail, e.g. an
+    // eviction under load) used to fall through to the generic "Run failed"
+    // default, confidently announcing a failure the run may not have had.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).events$.next({ type: 'error', error: 'stream closed: the server reclaimed this subscription' });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab lost track of the run — status unavailable.');
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 

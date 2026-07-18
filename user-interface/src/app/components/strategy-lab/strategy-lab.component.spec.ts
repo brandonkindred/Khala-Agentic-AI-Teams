@@ -900,9 +900,14 @@ describe('StrategyLabComponent — SSE event side effects (events$ wiring)', () 
       expect(component.error()).toBe('Sandbox crashed');
     });
 
-    it('falls back to a generic message when detail is empty (the shared-infra reclaim shape)', () => {
+    it('falls back to a connection-lost message, not "Run failed", for the shared-infra reclaim shape', () => {
+      // Regression: a subscription-reclaim event (only .error, never
+      // .detail — a connection-level event, not necessarily a job failure)
+      // used to fall through to the generic "Run failed" default, wrongly
+      // announcing a definite failure for what may just be a reconnectable
+      // connection loss.
       runService.events$.next({ type: 'error', error: 'subscription reclaimed' });
-      expect(component.error()).toBe('Run failed');
+      expect(component.error()).toBe('Strategy Lab lost track of the run — status unavailable.');
     });
   });
 

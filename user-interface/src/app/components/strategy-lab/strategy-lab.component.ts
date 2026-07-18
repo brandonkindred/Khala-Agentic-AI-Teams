@@ -366,11 +366,15 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   private lastCycleIndex = -1;
 
   /**
-   * Terminal-outcome text for the aria-live status region (`runAnnouncement`),
-   * set once in `onRunComplete()` — at that point `runStatus` is already
-   * cleared, so the in-progress branch can no longer describe what just
-   * happened. Reset to null when a new run starts so a stale outcome from a
-   * previous run can't leak into the next run's brief "Starting…" window.
+   * Terminal-outcome text for the aria-live status region (`runAnnouncement`).
+   * Set from `handleStreamEvent()`'s `complete`/`error` branches — using the
+   * terminal event's own data, while `runService.runStatus()` is still
+   * populated — or, when neither branch fires (SSE degrades to polling, or a
+   * reconnect gets only a terminal snapshot then `done`), backstopped by
+   * `refreshResultsOnRunFinish`'s `??=` fallback once `runStatus()` has
+   * already cleared. Reset to null when a new run starts so a stale outcome
+   * from a previous run can't leak into the next run's brief "Starting…"
+   * window.
    */
   private runOutcomeAnnouncement: string | null = null;
 
@@ -418,7 +422,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    *   fallback itself errors) — never "no run happened", since this is only
    *   called after `wasRunning` was true.
    * Postconditions: returns a sentence reflecting `status.status`/
-   *   `errored_cycles` when `status` is non-null; a distinct
+   *   `errored_cycles`/`skipped_cycles` when `status` is non-null; a distinct
    *   connection-lost sentence when `status` is null — never the generic
    *   "complete" sentence for an outcome that isn't actually known. Always
    *   non-empty.
@@ -427,13 +431,12 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     if (!status) return 'Strategy Lab lost track of the run — status unavailable.';
     if (status.status === 'failed') return 'Strategy Lab run failed.';
     if (status.status === 'cancelled') return 'Strategy Lab run cancelled.';
-    // 'interrupted' is a real backend status (reconnecting to an
-    // already-stopped run sends a terminal snapshot carrying it) that
-    // doesn't fit the narrower StrategyLabRunStatus.status union — cast
-    // rather than widen the shared type just for this comparison.
-    if ((status.status as string) === 'interrupted') return 'Strategy Lab run interrupted.';
+    if (status.status === 'interrupted') return 'Strategy Lab run interrupted.';
     if (status.status === 'completed_with_errors' || (status.errored_cycles ?? 0) > 0) {
       return 'Strategy Lab run finished with errors.';
+    }
+    if ((status.skipped_cycles ?? 0) > 0) {
+      return 'Strategy Lab run finished with some strategies skipped.';
     }
     return 'Strategy Lab run complete.';
   }
@@ -545,11 +548,13 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    *
    * Preconditions: none — every branch is safe regardless of `runService`
    *   state.
-   * Postconditions: `activityLog`, `completionWarning`, and `error` are
-   *   updated for event types that carry them; `loadResults()` runs after a
-   *   completed cycle (in addition to `refreshResultsOnRunFinish`'s
-   *   once-per-run refresh — a multi-cycle run's earlier cycles need this
-   *   mid-run call since `running()` stays true until the whole run ends).
+   * Postconditions: `activityLog`, `completionWarning`, `error`, and
+   *   `runOutcomeAnnouncement` are updated for event types that carry them
+   *   (`complete`/`error` set `runOutcomeAnnouncement` directly from the
+   *   terminal event's own data); `loadResults()` runs after a completed
+   *   cycle (in addition to `refreshResultsOnRunFinish`'s once-per-run
+   *   refresh — a multi-cycle run's earlier cycles need this mid-run call
+   *   since `running()` stays true until the whole run ends).
    */
   private handleStreamEvent(event: StrategyLabStreamEvent): void {
     if (event.type === 'progress' && this.runService.runStatus()) {
@@ -581,28 +586,49 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       // Terminal-outcome text for the aria-live status region — derived here
       // (not from `error`/`completionWarning`, both shared ambient fields
       // that a prior mid-run `batch_warning` could already have populated)
-      // while the event's own errored_count/status are still on hand.
-      const erroredOrWarned = event.errored_count > 0 || event.status === 'completed_with_errors';
-      if (erroredOrWarned) {
+      // while the event's own errored_count/skipped_count/status are still
+      // on hand. Errors take priority over skips (skipped_count alone is a
+      // non-fatal, non-error outcome per the backend's own status
+      // classification — see `describeRunStatus`), but either qualifies the
+      // plain "complete" text: skips are surfaced live via the in-progress
+      // skipped-badge, but that badge disappears once `running()` goes
+      // false, so this terminal announcement is a screen-reader user's only
+      // remaining signal that not every requested strategy was produced.
+      const hasErrors = event.errored_count > 0 || event.status === 'completed_with_errors';
+      const hasSkips = event.skipped_count > 0;
+      if (hasErrors || hasSkips) {
         const parts: string[] = [];
         if (event.errored_count > 0) parts.push(`${event.errored_count} cycle(s) errored`);
-        if (event.skipped_count > 0) parts.push(`${event.skipped_count} cycle(s) skipped`);
+        if (hasSkips) parts.push(`${event.skipped_count} cycle(s) skipped`);
         this.completionWarning.set(`Run finished with ${parts.join(' and ')}. See details below.`);
       }
-      this.runOutcomeAnnouncement = erroredOrWarned
+      this.runOutcomeAnnouncement = hasErrors
         ? 'Strategy Lab run finished with errors.'
-        : 'Strategy Lab run complete.';
+        : hasSkips
+          ? 'Strategy Lab run finished with some strategies skipped.'
+          : 'Strategy Lab run complete.';
     }
 
     if (event.type === 'error') {
-      const detail = event.detail || 'Run failed';
-      this.error.set(detail);
-      // User cancellations are published as a terminal `error` event with a
-      // "cancelled" detail (there is no distinct cancel event type) — that
-      // is a deliberate stop, not a failure, and must not be announced as one.
-      this.runOutcomeAnnouncement = /cancel/i.test(detail)
-        ? 'Strategy Lab run cancelled.'
-        : 'Strategy Lab run failed.';
+      if (event.detail === undefined) {
+        // The shared-infra "subscription reclaimed" wire shape
+        // (StrategyLabErrorReclaimEvent) carries only `.error`, never
+        // `.detail` — a connection-level event (e.g. eviction under load),
+        // not necessarily a job failure, so it gets its own message rather
+        // than confidently announcing a failure the run may not have had.
+        const message = 'Strategy Lab lost track of the run — status unavailable.';
+        this.error.set(message);
+        this.runOutcomeAnnouncement = message;
+      } else {
+        const detail = event.detail || 'Run failed';
+        this.error.set(detail);
+        // User cancellations are published as a terminal `error` event with a
+        // "cancelled" detail (there is no distinct cancel event type) — that
+        // is a deliberate stop, not a failure, and must not be announced as one.
+        this.runOutcomeAnnouncement = /cancel/i.test(detail)
+          ? 'Strategy Lab run cancelled.'
+          : 'Strategy Lab run failed.';
+      }
     }
   }
 
@@ -859,6 +885,78 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   });
 
   /**
+   * Cycles the run has finished attempting (successfully or not) as of
+   * `status`, and whether that count's tracker-merge double-count correction
+   * may be under-subtracting. Shared by `currentStrategyNumber` and
+   * `runAnnouncement`'s "Finishing up" decision so both derive the same
+   * number from one computation.
+   *
+   * Preconditions: `status` is the caller's own already-read
+   *   `runService.runStatus()` snapshot (never re-read here, so this stays
+   *   safe to call from inside a `computed()`).
+   * Postconditions: `attemptedCycles` counts `completed_cycles` +
+   *   `skipped_cycles` + `errored_cycles`, minus cycles double-counted by a
+   *   post-completion tracker-merge failure (main.py's wave loop, tagged
+   *   `reason: 'tracker_merge_failed'` in `errored_details` — published as
+   *   `cycle_complete`, then separately re-published as `cycle_errored` for
+   *   the same `cycle_index`). `correctionSaturated` is true only when
+   *   `errored_details` (capped at 50 entries server-side, unlike the
+   *   uncapped `errored_cycles` counter) has both reached that cap AND
+   *   contains at least one visible tracker-merge entry — the signal that
+   *   double-counted cycles exist AND some may have been evicted before
+   *   they could be subtracted, not merely that many cycles have errored.
+   */
+  private cycleProgress(status: StrategyLabRunStatus): { attemptedCycles: number; correctionSaturated: boolean } {
+    const erroredDetails = status.errored_details ?? [];
+    const trackerMergeDoubleCounts = erroredDetails.filter((d) => d.reason === 'tracker_merge_failed').length;
+    return {
+      attemptedCycles:
+        status.completed_cycles + status.skipped_cycles + (status.errored_cycles ?? 0) - trackerMergeDoubleCounts,
+      correctionSaturated: erroredDetails.length >= 50 && trackerMergeDoubleCounts > 0,
+    };
+  }
+
+  /**
+   * The strategy position to display — shared by the sighted "Strategy N of
+   * M" text and `runAnnouncement`'s aria-live equivalent so the two can
+   * never disagree for the same `runStatus`.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `1` when idle (no run tracked); the backend's
+   *   1-based `current_cycle.cycle_index` when a cycle is actively
+   *   progressing; otherwise `attemptedCycles + 1` clamped to
+   *   `total_cycles`, so this never reports an impossible position (e.g.
+   *   "Strategy 6 of 5") even while a run is between cycles or finishing up.
+   */
+  readonly currentStrategyNumber = computed(() => {
+    const status = this.runService.runStatus();
+    if (!status) return 1;
+    if (status.current_cycle) return status.current_cycle.cycle_index;
+    const { attemptedCycles } = this.cycleProgress(status);
+    return Math.min(attemptedCycles + 1, status.total_cycles);
+  });
+
+  /**
+   * The batch position to display — shared by the sighted "Batch N of M"
+   * text and `runAnnouncement`'s aria-live equivalent so the two can never
+   * disagree for the same `runStatus`.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `1` when idle or the run has no batching;
+   *   otherwise `current_batch` (or, between batches, `completed_batches +
+   *   1`) clamped to `batch_count` — after the last batch's
+   *   `batch_complete`, `current_batch` is null and `completed_batches`
+   *   already equals `batch_count`, so without this clamp the naive
+   *   `+ 1` would report an impossible "Batch 4 of 3" for the brief window
+   *   before the terminal `complete` event arrives.
+   */
+  readonly currentBatchNumber = computed(() => {
+    const status = this.runService.runStatus();
+    if (!status || !status.batch_count) return 1;
+    return Math.min(status.current_batch ?? (status.completed_batches ?? 0) + 1, status.batch_count);
+  });
+
+  /**
    * Concise text for the always-present aria-live status region: batch and
    * strategy position plus the current phase label while a run proceeds, the
    * terminal outcome just after a run ends, or '' when idle. Deliberately
@@ -875,57 +973,21 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     if (this.running() && status) {
       const segments: string[] = [];
       if (status.batch_count && status.batch_count > 1) {
-        // After the last batch's batch_complete, current_batch is null and
-        // completed_batches already equals batch_count — the same terminal
-        // gap as the strategy count below. Clamp so this can't announce an
-        // impossible "Batch 4 of 3".
-        const batchNum = Math.min(
-          status.current_batch ?? (status.completed_batches ?? 0) + 1,
-          status.batch_count,
-        );
-        segments.push(`Batch ${batchNum} of ${status.batch_count}`);
+        segments.push(`Batch ${this.currentBatchNumber()} of ${status.batch_count}`);
       }
-      // Cycles the run has finished attempting, successfully or not.
-      // completed_cycles alone excludes skipped/errored cycles, which would
-      // otherwise repeat an already-attempted strategy's number as the
-      // "next" one, and would miss the "Finishing up" terminal gap below
-      // when the last attempted cycle was skipped/errored rather than
-      // completed. A post-completion tracker-merge failure (main.py's wave
-      // loop, tagged reason: 'tracker_merge_failed' in errored_details)
-      // double-counts one cycle in both completed_cycles and errored_cycles
-      // — it was published as cycle_complete, then separately re-published
-      // as cycle_errored for the same cycle_index — so those entries are
-      // subtracted back out.
-      const erroredDetails = status.errored_details ?? [];
-      const trackerMergeDoubleCounts = erroredDetails.filter((d) => d.reason === 'tracker_merge_failed').length;
-      // errored_details is capped at 50 entries server-side (same cap
-      // elsewhere in this file), but errored_cycles is not — a run with more
-      // than 50 tracker-merge failures loses visibility into the true
-      // double-count once the array saturates, so trackerMergeDoubleCounts
-      // can under-subtract and attemptedCycles can drift above the number of
-      // cycles truly attempted. That inflation is harmless for the
-      // current_cycle/"else" branches below (an inflated value only makes
-      // attemptedCycles < total_cycles LESS likely to hold, never wrongly
-      // true) — the risk is specifically the "Finishing up" check's >=
-      // comparison firing on a run that isn't actually finishing. When
-      // saturated, this fallback stops trusting that specific comparison
-      // rather than risk a false "Finishing up": a live cycle_complete/
-      // cycle_errored/complete event, each unaffected by this cap, corrects
-      // it within moments regardless.
-      const correctionSaturated = erroredDetails.length >= 50;
-      const attemptedCycles =
-        status.completed_cycles + status.skipped_cycles + (status.errored_cycles ?? 0) - trackerMergeDoubleCounts;
+      const { attemptedCycles, correctionSaturated } = this.cycleProgress(status);
       // Once the last cycle's cycle_complete/skipped/errored lands,
       // attemptedCycles already equals total_cycles — briefly, before the
       // terminal `complete` event arrives, there is no "next" strategy to
       // report. Reporting one here would announce an impossible position
-      // (e.g. "Strategy 6 of 5").
+      // (e.g. "Strategy 6 of 5"). Skipped when correctionSaturated, since an
+      // under-subtracted attemptedCycles could cross this threshold on a run
+      // that isn't actually finishing — a live cycle_complete/cycle_errored/
+      // complete event, each unaffected by the cap, corrects it moments later.
       if (!status.current_cycle && attemptedCycles >= status.total_cycles && !correctionSaturated) {
         segments.push('Finishing up');
       } else if (status.current_cycle) {
-        // The backend's cycle_index is already 1-based (`cn = i + 1` in
-        // main.py's wave loop) — used directly, not offset again.
-        segments.push(`Strategy ${status.current_cycle.cycle_index} of ${status.total_cycles}`);
+        segments.push(`Strategy ${this.currentStrategyNumber()} of ${status.total_cycles}`);
         const phaseLabel = STRATEGY_LAB_PHASES.find((p) => p.id === status.current_cycle?.phase)?.label;
         // Real backend phases (design_review, aligning, telemetry, ...) go
         // beyond STRATEGY_LAB_PHASES' 4 known ids. current_cycle is
@@ -943,11 +1005,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         // current_cycle" cannot be read as "genuinely idle": say something
         // true in both cases rather than claiming idleness that likely
         // isn't real.
-        // Clamped: reachable when correctionSaturated suppressed "Finishing
-        // up" above despite attemptedCycles >= total_cycles — without this,
-        // an inflated attemptedCycles would announce an impossible
-        // "Strategy 71 of 60" instead of holding at the last real position.
-        segments.push(`Strategy ${Math.min(attemptedCycles + 1, status.total_cycles)} of ${status.total_cycles}`);
+        segments.push(`Strategy ${this.currentStrategyNumber()} of ${status.total_cycles}`);
         segments.push('Run in progress');
       }
       return segments.join(' — ') + '.';

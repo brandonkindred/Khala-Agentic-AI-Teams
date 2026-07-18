@@ -80,7 +80,7 @@
         }
         <span>
           @if (running() && runService.runStatus(); as runStatus) {
-            Strategy {{ runStatus.completed_cycles + 1 }} of {{ runStatus.total_cycles }}
+            Strategy {{ currentStrategyNumber() }} of {{ runStatus.total_cycles }}
           } @else if (running()) {
             Starting…
           } @else {
@@ -164,10 +164,10 @@
         <mat-icon class="pulse-icon" aria-hidden="true">hub</mat-icon>
         <span class="progress-title">
           @if (runStatus.batch_count && runStatus.batch_count > 1) {
-            Batch {{ runStatus.current_batch ?? (runStatus.completed_batches ?? 0) + 1 }}
+            Batch {{ currentBatchNumber() }}
             of {{ runStatus.batch_count }} —
           }
-          Strategy {{ runStatus.completed_cycles + 1 }} of {{ runStatus.total_cycles }}
+          Strategy {{ currentStrategyNumber() }} of {{ runStatus.total_cycles }}
         </span>
         @if (runStatus.skipped_cycles) {
           <span class="skipped-badge">{{ runStatus.skipped_cycles }} skipped</span>
