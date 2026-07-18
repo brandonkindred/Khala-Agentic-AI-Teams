@@ -319,6 +319,23 @@ def test_architecture_activity_returns_empty_with_no_architecture() -> None:
     assert out == []
 
 
+def test_architecture_activity_fails_safe_when_llm_resolution_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_resolve_llm()`` runs BEFORE the wrapped pass's own env/no-op checks, so a
+    client-resolution failure (e.g. no LLM provider configured) must not raise --
+    this activity is purely additive and must degrade to no findings like every
+    other failure mode the wrapped pass itself already handles."""
+    from code_review_agent.temporal import activities as A
+
+    def _raise() -> Any:
+        raise RuntimeError("no provider configured")
+
+    monkeypatch.setattr(A, "_resolve_llm", _raise)
+    out = A.find_architecture_and_redundancy_activity(_input().model_dump(mode="json"))
+    assert out == []
+
+
 # ---------------------------------------------------------------------------
 # 3b. repo_root reconstructs a whole-repo reader across the Temporal boundary
 # ---------------------------------------------------------------------------
@@ -433,6 +450,50 @@ def test_architecture_activity_reconstructs_reader_from_repo_root(
     captured.clear()
     A.find_architecture_and_redundancy_activity(_input().model_dump(mode="json"))
     assert captured["repo_reader"] is None
+
+
+def test_side_effect_activity_reconstructs_reader_from_repo_root(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The side-effect activity rebuilds a reader from ``repo_root`` and threads
+    it into ``find_side_effect_impact_issues``, matching the other two additive
+    passes rather than hardcoding ``repo_reader=None``."""
+    import code_review_agent.side_effect_impact_pass as seip
+    from code_review_agent.repo_reader import DiskRepoReader
+    from code_review_agent.temporal import activities as A
+
+    captured: Dict[str, Any] = {}
+
+    def _capture(llm: Any, input_data: Any, repo_reader: Any = None) -> Any:
+        captured["repo_reader"] = repo_reader
+        return []
+
+    monkeypatch.setattr(seip, "find_side_effect_impact_issues", _capture)
+
+    A.find_side_effect_impact_activity(_input(repo_root=str(tmp_path)).model_dump(mode="json"))
+    assert isinstance(captured["repo_reader"], DiskRepoReader)
+
+    captured.clear()
+    A.find_side_effect_impact_activity(_input().model_dump(mode="json"))
+    assert captured["repo_reader"] is None
+
+
+def test_side_effect_activity_fails_safe_when_llm_resolution_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_resolve_llm()`` runs BEFORE the wrapped pass's own env/profile/
+    ``pre_numbered`` early-return checks, so a client-resolution failure must
+    not raise -- this activity is purely additive and must degrade to no
+    findings, matching the wrapped pass's own fail-safe contract, even when
+    the failure happens before that pass's internals ever run."""
+    from code_review_agent.temporal import activities as A
+
+    def _raise() -> Any:
+        raise RuntimeError("no provider configured")
+
+    monkeypatch.setattr(A, "_resolve_llm", _raise)
+    out = A.find_side_effect_impact_activity(_input().model_dump(mode="json"))
+    assert out == []
 
 
 def test_finalize_activity_reconciles_minor_only_to_approved() -> None:
@@ -756,11 +817,12 @@ def test_dispatch_unavailable_is_distinct_from_review_failure() -> None:
 
 def test_workflow_and_activities_are_registered() -> None:
     assert CodeReviewWorkflow in WORKFLOWS
-    assert len(ACTIVITIES) == 6
+    assert len(ACTIVITIES) == 7
     names = {getattr(a, "__name__", "") for a in ACTIVITIES}
     assert "review_chunk_activity" in names
     assert "prepare_review_activity" in names
     assert "find_architecture_and_redundancy_activity" in names
+    assert "find_side_effect_impact_activity" in names
 
 
 # ---------------------------------------------------------------------------

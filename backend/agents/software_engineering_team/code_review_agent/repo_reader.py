@@ -121,6 +121,7 @@ class DiskRepoReader:
         self._lock = threading.Lock()
         self._read_cache: "OrderedDict[str, Optional[str]]" = OrderedDict()
         self._listing: Optional[List[str]] = None
+        self._listing_truncated = False
 
     def _resolve_under_root(self, path: str) -> Optional[str]:
         """Resolve ``path`` to an absolute path confined under ``repo_root``.
@@ -198,12 +199,34 @@ class DiskRepoReader:
             self._listing = listing
         return list(listing)
 
+    def listing_truncated(self) -> bool:
+        """Whether ``list_files()`` hit ``max_listed_files`` and omitted paths.
+
+        Preconditions:
+            - ``list_files()`` has already been called at least once (the
+              truncation state is only known once the walk has actually run;
+              calling this first returns ``False``, matching an as-yet-unknown
+              listing rather than a false positive).
+
+        Postconditions:
+            - Returns ``True`` iff the repository has more matching paths than
+              ``max_listed_files`` -- i.e. the listing itself is incomplete,
+              not just large. A caller reasoning from ``list_files()``'s output
+              (e.g. a repo-wide substring search) must not treat an exhaustive
+              scan of the returned paths as proof a target is absent from the
+              WHOLE repository when this is ``True``.
+        """
+        with self._lock:
+            return self._listing_truncated
+
     def _walk(self) -> List[str]:
         """Walk ``repo_root`` collecting bounded, filtered relative paths.
 
         Postconditions:
             - Returns sorted repo-relative POSIX paths, skipping ``_SKIP_DIRS``
               and capped at ``max_listed_files``; ``[]`` on any OS error.
+            - Sets ``self._listing_truncated`` when the cap was hit, so
+              ``listing_truncated()`` reflects this call once it returns.
         """
         found: List[str] = []
         try:
@@ -216,6 +239,8 @@ class DiskRepoReader:
                         logger.debug(
                             "DiskRepoReader: listing hit cap %s; truncating", self._max_listed
                         )
+                        with self._lock:
+                            self._listing_truncated = True
                         return sorted(found)
         except OSError as exc:
             logger.debug("DiskRepoReader: walk failed under %s: %s", self._root, exc)
