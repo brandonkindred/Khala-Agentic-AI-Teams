@@ -43,6 +43,26 @@ GIT_UTILS = "shared_git.git_utils"
 # --------------------------------------------------------------------------- stubs
 
 
+class _DefaultGroomTaskMixin:
+    """Ungroomed-default ``run_groom_task`` for Tech-Lead stubs that don't care about grooming.
+
+    Mirrors the real ``run_groom_task``'s own default/fallback shape, so mixing this in changes no
+    existing assertion for a stub that doesn't otherwise override it.
+    """
+
+    def run_groom_task(
+        self, task_id, task_title, task_description, task_dependencies, plan_context
+    ):
+        return {
+            "acceptance_criteria": [],
+            "out_of_scope": "",
+            "description_enriched": task_description,
+            "priority": "medium",
+            "subtasks": [],
+            "task_dependencies": task_dependencies,
+        }
+
+
 class StubTechLead:
     """Duck-typed Tech Lead: records the review evidence and returns a fixed verdict."""
 
@@ -906,7 +926,7 @@ def test_branch_diff_bad_branch_returns_empty(tmp_path):
 
 
 def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -963,7 +983,7 @@ def test_terminal_status_write_survives_slow_pending_graph_persist(tmp_path, mon
     import threading
     import time
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -1028,7 +1048,7 @@ def test_failed_background_persist_write_is_retried_at_round_boundary(tmp_path, 
     job-service write that carries a task_graph_snapshot and asserts the retried write
     still lands with the correct (merged) state."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -1107,7 +1127,7 @@ def test_status_write_survives_concurrent_worker_graph_mutation(tmp_path, monkey
     import threading
     import time
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -1210,7 +1230,7 @@ def test_background_graph_write_after_pause_carries_pause_phase_not_stale_coding
     import threading
     import time
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -1302,7 +1322,7 @@ def test_failed_direct_write_does_not_leak_into_background_graph_persist(tmp_pat
     actually confirmed on the wire, even though the rest of the failed call's fields (e.g. HITL
     pending-question metadata on a real pause) never landed either."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -2228,7 +2248,7 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
     """The fresh (non-resume) path persists the stacks so a later retry can resume without
     re-planning."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -2273,7 +2293,7 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
 def test_fresh_run_defaults_missing_task_id(tmp_path, monkeypatch):
     """Malformed Tech Lead task output without an id becomes a stable fallback task."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -2316,6 +2336,251 @@ def test_fresh_run_defaults_missing_task_id(tmp_path, monkeypatch):
     assert task.status == TaskStatus.MERGED
 
 
+# ----------------------------------------------------- task grooming (run_groom_task wiring)
+
+
+def test_task_creation_grooms_every_task_after_planning(tmp_path, monkeypatch):
+    """Every planned task is groomed (via run_groom_task) strictly after planning and strictly
+    before the swarm is built, and the groomed acceptance_criteria/priority land on the graph's
+    tasks while the planner's own dependencies (not grooming's) are kept."""
+    call_order: List[str] = []
+
+    class GroomingTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            call_order.append("plan")
+            return {
+                "tasks": [
+                    {"id": "t1", "title": "T1", "description": "d1", "dependencies": []},
+                    {"id": "t2", "title": "T2", "description": "d2", "dependencies": ["t1"]},
+                ],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+        def run_groom_task(
+            self, task_id, task_title, task_description, task_dependencies, plan_context
+        ):
+            call_order.append(f"groom:{task_id}")
+            return {
+                "acceptance_criteria": [f"AC for {task_id}"],
+                "out_of_scope": "",
+                "description_enriched": task_description,
+                "priority": "high",
+                "subtasks": [],
+                # Grooming's own dependency opinion must be ignored — the planner's wins.
+                "task_dependencies": [],
+            }
+
+    captured: Dict[str, Any] = {}
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            captured["graph"] = k["graph"]
+            call_order.append("swarm_built")
+
+        def run(self, **kw):
+            pass
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", GroomingTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: None,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    assert call_order[0] == "plan"
+    assert set(call_order[1:3]) == {"groom:t1", "groom:t2"}  # parallel -> order unspecified
+    assert call_order[3] == "swarm_built"  # grooming finished before the swarm was built
+
+    graph = captured["graph"]
+    assert graph.get_task("t1").acceptance_criteria == ["AC for t1"]
+    assert graph.get_task("t1").priority == "high"
+    assert graph.get_task("t2").acceptance_criteria == ["AC for t2"]
+    assert graph.get_task("t2").dependencies == ["t1"]  # planner's deps preserved, not grooming's
+
+
+def test_task_creation_grooming_failure_falls_back_for_that_task_only(tmp_path, monkeypatch):
+    """One task's run_groom_task raising must not abort the round (parallel_map is fast-fail by
+    default) -- that task falls back to ungroomed defaults while its sibling grooms normally."""
+
+    class PartiallyFailingTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [
+                    {"id": "t1", "title": "T1", "description": "d1", "dependencies": []},
+                    {"id": "t2", "title": "T2", "description": "d2", "dependencies": []},
+                ],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+        def run_groom_task(
+            self, task_id, task_title, task_description, task_dependencies, plan_context
+        ):
+            if task_id == "t2":
+                raise RuntimeError("boom")
+            return {
+                "acceptance_criteria": ["AC"],
+                "out_of_scope": "",
+                "description_enriched": task_description,
+                "priority": "high",
+                "subtasks": [],
+                "task_dependencies": task_dependencies,
+            }
+
+    captured: Dict[str, Any] = {}
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            captured["graph"] = k["graph"]
+
+        def run(self, **kw):
+            pass
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", PartiallyFailingTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: None,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    graph = captured["graph"]
+    assert graph.get_task("t1").acceptance_criteria == ["AC"]  # groomed normally
+    assert graph.get_task("t2").acceptance_criteria == []  # fell back to ungroomed defaults
+    assert graph.get_task("t2").description == "d2"  # ungroomed description preserved
+
+
+def test_groomed_acceptance_criteria_reaches_code_review(tmp_path, monkeypatch):
+    """A task's grooming output (acceptance_criteria), once populated on the graph by the
+    orchestrator's task-creation wiring, flows through to the Tech Lead's code review call --
+    CODE_REVIEW_USER surfaces acceptance_criteria as though it were always populated, so it must
+    actually be populated by the time a task reaches review."""
+    _patch_git(monkeypatch)
+
+    class GroomingTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1", "description": "d1", "dependencies": []}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+        def run_groom_task(
+            self, task_id, task_title, task_description, task_dependencies, plan_context
+        ):
+            return {
+                "acceptance_criteria": ["Must handle empty input", "Must return 200"],
+                "out_of_scope": "auth",
+                "description_enriched": task_description,
+                "priority": "medium",
+                "subtasks": [],
+                "task_dependencies": task_dependencies,
+            }
+
+    captured: Dict[str, Any] = {}
+
+    class CapturingSwarm:
+        def __init__(self, *a, **k):
+            captured["graph"] = k["graph"]
+
+        def run(self, **kw):
+            pass  # only the task-creation wiring is under test here
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", GroomingTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", CapturingSwarm)
+
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: None,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    graph = captured["graph"]
+    assert graph.get_task("t1").acceptance_criteria == [
+        "Must handle empty input",
+        "Must return 200",
+    ]
+
+    # Drive the real review path against this groomed task and assert the acceptance criteria the
+    # new wiring populated is exactly what reaches run_code_review.
+    class RecordingTechLead(StubTechLead):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.acceptance_criteria_calls: List[List[str]] = []
+
+        def run_code_review(self, task_title, task_description, acceptance_criteria, **kw):
+            self.acceptance_criteria_calls.append(list(acceptance_criteria))
+            return super().run_code_review(task_title, task_description, acceptance_criteria, **kw)
+
+    tech_lead = RecordingTechLead(approved=True)
+    worker = StubWorker("backend")
+    swarm = CodingTeamSwarm(
+        tech_lead=tech_lead,
+        workers=[worker],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["backend"],
+        llm_getter=lambda key: None,
+    )
+    graph.assign_task_to_agent("t1", "backend")
+    graph.set_task_in_review("t1")
+
+    swarm._review_and_merge(lambda **kw: None)
+
+    assert tech_lead.acceptance_criteria_calls == [["Must handle empty input", "Must return 200"]]
+    assert graph.get_task("t1").status == TaskStatus.MERGED
+
+
+def test_sanitized_subtasks_drops_entries_without_id():
+    """A groomed subtask missing 'id' would blow up Subtask/Task construction -- filtered out."""
+    raw = [
+        {"id": "s1", "title": "Sub 1"},
+        {"title": "no id, dropped"},
+        "not a dict",
+        None,
+    ]
+    assert orch_mod._sanitized_subtasks(raw) == [{"id": "s1", "title": "Sub 1"}]
+    assert orch_mod._sanitized_subtasks(None) == []
+    assert orch_mod._sanitized_subtasks([]) == []
+
+
 # ----------------------------------------------------- task graph helpers (direct)
 
 
@@ -2354,7 +2619,7 @@ def test_reset_in_flight_demotes_only_nonterminal():
 
 
 def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -2738,7 +3003,7 @@ def test_changing_diff_keeps_revising_without_escalation(tmp_path, monkeypatch):
 def test_whole_job_already_complete_when_all_resolved_without_changes(tmp_path, monkeypatch):
     """A job whose only terminal tasks are already-done resolutions reports already_complete."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -2787,7 +3052,7 @@ def test_not_already_complete_when_a_task_is_left_non_terminal(tmp_path, monkeyp
     still-pending (TO_DO) task is a normal completion, not an 'already complete, recommend closing'
     no-op — the swarm can exit at max_rounds with unfinished work and must not abandon it."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -3196,7 +3461,7 @@ def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeyp
     start, per-snapshot updates from the task graph, and 100 on terminal completion."""
     updates: List[Dict[str, Any]] = []
 
-    class _PlanningTechLead:
+    class _PlanningTechLead(_DefaultGroomTaskMixin):
         def run_plan_to_task_graph(self, plan_input):
             return {
                 "tasks": [{"id": "t1", "title": "T1"}, {"id": "t2", "title": "T2"}],
@@ -3747,6 +4012,18 @@ def test_review_concurrency_env_parsing(monkeypatch):
     assert progress_mod._review_concurrency() == 1  # floored so review always progresses
     monkeypatch.setenv("CODING_TEAM_REVIEW_CONCURRENCY", "7")
     assert progress_mod._review_concurrency() == 7
+
+
+def test_groom_concurrency_env_parsing(monkeypatch):
+    """CODING_TEAM_GROOM_CONCURRENCY: default when unset/garbage, floored at 1, honored otherwise."""
+    monkeypatch.delenv("CODING_TEAM_GROOM_CONCURRENCY", raising=False)
+    assert progress_mod._groom_concurrency() == progress_mod.GROOM_CONCURRENCY
+    monkeypatch.setenv("CODING_TEAM_GROOM_CONCURRENCY", "not-a-number")
+    assert progress_mod._groom_concurrency() == progress_mod.GROOM_CONCURRENCY
+    monkeypatch.setenv("CODING_TEAM_GROOM_CONCURRENCY", "0")
+    assert progress_mod._groom_concurrency() == 1  # floored so grooming always progresses
+    monkeypatch.setenv("CODING_TEAM_GROOM_CONCURRENCY", "7")
+    assert progress_mod._groom_concurrency() == 7
 
 
 # --------------------------------------------------- implementation-worker fan-out (worktrees)
