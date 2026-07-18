@@ -895,7 +895,12 @@ type StrategyLabSnapshotCycleProgress = Omit<StrategyLabCycleProgress, 'phase' |
 
 /**
  * Initial/refresh snapshot — wire shape matches the polling endpoint 1:1,
- * with two widenings confirmed against the backend:
+ * with three widenings confirmed against the backend (every Optional[...]
+ * field on StrategyLabRunStatusResponse was audited against its Python
+ * default — completed_cycles/skipped_cycles/errored_cycles/batch_size/
+ * batch_count/completed_batches all default to a real 0/1, never None, so
+ * they're correctly typed as-is; current_cycle/error are the only two
+ * `Optional[X] = None` fields, hence the widenings below):
  *  - `current_cycle` (and nested `strategy`/`metrics`) can be a real
  *    `null`, not just an omitted key: `_run_state_to_response(...)
  *    .model_dump(mode="json")` serializes unset Optional[...] fields as
@@ -908,11 +913,16 @@ type StrategyLabSnapshotCycleProgress = Omit<StrategyLabCycleProgress, 'phase' |
  *    not on StrategyLabRunStatus itself — that type also backs the REST
  *    polling endpoint and has other UI consumers not audited for a 6th
  *    status value (see PR description).
+ *  - `error` (`Optional[str] = None`, main.py:346) is the same
+ *    always-present/nullable pattern as `current_cycle` — widened to
+ *    `string | null` and made required (not `?:`) since model_dump always
+ *    emits the key (main.py:386: `error=state.get("error")`).
  */
-export interface StrategyLabSnapshotEvent extends Omit<StrategyLabRunStatus, 'current_cycle' | 'status'> {
+export interface StrategyLabSnapshotEvent extends Omit<StrategyLabRunStatus, 'current_cycle' | 'status' | 'error'> {
   type: 'snapshot';
   status: StrategyLabRunStatus['status'] | 'interrupted';
   current_cycle?: StrategyLabSnapshotCycleProgress | null;
+  error: string | null;
 }
 
 /**
