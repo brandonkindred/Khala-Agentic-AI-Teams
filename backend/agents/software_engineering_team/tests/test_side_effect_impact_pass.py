@@ -469,6 +469,30 @@ def test_returns_empty_for_non_code_review_profile() -> None:
     assert result == []
 
 
+def test_returns_empty_when_pre_numbered() -> None:
+    """Hunk-fallback mode: ``index.files`` holds partial excerpts, not full files.
+
+    Preconditions: none.
+    Postconditions: no LLM call is made and no findings are returned, since
+        this pass cannot verify a finding against content it never fully saw.
+    """
+
+    class _FailIfAskedClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "side-effect pass should not run"
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    result = find_side_effect_impact_issues(
+        _FailIfAskedClient(),
+        CodeReviewInput(
+            files={"app/main.py": "def bar():\n    return 1\n"},
+            task_description="wire up bar",
+            pre_numbered=True,
+        ),
+    )
+    assert result == []
+
+
 # --------------------------------------------------------------------------- happy path
 
 

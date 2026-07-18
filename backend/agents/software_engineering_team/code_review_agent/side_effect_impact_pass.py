@@ -465,8 +465,19 @@ def find_side_effect_impact_issues(
           profiles have a narrower contract that expects every issue to be
           attributable to a specific criterion/requirement, which a
           side-effects finding never is -- see
-          ``architecture_consistency_pass``'s identical restriction), or when
-          the submission has no readable files.
+          ``architecture_consistency_pass``'s identical restriction), when
+          ``input_data.pre_numbered`` is True (the PR-review hunk-fallback
+          mode, used when whole-file fetching is unavailable: ``index.files``
+          then holds partial diff-hunk excerpts rendered with original-line-
+          number prefixes, not complete file content, and no tool this pass
+          has can retrieve a more complete view of a changed file --
+          ``read_file`` resolves a changed path from ``index.files`` first, so
+          it returns the same partial excerpt already in the prompt. This
+          pass's entire contract is "never flag from a guess"; reasoning
+          about a function's complete current behavior from a partial hunk
+          would violate that, risking false-positive caller-impact findings
+          on code the pass never actually saw in full), or when the
+          submission has no readable files.
         - Otherwise returns zero or more NEW ``CodeReviewIssue``s in category
           ``"side-effects"`` only, each with its cited ``line`` bounds-checked
           against the real file (a hallucinated out-of-range line is nulled to
@@ -480,6 +491,8 @@ def find_side_effect_impact_issues(
     if not env_flag_enabled(_PASS_ENV):
         return []
     if input_data.profile != ReviewProfile.CODE_REVIEW:
+        return []
+    if input_data.pre_numbered:
         return []
     try:
         return _run_pass(llm, input_data, repo_reader, index)
