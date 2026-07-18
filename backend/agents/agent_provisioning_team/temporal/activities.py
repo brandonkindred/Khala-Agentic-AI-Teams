@@ -195,9 +195,25 @@ def check_existing_environment_activity(agent_id: str) -> bool:
           returns ``None`` for that case too, indistinguishable from
           confirmed absence without ``readable()``): the registry being
           unreadable is not proof nothing is there.
+        * When ``EnvironmentStore`` holds NO record at all (confirmed
+          readable-and-empty): still returns ``True`` unless the
+          deterministic container name (``agent-<agent_id>``, the same name
+          every provisioner/rollback path in this codebase uses) is
+          CONFIRMED absent from Docker. The record and the container are
+          two independently-losable things — a record can go missing (disk
+          issue, manual cleanup, a prior compensation that removed the
+          record but not the container) while the container itself, or
+          ``DockerProvisionerTool``'s own separate idempotency state, is
+          still there; ``docker.provision()`` would then reuse it via its
+          own ``_on_reuse`` check regardless of what ``EnvironmentStore``
+          says. Skipping this probe would let a later phase's failure
+          authorize tearing down (or ``verify_and_remove_orphan``-ing) a
+          container that predates this run, just because its record
+          happened to be the thing that was lost.
         * Returns ``False`` only when the registry is confirmed readable and
-          holds no record at all for ``agent_id``, or holds one whose
-          container is confirmed gone.
+          holds no record at all for ``agent_id`` AND the deterministic
+          container name is also confirmed absent — or holds a record whose
+          own container is confirmed gone.
         * Never raises (``EnvironmentStore.get``/``readable`` never raise;
           the Docker probe is itself never-raising and advisory only).
     """
@@ -209,7 +225,9 @@ def check_existing_environment_activity(agent_id: str) -> bool:
     existing = env_store.get(agent_id)
     if existing is not None:
         return DockerProvisionerTool._container_exists(existing.container_name) is not False
-    return not env_store.readable(agent_id)
+    if not env_store.readable(agent_id):
+        return True
+    return DockerProvisionerTool._container_exists(f"agent-{agent_id}") is not False
 
 
 @activity.defn(name="agent_provisioning_acquire_lock")

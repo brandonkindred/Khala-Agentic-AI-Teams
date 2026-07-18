@@ -1430,12 +1430,45 @@ def test_check_existing_environment_activity_true_when_running(tmp_path: Path) -
 def test_check_existing_environment_activity_false_when_absent(tmp_path: Path) -> None:
     from agent_provisioning_team.shared.environment_store import EnvironmentStore
     from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
 
-    with patch(
-        "agent_provisioning_team.shared.environment_store.EnvironmentStore",
-        return_value=EnvironmentStore(storage_dir=tmp_path),
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=EnvironmentStore(storage_dir=tmp_path),
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=False),
     ):
         assert t_acts.check_existing_environment_activity("missing-agent") is False
+
+
+def test_check_existing_environment_activity_true_when_record_missing_but_container_exists(
+    tmp_path: Path,
+) -> None:
+    """A record can go missing while its container (or docker's own state) survives.
+
+    The record and the container are two independently-losable things — a
+    prior compensation could have removed the record but not the container,
+    or the record file could simply be lost to a disk issue. Since
+    docker.provision() would still reuse that container via its own
+    _on_reuse check regardless of what EnvironmentStore says, this must
+    probe the deterministic container name directly rather than assuming
+    absence just because EnvironmentStore has nothing.
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=EnvironmentStore(storage_dir=tmp_path),
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=True) as mock_probe,
+    ):
+        assert t_acts.check_existing_environment_activity("orphan-agent") is True
+
+    mock_probe.assert_called_once_with("agent-orphan-agent")
 
 
 def test_check_existing_environment_activity_true_when_not_running(tmp_path: Path) -> None:
@@ -1584,14 +1617,18 @@ def test_check_existing_environment_activity_true_when_registry_unreadable(
 def test_check_existing_environment_activity_false_when_confirmed_absent(
     tmp_path: Path,
 ) -> None:
-    """A confirmed-readable, confirmed-empty registry correctly reports False."""
+    """A confirmed-readable, confirmed-empty registry AND confirmed-absent container is False."""
     from agent_provisioning_team.shared.environment_store import EnvironmentStore
     from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
 
     env_store = EnvironmentStore(storage_dir=tmp_path)
-    with patch(
-        "agent_provisioning_team.shared.environment_store.EnvironmentStore",
-        return_value=env_store,
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=False),
     ):
         assert t_acts.check_existing_environment_activity("a5") is False
 

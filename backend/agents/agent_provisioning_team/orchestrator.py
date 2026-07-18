@@ -409,7 +409,20 @@ class ProvisioningOrchestrator:
               against an already-delivered agent) and must be preserved — a
               newly-provisioned tool from THIS attempt still gets rolled
               back, but the environment this attempt never created is left
-              untouched. Whether it is safe to independently reclaim an
+              untouched.
+            * ``tear_down_environment=True``'s credential-file cleanup is
+              NOT an unconditional ``delete_credentials(agent_id)`` when any
+              tool was excluded from the per-tool purge above (reused, or an
+              attempted rollback that never confirmed success): it instead
+              purges every OTHER currently-stored tool's entry individually,
+              leaving those excluded ones alone. An unconditional delete
+              here would otherwise strip the only remaining way to reach an
+              account whose rollback may not have actually landed, even
+              though the environment/container around it is being torn
+              down — that account is frequently an external resource (e.g.
+              a database), not something destroying the container alone
+              would also destroy.
+            * Whether it is safe to independently reclaim an
               orphaned container by name afterward (e.g.
               ``compensate_activity``'s own ``verify_and_remove_orphan``
               follow-up) is not reported here — callers needing that answer
@@ -425,6 +438,15 @@ class ProvisioningOrchestrator:
         # provisioners whose class `tool_name` differs from the registry stem
         # (e.g. PostgresProvisionerTool.tool_name == "postgresql" vs key
         # "postgres_provisioner"), leaking accounts + encrypted credentials.
+        #
+        # Every tool this loop does NOT confirm-and-purge itself (reused, no
+        # rollback attempted, or an attempted rollback that didn't confirm
+        # success) is tracked here so the tear_down_environment=True cleanup
+        # below can exclude it from the credential purge — that cleanup used
+        # to be an unconditional delete_credentials(agent_id), which
+        # defeated this same preservation the moment the environment (not
+        # just an individual tool) was being torn down.
+        preserved_credentials: set[str] = set()
         for r in tool_results:
             if not getattr(r, "success", False):
                 continue
@@ -435,6 +457,8 @@ class ProvisioningOrchestrator:
                     "pre-existing account rather than creating one",
                     tool_name or "?",
                 )
+                if tool_name:
+                    preserved_credentials.add(tool_name)
                 continue
             key = getattr(r, "provisioner_key", None)
             if not key:
@@ -443,10 +467,14 @@ class ProvisioningOrchestrator:
                     "skipping rollback (stale result pre-#293).",
                     tool_name or "?",
                 )
+                if tool_name:
+                    preserved_credentials.add(tool_name)
                 continue
             provisioner = self.tool_agents.get(key)
             if provisioner is None:
                 logger.warning("Compensation: no provisioner registered for key=%s", key)
+                if tool_name:
+                    preserved_credentials.add(tool_name)
                 continue
             # Prefer persisted per-step compensations when the provisioner
             # registered any during `_do_provision`: replay in LIFO order,
@@ -526,6 +554,8 @@ class ProvisioningOrchestrator:
                     self.credential_store.delete_tool_credentials(agent_id, tool_name)
                 except Exception:  # noqa: BLE001
                     logger.exception("Compensation: credential cleanup failed for %s", tool_name)
+            elif tool_name:
+                preserved_credentials.add(tool_name)
 
         if not tear_down_environment:
             return
@@ -538,7 +568,19 @@ class ProvisioningOrchestrator:
                 logger.exception("Compensation: docker teardown failed")
 
         try:
-            self.credential_store.delete_credentials(agent_id)
+            if preserved_credentials:
+                # A plain delete_credentials(agent_id) here would defeat the
+                # per-tool preservation above the moment the environment
+                # itself is also being torn down — purge only the entries
+                # NOT deliberately preserved (reused, or a rollback that
+                # didn't confirm success) instead of the whole file.
+                stored = self.credential_store.get_credentials(agent_id) or {}
+                for stored_tool_name in stored:
+                    if stored_tool_name in preserved_credentials:
+                        continue
+                    self.credential_store.delete_tool_credentials(agent_id, stored_tool_name)
+            else:
+                self.credential_store.delete_credentials(agent_id)
         except Exception:  # noqa: BLE001
             logger.exception("Compensation: credential cleanup failed")
 
