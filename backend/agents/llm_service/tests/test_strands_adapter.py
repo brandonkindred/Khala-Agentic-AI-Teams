@@ -978,6 +978,23 @@ def test_get_strands_model_exposes_context_for_hasattr_guards() -> None:
 
 
 # ---------------------------------------------------------------------------
+# supports_structured_output delegation
+# ---------------------------------------------------------------------------
+
+
+class _StructuredOutputClient(DummyLLMClient):
+    def supports_structured_output(self) -> bool:
+        return True
+
+
+def test_llm_client_model_supports_structured_output_delegates_to_backing_client() -> None:
+    """The adapter must answer for its backing client's capability flag, matching the
+    get_max_context_tokens delegation precedent above."""
+    assert LLMClientModel(_StructuredOutputClient()).supports_structured_output() is True
+    assert LLMClientModel(DummyLLMClient()).supports_structured_output() is False
+
+
+# ---------------------------------------------------------------------------
 # Thinking levels through the adapter
 # ---------------------------------------------------------------------------
 

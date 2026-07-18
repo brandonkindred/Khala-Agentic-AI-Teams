@@ -18,6 +18,7 @@ from contextvars import ContextVar
 from typing import Any, Callable, Dict, Optional
 
 import httpx
+from pydantic import BaseModel
 
 from shared_llm_recovery import (
     extract_json_object as _shared_extract_json_object,
@@ -201,6 +202,26 @@ def _think_payload_fields(think: "bool | str") -> dict:
     elif think is False:
         fields["reasoning_effort"] = "none"
     return fields
+
+
+def _normalize_schema_for_wire(schema: "dict | type[BaseModel]") -> dict:
+    """Return a plain JSON-Schema dict for the wire, from a dict or a Pydantic model class.
+
+    Preconditions: ``schema`` is either a ``dict`` (assumed already a valid
+        JSON Schema object) or a class (not instance) subclassing
+        ``pydantic.BaseModel``.
+    Postconditions: returns a ``dict``. A dict input is returned unchanged
+        (not copied — caller must not mutate it); a ``BaseModel`` subclass
+        input is converted via ``.model_json_schema()`` (which itself returns
+        a fresh dict on each call). Raises ``TypeError`` for any other input
+        shape — fails fast/synchronously rather than sending a malformed
+        wire payload.
+    """
+    if isinstance(schema, dict):
+        return schema
+    if isinstance(schema, type) and issubclass(schema, BaseModel):
+        return schema.model_json_schema()
+    raise TypeError(f"schema must be a dict or a pydantic.BaseModel subclass, got {type(schema)!r}")
 
 
 def _thinking_downgrade_enabled() -> bool:
@@ -756,6 +777,16 @@ class OllamaLLMClient(LLMClient):
         """Return model's num_ctx (cached)."""
         return self._fetch_model_num_ctx()
 
+    def supports_structured_output(self) -> bool:
+        """Ollama's OpenAI-compatible endpoint accepts a ``response_format=
+        {"type": "json_schema", ...}`` payload for decoder-level schema
+        enforcement (see ``_complete_json_impl``).
+
+        Preconditions: none.
+        Postconditions: always returns True. Never raises.
+        """
+        return True
+
     def _log_llm_server_error(
         self,
         status_code: int,
@@ -982,6 +1013,7 @@ class OllamaLLMClient(LLMClient):
         sem: threading.BoundedSemaphore,
         *,
         resolved_think: "bool | str | None" = None,
+        schema_forced: bool = False,
     ) -> str:
         """POST to /v1/chat/completions with SSE streaming; return raw content. Raises LLM* on non-200 or malformed.
 
@@ -1007,7 +1039,9 @@ class OllamaLLMClient(LLMClient):
             ``rate_limit_cap >= rate_limit_initial > 0``; ``sem`` is the global
             concurrency semaphore. ``resolved_think`` is the resolved thinking
             wire value baked into ``payload`` (bool or level string), or ``None``
-            when the caller cannot offer a thinking downgrade.
+            when the caller cannot offer a thinking downgrade. ``schema_forced``
+            True means ``payload["response_format"]`` requests provider-enforced
+            JSON-Schema decoding (see ``_normalize_schema_for_wire``).
         Postconditions: returns the raw assistant content on success. A 429 retry's
             ``time.sleep`` happens at the loop-level handler — AFTER the semaphore
             and HTTP stream contexts have been released — never while holding them.
@@ -1016,6 +1050,14 @@ class OllamaLLMClient(LLMClient):
             budget is exhausted, ``LLMTemporaryError`` after the transient budget,
             ``LLMSemanticExhaustionError`` after the thinking-downgrade ladder is
             exhausted, or ``LLMPermanentError``/``LLMTruncatedError`` immediately.
+            When ``schema_forced`` is True, the FIRST empty-response signal
+            bypasses the thinking-downgrade ladder entirely (and the
+            ``_thinking_downgrade_enabled`` kill switch) and immediately raises
+            ``LLMSemanticExhaustionError(schema_forced=True)`` — a schema-forced
+            starvation is a terminal fallback signal, never a proof-of-change
+            retry candidate, so this path cannot regress into the
+            previously-reverted retry-loop-on-starvation bug because there is no
+            retry loop for it at all.
         """
         url = f"{self.base_url}/v1/chat/completions"
         last_error: Optional[Exception] = None
@@ -1385,6 +1427,42 @@ class OllamaLLMClient(LLMClient):
                     )
                 raise e
             except _EmptyResponseSignal as sig:
+                if schema_forced:
+                    # One strike, no ladder, no retry loop: schema-forced
+                    # decoding starved the content channel (the exact failure
+                    # mode Strategy Lab's earlier decoder-level
+                    # format=<json-schema> attempt hit on long code-emitting
+                    # turns — see strategy_lab/agents/_response_schemas.py).
+                    # Bail immediately with an explicit signal callers can
+                    # catch/branch on, regardless of the thinking-downgrade
+                    # kill switch state — falling through to the legacy
+                    # "retry verbatim" branch below would resurrect exactly
+                    # the retry-loop shape that was reverted.
+                    fingerprint = sha256_fingerprint(
+                        json.dumps(stream_payload, sort_keys=True, default=str)
+                    )
+                    logger.error(
+                        "LLM schema-forced decoding starved the content channel: rid=%s %s "
+                        "failure_class=semantic_exhaustion schema_forced=True attempts_used=%d "
+                        "finish_reason=%s payload_fingerprint=%s",
+                        current_request_id() or "-",
+                        _attribution_log_fields(),
+                        attempt + 1,
+                        sig.finish_reason,
+                        fingerprint,
+                    )
+                    raise LLMSemanticExhaustionError(
+                        "Schema-forced structured decoding produced no assistant content; "
+                        "caller should catch this and retry with schema=None (unconstrained "
+                        "json_object mode)",
+                        attempts_used=attempt + 1,
+                        original_thinking_level=resolved_think,
+                        retry_thinking_level=None,
+                        content_bytes_seen=sig.content_len > 0,
+                        payload_fingerprint=fingerprint,
+                        finish_reason=sig.finish_reason,
+                        schema_forced=True,
+                    )
                 if not _thinking_downgrade_enabled():
                     # Kill switch off: legacy behavior — empty responses retry
                     # verbatim on the transient schedule, then fail as a plain
@@ -1591,6 +1669,12 @@ class OllamaLLMClient(LLMClient):
         ``think=None`` (default) resolves to the platform default — the
         model's max registered thinking level when known; ``False`` disables;
         a string selects a specific level.
+
+        ``schema`` (a JSON Schema dict or ``pydantic.BaseModel`` subclass) is
+        accepted via ``**kwargs`` and forwarded to ``_complete_json_impl``,
+        which requests provider-enforced schema-conformant decoding on the
+        wire — see ``LLMClient.complete_json`` and
+        ``OllamaLLMClient.supports_structured_output``.
         """
         if not objective or not objective.strip():
             # DbC precondition (see LLMClient): every call must declare a
@@ -1637,6 +1721,16 @@ class OllamaLLMClient(LLMClient):
         )
         max_tokens = self._resolve_max_tokens(kwargs.pop("max_tokens", None))
         tools = kwargs.pop("tools", None)
+        schema = kwargs.pop("schema", None)
+        if tools and schema is not None:
+            # Fails fast/synchronously — cheaper and less surprising than
+            # silently dropping one of the two on an OpenAI-compatible
+            # endpoint where tools and json_schema response_format are
+            # mutually exclusive wire modes.
+            raise ValueError(
+                "complete_json: 'tools' and 'schema' are mutually exclusive on the "
+                "Ollama wire protocol; pass only one"
+            )
         payload: dict = {
             "model": self.model,
             "temperature": temperature,
@@ -1647,8 +1741,19 @@ class OllamaLLMClient(LLMClient):
             ],
             **_think_payload_fields(think),
         }
+        schema_forced = False
         if tools:
             payload["tools"] = tools
+        elif schema is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_response",
+                    "schema": _normalize_schema_for_wire(schema),
+                    "strict": True,
+                },
+            }
+            schema_forced = True
         else:
             payload["response_format"] = {"type": "json_object"}
         try:
@@ -1662,6 +1767,7 @@ class OllamaLLMClient(LLMClient):
                 rl_cap,
                 sem,
                 resolved_think=think,
+                schema_forced=schema_forced,
             )
             if not (
                 content or ""
@@ -1782,6 +1888,11 @@ class OllamaLLMClient(LLMClient):
                 "model": self.model,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
+                # Continuation never re-applies a caller's schema= constraint —
+                # always falls back to plain json_object (see the schema_forced
+                # bail-out in _ollama_post's _EmptyResponseSignal handler for
+                # why: continuation itself is triggered by a long generation,
+                # exactly the risk profile schema-forced decoding must avoid).
                 "response_format": {"type": "json_object"},
                 "messages": messages,
                 **_think_payload_fields(use_think),
