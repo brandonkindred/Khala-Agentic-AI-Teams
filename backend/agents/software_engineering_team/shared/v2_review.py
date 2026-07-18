@@ -374,7 +374,9 @@ def _qa_review_step(
     """Independent QA step.
 
     Preconditions: ``qa_agent_fn`` is the per-team QA runner (the test patch
-        surface for ``_run_qa_agent``). ``cache``: see
+        surface for ``_run_qa_agent``) — it need not accept a ``cache``
+        keyword unless a caller actually supplies one (see Postconditions).
+        ``cache``: see
         ``software_engineering_team.shared.agent_review.run_chunked_agent_review``.
     Postconditions:
         - Returns an empty :class:`_ReviewStepResult` when ``qa_agent`` is None.
@@ -382,21 +384,29 @@ def _qa_review_step(
           synthetic high-severity issue rather than propagating — a bare exception
           here would previously have aborted the whole review; fanning this step
           out concurrently with code review/security must not make that worse.
+        - ``cache`` is forwarded to ``qa_agent_fn`` only when not None, so a
+          ``qa_agent_fn`` predating this parameter keeps working unchanged for
+          callers that don't opt into caching.
     """
     if qa_agent is None:
         return _ReviewStepResult(issues=[])
     try:
-        return _ReviewStepResult(
-            issues=qa_agent_fn(
-                qa_agent=qa_agent,
-                files=files,
-                language=language,
-                task_description=task_description,
-                task_id=task_id,
-                context=context,
-                cache=cache,
-            )
+        kwargs: Dict[str, Any] = dict(
+            qa_agent=qa_agent,
+            files=files,
+            language=language,
+            task_description=task_description,
+            task_id=task_id,
+            context=context,
         )
+        # Only pass ``cache`` when it's actually in use: an injected
+        # ``qa_agent_fn`` predating this parameter (e.g. a test's patch
+        # surface) has no ``cache`` in its signature and no ``**kwargs``
+        # catch-all, so an unconditional ``cache=None`` would still raise
+        # TypeError on every call, not just when caching is requested.
+        if cache is not None:
+            kwargs["cache"] = cache
+        return _ReviewStepResult(issues=qa_agent_fn(**kwargs))
     except Exception as exc:
         logger.warning("[%s] QA agent step failed outright: %s", task_id, exc)
         return _ReviewStepResult(
@@ -425,28 +435,36 @@ def _security_review_step(
     """Independent security step.
 
     Preconditions: ``security_agent_fn`` is the per-team security runner (the
-        test patch surface for ``_run_security_agent``). ``cache``: see
+        test patch surface for ``_run_security_agent``) — it need not accept a
+        ``cache`` keyword unless a caller actually supplies one (see
+        Postconditions). ``cache``: see
         ``software_engineering_team.shared.agent_review.run_chunked_agent_review``.
     Postconditions:
         - Returns an empty :class:`_ReviewStepResult` when ``security_agent`` is None.
           Otherwise never raises: an outright security-agent failure is reported as
           a synthetic critical-severity issue rather than propagating (see
           ``_qa_review_step`` for the identical rationale).
+        - ``cache`` is forwarded to ``security_agent_fn`` only when not None,
+          mirroring ``_qa_review_step``'s identical backward-compatibility
+          rationale.
     """
     if security_agent is None:
         return _ReviewStepResult(issues=[])
     try:
-        return _ReviewStepResult(
-            issues=security_agent_fn(
-                security_agent=security_agent,
-                files=files,
-                language=language,
-                task_description=task_description,
-                task_id=task_id,
-                context=context,
-                cache=cache,
-            )
+        kwargs: Dict[str, Any] = dict(
+            security_agent=security_agent,
+            files=files,
+            language=language,
+            task_description=task_description,
+            task_id=task_id,
+            context=context,
         )
+        # See _qa_review_step's identical rationale: only pass ``cache`` when
+        # it's actually in use, so an injected ``security_agent_fn`` predating
+        # this parameter isn't broken by an unconditional ``cache=None``.
+        if cache is not None:
+            kwargs["cache"] = cache
+        return _ReviewStepResult(issues=security_agent_fn(**kwargs))
     except Exception as exc:
         logger.warning("[%s] Security agent step failed outright: %s", task_id, exc)
         return _ReviewStepResult(
