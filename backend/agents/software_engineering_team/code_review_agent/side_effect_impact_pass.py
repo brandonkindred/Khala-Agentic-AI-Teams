@@ -115,7 +115,7 @@ def _search_repository(
     query: str,
     max_matches: int = _REPO_SEARCH_MATCH_LIMIT,
     max_files_scanned: Optional[int] = None,
-) -> List[Tuple[str, int, str]]:
+) -> Tuple[List[Tuple[str, int, str]], bool]:
     """Find a case-insensitive substring across the REST of the repository.
 
     Complements ``CodebaseIndex.search`` (submission-only) with a repo-wide
@@ -127,8 +127,8 @@ def _search_repository(
         - ``max_matches`` > 0 and, when given explicitly, ``max_files_scanned`` > 0.
 
     Postconditions:
-        - Returns ``[]`` when ``index.repo_reader`` is None, when the query is
-          blank, or when the reader's own ``list_files`` fails.
+        - Returns ``([], False)`` when ``index.repo_reader`` is None, when the
+          query is blank, or when the reader's own ``list_files`` fails.
         - When ``max_files_scanned`` is None (the normal call path), it resolves
           to ``_DISK_REPO_SEARCH_FILE_SCAN_LIMIT`` for a ``DiskRepoReader`` (no
           per-file fetch cost -- bounded only by the reader's own listing cap) or
@@ -139,7 +139,13 @@ def _search_repository(
           of ``index.files`` (already reachable via ``search_codebase``, so
           scanning it again here would be redundant work), returning up to
           ``max_matches`` ``(path, 1-based-line, line-text)`` tuples in
-          list-then-line order.
+          list-then-line order, alongside a ``truncated`` flag.
+        - ``truncated`` is ``True`` whenever the scan stopped before examining
+          every candidate path -- either the file-scan cap was hit or
+          ``max_matches`` was reached first. A caller must not treat an empty
+          result list as proof the substring is absent anywhere in the
+          repository when ``truncated`` is ``True``; it only proves the
+          substring is absent from the files actually scanned.
         - Never raises: a reader ``list_files``/``read_file`` failure is
           logged and treated as "no matches from that path/call", not
           propagated -- a broken reader must only ever narrow what this
@@ -148,7 +154,7 @@ def _search_repository(
     assert max_matches > 0, "max_matches must be positive"
     assert max_files_scanned is None or max_files_scanned > 0, "max_files_scanned must be positive"
     if index.repo_reader is None:
-        return []
+        return [], False
     if max_files_scanned is None:
         max_files_scanned = (
             _DISK_REPO_SEARCH_FILE_SCAN_LIMIT
@@ -157,12 +163,12 @@ def _search_repository(
         )
     needle = (query or "").strip().lower()
     if not needle:
-        return []
+        return [], False
     try:
         paths = index.repo_reader.list_files()
     except Exception as exc:  # noqa: BLE001 - fail-safe: a reader failure must never raise
         logger.debug("SideEffectImpactPass: repo_reader.list_files() failed: %s", exc)
-        return []
+        return [], False
 
     results: List[Tuple[str, int, str]] = []
     scanned = 0
@@ -170,7 +176,7 @@ def _search_repository(
         if path in index.files:
             continue
         if scanned >= max_files_scanned:
-            break
+            return results, True
         scanned += 1
         try:
             content = index.repo_reader.read_file(path)
@@ -183,8 +189,8 @@ def _search_repository(
             if needle in line.lower():
                 results.append((path, lineno, line.rstrip()))
                 if len(results) >= max_matches:
-                    return results
-    return results
+                    return results, True
+    return results, False
 
 
 def _build_side_effect_tools(index: CodebaseIndex) -> list:
@@ -214,14 +220,31 @@ def _build_side_effect_tools(index: CodebaseIndex) -> list:
 
         Returns:
             Matching "path:line: text" lines, or a message that nothing
-            matched or that no repository access is available.
+            matched or that no repository access is available. A truncated
+            scan (the repository is larger than this tool's per-call file
+            cap) is flagged explicitly rather than reported as if the whole
+            repository had been searched -- follow up with targeted
+            ``list_files()``/``read_file()`` calls when this matters.
         """
         if index.repo_reader is None:
             return "No repository access is available beyond this submission."
-        matches = _search_repository(index, query)
+        matches, truncated = _search_repository(index, query)
         if not matches:
+            if truncated:
+                return (
+                    f"No matches for {query!r} in the files scanned, but the scan was "
+                    "truncated before covering the whole repository -- this does NOT prove "
+                    "the substring is absent elsewhere. Use list_files()/read_file() for a "
+                    "more targeted follow-up if this caller-impact check matters."
+                )
             return f"No matches for {query!r} in the rest of the repository."
-        return "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
+        result = "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
+        if truncated:
+            result += (
+                f"\n\n(Scan truncated before covering the whole repository -- there may be "
+                f"more matches for {query!r} beyond what's shown above.)"
+            )
+        return result
 
     return [*_build_tools(index), search_repository]
 

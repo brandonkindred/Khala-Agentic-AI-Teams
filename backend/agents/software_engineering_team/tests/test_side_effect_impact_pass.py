@@ -98,15 +98,15 @@ def test_build_prompt_mentions_search_repository_tool() -> None:
 
 def test_search_repository_returns_empty_with_no_reader() -> None:
     index = CodebaseIndex(files={"app/main.py": "code"})
-    assert _search_repository(index, "bar") == []
+    assert _search_repository(index, "bar") == ([], False)
 
 
 def test_search_repository_returns_empty_for_blank_query() -> None:
     index = CodebaseIndex(
         files={"app/main.py": "code"}, repo_reader=_FakeReader({"app/caller.py": "bar()"})
     )
-    assert _search_repository(index, "") == []
-    assert _search_repository(index, "   ") == []
+    assert _search_repository(index, "") == ([], False)
+    assert _search_repository(index, "   ") == ([], False)
 
 
 def test_search_repository_finds_matches_in_repo_reader_files() -> None:
@@ -114,8 +114,9 @@ def test_search_repository_finds_matches_in_repo_reader_files() -> None:
         files={"app/main.py": "def bar():\n    return 1\n"},
         repo_reader=_FakeReader({"app/caller.py": "from app.main import bar\n\nresult = bar()\n"}),
     )
-    matches = _search_repository(index, "bar(")
+    matches, truncated = _search_repository(index, "bar(")
     assert matches == [("app/caller.py", 3, "result = bar()")]
+    assert truncated is False
 
 
 def test_search_repository_skips_files_already_in_the_submission() -> None:
@@ -126,8 +127,9 @@ def test_search_repository_skips_files_already_in_the_submission() -> None:
         files={"app/main.py": "needle here"},
         repo_reader=_FakeReader({"app/main.py": "needle here", "app/other.py": "needle there"}),
     )
-    matches = _search_repository(index, "needle")
+    matches, truncated = _search_repository(index, "needle")
     assert matches == [("app/other.py", 1, "needle there")]
+    assert truncated is False
 
 
 def test_search_repository_respects_max_matches() -> None:
@@ -135,8 +137,9 @@ def test_search_repository_respects_max_matches() -> None:
         files={},
         repo_reader=_FakeReader({f"f{i}.py": "needle\n" for i in range(5)}),
     )
-    matches = _search_repository(index, "needle", max_matches=2)
+    matches, truncated = _search_repository(index, "needle", max_matches=2)
     assert len(matches) == 2
+    assert truncated is True
 
 
 def test_search_repository_respects_max_files_scanned() -> None:
@@ -144,8 +147,21 @@ def test_search_repository_respects_max_files_scanned() -> None:
         files={},
         repo_reader=_FakeReader({f"f{i}.py": "needle\n" for i in range(5)}),
     )
-    matches = _search_repository(index, "needle", max_files_scanned=2)
+    matches, truncated = _search_repository(index, "needle", max_files_scanned=2)
     assert len(matches) == 2
+    assert truncated is True
+
+
+def test_search_repository_not_truncated_when_scan_covers_every_candidate() -> None:
+    """``truncated`` is ``False`` when the scan finishes the whole candidate
+    list on its own, without hitting either cap."""
+    index = CodebaseIndex(
+        files={},
+        repo_reader=_FakeReader({f"f{i}.py": "no match" for i in range(3)}),
+    )
+    matches, truncated = _search_repository(index, "needle", max_files_scanned=10)
+    assert matches == []
+    assert truncated is False
 
 
 def test_search_repository_default_limit_stays_conservative_for_unknown_readers() -> None:
@@ -157,7 +173,9 @@ def test_search_repository_default_limit_stays_conservative_for_unknown_readers(
     files = {f"f{i}.py": "no match" for i in range(45)}
     files["z_match.py"] = "needle\n"
     index = CodebaseIndex(files={}, repo_reader=_FakeReader(files))
-    assert _search_repository(index, "needle") == []
+    matches, truncated = _search_repository(index, "needle")
+    assert matches == []
+    assert truncated is True
 
 
 def test_search_repository_disk_reader_scans_beyond_the_conservative_cap(
@@ -173,8 +191,9 @@ def test_search_repository_disk_reader_scans_beyond_the_conservative_cap(
         (tmp_path / f"a_{i:03d}.py").write_text("no match\n")
     (tmp_path / "z_caller.py").write_text("result = bar()\n")
     index = CodebaseIndex(files={}, repo_reader=DiskRepoReader(str(tmp_path)))
-    matches = _search_repository(index, "bar(")
+    matches, truncated = _search_repository(index, "bar(")
     assert matches == [("z_caller.py", 1, "result = bar()")]
+    assert truncated is False
 
 
 def test_search_repository_fails_safe_on_reader_error() -> None:
@@ -186,7 +205,7 @@ def test_search_repository_fails_safe_on_reader_error() -> None:
             raise RuntimeError("boom")
 
     index = CodebaseIndex(files={}, repo_reader=_RaisingReader())
-    assert _search_repository(index, "bar") == []
+    assert _search_repository(index, "bar") == ([], False)
 
 
 def test_search_repository_skips_a_single_unreadable_file() -> None:
@@ -202,8 +221,9 @@ def test_search_repository_skips_a_single_unreadable_file() -> None:
             return "needle\n"
 
     index = CodebaseIndex(files={}, repo_reader=_PartlyRaisingReader())
-    matches = _search_repository(index, "needle")
+    matches, truncated = _search_repository(index, "needle")
     assert matches == [("good.py", 1, "needle")]
+    assert truncated is False
 
 
 def test_search_repository_skips_files_the_reader_cannot_read() -> None:
@@ -212,8 +232,9 @@ def test_search_repository_skips_files_the_reader_cannot_read() -> None:
     index = CodebaseIndex(files={}, repo_reader=_FakeReader({"present.py": "needle here"}))
     # "missing.py" is not in the reader's map, so read_file returns None for it.
     index.repo_reader._files["missing.py"] = None
-    matches = _search_repository(index, "needle")
+    matches, truncated = _search_repository(index, "needle")
     assert matches == [("present.py", 1, "needle here")]
+    assert truncated is False
 
 
 # --------------------------------------------------------------------------- tools
@@ -253,6 +274,27 @@ def test_search_repository_tool_finds_matches() -> None:
     )
     search_repository = _build_side_effect_tools(index)[-1]
     assert "app/caller.py:1: result = bar()" in search_repository("bar(")
+
+
+def test_search_repository_tool_flags_truncated_scan_with_no_matches() -> None:
+    """A truncated no-match scan must not read as an exhaustive negative result --
+    the model needs to know the repository was larger than what got scanned."""
+    files = {f"f{i}.py": "no match" for i in range(45)}
+    index = CodebaseIndex(files={}, repo_reader=_FakeReader(files))
+    search_repository = _build_side_effect_tools(index)[-1]
+    result = search_repository("needle")
+    assert "No matches for" in result
+    assert "truncated" in result.lower()
+
+
+def test_search_repository_tool_flags_truncated_scan_with_matches() -> None:
+    """A truncated scan that DID find matches still warns there may be more."""
+    files = {f"f{i}.py": "needle\n" for i in range(45)}
+    index = CodebaseIndex(files={}, repo_reader=_FakeReader(files))
+    search_repository = _build_side_effect_tools(index)[-1]
+    result = search_repository("needle")
+    assert "f0.py:1: needle" in result
+    assert "truncated" in result.lower()
 
 
 # --------------------------------------------------------------------------- line bounds
