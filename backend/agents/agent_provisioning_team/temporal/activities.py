@@ -173,31 +173,42 @@ def check_existing_environment_activity(agent_id: str) -> bool:
     Preconditions:
         * ``agent_id`` is non-empty.
     Postconditions:
-        * Returns ``True`` iff ``EnvironmentStore`` currently holds ANY record
-          for ``agent_id``, regardless of its ``status`` field. A status other
-          than ``"running"``/``"ready"`` (e.g. ``"stopped"``) still means a
-          container previously existed for this agent — ``run_setup`` only
+        * When ``EnvironmentStore`` holds a record for ``agent_id``: returns
+          ``True`` unless the record's own ``container_name`` is CONFIRMED
+          absent from Docker (a direct ``docker inspect`` probe, not the
+          record's ``status`` field). A status other than ``"running"``/
+          ``"ready"`` (e.g. ``"stopped"``) still means a container may
+          previously have existed for this agent — ``run_setup`` only
           fast-paths on ``"running"``, but ``docker.provision()``'s own
           idempotency state (independent of ``EnvironmentStore``) can still
           resolve to reusing that same underlying container regardless of
-          what status this record carries, so treating a non-running record
-          as "nothing here" would let a later phase's failure tear down a
-          container that predates this run.
+          what status this record carries. But a record whose container is
+          verifiably GONE is stale metadata with nothing left to protect:
+          ``run_setup`` will create an entirely fresh container and overwrite
+          the record, so treating the stale record as "pre-existing" would
+          instead leak the container THIS run creates (a later failure would
+          pass ``tear_down_environment=False`` and skip tearing it down). A
+          probe that can't tell (daemon unreachable, timeout — ``None``) is
+          treated the same as "alive": conservatively, "might exist".
         * Also returns ``True`` — conservatively, "might exist" — when the
           record location is present but genuinely unreadable (``get()``
           returns ``None`` for that case too, indistinguishable from
           confirmed absence without ``readable()``): the registry being
           unreadable is not proof nothing is there.
         * Returns ``False`` only when the registry is confirmed readable and
-          holds no record at all for ``agent_id``.
-        * Never raises (``EnvironmentStore.get``/``readable`` never raise).
+          holds no record at all for ``agent_id``, or holds one whose
+          container is confirmed gone.
+        * Never raises (``EnvironmentStore.get``/``readable`` never raise;
+          the Docker probe is itself never-raising and advisory only).
     """
     assert agent_id, "agent_id must be non-empty"
     from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
 
     env_store = EnvironmentStore()
-    if env_store.get(agent_id) is not None:
-        return True
+    existing = env_store.get(agent_id)
+    if existing is not None:
+        return DockerProvisionerTool._container_exists(existing.container_name) is not False
     return not env_store.readable(agent_id)
 
 

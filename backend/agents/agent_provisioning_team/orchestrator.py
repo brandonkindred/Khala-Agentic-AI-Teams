@@ -377,12 +377,22 @@ class ProvisioningOrchestrator:
               purging its credential entry) would destroy/invalidate a
               resource that predates this attempt, independent of
               ``tear_down_environment``.
-            * Every other successfully-rolled-back tool also has its
-              generated credential entry purged from the credential store
-              (``CredentialStore.delete_tool_credentials``) — the
-              credentials phase generates a fresh secret for every tool
-              upfront, so once a tool's account is torn back down that
-              secret no longer corresponds to anything live.
+            * Every other tool has its ``details.reused``-derived rollback
+              attempted (replay-compensation or ``deprovision``, whichever
+              applies), and only when that rollback CONFIRMS success — a
+              replay with no individual step failures, or a
+              ``DeprovisionResult(success=True)`` — is its generated
+              credential entry purged from the credential store
+              (``CredentialStore.delete_tool_credentials``). Rollback
+              "not raising" is not enough: ``deprovision()`` commonly reports
+              failure via ``DeprovisionResult(success=False)`` rather than an
+              exception, and a replay step can fail without escaping its own
+              try/except — purging the credential in either case would strip
+              the only remaining way to reach an account that may still be
+              live. The credentials phase generates a fresh secret for every
+              tool upfront, so once (and only once) a tool's account is
+              confirmed torn back down, that secret no longer corresponds to
+              anything live and is safe to discard.
             * ``tear_down_environment=False`` skips the Docker / whole-agent
               credential-file / environment-record teardown entirely, while
               tool rollback above still runs unconditionally (modulo the
@@ -434,7 +444,16 @@ class ProvisioningOrchestrator:
                     "Compensation: could not read records for %s; falling back to deprovision",
                     key,
                 )
+            # Tracks whether rollback actually landed, not merely whether it
+            # avoided raising — deprovision() reports many failures via
+            # DeprovisionResult(success=False) rather than an exception, and a
+            # replay step can individually fail without raising past its own
+            # try/except. Only a confirmed-successful rollback should purge
+            # the credential entry below; otherwise the account may still be
+            # live and the credential is the only way left to reach it.
+            rollback_succeeded = False
             if records:
+                replay_failed = False
                 for rec in reversed(records):
                     try:
                         provisioner.replay_compensation(agent_id, rec.kind, rec.payload)
@@ -442,18 +461,30 @@ class ProvisioningOrchestrator:
                         logger.exception(
                             "Compensation: replay failed kind=%s for %s", rec.kind, key
                         )
+                        replay_failed = True
                 try:
                     provisioner.clear_compensations(agent_id)
                     provisioner._state.delete(agent_id)
+                    rollback_succeeded = not replay_failed
                 except Exception:  # noqa: BLE001
                     logger.exception("Compensation: post-replay state cleanup failed for %s", key)
             else:
                 try:
-                    provisioner.deprovision(agent_id)
+                    deprovision_result = provisioner.deprovision(agent_id)
+                    rollback_succeeded = bool(getattr(deprovision_result, "success", False))
+                    if not rollback_succeeded:
+                        logger.error(
+                            "Compensation: deprovision reported failure for %s "
+                            "(agent_id=%s, error=%s); credential entry preserved since "
+                            "the account may still be live",
+                            key,
+                            agent_id,
+                            getattr(deprovision_result, "error", None),
+                        )
                 except Exception:  # noqa: BLE001 — best-effort cleanup
                     logger.exception("Compensation: deprovision failed for %s", key)
 
-            if tool_name:
+            if tool_name and rollback_succeeded:
                 try:
                     self.credential_store.delete_tool_credentials(agent_id, tool_name)
                 except Exception:  # noqa: BLE001

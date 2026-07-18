@@ -536,6 +536,56 @@ def test_compensate_purges_credentials_for_rolled_back_tool(tmp_path: Path) -> N
     cred_store.delete_tool_credentials.assert_called_once_with("a1", "t")
 
 
+def test_compensate_preserves_credentials_when_deprovision_reports_failure(
+    tmp_path: Path,
+) -> None:
+    """A reported (not raised) deprovision failure must not purge the credential.
+
+    Provisioner deprovision() methods commonly report failure via
+    DeprovisionResult(success=False) rather than raising — "didn't raise" is
+    not the same as "actually tore the account down". Purging the credential
+    entry anyway would strip the only remaining way to reach an account that
+    may still be live.
+    """
+    cred_store = MagicMock()
+    fake_prov = MagicMock()
+    fake_prov.list_compensations.return_value = []
+    fake_prov.deprovision.return_value = DeprovisionResult(
+        tool_name="t", success=False, error="daemon down"
+    )
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"x": fake_prov, "docker_provisioner": MagicMock()},
+    )
+
+    fresh = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
+    orch.compensate("a1", [fresh], tear_down_environment=False)
+    fake_prov.deprovision.assert_called_once_with("a1")
+    cred_store.delete_tool_credentials.assert_not_called()
+
+
+def test_compensate_preserves_credentials_when_replay_step_fails(tmp_path: Path) -> None:
+    """A failed (but swallowed) replay-compensation step must not purge the credential."""
+    from agent_provisioning_team.shared.provisioner_state import CompensationRecord
+
+    cred_store = MagicMock()
+    fake_prov = MagicMock()
+    fake_prov.list_compensations.return_value = [CompensationRecord(kind="k1", payload={})]
+    fake_prov.replay_compensation.side_effect = RuntimeError("replay boom")
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"x": fake_prov, "docker_provisioner": MagicMock()},
+    )
+
+    fresh = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
+    orch.compensate("a1", [fresh], tear_down_environment=False)
+    cred_store.delete_tool_credentials.assert_not_called()
+
+
 def test_compensate_post_replay_state_cleanup_failure(tmp_path: Path) -> None:
     """If clear_compensations or _state.delete fails, swallow and move on."""
     from agent_provisioning_team.shared.provisioner_state import CompensationRecord

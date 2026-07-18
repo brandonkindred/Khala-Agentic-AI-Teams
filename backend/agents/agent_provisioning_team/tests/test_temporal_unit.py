@@ -1322,6 +1322,7 @@ def test_list_manifest_tools_activity_rejects_empty_path() -> None:
 def test_check_existing_environment_activity_true_when_running(tmp_path: Path) -> None:
     from agent_provisioning_team.shared.environment_store import EnvironmentInfo, EnvironmentStore
     from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
 
     env_store = EnvironmentStore(storage_dir=tmp_path)
     env_store.register(
@@ -1330,9 +1331,12 @@ def test_check_existing_environment_activity_true_when_running(tmp_path: Path) -
         )
     )
 
-    with patch(
-        "agent_provisioning_team.shared.environment_store.EnvironmentStore",
-        return_value=env_store,
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=True),
     ):
         assert t_acts.check_existing_environment_activity("a1") is True
 
@@ -1359,6 +1363,7 @@ def test_check_existing_environment_activity_true_when_not_running(tmp_path: Pat
     """
     from agent_provisioning_team.shared.environment_store import EnvironmentInfo, EnvironmentStore
     from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
 
     env_store = EnvironmentStore(storage_dir=tmp_path)
     env_store.register(
@@ -1367,11 +1372,77 @@ def test_check_existing_environment_activity_true_when_not_running(tmp_path: Pat
         )
     )
 
-    with patch(
-        "agent_provisioning_team.shared.environment_store.EnvironmentStore",
-        return_value=env_store,
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=True),
     ):
         assert t_acts.check_existing_environment_activity("a2") is True
+
+
+def test_check_existing_environment_activity_false_when_record_stale_and_container_gone(
+    tmp_path: Path,
+) -> None:
+    """A record whose backing container is CONFIRMED gone is stale, not pre-existing.
+
+    A record can survive after its container is destroyed out-of-band (or
+    the docker-level idempotency state is separately lost). run_setup would
+    then create an entirely fresh container and overwrite the record — so
+    trusting the stale record alone would misreport a brand-new container
+    THIS run creates as "pre-existing", leaking it if a later phase fails
+    (tear_down_environment=False would skip tearing it down).
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentInfo, EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(
+        EnvironmentInfo(
+            agent_id="a2b", container_id="c-stale", container_name="agent-a2b", status="stopped"
+        )
+    )
+
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=False),
+    ):
+        assert t_acts.check_existing_environment_activity("a2b") is False
+
+
+def test_check_existing_environment_activity_true_when_container_probe_inconclusive(
+    tmp_path: Path,
+) -> None:
+    """A record whose container liveness can't be determined is treated as pre-existing.
+
+    _container_exists returns None (daemon unreachable, probe timeout) when
+    it can't tell — that is not proof the container is gone, so this must
+    stay conservative rather than risk destroying a live one.
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentInfo, EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(
+        EnvironmentInfo(
+            agent_id="a2c", container_id="c-unknown", container_name="agent-a2c", status="stopped"
+        )
+    )
+
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=None),
+    ):
+        assert t_acts.check_existing_environment_activity("a2c") is True
 
 
 def test_check_existing_environment_activity_true_when_ready(tmp_path: Path) -> None:
@@ -1384,15 +1455,19 @@ def test_check_existing_environment_activity_true_when_ready(tmp_path: Path) -> 
     """
     from agent_provisioning_team.shared.environment_store import EnvironmentInfo, EnvironmentStore
     from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
 
     env_store = EnvironmentStore(storage_dir=tmp_path)
     env_store.register(
         EnvironmentInfo(agent_id="a3", container_id="c3", container_name="agent-a3", status="ready")
     )
 
-    with patch(
-        "agent_provisioning_team.shared.environment_store.EnvironmentStore",
-        return_value=env_store,
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=True),
     ):
         assert t_acts.check_existing_environment_activity("a3") is True
 

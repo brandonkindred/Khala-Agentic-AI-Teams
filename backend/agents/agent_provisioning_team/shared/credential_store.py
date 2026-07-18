@@ -447,10 +447,16 @@ class CredentialStore:
               generated-but-now-stale secret (its account was just rolled
               back) without discarding the agent's other, still-valid tools'
               credentials the way ``delete_credentials`` would.
+            * When the read source was a LEGACY path (not the primary), that
+              legacy file is unlinked after the primary write succeeds —
+              mirroring ``remove``'s write-forward migration below. Otherwise
+              the purged secret would still sit in the legacy copy and could
+              resurface if the primary file is later removed or becomes
+              unreadable, since reads fall back to legacy candidates.
         """
         assert agent_id, "agent_id must be non-empty"
         assert tool_name, "tool_name must be non-empty"
-        existing, _src = self._read_agent_credentials(agent_id)
+        existing, src = self._read_agent_credentials(agent_id)
         if not existing or tool_name not in existing:
             return False
         del existing[tool_name]
@@ -458,6 +464,8 @@ class CredentialStore:
         encrypted = self.multifernet.encrypt(json.dumps(existing).encode())
         path.write_bytes(encrypted)
         path.chmod(0o600)
+        if src is not None and src != path and src.exists():
+            src.unlink()
         return True
 
     def list_agents(self) -> List[str]:

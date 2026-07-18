@@ -406,7 +406,26 @@ class AgentProvisioningWorkflow:
               own creation regardless of ``tear_down_environment``).
         Postconditions:
             * Invokes ``compensate_activity`` once for the partial success set.
+            * When ``tear_down_environment`` is ``True`` (no environment
+              predates this run — see ``pre_existing_environment``), every
+              entry's ``reused`` is forced ``False`` before sending: a tool's
+              own ``reused=True`` there cannot mean "predates this run" (there
+              was nothing at ``agent_id`` for it to predate) — it can only be
+              an artifact of Temporal retrying THIS run's own
+              ``provision_tool_activity`` after its response was lost (the
+              retry's idempotent create then reads back the first attempt's
+              own successful write as "existing"). Left uncorrected, treating
+              that as pre-existing would skip rolling it back and leak it.
+              When ``tear_down_environment`` is ``False``, a genuine
+              pre-existing environment means ``reused`` entries really can
+              predate this run (e.g. a re-run against an already-delivered
+              agent), so it is passed through unmodified there — the residual
+              ambiguity between "predates this run" and "this run's own
+              retry" in that case needs a stronger ownership signal than a
+              same-attempt idempotency read can provide, tracked in #1489.
         """
+        if tear_down_environment:
+            succeeded = [{**s, "reused": False} for s in succeeded]
         await workflow.execute_activity(
             _activities.compensate_activity,
             args=[agent_id, succeeded, job_id, tear_down_environment],
@@ -806,6 +825,20 @@ class AgentProvisioningWorkflow:
             # compensating here, keyed on agent_id alone like every teardown
             # path, would recreate the exact cross-job teardown race this lock
             # exists to prevent.
+            # BUT lock_acquired is also False — with no exception raised — for
+            # a pre-lock-deploy replay (_acquire_agent_lock's own no-op-return
+            # branch), which is NOT the same situation: such a history was
+            # recorded before the lock existed at all, back when this except
+            # block's only gate was progress flags (no lock concept to check),
+            # so it may already contain a recorded compensate_activity command
+            # that a lock_acquired-only guard would now omit — a command
+            # dropped from the replayed sequence is genuine nondeterminism.
+            # Re-checking the SAME patch marker _acquire_agent_lock already
+            # consulted internally (safe/idempotent to check again) tells the
+            # two apart: unpatched means this is that pre-lock replay, so fall
+            # back to the pre-lock guard shape (progress flags only) to
+            # reproduce its original sequence; patched means lock_acquired's
+            # value is meaningful (True=held it, False=acquire itself failed).
             # pre_existing_environment gates WHAT compensate tears down, not
             # whether it runs: holding the lock only rules out a CONCURRENT
             # workflow — it says nothing about whether THIS run is the one
@@ -819,9 +852,11 @@ class AgentProvisioningWorkflow:
             # predate this run when pre_existing_environment is True — are
             # excluded from teardown (see compensate_activity's
             # tear_down_environment parameter).
+            lock_safe_to_compensate = not workflow.patched(_PROVISIONING_LOCK_PATCH) or (
+                lock_acquired and not lock_lost
+            )
             if (
-                lock_acquired
-                and not lock_lost
+                lock_safe_to_compensate
                 and not account_provisioning_done
                 and not tools_phase_compensated
             ):
@@ -840,11 +875,13 @@ class AgentProvisioningWorkflow:
                         exc,
                     )
             elif not account_provisioning_done and not tools_phase_compensated:
-                # lock_acquired/lock_lost is the only remaining reason to land
+                # lock_safe_to_compensate is the only remaining reason to land
                 # here now: pre_existing_environment no longer disables
                 # compensation outright (it's threaded into the call as
                 # tear_down_environment instead), so the first branch's
-                # condition can only have failed on the lock.
+                # condition can only have failed on the lock (a genuine
+                # post-lock acquire failure or a lost renewal — never a
+                # pre-lock replay, which always takes the first branch).
                 workflow.logger.error(
                     "Skipped unfenced compensation for job=%s agent=%s: this run %s "
                     "the agent_id lock (a different job may now own its resources): %s",

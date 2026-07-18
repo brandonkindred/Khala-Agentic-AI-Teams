@@ -502,6 +502,68 @@ def test_merge_enriched_credentials_does_not_mutate_input() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compensate_failed_tools_clears_reused_when_tearing_down_environment() -> None:
+    """A tool marked reused must not be trusted when nothing predates this run.
+
+    ``reused=True`` on a tool result can also mean Temporal retried
+    ``provision_tool_activity`` after its response was lost — the retry's
+    idempotent create then reads back THIS run's own first-attempt write as
+    "existing". When ``tear_down_environment=True`` (no environment predates
+    this run, so there is nothing else ``reused`` could refer to), that
+    apparent reuse must be overridden to False before compensating, or it
+    would wrongly exclude the tool from rollback and leak it.
+    """
+    from agent_provisioning_team.temporal import workflows as wf
+
+    stub = _ExecActivityStub({"compensate_activity": None})
+    succeeded = [
+        {"tool_name": "postgresql", "provisioner_key": "postgres_provisioner", "reused": True},
+    ]
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        await wf.AgentProvisioningWorkflow()._compensate_failed_tools(
+            "agent-1", succeeded, "job-1", tear_down_environment=True
+        )
+
+    call = _call(stub, "compensate_activity")
+    assert call["args"] == [
+        "agent-1",
+        [{"tool_name": "postgresql", "provisioner_key": "postgres_provisioner", "reused": False}],
+        "job-1",
+        True,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compensate_failed_tools_preserves_reused_when_environment_predates_run() -> None:
+    """A tool marked reused is passed through unmodified when an environment does predate this run.
+
+    ``tear_down_environment=False`` means ``pre_existing_environment`` was
+    True — a reused account there really can predate this run (e.g. a re-run
+    against an already-delivered agent), so nothing overrides it here.
+    """
+    from agent_provisioning_team.temporal import workflows as wf
+
+    stub = _ExecActivityStub({"compensate_activity": None})
+    succeeded = [
+        {"tool_name": "postgresql", "provisioner_key": "postgres_provisioner", "reused": True},
+    ]
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        await wf.AgentProvisioningWorkflow()._compensate_failed_tools(
+            "agent-1", succeeded, "job-1", tear_down_environment=False
+        )
+
+    call = _call(stub, "compensate_activity")
+    assert call["args"] == [
+        "agent-1",
+        [{"tool_name": "postgresql", "provisioner_key": "postgres_provisioner", "reused": True}],
+        "job-1",
+        False,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_workflow_compensates_on_tool_failure(tmp_path) -> None:
     """When a tool fails, succeeded tools are compensated and the job is marked failed."""
     from agent_provisioning_team.temporal import workflows as wf
@@ -972,18 +1034,23 @@ async def test_workflow_skips_environment_teardown_when_environment_pre_existed(
 
 
 @pytest.mark.asyncio
-async def test_workflow_unpatched_replay_skips_compensation_on_setup_failure(
+async def test_workflow_unpatched_replay_still_compensates_on_setup_failure(
     tmp_path, monkeypatch
 ) -> None:
-    """A pre-lock-deploy replay must never compensate on a setup failure.
+    """A pre-lock-deploy replay must still compensate on a setup failure.
 
     ``_acquire_agent_lock`` returns False (a no-op) when replaying a history
-    from before the lock existed — this run never actually held agent_id's
-    lock, so compensating on a later failure could tear down whatever job is
-    running lock-free against the same agent_id (the exact race the lock was
-    introduced to prevent). This is a regression test for a bug where
-    lock_acquired was set True unconditionally after calling
-    _acquire_agent_lock, even on this no-op replay branch.
+    from before the lock existed — but before the lock existed at all, this
+    except block's only gate was the progress flags
+    (``account_provisioning_done`` / ``tools_phase_compensated``), so such a
+    history may already contain a recorded ``compensate_activity`` command
+    for a setup failure. Gating solely on ``lock_acquired`` would make that
+    decision False for EVERY pre-lock replay (a pre-lock no-op never sets it
+    True), silently dropping that recorded command — a regression test for
+    exactly that: the guard must fall back to the pre-lock shape (ignore the
+    lock check entirely) whenever this is a pre-lock replay specifically,
+    rather than conflating "never held the lock because this predates it"
+    with "never held the lock because acquiring it just failed".
     """
     from agent_provisioning_team.temporal import workflows as wf
 
@@ -992,6 +1059,7 @@ async def test_workflow_unpatched_replay_skips_compensation_on_setup_failure(
     stub = _ExecActivityStub(
         {
             "setup_activity": RuntimeError("setup boom"),
+            "compensate_activity": None,
             "mark_job_failed_activity": None,
         }
     )
@@ -1005,8 +1073,9 @@ async def test_workflow_unpatched_replay_skips_compensation_on_setup_failure(
 
     fn_names = [c["name"] for c in stub.calls]
     assert "acquire_agent_lock_activity" not in fn_names
-    assert "compensate_activity" not in fn_names
     assert "check_existing_environment_activity" not in fn_names
+    compensate_call = _call(stub, "compensate_activity")
+    assert compensate_call["args"] == ["agent-1", [], "job-1", False]
 
 
 @pytest.mark.asyncio

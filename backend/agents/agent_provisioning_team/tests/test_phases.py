@@ -859,6 +859,44 @@ def test_run_account_provisioning_success(tmp_path: Path) -> None:
     assert any(c[2] == "complete" for c in cb_calls)
 
 
+def test_run_account_provisioning_stamps_manifest_tool_name(tmp_path: Path) -> None:
+    """The manifest's tool alias overrides the provisioner's own tool_name.
+
+    A provisioner returns its own class-level tool_name (e.g. "postgresql"),
+    which can differ from the manifest's alias for it (e.g. "pg") — but
+    credentials are generated/stored under the MANIFEST name. Compensation's
+    credential purge looks the entry up by result.tool_name, so leaving the
+    provisioner's own name here would make it silently miss the credential
+    actually stored for this tool. Mirrors provision_tool_activity (the
+    Temporal path), which already does this override.
+    """
+    from agent_provisioning_team.phases.account_provisioning import run_account_provisioning
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolDefinition, ToolManifest
+
+    aliased = MagicMock()
+    aliased.provision.return_value = ToolProvisionResult(
+        tool_name="postgresql",
+        success=True,
+        provisioner_key="postgres_provisioner",
+        permissions=["read"],
+    )
+
+    manifest = ToolManifest(
+        tools=[ToolDefinition(name="pg", provisioner="postgres_provisioner", config={})]
+    )
+
+    result = run_account_provisioning(
+        agent_id="a1",
+        manifest=manifest,
+        credentials={"pg": GeneratedCredentials(tool_name="pg")},
+        provisioners={"postgres_provisioner": aliased},
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+    )
+
+    assert result.tool_results[0].tool_name == "pg"
+
+
 def test_deprovision_tools_all() -> None:
     from agent_provisioning_team.models import DeprovisionResult
     from agent_provisioning_team.phases.account_provisioning import deprovision_tools
