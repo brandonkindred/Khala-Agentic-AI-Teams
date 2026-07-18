@@ -335,6 +335,72 @@ def test_ad_hoc_sequential_calls_with_overlapping_timestamps_no_longer_corrupt()
     assert got_b == pytest.approx(expected_b)
 
 
+def test_shared_registry_does_not_blend_different_window_depths_for_one_symbol() -> None:
+    """Regression test for an eighth bug caught in code review: even *within*
+    one correctly-scoped ``registries`` dict (the ``_active_registries``
+    contextvar, simulating a strategy mid-``on_bar``), reading the same
+    symbol at two different window depths — e.g.
+    ``bollinger_bands(ctx.history(sym, 20))`` then
+    ``bollinger_bands(ctx.history(sym, 21))`` — used to blend both windows'
+    deque state into a wrong value. Root cause lives in ``streaming.py``'s
+    ``_advance_kind`` (out of scope to change): it checks ``id(bars[-2])``
+    against the cached fingerprint *before* checking timestamps, so an
+    ``id()`` match short-circuits the (correctly-disagreeing) timestamp
+    check entirely — and empirically, for two same-shaped ``_RegBar`` lists
+    built back-to-back, CPython's allocator reuses that address reliably,
+    not rarely (reproduced 100% across 2000 trials for this exact
+    depth-20-then-21 pair before the fix). ``_shared_registry`` now buckets
+    by ``len(reference)`` too, so the two depths never share a registry in
+    the first place — the second call must match a fully independent
+    computation over its own (longer) window, not a value blended with the
+    first call's shorter one."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    full_bars = _bars(30)  # one stable, growing stream — real per-bar timestamps
+
+    token = si._active_registries.set({})
+    try:
+        si.bollinger_bands(full_bars[-20:], period=15)  # warms a length-20 bucket
+        got = si.bollinger_bands(full_bars[-21:], period=15)[0]  # different depth, same bar
+    finally:
+        si._active_registries.reset(token)
+
+    expected = IndicatorRegistry().bollinger_bands(
+        full_bars[-21:], period=15, num_std=2.0, source="close", select="upper"
+    )
+    assert got == pytest.approx(expected)
+
+
+def test_shared_registry_still_caches_across_a_stable_window_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The length-bucketing fix above must not defeat the steady-state
+    caching this whole module exists for: a caller requesting the *same*
+    depth every call (the normal case once ``ctx.history(sym, n)`` warmup
+    completes) still shares one registry, constructed exactly once, across
+    many calls."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    constructed: list[object] = []
+    real_init = IndicatorRegistry.__init__
+
+    def _counting_init(self) -> None:
+        constructed.append(self)
+        real_init(self)
+
+    monkeypatch.setattr(IndicatorRegistry, "__init__", _counting_init)
+
+    full_bars = _bars(40)
+    token = si._active_registries.set({})
+    try:
+        for i in range(20, len(full_bars) + 1):
+            si.bollinger_bands(full_bars[i - 20 : i], period=15)  # constant depth: 20
+    finally:
+        si._active_registries.reset(token)
+
+    assert len(constructed) == 1
+
+
 # ---------------------------------------------------------------------------
 # Flat sandbox layout: the module imports the impl as ``_indicators_impl``
 # ---------------------------------------------------------------------------

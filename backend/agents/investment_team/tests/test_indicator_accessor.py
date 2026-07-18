@@ -208,7 +208,17 @@ def test_indicator_value_shares_one_registry_per_symbol(monkeypatch: pytest.Monk
     ``predicate_conformance.py``) — ``indicator_value`` has no caching of its
     own for a caller that omits ``registries`` entirely; see
     ``test_ad_hoc_sequential_calls_with_overlapping_timestamps_no_longer_corrupt``
-    in ``test_strategy_indicators.py`` for why that's deliberate."""
+    in ``test_strategy_indicators.py`` for why that's deliberate.
+
+    Reads a fixed-size sliding window each call (matching ``StrategyContext``
+    ``_ingest_bar``'s bounded retention window, not an ever-growing prefix):
+    the registry cache is also keyed by window length (see
+    ``test_shared_registry_does_not_blend_different_window_depths_for_one_
+    symbol`` in ``test_strategy_indicators.py``), so a history that never
+    stopped growing would never actually settle on one registry either, in
+    production or here — ``ctx.indicator()``'s own ``history`` argument
+    always caps at ``STREAMING_WINDOW_BARS`` for exactly this reason.
+    """
     from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
 
     constructed: list[object] = []
@@ -222,9 +232,11 @@ def test_indicator_value_shares_one_registry_per_symbol(monkeypatch: pytest.Monk
 
     registries: dict = {}
     bars = _make_bars(n=40, symbol="QQQ")
-    for i in range(20, len(bars) + 1):
-        indicator_value("sma", bars[:i], period=10, registries=registries)
-        indicator_value("macd", bars[:i], registries=registries)
+    window = 20
+    for i in range(window, len(bars) + 1):
+        recent = bars[i - window : i]
+        indicator_value("sma", recent, period=10, registries=registries)
+        indicator_value("macd", recent, registries=registries)
 
     assert len(constructed) == 1
 
@@ -235,7 +247,8 @@ def test_indicator_value_registry_count_scales_with_distinct_symbols(
     """'Once per backtest' means once per symbol-stream within a backtest, not
     a single flat instance: a multi-symbol backtest constructs one registry
     per symbol it actually reads — still far below one-per-call, but not a
-    literal singleton either. Passes an explicit ``registries`` dict — see
+    literal singleton either. Passes an explicit ``registries`` dict and a
+    fixed-size sliding window — see
     ``test_indicator_value_shares_one_registry_per_symbol`` above."""
     from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
 
@@ -251,9 +264,10 @@ def test_indicator_value_registry_count_scales_with_distinct_symbols(
     registries: dict = {}
     aaa = _make_bars(n=30, symbol="AAA")
     bbb = _make_bars(n=30, symbol="BBB")
-    for i in range(20, 31):
-        indicator_value("sma", aaa[:i], period=10, registries=registries)
-        indicator_value("sma", bbb[:i], period=10, registries=registries)
+    window = 20
+    for i in range(window, 31):
+        indicator_value("sma", aaa[i - window : i], period=10, registries=registries)
+        indicator_value("sma", bbb[i - window : i], period=10, registries=registries)
 
     assert len(constructed) == 2
 

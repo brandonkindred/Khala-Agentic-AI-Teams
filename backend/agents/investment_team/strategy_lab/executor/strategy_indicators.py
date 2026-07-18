@@ -155,6 +155,30 @@ def _shared_registry(
     wrapper functions have no ``source`` concept (they always read whatever
     field the caller passed as "the" series) and all share the default.
 
+    ``len(reference)`` is *also* part of the bucket key, even within one
+    correctly-scoped ``registries`` dict (an execution's own, or the current
+    ``_active_registries``). A caller reading the same symbol at two
+    different window depths — e.g. ``bollinger_bands(ctx.history(sym, 20))``
+    then ``bollinger_bands(ctx.history(sym, 50))`` for the same bar — passes
+    genuinely different-length bar sequences that would otherwise share one
+    registry under plain ``(symbol, source)``. ``IndicatorRegistry``'s own
+    ``_advance_kind`` checks ``id(bars[-2])`` against its cached fingerprint
+    *before* checking timestamps (an ``elif``, not a joint condition) and
+    treats an ``id()`` match alone as sufficient proof of "same bar" even
+    when the timestamps, had they been checked, would have correctly
+    disagreed — and empirically, for two same-shaped ``_RegBar`` lists built
+    back-to-back with no other same-size allocation between them, CPython's
+    allocator reuses that address far more often than not (reproduced 100%
+    across 2000 trials for a `bollinger_bands` depth-20-then-21 pair, not a
+    rare coincidence). Splitting the bucket by length sidesteps that
+    ``IndicatorRegistry``-internal behavior entirely — out of scope to
+    change directly — rather than trying to out-guess it. The cost is
+    bounded and one-time: during warm-up, a caller whose depth grows every
+    bar (fewer than ``n`` bars retained yet) gets one extra registry per
+    distinct length seen, same as any other cold-start; once the depth
+    stabilizes, every call hits the same key and the full caching benefit
+    applies exactly as before.
+
     ``registries`` is the dict this call reads/writes into: pass the owning
     execution context's own dict (``StrategyContext``/``_ShadowContext`` each
     hold one, see ``contract.py``/``predicate_conformance.py``) so that
@@ -212,11 +236,11 @@ def _shared_registry(
         both a non-``None`` ``timestamp`` and a non-``None`` ``symbol``,
         AND ``registries`` (or, if ``None``, the current
         ``_active_registries``) resolves to a dict, constructs and caches one
-        per ``(symbol, source)`` in that dict the first time it's seen and
-        returns that same instance on every subsequent call for that key
-        against that same dict; otherwise (missing timestamp/symbol, or no
-        dict available at all) returns a fresh, never-cached instance. Never
-        mutates ``reference``.
+        per ``(symbol, source, len(reference))`` in that dict the first time
+        it's seen and returns that same instance on every subsequent call for
+        that key against that same dict; otherwise (missing timestamp/symbol,
+        or no dict available at all) returns a fresh, never-cached instance.
+        Never mutates ``reference``.
     """
     last = _trailing_element(reference)
     if last is None:
@@ -238,7 +262,7 @@ def _shared_registry(
         registries = _active_registries.get()
     if registries is None:
         return IndicatorRegistry()
-    key = (symbol, source)
+    key = (symbol, source, len(reference))
     reg = registries.get(key)
     if reg is None:
         reg = IndicatorRegistry()
