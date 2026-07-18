@@ -1,5 +1,6 @@
-import { TestBed } from '@angular/core/testing';
-import { of, NEVER } from 'rxjs';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
+import { of, NEVER, Subject } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
@@ -8,9 +9,12 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
+import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { StrategyLabComponent } from './strategy-lab.component';
 import type {
   StrategyLabRecord,
+  StrategyLabRunStatus,
+  StrategyLabStreamEvent,
   StrategySpec,
   TradeRecord,
   PaperTradingSession,
@@ -18,6 +22,35 @@ import type {
   QualityGateResult,
 } from '../../models';
 import { expectNoAxeViolations } from '../../testing/a11y';
+
+/**
+ * A `StrategyLabRunService` test double: real signals so components read
+ * them exactly as they would the live service; tests drive state directly
+ * via `.set()`. See `strategy-lab.component.spec.ts` for the same pattern.
+ */
+function createRunServiceStub() {
+  return {
+    runStatus: signal<StrategyLabRunStatus | null>(null),
+    running: signal(false),
+    activeRunId: signal<string | null>(null),
+    paperTradingSessions: signal<Record<string, PaperTradingSession>>({}),
+    paperTradingLabRecordId: signal<string | null>(null),
+    events$: new Subject<StrategyLabStreamEvent>(),
+    errors$: new Subject<string>(),
+    checkForActiveRun: vi.fn(),
+    startRun: vi.fn(),
+    clearPaperTradingSessions: vi.fn(),
+    hydratePaperTradingSessions: vi.fn(),
+    trackPaperTradingSession: vi.fn(),
+  };
+}
+
+type RunServiceStub = ReturnType<typeof createRunServiceStub>;
+
+/** The `StrategyLabRunService` stub a fixture's component was constructed with — see `createRunServiceStub`. */
+function stubOf(fixture: ComponentFixture<StrategyLabComponent>): RunServiceStub {
+  return fixture.componentInstance.runService as unknown as RunServiceStub;
+}
 
 const STRATEGY: StrategySpec = {
   strategy_id: 'strat-1',
@@ -108,7 +141,11 @@ describe('StrategyLabComponent a11y — result card disclosure', () => {
         { provide: InvestmentApiService, useValue: apiSpy },
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
-    }).compileComponents();
+    })
+      .overrideComponent(StrategyLabComponent, {
+        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }] },
+      })
+      .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
     fixture.detectChanges(); // triggers ngOnInit -> loadResults() -> renders the card
@@ -198,6 +235,7 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
     sharpe_aligned: true,
     drawdown_aligned: true,
     profit_factor_aligned: true,
+    overall_aligned: true,
   };
 
   const PAPER_SESSION: PaperTradingSession = {
@@ -245,7 +283,11 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
         { provide: InvestmentApiService, useValue: apiSpy },
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
-    }).compileComponents();
+    })
+      .overrideComponent(StrategyLabComponent, {
+        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }] },
+      })
+      .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
     fixture.detectChanges(); // triggers ngOnInit -> loadResults() -> renders the card
@@ -273,8 +315,8 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
 
   it('activity-log: focusable, named, no axe violations while a run is active', async () => {
     const fixture = await createFixture(RECORD);
-    fixture.componentInstance.running = true;
-    fixture.componentInstance.runStatus = {
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
       run_id: 'run-1',
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
@@ -283,10 +325,10 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
       skipped_cycles: 0,
       completed_record_ids: [],
       current_cycle: { cycle_index: 0, phase: 'backtesting' },
-    };
-    fixture.componentInstance.activityLog = [
+    });
+    fixture.componentInstance.activityLog.set([
       { time: '10:00:00', status: 'active', message: 'Executing strategy backtest...' },
-    ];
+    ]);
     fixture.detectChanges();
 
     const log: HTMLElement = fixture.nativeElement.querySelector('.activity-log');
@@ -308,7 +350,7 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
 
   it('comparison-table-wrap: focusable, named, no axe violations (independent of card expansion)', async () => {
     const fixture = await createFixture(RECORD);
-    fixture.componentInstance.paperTradingSessions = { 'rec-1': PAPER_SESSION };
+    stubOf(fixture).paperTradingSessions.set({ 'rec-1': PAPER_SESSION });
     fixture.detectChanges();
 
     const wrap: HTMLElement = fixture.nativeElement.querySelector('.comparison-table-wrap');
@@ -414,6 +456,7 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
     sharpe_aligned: true,
     drawdown_aligned: true,
     profit_factor_aligned: true,
+    overall_aligned: true,
   };
 
   const PAPER_SESSION: PaperTradingSession = {
@@ -463,7 +506,11 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
         { provide: InvestmentApiService, useValue: apiSpy },
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
-    }).compileComponents();
+    })
+      .overrideComponent(StrategyLabComponent, {
+        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }] },
+      })
+      .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
     fixture.detectChanges(); // triggers ngOnInit -> loadResults() -> renders the card
@@ -511,8 +558,8 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
 
   it('in-progress run icons, including the phase-stepper node icon, are aria-hidden', async () => {
     const fixture = await createFixture();
-    fixture.componentInstance.running = true;
-    fixture.componentInstance.runStatus = {
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
       run_id: 'run-1',
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
@@ -521,11 +568,11 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
       skipped_cycles: 0,
       completed_record_ids: [],
       current_cycle: { cycle_index: 0, phase: 'backtesting' },
-    };
-    fixture.componentInstance.activityLog = [
+    });
+    fixture.componentInstance.activityLog.set([
       { time: '10:00:00', status: 'done', message: 'Market data loaded.' },
       { time: '10:00:05', status: 'error', message: 'Backtest sandbox failed.' },
-    ];
+    ]);
     fixture.detectChanges();
 
     const pulseIcon: HTMLElement = fixture.nativeElement.querySelector('.pulse-icon');
@@ -590,9 +637,34 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
+  it('gate-result rows keep stable DOM node identity across a re-render with unchanged data', async () => {
+    const fixture = await createFixture(RECORD_WITH_GATES, {
+      items: [RECORD_WITH_GATES], count: 1, winning_count: 0, losing_count: 1,
+    });
+    fixture.componentInstance.toggleCard('rec-1');
+    fixture.detectChanges();
+    const headers: HTMLElement[] = Array.from(
+      fixture.nativeElement.querySelectorAll('mat-expansion-panel-header'),
+    );
+    headers.find((h) => h.textContent?.includes('Quality Gates'))!.click();
+    fixture.detectChanges();
+
+    const before: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.gate-result'));
+    expect(before).toHaveLength(2);
+
+    // An unrelated change-detection pass — gateViewModels(record) is called
+    // again by the @for expression, but for the same record it must return
+    // the same memoized array/objects, so @for reuses these exact DOM nodes
+    // instead of tearing down and recreating them.
+    fixture.detectChanges();
+
+    const after: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.gate-result'));
+    expect(after).toEqual(before);
+  }, 15000);
+
   it('paper-trading verdict icon and comparison-table aligned icon are aria-hidden', async () => {
     const fixture = await createFixture();
-    fixture.componentInstance.paperTradingSessions = { 'rec-1': PAPER_SESSION };
+    stubOf(fixture).paperTradingSessions.set({ 'rec-1': PAPER_SESSION });
     fixture.detectChanges();
 
     const verdictIcon: HTMLElement = fixture.nativeElement.querySelector('.paper-verdict-badge mat-icon');
