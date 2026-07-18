@@ -23,9 +23,10 @@ from strands import Agent
 
 from ...models import BacktestExecutionDiagnostics, CoverageReport, StrategySpec, ZeroTradeCategory
 from ..coverage_probe import format_coverage_report
-from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import StrategySpecParseError, extract_json_object, validate_structured_rules
+from ._prompt_context import render_prior_attempts, spec_prompt_fields
+from ._response_schemas import ZERO_TRADE_REPAIR_SCHEMA
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,10 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 # Loaded once at import — the system prompt is static, so re-reading it from disk
 # on every zero-trade repair is wasted I/O.
 _SYSTEM_PROMPT = (_PROMPT_DIR / "zero_trade_repair_system.md").read_text(encoding="utf-8")
+
+# The JSON Schema the LLM response must conform to, rendered once for
+# injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).
+_ZERO_TRADE_REPAIR_SCHEMA_JSON = json.dumps(ZERO_TRADE_REPAIR_SCHEMA, indent=2)
 
 # Spec keys the orchestrator will honour from a ZeroTradeRepairReport's
 # ``proposed_spec_updates``. Anything else is silently dropped — the
@@ -123,6 +128,12 @@ Summary: {summary}
 4. Predict the change in order and trade count your fix should produce.
 
 Return ONLY a JSON object with no markdown.
+
+Your response MUST conform to this JSON Schema:
+
+```json
+{response_schema_json}
+```
 """
 
 
@@ -171,23 +182,13 @@ class ZeroTradeRepairAgent:
 
         system_prompt = _SYSTEM_PROMPT
 
-        prior_text = (
-            "None yet."
-            if not prior_attempts
-            else "\n".join(f"  Round {i + 1}: {a}" for i, a in enumerate(prior_attempts))
-        )
+        prior_text = render_prior_attempts(prior_attempts)
 
         coverage_rendered = format_coverage_report(coverage_report)
         coverage_section = f"\n{coverage_rendered}" if coverage_rendered else ""
 
         user_prompt = _ZERO_TRADE_USER_TEMPLATE.format(
-            asset_class=spec.asset_class,
-            hypothesis=spec.hypothesis,
-            signal_definition=spec.signal_definition,
-            entry_rules=format_rules_for_prompt(spec.entry_rules),
-            exit_rules=format_rules_for_prompt(spec.exit_rules),
-            sizing_rules=format_sizing_rule(spec.sizing),
-            risk_limits=spec.risk_limits.model_dump_json(),
+            **spec_prompt_fields(spec),
             strategy_code=code,
             zero_trade_category=diagnostics.zero_trade_category,
             summary=diagnostics.summary or "(no executor summary)",
@@ -195,6 +196,7 @@ class ZeroTradeRepairAgent:
             coverage_block=coverage_section,
             n_prior_attempts=len(prior_attempts) if prior_attempts else 0,
             prior_attempts_text=prior_text,
+            response_schema_json=_ZERO_TRADE_REPAIR_SCHEMA_JSON,
         )
 
         agent = Agent(

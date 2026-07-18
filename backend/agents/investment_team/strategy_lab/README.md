@@ -269,7 +269,9 @@ raises `ValueError` and the spec-authoring agents re-prompt the model instead of
 guess of half-written code. The **Bedrock** path is unchanged (native `BedrockModel`).
 
 The JSON *shape* contract on the Ollama path is enforced by `json_object` wire mode plus pydantic
-validation downstream (and, for `RefinementAgent`, a schema embedded verbatim in its prompt). This
+validation downstream, and each of the five spec-authoring/reviewing agents (design, design-review,
+refinement, zero-trade repair, alignment fix-proposer) embeds its schema verbatim in its user prompt.
+This
 replaced the strands-native decoder-level `format=<schema>` constraint — which, paired with thinking
 on long generations, was itself a contributor to the empty-response failure this routing fixes. The
 former `STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED` toggle and the per-call `response_schema=` argument
