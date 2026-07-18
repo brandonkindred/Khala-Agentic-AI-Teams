@@ -17,7 +17,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from strands import Agent
 
 from llm_service import LLMClient
-from software_engineering_team.shared.agent_review import run_qa_agent, run_security_agent
+from software_engineering_team.shared.agent_review import (
+    AgentReviewCache,
+    run_qa_agent,
+    run_security_agent,
+)
 from software_engineering_team.shared.llm_review import LlmReviewOutput, run_team_llm_review
 from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.review_utils import (
@@ -109,6 +113,7 @@ def _run_qa_agent(
     task_description: str,
     task_id: str,
     context: str = "",
+    cache: Optional[AgentReviewCache] = None,
 ) -> List[ReviewIssue]:
     """Run the external QA agent over each file's raw, function-aware-split source.
 
@@ -117,6 +122,7 @@ def _run_qa_agent(
 
     Preconditions:
         - ``qa_agent`` is not None and exposes ``.run(QAInput) -> QAOutput``.
+        - ``cache``: see ``software_engineering_team.shared.agent_review``.
 
     Postconditions: see ``software_engineering_team.shared.agent_review``; QA bugs
     become ``ReviewIssue``s with ``source="qa"``.
@@ -131,6 +137,7 @@ def _run_qa_agent(
         max_chars=MAX_REVIEW_CODE_CHARS,
         warn_threshold=MANY_CHUNKS_WARN_THRESHOLD,
         context=context,
+        cache=cache,
     )
 
 
@@ -142,6 +149,7 @@ def _run_security_agent(
     task_description: str,
     task_id: str,
     context: str = "",
+    cache: Optional[AgentReviewCache] = None,
 ) -> List[ReviewIssue]:
     """Run the external security agent over each file's raw, function-aware-split source.
 
@@ -151,6 +159,7 @@ def _run_security_agent(
     Preconditions:
         - ``security_agent`` is not None and exposes
           ``.run(SecurityInput) -> SecurityOutput``.
+        - ``cache``: see ``software_engineering_team.shared.agent_review``.
 
     Postconditions: see ``software_engineering_team.shared.agent_review``;
     vulnerabilities become ``ReviewIssue``s with ``source="security"``.
@@ -165,6 +174,7 @@ def _run_security_agent(
         max_chars=MAX_REVIEW_CODE_CHARS,
         warn_threshold=MANY_CHUNKS_WARN_THRESHOLD,
         context=context,
+        cache=cache,
     )
 
 
@@ -436,11 +446,13 @@ def _run_agent_testing_phase(
     repo_path: Optional[Path],
     detail_callback: Optional[Callable[[str], None]],
     language: str,
+    cache: Optional[AgentReviewCache] = None,
 ) -> PhaseReviewResult:
     """Shared QA/security testing-phase body parameterised by ``spec``.
 
     Preconditions: when ``review_agent`` is not None, ``agent_runner`` runs it
-    over ``files`` and returns ``ReviewIssue``s.
+    over ``files`` and returns ``ReviewIssue``s. ``cache``: see
+    ``software_engineering_team.shared.agent_review``.
     Postconditions: returns a :class:`PhaseReviewResult` that fails on any
     critical/high issue, including a synthesised "gate skipped" issue when
     neither ``review_agent`` nor the spec's tool agent is available. An
@@ -471,6 +483,7 @@ def _run_agent_testing_phase(
                     task_description=f"Microtask: {microtask.description or microtask.title}",
                     task_id=task_id,
                     context=f" for microtask {microtask_id}",
+                    cache=cache,
                 )
             )
         except Exception as exc:
@@ -597,12 +610,14 @@ def run_qa_testing_phase(
     repo_path: Optional[Path] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     language: str = "python",
+    cache: Optional[AgentReviewCache] = None,
 ) -> PhaseReviewResult:
     """
     Run QA testing phase: bug detection, test coverage, quality assurance.
 
     This phase runs after code review passes, focusing on finding bugs
-    and ensuring test coverage.
+    and ensuring test coverage. ``cache``: see
+    ``software_engineering_team.shared.agent_review``.
     """
     return _run_agent_testing_phase(
         spec=_QA_TESTING_PHASE_SPEC,
@@ -615,6 +630,7 @@ def run_qa_testing_phase(
         repo_path=repo_path,
         detail_callback=detail_callback,
         language=language,
+        cache=cache,
     )
 
 
@@ -628,12 +644,14 @@ def run_security_testing_phase(
     repo_path: Optional[Path] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     language: str = "python",
+    cache: Optional[AgentReviewCache] = None,
 ) -> PhaseReviewResult:
     """
     Run security testing phase: vulnerability scanning, security best practices.
 
     This phase runs after QA testing passes, focusing on identifying
-    security vulnerabilities and ensuring secure coding practices.
+    security vulnerabilities and ensuring secure coding practices. ``cache``:
+    see ``software_engineering_team.shared.agent_review``.
     """
     return _run_agent_testing_phase(
         spec=_SECURITY_TESTING_PHASE_SPEC,
@@ -646,6 +664,7 @@ def run_security_testing_phase(
         repo_path=repo_path,
         detail_callback=detail_callback,
         language=language,
+        cache=cache,
     )
 
 

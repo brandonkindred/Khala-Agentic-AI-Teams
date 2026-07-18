@@ -98,8 +98,8 @@ def _noop_runners() -> Dict[str, Any]:
     """Stub runners that return no issues and never touch an LLM/agent."""
     return {
         "llm_review_fn": lambda *, llm, task, files, **kw: [],
-        "qa_agent_fn": lambda *, qa_agent, files, language, task_description, task_id, context="": [],
-        "security_agent_fn": lambda *, security_agent, files, language, task_description, task_id, context="": [],
+        "qa_agent_fn": lambda *, qa_agent, files, language, task_description, task_id, context="", cache=None: [],
+        "security_agent_fn": lambda *, security_agent, files, language, task_description, task_id, context="", cache=None: [],
         "build_verify_fn": _build_verify_fn,
     }
 
@@ -599,10 +599,10 @@ def test_microtask_qa_and_security_with_detail_callback(tmp_path: Path) -> None:
         detail_callback=details.append,
         language="python",
         llm_review_fn=lambda *, llm, task, files, **kw: [],
-        qa_agent_fn=lambda *, qa_agent, files, language, task_description, task_id, context="": [
+        qa_agent_fn=lambda *, qa_agent, files, language, task_description, task_id, context="", cache=None: [
             ReviewIssue(source="qa", severity="low", description="bug")
         ],
-        security_agent_fn=lambda *, security_agent, files, language, task_description, task_id, context="": [
+        security_agent_fn=lambda *, security_agent, files, language, task_description, task_id, context="", cache=None: [
             ReviewIssue(source="security", severity="low", description="vuln")
         ],
         build_verify_fn=_build_verify_fn,
@@ -611,6 +611,43 @@ def test_microtask_qa_and_security_with_detail_callback(tmp_path: Path) -> None:
     assert "Running security scan..." in details
     assert any(i.source == "qa" for i in result.issues)
     assert any(i.source == "security" for i in result.issues)
+
+
+def test_microtask_qa_and_security_hooks_without_cache_param_still_work(tmp_path: Path) -> None:
+    """A qa_agent_fn/security_agent_fn predating the cache parameter (no
+    ``cache`` in its signature, no ``**kwargs`` catch-all) must still work
+    when the caller doesn't opt into caching (agent_review_cache omitted,
+    defaulting to None) -- the cache kwarg must not be forced on every call."""
+    config = _build_config()
+
+    def _old_style_qa(*, qa_agent, files, language, task_description, task_id, context=""):
+        return [ReviewIssue(source="qa", severity="low", description="bug")]
+
+    def _old_style_security(
+        *, security_agent, files, language, task_description, task_id, context=""
+    ):
+        return [ReviewIssue(source="security", severity="low", description="vuln")]
+
+    result = run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        qa_agent=MagicMock(),
+        security_agent=MagicMock(),
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
+        qa_agent_fn=_old_style_qa,
+        security_agent_fn=_old_style_security,
+        build_verify_fn=_build_verify_fn,
+    )
+    # A TypeError from the forced cache= kwarg would be swallowed and turned
+    # into a synthetic "agent failed" issue instead -- assert the real
+    # findings came through, not that.
+    assert any(i.description == "bug" for i in result.issues)
+    assert any(i.description == "vuln" for i in result.issues)
 
 
 def test_microtask_tool_agents_no_context_variant(tmp_path: Path) -> None:

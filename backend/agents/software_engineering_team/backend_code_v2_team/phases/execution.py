@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional
 from strands import Agent
 
 from llm_service import LLMClient
+from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.phases.execution import (
     GatedExecutionConfig,
@@ -187,6 +188,7 @@ def _qa_gate(
     files: Dict[str, str],
     deps: ReviewDependencies,
     detail_callback: Callable[[str], None],
+    cache: Optional[AgentReviewCache] = None,
 ) -> GateOutcome:
     """Run the backend QA-testing phase."""
     from .review import run_qa_testing_phase
@@ -199,6 +201,7 @@ def _qa_gate(
         tool_agents=deps.tool_agents,
         repo_path=repo_path,
         detail_callback=detail_callback,
+        cache=cache,
     )
     return GateOutcome(passed=r.passed, issues=r.issues, summary=r.summary)
 
@@ -212,6 +215,7 @@ def _security_gate(
     files: Dict[str, str],
     deps: ReviewDependencies,
     detail_callback: Callable[[str], None],
+    cache: Optional[AgentReviewCache] = None,
 ) -> GateOutcome:
     """Run the backend security-testing phase."""
     from .review import run_security_testing_phase
@@ -224,6 +228,7 @@ def _security_gate(
         tool_agents=deps.tool_agents,
         repo_path=repo_path,
         detail_callback=detail_callback,
+        cache=cache,
     )
     return GateOutcome(passed=r.passed, issues=r.issues, summary=r.summary)
 

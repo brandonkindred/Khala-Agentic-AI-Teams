@@ -53,11 +53,11 @@ audit).
 ### STRATEGY_LAB_ALIGNMENT_ADJUDICATION_CONCURRENCY
 Max number of near-miss LLM adjudications the `DeterministicAlignmentChecker` runs concurrently per
 `check()` (default `4`; sub-1 floors to `1` = fully serial).
-Near-miss candidates are collected during the trade loop and dispatched through a bounded
-`ThreadPoolExecutor` (the adjudicator is synchronous) instead of blocking the loop one trade at a
-time; verdicts are slotted back in trade order so the output is identical to the serial path
-regardless of completion timing. Trades cloud concurrency for wall time without changing the gate's
-result.
+Near-miss candidates are collected during the trade loop and dispatched through
+`shared_concurrency.parallel_map` (the adjudicator is synchronous) instead of blocking the loop one
+trade at a time; verdicts are slotted back in trade order so the output is identical to the serial
+path regardless of completion timing. Trades cloud concurrency for wall time without changing the
+gate's result.
 
 ### STRATEGY_LAB_LLM_TIMEOUT
 Per-call wall-clock timeout (seconds) for every Strategy Lab LLM call routed through the shared

@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from llm_service import LLMClient
+from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.llm_review import LlmReviewOutput
 from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.review_progress import (
@@ -368,31 +369,44 @@ def _qa_review_step(
     task_id: str,
     qa_agent_fn: Callable[..., List[ReviewIssue]],
     context: str = "",
+    cache: Optional[AgentReviewCache] = None,
 ) -> _ReviewStepResult:
     """Independent QA step.
 
     Preconditions: ``qa_agent_fn`` is the per-team QA runner (the test patch
-        surface for ``_run_qa_agent``).
+        surface for ``_run_qa_agent``) — it need not accept a ``cache``
+        keyword unless a caller actually supplies one (see Postconditions).
+        ``cache``: see
+        ``software_engineering_team.shared.agent_review.run_chunked_agent_review``.
     Postconditions:
         - Returns an empty :class:`_ReviewStepResult` when ``qa_agent`` is None.
           Otherwise never raises: an outright QA-agent failure is reported as a
           synthetic high-severity issue rather than propagating — a bare exception
           here would previously have aborted the whole review; fanning this step
           out concurrently with code review/security must not make that worse.
+        - ``cache`` is forwarded to ``qa_agent_fn`` only when not None, so a
+          ``qa_agent_fn`` predating this parameter keeps working unchanged for
+          callers that don't opt into caching.
     """
     if qa_agent is None:
         return _ReviewStepResult(issues=[])
     try:
-        return _ReviewStepResult(
-            issues=qa_agent_fn(
-                qa_agent=qa_agent,
-                files=files,
-                language=language,
-                task_description=task_description,
-                task_id=task_id,
-                context=context,
-            )
+        kwargs: Dict[str, Any] = dict(
+            qa_agent=qa_agent,
+            files=files,
+            language=language,
+            task_description=task_description,
+            task_id=task_id,
+            context=context,
         )
+        # Only pass ``cache`` when it's actually in use: an injected
+        # ``qa_agent_fn`` predating this parameter (e.g. a test's patch
+        # surface) has no ``cache`` in its signature and no ``**kwargs``
+        # catch-all, so an unconditional ``cache=None`` would still raise
+        # TypeError on every call, not just when caching is requested.
+        if cache is not None:
+            kwargs["cache"] = cache
+        return _ReviewStepResult(issues=qa_agent_fn(**kwargs))
     except Exception as exc:
         logger.warning("[%s] QA agent step failed outright: %s", task_id, exc)
         return _ReviewStepResult(
@@ -416,30 +430,41 @@ def _security_review_step(
     task_id: str,
     security_agent_fn: Callable[..., List[ReviewIssue]],
     context: str = "",
+    cache: Optional[AgentReviewCache] = None,
 ) -> _ReviewStepResult:
     """Independent security step.
 
     Preconditions: ``security_agent_fn`` is the per-team security runner (the
-        test patch surface for ``_run_security_agent``).
+        test patch surface for ``_run_security_agent``) — it need not accept a
+        ``cache`` keyword unless a caller actually supplies one (see
+        Postconditions). ``cache``: see
+        ``software_engineering_team.shared.agent_review.run_chunked_agent_review``.
     Postconditions:
         - Returns an empty :class:`_ReviewStepResult` when ``security_agent`` is None.
           Otherwise never raises: an outright security-agent failure is reported as
           a synthetic critical-severity issue rather than propagating (see
           ``_qa_review_step`` for the identical rationale).
+        - ``cache`` is forwarded to ``security_agent_fn`` only when not None,
+          mirroring ``_qa_review_step``'s identical backward-compatibility
+          rationale.
     """
     if security_agent is None:
         return _ReviewStepResult(issues=[])
     try:
-        return _ReviewStepResult(
-            issues=security_agent_fn(
-                security_agent=security_agent,
-                files=files,
-                language=language,
-                task_description=task_description,
-                task_id=task_id,
-                context=context,
-            )
+        kwargs: Dict[str, Any] = dict(
+            security_agent=security_agent,
+            files=files,
+            language=language,
+            task_description=task_description,
+            task_id=task_id,
+            context=context,
         )
+        # See _qa_review_step's identical rationale: only pass ``cache`` when
+        # it's actually in use, so an injected ``security_agent_fn`` predating
+        # this parameter isn't broken by an unconditional ``cache=None``.
+        if cache is not None:
+            kwargs["cache"] = cache
+        return _ReviewStepResult(issues=security_agent_fn(**kwargs))
     except Exception as exc:
         logger.warning("[%s] Security agent step failed outright: %s", task_id, exc)
         return _ReviewStepResult(
@@ -479,10 +504,16 @@ def _run_review_steps(
         # concurrent branch (e.g. every DummyLLMClient-backed test).
         from shared_concurrency import parallel_map
 
-        results = parallel_map(step_fns, lambda fn: fn(), max_workers=len(step_fns), skip_none=False)
+        results = parallel_map(
+            step_fns, lambda fn: fn(), max_workers=len(step_fns), skip_none=False
+        )
     issues = [issue for step_result in results for issue in step_result.issues]
     raw_issue_count = next(
-        (step_result.raw_issue_count for step_result in results if step_result.raw_issue_count is not None),
+        (
+            step_result.raw_issue_count
+            for step_result in results
+            if step_result.raw_issue_count is not None
+        ),
         None,
     )
     return _ReviewStepResult(issues=issues, raw_issue_count=raw_issue_count)
@@ -738,6 +769,7 @@ def run_microtask_review(
     build_verify_fn: Callable[..., Tuple[bool, str]],
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
+    agent_review_cache: Optional[AgentReviewCache] = None,
 ) -> ReviewResult:
     """Run the shared full review on a single microtask's output files.
 
@@ -749,6 +781,9 @@ def run_microtask_review(
           unaffected.
         - ``enable_llm_review_grounding`` is forwarded to the LLM-fallback path
           (defaults True).
+        - ``agent_review_cache``, when given, is forwarded to the QA and security
+          steps only (not code review, which has its own cache) — see
+          ``software_engineering_team.shared.agent_review.run_chunked_agent_review``.
 
     Postconditions:
         - Returns a :class:`ReviewResult` scoped to ``files``; ``passed``
@@ -854,6 +889,7 @@ def run_microtask_review(
                 task_id=task_id,
                 qa_agent_fn=qa_agent_fn,
                 context=microtask_ctx,
+                cache=agent_review_cache,
             ),
             lambda: _security_review_step(
                 security_agent=security_agent,
@@ -863,6 +899,7 @@ def run_microtask_review(
                 task_id=task_id,
                 security_agent_fn=security_agent_fn,
                 context=microtask_ctx,
+                cache=agent_review_cache,
             ),
         ],
         llm=llm,

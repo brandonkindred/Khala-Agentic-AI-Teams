@@ -104,6 +104,38 @@
             <span>The personal access token has no repository access.</span>
           </div>
         } @else {
+          <div class="github-search-field">
+            <mat-form-field appearance="outline" class="github-search-field__input" subscriptSizing="dynamic">
+              <mat-label>Search repositories</mat-label>
+              <input
+                matInput
+                [(ngModel)]="repoSearch"
+                placeholder="Filter by name…"
+                aria-label="Search repositories"
+              />
+              <mat-icon matPrefix aria-hidden="true">search</mat-icon>
+              @if (repoSearch) {
+                <button
+                  matSuffix
+                  mat-icon-button
+                  type="button"
+                  (click)="clearRepoSearch()"
+                  aria-label="Clear repository search"
+                >
+                  <mat-icon aria-hidden="true">close</mat-icon>
+                </button>
+              }
+            </mat-form-field>
+          </div>
+          @if (hasFilteredOutRepos) {
+            <div class="github-empty">
+              <mat-icon>search_off</mat-icon>
+              <span>No repositories match "{{ repoSearch }}".</span>
+              <button mat-button type="button" class="github-empty__action" (click)="clearRepoSearch()">
+                Clear search
+              </button>
+            </div>
+          } @else {
           @if (!selectedRepo) {
             <p class="github-flow-hint">
               <mat-icon aria-hidden="true">touch_app</mat-icon>
@@ -111,7 +143,7 @@
             </p>
           }
           <div class="github-repos-list">
-            @for (repo of repos; track repo.full_name; let i = $index) {
+            @for (repo of filteredRepos; track repo.full_name; let i = $index) {
               <button
                 class="github-repo-row"
                 type="button"
@@ -169,6 +201,39 @@
                         <span>No open issues found.</span>
                       </div>
                     } @else {
+                      <div class="github-search-field">
+                        <mat-form-field appearance="outline" class="github-search-field__input" subscriptSizing="dynamic">
+                          <mat-label>Search issues</mat-label>
+                          <input
+                            matInput
+                            [(ngModel)]="issueSearch"
+                            (ngModelChange)="onIssueSearchChange()"
+                            placeholder="Filter by title…"
+                            aria-label="Search issues in this repository"
+                          />
+                          <mat-icon matPrefix aria-hidden="true">search</mat-icon>
+                          @if (issueSearch) {
+                            <button
+                              matSuffix
+                              mat-icon-button
+                              type="button"
+                              (click)="clearIssueSearch()"
+                              aria-label="Clear issue search"
+                            >
+                              <mat-icon aria-hidden="true">close</mat-icon>
+                            </button>
+                          }
+                        </mat-form-field>
+                      </div>
+                      @if (hasFilteredOutIssues) {
+                        <div class="github-empty">
+                          <mat-icon>search_off</mat-icon>
+                          <span>No issues match "{{ issueSearch }}".</span>
+                          <button mat-button type="button" class="github-empty__action" (click)="clearIssueSearch()">
+                            Clear search
+                          </button>
+                        </div>
+                      } @else {
                       <div class="github-issues-list">
                         @for (vm of pagedIssueVms; track vm.number) {
                           <button
@@ -262,10 +327,10 @@
                           }
                         }
                       </div>
-                      @if (issues.length > paginatorThreshold) {
+                      @if (filteredIssues.length > paginatorThreshold) {
                         <mat-paginator
                           class="github-issues-paginator"
-                          [length]="issues.length"
+                          [length]="filteredIssues.length"
                           [pageSize]="pageSize"
                           [pageIndex]="pageIndex"
                           [pageSizeOptions]="PAGE_SIZE_OPTIONS"
@@ -273,12 +338,14 @@
                           (page)="onPageChange($event)"
                         ></mat-paginator>
                       }
+                      }
                     }
                   }
                 </div>
               }
             }
           </div>
+          }
         }
       }
     </section>

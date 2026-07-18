@@ -7,6 +7,14 @@ write is guarded by ``is_postgres_enabled()`` and wrapped so an operational
 failure never breaks the caller: this is instrumentation, not part of the
 finalize contract. See ``planning_team.postgres`` for the ``planning_runs``
 DDL this module writes to.
+
+``run_workflow`` itself has no job_id of its own — job-store bookkeeping is
+owned entirely by whichever caller invokes it. A caller that invokes it
+directly instead of going through this team's own job store (currently
+``software_engineering_team``'s SE-embedded planning phase; see
+``software_engineering_team.shared.planning_audit``) therefore owns its own
+call to ``record_planning_run`` at its own finalize point, using its own
+job_id. This module's own two call sites (below) are unaffected by that.
 """
 
 from __future__ import annotations

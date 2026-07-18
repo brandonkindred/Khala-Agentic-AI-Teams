@@ -31,12 +31,12 @@ import logging
 import math
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from shared_concurrency import parallel_map
 from shared_postgres import is_postgres_enabled
 from shared_postgres.client import get_conn
 
@@ -687,10 +687,10 @@ class MarketDataCache:
         if not symbols:
             return result
         workers = _default_workers(len(symbols))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(
-                    self.get_or_fetch,
+
+        def _fetch_one(sym: str) -> Optional[Tuple[str, List[OHLCVBar], Optional[SnapshotMeta]]]:
+            try:
+                bars, meta = self.get_or_fetch(
                     symbol=sym,
                     asset_class=asset_class,
                     frequency=frequency,
@@ -698,18 +698,18 @@ class MarketDataCache:
                     end=end,
                     fetch_fn=fetch_fn,
                     as_of=as_of,
-                ): sym
-                for sym in symbols
-            }
-            for fut in as_completed(futures):
-                sym = futures[fut]
-                try:
-                    bars, meta = fut.result()
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning("cache fetch failed for %s: %s", sym, exc)
-                    continue
-                if bars:
-                    result[sym] = (bars, meta)
+                )
+            except Exception as exc:
+                logger.warning("cache fetch failed for %s: %s", sym, exc)
+                return None
+            if not bars:
+                return None
+            return (sym, bars, meta)
+
+        for sym, bars, meta in parallel_map(
+            symbols, _fetch_one, max_workers=workers, preserve_order=False, skip_none=True
+        ):
+            result[sym] = (bars, meta)
         return result
 
     # ------------------------------------------------------------------
