@@ -179,10 +179,26 @@ const STATUS_ICONS: Record<string, string> = {
   error: 'error',
 };
 
-/** Underscore-to-space, first-letter-capitalized fallback for an unmapped raw value. */
+/**
+ * Underscore-to-space, first-letter-capitalized fallback for an unmapped raw value.
+ *
+ * Preconditions: `value` is a non-null string (may be empty).
+ * Postconditions: returns `value` with every `_` replaced by a space and its first
+ * character capitalized; returns `value` unchanged (empty string) when `value` is
+ * empty. Pure — no side effects.
+ */
 function humanize(value: string): string {
   return value.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
 }
+
+/**
+ * The raw values `STATUS_LABELS`/`STATUS_ICONS` have a curated (non-fallback) entry
+ * for. Exported only so a test can assert this set stays in sync with
+ * `CODING_TEAM_TERMINAL_STATUSES` (`job-status.model.ts`) as new statuses are
+ * introduced there, and that the two maps never drift from each other.
+ */
+export const KNOWN_BADGE_LABELS: ReadonlySet<string> = new Set(Object.keys(STATUS_LABELS));
+export const KNOWN_BADGE_ICONS: ReadonlySet<string> = new Set(Object.keys(STATUS_ICONS));
 
 /**
  * Friendly, human-readable text for a row status badge, or null when there is none.

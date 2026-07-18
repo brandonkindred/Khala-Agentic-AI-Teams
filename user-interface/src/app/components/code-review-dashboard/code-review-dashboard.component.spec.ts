@@ -304,6 +304,46 @@ describe('CodeReviewDashboardComponent', () => {
     expect(el.querySelector('app-empty-state h3')?.textContent).toContain('No pull requests match');
   });
 
+  it('noPullMatchDescription names only the active filter(s)', async () => {
+    await setup();
+    component.pullFilter = 'nonexistent';
+    expect(component.noPullMatchDescription).toBe('Try a different search.');
+    component.pullFilter = '';
+    component.hideDrafts = true;
+    expect(component.noPullMatchDescription).toBe('Turn off Hide drafts to see more.');
+    component.pullFilter = 'nonexistent';
+    expect(component.noPullMatchDescription).toBe('Try a different search or turn off Hide drafts.');
+  });
+
+  it('renders the tailored empty-state description when the PR filter excludes everything', async () => {
+    await setup();
+    component.pullFilter = 'nonexistent-xyz';
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('app-empty-state .kh-empty-message')?.textContent).toContain('Try a different search.');
+  });
+
+  it('pullCountAnnouncement is empty when the repo has no open PRs', async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(of([]));
+    await setup();
+    expect(component.pullCountAnnouncement).toBe('');
+  });
+
+  it('pullCountAnnouncement is singular for one result and plural otherwise, and updates as the filter changes', async () => {
+    await setup(); // default mock: makePulls(3)
+    expect(component.pullCountAnnouncement).toBe('3 pull requests shown');
+    component.pullFilter = '#2';
+    expect(component.pullCountAnnouncement).toBe('1 pull request shown');
+  });
+
+  it('renders the PR count announcement in a role="status" live region', async () => {
+    await setup();
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    const texts = Array.from(el.querySelectorAll('[role="status"]')).map((r) => r.textContent?.trim());
+    expect(texts).toContain('3 pull requests shown');
+  });
+
   it("the rendered paginator's length reflects filteredPulls.length once filtered", async () => {
     integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(25)));
     await setup();
@@ -416,6 +456,51 @@ describe('CodeReviewDashboardComponent', () => {
     const el: HTMLElement = fixture.nativeElement;
     const texts = Array.from(el.querySelectorAll('[role="status"]')).map((r) => r.textContent?.trim());
     expect(texts).toContain('2 repositories shown');
+  });
+
+  it('onRepoFilterChange updates repoFilter', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    component.onRepoFilterChange('gizmos');
+    expect(component.repoFilter).toBe('gizmos');
+  });
+
+  it('onRepoFilterChange collapses the expanded repo when the new filter excludes it', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup(); // setup() expands repos[0] = REPO (acme/widgets)
+    expect(component.selectedRepo?.full_name).toBe('acme/widgets');
+    component.onRepoFilterChange('gizmos'); // excludes acme/widgets
+    expect(component.selectedRepo).toBeNull();
+    expect(component.pulls.length).toBe(0);
+    expect(component.pullsLoaded).toBe(false);
+  });
+
+  it('onRepoFilterChange leaves the expanded repo untouched when it still matches', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    expect(component.selectedRepo?.full_name).toBe('acme/widgets');
+    component.onRepoFilterChange('widgets'); // still matches acme/widgets
+    expect(component.selectedRepo?.full_name).toBe('acme/widgets');
+    expect(component.pullsLoaded).toBe(true);
+  });
+
+  it('onRepoFilterChange is a no-op collapse when no repo is expanded', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    component.toggleRepo(component.repos[0]); // collapse
+    expect(component.selectedRepo).toBeNull();
+    component.onRepoFilterChange('nonexistent');
+    expect(component.selectedRepo).toBeNull();
+  });
+
+  it('typing a repo filter that excludes the expanded repo collapses its PR panel in the DOM', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.cr-repo-pulls')).not.toBeNull();
+    component.onRepoFilterChange('gizmos');
+    fixture.detectChanges();
+    expect(el.querySelector('.cr-repo-pulls')).toBeNull();
   });
 
   // -------------------------------------------------------------------------

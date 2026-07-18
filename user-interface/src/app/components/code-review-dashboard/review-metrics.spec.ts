@@ -5,11 +5,14 @@ import {
   badgeLabel,
   friendlyBadgeLabel,
   isLatestRunning,
+  KNOWN_BADGE_ICONS,
+  KNOWN_BADGE_LABELS,
   reviewDuration,
   severityEntries,
   terminalTimestamp,
   type ReviewDurationInput,
 } from './review-metrics';
+import { CODING_TEAM_TERMINAL_STATUSES } from '../../models/job-status.model';
 import { makeReviewRecord as record } from './testing/fixtures';
 
 describe('review-metrics', () => {
@@ -218,6 +221,18 @@ describe('review-metrics', () => {
 
     it('falls back to a generic icon for an unmapped value', () => {
       expect(badgeIcon('some_future_status')).toBe('info');
+    });
+  });
+
+  describe('STATUS_LABELS / STATUS_ICONS coverage', () => {
+    it('cover the same set of raw values as each other', () => {
+      expect(KNOWN_BADGE_ICONS).toEqual(KNOWN_BADGE_LABELS);
+    });
+
+    it('cover every coding-team terminal status, so none silently falls through to the generic fallback', () => {
+      for (const status of CODING_TEAM_TERMINAL_STATUSES) {
+        expect(KNOWN_BADGE_LABELS.has(status)).toBe(true);
+      }
     });
   });
 });

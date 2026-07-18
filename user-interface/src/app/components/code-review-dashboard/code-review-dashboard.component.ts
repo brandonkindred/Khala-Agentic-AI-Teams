@@ -24,6 +24,7 @@ import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-sp
 import { EmptyStateComponent } from '../../shared/empty-state/empty-state.component';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
+import { resultCountAnnouncement } from '../../shared/result-count-announcement';
 
 /**
  * Code Review dashboard: lists every repository the configured PAT can access and, per
@@ -275,7 +276,15 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
       });
   }
 
-  /** `repos` narrowed by `repoFilter`, matching case-insensitively on `full_name` or `description`. */
+  /**
+   * `repos` narrowed by `repoFilter`, matching case-insensitively on `full_name` or
+   * `description`.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `repos` itself (same reference) when `repoFilter` is empty
+   * or whitespace-only; otherwise a new array of the `repos` entries whose `full_name`
+   * or `description` contains `repoFilter`, case-insensitively. Does not mutate `repos`.
+   */
   get filteredRepos(): GitHubRepoItem[] {
     const q = this.repoFilter.trim().toLowerCase();
     if (!q) return this.repos;
@@ -284,23 +293,91 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
     );
   }
 
-  /** Polite live-region text for how many repos `filteredRepos` currently shows; empty
-   *  before repos have loaded or when the token has no repo access at all. */
+  /**
+   * Polite live-region text for how many repos `filteredRepos` currently shows.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `''` before `repos` has loaded or when the token has no
+   * repo access at all (`repos.length === 0`) — in both cases the search UI isn't
+   * rendered, so there's nothing to announce. Otherwise returns
+   * `resultCountAnnouncement(filteredRepos.length, 'repository', 'repositories')`.
+   */
   get repoCountAnnouncement(): string {
     if (!this.reposLoaded || this.repos.length === 0) return '';
-    const n = this.filteredRepos.length;
-    return n === 1 ? '1 repository shown' : `${n} repositories shown`;
+    return resultCountAnnouncement(this.filteredRepos.length, 'repository', 'repositories');
   }
 
-  /** `pulls` narrowed by `pullFilter` (substring match against `"#<number> <title>"`,
-   *  case-insensitively) and, when `hideDrafts` is set, with draft PRs excluded. */
+  /**
+   * Update the repo text filter, collapsing the expanded repo if the new filter
+   * excludes it from `filteredRepos` — an expanded row that's no longer in the visible
+   * list shouldn't stay silently expanded off-screen.
+   *
+   * Preconditions: `value` is the search input's current text.
+   * Postconditions: `repoFilter` is set to `value`. If `selectedRepo` is set and is no
+   * longer present in `filteredRepos` under the new filter, `selectedRepo` is cleared
+   * and repo-scoped PR state is reset via `resetRepoScopedState` — identical to
+   * collapsing that repo through `toggleRepo`. Otherwise `selectedRepo` and PR state
+   * are left untouched.
+   */
+  onRepoFilterChange(value: string): void {
+    this.repoFilter = value;
+    const selected = this.selectedRepo;
+    if (selected && !this.filteredRepos.some((r) => r.full_name === selected.full_name)) {
+      this.selectedRepo = null;
+      this.resetRepoScopedState();
+    }
+  }
+
+  /**
+   * `pulls` narrowed by `pullFilter` (substring match against `"#<number> <title>"`,
+   * case-insensitively) and, when `hideDrafts` is set, with draft PRs excluded.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `pulls` itself (same reference) when `hideDrafts` is false
+   * and `pullFilter` is empty or whitespace-only; otherwise a new array of the `pulls`
+   * entries that pass both the draft exclusion (when `hideDrafts`) and the text match
+   * (when `pullFilter` is non-empty). Does not mutate `pulls`.
+   */
   get filteredPulls(): GitHubPullRequestItem[] {
     const q = this.pullFilter.trim().toLowerCase();
+    if (!this.hideDrafts && !q) return this.pulls;
     return this.pulls.filter((p) => {
       if (this.hideDrafts && p.draft) return false;
       if (!q) return true;
       return `#${p.number} ${p.title}`.toLowerCase().includes(q);
     });
+  }
+
+  /**
+   * Polite live-region text for how many PRs `filteredPulls` currently shows.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `''` before `pulls` has loaded or when the expanded repo
+   * has no open PRs at all (`pulls.length === 0`) — in both cases the search UI isn't
+   * rendered, so there's nothing to announce. Otherwise returns
+   * `resultCountAnnouncement(filteredPulls.length, 'pull request', 'pull requests')`.
+   */
+  get pullCountAnnouncement(): string {
+    if (!this.pullsLoaded || this.pulls.length === 0) return '';
+    return resultCountAnnouncement(this.filteredPulls.length, 'pull request', 'pull requests');
+  }
+
+  /**
+   * Tailored copy for the "No pull requests match" empty state, naming only the
+   * filter(s) actually active so the suggested remedy is never irrelevant.
+   *
+   * Preconditions: called only while `filteredPulls.length === 0` and
+   * `pulls.length > 0` (i.e. at least one of `pullFilter`/`hideDrafts` is narrowing the
+   * list — otherwise `filteredPulls` would equal `pulls`, per its own postcondition).
+   * Postconditions: returns copy mentioning "Hide drafts" only when `hideDrafts` is
+   * true, and mentions searching only when `pullFilter` is non-empty (mentions both
+   * when both are active).
+   */
+  get noPullMatchDescription(): string {
+    const hasQuery = this.pullFilter.trim().length > 0;
+    if (hasQuery && this.hideDrafts) return 'Try a different search or turn off Hide drafts.';
+    if (this.hideDrafts) return 'Turn off Hide drafts to see more.';
+    return 'Try a different search.';
   }
 
   /** The slice of PRs visible on the current page. */
@@ -315,14 +392,24 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
     this.pageSize = event.pageSize;
   }
 
-  /** Update the PR text filter and reset to page 1 — the current page may no longer
-   *  exist against the narrowed result set. */
+  /**
+   * Update the PR text filter and reset to page 1 — the current page may no longer
+   * exist against the narrowed result set.
+   *
+   * Preconditions: `value` is the search input's current text.
+   * Postconditions: `pullFilter` is set to `value` and `pageIndex` is set to 0.
+   */
   onPullFilterChange(value: string): void {
     this.pullFilter = value;
     this.pageIndex = 0;
   }
 
-  /** Toggle whether `filteredPulls` excludes draft PRs, resetting to page 1. */
+  /**
+   * Toggle whether `filteredPulls` excludes draft PRs, resetting to page 1.
+   *
+   * Preconditions: `value` is the toggle's new checked state.
+   * Postconditions: `hideDrafts` is set to `value` and `pageIndex` is set to 0.
+   */
   onHideDraftsChange(value: boolean): void {
     this.hideDrafts = value;
     this.pageIndex = 0;
