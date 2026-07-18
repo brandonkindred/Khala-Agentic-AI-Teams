@@ -38,3 +38,11 @@ def test_dummy_complete_text_alias() -> None:
     c = DummyLLMClient()
     s = c.complete_text("hi", objective="test", temperature=0.0)
     assert isinstance(s, str)
+
+
+def test_dummy_complete_json_accepts_schema_kwarg_as_noop() -> None:
+    """schema= is a client-agnostic opt-in — an unsupporting client silently ignores it."""
+    c = DummyLLMClient()
+    assert c.supports_structured_output() is False
+    j = c.complete_json("hello", temperature=0.1, schema={"type": "object"})
+    assert isinstance(j, dict)
