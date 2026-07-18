@@ -80,6 +80,10 @@ def create_team_app(
           closes the Postgres pool on shutdown (both no-ops/guarded when Postgres
           is unconfigured), wrapping the optional hooks. ``fastapi_kwargs`` pass
           through to the ``FastAPI`` constructor.
+        - The returned app exposes its ``postgres_schema`` (the given
+          ``TeamSchema`` or ``None``) via ``app.state.postgres_schema`` so early
+          bootstrap paths (e.g. the team-service wrapper) can register the schema's
+          DDL before starting background workers that write to it.
     Invariants:
         - Postgres wiring fires iff ``postgres_schema is not None``.
     """
@@ -139,5 +143,10 @@ def create_team_app(
                     logger.warning("%s shared_postgres close_pool failed", team_key, exc_info=True)
 
     app = FastAPI(title=title, version=version, lifespan=_lifespan, **fastapi_kwargs)
+    # Expose the team's schema (or None) so early bootstrap paths that run before
+    # the lifespan fires — e.g. the team-service wrapper starting a Temporal worker
+    # at import time — can register the DDL first and avoid racing a best-effort
+    # write against schema creation on a fresh database.
+    app.state.postgres_schema = postgres_schema
     instrument_fastapi_app(app, team_key=team_key, excluded_urls=excluded_urls)
     return app

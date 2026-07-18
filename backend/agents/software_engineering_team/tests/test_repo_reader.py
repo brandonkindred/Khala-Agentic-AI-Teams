@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import os
 
-from code_review_agent.repo_reader import DiskRepoReader, RepoReader
+from code_review_agent.repo_reader import (
+    DiskRepoReader,
+    RepoReader,
+    disk_repo_reader_from_root,
+)
 
 
 def _write(root, rel: str, content: str) -> None:
@@ -101,3 +105,47 @@ def test_list_files_cached(tmp_path) -> None:
     _write(tmp_path, "b.py", "2")
     # Listing is memoized: a file added after the first call is not re-walked.
     assert reader.list_files() == first
+
+
+# ---------------------------------------------------------------------------
+# disk_repo_reader_from_root: the fail-safe factory used across the boundary
+# ---------------------------------------------------------------------------
+
+
+def test_from_root_builds_reader_for_real_path(tmp_path) -> None:
+    _write(tmp_path, "a.py", "1")
+    reader = disk_repo_reader_from_root(str(tmp_path))
+    assert isinstance(reader, DiskRepoReader)
+    assert reader.read_file("a.py") == "1"
+
+
+def test_from_root_none_for_none() -> None:
+    assert disk_repo_reader_from_root(None) is None
+
+
+def test_from_root_none_for_blank() -> None:
+    # A blank/whitespace path must not become a reader rooted at cwd.
+    assert disk_repo_reader_from_root("") is None
+    assert disk_repo_reader_from_root("   ") is None
+
+
+def test_from_root_reads_none_for_missing_checkout(tmp_path) -> None:
+    # A path that does not exist still builds a reader (constructor only realpaths),
+    # but every read degrades to None — the pre-existing keep-more behavior.
+    missing = str(tmp_path / "gone")
+    reader = disk_repo_reader_from_root(missing)
+    assert isinstance(reader, DiskRepoReader)
+    assert reader.read_file("anything.py") is None
+    assert reader.list_files() == []
+
+
+def test_from_root_none_when_construction_raises(monkeypatch) -> None:
+    # The factory is fail-safe: any construction error degrades to None (keep-more),
+    # never propagates — a reader is only an optional enhancement.
+    import code_review_agent.repo_reader as rr
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(rr, "DiskRepoReader", _boom)
+    assert rr.disk_repo_reader_from_root("/some/path") is None

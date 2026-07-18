@@ -299,6 +299,10 @@ def _code_review_step(
             ctx = review_context or ReviewContext()
             # files= keeps per-file attribution and lets the coordinator bound
             # its own prompts — no header parsing, no upstream truncation.
+            # repo_root carries the workspace path as a serializable field so a
+            # durable Temporal review can rebuild the whole-repo reader worker-side
+            # (a live repo_reader object cannot cross that boundary); the live
+            # reader below still drives the in-process/thread-mode path.
             cr_input = _CRInput(
                 files=files,
                 task_description=task_description,
@@ -307,6 +311,7 @@ def _code_review_step(
                 language=language,
                 architecture=ctx.architecture,
                 spec_content=ctx.spec_content,
+                repo_root=str(repo_path),
             )
             cr_result = call_code_review_agent(
                 code_review_agent,
