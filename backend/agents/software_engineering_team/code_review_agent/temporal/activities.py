@@ -327,27 +327,21 @@ def find_side_effect_impact_activity(
         - Returns zero or more NEW ``CodeReviewIssue`` dicts (category
           ``"side-effects"``); never mutates or removes any finding from the
           caller's perspective — this activity is purely additive, mirroring
-          ``find_side_effect_impact_issues``'s own contract. ``repo_reader`` is
-          not available across the Temporal boundary (same limitation as
-          ``find_architecture_and_redundancy_activity``), so this pass can find
-          callers only within the submission's own files plus the
-          ``existing_codebase`` excerpt via ``search_codebase`` — the
-          ``search_repository`` tool has nothing to search without a reader.
-        - **This hits this pass harder than the other two activities in this
-          module.** Since Temporal is this agent's default execution mode
-          (``CodeReviewAgent.run()`` dispatches here whenever Temporal is
-          reachable, which both production callers that build a real
-          ``repo_reader`` — the PR-review flow and the SE per-task pipeline —
-          do not opt out of), ``search_repository`` is a complete no-op in the
-          default deployment: it has nothing to search, so this pass's entire
-          reason for existing (finding an out-of-diff caller whose assumptions
-          a behavior change breaks) does not function there. The other two
-          activities degrade more gracefully (the false-positive filter only
-          loses one narrow confirmation; the architecture pass still gets
-          partial value from the ``existing_codebase`` excerpt). Tracked for a
-          real fix (force-in-process for reader-backed reviews, or threading a
-          serializable repo identifier through the Temporal payload) rather
-          than being addressed here.
+          ``find_side_effect_impact_issues``'s own contract. When
+          ``review_input.repo_root`` names a disk checkout reachable by this
+          worker, a ``DiskRepoReader`` is rebuilt from it (via
+          ``_repo_reader_from_input``, the same helper the false-positive and
+          architecture activities use) so ``search_repository`` can find
+          out-of-diff callers exactly as it does in thread mode; otherwise the
+          reader is ``None`` and this pass can only see callers within the
+          submission's own files plus the ``existing_codebase`` excerpt.
+        - A live ``GitHubRepoReader`` (the PR-review flow) cannot cross this
+          boundary at all — it holds a per-request auth token, not a
+          reconstructible field — so that caller forces the in-process
+          coordinator instead of Temporal dispatch whenever it supplies a
+          reader (``coding_engine_provider.py``); this activity is then simply
+          never invoked for that review, and ``find_side_effect_impact_issues``
+          receives the live reader directly.
         - Never raises: the wrapped function is itself fail-safe (disabled via
           env, wrong profile, or any setup/LLM failure all degrade to an empty
           list), so an activity failure here would only ever be an unexpected
@@ -358,7 +352,9 @@ def find_side_effect_impact_activity(
 
     input_data = CodeReviewInput.model_validate(review_input)
     llm = _resolve_llm()
-    findings = find_side_effect_impact_issues(llm, input_data, repo_reader=None)
+    findings = find_side_effect_impact_issues(
+        llm, input_data, repo_reader=_repo_reader_from_input(input_data)
+    )
     return [i.model_dump(mode="json") for i in findings]
 
 

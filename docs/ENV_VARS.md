@@ -809,14 +809,19 @@ repository reader to be attached (the GitHub PR-review path and the
 software-engineering pipeline both supply one; without one, this pass can
 still find callers within the submission's own files via `search_codebase`).
 
-**Known limitation:** Temporal is this agent's default execution mode, and
-`repo_reader` is not forwarded across the Temporal activity boundary — so in
-the default deployment, `search_repository` has nothing to search and this
-pass's caller-impact detection is limited to callers already present in the
-submission. This is a pre-existing limitation of the whole engine (the
-false-positive filter and architecture pass inherit it too), not something
-specific to this pass, though it costs this pass the most since repo-wide
-caller search is its entire purpose.
+Temporal is this agent's default execution mode. A live `RepoReader` cannot
+cross that boundary directly, so the reader used for `search_repository`
+depends on which kind was supplied: the software-engineering pipeline's
+`DiskRepoReader` is rebuilt worker-side from a serializable `repo_root` field
+on `CodeReviewInput` (the same mechanism the false-positive filter and
+architecture pass use), so repo-wide search works there even under Temporal;
+the GitHub PR-review path's reader holds a per-request auth token that cannot
+be reconstructed, so that caller forces in-process execution whenever it
+supplies a reader instead, bypassing Temporal for that one review. The only
+remaining gap is a Temporal review with no reader and no reachable
+`repo_root` at all, where `search_repository` falls back to the submission's
+own files via `search_codebase` — the same conservative (keep-more) behavior
+the other two passes already have in that case.
 
 Any setup or LLM failure is fail-safe: it is logged and yields no additional
 findings, so a broken pass never blocks or changes the rest of the review. Set

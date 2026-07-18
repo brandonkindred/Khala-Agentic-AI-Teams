@@ -435,6 +435,32 @@ def test_architecture_activity_reconstructs_reader_from_repo_root(
     assert captured["repo_reader"] is None
 
 
+def test_side_effect_activity_reconstructs_reader_from_repo_root(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The side-effect activity rebuilds a reader from ``repo_root`` and threads
+    it into ``find_side_effect_impact_issues``, matching the other two additive
+    passes rather than hardcoding ``repo_reader=None``."""
+    import code_review_agent.side_effect_impact_pass as seip
+    from code_review_agent.repo_reader import DiskRepoReader
+    from code_review_agent.temporal import activities as A
+
+    captured: Dict[str, Any] = {}
+
+    def _capture(llm: Any, input_data: Any, repo_reader: Any = None) -> Any:
+        captured["repo_reader"] = repo_reader
+        return []
+
+    monkeypatch.setattr(seip, "find_side_effect_impact_issues", _capture)
+
+    A.find_side_effect_impact_activity(_input(repo_root=str(tmp_path)).model_dump(mode="json"))
+    assert isinstance(captured["repo_reader"], DiskRepoReader)
+
+    captured.clear()
+    A.find_side_effect_impact_activity(_input().model_dump(mode="json"))
+    assert captured["repo_reader"] is None
+
+
 def test_finalize_activity_reconciles_minor_only_to_approved() -> None:
     from code_review_agent.temporal import activities as A
 
