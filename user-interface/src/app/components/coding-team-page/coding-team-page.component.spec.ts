@@ -520,6 +520,43 @@ describe('CodingTeamPageComponent', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Primary-action discoverability
+  // -------------------------------------------------------------------------
+
+  describe('primary-action discoverability', () => {
+    it('signposts the repo → issue → confirm flow before any repo is expanded', async () => {
+      await setup();
+      showView('github');
+      const el: HTMLElement = fixture.nativeElement;
+      const hint = el.querySelector('.github-flow-hint');
+      expect(hint).not.toBeNull();
+      expect(hint?.textContent).toContain('Select a repo, then an issue');
+    });
+
+    it('hides the flow hint once a repo is expanded', async () => {
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('.github-flow-hint')).toBeNull();
+    });
+
+    it('renders the Confirm & Start action bar when an issue is selected', async () => {
+      await setup();
+      expandFirstRepo();
+      component.selectIssue(component.issues[0]);
+      showView('github');
+      const el: HTMLElement = fixture.nativeElement;
+      const actions = el.querySelector('.github-confirm-panel__actions');
+      expect(actions).not.toBeNull();
+      const confirmBtn = actions?.querySelector('button') as HTMLButtonElement;
+      expect(confirmBtn).not.toBeNull();
+      expect(confirmBtn.textContent).toContain('Confirm');
+      expect(confirmBtn.disabled).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Pure helpers
   // -------------------------------------------------------------------------
 

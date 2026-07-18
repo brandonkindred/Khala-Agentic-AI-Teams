@@ -694,8 +694,13 @@ def _run_reviewer(
         # A reviewer-side failure (LLM outage, unrecoverable exhaustion, etc.) is
         # not a code defect: record the detail in the job store but never post the
         # raw exception on the PR — degrade to a quiet, re-runnable outage.
+        # str(e) is "" for a bare zero-arg exception (e.g. a durable-review
+        # client-side wait timing out with no attached detail); recording just
+        # "code review failed: " is useless for later triage, so fall back to
+        # naming the exception type when it carries no message of its own.
+        detail = str(e) if e.args else f"{type(e).__name__} (no error message)"
         _main._record_review_outage(
-            client, owner, repo, pr_number, job_id, f"code review failed: {e}"
+            client, owner, repo, pr_number, job_id, f"code review failed: {detail}"
         )
         return None
     finally:

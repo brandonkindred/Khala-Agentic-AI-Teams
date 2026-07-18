@@ -138,6 +138,9 @@ class CodeReviewAgent:
                 the model was unavailable (an infrastructure failure), or no
                 chunk could be reviewed at all. Callers must treat this as a
                 failed review run — never as review feedback for the coding agent.
+            TimeoutError: when dispatched to Temporal (the default) and the
+                synchronous wait for the durable workflow's result exceeds
+                ``CODE_REVIEW_EXECUTE_TIMEOUT_S`` — see ``_run_via_temporal``.
         """
         code_size = (
             sum(len(c) for c in input_data.files.values())
@@ -200,10 +203,14 @@ class CodeReviewAgent:
                 the submission (mapped from its ``ApplicationError`` marker).
             _TemporalDispatchUnavailable: the worker/client never became available
                 (the caller falls back to in-process review).
+            TimeoutError: this call's own wait for the workflow result exceeded
+                the configured ceiling (``CODE_REVIEW_EXECUTE_TIMEOUT_S``); the
+                workflow may still be running, or may have completed, server-side
+                (message includes the configured duration — see below).
         """
         from temporalio.client import WorkflowFailureError
 
-        from .temporal.config import WORKFLOW_ID_PREFIX
+        from .temporal.config import WORKFLOW_ID_PREFIX, resolve_execute_timeout_s
         from .temporal.start_workflow import execute_code_review_workflow_sync
         from .temporal.worker import start_code_review_temporal_worker_thread
         from .temporal.workflows import CODE_REVIEW_UNAVAILABLE_TYPE
@@ -214,9 +221,12 @@ class CodeReviewAgent:
         start_code_review_temporal_worker_thread()
 
         workflow_id = f"{WORKFLOW_ID_PREFIX}{uuid.uuid4().hex}"
+        execute_timeout_s = resolve_execute_timeout_s()
         try:
             result = execute_code_review_workflow_sync(
-                input_data.model_dump(mode="json"), workflow_id=workflow_id
+                input_data.model_dump(mode="json"),
+                workflow_id=workflow_id,
+                execute_timeout_s=execute_timeout_s,
             )
         except RuntimeError as exc:
             # ``_await_client`` raises this when no worker client is available.
@@ -232,6 +242,19 @@ class CodeReviewAgent:
             if _reports_review_unavailable(exc, CODE_REVIEW_UNAVAILABLE_TYPE):
                 raise CodeReviewUnavailableError(str(exc)) from exc
             raise
+        except TimeoutError as exc:
+            # The bare TimeoutError concurrent.futures.Future.result raises (==
+            # the builtin TimeoutError on Python >= 3.11, the deployed runtime)
+            # carries no message (str(exc) == ""). Attach real context here, at
+            # the source, so it survives to whatever catches this (pr_review.py's
+            # _run_reviewer today) instead of logging as "code review failed: ".
+            raise TimeoutError(
+                f"Durable code review wait timed out after {execute_timeout_s:.0f}s "
+                "waiting for the Temporal workflow result "
+                "(code_review_agent/temporal/start_workflow.py); the workflow may "
+                "still be running, or may have completed, on the server. This is "
+                "a client-side wait timeout, not a reviewer content failure."
+            ) from exc
 
         notify_review_progress(progress_callback, "done", "durable review complete", 1.0)
         return CodeReviewOutput.model_validate(result)
