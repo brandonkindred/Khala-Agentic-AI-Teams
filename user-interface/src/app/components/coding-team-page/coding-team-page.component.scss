@@ -636,6 +636,33 @@
   padding: 1.5rem;
   justify-content: center;
   color: var(--kh-text-tertiary);
+
+  // "Clear search" action shown in the no-matches variant of this empty state.
+  &__action {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--kh-accent, #3f51b5);
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+
+    &:hover {
+      text-decoration: none;
+    }
+  }
+}
+
+// Search/filter input above the repo list, and above an expanded repo's issue list. Uses
+// `subscriptSizing="dynamic"` in the template so the (empty) hint/error subscript row collapses
+// without piercing Material's view encapsulation.
+.github-search-field {
+  margin-bottom: 0.75rem;
+
+  &__input {
+    width: 100%;
+    max-width: 24rem;
+  }
 }
 
 .github-label-filter {

@@ -116,6 +116,9 @@ describe('CodingTeamPageComponent', () => {
   }
 
   beforeEach(() => {
+    // toggleRepo() now writes to real localStorage (last-used-repo memory); start every test with
+    // a clean slate so one test's expand can't leak into another's "fresh visit" assertions.
+    localStorage.clear();
     apiSpy = {
       health: vi.fn().mockReturnValue(of({ status: 'ok' })),
       getJobStatus: vi.fn().mockReturnValue(of({ job_id: 'j1', status: 'running' })),
@@ -135,6 +138,7 @@ describe('CodingTeamPageComponent', () => {
   afterEach(() => {
     // Tear down the runs/status poll timers so they never bleed into the next test.
     fixture?.destroy();
+    localStorage.clear();
   });
 
   /** Switch the visible view (the page opens on 'chat') and re-render. */
@@ -553,6 +557,230 @@ describe('CodingTeamPageComponent', () => {
       expect(confirmBtn).not.toBeNull();
       expect(confirmBtn.textContent).toContain('Confirm');
       expect(confirmBtn.disabled).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Repo search
+  // -------------------------------------------------------------------------
+
+  describe('repo search', () => {
+    const REPO_B: GitHubRepoItem = { ...REPO, name: 'gadgets', full_name: 'acme/gadgets' };
+    const REPO_C: GitHubRepoItem = { ...REPO, owner: 'other', name: 'widgets', full_name: 'other/widgets' };
+
+    beforeEach(() => {
+      integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, REPO_B, REPO_C]));
+    });
+
+    it('narrows the visible repo rows as the user types', async () => {
+      await setup();
+      showView('github');
+      component.repoSearch = 'gadgets';
+      fixture.detectChanges();
+      const el: HTMLElement = fixture.nativeElement;
+      const rows = Array.from(el.querySelectorAll('.github-repo-row'));
+      expect(rows.length).toBe(1);
+      expect(rows[0].textContent).toContain('acme/gadgets');
+    });
+
+    it('matches full_name case-insensitively as a substring', async () => {
+      await setup();
+      showView('github');
+      component.repoSearch = 'OTHER/WID';
+      fixture.detectChanges();
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelectorAll('.github-repo-row').length).toBe(1);
+    });
+
+    it('clearing the search restores the full repo list', async () => {
+      await setup();
+      showView('github');
+      component.repoSearch = 'gadgets';
+      fixture.detectChanges();
+      component.clearRepoSearch();
+      fixture.detectChanges();
+      const el: HTMLElement = fixture.nativeElement;
+      expect(component.repoSearch).toBe('');
+      expect(el.querySelectorAll('.github-repo-row').length).toBe(3);
+    });
+
+    it('shows a no-matches empty state with a Clear search action when nothing matches', async () => {
+      await setup();
+      showView('github');
+      component.repoSearch = 'nonexistent-repo-xyz';
+      fixture.detectChanges();
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelectorAll('.github-repo-row').length).toBe(0);
+      expect(el.textContent).toContain('No repositories match');
+      const clearBtn = Array.from(el.querySelectorAll('button')).find((b) => b.textContent?.includes('Clear search'));
+      expect(clearBtn).toBeTruthy();
+    });
+
+    it('preserves aria-expanded/aria-controls semantics for a row that survives a search, even when its list index shifts', async () => {
+      await setup();
+      showView('github');
+      component.toggleRepo(REPO_C); // expands "other/widgets", originally at index 2
+      component.repoSearch = 'widgets'; // matches acme/widgets (idx 0) and other/widgets (now idx 1)
+      fixture.detectChanges();
+      const el: HTMLElement = fixture.nativeElement;
+      const rows = Array.from(el.querySelectorAll('.github-repo-row')) as HTMLElement[];
+      expect(rows.length).toBe(2);
+      const expandedRow = rows.find((r) => r.getAttribute('aria-expanded') === 'true');
+      expect(expandedRow?.textContent).toContain('other/widgets');
+      const controlsId = expandedRow?.getAttribute('aria-controls');
+      expect(controlsId).toBe('repo-issues-1');
+      const panel = el.querySelector(`#${controlsId}`);
+      expect(panel).not.toBeNull();
+      expect(panel?.classList.contains('github-repo-issues')).toBe(true);
+      const collapsedRow = rows.find((r) => r !== expandedRow);
+      expect(collapsedRow?.getAttribute('aria-expanded')).toBe('false');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Issue search
+  // -------------------------------------------------------------------------
+
+  describe('issue search', () => {
+    /** Mirrors what the template's (ngModelChange) triggers on a real keystroke. */
+    function setIssueSearch(value: string): void {
+      component.issueSearch = value;
+      component.onIssueSearchChange();
+      fixture.detectChanges();
+    }
+
+    it('narrows the visible issue rows as the user types', async () => {
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      setIssueSearch('Issue 2');
+      const el: HTMLElement = fixture.nativeElement;
+      const rows = Array.from(el.querySelectorAll('.github-issue-row'));
+      expect(rows.length).toBe(1);
+      expect(rows[0].textContent).toContain('Issue 2');
+    });
+
+    it('clearing the search restores the full issue list', async () => {
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      setIssueSearch('Issue 2');
+      component.clearIssueSearch();
+      fixture.detectChanges();
+      const el: HTMLElement = fixture.nativeElement;
+      expect(component.issueSearch).toBe('');
+      expect(el.querySelectorAll('.github-issue-row').length).toBe(3);
+    });
+
+    it('shows a no-matches empty state with a Clear search action when nothing matches', async () => {
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      setIssueSearch('nonexistent-issue-xyz');
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelectorAll('.github-issue-row').length).toBe(0);
+      expect(el.textContent).toContain('No issues match');
+      const clearBtn = Array.from(el.querySelectorAll('button')).find((b) => b.textContent?.includes('Clear search'));
+      expect(clearBtn).toBeTruthy();
+    });
+
+    it('resets to the first page when a search narrows the list below the current page', async () => {
+      integrationsSpy.getGitHubIssues.mockReturnValue(of(makeIssues(25)));
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      component.onPageChange({ pageIndex: 1, pageSize: 10, length: 25 });
+      fixture.detectChanges();
+      expect(component.pagedIssueVms.map((vm) => vm.title)).toContain('Issue 11');
+
+      // "Issue 3" uniquely matches issue #3 — "Issue 13"/"Issue 23" don't contain that substring.
+      setIssueSearch('Issue 3');
+
+      expect(component.pageIndex).toBe(0);
+      expect(component.pagedIssueVms.length).toBe(1);
+      expect(component.pagedIssueVms[0].title).toBe('Issue 3');
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelectorAll('.github-issue-row').length).toBe(1);
+    });
+
+    it('preserves aria-expanded/aria-controls semantics for an issue row that survives a search', async () => {
+      await setup();
+      showView('github');
+      expandFirstRepo();
+      component.selectIssue(component.issues[1]); // "Issue 2"
+      fixture.detectChanges();
+      setIssueSearch('Issue'); // matches all 3 — the selected row survives unchanged
+
+      const el: HTMLElement = fixture.nativeElement;
+      const rows = Array.from(el.querySelectorAll('.github-issue-row')) as HTMLElement[];
+      const selectedRow = rows.find((r) => r.getAttribute('aria-expanded') === 'true');
+      expect(selectedRow?.textContent).toContain('Issue 2');
+      expect(selectedRow?.getAttribute('aria-controls')).toBe('confirm-panel-2');
+      const panel = el.querySelector('#confirm-panel-2');
+      expect(panel).not.toBeNull();
+      expect(panel?.classList.contains('github-confirm-panel')).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Last-used repo persistence
+  // -------------------------------------------------------------------------
+
+  describe('last-used repo persistence', () => {
+    const STORAGE_KEY = 'coding-team-last-repo-v1';
+
+    it('remembers the repo when it is expanded', async () => {
+      await setup();
+      expandFirstRepo();
+      expect(localStorage.getItem(STORAGE_KEY)).toBe('acme/widgets');
+    });
+
+    it('does not forget the repo when it is collapsed', async () => {
+      await setup();
+      expandFirstRepo();
+      component.toggleRepo(component.repos[0]); // collapse
+      fixture.detectChanges();
+      expect(component.selectedRepo).toBeNull();
+      expect(localStorage.getItem(STORAGE_KEY)).toBe('acme/widgets');
+    });
+
+    it('pre-expands the remembered repo on the next visit', async () => {
+      localStorage.setItem(STORAGE_KEY, 'acme/widgets');
+      await setup();
+      expect(component.selectedRepo?.full_name).toBe('acme/widgets');
+      expect(component.issuesLoaded).toBe(true);
+      expect(integrationsSpy.getGitHubIssues).toHaveBeenCalledWith(
+        expect.objectContaining({ owner: 'acme', repo: 'widgets' }),
+      );
+    });
+
+    it('does not restore, and surfaces no error, when the remembered repo is no longer accessible', async () => {
+      localStorage.setItem(STORAGE_KEY, 'someone-else/gone');
+      await setup();
+      expect(component.selectedRepo).toBeNull();
+      expect(component.repoError).toBeNull();
+      expect(component.issueError).toBeNull();
+    });
+
+    it('does not restore, and does not throw, when the stored value matches no repo', async () => {
+      localStorage.setItem(STORAGE_KEY, '{not json, just garbage}}}');
+      await setup();
+      expect(component.selectedRepo).toBeNull();
+      expect(component.repoError).toBeNull();
+    });
+
+    it('does not re-expand a manually-collapsed repo on a later manual refresh', async () => {
+      localStorage.setItem(STORAGE_KEY, 'acme/widgets');
+      await setup();
+      expect(component.selectedRepo?.full_name).toBe('acme/widgets');
+
+      component.toggleRepo(component.repos[0]); // collapse
+      fixture.detectChanges();
+      expect(component.selectedRepo).toBeNull();
+
+      component.loadRepos(); // manual "Refresh"
+      fixture.detectChanges();
+      expect(component.selectedRepo).toBeNull();
     });
   });
 
