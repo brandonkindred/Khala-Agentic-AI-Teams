@@ -3,7 +3,7 @@
   <!-- Header row -->
   <div class="lab-header">
     <div class="lab-title">
-      <mat-icon>science</mat-icon>
+      <mat-icon aria-hidden="true">science</mat-icon>
       <div>
         <h2>Strategy Lab</h2>
         <p class="lab-subtitle">Autonomous swing trading strategy ideation, backtesting, and analysis</p>
@@ -22,7 +22,7 @@
           @if (clearingAll) {
             <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
           } @else {
-            <mat-icon>delete_sweep</mat-icon>
+            <mat-icon aria-hidden="true">delete_sweep</mat-icon>
           }
           <span>{{ clearingAll ? 'Clearing…' : 'Clear all' }}</span>
         </button>
@@ -63,7 +63,7 @@
         @if (running) {
           <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
         } @else {
-          <mat-icon>auto_awesome</mat-icon>
+          <mat-icon aria-hidden="true">auto_awesome</mat-icon>
         }
         <span>
           @if (running && runStatus) {
@@ -82,7 +82,7 @@
        to the Integrations page with the TradingView panel deep-linked in focus. -->
   @if (tradingViewStatusKnown && !tradingViewConfigured) {
     <div class="ds-notice">
-      <mat-icon class="ds-notice__icon">insights</mat-icon>
+      <mat-icon class="ds-notice__icon" aria-hidden="true">insights</mat-icon>
       <div class="ds-notice__text">
         <b>Backtests are using free public market data</b>
         <span>Connect a TradingView MCP server for higher-fidelity OHLCV price bars.</span>
@@ -95,7 +95,7 @@
         [queryParams]="{ focus: 'tradingview' }"
       >
         Configure TradingView
-        <mat-icon>arrow_forward</mat-icon>
+        <mat-icon aria-hidden="true">arrow_forward</mat-icon>
       </a>
     </div>
   }
@@ -104,7 +104,7 @@
        may generate strategies for. All selected = no constraint. -->
   <div class="category-row">
     <div class="category-label">
-      <mat-icon>category</mat-icon>
+      <mat-icon aria-hidden="true">category</mat-icon>
       <span>Categories</span>
     </div>
     <mat-button-toggle-group
@@ -118,7 +118,7 @@
     >
       @for (cat of categoryOptions; track cat.value) {
         <mat-button-toggle [value]="cat.value">
-          <mat-icon>{{ cat.icon }}</mat-icon>
+          <mat-icon aria-hidden="true">{{ cat.icon }}</mat-icon>
           <span>{{ cat.label }}</span>
         </mat-button-toggle>
       }
@@ -139,7 +139,7 @@
   @if (completionWarning) {
     <app-inline-banner variant="warning" [message]="completionWarning">
       <button mat-icon-button (click)="completionWarning = null" aria-label="Dismiss warning">
-        <mat-icon>close</mat-icon>
+        <mat-icon aria-hidden="true">close</mat-icon>
       </button>
     </app-inline-banner>
   }
@@ -148,7 +148,7 @@
   @if (running && runStatus) {
     <div class="in-progress-section">
       <div class="progress-header">
-        <mat-icon class="pulse-icon">hub</mat-icon>
+        <mat-icon class="pulse-icon" aria-hidden="true">hub</mat-icon>
         <span class="progress-title">
           @if (runStatus.batch_count && runStatus.batch_count > 1) {
             Batch {{ runStatus.current_batch ?? (runStatus.completed_batches ?? 0) + 1 }}
@@ -183,7 +183,10 @@
                  [class.has-connector]="!last"
                  [class.next-completed]="!last && isPhaseCompleted(STRATEGY_LAB_PHASES[i + 1].id)">
               <div class="phase-node">
-                <mat-icon>{{ isPhaseCompleted(phase.id) ? 'check' : phase.icon }}</mat-icon>
+                <!-- Completed/current/pending state has no text alternative yet (color-cue
+                     follow-up work); aria-hidden here only matches mat-icon's own default,
+                     it does not add a new gap. -->
+                <mat-icon aria-hidden="true">{{ isPhaseCompleted(phase.id) ? 'check' : phase.icon }}</mat-icon>
               </div>
               <span class="phase-label">{{ phase.label }}</span>
             </div>
@@ -193,7 +196,7 @@
         <!-- Strategy preview (once ideation completes) -->
         @if (runStatus.current_cycle.strategy) {
           <div class="strategy-preview">
-            <mat-icon class="preview-icon">{{ getAssetClassIcon(runStatus.current_cycle.strategy.asset_class) }}</mat-icon>
+            <mat-icon class="preview-icon" aria-hidden="true">{{ getAssetClassIcon(runStatus.current_cycle.strategy.asset_class) }}</mat-icon>
             <div class="preview-text">
               <span class="preview-asset">{{ runStatus.current_cycle.strategy.asset_class }}</span>
               <span class="preview-hypothesis">{{ runStatus.current_cycle.strategy.hypothesis }}</span>
@@ -241,9 +244,9 @@
                   @if (entry.status === 'active') {
                     <mat-spinner diameter="12"></mat-spinner>
                   } @else if (entry.status === 'done') {
-                    <mat-icon>check_circle</mat-icon>
+                    <mat-icon aria-hidden="true">check_circle</mat-icon>
                   } @else {
-                    <mat-icon>cancel</mat-icon>
+                    <mat-icon aria-hidden="true">cancel</mat-icon>
                   }
                 </span>
                 <span class="log-message">{{ entry.message }}</span>
@@ -268,17 +271,17 @@
         <span class="chip-label">Total Strategies</span>
       </div>
       <div class="summary-chip winning">
-        <mat-icon>trending_up</mat-icon>
+        <mat-icon aria-hidden="true">trending_up</mat-icon>
         <span class="chip-count">{{ winningCount }}</span>
         <span class="chip-label">Winning (&gt;8% pa)</span>
       </div>
       <div class="summary-chip losing">
-        <mat-icon>trending_down</mat-icon>
+        <mat-icon aria-hidden="true">trending_down</mat-icon>
         <span class="chip-count">{{ losingCount }}</span>
         <span class="chip-label">Losing</span>
       </div>
       <div class="summary-chip rate">
-        <mat-icon>percent</mat-icon>
+        <mat-icon aria-hidden="true">percent</mat-icon>
         <span class="chip-count">{{ (winningCount / totalCount * 100) | number:'1.0-0' }}%</span>
         <span class="chip-label">Win Rate</span>
       </div>
@@ -295,11 +298,11 @@
       >
         <mat-button-toggle value="all">All ({{ totalCount }})</mat-button-toggle>
         <mat-button-toggle value="winning">
-          <mat-icon class="toggle-icon winning-icon">check_circle</mat-icon>
+          <mat-icon class="toggle-icon winning-icon" aria-hidden="true">check_circle</mat-icon>
           Winning ({{ winningCount }})
         </mat-button-toggle>
         <mat-button-toggle value="losing">
-          <mat-icon class="toggle-icon losing-icon">cancel</mat-icon>
+          <mat-icon class="toggle-icon losing-icon" aria-hidden="true">cancel</mat-icon>
           Losing ({{ losingCount }})
         </mat-button-toggle>
       </mat-button-toggle-group>
@@ -316,7 +319,7 @@
   <!-- Empty state -->
   @if (!loading && totalCount === 0) {
     <div class="empty-state">
-      <mat-icon>science</mat-icon>
+      <mat-icon aria-hidden="true">science</mat-icon>
       <h3>No strategies yet</h3>
       <p>Click <strong>Run New Strategy</strong> to have the agent ideate and backtest its first swing trading strategy.</p>
     </div>
@@ -331,7 +334,7 @@
           <!-- Card header -->
           <mat-card-header class="strategy-card-header-row">
             <div mat-card-avatar class="strategy-avatar" [class.winning-avatar]="record.is_winning" [class.losing-avatar]="!record.is_winning">
-              <mat-icon>{{ record.is_winning ? 'trending_up' : 'trending_down' }}</mat-icon>
+              <mat-icon aria-hidden="true">{{ record.is_winning ? 'trending_up' : 'trending_down' }}</mat-icon>
             </div>
             <div class="strategy-card-header-text">
               <mat-card-title>
@@ -353,7 +356,7 @@
               @if (deletingLabRecordId === record.lab_record_id) {
                 <mat-spinner diameter="22"></mat-spinner>
               } @else {
-                <mat-icon>delete_outline</mat-icon>
+                <mat-icon aria-hidden="true">delete_outline</mat-icon>
               }
             </button>
           </mat-card-header>
@@ -363,7 +366,7 @@
             <!-- Win/lose badge + key metrics -->
             <div class="metrics-row">
               <div class="outcome-badge" [class.winning-badge]="record.is_winning" [class.losing-badge]="!record.is_winning">
-                <mat-icon>{{ record.is_winning ? 'emoji_events' : 'close' }}</mat-icon>
+                <mat-icon aria-hidden="true">{{ record.is_winning ? 'emoji_events' : 'close' }}</mat-icon>
                 {{ record.is_winning ? 'WINNING' : 'LOSING' }}
               </div>
 
@@ -404,7 +407,7 @@
               [attr.aria-label]="cardToggleLabel(record)"
               (click)="toggleCard(record.lab_record_id)"
             >
-              <mat-icon class="expand-chevron">
+              <mat-icon class="expand-chevron" aria-hidden="true">
                 {{ isCardExpanded(record.lab_record_id) ? 'expand_less' : 'expand_more' }}
               </mat-icon>
             </button>
@@ -420,13 +423,13 @@
 
             <!-- Hypothesis -->
             <div class="hypothesis">
-              <mat-icon class="hypothesis-icon">lightbulb</mat-icon>
+              <mat-icon class="hypothesis-icon" aria-hidden="true">lightbulb</mat-icon>
               <p>{{ record.strategy.hypothesis }}</p>
             </div>
 
             <!-- Analysis narrative -->
             <div class="narrative">
-              <mat-icon class="narrative-icon">auto_stories</mat-icon>
+              <mat-icon class="narrative-icon" aria-hidden="true">auto_stories</mat-icon>
               <p>{{ record.analysis_narrative }}</p>
             </div>
 
@@ -437,7 +440,7 @@
                 <mat-expansion-panel class="signal-panel">
                   <mat-expansion-panel-header>
                     <mat-panel-title>
-                      <mat-icon class="panel-icon">radar</mat-icon>
+                      <mat-icon class="panel-icon" aria-hidden="true">radar</mat-icon>
                       Signal intelligence
                     </mat-panel-title>
                     <mat-panel-description>
@@ -453,7 +456,7 @@
                 <mat-expansion-panel class="ledger-panel">
                   <mat-expansion-panel-header>
                     <mat-panel-title>
-                      <mat-icon class="panel-icon">receipt_long</mat-icon>
+                      <mat-icon class="panel-icon" aria-hidden="true">receipt_long</mat-icon>
                       Trade Ledger
                     </mat-panel-title>
                     <mat-panel-description>
@@ -610,7 +613,7 @@
               <mat-expansion-panel>
                 <mat-expansion-panel-header>
                   <mat-panel-title>
-                    <mat-icon class="panel-icon">psychology</mat-icon>
+                    <mat-icon class="panel-icon" aria-hidden="true">psychology</mat-icon>
                     Strategy Details
                   </mat-panel-title>
                   <mat-panel-description>Signal, rules, and ideation rationale</mat-panel-description>
@@ -658,7 +661,7 @@
                 <mat-expansion-panel>
                   <mat-expansion-panel-header>
                     <mat-panel-title>
-                      <mat-icon class="panel-icon">verified</mat-icon>
+                      <mat-icon class="panel-icon" aria-hidden="true">verified</mat-icon>
                       Quality Gates
                     </mat-panel-title>
                     <mat-panel-description>
@@ -671,7 +674,7 @@
                   <div class="gate-results">
                     @for (gate of record.quality_gate_results; track $index) {
                       <div class="gate-result" [class]="gateSeverityClass(gate, record)">
-                        <mat-icon class="gate-icon">{{ gateIcon(gate, record) }}</mat-icon>
+                        <mat-icon class="gate-icon" aria-hidden="true">{{ gateIcon(gate, record) }}</mat-icon>
                         <span class="gate-name">{{ gate.gate_name }}</span>
                         <span class="gate-detail">
                           {{ gate.details }}
@@ -690,7 +693,7 @@
                 <mat-expansion-panel>
                   <mat-expansion-panel-header>
                     <mat-panel-title>
-                      <mat-icon class="panel-icon">code</mat-icon>
+                      <mat-icon class="panel-icon" aria-hidden="true">code</mat-icon>
                       Strategy Code
                     </mat-panel-title>
                     <mat-panel-description>Generated Python backtest script</mat-panel-description>
@@ -725,7 +728,7 @@
                              [class.verdict-ready]="session.verdict === 'ready_for_live'"
                              [class.verdict-not-performant]="session.verdict === 'not_performant'"
                              [class.verdict-inconclusive]="!session.verdict">
-                          <mat-icon>{{ session.verdict === 'ready_for_live' ? 'verified' : session.verdict === 'not_performant' ? 'warning' : 'help_outline' }}</mat-icon>
+                          <mat-icon aria-hidden="true">{{ session.verdict === 'ready_for_live' ? 'verified' : session.verdict === 'not_performant' ? 'warning' : 'help_outline' }}</mat-icon>
                           {{ verdictLabel(session.verdict) }}
                         </div>
                         <span class="paper-meta">
@@ -745,7 +748,7 @@
                               (click)="runPaperTrading(record)"
                               [disabled]="paperTradingLabRecordId !== null || running"
                             >
-                              <mat-icon>refresh</mat-icon>
+                              <mat-icon aria-hidden="true">refresh</mat-icon>
                               Re-run
                             </button>
                           }
@@ -777,7 +780,14 @@
                                 <td class="num-cell">{{ m.backtest }}</td>
                                 <td class="num-cell">{{ m.paper }}</td>
                                 <td class="cmp-aligned">
-                                  <mat-icon [class.aligned-yes]="m.aligned" [class.aligned-no]="!m.aligned">
+                                  <!-- Sole content of this cell, no text alternative yet (color-cue
+                                       follow-up work); aria-hidden here only matches mat-icon's own
+                                       default, it does not add a new gap. -->
+                                  <mat-icon
+                                    aria-hidden="true"
+                                    [class.aligned-yes]="m.aligned"
+                                    [class.aligned-no]="!m.aligned"
+                                  >
                                     {{ m.aligned ? 'check_circle' : 'cancel' }}
                                   </mat-icon>
                                 </td>
@@ -791,14 +801,14 @@
                     <!-- Divergence analysis (when not performant) -->
                     @if (session.divergence_analysis) {
                       <div class="divergence-analysis">
-                        <mat-icon class="narrative-icon">analytics</mat-icon>
+                        <mat-icon class="narrative-icon" aria-hidden="true">analytics</mat-icon>
                         <p>{{ session.divergence_analysis }}</p>
                       </div>
                     }
 
                     @if (!record.is_publishable) {
                       <div class="paper-trading-skipped paper-trading-skipped-inline">
-                        <mat-icon class="paper-skip-icon">block</mat-icon>
+                        <mat-icon class="paper-skip-icon" aria-hidden="true">block</mat-icon>
                         <div class="paper-skip-copy">
                           <span class="paper-skip-title">Re-run unavailable — record is not publishable</span>
                           @if (publishabilitySkipLabel(record); as reason) {
@@ -828,13 +838,13 @@
                       (click)="runPaperTrading(record)"
                       [disabled]="paperTradingLabRecordId !== null || running"
                     >
-                      <mat-icon>candlestick_chart</mat-icon>
+                      <mat-icon aria-hidden="true">candlestick_chart</mat-icon>
                       <span>Paper Trade This Strategy</span>
                     </button>
                   }
                 } @else {
                   <div class="paper-trading-skipped">
-                    <mat-icon class="paper-skip-icon">block</mat-icon>
+                    <mat-icon class="paper-skip-icon" aria-hidden="true">block</mat-icon>
                     <div class="paper-skip-copy">
                       <span class="paper-skip-title">Not publishable — paper trading unavailable</span>
                       @if (publishabilitySkipLabel(record); as reason) {
@@ -855,7 +865,7 @@
   <!-- No results after filtering -->
   @if (!loading && totalCount > 0 && displayedItems.length === 0) {
     <div class="empty-state">
-      <mat-icon>filter_list_off</mat-icon>
+      <mat-icon aria-hidden="true">filter_list_off</mat-icon>
       <p>No {{ filter }} strategies found. Try a different filter.</p>
     </div>
   }

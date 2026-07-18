@@ -28,7 +28,7 @@ from .models import (
     ReviewProgressCallback,
     notify_review_progress,
 )
-from .repo_reader import RepoReader
+from .repo_reader import RepoReader, disk_repo_reader_from_root
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,9 @@ class CodeReviewAgent:
             - ``repo_reader`` is None or a ``repo_reader.RepoReader`` giving the
               false-positive verifier whole-repo read access (so it can confirm a
               file/module a finding calls missing already exists outside the diff).
+              When it is None and ``input_data.repo_root`` names a disk checkout,
+              the in-process path rebuilds a ``DiskRepoReader`` from that path so
+              a live reader and a serialized ``repo_root`` grant the same access.
 
         Postconditions:
             - Returns the coordinator's merged verdict covering every submitted
@@ -174,8 +177,15 @@ class CodeReviewAgent:
                     "falling back to in-process review",
                     exc,
                 )
+        # A live reader wins; otherwise rebuild one from the serializable
+        # ``repo_root`` so the in-process path grants the same off-diff read access
+        # as the Temporal activities (which reconstruct from the same field). Both
+        # channels are fail-safe — a missing path yields None (keep-more).
+        effective_reader = repo_reader
+        if effective_reader is None:
+            effective_reader = disk_repo_reader_from_root(input_data.repo_root)
         return run_coordinator(
-            self.llm, input_data, progress_callback=progress_callback, repo_reader=repo_reader
+            self.llm, input_data, progress_callback=progress_callback, repo_reader=effective_reader
         )
 
     def _run_via_temporal(
