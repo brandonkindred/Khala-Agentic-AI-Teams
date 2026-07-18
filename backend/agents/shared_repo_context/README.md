@@ -35,6 +35,4 @@ is the single implementation behind the per-domain `_read_repo_code` readers in 
 backend/frontend code-v2 teams and the ai-agent-development team. Those methods are
 now thin delegators that pass their own extension/exclude sets and `max_chars`
 budget — same `--- <relpath> ---` header, same stop-at-budget (whole files only)
-behaviour as before, one implementation. coding_team's `_read_repo_context` keeps
-its distinct 80-file / full-content contract but sources its filter constants
-(`FULL_STACK_EXTENSIONS`, `REPO_INSPECT_EXCLUDE_DIRS`) from this package.
+behaviour as before, one implementation.

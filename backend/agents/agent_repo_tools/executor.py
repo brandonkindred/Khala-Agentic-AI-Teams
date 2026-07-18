@@ -14,8 +14,8 @@ from .definitions import REPO_INSPECT_TOOL_DEFINITIONS
 
 logger = logging.getLogger(__name__)
 
-# Directories never surfaced by inspection. Single-sourced with the passive repo-context scanner
-# (coding_team._read_repo_context) so both views of the repo agree.
+# Directories never surfaced by inspection. Sourced directly from shared_repo_context so every
+# repo-inspection scanner in the codebase agrees on what's excluded.
 _INSPECT_EXCLUDE_DIRS: frozenset[str] = REPO_INSPECT_EXCLUDE_DIRS
 
 # ``Path.glob`` follows symlinked directories when expanding ``**`` on Python < 3.13, so a symlink
