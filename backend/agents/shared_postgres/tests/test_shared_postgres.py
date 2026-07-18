@@ -15,6 +15,7 @@ from shared_postgres import (
     is_postgres_enabled,
     register_all_team_schemas,
     register_team_schemas,
+    register_team_schemas_many,
 )
 from shared_postgres import client as client_mod
 from shared_postgres import registry as registry_mod
@@ -197,6 +198,107 @@ def test_register_team_schemas_runs_when_enabled(monkeypatch):
     result = register_team_schemas(TeamSchema(team="demo", statements=["SELECT 1"]))
     assert result is True
     assert called["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# register_team_schemas_many (shared best-effort loop)
+# ---------------------------------------------------------------------------
+
+
+def test_register_team_schemas_many_registers_all_in_order(monkeypatch):
+    import shared_postgres
+
+    calls: list[str] = []
+
+    def fake_register(schema):
+        calls.append(schema.team)
+        return True
+
+    monkeypatch.setattr(shared_postgres, "register_team_schemas", fake_register)
+
+    schemas = [TeamSchema(team="a"), TeamSchema(team="b"), TeamSchema(team="c")]
+    applied = register_team_schemas_many(schemas)
+    assert calls == ["a", "b", "c"]
+    assert applied == tuple(schemas)
+
+
+def test_register_team_schemas_many_continues_past_one_failure(monkeypatch, caplog):
+    import shared_postgres
+
+    def fake_register(schema):
+        if schema.team == "boom":
+            raise RuntimeError("pg down")
+        return True
+
+    monkeypatch.setattr(shared_postgres, "register_team_schemas", fake_register)
+
+    ok1, boom, ok2 = TeamSchema(team="ok1"), TeamSchema(team="boom"), TeamSchema(team="ok2")
+    with caplog.at_level("ERROR"):
+        applied = register_team_schemas_many([ok1, boom, ok2])
+
+    assert applied == (ok1, ok2)  # boom skipped, ok2 still attempted
+    assert any("schema=boom" in rec.message for rec in caplog.records)
+
+
+def test_register_team_schemas_many_tolerates_schema_without_team(monkeypatch, caplog):
+    # The regression this function exists to prevent: a schema-like value that lacks
+    # .team must not itself blow up the failure log (which would abort the loop and
+    # silently skip every schema after it — see backend/team_service/entrypoint.py's
+    # prior hand-rolled version of this loop).
+    import shared_postgres
+
+    class _NoTeam:
+        pass
+
+    bad = _NoTeam()
+    ok = TeamSchema(team="ok")
+
+    def fake_register(schema):
+        if schema is bad:
+            raise RuntimeError("boom")
+        return True
+
+    monkeypatch.setattr(shared_postgres, "register_team_schemas", fake_register)
+
+    with caplog.at_level("ERROR"):
+        applied = register_team_schemas_many([bad, ok])
+
+    assert applied == (ok,)  # ok still registered despite bad's missing .team
+    assert any("schema=" in rec.message for rec in caplog.records)
+
+
+def test_register_team_schemas_many_empty_input(monkeypatch):
+    import shared_postgres
+
+    calls: list[TeamSchema] = []
+    monkeypatch.setattr(
+        shared_postgres, "register_team_schemas", lambda s: (calls.append(s), True)[1]
+    )
+    assert register_team_schemas_many([]) == ()
+    assert calls == []
+
+
+def test_register_team_schemas_many_excludes_disabled_no_ops(monkeypatch):
+    # register_team_schemas returning False (Postgres disabled) must not count as applied.
+    import shared_postgres
+
+    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda s: False)
+    assert register_team_schemas_many([TeamSchema(team="x")]) == ()
+
+
+def test_register_team_schemas_many_honors_monkeypatched_package_attribute(monkeypatch):
+    # register_team_schemas_many resolves register_team_schemas via a fresh
+    # `from shared_postgres import register_team_schemas` at call time specifically so
+    # that monkeypatching the PACKAGE attribute (as every caller's test suite does) is
+    # honored, even though register_team_schemas_many is defined in the same module
+    # (runner.py) as the original register_team_schemas function.
+    import shared_postgres
+
+    seen = []
+    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda s: seen.append(s) or True)
+    schema = TeamSchema(team="x")
+    register_team_schemas_many([schema])
+    assert seen == [schema]
 
 
 # ---------------------------------------------------------------------------
@@ -746,6 +848,63 @@ def test_truncate_team_tables_rejects_quote_in_name(monkeypatch):
     schema = TeamSchema(team="demo", table_names=['bad"name'])
     with pytest.raises(ValueError, match="double-quote"):
         truncate_team_tables(schema)
+
+
+# ---------------------------------------------------------------------------
+# drop_team_tables
+# ---------------------------------------------------------------------------
+
+
+def test_drop_team_tables_noop_on_empty_list(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres.testing import drop_team_tables
+
+    schema = TeamSchema(team="demo", statements=[], table_names=[])
+    assert drop_team_tables(schema) == 0
+
+
+def test_drop_team_tables_issues_one_drop_per_table(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres import testing as testing_mod
+
+    executed: list[str] = []
+
+    @contextmanager
+    def fake_get_conn(database=None):
+        cursor = MagicMock()
+        cursor.__enter__ = lambda self: cursor
+        cursor.__exit__ = lambda self, *a: None
+        cursor.execute.side_effect = lambda sql: executed.append(sql)
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        yield conn
+
+    monkeypatch.setattr(testing_mod, "get_conn", fake_get_conn)
+
+    schema = TeamSchema(team="demo", table_names=["demo_a", "demo_b"])
+    dropped = testing_mod.drop_team_tables(schema)
+    assert dropped == 2
+    assert len(executed) == 2  # one DROP per table, not one combined statement
+    assert 'DROP TABLE IF EXISTS "demo_a" CASCADE' == executed[0]
+    assert 'DROP TABLE IF EXISTS "demo_b" CASCADE' == executed[1]
+
+
+def test_drop_team_tables_raises_when_disabled(monkeypatch):
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    from shared_postgres.testing import drop_team_tables
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    with pytest.raises(RuntimeError, match="POSTGRES_HOST is not set"):
+        drop_team_tables(schema)
+
+
+def test_drop_team_tables_rejects_quote_in_name(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres.testing import drop_team_tables
+
+    schema = TeamSchema(team="demo", table_names=['bad"name'])
+    with pytest.raises(ValueError, match="double-quote"):
+        drop_team_tables(schema)
 
 
 # ---------------------------------------------------------------------------

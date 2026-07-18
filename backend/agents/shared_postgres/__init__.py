@@ -42,7 +42,11 @@ from shared_postgres.client import (
 )
 from shared_postgres.metrics import timed_query
 from shared_postgres.registry import TEAM_POSTGRES_MODULES, register_all_team_schemas
-from shared_postgres.runner import ensure_team_schema, register_team_schemas
+from shared_postgres.runner import (
+    ensure_team_schema,
+    register_team_schemas,
+    register_team_schemas_many,
+)
 from shared_postgres.schema import TeamSchema
 from shared_postgres.secrets import (
     delete_secret,
@@ -110,6 +114,7 @@ __all__ = [
     "probe_cursor",
     "register_all_team_schemas",
     "register_team_schemas",
+    "register_team_schemas_many",
     "resolve_storage_status",
     "set_secret",
     "set_secrets",

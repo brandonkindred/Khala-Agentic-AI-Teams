@@ -15,7 +15,16 @@ worker. This test proves that registering every schema in that set (not just
 the team's own primary schema) closes the race, with a negative control proving
 the harness actually detects the bug it exists to catch.
 
-Requires POSTGRES_HOST (skipped otherwise). Run against a local Postgres with:
+DESTRUCTIVE: this test drops and recreates the real ``user_profiles`` /
+``user_profile_associations`` tables (structure only is restored — any data
+that existed before the drop is gone; there is no undo). Run it ONLY against a
+disposable Postgres instance (CI's ephemeral service container, or a local
+throwaway) — never against a shared or persistent database whose data matters,
+since dropping these tables destroys every team's artifact associations, not
+just job_matching's.
+
+Requires POSTGRES_HOST (skipped otherwise). Run against a disposable local
+Postgres with:
     POSTGRES_HOST=localhost POSTGRES_USER=postgres POSTGRES_DB=postgres \\
         pytest -m integration test_schema_registration.py -v
 (set POSTGRES_PORT / POSTGRES_PASSWORD too if your local instance needs them).
@@ -54,57 +63,58 @@ def _real_postgres_host(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", _REAL_POSTGRES_HOST)
 
 
-def _drop_user_profile_tables() -> None:
-    from shared_postgres import get_conn
-    from user_profile.postgres import SCHEMA as USER_PROFILE_SCHEMA
-
-    with get_conn(USER_PROFILE_SCHEMA.database) as conn, conn.cursor() as cur:
-        for table in USER_PROFILE_SCHEMA.table_names:
-            cur.execute(f'DROP TABLE IF EXISTS "{table}" CASCADE')
-
-
-def _restore_user_profile_tables() -> None:
-    from shared_postgres import ensure_team_schema
-    from user_profile.postgres import SCHEMA as USER_PROFILE_SCHEMA
-
-    ensure_team_schema(USER_PROFILE_SCHEMA)
-
-
 @pytest.fixture
 def fresh_user_profile_tables(_real_postgres_host):
     """Simulate a brand-new database: drop user_profile's tables, restore after.
 
-    Restoration runs in `finally` so a test failure still leaves the shared
-    Postgres instance usable for whatever else runs against it afterward.
+    DESTRUCTIVE — see the module docstring. Only structure is restored
+    (``CREATE TABLE IF NOT EXISTS``); any data present before the drop is
+    gone. The drop itself runs inside the same `try` as the restore so a
+    partial failure (e.g. the second table's DROP fails after the first one
+    already succeeded) still restores whatever it can, rather than leaving
+    the shared instance stuck with a table missing.
     """
-    _drop_user_profile_tables()
+    from shared_postgres.testing import drop_team_tables
+    from user_profile.postgres import SCHEMA as USER_PROFILE_SCHEMA
+
     try:
+        drop_team_tables(USER_PROFILE_SCHEMA)
         yield
     finally:
-        _restore_user_profile_tables()
+        from shared_postgres import ensure_team_schema
+
+        ensure_team_schema(USER_PROFILE_SCHEMA)
+
+
+def _assert_fallback_logged(caplog, *, expected: bool) -> None:
+    """Assert whether career_store's fallback WARNING fired during this test.
+
+    The return value of ``load_career_profile()`` (``None``) can't distinguish
+    "table missing" (the bug) from "table exists but has no career section
+    yet" (the normal, correct case) — only this WARNING does.
+    """
+    assert any(_FALLBACK_MESSAGE in r.getMessage() for r in caplog.records) is expected
 
 
 def test_registering_all_exposed_schemas_closes_the_race(fresh_user_profile_tables, caplog) -> None:
     """Registering every schema in app.state.postgres_schemas — the set the
-    team-service wrapper now registers before starting the Temporal worker —
-    means user_profiles exists by the time career_store's best-effort read runs,
-    so it no longer falls back silently."""
+    team-service wrapper now registers before starting the Temporal worker,
+    via the same shared_postgres.register_team_schemas_many helper — means
+    user_profiles exists by the time career_store's best-effort read runs, so
+    it no longer falls back silently."""
     from job_matching_team.api.main import app as job_matching_app
     from job_matching_team.profile.career_store import load_career_profile
-    from shared_postgres import register_team_schemas
+    from shared_postgres import register_team_schemas_many
 
     schemas = job_matching_app.state.postgres_schemas
     assert len(schemas) >= 2  # sanity: both JOB_MATCHING_SCHEMA and USER_PROFILE_SCHEMA present
-    for schema in schemas:
-        assert register_team_schemas(schema) is True
+    applied = register_team_schemas_many(schemas)
+    assert applied == schemas  # every schema registered cleanly, none skipped
 
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=_CAREER_STORE_LOGGER):
         load_career_profile()
-    # The return value (None) is NOT the signal here: it's identical whether the
-    # table was missing (the bug) or the table exists but simply has no career
-    # section yet (the normal, correct case). Only the WARNING distinguishes them.
-    assert not any(_FALLBACK_MESSAGE in r.getMessage() for r in caplog.records)
+    _assert_fallback_logged(caplog, expected=False)
 
 
 def test_missing_user_profile_schema_reproduces_the_original_bug(
@@ -125,4 +135,4 @@ def test_missing_user_profile_schema_reproduces_the_original_bug(
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=_CAREER_STORE_LOGGER):
         load_career_profile()
-    assert any(_FALLBACK_MESSAGE in r.getMessage() for r in caplog.records)
+    _assert_fallback_logged(caplog, expected=True)

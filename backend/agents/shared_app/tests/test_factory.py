@@ -72,6 +72,20 @@ def test_postgres_schema_exposed_on_app_state() -> None:
     assert app_none.state.postgres_schema is None
 
 
+def test_extra_postgres_schemas_none_treated_as_omitted() -> None:
+    """An explicit extra_postgres_schemas=None degrades the same as omitting
+    it, matching postgres_schema=None's own "no schema" convention — it must
+    not crash the unpack of `*extra_postgres_schemas`."""
+    app = create_team_app(
+        service_name="svc",
+        team_key="tk",
+        title="T",
+        postgres_schema=object(),
+        extra_postgres_schemas=None,  # type: ignore[arg-type]
+    )
+    assert len(app.state.postgres_schemas) == 1  # just the primary, no crash
+
+
 def test_extra_postgres_schemas_exposed_on_app_state() -> None:
     """app.state.postgres_schemas is the full ordered set (primary first, then
     extras) so bootstrap paths that need every schema (not just the primary)

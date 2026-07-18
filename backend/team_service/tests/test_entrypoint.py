@@ -184,16 +184,17 @@ def test_wrapper_registers_schema_before_temporal_worker() -> None:
     )
     _compile(body)
     # Every schema is resolved off the imported app (the full ordered set, not
-    # just the primary) and registered via the shared helper, in a loop so one
-    # schema's failure can't skip another's registration.
+    # just the primary) and registered via the shared best-effort helper —
+    # register_team_schemas_many — so one schema's failure can't skip another's
+    # registration (that loop's own isolation is factory.py/shared_postgres's
+    # responsibility now, not something duplicated in the generated source).
     assert "app, 'state'" in body
     assert "postgres_schemas" in body
-    assert "for _schema in _schemas:" in body
-    assert "register_team_schemas" in body
+    assert "register_team_schemas_many" in body
     # DDL is gated on TEMPORAL_ADDRESS (only runs when the worker will actually
     # start), so thread/local mode stays side-effect-free at import time.
     addr_idx = body.index("_os.environ.get('TEMPORAL_ADDRESS', '').strip()")
-    reg_idx = body.index("register_team_schemas")
+    reg_idx = body.index("register_team_schemas_many")
     worker_idx = body.index("_il.import_module('planning_team.temporal.worker')")
     assert addr_idx < reg_idx
     # Ordering: registration must precede the worker-start block so the worker never
@@ -212,16 +213,22 @@ def test_wrapper_omits_schema_registration_without_temporal() -> None:
     assert "postgres_schema" not in body
 
 
-def test_wrapper_temporal_block_registers_every_schema_and_continues_past_failure(
+def test_wrapper_temporal_block_delegates_to_shared_helper_and_continues_past_failure(
     monkeypatch,
 ) -> None:
     """Executes the generated Temporal-block source (not just compiles it)
-    against fakes, proving real multi-schema iteration and continue-past-one-
-    schema's-failure — the string/ordering assertions above prove the source
-    *shape* is correct but can't prove the loop actually behaves this way."""
+    against the REAL shared_postgres.register_team_schemas_many — only its
+    internal register_team_schemas call is faked — proving the generated code
+    correctly delegates every schema to the shared best-effort helper. Includes
+    a schema lacking .team ahead of a valid one: the exact shape that used to
+    make the wrapper's old hand-rolled loop abort early and silently skip
+    every schema after it (see backend/agents/shared_postgres/tests for the
+    helper's own, more exhaustive coverage of that behavior)."""
     import logging
     import sys
     import types
+
+    import shared_postgres
 
     body = entrypoint.build_wrapper_body(
         "planning_team",
@@ -232,20 +239,20 @@ def test_wrapper_temporal_block_registers_every_schema_and_continues_past_failur
     )
     temporal_block = body[body.index("try:\n    import os as _os") :]
 
-    ok1, boom, ok2 = (types.SimpleNamespace(team=t) for t in ("ok1", "boom", "ok2"))
+    ok1 = types.SimpleNamespace(team="ok1")
+    boom = object()  # deliberately lacks .team
+    ok2 = types.SimpleNamespace(team="ok2")
     fake_app = types.SimpleNamespace(state=types.SimpleNamespace(postgres_schemas=(ok1, boom, ok2)))
 
     registered: list[str] = []
 
     def _fake_rts(schema):
-        if schema.team == "boom":
+        if schema is boom:
             raise RuntimeError("boom")
         registered.append(schema.team)
         return True
 
-    fake_shared_postgres = types.ModuleType("shared_postgres")
-    fake_shared_postgres.register_team_schemas = _fake_rts
-    monkeypatch.setitem(sys.modules, "shared_postgres", fake_shared_postgres)
+    monkeypatch.setattr(shared_postgres, "register_team_schemas", _fake_rts)
 
     worker_started: list[bool] = []
     fake_worker_mod = types.ModuleType("planning_team.temporal.worker")
@@ -256,8 +263,8 @@ def test_wrapper_temporal_block_registers_every_schema_and_continues_past_failur
     namespace = {"app": fake_app, "_log": logging.getLogger("test_wrapper_temporal_block")}
     exec(compile(temporal_block, "<temporal-block>", "exec"), namespace)  # noqa: S102
 
-    assert registered == ["ok1", "ok2"]  # both non-failing schemas registered, in order
-    assert worker_started == [True]  # worker still starts despite one schema's failure
+    assert registered == ["ok1", "ok2"]  # boom skipped, ok2 still attempted despite it
+    assert worker_started == [True]  # worker still starts despite the mid-list failure
 
 
 def test_temporal_names_embedded_safely() -> None:

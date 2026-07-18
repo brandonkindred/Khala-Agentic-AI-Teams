@@ -8,11 +8,18 @@ TABLE`` that came before it. Per-statement errors are logged at
 ``register_team_schemas`` is the no-op-safe wrapper teams call from
 their FastAPI lifespan: it returns immediately when ``POSTGRES_HOST`` is
 unset, so lifespans can unconditionally invoke it.
+
+``register_team_schemas_many`` is the shared "register several schemas,
+independently best-effort" loop — the single implementation shared by
+``shared_app.create_team_app``'s lifespan and the team-service wrapper's
+pre-Temporal-worker registration, so that resilience contract (one
+schema's failure never blocks another's) can't drift between the two.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Iterable
 
 from shared_postgres.client import get_conn, is_postgres_enabled
 from shared_postgres.schema import TeamSchema
@@ -80,3 +87,37 @@ def register_team_schemas(schema: TeamSchema) -> bool:
         return False
     ensure_team_schema(schema)
     return True
+
+
+def register_team_schemas_many(schemas: Iterable[TeamSchema]) -> tuple[TeamSchema, ...]:
+    """Register every schema in ``schemas``, independently best-effort.
+
+    Preconditions:
+        - ``schemas`` is an iterable of ``TeamSchema`` instances.
+    Postconditions:
+        - Every schema in ``schemas`` is attempted regardless of whether an
+          earlier one failed or raised — a failure is logged (identifying the
+          schema via ``getattr(schema, "team", schema)``, tolerant of a
+          non-``TeamSchema`` test double) and does not stop the loop. Returns
+          the schemas that were actually applied (``register_team_schemas``
+          returned ``True`` for them), in the given order — callers that need
+          their own per-schema success/failure logging can compare this
+          against the input.
+    """
+    # Imported lazily, once per call (not once per schema — the module-level
+    # `register_team_schemas` name would bypass a test's
+    # ``monkeypatch.setattr(shared_postgres, "register_team_schemas", ...)``,
+    # which rebinds the package attribute, not this module's own global).
+    from shared_postgres import register_team_schemas as _rts
+
+    applied: list[TeamSchema] = []
+    for schema in schemas:
+        try:
+            if _rts(schema):
+                applied.append(schema)
+        except Exception:
+            logger.exception(
+                "postgres schema registration failed (schema=%s)",
+                getattr(schema, "team", schema),
+            )
+    return tuple(applied)

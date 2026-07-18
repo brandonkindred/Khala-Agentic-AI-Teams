@@ -391,9 +391,9 @@ def test_startup_backstop_swallows_worker_failure(monkeypatch):
 
 
 def test_postgres_schemas_include_user_profile() -> None:
-    """job_matching now exposes user_profile's schema too (issue #1697), so the
-    team-service wrapper registers user_profiles/user_profile_associations
-    before the Temporal worker starts, closing the race where a queued
+    """job_matching now exposes user_profile's schema too, so the team-service
+    wrapper registers user_profiles/user_profile_associations before the
+    Temporal worker starts, closing the race where a queued
     job_matching_prepare_scan activity could read a not-yet-created table."""
     from job_matching_team.postgres import SCHEMA as JOB_MATCHING_SCHEMA
     from user_profile import SCHEMA as USER_PROFILE_SCHEMA

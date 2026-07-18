@@ -2,15 +2,20 @@
 
 Almost every team's ``api/main.py`` opens with the same four moves: call
 :func:`shared_observability.init_otel`, build a ``FastAPI`` with a lifespan that
-registers the team's Postgres schema on startup and closes the pool on shutdown,
-then :func:`shared_observability.instrument_fastapi_app`. :func:`create_team_app`
-collapses that boilerplate into one call while leaving room for team-specific
-startup/shutdown work via optional hooks.
+registers the team's Postgres schema(s) on startup and closes the pool on
+shutdown, then :func:`shared_observability.instrument_fastapi_app`.
+:func:`create_team_app` collapses that boilerplate into one call while leaving
+room for team-specific startup/shutdown work via optional hooks. A team can
+also depend on another team's schema (e.g. shared user-profile tables) via
+``extra_postgres_schemas`` — every schema given, primary and extra alike, is
+exposed together on ``app.state.postgres_schemas`` for early bootstrap paths
+(e.g. the team-service wrapper) to register before starting background workers.
 
-Degrades cleanly: ``postgres_schema=None`` skips all Postgres wiring, and the
-``shared_postgres`` import is lazy so a team without it is never forced to depend
-on it. Schema registration and pool teardown are defensive (logged, never raised
-into app startup), matching the per-team lifespans this replaces.
+Degrades cleanly: omitting both ``postgres_schema`` and
+``extra_postgres_schemas`` skips all Postgres wiring, and the
+``shared_postgres`` import is lazy so a team without it is never forced to
+depend on it. Schema registration and pool teardown are defensive (logged,
+never raised into app startup), matching the per-team lifespans this replaces.
 """
 
 from __future__ import annotations
@@ -68,7 +73,12 @@ def create_team_app(
         - ``extra_postgres_schemas`` (when given) is a sequence of additional
           ``shared_postgres.TeamSchema`` — e.g. a schema owned by another team
           that this one also depends on. Registered after ``postgres_schema``,
-          in the given order.
+          in the given order; ``None`` is treated the same as omitting it (no
+          extras). A schema appearing in both ``postgres_schema`` and
+          ``extra_postgres_schemas`` is **not** deduplicated — it is registered
+          once per occurrence (harmless, since DDL is idempotent, but a
+          wasted round-trip callers should avoid by not repeating a schema
+          between the two params).
         - ``fastapi_kwargs`` must not contain ``lifespan`` (set explicitly here);
           passing it raises ``ValueError``. ``title``/``version`` are named
           parameters, so duplicating them raises ``TypeError`` from Python itself.
@@ -82,11 +92,14 @@ def create_team_app(
           instrumentor to override its default span-exclusion list — e.g. so a
           business route whose path contains ``metrics`` stays traced. Its
           lifespan registers every schema in ``postgres_schema`` and
-          ``extra_postgres_schemas`` on startup — each independently best-effort,
-          so one schema's registration failure never blocks another's, nor
-          ``on_startup`` — and closes the Postgres pool on shutdown (both
-          no-ops/guarded when Postgres is unconfigured), wrapping the optional
-          hooks. ``fastapi_kwargs`` pass through to the ``FastAPI`` constructor.
+          ``extra_postgres_schemas`` on startup via
+          :func:`shared_postgres.register_team_schemas_many` — each
+          independently best-effort, so one schema's registration failure
+          (including one whose ``.team`` attribute is itself unreadable) never
+          blocks another's, nor ``on_startup`` — and closes the Postgres pool
+          on shutdown (both no-ops/guarded when Postgres is unconfigured),
+          wrapping the optional hooks. ``fastapi_kwargs`` pass through to the
+          ``FastAPI`` constructor.
         - The returned app exposes its ``postgres_schema`` (the given
           ``TeamSchema`` or ``None``, unchanged) via ``app.state.postgres_schema``,
           and the full ordered set — ``postgres_schema`` first, then
@@ -124,30 +137,30 @@ def create_team_app(
 
     # Primary schema first, then extras, in the given order; None filtered so
     # callers never need to check "was a primary schema even given" separately.
+    # `extra_postgres_schemas or ()` normalizes an explicit None the same as
+    # omitting it, matching postgres_schema's own None-means-none convention.
     # Computed once here (not inside _lifespan) since app.state needs it too.
     all_postgres_schemas: tuple = tuple(
-        s for s in (postgres_schema, *extra_postgres_schemas) if s is not None
+        s for s in (postgres_schema, *(extra_postgres_schemas or ())) if s is not None
     )
 
     @asynccontextmanager
     async def _lifespan(application: FastAPI):
-        for _schema in all_postgres_schemas:
+        if all_postgres_schemas:
             try:
-                from shared_postgres import register_team_schemas
+                from shared_postgres import register_team_schemas_many
 
-                register_team_schemas(_schema)
+                # Best-effort per schema (one failure never blocks another's,
+                # nor on_startup below) is register_team_schemas_many's own
+                # contract; this try only guards against something registering
+                # itself can't recover from, e.g. shared_postgres failing to
+                # import.
+                register_team_schemas_many(all_postgres_schemas)
             except Exception:
-                # getattr, not _schema.team directly: existing tests pass an
-                # opaque object() as postgres_schema (never dereferenced before
-                # this log line was added), and this path must not itself raise.
-                logger.exception(
-                    "%s postgres schema registration failed (schema=%s)",
-                    team_key,
-                    getattr(_schema, "team", _schema),
-                )
+                logger.exception("%s postgres schema registration failed", team_key)
         # on_startup runs inside the try so that a raising hook still triggers
-        # teardown — register_team_schemas may have opened the process-wide pool
-        # above, and a startup failure must not leak it.
+        # teardown — register_team_schemas_many may have opened the process-wide
+        # pool above, and a startup failure must not leak it.
         try:
             await _maybe_call(on_startup)
             yield
