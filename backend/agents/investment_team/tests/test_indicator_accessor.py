@@ -25,7 +25,10 @@ from investment_team.strategy_lab.executor.predicate_evaluator import (
     BarRecord,
     StreamingHistoryView,
 )
-from investment_team.strategy_lab.executor.strategy_indicators import indicator_value
+from investment_team.strategy_lab.executor.strategy_indicators import (
+    bollinger_bands,
+    indicator_value,
+)
 from investment_team.strategy_lab.quality_gates.code_conformance import CodeConformanceGate
 from investment_team.strategy_lab.quality_gates.predicate_conformance import (
     _ShadowBar,
@@ -50,6 +53,39 @@ def _make_bars(n: int = 60, *, symbol: str = "QQQ") -> list[Bar]:
     """Deterministic OHLCV bars with genuine intrabar range (so ATR/ADX/Stoch
     are non-degenerate)."""
     rng = random.Random(7)
+    bars: list[Bar] = []
+    px = 100.0
+    for i in range(n):
+        px *= 1 + rng.uniform(-0.02, 0.025)
+        high = px * (1 + rng.uniform(0.0, 0.012))
+        low = px * (1 - rng.uniform(0.0, 0.012))
+        opn = low + (high - low) * rng.random()
+        bars.append(
+            Bar(
+                symbol=symbol,
+                timestamp=f"2026-02-{(i % 28) + 1:02d}T00:00:00Z",
+                timeframe="1d",
+                open=opn,
+                high=high,
+                low=low,
+                close=px,
+                volume=1000.0 + i,
+            )
+        )
+    return bars
+
+
+def _make_diverging_bars(n: int, *, symbol: str, seed: int) -> list[Bar]:
+    """Like :func:`_make_bars`, but with a caller-chosen ``seed`` so two
+    symbols' fixtures are genuinely different series.
+
+    ``_make_bars`` reseeds ``random.Random(7)`` identically regardless of its
+    ``symbol`` argument, so two calls with different symbols produce
+    bit-identical OHLCV — fine for testing dispatch-by-symbol, but unable to
+    distinguish real cross-symbol cache isolation from lucky coincidence
+    (see ``test_ctx_indicator_isolates_deque_state_across_genuinely_different_symbols``).
+    """
+    rng = random.Random(seed)
     bars: list[Bar] = []
     px = 100.0
     for i in range(n):
@@ -156,6 +192,317 @@ def test_indicator_value_warmup_and_empty_return_none() -> None:
 def test_indicator_value_accepts_plain_number_sequence() -> None:
     closes = [float(x) for x in range(1, 41)]
     assert indicator_value("sma", closes, period=5) == pytest.approx(38.0)
+
+
+# ---------------------------------------------------------------------------
+# indicator_value — shared registry (issue: backtest hot loop caching)
+# ---------------------------------------------------------------------------
+
+
+def test_indicator_value_shares_one_registry_per_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Acceptance criterion: the registry is instantiated once per backtest
+    (per symbol), not once per indicator call — checked across many calls and
+    two different indicators (one always-recompute, one deque-stateful).
+    Passes an explicit ``registries`` dict, matching how ``ctx.indicator()``
+    actually calls this in production (see ``contract.py``/
+    ``predicate_conformance.py``) — ``indicator_value`` has no caching of its
+    own for a caller that omits ``registries`` entirely; see
+    ``test_ad_hoc_sequential_calls_with_overlapping_timestamps_no_longer_corrupt``
+    in ``test_strategy_indicators.py`` for why that's deliberate.
+
+    Reads an ever-growing prefix each call, the way a real backtest's history
+    actually behaves before ``STREAMING_WINDOW_BARS`` caps it. This is safe
+    here specifically because ``registries`` is passed explicitly:
+    ``_shared_registry`` only adds ``len(reference)`` to its bucket key on
+    the ``_active_registries`` fallback path used by the standalone wrapper
+    functions (see ``_shared_registry``'s docstring, and
+    ``test_shared_registry_does_not_blend_different_window_depths_for_one_
+    symbol`` in ``test_strategy_indicators.py`` for that path's own
+    coverage) — the explicit-``registries`` path ``ctx.indicator()`` uses
+    keys on ``(symbol, source)`` alone, because its ``history`` argument is
+    always the context's own monotonically-growing (then capped) retained
+    history, never a caller-chosen depth.
+    """
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    constructed: list[object] = []
+    real_init = IndicatorRegistry.__init__
+
+    def _counting_init(self) -> None:
+        constructed.append(self)
+        real_init(self)
+
+    monkeypatch.setattr(IndicatorRegistry, "__init__", _counting_init)
+
+    registries: dict = {}
+    bars = _make_bars(n=40, symbol="QQQ")
+    for i in range(20, len(bars) + 1):
+        indicator_value("sma", bars[:i], period=10, registries=registries)
+        indicator_value("macd", bars[:i], registries=registries)
+
+    assert len(constructed) == 1
+
+
+def test_indicator_value_registry_count_scales_with_distinct_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'Once per backtest' means once per symbol-stream within a backtest, not
+    a single flat instance: a multi-symbol backtest constructs one registry
+    per symbol it actually reads — still far below one-per-call, but not a
+    literal singleton either. Passes an explicit ``registries`` dict and an
+    ever-growing prefix — see
+    ``test_indicator_value_shares_one_registry_per_symbol`` above for why
+    that's safe on this path."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    constructed: list[object] = []
+    real_init = IndicatorRegistry.__init__
+
+    def _counting_init(self) -> None:
+        constructed.append(self)
+        real_init(self)
+
+    monkeypatch.setattr(IndicatorRegistry, "__init__", _counting_init)
+
+    registries: dict = {}
+    aaa = _make_bars(n=30, symbol="AAA")
+    bbb = _make_bars(n=30, symbol="BBB")
+    for i in range(20, 31):
+        indicator_value("sma", aaa[:i], period=10, registries=registries)
+        indicator_value("sma", bbb[:i], period=10, registries=registries)
+
+    assert len(constructed) == 2
+
+
+def test_indicator_value_recomputes_when_trailing_close_coincidentally_matches() -> None:
+    """Regression test for a real bug caught in code review: two calls for
+    the same symbol whose windows have the same length and the same final
+    close value, but genuinely different earlier bars and a different final
+    timestamp, must not let the shared registry return the first call's
+    cached value for the second.
+
+    Guards against IndicatorRegistry's ``(id(last), len, timestamp, close)``
+    fingerprint colliding: ``_RegBar`` objects are freshly built and
+    discarded every call, and CPython commonly reuses a just-freed object's
+    ``id()`` for the next same-sized object — without a real, distinct
+    timestamp on each row, that coincidence alone could make a genuinely
+    different window look like a cache hit (or, for a deque-stateful
+    indicator, look like the same stream advancing by one bar).
+    """
+    period = 10
+    # 20 bars each; the trailing `period` window differs in every earlier
+    # value but both sequences share the same final close (150.0) and the
+    # same length — the exact ambiguity flagged in review.
+    seq_a = [
+        Bar(
+            symbol="TEST",
+            timestamp=f"2024-01-{i + 1:02d}T00:00:00Z",
+            timeframe="1d",
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=(100.0 + i if i < 19 else 150.0),
+            volume=1000.0,
+        )
+        for i in range(20)
+    ]
+    seq_b = [
+        Bar(
+            symbol="TEST",
+            timestamp=f"2024-06-{i + 1:02d}T00:00:00Z",
+            timeframe="1d",
+            open=200.0,
+            high=201.0,
+            low=199.0,
+            close=(200.0 - i if i < 19 else 150.0),
+            volume=1000.0,
+        )
+        for i in range(20)
+    ]
+    assert len(seq_a) == len(seq_b)
+    assert seq_a[-1].close == seq_b[-1].close == 150.0
+    assert seq_a[-1].timestamp != seq_b[-1].timestamp
+
+    got_a = indicator_value("sma", seq_a, period=period)
+    got_b = indicator_value("sma", seq_b, period=period)
+
+    expected_a = sum(b.close for b in seq_a[-period:]) / period
+    expected_b = sum(b.close for b in seq_b[-period:]) / period
+    assert expected_a != expected_b  # the two windows must genuinely differ
+    assert got_a == pytest.approx(expected_a)
+    assert got_b == pytest.approx(expected_b)
+
+
+def test_indicator_value_source_bucket_isolates_high_and_close_projections() -> None:
+    """Regression test for a second bug caught in code review:
+    ``indicator_value`` always dispatches to the registry with the literal
+    ``source="close"`` (the caller's requested source is pre-projected onto
+    ``_RegBar.close`` before the registry ever sees it), so the registry's
+    own cache key can't tell "sma of high" apart from "sma of close" for the
+    same bars. Engineered so the trailing bar's ``high`` equals its
+    ``close`` (the exact scenario flagged in review) — without bucketing by
+    the true requested source, the two projections' fingerprints could
+    coincide entirely and one query would silently return the other's value.
+    """
+    n = 20
+    bars = [
+        Bar(
+            symbol="TEST",
+            timestamp=f"2024-01-{i + 1:02d}T00:00:00Z",
+            timeframe="1d",
+            open=100.0,
+            high=100.0 + i + (0.0 if i == n - 1 else 5.0),
+            low=99.0,
+            close=100.0 + i,
+            volume=1000.0,
+        )
+        for i in range(n)
+    ]
+    assert bars[-1].high == bars[-1].close  # the exact ambiguity flagged in review
+    assert any(b.high != b.close for b in bars[:-1])  # earlier bars genuinely differ
+
+    got_high = indicator_value("sma", bars, source="high", period=10)
+    got_close = indicator_value("sma", bars, source="close", period=10)
+
+    expected_high = sum(b.high for b in bars[-10:]) / 10
+    expected_close = sum(b.close for b in bars[-10:]) / 10
+    assert expected_high != expected_close  # the two sources must genuinely differ
+    assert got_high == pytest.approx(expected_high)
+    assert got_close == pytest.approx(expected_close)
+
+
+def test_shadow_context_owns_isolated_indicator_registries() -> None:
+    """Regression test for a third bug caught in code review: ``_ShadowContext``
+    runs in-process on worker threads (e.g. ``api.main``'s
+    ``_strategy_lab_worker`` ``ThreadPoolExecutor``) that can process many
+    unrelated shadow-conformance executions over their lifetime. Each
+    instance owns its own indicator-registry cache as an instance attribute
+    (not shared thread-local state), so constructing a second context can
+    neither read nor clear the first's — a stronger guarantee than "reset at
+    construction" (see ``test_interleaved_contexts_do_not_corrupt_each_others_
+    indicator_state`` for why construction-time-only resets aren't enough).
+    """
+    first = _ShadowContext()
+    for i, b in enumerate(_shadow_bars(30)):
+        first._ingest_bar(b, i)
+    first.indicator("bollinger", period=20, band="upper")  # warms the cache for "QQQ"
+    assert first._indicator_registries  # sanity: something got cached
+
+    second = _ShadowContext()
+    assert second._indicator_registries == {}  # a fresh, independent dict
+    assert first._indicator_registries  # constructing `second` didn't touch `first`
+
+
+def test_strategy_context_owns_isolated_indicator_registries() -> None:
+    """``StrategyContext`` can be constructed in-process (not just inside the
+    sandboxed subprocess — e.g. by tests); it gets the same per-instance
+    isolation guarantee as ``_ShadowContext`` (see
+    ``test_shadow_context_owns_isolated_indicator_registries``)."""
+    first = StrategyContext(emit=lambda _d: None)
+    for b in _make_bars(30, symbol="QQQ"):
+        first._ingest_bar(b)
+    first.indicator("bollinger", period=20, band="upper")
+    assert first._indicator_registries
+
+    second = StrategyContext(emit=lambda _d: None)
+    assert second._indicator_registries == {}
+    assert first._indicator_registries
+
+
+def test_interleaved_contexts_do_not_corrupt_each_others_indicator_state() -> None:
+    """Regression test for a fourth bug caught in code review: two contexts
+    for the *same* symbol, constructed before either runs, with their bar
+    ingestion and indicator reads interleaved bar-by-bar — not one context
+    fully driven to completion before the next is even constructed. A
+    thread-local cache keyed only by ``(symbol, source)`` cannot tell these
+    two apart (both are "the same thread, the same symbol"), so an earlier
+    "reset the cache at construction" fix does not help once interleaving
+    begins — each context owning its own registries dict does not need to
+    tell them apart at all. Uses ``bollinger`` (deque-stateful, so a
+    corrupted read would visibly diverge from an independent computation)
+    over two genuinely different series for the same symbol.
+    """
+    a = _make_diverging_bars(60, symbol="X", seed=1)
+    b = _make_diverging_bars(60, symbol="X", seed=99)
+    ctx_a = StrategyContext(emit=lambda _d: None)
+    ctx_b = StrategyContext(emit=lambda _d: None)  # constructed before either runs
+    for ba, bb in zip(a, b):
+        ctx_a._ingest_bar(ba)
+        ctx_a.indicator("bollinger", period=20, band="upper")
+        ctx_b._ingest_bar(bb)
+        ctx_b.indicator("bollinger", period=20, band="upper")
+
+    got_a = ctx_a.indicator("bollinger", period=20, band="upper")
+    got_b = ctx_b.indicator("bollinger", period=20, band="upper")
+    exp_a = _engine_latest(
+        _engine_view(a), IndicatorRef(name="bollinger", params={"period": 20, "band": "upper"})
+    )
+    exp_b = _engine_latest(
+        _engine_view(b), IndicatorRef(name="bollinger", params={"period": 20, "band": "upper"})
+    )
+    assert got_a == pytest.approx(exp_a)
+    assert got_b == pytest.approx(exp_b)
+    assert got_a != pytest.approx(got_b)  # fixtures must actually differ
+
+
+def test_interleaved_standalone_wrapper_calls_do_not_corrupt_each_others_indicator_state() -> None:
+    """Regression test for a sixth bug caught in code review: the fourth
+    bug's fix (instance-owned ``_indicator_registries``, see
+    ``test_interleaved_contexts_do_not_corrupt_each_others_indicator_state``)
+    only covers ``ctx.indicator(...)``. The 16 standalone wrapper functions
+    have no ``registries`` parameter, so a strategy calling e.g.
+    ``bollinger_bands(...)`` directly (a documented, supported call shape —
+    see ``strategy_indicators``'s module docstring) always fell through to a
+    cache *shared* with whatever other execution last ran on this thread,
+    regardless of which context's dispatch was driving it.
+
+    This is not a theoretical risk: sharing one registry across two
+    different bar streams for the same symbol reliably corrupts
+    deque-stateful indicators like ``bollinger`` — verified empirically
+    (~91% of trials returned a value blended from both streams, via
+    ``streaming.py``'s ``_advance_kind`` misclassifying the second stream's
+    tail as a "slide" continuation of the first's cached deque state).
+
+    ``_active_registries`` (a contextvar) closes this: ``StrategyContext``/
+    ``_ShadowContext`` bracket every call into strategy code with
+    ``.set(self._indicator_registries)``/``.reset(token)`` (see
+    ``streaming_harness.py``'s ``_HARNESS_SCRIPT`` and
+    ``predicate_conformance.py``'s ``_check_fixture``), so a standalone
+    wrapper resolves to the *dispatching* context's own dict instead. This
+    test brackets manually to prove the underlying mechanism directly, the
+    same way the fourth bug's regression test manually interleaves two
+    contexts even though no current caller genuinely interleaves them.
+    """
+    from investment_team.strategy_lab.executor import strategy_indicators as si
+
+    a = _make_diverging_bars(60, symbol="X", seed=1)
+    b = _make_diverging_bars(60, symbol="X", seed=99)
+    ctx_a = StrategyContext(emit=lambda _d: None)
+    ctx_b = StrategyContext(emit=lambda _d: None)  # constructed before either runs
+
+    got_a = got_b = None
+    for i in range(20, 61):
+        token = si._active_registries.set(ctx_a._indicator_registries)
+        try:
+            got_a = bollinger_bands(a[:i], period=20)[0]  # (upper, middle, lower)
+        finally:
+            si._active_registries.reset(token)
+
+        token = si._active_registries.set(ctx_b._indicator_registries)
+        try:
+            got_b = bollinger_bands(b[:i], period=20)[0]
+        finally:
+            si._active_registries.reset(token)
+
+    exp_a = _engine_latest(
+        _engine_view(a), IndicatorRef(name="bollinger", params={"period": 20, "band": "upper"})
+    )
+    exp_b = _engine_latest(
+        _engine_view(b), IndicatorRef(name="bollinger", params={"period": 20, "band": "upper"})
+    )
+    assert got_a == pytest.approx(exp_a)
+    assert got_b == pytest.approx(exp_b)
+    assert got_a != pytest.approx(got_b)  # fixtures must actually differ
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +622,38 @@ def test_strategy_context_indicator_multi_symbol_isolation() -> None:
     assert explicit_aaa == pytest.approx(
         _engine_latest(_engine_view(a), IndicatorRef(name="sma", params={"period": 10}))
     )
+
+
+def test_ctx_indicator_isolates_deque_state_across_genuinely_different_symbols() -> None:
+    """Regression guard for cross-symbol cache collisions in the shared
+    IndicatorRegistry.
+
+    Unlike ``test_strategy_context_indicator_multi_symbol_isolation`` (whose
+    two symbols' fixtures are numerically identical, so it can't distinguish
+    real isolation from lucky coincidence), this uses genuinely divergent
+    series for ``bollinger`` — one of ``IndicatorRegistry``'s deque-stateful
+    methods with no ``symbol`` component in its own cache key — so a shared,
+    unbucketed registry would produce a visibly wrong value for at least one
+    symbol once its state gets interleaved with the other's.
+    """
+    a = _make_diverging_bars(60, symbol="AAA", seed=1)
+    b = _make_diverging_bars(60, symbol="BBB", seed=99)
+    ctx = StrategyContext(emit=lambda _d: None)
+    for ba, bb in zip(a, b):
+        ctx._ingest_bar(ba)
+        ctx._ingest_bar(bb)
+
+    got_aaa = ctx.indicator("bollinger", period=20, band="upper", symbol="AAA")
+    got_bbb = ctx.indicator("bollinger", period=20, band="upper", symbol="BBB")
+    exp_aaa = _engine_latest(
+        _engine_view(a), IndicatorRef(name="bollinger", params={"period": 20, "band": "upper"})
+    )
+    exp_bbb = _engine_latest(
+        _engine_view(b), IndicatorRef(name="bollinger", params={"period": 20, "band": "upper"})
+    )
+    assert got_aaa == pytest.approx(exp_aaa)
+    assert got_bbb == pytest.approx(exp_bbb)
+    assert got_aaa != pytest.approx(got_bbb)  # fixtures must actually differ
 
 
 def test_strategy_context_indicator_no_bar_yet_raises() -> None:
