@@ -104,6 +104,12 @@
             <span>The personal access token has no repository access.</span>
           </div>
         } @else {
+          @if (!selectedRepo) {
+            <p class="github-flow-hint">
+              <mat-icon aria-hidden="true">touch_app</mat-icon>
+              Select a repo, then an issue, to start a run.
+            </p>
+          }
           <div class="github-repos-list">
             @for (repo of repos; track repo.full_name; let i = $index) {
               <button
