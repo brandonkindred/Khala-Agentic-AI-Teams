@@ -17,6 +17,7 @@ invalid, provoking bogus findings).
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
@@ -65,9 +66,13 @@ def _piece_cache_key(source: str, cache_context: str, piece: str) -> str:
           ``code_review_agent.mapping._chunk_cache_key``'s "exact LLM input" key
           design — so any edit to the piece's content (or a different
           language/task_description folded into ``cache_context``) changes the
-          digest and naturally invalidates a prior entry.
+          digest and naturally invalidates a prior entry. Hashing a JSON array
+          (rather than a flat NUL-joined string) keeps this true even when a
+          field contains a literal NUL byte, which would otherwise let two
+          different ``(cache_context, piece)`` pairs join to an identical body
+          string.
     """
-    body = f"{source}\x00{cache_context}\x00{piece}"
+    body = json.dumps([source, cache_context, piece])
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
@@ -202,8 +207,11 @@ def run_chunked_agent_review(
                 )
                 failed += 1
                 continue
+            # Materialize once so a one-shot iterable (e.g. a generator) isn't
+            # exhausted by the cache write, leaving nothing for the loop below.
+            items = list(items or [])
             if cache_key is not None:
-                cache.put(cache_key, list(items or []))
+                cache.put(cache_key, items)
         for item in items or []:
             issues.append(
                 issue_factory(

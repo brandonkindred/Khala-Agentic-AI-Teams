@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 from software_engineering_team.shared.agent_review import (
     AgentReviewCache,
+    _piece_cache_key,
     run_chunked_agent_review,
     run_qa_agent,
     run_security_agent,
@@ -328,6 +329,16 @@ def test_agent_review_cache_get_put_returns_independent_copies():
     assert len(cache.get("k")) == 1  # a second get is unaffected
 
 
+def test_piece_cache_key_does_not_collide_across_separator_boundary():
+    """A literal NUL byte inside cache_context or piece must not let two
+    different (cache_context, piece) pairs hash identically (the flat
+    NUL-joined body of "python\x00A"/"B" and "python"/"A\x00B" is otherwise
+    the same string)."""
+    key_a = _piece_cache_key("qa", "python\x00A", "B")
+    key_b = _piece_cache_key("qa", "python", "A\x00B")
+    assert key_a != key_b
+
+
 def test_cache_hit_skips_run_chunk_for_identical_piece():
     """A second call with byte-identical content/context reuses the cached result."""
     calls = {"n": 0}
@@ -413,6 +424,33 @@ def test_cache_misses_on_changed_context():
     run_chunked_agent_review(cache_context="python\x00task-b", **common)
 
     assert calls["n"] == 2  # different cache_context -> both calls hit the agent
+
+
+def test_cache_write_does_not_exhaust_a_generator_run_chunk_result():
+    """run_chunk may return any iterable, not just a list. Caching its result
+    must not consume a one-shot generator before the issue-conversion loop
+    below gets a chance to see it."""
+
+    def run_chunk(code: str):
+        return (b for b in [_Bug()])  # one-shot: exhausted after a single pass
+
+    cache = AgentReviewCache()
+    issues = run_chunked_agent_review(
+        run_chunk=run_chunk,
+        files={"x.py": "def f():\n    return 1"},
+        source="qa",
+        default_severity="medium",
+        label="QA agent",
+        task_id="t1",
+        issue_factory=_Issue,
+        max_chars=MAX,
+        warn_threshold=20,
+        cache=cache,
+        cache_context="python\x00task",
+    )
+
+    assert len(issues) == 1  # the generator's item must still reach the issue list
+    assert issues[0].description == "real bug"
 
 
 def test_unchanged_second_file_stays_cached_only_changed_one_is_rereviewed():
