@@ -1,26 +1,24 @@
 import type {
   BacktestResult,
-  StrategyLabCycleProgress,
   StrategyLabErroredDetail,
   StrategyLabRunStatus,
   StrategyLabStreamEvent,
-} from '../../models';
+} from '../models';
 
 /**
- * Applies one Strategy Lab stream event to the current run-status snapshot,
- * producing the next snapshot without mutating either input.
+ * Pure reducer folding one SSE stream event into the next Strategy Lab run
+ * status. One `case` per `StrategyLabStreamEvent.type`; each reads fields
+ * directly off the type narrowed by that discriminant, with no index casts.
  *
- * Preconditions: `event` is a well-formed member of the `StrategyLabStreamEvent`
- *   union — the SSE decoder that produces `event` owns validating this; a
- *   malformed frame is that caller's contract violation, not defended against
- *   here. `state` is either `null` (no run currently tracked) or a well-formed
- *   `StrategyLabRunStatus`.
- * Postconditions: returns the next `StrategyLabRunStatus`, or `null` when
- *   `state` was already `null` for an event type that only updates an
- *   existing run. Never mutates `state` (or any object/array reachable from
- *   it) or `event`. Returns the exact same `state` reference — not a clone —
- *   when `event`'s type carries no run-status change.
- * Invariants: none — stateless pure function.
+ * Preconditions: `event` is a value the backend actually emits for its
+ *   `type` (the discriminated union's field/optionality guarantees are
+ *   trusted as-is, not re-validated at runtime); `state`/`event` are never
+ *   mutated by the caller after this call.
+ * Postconditions: for an event that carries no run-status field
+ *   (`batch_warning`, `complete`, `error`, `done`) or when `state` is
+ *   `null` (no run is being tracked), returns the exact same `state`
+ *   reference, unchanged. Otherwise returns a **new** `StrategyLabRunStatus`
+ *   object reflecting the event; `state` and `event` are never mutated.
  */
 export function reduce(
   state: StrategyLabRunStatus | null,
@@ -31,20 +29,15 @@ export function reduce(
       if (!state) return state;
       return {
         ...state,
-        // event.status additionally allows 'interrupted' (see the doc comment
-        // on StrategyLabSnapshotEvent in the models file); StrategyLabRunStatus
-        // stays the narrower 5-value union since it also backs the REST
-        // polling response with other, unaudited consumers. Passed through
-        // as-is rather than widening that shared type.
-        status: event.status as StrategyLabRunStatus['status'],
+        status: event.status,
         completed_cycles: event.completed_cycles,
         skipped_cycles: event.skipped_cycles,
         errored_cycles: event.errored_cycles ?? state.errored_cycles,
         errored_details: event.errored_details ?? state.errored_details,
-        // An explicit `null` on the wire means "no new value" here, same as
-        // the merge this replaces — not "clear the field". StrategyLabRunStatus
-        // itself stays narrower than the snapshot's nested shape (see above).
-        current_cycle: (event.current_cycle ?? state.current_cycle) as StrategyLabCycleProgress | undefined,
+        // A real `null`/omitted current_cycle on the wire is treated the same
+        // — both fall back to the prior value. Preserved from the original
+        // Object.assign merge this replaces, not a new behavior.
+        current_cycle: event.current_cycle ?? state.current_cycle,
         completed_record_ids: event.completed_record_ids,
         error: event.error ?? state.error,
         batch_size: event.batch_size ?? state.batch_size,
@@ -57,6 +50,7 @@ export function reduce(
     case 'progress': {
       if (!state) return state;
       const prevStrategy = state.current_cycle?.strategy;
+      const prevMetrics = state.current_cycle?.metrics;
       return {
         ...state,
         current_cycle: {
@@ -65,11 +59,13 @@ export function reduce(
           sub_phase: event.sub_phase,
           refinement_round: event.refinement_round,
           strategy: event.strategy ?? prevStrategy,
-          // Not numeric-only on the wire (see StrategyLabProgressEvent.metrics'
-          // own doc comment); StrategyLabCycleProgress.metrics stays
-          // Partial<BacktestResult> because the template reads named numeric
-          // fields off it directly.
-          metrics: (event.metrics as Partial<BacktestResult> | undefined) ?? state.current_cycle?.metrics,
+          // event.metrics is honestly Record<string, unknown> — a cycle's
+          // "complete" sub-phase republishes a full BacktestResult.model_dump()
+          // here, which isn't numeric-only (see StrategyLabProgressEvent's own
+          // doc comment). This assertion reflects that still-open, already-
+          // documented modeling gap; it is not one of the index casts this
+          // reducer otherwise eliminates.
+          metrics: (event.metrics as Partial<BacktestResult> | undefined) ?? prevMetrics,
           checks_passed: event.checks_passed,
           checks_total: event.checks_total,
           symbols_count: event.symbols_count,
@@ -85,12 +81,20 @@ export function reduce(
 
     case 'cycle_complete': {
       if (!state) return state;
-      return { ...state, completed_cycles: event.completed_cycles, current_cycle: undefined };
+      return {
+        ...state,
+        completed_cycles: event.completed_cycles,
+        current_cycle: undefined,
+      };
     }
 
     case 'cycle_skipped': {
       if (!state) return state;
-      return { ...state, skipped_cycles: state.skipped_cycles + 1, current_cycle: undefined };
+      return {
+        ...state,
+        skipped_cycles: state.skipped_cycles + 1,
+        current_cycle: undefined,
+      };
     }
 
     case 'cycle_errored': {
@@ -129,22 +133,20 @@ export function reduce(
 
     case 'batch_complete': {
       if (!state) return state;
-      return { ...state, completed_batches: event.completed_batches, current_batch: null };
+      return {
+        ...state,
+        completed_batches: event.completed_batches,
+        current_batch: null,
+      };
     }
 
+    // These event types carry no StrategyLabRunStatus field — the component
+    // reacts to them for other state (completionWarning, error, activity log)
+    // outside this reducer.
     case 'batch_warning':
     case 'complete':
     case 'error':
     case 'done':
       return state;
-
-    default: {
-      // Compile-time exhaustiveness: a new StrategyLabStreamEvent member fails
-      // to build until it gets an explicit case above, rather than silently
-      // no-oping like the pre-refactor handleStreamEvent did for 'done'.
-      const unhandled: never = event;
-      void unhandled;
-      return state;
-    }
   }
 }

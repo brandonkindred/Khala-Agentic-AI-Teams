@@ -1,5 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of, NEVER, Subject, throwError } from 'rxjs';
+import { signal } from '@angular/core';
+import { of, NEVER, Subject } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
@@ -8,19 +9,48 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
+import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { StrategyLabComponent } from './strategy-lab.component';
 import type {
   StrategyLabRecord,
+  StrategyLabRunStatus,
+  StrategyLabStreamEvent,
   StrategySpec,
   TradeRecord,
   PaperTradingSession,
   PaperTradingComparison,
   QualityGateResult,
-  StrategyLabRunStartResponse,
-  StrategyLabStreamEvent,
-  StrategyLabPhase,
 } from '../../models';
 import { expectNoAxeViolations } from '../../testing/a11y';
+
+/**
+ * A `StrategyLabRunService` test double: real signals so components read
+ * them exactly as they would the live service; tests drive state directly
+ * via `.set()`. See `strategy-lab.component.spec.ts` for the same pattern.
+ */
+function createRunServiceStub() {
+  return {
+    runStatus: signal<StrategyLabRunStatus | null>(null),
+    running: signal(false),
+    activeRunId: signal<string | null>(null),
+    paperTradingSessions: signal<Record<string, PaperTradingSession>>({}),
+    paperTradingLabRecordId: signal<string | null>(null),
+    events$: new Subject<StrategyLabStreamEvent>(),
+    errors$: new Subject<string>(),
+    checkForActiveRun: vi.fn(),
+    startRun: vi.fn(),
+    clearPaperTradingSessions: vi.fn(),
+    hydratePaperTradingSessions: vi.fn(),
+    trackPaperTradingSession: vi.fn(),
+  };
+}
+
+type RunServiceStub = ReturnType<typeof createRunServiceStub>;
+
+/** The `StrategyLabRunService` stub a fixture's component was constructed with — see `createRunServiceStub`. */
+function stubOf(fixture: ComponentFixture<StrategyLabComponent>): RunServiceStub {
+  return fixture.componentInstance.runService as unknown as RunServiceStub;
+}
 
 const STRATEGY: StrategySpec = {
   strategy_id: 'strat-1',
@@ -111,7 +141,11 @@ describe('StrategyLabComponent a11y — result card disclosure', () => {
         { provide: InvestmentApiService, useValue: apiSpy },
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
-    }).compileComponents();
+    })
+      .overrideComponent(StrategyLabComponent, {
+        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }] },
+      })
+      .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
     fixture.detectChanges(); // triggers ngOnInit -> loadResults() -> renders the card
@@ -201,6 +235,7 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
     sharpe_aligned: true,
     drawdown_aligned: true,
     profit_factor_aligned: true,
+    overall_aligned: true,
   };
 
   const PAPER_SESSION: PaperTradingSession = {
@@ -248,7 +283,11 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
         { provide: InvestmentApiService, useValue: apiSpy },
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
-    }).compileComponents();
+    })
+      .overrideComponent(StrategyLabComponent, {
+        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }] },
+      })
+      .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
     fixture.detectChanges(); // triggers ngOnInit -> loadResults() -> renders the card
@@ -274,9 +313,44 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
+  it('activity-log: focusable, named, no axe violations while a run is active', async () => {
+    const fixture = await createFixture(RECORD);
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      current_cycle: { cycle_index: 0, phase: 'backtesting' },
+    });
+    fixture.componentInstance.activityLog.set([
+      { time: '10:00:00', status: 'active', message: 'Executing strategy backtest...' },
+    ]);
+    fixture.detectChanges();
+
+    const log: HTMLElement = fixture.nativeElement.querySelector('.activity-log');
+    expect(log).toBeTruthy();
+    expect(log.getAttribute('tabindex')).toBe('0');
+    expect(log.getAttribute('role')).toBe('group');
+    expect(log.getAttribute('aria-label')).toBe('Strategy run activity log, scrollable');
+
+    // Pre-existing gaps in the "run in progress" header — the run-btn's spinner
+    // and the phase progress-bar/spinners lack accessible names, and the
+    // running run-btn nests a focusable spinner. Both predate this fix, are
+    // unrelated to the activity-log focus-indicator under test here, and are
+    // only surfaced now because this is the first a11y spec to set `running`.
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
   it('comparison-table-wrap: focusable, named, no axe violations (independent of card expansion)', async () => {
     const fixture = await createFixture(RECORD);
-    fixture.componentInstance.paperTradingSessions = { 'rec-1': PAPER_SESSION };
+    stubOf(fixture).paperTradingSessions.set({ 'rec-1': PAPER_SESSION });
     fixture.detectChanges();
 
     const wrap: HTMLElement = fixture.nativeElement.querySelector('.comparison-table-wrap');
@@ -290,18 +364,10 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
 });
 
 describe('StrategyLabComponent a11y — run announcement live region', () => {
-  const START_RESPONSE: StrategyLabRunStartResponse = {
-    run_id: 'run-1',
-    status: 'running',
-    total_cycles: 5,
-    message: 'started',
-  };
-
   async function createFixture() {
     const apiSpy = {
-      runStrategyLab: vi.fn().mockReturnValue(of(START_RESPONSE)),
-      streamRunStatus: vi.fn(),
-      getRunStatus: vi.fn(),
+      runStrategyLab: vi.fn().mockReturnValue(NEVER),
+      streamRunStatus: vi.fn().mockReturnValue(NEVER),
       getStrategyLabConfig: vi.fn().mockReturnValue(
         of({ batch_count_min: 1, batch_count_max: 100, asset_categories: [] }),
       ),
@@ -324,11 +390,15 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
         { provide: InvestmentApiService, useValue: apiSpy },
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
-    }).compileComponents();
+    })
+      .overrideComponent(StrategyLabComponent, {
+        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }] },
+      })
+      .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
     fixture.detectChanges(); // triggers ngOnInit
-    return { fixture, apiSpy };
+    return fixture;
   }
 
   /** Reads the always-present SR-only status region, asserting its fixed attributes. */
@@ -340,15 +410,15 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
   }
 
   it('is present and empty while idle', async () => {
-    const { fixture } = await createFixture();
+    const fixture = await createFixture();
     expect(liveRegionText(fixture)).toBe('');
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
   it('announces strategy position and the current phase as a run proceeds', async () => {
-    const { fixture } = await createFixture();
-    fixture.componentInstance.running = true;
-    fixture.componentInstance.runStatus = {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
       run_id: 'run-1',
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
@@ -359,7 +429,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       // The backend's cycle_index is 1-based (cn = i + 1 in main.py's wave
       // loop) — 1 is the first strategy, not 0.
       current_cycle: { cycle_index: 1, phase: 'backtesting' },
-    };
+    });
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy 1 of 5 — Backtest phase.');
@@ -376,9 +446,9 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     // backend's 1-based cn) identifies that cycle directly. Here cycle 1
     // was skipped and cycle 2 completed, so completed_cycles is 1 while
     // cycle 3 (cycle_index 3) is the one now active.
-    const { fixture } = await createFixture();
-    fixture.componentInstance.running = true;
-    fixture.componentInstance.runStatus = {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
       run_id: 'run-1',
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
@@ -387,7 +457,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       skipped_cycles: 1,
       completed_record_ids: ['rec-1'],
       current_cycle: { cycle_index: 3, phase: 'ideating' },
-    };
+    });
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy 3 of 5 — Ideate phase.');
@@ -402,9 +472,9 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     // known ids (design_review, aligning, telemetry-related, ...). Work is
     // actively progressing then, so falling back to the between-cycles
     // "Run in progress" text would lose the phase detail unnecessarily.
-    const { fixture } = await createFixture();
-    fixture.componentInstance.running = true;
-    fixture.componentInstance.runStatus = {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
       run_id: 'run-1',
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
@@ -412,8 +482,8 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       completed_cycles: 0,
       skipped_cycles: 0,
       completed_record_ids: [],
-      current_cycle: { cycle_index: 1, phase: 'design_review' as unknown as StrategyLabPhase },
-    };
+      current_cycle: { cycle_index: 1, phase: 'design_review' },
+    });
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy 1 of 5 — Design review phase.');
@@ -429,9 +499,9 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     // finishes — even while the rest of the wave is still active. Nothing
     // in the wire data says whether siblings remain running, so this state
     // must not claim genuine idleness ("Preparing next strategy").
-    const { fixture } = await createFixture();
-    fixture.componentInstance.running = true;
-    fixture.componentInstance.runStatus = {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
       run_id: 'run-1',
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
@@ -439,7 +509,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       completed_cycles: 1,
       skipped_cycles: 0,
       completed_record_ids: ['rec-1'],
-    };
+    });
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy 2 of 5 — Run in progress.');
@@ -459,9 +529,9 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     // "completed_cycles + 1 of total_cycles" would announce an impossible
     // "Strategy 6 of 5" for the brief window before the terminal `complete`
     // event lands.
-    const { fixture } = await createFixture();
-    fixture.componentInstance.running = true;
-    fixture.componentInstance.runStatus = {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
       run_id: 'run-1',
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
@@ -469,7 +539,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       completed_cycles: 5,
       skipped_cycles: 0,
       completed_record_ids: ['rec-1', 'rec-2', 'rec-3', 'rec-4', 'rec-5'],
-    };
+    });
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Finishing up.');
@@ -484,9 +554,9 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     // Cycle 1 completed and cycle 2 was skipped — completed_cycles is only
     // 1, so "completed_cycles + 1" would announce "Strategy 2", repeating
     // the cycle that was just skipped instead of the genuinely next one.
-    const { fixture } = await createFixture();
-    fixture.componentInstance.running = true;
-    fixture.componentInstance.runStatus = {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
       run_id: 'run-1',
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
@@ -494,7 +564,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       completed_cycles: 1,
       skipped_cycles: 1,
       completed_record_ids: ['rec-1'],
-    };
+    });
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy 3 of 5 — Run in progress.');
@@ -511,9 +581,9 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     // throws (tagged reason: 'tracker_merge_failed' in errored_details).
     // Naively summing completed_cycles + skipped_cycles + errored_cycles
     // would count that one cycle twice.
-    const { fixture } = await createFixture();
-    fixture.componentInstance.running = true;
-    fixture.componentInstance.runStatus = {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
       run_id: 'run-1',
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
@@ -525,7 +595,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
         { cycle_index: 2, error: 'merge boom', reason: 'tracker_merge_failed' },
       ],
       completed_record_ids: ['rec-1', 'rec-2'],
-    };
+    });
     fixture.detectChanges();
 
     // Without the correction this would read "Strategy 4 of 5" (2 + 0 + 1 + 1).
@@ -542,9 +612,9 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     // total_cycles on its own, so the "Finishing up" terminal gap would
     // never trigger — the live region would announce a "Strategy 3 of 3 —
     // Run in progress" that never resolves until the terminal event.
-    const { fixture } = await createFixture();
-    fixture.componentInstance.running = true;
-    fixture.componentInstance.runStatus = {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
       run_id: 'run-1',
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
@@ -553,7 +623,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       skipped_cycles: 0,
       errored_cycles: 1,
       completed_record_ids: ['rec-1', 'rec-2'],
-    };
+    });
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Finishing up.');
@@ -567,9 +637,9 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     // Regression: after the last batch's batch_complete, current_batch is
     // null and completed_batches already equals batch_count — the same
     // terminal gap as the strategy-count fix above, one level up.
-    const { fixture } = await createFixture();
-    fixture.componentInstance.running = true;
-    fixture.componentInstance.runStatus = {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
       run_id: 'run-1',
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
@@ -580,7 +650,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       batch_count: 3,
       completed_batches: 3,
       current_batch: null,
-    };
+    });
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Batch 3 of 3 — Finishing up.');
@@ -591,9 +661,9 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
   }, 15000);
 
   it('includes batch position for multi-batch runs', async () => {
-    const { fixture } = await createFixture();
-    fixture.componentInstance.running = true;
-    fixture.componentInstance.runStatus = {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
       run_id: 'run-1',
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
@@ -604,7 +674,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       batch_count: 3,
       current_batch: 2,
       current_cycle: { cycle_index: 1, phase: 'ideating' },
-    };
+    });
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Batch 2 of 3 — Strategy 1 of 5 — Ideate phase.');
@@ -615,15 +685,21 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
   }, 15000);
 
   it('announces the terminal outcome once a run completes, replacing the progress text', async () => {
-    const { fixture, apiSpy } = await createFixture();
-    const stream$ = new Subject<StrategyLabStreamEvent>();
-    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
-
-    fixture.componentInstance.runNewStrategy();
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
     fixture.detectChanges();
     expect(liveRegionText(fixture)).toBe('Strategy 1 of 5 — Run in progress.');
 
-    stream$.next({
+    stubOf(fixture).events$.next({
       type: 'complete',
       message: 'done',
       status: 'completed',
@@ -634,9 +710,14 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       completed_batches: 1,
       total_batches: 1,
     });
+    // Mirrors the real StrategyLabRunService.finishRun(), called right after
+    // emitting the terminal event — the component must have already derived
+    // the outcome from the event itself, not from runStatus (now cleared).
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
     fixture.detectChanges();
 
-    expect(fixture.componentInstance.running).toBe(false);
+    expect(fixture.componentInstance.running()).toBe(false);
     expect(liveRegionText(fixture)).toBe('Strategy Lab run complete.');
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
@@ -648,18 +729,24 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     // driven by the 'complete' event's own status/errored_count — not by
     // whether that unrelated warning banner happens to be non-null — or a
     // fully clean run would misreport as "finished with errors".
-    const { fixture, apiSpy } = await createFixture();
-    const stream$ = new Subject<StrategyLabStreamEvent>();
-    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
-
-    fixture.componentInstance.runNewStrategy();
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
     fixture.detectChanges();
 
-    stream$.next({ type: 'batch_warning', batch_index: 0, reason: 'signal_brief_failed' });
+    stubOf(fixture).events$.next({ type: 'batch_warning', batch_index: 0, reason: 'signal_brief_failed' });
     fixture.detectChanges();
-    expect(fixture.componentInstance.completionWarning).toBeTruthy();
+    expect(fixture.componentInstance.completionWarning()).toBeTruthy();
 
-    stream$.next({
+    stubOf(fixture).events$.next({
       type: 'complete',
       message: 'done',
       status: 'completed',
@@ -670,6 +757,8 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       completed_batches: 1,
       total_batches: 1,
     });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy Lab run complete.');
@@ -677,14 +766,20 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
   }, 15000);
 
   it('announces a qualified terminal outcome when the run finishes with errored cycles', async () => {
-    const { fixture, apiSpy } = await createFixture();
-    const stream$ = new Subject<StrategyLabStreamEvent>();
-    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
-
-    fixture.componentInstance.runNewStrategy();
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
     fixture.detectChanges();
 
-    stream$.next({
+    stubOf(fixture).events$.next({
       type: 'complete',
       message: 'done',
       status: 'completed_with_errors',
@@ -695,6 +790,8 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       completed_batches: 1,
       total_batches: 1,
     });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy Lab run finished with errors.');
@@ -702,14 +799,22 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
   }, 15000);
 
   it('announces run failure as the terminal outcome', async () => {
-    const { fixture, apiSpy } = await createFixture();
-    const stream$ = new Subject<StrategyLabStreamEvent>();
-    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
-
-    fixture.componentInstance.runNewStrategy();
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
     fixture.detectChanges();
 
-    stream$.next({ type: 'error', detail: 'Sandbox crashed' });
+    stubOf(fixture).events$.next({ type: 'error', detail: 'Sandbox crashed' });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy Lab run failed.');
@@ -720,122 +825,32 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     // Regression: the backend has no distinct cancel event type — user
     // cancellations are published as a terminal `error` event whose detail
     // says so. That's a deliberate stop, not a failure.
-    const { fixture, apiSpy } = await createFixture();
-    const stream$ = new Subject<StrategyLabStreamEvent>();
-    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
-
-    fixture.componentInstance.runNewStrategy();
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
     fixture.detectChanges();
 
-    stream$.next({ type: 'error', detail: 'Run cancelled by user' });
+    stubOf(fixture).events$.next({ type: 'error', detail: 'Run cancelled by user' });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy Lab run cancelled.');
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
-  it('derives the terminal outcome from the last known run status when the stream closes with no explicit terminal event', async () => {
-    // Regression: a run that was already terminal before the SSE connection
-    // was established (e.g. the page reconnects to a finished run) can reach
-    // a bare stream-complete with no 'complete'/'error' event — e.g. after a
-    // terminal `snapshot` followed by `done`, which handleStreamEvent has no
-    // branch for. onRunComplete() must not blindly default to "complete" in
-    // that case; it should read the last known runStatus.status instead.
-    const { fixture, apiSpy } = await createFixture();
-    const stream$ = new Subject<StrategyLabStreamEvent>();
-    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
-
-    fixture.componentInstance.runNewStrategy();
-    fixture.detectChanges();
-    // Simulate a prior snapshot having updated the status to terminal.
-    fixture.componentInstance.runStatus!.status = 'failed';
-    stream$.complete();
-    fixture.detectChanges();
-
-    expect(liveRegionText(fixture)).toBe('Strategy Lab run failed.');
-    await expectNoAxeViolations(fixture.nativeElement);
-  }, 15000);
-
-  it('treats an "interrupted" snapshot status as non-successful, not a plain "complete"', async () => {
-    // Regression: reconnecting to a run that is already terminal with
-    // status 'interrupted' (a real backend status not in the narrower
-    // StrategyLabRunStatus.status union) sends a terminal snapshot followed
-    // by `done`, landing on this same no-explicit-outcome fallback.
-    const { fixture, apiSpy } = await createFixture();
-    const stream$ = new Subject<StrategyLabStreamEvent>();
-    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
-
-    fixture.componentInstance.runNewStrategy();
-    fixture.detectChanges();
-    (fixture.componentInstance.runStatus as unknown as { status: string }).status = 'interrupted';
-    stream$.complete();
-    fixture.detectChanges();
-
-    expect(liveRegionText(fixture)).toBe('Strategy Lab run interrupted.');
-    await expectNoAxeViolations(fixture.nativeElement);
-  }, 15000);
-
-  it('derives a qualified terminal outcome from errored_cycles when the stream closes with no explicit terminal event', async () => {
-    const { fixture, apiSpy } = await createFixture();
-    const stream$ = new Subject<StrategyLabStreamEvent>();
-    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
-
-    fixture.componentInstance.runNewStrategy();
-    fixture.detectChanges();
-    fixture.componentInstance.runStatus!.errored_cycles = 2;
-    stream$.complete();
-    fixture.detectChanges();
-
-    expect(liveRegionText(fixture)).toBe('Strategy Lab run finished with errors.');
-    await expectNoAxeViolations(fixture.nativeElement);
-  }, 15000);
-
-  it('falls back to a plain "complete" when the stream closes with no terminal signal at all', async () => {
-    const { fixture, apiSpy } = await createFixture();
-    const stream$ = new Subject<StrategyLabStreamEvent>();
-    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
-
-    fixture.componentInstance.runNewStrategy();
-    fixture.detectChanges();
-    // No status/errored_cycles update — runStatus.status is still 'running'.
-    stream$.complete();
-    fixture.detectChanges();
-
-    expect(liveRegionText(fixture)).toBe('Strategy Lab run complete.');
-    await expectNoAxeViolations(fixture.nativeElement);
-  }, 15000);
-
-  it('does not announce success when SSE fails over to polling and polling itself then fails', async () => {
-    // Regression: fallbackToPolling's own `error` handler used to call
-    // onRunComplete() with no outcome. The last known runStatus.status at
-    // that point is always still 'running' (takeWhile only lets a
-    // non-running status through, which takes the `next` branch instead),
-    // so the generic default wrongly announced "Strategy Lab run complete."
-    // for what is actually a lost-connectivity failure.
-    const { fixture, apiSpy } = await createFixture();
-    apiSpy.streamRunStatus.mockReturnValue(throwError(() => new Error('stream failed')));
-    apiSpy.getRunStatus.mockReturnValue(throwError(() => new Error('poll failed')));
-
-    // fallbackToPolling's timer(0, 5000) needs a tick to fire; fake timers
-    // are scoped to this test only (try/finally) so they can't interfere
-    // with the other real-time/async-axe tests in this file.
-    vi.useFakeTimers();
-    try {
-      fixture.componentInstance.runNewStrategy();
-      vi.advanceTimersByTime(0);
-    } finally {
-      vi.useRealTimers();
-    }
-    fixture.detectChanges();
-
-    expect(liveRegionText(fixture)).toBe('Strategy Lab lost track of the run — status unavailable.');
-    await expectNoAxeViolations(fixture.nativeElement);
-  }, 15000);
-
   it('activity-log stays keyboard-focusable and its entries stay exposed to assistive tech, while a run is active', async () => {
-    const { fixture } = await createFixture();
-    fixture.componentInstance.running = true;
-    fixture.componentInstance.runStatus = {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
       run_id: 'run-1',
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
@@ -844,10 +859,10 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       skipped_cycles: 0,
       completed_record_ids: [],
       current_cycle: { cycle_index: 1, phase: 'backtesting' },
-    };
-    fixture.componentInstance.activityLog = [
+    });
+    fixture.componentInstance.activityLog.set([
       { time: '10:00:00', status: 'active', message: 'Executing strategy backtest...' },
-    ];
+    ]);
     fixture.detectChanges();
 
     // The scrollable wrapper keeps its WCAG 2.4.7 focusable-region treatment
@@ -972,6 +987,7 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
     sharpe_aligned: true,
     drawdown_aligned: true,
     profit_factor_aligned: true,
+    overall_aligned: true,
   };
 
   const PAPER_SESSION: PaperTradingSession = {
@@ -1021,7 +1037,11 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
         { provide: InvestmentApiService, useValue: apiSpy },
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
-    }).compileComponents();
+    })
+      .overrideComponent(StrategyLabComponent, {
+        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }] },
+      })
+      .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
     fixture.detectChanges(); // triggers ngOnInit -> loadResults() -> renders the card
@@ -1069,8 +1089,8 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
 
   it('in-progress run icons, including the phase-stepper node icon, are aria-hidden', async () => {
     const fixture = await createFixture();
-    fixture.componentInstance.running = true;
-    fixture.componentInstance.runStatus = {
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
       run_id: 'run-1',
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
@@ -1079,11 +1099,11 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
       skipped_cycles: 0,
       completed_record_ids: [],
       current_cycle: { cycle_index: 1, phase: 'backtesting' },
-    };
-    fixture.componentInstance.activityLog = [
+    });
+    fixture.componentInstance.activityLog.set([
       { time: '10:00:00', status: 'done', message: 'Market data loaded.' },
       { time: '10:00:05', status: 'error', message: 'Backtest sandbox failed.' },
-    ];
+    ]);
     fixture.detectChanges();
 
     const pulseIcon: HTMLElement = fixture.nativeElement.querySelector('.pulse-icon');
@@ -1148,9 +1168,34 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
+  it('gate-result rows keep stable DOM node identity across a re-render with unchanged data', async () => {
+    const fixture = await createFixture(RECORD_WITH_GATES, {
+      items: [RECORD_WITH_GATES], count: 1, winning_count: 0, losing_count: 1,
+    });
+    fixture.componentInstance.toggleCard('rec-1');
+    fixture.detectChanges();
+    const headers: HTMLElement[] = Array.from(
+      fixture.nativeElement.querySelectorAll('mat-expansion-panel-header'),
+    );
+    headers.find((h) => h.textContent?.includes('Quality Gates'))!.click();
+    fixture.detectChanges();
+
+    const before: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.gate-result'));
+    expect(before).toHaveLength(2);
+
+    // An unrelated change-detection pass — gateViewModels(record) is called
+    // again by the @for expression, but for the same record it must return
+    // the same memoized array/objects, so @for reuses these exact DOM nodes
+    // instead of tearing down and recreating them.
+    fixture.detectChanges();
+
+    const after: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.gate-result'));
+    expect(after).toEqual(before);
+  }, 15000);
+
   it('paper-trading verdict icon and comparison-table aligned icon are aria-hidden', async () => {
     const fixture = await createFixture();
-    fixture.componentInstance.paperTradingSessions = { 'rec-1': PAPER_SESSION };
+    stubOf(fixture).paperTradingSessions.set({ 'rec-1': PAPER_SESSION });
     fixture.detectChanges();
 
     const verdictIcon: HTMLElement = fixture.nativeElement.querySelector('.paper-verdict-badge mat-icon');
