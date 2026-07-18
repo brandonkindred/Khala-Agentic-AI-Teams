@@ -326,7 +326,7 @@ describe('strategy-lab-run.reducer', () => {
   });
 
   describe('cycle_errored', () => {
-    it('increments errored_cycles, remaps reason to exception_type, and clears current_cycle', () => {
+    it('increments errored_cycles, carries reason through as-is, and clears current_cycle', () => {
       const state = baseState({ errored_cycles: 1, current_cycle: { cycle_index: 1, phase: 'backtesting' } });
       const event: StrategyLabStreamEvent = {
         type: 'cycle_errored',
@@ -340,9 +340,29 @@ describe('strategy-lab-run.reducer', () => {
 
       expect(result?.errored_cycles).toBe(2);
       expect(result?.errored_details).toEqual([
-        { cycle_index: 1, batch_index: 0, error: 'bad data', exception_type: 'ValueError' },
+        { cycle_index: 1, batch_index: 0, error: 'bad data', reason: 'ValueError' },
       ]);
       expect(result?.current_cycle).toBeUndefined();
+    });
+
+    it('preserves the tracker_merge_failed marker under `reason` so downstream double-count detection matches', () => {
+      // Regression: a prior version of this reducer stored event.reason
+      // under detail.exception_type, so a live-streamed tracker-merge
+      // failure (which the backend marks with reason: 'tracker_merge_failed'
+      // both on the wire and in its own stored errored_details) never
+      // matched code that specifically checks detail.reason.
+      const state = baseState();
+      const event: StrategyLabStreamEvent = {
+        type: 'cycle_errored',
+        cycle_index: 2,
+        batch_index: 0,
+        reason: 'tracker_merge_failed',
+        error: 'merge boom',
+      };
+
+      const result = reduce(state, event);
+
+      expect(result?.errored_details?.[0].reason).toBe('tracker_merge_failed');
     });
 
     it('initializes errored_cycles/errored_details when absent on prior state', () => {

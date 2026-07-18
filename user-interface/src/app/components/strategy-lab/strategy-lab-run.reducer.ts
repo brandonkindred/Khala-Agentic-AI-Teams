@@ -95,11 +95,19 @@ export function reduce(
 
     case 'cycle_errored': {
       if (!state) return state;
+      // event.reason carries whatever the backend's cycle_errored publish
+      // put there — a raw exception class name for a cycle's own failure,
+      // or the fixed marker 'tracker_merge_failed' for a post-completion
+      // tracker-merge failure (main.py) — stored under the same-named
+      // `reason` field, not renamed to `exception_type`, so callers that
+      // key off the 'tracker_merge_failed' marker (e.g. the live region's
+      // double-count correction) see it on a live-streamed event exactly
+      // as they would on a polled/snapshot-sourced errored_details entry.
       const detail: StrategyLabErroredDetail = {
         cycle_index: event.cycle_index,
         batch_index: event.batch_index,
         error: event.error,
-        exception_type: event.reason,
+        reason: event.reason,
       };
       return {
         ...state,
