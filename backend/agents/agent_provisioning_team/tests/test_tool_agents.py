@@ -919,6 +919,87 @@ def test_docker_on_reuse_proceeds_when_existence_unknown(tmp_path: Path) -> None
     assert prov._state.get("a1") is not None
 
 
+def test_docker_provisioner_stamps_job_id_label_when_config_key_present(tmp_path: Path) -> None:
+    """A job_id present in config under JOB_ID_CONFIG_KEY is stamped as a
+    khala.job_id Docker label -- the attempt-scoped identity marker
+    compensate_activity/check_existing_environment_activity read back to
+    disambiguate a self-leaked container from a pre-existing one.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import (
+        JOB_ID_CONFIG_KEY,
+        DockerProvisionerTool,
+    )
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    success = SimpleNamespace(returncode=0, stdout="abc123def456789012\n", stderr="")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=success)):
+        result = prov.provision(
+            "agent-1", {JOB_ID_CONFIG_KEY: "job-42"}, GeneratedCredentials(tool_name="docker")
+        )
+
+    assert result.success is True
+    run_cmd = next(c for c in calls if c[:2] == ["docker", "run"])
+    assert "--label" in run_cmd
+    assert run_cmd[run_cmd.index("--label") + 1] == "khala.job_id=job-42"
+
+
+def test_docker_provisioner_omits_label_when_no_job_id_in_config(tmp_path: Path) -> None:
+    """No JOB_ID_CONFIG_KEY in config means no --label flag at all -- keeps
+    non-Temporal / job_id-less callers behaving exactly as before this
+    labeling primitive existed.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    success = SimpleNamespace(returncode=0, stdout="abc123def456789012\n", stderr="")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=success)):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is True
+    run_cmd = next(c for c in calls if c[:2] == ["docker", "run"])
+    assert "--label" not in run_cmd
+
+
+def test_container_owner_job_id_returns_label_value() -> None:
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    labeled = SimpleNamespace(returncode=0, stdout="job-42\n", stderr="")
+    with patch("subprocess.run", return_value=labeled):
+        assert DockerProvisionerTool._container_owner_job_id("agent-a1") == "job-42"
+
+
+def test_container_owner_job_id_returns_none_when_label_absent() -> None:
+    """Docker's Go-template `index` on a missing label key yields an empty
+    string, not an error -- must be treated the same as "no ownership signal".
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    unlabeled = SimpleNamespace(returncode=0, stdout="\n", stderr="")
+    with patch("subprocess.run", return_value=unlabeled):
+        assert DockerProvisionerTool._container_owner_job_id("agent-a1") is None
+
+
+def test_container_owner_job_id_returns_none_when_container_absent() -> None:
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    absent = SimpleNamespace(returncode=1, stdout="", stderr="Error: No such object")
+    with patch("subprocess.run", return_value=absent):
+        assert DockerProvisionerTool._container_owner_job_id("agent-a1") is None
+
+
+def test_container_owner_job_id_returns_none_on_probe_error() -> None:
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with patch("subprocess.run", side_effect=OSError("daemon unreachable")):
+        assert DockerProvisionerTool._container_owner_job_id("agent-a1") is None
+
+
 # ---------------------------------------------------------------------------
 # generic_provisioner.py
 # ---------------------------------------------------------------------------

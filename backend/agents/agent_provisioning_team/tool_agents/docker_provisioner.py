@@ -65,6 +65,24 @@ _FULL_DOCKER_PERMISSIONS: list[str] = [
     "restart",
 ]
 
+# Docker label stamped on every container this provisioner creates, carrying
+# the Temporal job_id of the attempt that created it. This is an
+# attempt-scoped identity marker that survives local idempotency-state loss:
+# check_existing_environment_activity and compensate_activity (both in
+# temporal/activities.py) read it back to positively tell "this run's own
+# leaked container" apart from "a container that predates this run" in the
+# exact scenario where no EnvironmentStore record survives to answer that on
+# its own (see those activities' docstrings for the full reasoning).
+JOB_ID_LABEL = "khala.job_id"
+
+# Config-dict key provision_tool_activity stashes job_id under before calling
+# agent.provision(...). Underscore-prefixed so it can never collide with a
+# real manifest-supplied config key (base_image, expose_ssh, etc.). Every
+# non-Docker provisioner already ignores unknown config keys via plain
+# dict.get(...), so threading this through the generic config dict is inert
+# for postgres/redis/git/generic — only DockerProvisionerTool reads it.
+JOB_ID_CONFIG_KEY = "_provisioning_job_id"
+
 
 class DockerProvisionerTool(BaseToolProvisioner):
     """Tool agent for Docker container provisioning."""
@@ -128,6 +146,16 @@ class DockerProvisionerTool(BaseToolProvisioner):
         env_vars = config.get("environment", {})
         for key, value in env_vars.items():
             build_cmd.extend(["-e", f"{key}={value}"])
+
+        # Stamped so a later, disjoint activity invocation (compensate_activity,
+        # or this same job_id's own retried check_existing_environment_activity)
+        # can positively attribute this container to THIS attempt even if the
+        # local idempotency state that would otherwise prove it never gets
+        # written — the label lives on the container itself, independent of
+        # anything local (issue: self-leaked vs pre-existing disambiguation).
+        job_id = config.get(JOB_ID_CONFIG_KEY)
+        if job_id:
+            build_cmd.extend(["--label", f"{JOB_ID_LABEL}={job_id}"])
 
         if config.get("expose_ssh", False):
             build_cmd.extend(["-p", f"{ssh_port}:22"])
@@ -302,6 +330,50 @@ class DockerProvisionerTool(BaseToolProvisioner):
         if _reports_container_absent(probe.stderr):
             return False
         return None
+
+    @staticmethod
+    def _container_owner_job_id(container_name: str) -> Optional[str]:
+        """Read the ``khala.job_id`` label off a container, if any.
+
+        Preconditions:
+            * ``container_name`` is non-empty.
+            * Callers invoke this only AFTER separately confirming the
+              container exists (e.g. via ``_container_exists``) — this does
+              not itself distinguish "absent container" from "container with
+              no/empty label" from "probe inconclusive": all three collapse
+              to ``None`` below, which is safe precisely because existence is
+              already established elsewhere before this is called.
+        Postconditions:
+            * Returns the label's value when the daemon reports one non-empty.
+            * Returns ``None`` when the container is absent, the label key is
+              absent or empty (Docker's Go-template ``index`` on a missing map
+              key yields ``""``, not an error — the same behavior already
+              relied on by ``sandbox/provisioner.py``'s read of
+              docker-compose's own ``com.docker.compose.project`` label), or
+              the probe itself failed (daemon unreachable, timeout).
+            * Never raises.
+        """
+        assert container_name, "container_name must be non-empty"
+        try:
+            probe = subprocess.run(
+                [
+                    "docker",
+                    "inspect",
+                    "--type=container",
+                    "--format",
+                    f'{{{{ index .Config.Labels "{JOB_ID_LABEL}" }}}}',
+                    container_name,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except Exception:  # noqa: BLE001 — probe is advisory only
+            return None
+        if probe.returncode != 0:
+            return None
+        value = probe.stdout.strip()
+        return value or None
 
     @staticmethod
     def _best_effort_remove_container(container_name: str) -> None:

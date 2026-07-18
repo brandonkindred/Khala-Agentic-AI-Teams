@@ -1149,7 +1149,92 @@ def test_compensate_activity_skips_orphan_probe_when_deterministic_container_sti
     and the container are independently losable, e.g. the setup
     name-conflict path where Docker/idempotency state was lost but
     agent-<agent_id> is a real pre-existing container. An absent record
-    alone must not be treated as proof the container is an orphan.
+    alone must not be treated as proof the container is an orphan. The
+    container carries no khala.job_id label (a legacy container, or one
+    created before this labeling primitive existed) -- pinned explicitly so
+    this test stays scoped to the "no ownership signal" branch rather than
+    the separate foreign-job-label branch covered by
+    test_compensate_activity_protects_foreign_job_label_container.
+    """
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store.get.return_value = None
+    fake_orch.environment_store.readable.return_value = True
+    fake_orch.tool_agents.get.return_value._container_exists.return_value = True
+    fake_orch.tool_agents.get.return_value._container_owner_job_id.return_value = None
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases"),
+    ):
+        activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=False)
+
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_not_called()
+
+
+def test_compensate_activity_reclaims_self_leaked_container_by_job_id_label() -> None:
+    """A container labeled with THIS run's own job_id and no EnvironmentStore
+    record is unambiguously this attempt's own leak -- e.g. setup created it,
+    failed before registration completed, and its own local rollback also
+    failed to remove it. Must be reclaimed via verify_and_remove_orphan, not
+    protected as "possibly pre-existing" the way an unlabeled container is.
+    """
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store.get.return_value = None
+    fake_orch.environment_store.readable.return_value = True
+    fake_orch.tool_agents.get.return_value._container_exists.return_value = True
+    fake_orch.tool_agents.get.return_value._container_owner_job_id.return_value = "j-comp"
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.return_value = True
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases"),
+    ):
+        activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=False)
+
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_called_once_with("a1")
+
+
+def test_compensate_activity_protects_foreign_job_label_container(caplog) -> None:
+    """A container labeled with a DIFFERENT job's job_id must stay protected,
+    same as an unlabeled one -- the #1489 per-agent_id lock should already
+    rule out a live concurrent job at this agent_id, so this is unexpected
+    and worth a distinct warning rather than silent removal.
+    """
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store.get.return_value = None
+    fake_orch.environment_store.readable.return_value = True
+    fake_orch.tool_agents.get.return_value._container_exists.return_value = True
+    fake_orch.tool_agents.get.return_value._container_owner_job_id.return_value = "some-other-job"
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases"),
+        caplog.at_level("WARNING"),
+    ):
+        activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=False)
+
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_not_called()
+    assert "some-other-job" in caplog.text
+    assert "j-comp" in caplog.text
+
+
+def test_compensate_activity_falls_back_to_conservative_protect_without_job_id() -> None:
+    """When compensate_activity itself was called with no job_id, there is
+    nothing to compare a label against -- must fall back to the original
+    conservative behavior (protect) without even consulting the label, so
+    every pre-labeling-era caller keeps working exactly as before.
     """
     from agent_provisioning_team.temporal import activities
 
@@ -1164,8 +1249,9 @@ def test_compensate_activity_skips_orphan_probe_when_deterministic_container_sti
         ),
         patch.object(activities._js, "clear_completed_phases"),
     ):
-        activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=False)
+        activities.compensate_activity("a1", [], job_id=None, tear_down_environment=False)
 
+    fake_orch.tool_agents.get.return_value._container_owner_job_id.assert_not_called()
     fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_not_called()
 
 
@@ -1700,6 +1786,86 @@ def test_check_existing_environment_activity_false_when_confirmed_absent(
         patch.object(DockerProvisionerTool, "_container_exists", return_value=False),
     ):
         assert t_acts.check_existing_environment_activity("a5") is False
+
+
+def test_check_existing_environment_activity_false_when_container_labeled_with_own_job_id(
+    tmp_path: Path,
+) -> None:
+    """No record, but the container is labeled with THIS run's own job_id.
+
+    A resumed job reuses job_id (start_workflow.py derives the Temporal
+    workflow id deterministically from it), so a container this same job_id's
+    earlier attempt created and labeled is not something that predates this
+    run -- must return False, not the conservative True an unlabeled or
+    foreign-labeled container would get.
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=True),
+        patch.object(DockerProvisionerTool, "_container_owner_job_id", return_value="job-42"),
+    ):
+        assert t_acts.check_existing_environment_activity("a6", job_id="job-42") is False
+
+
+def test_check_existing_environment_activity_true_when_container_labeled_with_foreign_job_id(
+    tmp_path: Path, caplog
+) -> None:
+    """No record, container exists, label belongs to a DIFFERENT job.
+
+    The #1489 per-agent_id lock should already rule out a live concurrent job
+    at this agent_id, so this is unexpected -- log a warning and protect the
+    container as pre-existing (same outcome as no label at all).
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=True),
+        patch.object(
+            DockerProvisionerTool, "_container_owner_job_id", return_value="some-other-job"
+        ),
+        caplog.at_level("WARNING"),
+    ):
+        assert t_acts.check_existing_environment_activity("a7", job_id="job-42") is True
+
+    assert "some-other-job" in caplog.text
+    assert "job-42" in caplog.text
+
+
+def test_check_existing_environment_activity_true_when_job_id_omitted(tmp_path: Path) -> None:
+    """job_id omitted (the pre-labeling-primitive call shape) leaves behavior
+    byte-for-byte unchanged: no label consultation at all, just the
+    conservative "container exists" fallback."""
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=True),
+        patch.object(DockerProvisionerTool, "_container_owner_job_id") as mock_owner,
+    ):
+        assert t_acts.check_existing_environment_activity("a8") is True
+
+    mock_owner.assert_not_called()
 
 
 def test_check_existing_environment_activity_rejects_empty_agent_id() -> None:
