@@ -483,6 +483,57 @@ def test_failed_piece_is_not_cached_and_is_retried():
     assert len(second) == 1 and second[0].description == "real bug"  # the retry succeeded
 
 
+def test_failing_cache_miss_among_cache_hits_still_appends_synthetic_issue():
+    """A cache hit must never outnumber a failed fresh attempt into looking like
+    partial coverage: one file cached clean from a prior cycle plus one changed
+    file whose only fresh attempt fails must still fail closed, even though
+    ``len(pieces)`` (2) is greater than ``failed`` (1)."""
+    calls = {"n": 0}
+
+    def run_chunk(code: str):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return [_Bug()]  # both round-1 pieces succeed and get cached
+        raise RuntimeError("agent unavailable")  # b.py's only round-2 attempt fails
+
+    cache = AgentReviewCache()
+    common = dict(
+        run_chunk=run_chunk,
+        source="qa",
+        default_severity="medium",
+        label="QA agent",
+        task_id="t1",
+        issue_factory=_Issue,
+        max_chars=MAX,
+        warn_threshold=20,
+        cache=cache,
+        cache_context="python\x00task",
+    )
+
+    # Round 1: both files reviewed for real and cached.
+    run_chunked_agent_review(
+        files={"a.py": "def a():\n    return 1", "b.py": "def b():\n    return 2"}, **common
+    )
+    assert calls["n"] == 2
+
+    # Round 2: a.py is unchanged (served from cache, no run_chunk call), b.py
+    # changed and its only fresh attempt fails. len(pieces) == 2 but exactly
+    # one piece (b.py) actually needed a fresh review this call, and it failed.
+    second = run_chunked_agent_review(
+        files={"a.py": "def a():\n    return 1", "b.py": "def b():\n    return 3"}, **common
+    )
+    assert calls["n"] == 3  # only b.py attempted a fresh call
+
+    # a.py's cached issue plus the synthetic "review incomplete" issue for b.py --
+    # not a bare cache replay that silently omits the fact that b.py was never
+    # actually reviewed this round.
+    assert len(second) == 2
+    cached = [i for i in second if i.description == "real bug"]
+    synthetic = [i for i in second if i.severity == "critical" and i.description != "real bug"]
+    assert len(cached) == 1
+    assert len(synthetic) == 1
+
+
 def test_cache_none_default_is_unchanged_passthrough():
     """Omitting ``cache`` (the default) calls the agent every time, exactly as before caching existed."""
     calls = {"n": 0}

@@ -125,16 +125,22 @@ def run_chunked_agent_review(
           from the other pieces are still returned (one bad piece never aborts
           the whole review). Such a piece is never cached, so it is retried for
           real on the next call.
-        - If every piece failed (no partial coverage to fall back on — the
-          agent produced zero completed reviews for this call), a single
-          synthetic issue at ``failure_severity`` is appended instead of
-          silently returning an empty list: an empty result is otherwise
+        - If every piece that actually attempted a fresh ``run_chunk`` call
+          this invocation failed (no partial coverage to fall back on), a
+          single synthetic issue at ``failure_severity`` is appended instead
+          of silently returning an empty list: an empty result is otherwise
           indistinguishable from "reviewed cleanly, no findings," and a
           downstream gate that only checks for blocking issues would pass a
-          microtask that was never actually reviewed. Only a *total* failure
-          triggers this — a mix of failed and successful pieces keeps today's
-          lenient "one bad piece never aborts the whole review" behavior,
-          since partial coverage is still real coverage.
+          microtask that was never actually reviewed. A piece served from
+          ``cache`` already carries a real verdict from an earlier call, so it
+          counts toward neither "attempted" nor "failed" here — it must not
+          silently outnumber a failed fresh attempt into looking like partial
+          coverage (e.g. one cached-clean file plus one changed file whose
+          only fresh attempt fails must still fail closed, not read as "1 of 2
+          pieces failed, stay lenient"). A mix of failed and successful fresh
+          attempts still keeps today's lenient "one bad piece never aborts the
+          whole review" behavior, since partial coverage is still real
+          coverage.
         - A file that fits in one segment is reviewed in a single call.
         - When ``cache`` is given, a piece whose exact LLM input (``source`` +
           ``cache_context`` + raw content) was already reviewed earlier in the
@@ -176,10 +182,12 @@ def run_chunked_agent_review(
         )
     issues: List[IssueT] = []
     failed = 0
+    attempted = 0
     for idx, (path, piece) in enumerate(pieces, start=1):
         cache_key = _piece_cache_key(source, cache_context, piece) if cache is not None else None
         items = cache.get(cache_key) if cache_key is not None else None
         if items is None:
+            attempted += 1
             try:
                 items = run_chunk(piece)
             except Exception as exc:
@@ -211,12 +219,17 @@ def run_chunked_agent_review(
                     recommendation=getattr(item, "recommendation", ""),
                 )
             )
-    if failed and failed == len(pieces):
-        # Zero completed reviews: every piece failed, so there is no partial
-        # coverage to fall back on (unlike the mixed-outcome case above, which
-        # stays lenient). An empty `issues` here would be indistinguishable from
-        # a genuine clean pass, silently defeating a downstream gate that only
-        # checks for blocking issues -- surface it instead.
+    if failed and failed == attempted:
+        # Zero completed reviews among the pieces that actually needed one this
+        # call: every fresh attempt failed, so there is no partial coverage to
+        # fall back on (unlike the mixed-outcome case above, which stays
+        # lenient). Compared against `attempted`, not `len(pieces)` -- a cache
+        # hit already has a real verdict from an earlier call and correctly
+        # contributes nothing to either counter, so it must not silently
+        # outnumber a failed fresh attempt into looking like partial coverage.
+        # An empty `issues` here would be indistinguishable from a genuine
+        # clean pass, silently defeating a downstream gate that only checks
+        # for blocking issues -- surface it instead.
         issues.append(
             issue_factory(
                 source=source,
