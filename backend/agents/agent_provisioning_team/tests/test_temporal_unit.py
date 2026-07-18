@@ -1800,8 +1800,9 @@ def test_setup_activity_checkpoints_inside_run_setup_rollback_boundary() -> None
     assert mock_phase.call_args.args[1] == "setup"
 
 
-def test_setup_activity_retry_fast_path_does_not_overwrite_fresh_checkpoint() -> None:
-    """A retry's reused=True fast path must not clobber an earlier reused=False checkpoint.
+def test_setup_activity_retry_fast_path_returns_prior_stronger_checkpoint() -> None:
+    """A retry's reused=True fast path must not overwrite — or return — a
+    weaker result when an earlier reused=False checkpoint already exists.
 
     If the first attempt of this activity creates a container and durably
     checkpoints via on_registered (reused=False), but Temporal loses that
@@ -1810,7 +1811,12 @@ def test_setup_activity_retry_fast_path_does_not_overwrite_fresh_checkpoint() ->
     fallback write below must not blindly overwrite the earlier, stronger
     "this job created it" evidence already on record with this weaker one —
     a later resume reading phase_results would otherwise lose track of the
-    fact that this job created the environment.
+    fact that this job created the environment. The activity's own RETURN
+    VALUE must also surface that earlier, stronger checkpoint rather than
+    this retry's own weaker reused=True result: the workflow corrects a
+    conservative pre_existing_environment from THIS activity's return value
+    alone, never from job_store directly, so returning the weaker result
+    here would silently drop the stronger evidence for the rest of the run.
     """
     from agent_provisioning_team.models import EnvironmentInfo, SetupResult
     from agent_provisioning_team.temporal import activities as t_acts
@@ -1820,7 +1826,67 @@ def test_setup_activity_retry_fast_path_does_not_overwrite_fresh_checkpoint() ->
     fake_orch.tool_agents = {"docker_provisioner": MagicMock()}
     fake_manifest = MagicMock()
 
-    # Fast-path result: reused=True, no on_registered call.
+    # Fast-path result: reused=True, no on_registered call — this retry's
+    # own (weaker) outcome.
+    reused_result = SetupResult(
+        success=True,
+        environment=EnvironmentInfo(container_id="c1", container_name="c1", reused=True),
+    )
+    # The earlier attempt's durable checkpoint: reused=False, proof this
+    # job's own earlier try created the container fresh.
+    prior_checkpoint = {
+        "success": True,
+        "environment": EnvironmentInfo(
+            container_id="c1", container_name="c1", reused=False
+        ).model_dump(),
+    }
+
+    with (
+        patch.object(t_acts, "_best_effort_job_store"),
+        patch.object(t_acts._js, "add_completed_phase") as mock_phase,
+        patch.object(
+            t_acts._js,
+            "get_job",
+            return_value={
+                "completed_phases": ["setup"],
+                "phase_results": {"setup": prior_checkpoint},
+            },
+        ),
+        patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
+        patch(
+            "agent_provisioning_team.phases.setup.run_setup",
+            return_value=reused_result,
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        payload = t_acts.setup_activity("j", "a", "default.yaml")
+
+    # The return value surfaces the earlier, STRONGER checkpoint — not this
+    # retry's own weaker reused=True outcome — so the workflow's
+    # pre_existing_environment correction still fires downstream.
+    assert payload["environment"]["reused"] is False
+    # The durable checkpoint (already recorded by an earlier attempt) is
+    # still left untouched — not overwritten with this weaker evidence.
+    mock_phase.assert_not_called()
+
+
+def test_setup_activity_retry_fast_path_falls_back_without_checkpoint_payload() -> None:
+    """A checkpointed phase with no recoverable payload falls back to this call's
+    own result rather than returning nothing.
+
+    completed_phases and phase_results are always written atomically together
+    by add_completed_phase, so this is a defensive-only edge case — but the
+    fast path must never surface a missing/malformed payload as if it were
+    the stronger evidence.
+    """
+    from agent_provisioning_team.models import EnvironmentInfo, SetupResult
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store = MagicMock()
+    fake_orch.tool_agents = {"docker_provisioner": MagicMock()}
+    fake_manifest = MagicMock()
+
     reused_result = SetupResult(
         success=True,
         environment=EnvironmentInfo(container_id="c1", container_name="c1", reused=True),
@@ -1832,7 +1898,9 @@ def test_setup_activity_retry_fast_path_does_not_overwrite_fresh_checkpoint() ->
         patch.object(
             t_acts._js,
             "get_job",
-            return_value={"completed_phases": ["setup"]},
+            # completed_phases says "setup" is checkpointed, but phase_results
+            # has no recoverable entry for it.
+            return_value={"completed_phases": ["setup"], "phase_results": {}},
         ),
         patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
         patch(
@@ -1843,10 +1911,7 @@ def test_setup_activity_retry_fast_path_does_not_overwrite_fresh_checkpoint() ->
     ):
         payload = t_acts.setup_activity("j", "a", "default.yaml")
 
-    # This call's own return value still reflects what actually happened here.
     assert payload["environment"]["reused"] is True
-    # But the durable checkpoint (already recorded by an earlier attempt) is
-    # left untouched — not overwritten with this weaker evidence.
     mock_phase.assert_not_called()
 
 

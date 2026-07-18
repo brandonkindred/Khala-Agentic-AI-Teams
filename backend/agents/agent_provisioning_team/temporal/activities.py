@@ -295,16 +295,27 @@ def setup_activity(
           acceptable to ``restore_setup``.
     Postconditions:
         * Returns ``{"success": True, "environment": <dump|None>}`` reflecting
-          THIS call's own outcome (including its own ``reused`` value).
+          THIS call's own outcome (including its own ``reused`` value) —
+          UNLESS a stronger checkpoint from an earlier attempt of this same
+          activity already exists (see below), in which case that earlier,
+          stronger result is returned instead.
         * Writes setup progress (or restore status) into ``job_store``. The
-          durable ``phase_results["setup"]`` checkpoint itself, though, is
-          never overwritten once present — only the first call to actually
+          durable ``phase_results["setup"]`` checkpoint itself is never
+          overwritten once present — only the first call to actually
           checkpoint (whether via ``on_registered`` on a fresh
           registration, or this fallback on the always-reused fast path)
           wins, so a Temporal retry whose fast path reuses what an earlier,
           response-lost attempt of this same activity already created
           (and durably recorded as ``reused=False``) can't replace that
           stronger ownership evidence with its own weaker ``reused=True``.
+          The RETURN VALUE mirrors this: when this call's own fast path
+          finds that stronger checkpoint already on record, it returns that
+          checkpoint's payload rather than its own weaker one — the caller
+          (the workflow) makes its ``pre_existing_environment`` correction
+          from this activity's own return value, not from ``job_store``
+          directly, so returning the weaker ``reused=True`` result here
+          would silently drop the stronger evidence for the rest of this
+          run even though it is right there on record.
         * Raises ``RuntimeError`` when a fresh setup fails.
     """
     assert job_id, "job_id must be non-empty"
@@ -381,6 +392,19 @@ def setup_activity(
         already_checkpointed = "setup" in (existing_job.get("completed_phases") or [])
         if not already_checkpointed:
             _js.add_completed_phase(job_id, "setup", payload)
+        else:
+            # Also RETURN the stronger checkpoint, not just preserve it on
+            # disk: the workflow corrects a conservative
+            # pre_existing_environment from THIS activity's own return
+            # value (environment_dump.get("reused") is False), never by
+            # reading job_store directly — so if this fast-path retry
+            # returned its own weaker reused=True payload instead, that
+            # correction would silently never fire for the rest of this
+            # run, even though the stronger reused=False evidence is
+            # sitting right here on record.
+            existing_setup_result = (existing_job.get("phase_results") or {}).get("setup")
+            if isinstance(existing_setup_result, dict):
+                payload = existing_setup_result
     _best_effort_job_store(_js.update_job, job_id, progress=15, status_text="Setup complete")
     return payload
 
