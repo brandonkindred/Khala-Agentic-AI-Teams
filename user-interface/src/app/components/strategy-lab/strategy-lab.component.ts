@@ -412,22 +412,27 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    * `complete` nor `error` branch of `handleStreamEvent()` already set
    * `runOutcomeAnnouncement` from richer, event-native data.
    *
-   * Preconditions: none.
+   * Preconditions: `status` is `null` only to mean "the run's fate is
+   *   genuinely unknown" (`StrategyLabRunService` clears `runStatus` before
+   *   capturing it into `lastTerminalStatus` specifically when its polling
+   *   fallback itself errors) — never "no run happened", since this is only
+   *   called after `wasRunning` was true.
    * Postconditions: returns a sentence reflecting `status.status`/
-   *   `errored_cycles` when available; falls back to a generic completion
-   *   sentence when `status` is null or carries no terminal signal (e.g. the
-   *   run's fate is genuinely unknown, such as polling itself failing after
-   *   SSE already had) — always non-empty, never blank.
+   *   `errored_cycles` when `status` is non-null; a distinct
+   *   connection-lost sentence when `status` is null — never the generic
+   *   "complete" sentence for an outcome that isn't actually known. Always
+   *   non-empty.
    */
   private describeRunStatus(status: StrategyLabRunStatus | null): string {
-    if (status?.status === 'failed') return 'Strategy Lab run failed.';
-    if (status?.status === 'cancelled') return 'Strategy Lab run cancelled.';
+    if (!status) return 'Strategy Lab lost track of the run — status unavailable.';
+    if (status.status === 'failed') return 'Strategy Lab run failed.';
+    if (status.status === 'cancelled') return 'Strategy Lab run cancelled.';
     // 'interrupted' is a real backend status (reconnecting to an
     // already-stopped run sends a terminal snapshot carrying it) that
     // doesn't fit the narrower StrategyLabRunStatus.status union — cast
     // rather than widen the shared type just for this comparison.
-    if ((status?.status as string) === 'interrupted') return 'Strategy Lab run interrupted.';
-    if (status?.status === 'completed_with_errors' || (status?.errored_cycles ?? 0) > 0) {
+    if ((status.status as string) === 'interrupted') return 'Strategy Lab run interrupted.';
+    if (status.status === 'completed_with_errors' || (status.errored_cycles ?? 0) > 0) {
       return 'Strategy Lab run finished with errors.';
     }
     return 'Strategy Lab run complete.';
@@ -890,13 +895,24 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       // double-counts one cycle in both completed_cycles and errored_cycles
       // — it was published as cycle_complete, then separately re-published
       // as cycle_errored for the same cycle_index — so those entries are
-      // subtracted back out. (errored_details is capped at 50 entries
-      // server-side, same as elsewhere in this file, so this correction can
-      // under-count for a run with 50+ errors of mixed kinds — a narrower
-      // edge case than the double-count it fixes.)
-      const trackerMergeDoubleCounts = (status.errored_details ?? []).filter(
-        (d) => d.reason === 'tracker_merge_failed',
-      ).length;
+      // subtracted back out.
+      const erroredDetails = status.errored_details ?? [];
+      const trackerMergeDoubleCounts = erroredDetails.filter((d) => d.reason === 'tracker_merge_failed').length;
+      // errored_details is capped at 50 entries server-side (same cap
+      // elsewhere in this file), but errored_cycles is not — a run with more
+      // than 50 tracker-merge failures loses visibility into the true
+      // double-count once the array saturates, so trackerMergeDoubleCounts
+      // can under-subtract and attemptedCycles can drift above the number of
+      // cycles truly attempted. That inflation is harmless for the
+      // current_cycle/"else" branches below (an inflated value only makes
+      // attemptedCycles < total_cycles LESS likely to hold, never wrongly
+      // true) — the risk is specifically the "Finishing up" check's >=
+      // comparison firing on a run that isn't actually finishing. When
+      // saturated, this fallback stops trusting that specific comparison
+      // rather than risk a false "Finishing up": a live cycle_complete/
+      // cycle_errored/complete event, each unaffected by this cap, corrects
+      // it within moments regardless.
+      const correctionSaturated = erroredDetails.length >= 50;
       const attemptedCycles =
         status.completed_cycles + status.skipped_cycles + (status.errored_cycles ?? 0) - trackerMergeDoubleCounts;
       // Once the last cycle's cycle_complete/skipped/errored lands,
@@ -904,7 +920,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       // terminal `complete` event arrives, there is no "next" strategy to
       // report. Reporting one here would announce an impossible position
       // (e.g. "Strategy 6 of 5").
-      if (!status.current_cycle && attemptedCycles >= status.total_cycles) {
+      if (!status.current_cycle && attemptedCycles >= status.total_cycles && !correctionSaturated) {
         segments.push('Finishing up');
       } else if (status.current_cycle) {
         // The backend's cycle_index is already 1-based (`cn = i + 1` in
@@ -927,7 +943,11 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         // current_cycle" cannot be read as "genuinely idle": say something
         // true in both cases rather than claiming idleness that likely
         // isn't real.
-        segments.push(`Strategy ${attemptedCycles + 1} of ${status.total_cycles}`);
+        // Clamped: reachable when correctionSaturated suppressed "Finishing
+        // up" above despite attemptedCycles >= total_cycles — without this,
+        // an inflated attemptedCycles would announce an impossible
+        // "Strategy 71 of 60" instead of holding at the last real position.
+        segments.push(`Strategy ${Math.min(attemptedCycles + 1, status.total_cycles)} of ${status.total_cycles}`);
         segments.push('Run in progress');
       }
       return segments.join(' — ') + '.';

@@ -607,6 +607,43 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
   }, 15000);
 
+  it('does not announce "Finishing up" early when a saturated tracker-merge correction under-subtracts', async () => {
+    // Regression: errored_details is capped at 50 entries server-side, but
+    // errored_cycles is not. For a 70-cycle run where 60 cycles each hit a
+    // post-completion tracker-merge failure, the visible correction (50
+    // entries) under-subtracts, so the naive attemptedCycles computes to
+    // 60 + 0 + 60 - 50 = 70 — equal to total_cycles, wrongly crossing the
+    // "Finishing up" threshold 10 cycles early even though the run has
+    // genuinely only gotten through 60 of 70. Saturation detection
+    // suppresses that false "Finishing up" and the position clamp then
+    // holds the announced number at total_cycles instead of the impossible
+    // "Strategy 71 of 70" the inflated count would otherwise produce.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 70,
+      completed_cycles: 60,
+      skipped_cycles: 0,
+      errored_cycles: 60,
+      errored_details: Array.from({ length: 50 }, (_, i) => ({
+        cycle_index: i + 1,
+        error: 'merge boom',
+        reason: 'tracker_merge_failed' as const,
+      })),
+      completed_record_ids: Array.from({ length: 60 }, (_, i) => `rec-${i + 1}`),
+    });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy 70 of 70 — Run in progress.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
   it('announces "Finishing up" when the last attempted cycle was errored rather than completed', async () => {
     // Regression: for a 3-cycle run where the last cycle errored (not
     // completed), completed_cycles stays at 2 and never reaches
@@ -966,6 +1003,36 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy Lab run complete.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a neutral "lost track" outcome, not success, when lastTerminalStatus is null', async () => {
+    // Regression: StrategyLabRunService.fallbackToPolling()'s own error
+    // handler (SSE dropped, then polling itself also failed) explicitly
+    // nulls runStatus before finishRun() captures it, so lastTerminalStatus
+    // reads null here specifically to mean "the run's fate is genuinely
+    // unknown" — describeRunStatus() must not fall through to its generic
+    // "Strategy Lab run complete." for this null, which would falsely
+    // announce success for what is actually a lost connection.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 1,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1'],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).lastTerminalStatus.set(null);
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab lost track of the run — status unavailable.');
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 

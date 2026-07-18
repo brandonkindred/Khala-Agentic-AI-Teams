@@ -180,7 +180,13 @@ export class StrategyLabRunService implements OnDestroy {
           }
         },
         error: () => {
-          // Polling also failed — stop tracking.
+          // Polling itself failed — the run's fate is genuinely unknown, not
+          // "still running" (the last value takeWhile let through before this
+          // error). Clear runStatus before finishRun() captures it into
+          // lastTerminalStatus, so that signal reads null here rather than a
+          // stale 'running' status a caller could mistake for a real
+          // terminal outcome (e.g. announcing success for a lost connection).
+          this._runStatus.set(null);
           this.finishRun();
         },
       });

@@ -291,7 +291,12 @@ describe('StrategyLabRunService', () => {
       expect(api.getRunStatus).toHaveBeenCalledTimes(2); // no further polling
     });
 
-    it('stops tracking when polling itself errors', async () => {
+    it('clears runStatus so lastTerminalStatus reads null when polling itself errors', async () => {
+      // The run's actual fate is unknown here (still 'running' is the last
+      // value takeWhile let through, not a real terminal status) — capturing
+      // it into lastTerminalStatus as-is would let a caller mistake a lost
+      // connection for a successful completion. null is the deliberate
+      // "we don't know" signal instead.
       vi.useFakeTimers();
       api.getRunStatus.mockReturnValue(throwError(() => new Error('network')));
       triggerFallback();
@@ -300,12 +305,7 @@ describe('StrategyLabRunService', () => {
 
       expect(service.running()).toBe(false);
       expect(service.runStatus()).toBeNull();
-      // Polling never got a successful response, so lastTerminalStatus is
-      // whatever runStatus held before polling started — still 'running',
-      // not a genuine terminal status. The run's actual fate is unknown; this
-      // is a documented, narrower residual gap (see PR discussion), not new
-      // behavior this test asserts as correct.
-      expect(service.lastTerminalStatus()?.status).toBe('running');
+      expect(service.lastTerminalStatus()).toBeNull();
     });
 
     it('stops polling once destroyed', async () => {
