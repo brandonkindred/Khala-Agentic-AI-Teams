@@ -21,10 +21,11 @@
       }
       @if (loading) {
         <div class="message assistant">
-          <div class="typing-indicator"><span></span><span></span><span></span></div>
+          <div class="typing-indicator" aria-hidden="true"><span></span><span></span><span></span></div>
         </div>
       }
     </div>
+    <div class="visually-hidden" aria-live="polite">{{ lastAssistantAnnouncement }}</div>
 
     <form [formGroup]="chatForm" (ngSubmit)="onSubmit()" class="input-form">
       <mat-form-field appearance="outline" class="message-input">
