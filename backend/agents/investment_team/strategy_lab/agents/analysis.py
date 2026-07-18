@@ -6,14 +6,10 @@ import logging
 from pathlib import Path
 from typing import Any, List, Optional
 
-from strands import Agent
-
 from ...models import WINNING_THRESHOLD, BacktestResult, StrategySpec, TradeRecord
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
-from ._llm_envelope import invoke_agent
-from ._parse_helpers import extract_json_object
+from ._agent_runner import invoke_json_agent
 from .alignment import TradeAlignmentReport
-from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
 
@@ -199,19 +195,14 @@ class AnalysisAgent:
             robustness_caveats_section=caveats_section,
         )
 
-        agent = Agent(
-            model=get_strands_model("strategy_ideation"), system_prompt=system_prompt, tools=[]
-        )
-
         try:
-            draft_raw = invoke_agent(
-                agent,
+            draft_parsed = invoke_json_agent(
                 draft_prompt,
                 agent_key="strategy_ideation",
                 phase="analysis_draft",
+                system_prompt=system_prompt,
                 logger=logger,
             )
-            draft_parsed = extract_json_object(draft_raw)
             draft_narrative = draft_parsed.get("draft_narrative", "")
         except Exception:
             logger.exception("Draft analysis failed")
@@ -255,19 +246,14 @@ class AnalysisAgent:
             "\n\n" + _STOP_ORDER_SEMANTICS
         )
 
-        review_agent = Agent(
-            model=get_strands_model("strategy_ideation"), system_prompt=review_system, tools=[]
-        )
-
         try:
-            review_raw = invoke_agent(
-                review_agent,
+            review_parsed = invoke_json_agent(
                 review_prompt,
                 agent_key="strategy_ideation",
                 phase="analysis_review",
+                system_prompt=review_system,
                 logger=logger,
             )
-            review_parsed = extract_json_object(review_raw)
             revised = review_parsed.get("revised_narrative", "")
             if revised:
                 return _ensure_misalignment_disclaimer(revised, alignment_report)
