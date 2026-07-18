@@ -11,8 +11,8 @@
   Uses <code>/api/investment/strategy-lab/*</code> and related strategy/backtest endpoints.
 </p>
 
-<div class="health-row" [class]="healthStatus">
-  @switch (healthStatus) {
+<div class="health-row" [class]="healthStatus()">
+  @switch (healthStatus()) {
     @case ('checking') {
       <mat-icon>hourglass_empty</mat-icon>
       <span>Checking API…</span>
