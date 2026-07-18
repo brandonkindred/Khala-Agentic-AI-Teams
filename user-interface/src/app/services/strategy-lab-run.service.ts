@@ -31,12 +31,22 @@ export class StrategyLabRunService implements OnDestroy {
   private readonly _paperTradingSessions = signal<Record<string, PaperTradingSession>>({});
   /** lab_record_id of the paper-trade session a caller-initiated trackPaperTradingSession() is following, or null. */
   private readonly _paperTradingLabRecordId = signal<string | null>(null);
+  /**
+   * `runStatus`'s value at the instant `finishRun()` clears it — the only way
+   * to learn how a run ended when that happens without an explicit
+   * `complete`/`error` stream event to carry the outcome (SSE degrades to
+   * polling and polling itself observes the terminal status; or a
+   * reconnect's terminal `snapshot` is followed straight by `done`, closing
+   * the stream with no distinct terminal event of its own).
+   */
+  private readonly _lastTerminalStatus = signal<StrategyLabRunStatus | null>(null);
 
   readonly runStatus = this._runStatus.asReadonly();
   readonly running = this._running.asReadonly();
   readonly activeRunId = this._activeRunId.asReadonly();
   readonly paperTradingSessions = this._paperTradingSessions.asReadonly();
   readonly paperTradingLabRecordId = this._paperTradingLabRecordId.asReadonly();
+  readonly lastTerminalStatus = this._lastTerminalStatus.asReadonly();
 
   /** Every raw SSE event, for side effects the run-status shape doesn't carry (e.g. reload results on `cycle_complete`). */
   private readonly _events = new Subject<StrategyLabStreamEvent>();
@@ -120,6 +130,7 @@ export class StrategyLabRunService implements OnDestroy {
    *   reflect the given values, and the run's SSE stream is connected.
    */
   startRun(runId: string, initialStatus: StrategyLabRunStatus): void {
+    this._lastTerminalStatus.set(null);
     this._activeRunId.set(runId);
     this._runStatus.set(initialStatus);
     this._running.set(true);
@@ -144,6 +155,7 @@ export class StrategyLabRunService implements OnDestroy {
   }
 
   private finishRun(): void {
+    this._lastTerminalStatus.set(this._runStatus());
     this._running.set(false);
     this._activeRunId.set(null);
     this._runStatus.set(null);

@@ -388,14 +388,50 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    * explicit `complete`/`error` event, the SSE stream's own `done`-then-close,
    * or the REST-polling fallback detecting a terminal status) with one rule,
    * rather than duplicating a `loadResults()` call at each of those call sites.
+   *
+   * Also backstops `runOutcomeAnnouncement` for the same transition: the
+   * `complete`/`error` branches of `handleStreamEvent()` already set it from
+   * the event's own data, but a run that ends WITHOUT either of those events
+   * reaching this component (SSE degrades to polling and polling itself
+   * observes the terminal status; or a reconnect's terminal `snapshot` is
+   * followed straight by `done`) leaves it unset. `??=` only fills that gap —
+   * it never overwrites an outcome the explicit branches already derived.
    */
   private readonly refreshResultsOnRunFinish = effect(() => {
     const isRunning = this.runService.running();
     if (!isRunning && this.wasRunning) {
+      this.runOutcomeAnnouncement ??= this.describeRunStatus(this.runService.lastTerminalStatus());
       this.loadResults();
     }
     this.wasRunning = isRunning;
   });
+
+  /**
+   * Best-effort terminal-outcome sentence derived from a run-status snapshot,
+   * used only as `refreshResultsOnRunFinish`'s fallback when neither the
+   * `complete` nor `error` branch of `handleStreamEvent()` already set
+   * `runOutcomeAnnouncement` from richer, event-native data.
+   *
+   * Preconditions: none.
+   * Postconditions: returns a sentence reflecting `status.status`/
+   *   `errored_cycles` when available; falls back to a generic completion
+   *   sentence when `status` is null or carries no terminal signal (e.g. the
+   *   run's fate is genuinely unknown, such as polling itself failing after
+   *   SSE already had) — always non-empty, never blank.
+   */
+  private describeRunStatus(status: StrategyLabRunStatus | null): string {
+    if (status?.status === 'failed') return 'Strategy Lab run failed.';
+    if (status?.status === 'cancelled') return 'Strategy Lab run cancelled.';
+    // 'interrupted' is a real backend status (reconnecting to an
+    // already-stopped run sends a terminal snapshot carrying it) that
+    // doesn't fit the narrower StrategyLabRunStatus.status union — cast
+    // rather than widen the shared type just for this comparison.
+    if ((status?.status as string) === 'interrupted') return 'Strategy Lab run interrupted.';
+    if (status?.status === 'completed_with_errors' || (status?.errored_cycles ?? 0) > 0) {
+      return 'Strategy Lab run finished with errors.';
+    }
+    return 'Strategy Lab run complete.';
+  }
 
   ngOnInit(): void {
     this.loadConfig();

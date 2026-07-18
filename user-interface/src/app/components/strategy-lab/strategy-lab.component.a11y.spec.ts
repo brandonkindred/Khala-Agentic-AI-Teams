@@ -35,6 +35,7 @@ function createRunServiceStub() {
     activeRunId: signal<string | null>(null),
     paperTradingSessions: signal<Record<string, PaperTradingSession>>({}),
     paperTradingLabRecordId: signal<string | null>(null),
+    lastTerminalStatus: signal<StrategyLabRunStatus | null>(null),
     events$: new Subject<StrategyLabStreamEvent>(),
     errors$: new Subject<string>(),
     checkForActiveRun: vi.fn(),
@@ -844,6 +845,127 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy Lab run cancelled.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces the outcome from lastTerminalStatus when no complete/error event ever reaches the component', async () => {
+    // Regression: StrategyLabRunService.finishRun() clears running/runStatus
+    // together whenever a run ends without an explicit complete/error stream
+    // event reaching this component (SSE degrades to polling and polling
+    // itself later observes a terminal status; or a reconnect's terminal
+    // `snapshot` is followed straight by `done`). Neither path calls
+    // handleStreamEvent()'s complete/error branches, so runOutcomeAnnouncement
+    // would otherwise stay null and the live region would silently go blank
+    // right as the run ends — the one moment a screen-reader user most needs
+    // to hear something.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 2,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1', 'rec-2'],
+    });
+    fixture.detectChanges();
+
+    // Mirrors StrategyLabRunService.finishRun(): captures the last known
+    // status into lastTerminalStatus, then nulls running/runStatus — with no
+    // events$ emission of any kind.
+    stubOf(fixture).lastTerminalStatus.set({
+      run_id: 'run-1',
+      status: 'failed',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 2,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1', 'rec-2'],
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run failed.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a qualified outcome from lastTerminalStatus.errored_cycles when no complete/error event ever reaches the component', async () => {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 3,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1', 'rec-2', 'rec-3'],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).lastTerminalStatus.set({
+      run_id: 'run-1',
+      status: 'completed',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 3,
+      skipped_cycles: 0,
+      errored_cycles: 2,
+      completed_record_ids: ['rec-1', 'rec-2', 'rec-3'],
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run finished with errors.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('prefers the explicit "complete" event outcome over lastTerminalStatus when both are present', async () => {
+    // The explicit-event branch always wins: it has richer per-event data
+    // (errored_count/skipped_count) than a generic status field can carry.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).events$.next({
+      type: 'complete',
+      message: 'done',
+      status: 'completed',
+      completed_count: 5,
+      skipped_count: 0,
+      errored_count: 0,
+      errored_details: [],
+      completed_batches: 1,
+      total_batches: 1,
+    });
+    // Even if the service's lastTerminalStatus disagrees (e.g. a stale value
+    // from bookkeeping order), the already-derived explicit outcome must win.
+    stubOf(fixture).lastTerminalStatus.set({
+      run_id: 'run-1',
+      status: 'failed',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run complete.');
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 

@@ -34,6 +34,7 @@ function createRunServiceStub() {
   const activeRunId = signal<string | null>(null);
   const paperTradingSessions = signal<Record<string, PaperTradingSession>>({});
   const paperTradingLabRecordId = signal<string | null>(null);
+  const lastTerminalStatus = signal<StrategyLabRunStatus | null>(null);
   const events$ = new Subject<StrategyLabStreamEvent>();
   const errors$ = new Subject<string>();
   return {
@@ -42,10 +43,12 @@ function createRunServiceStub() {
     activeRunId,
     paperTradingSessions,
     paperTradingLabRecordId,
+    lastTerminalStatus,
     events$,
     errors$,
     checkForActiveRun: vi.fn(),
     startRun: vi.fn((runId: string, status: StrategyLabRunStatus) => {
+      lastTerminalStatus.set(null);
       activeRunId.set(runId);
       runStatus.set(status);
       running.set(true);

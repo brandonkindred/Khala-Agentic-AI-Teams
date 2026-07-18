@@ -200,6 +200,37 @@ describe('StrategyLabRunService', () => {
       expect(service.runStatus()).toBeNull();
     });
 
+    it('captures the terminal snapshot into lastTerminalStatus before the stream completes with no explicit complete/error event', () => {
+      // A reconnect to an already-finished run: the backend sends a terminal
+      // `snapshot` (no distinct complete/error event replays for a
+      // reconnect), then closes the stream — reduce()'s 'snapshot' case folds
+      // the terminal status into runStatus, and finishRun() must capture that
+      // exact value into lastTerminalStatus before nulling runStatus, since
+      // nothing else observing this component ever sees it otherwise.
+      const sse = new Subject<StrategyLabStreamEvent>();
+      api.streamRunStatus.mockReturnValue(sse);
+      service.startRun('run-1', baseRunStatus);
+
+      sse.next({
+        type: 'snapshot',
+        run_id: 'run-1',
+        status: 'failed',
+        started_at: '2026-01-01T00:00:00Z',
+        total_cycles: 5,
+        completed_cycles: 2,
+        skipped_cycles: 0,
+        completed_record_ids: [],
+        error: null,
+      });
+      sse.next({ type: 'done' });
+      sse.complete();
+
+      expect(service.running()).toBe(false);
+      expect(service.runStatus()).toBeNull();
+      expect(service.lastTerminalStatus()?.status).toBe('failed');
+      expect(service.lastTerminalStatus()?.completed_cycles).toBe(2);
+    });
+
     it('falls back to REST polling when the stream errors', async () => {
       vi.useFakeTimers();
       const sse = new Subject<StrategyLabStreamEvent>();
@@ -251,6 +282,10 @@ describe('StrategyLabRunService', () => {
       expect(api.getRunStatus).toHaveBeenCalledTimes(2);
       expect(service.running()).toBe(false);
       expect(service.runStatus()).toBeNull();
+      // No complete/error stream event ever reached the caller on this path —
+      // lastTerminalStatus is the only record of how the run actually ended.
+      expect(service.lastTerminalStatus()?.status).toBe('completed');
+      expect(service.lastTerminalStatus()?.completed_cycles).toBe(5);
 
       await vi.advanceTimersByTimeAsync(5000);
       expect(api.getRunStatus).toHaveBeenCalledTimes(2); // no further polling
@@ -265,6 +300,12 @@ describe('StrategyLabRunService', () => {
 
       expect(service.running()).toBe(false);
       expect(service.runStatus()).toBeNull();
+      // Polling never got a successful response, so lastTerminalStatus is
+      // whatever runStatus held before polling started — still 'running',
+      // not a genuine terminal status. The run's actual fate is unknown; this
+      // is a documented, narrower residual gap (see PR discussion), not new
+      // behavior this test asserts as correct.
+      expect(service.lastTerminalStatus()?.status).toBe('running');
     });
 
     it('stops polling once destroyed', async () => {
